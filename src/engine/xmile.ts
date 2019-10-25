@@ -844,6 +844,10 @@ export class Model extends Record(ModelDefaults) implements XNode {
   }
 
   fixupClouds(): Model {
+    // if we don't have any views, there is nothing to fixup
+    if (this.views.size === 0) {
+      return this;
+    }
     const stocks = this.getStocks();
     const flowEnds = this.getFlowEnds(stocks);
     const views = this.views.map(view => {

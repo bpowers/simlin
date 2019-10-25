@@ -57,16 +57,13 @@ describe('roundtrip', async () => {
       const file1 = defined(project).toFile();
       const jsonStr1 = JSON.stringify(file1, undefined, 2);
       const jsonParsed1 = JSON.parse(jsonStr1);
-      const [file2, err2] = FileFromJSON(jsonParsed1);
-      expect(err2).to.be.undefined;
+      const file2 = FileFromJSON(jsonParsed1);
       const jsonStr2 = JSON.stringify(file2, undefined, 2);
       const jsonParsed2 = JSON.parse(jsonStr2);
-      console.log(jsonParsed1);
-      console.log(jsonParsed2);
       expect(jsonParsed1).to.deep.equal(jsonParsed2);
       expect(is(file1, file2)).to.be.true;
-      expect((file1 as any).equals(defined(file2))).to.be.true;
-      expect((defined(file2) as any).equals(file1)).to.be.true;
+      expect(file1.equals(defined(file2))).to.be.true;
+      expect(defined(file2).equals(file1)).to.be.true;
     });
   }
 });
