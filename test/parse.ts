@@ -1,13 +1,13 @@
-// Copyright 2015 Bobby Powers. All rights reserved.
-// Use of this source code is governed by the MIT
-// license that can be found in the LICENSE file.
+// Copyright 2019 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 import { List } from 'immutable';
 
 import { expect } from 'chai';
-import * as parse from '../lib/parse';
-import { SourceLoc } from '../lib/token';
-import { Node, BinaryExpr, ParenExpr, IfExpr, CallExpr, Ident, Constant } from '../lib/ast';
+import * as parse from '../lib/engine/parse';
+import { SourceLoc } from '../lib/engine/token';
+import { Node, BinaryExpr, ParenExpr, IfExpr, CallExpr, Ident, Constant } from '../lib/engine/ast';
 
 interface ParseTestData {
   in: string;

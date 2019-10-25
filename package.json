@@ -33,6 +33,7 @@
     "build:runtime0": "tsc -p .tsconfig.rt.json",
     "build:runtime1": "node support/build-runtime.js src/engine/runtime.ts",
     "build:runtime": "npm-run-all build:pre build:runtime0 build:runtime1",
+    "test": "tsc -p .tsconfig.test.json && mocha",
     "mocha": "mocha test/ --recursive --exit",
     "start": "npm-run-all -p start:backend start:frontend",
     "start:backend": "node_modules/.bin/ts-node-dev --no-notify --respawn src/index.ts",

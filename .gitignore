@@ -34,3 +34,5 @@ yarn-error.log*
 /*.iml
 
 /build-rt
+
+/test/*.js

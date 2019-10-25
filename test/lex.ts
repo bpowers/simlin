@@ -1,12 +1,10 @@
-// Copyright 2015 Bobby Powers. All rights reserved.
-// Use of this source code is governed by the MIT
-// license that can be found in the LICENSE file.
-
-'use strict';
+// Copyright 2019 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 import * as chai from 'chai';
-import { SourceLoc, Token, TokenType } from '../lib/token';
-import { Lexer } from '../lib/lex';
+import { SourceLoc, Token, TokenType } from '../lib/engine/token';
+import { Lexer } from '../lib/engine/lex';
 
 const expect = chai.expect;
 

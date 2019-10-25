@@ -1,12 +1,14 @@
-// Copyright 2018 Bobby Powers. All rights reserved.
+// Copyright 2019 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 import * as fs from 'fs';
 
 import { expect } from 'chai';
 import { is, List } from 'immutable';
-import { defined } from '../lib/common';
-import { stdProject } from '../lib/sd';
-import { FileFromJSON } from '../lib/xmile';
+import { defined } from '../lib/engine/common';
+import { stdProject } from '../lib/engine/project';
+import { FileFromJSON } from '../lib/engine/xmile';
 import { promisify } from 'util';
 import { DOMParser } from 'xmldom';
 
@@ -59,10 +61,12 @@ describe('roundtrip', async () => {
       expect(err2).to.be.undefined;
       const jsonStr2 = JSON.stringify(file2, undefined, 2);
       const jsonParsed2 = JSON.parse(jsonStr2);
+      console.log(jsonParsed1);
+      console.log(jsonParsed2);
       expect(jsonParsed1).to.deep.equal(jsonParsed2);
       expect(is(file1, file2)).to.be.true;
-      expect(file1.equals(defined(file2))).to.be.true;
-      expect(defined(file2).equals(file1)).to.be.true;
+      expect((file1 as any).equals(defined(file2))).to.be.true;
+      expect((defined(file2) as any).equals(file1)).to.be.true;
     });
   }
 });
