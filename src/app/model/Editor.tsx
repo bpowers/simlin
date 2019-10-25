@@ -140,6 +140,7 @@ interface EditorState {
   selection: Set<UID>;
   snackbarErrors: List<string>;
   drawerOpen: boolean;
+  projectVersion: number;
 }
 
 interface EditorProps extends WithStyles<typeof styles> {
@@ -165,6 +166,7 @@ export const Editor = withStyles(styles)(
         selection: Set(),
         snackbarErrors: List<string>(),
         drawerOpen: false,
+        projectVersion: -1,
       };
 
       setTimeout(async () => {
@@ -206,6 +208,50 @@ export const Editor = withStyles(styles)(
       }
     }
 
+    private updateProject(project: Project) {
+      this.setState({ project });
+      setTimeout(async () => {
+        await this.save(project, this.state.projectVersion);
+      });
+    }
+
+    private async save(project: Project, currVersion: number): Promise<void> {
+      const file = project.toFile();
+      // ensure we've converted to plain-old JavaScript objects
+      const projectJSON = JSON.parse(JSON.stringify(file));
+
+      const bodyContents = {
+        currVersion,
+        file: projectJSON,
+      };
+
+      const base = this.getBaseURL();
+      const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
+      const response = await fetch(apiPath, {
+        credentials: 'same-origin',
+        method: 'POST',
+        cache: 'no-cache',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(bodyContents),
+      });
+
+      const status = response.status;
+      if (!(status >= 200 && status < 400)) {
+        const body = await response.json();
+        const errorMsg = body && body.error ? body.error : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+        this.appendModelError(errorMsg);
+        return;
+      }
+
+      const projectResponse = await response.json();
+      const projectVersion: number = defined(projectResponse.version);
+
+      console.log(`successfully updated project to version ${projectVersion}!`);
+      this.setState({ projectVersion });
+    }
+
     private getBaseURL(): string {
       return this.props.baseURL !== undefined ? this.props.baseURL : baseURL;
     }
@@ -241,7 +287,10 @@ export const Editor = withStyles(styles)(
         return;
       }
 
+      // we don't call updateProject here because we don't want to
+      // POST a new version up when we've just downloaded it.
       this.setState({
+        projectVersion: defined(projectResponse.version),
         project,
       });
 
@@ -266,27 +315,24 @@ export const Editor = withStyles(styles)(
     };
 
     handleRename = (oldName: string, newName: string) => {
-      this.setState(prevState => {
-        if (!prevState.project) {
-          return {};
-        }
-        let newProject;
-        try {
-          newProject = prevState.project.rename(prevState.modelName, oldName, newName);
-        } catch (err) {
-          // if we don't do this, react yells because "update functions should be pure"
-          setTimeout(() => {
-            this.setState(prevState => ({
-              snackbarErrors: prevState.snackbarErrors.push(err.message),
-            }));
-          });
-          return {};
-        }
-        this.scheduleSimRun();
-        return {
-          project: newProject,
-        };
-      });
+      const { project } = this.state;
+      if (!project) {
+        return;
+      }
+      let newProject;
+      try {
+        newProject = project.rename(this.state.modelName, oldName, newName);
+      } catch (err) {
+        // if we don't do this, react yells because "update functions should be pure"
+        setTimeout(() => {
+          this.setState(prevState => ({
+            snackbarErrors: prevState.snackbarErrors.push(err.message),
+          }));
+        });
+        return;
+      }
+      this.scheduleSimRun();
+      this.updateProject(newProject);
     };
 
     handleSelection = (selection: Set<UID>) => {
@@ -317,9 +363,9 @@ export const Editor = withStyles(styles)(
         },
       );
       this.setState({
-        project,
         selection: Set(),
       });
+      this.updateProject(project);
     };
 
     handleFlowAttach = (flow: ViewElement, targetUid: number, cursorMoveDelta: Point) => {
@@ -504,7 +550,8 @@ export const Editor = withStyles(styles)(
       if (stockDetachingIdent) {
         project = project.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident, 'in');
       }
-      this.setState({ project, selection });
+      this.setState({ selection });
+      this.updateProject(project);
       this.scheduleSimRun();
     };
 
@@ -572,7 +619,8 @@ export const Editor = withStyles(styles)(
           return view.merge({ nextUid, elements });
         },
       );
-      this.setState({ project, selection });
+      this.setState({ selection });
+      this.updateProject(project);
     };
 
     handleCreateVariable = (element: ViewElement) => {
@@ -590,9 +638,9 @@ export const Editor = withStyles(styles)(
       project = project.addNewVariable(this.state.modelName, element.type, defined(element.name));
 
       this.setState({
-        project,
         selection: Set(),
       });
+      this.updateProject(project);
     };
 
     handleSelectionMove = (delta: Point, arcPoint?: Point) => {
@@ -726,9 +774,7 @@ export const Editor = withStyles(styles)(
           return view.merge({ elements });
         },
       );
-      this.setState({
-        project,
-      });
+      this.updateProject(project);
     };
 
     handleExitEditor = () => {
@@ -744,42 +790,43 @@ export const Editor = withStyles(styles)(
     };
 
     handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const newSimSpec = defined(this.state.project).simSpec.set('start', Number(event.target.value));
-      this.setState(prevState => {
-        this.scheduleSimRun();
-        return {
-          project: defined(prevState.project).setSimSpec(newSimSpec),
-        };
-      });
+      let { project } = this.state;
+      if (!project) {
+        return;
+      }
+      const newSimSpec = project.simSpec.set('start', Number(event.target.value));
+      this.updateProject(project.setSimSpec(newSimSpec));
+      this.scheduleSimRun();
     };
 
     handleStopTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const newSimSpec = defined(this.state.project).simSpec.set('stop', Number(event.target.value));
-      this.setState(prevState => {
-        this.scheduleSimRun();
-        return {
-          project: defined(prevState.project).setSimSpec(newSimSpec),
-        };
-      });
+      let { project } = this.state;
+      if (!project) {
+        return;
+      }
+      const newSimSpec = project.simSpec.set('stop', Number(event.target.value));
+      this.updateProject(project.setSimSpec(newSimSpec));
+      this.scheduleSimRun();
     };
 
     handleDtChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const newSimSpec = defined(this.state.project).simSpec.set('dt', Number(event.target.value));
-      this.setState(prevState => {
-        this.scheduleSimRun();
-        return {
-          project: defined(prevState.project).setSimSpec(newSimSpec),
-        };
-      });
+      let { project } = this.state;
+      if (!project) {
+        return;
+      }
+      const newSimSpec = project.simSpec.set('dt', Number(event.target.value));
+      this.updateProject(project.setSimSpec(newSimSpec));
+      this.scheduleSimRun();
     };
 
     handleTimeUnitsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const newSimSpec = defined(this.state.project).simSpec.set('timeUnits', event.target.value);
-      this.setState(prevState => {
-        return {
-          project: defined(prevState.project).setSimSpec(newSimSpec),
-        };
-      });
+      let { project } = this.state;
+      if (!project) {
+        return;
+      }
+      const newSimSpec = project.simSpec.set('timeUnits', event.target.value);
+      this.updateProject(project.setSimSpec(newSimSpec));
+      this.scheduleSimRun();
     };
 
     getDrawer() {
@@ -959,7 +1006,7 @@ export const Editor = withStyles(styles)(
       }
 
       const project = this.state.project.setEquation(this.state.modelName, ident, newEquation);
-      this.setState({ project });
+      this.updateProject(project);
       this.scheduleSimRun();
     };
 

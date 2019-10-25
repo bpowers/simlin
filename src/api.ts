@@ -253,7 +253,7 @@ export const apiRouter = (app: Application): Router => {
         project: projectModel._id,
         user: user._id,
         created: new Date(Date.now()),
-        contents: fileContents,
+        contents: JSON.stringify(fileContents),
       });
 
       // only update if the version matches
@@ -271,6 +271,15 @@ export const apiRouter = (app: Application): Router => {
           new: true,
         },
       ).exec();
+
+      // remove our preview
+      setTimeout(async () => {
+        try {
+          await Preview.deleteOne({ project: projectModel.id });
+        } catch (err) {
+          logger.warn(`unable to delete preview for ${req.params.projectName}`);
+        }
+      });
 
       // if the result is null we weren't able to find a matching
       // version in the DB, probably due to concurrent modification in
