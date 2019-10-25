@@ -1,0 +1,52 @@
+{
+  "extends": [
+    "tslint:recommended",
+    "tslint-react",
+    "tslint-config-prettier"
+  ],
+  "rules": {
+    "interface-name": {
+        "options": ["never-prefix"]
+    },
+    "max-classes-per-file": [true, 32],
+    "semicolon": [true, "always", "ignore-bound-class-methods"],
+    "arrow-parens": [true, "ban-single-arg-parens"],
+    "jsx-boolean-value": false,
+    "jsx-no-multiline-js": false,
+    "quotemark": false,
+    "member-access": [true, "no-public"],
+    "member-ordering": false,
+    "no-bitwise": false,
+    "no-conditional-assignment": false,
+    "no-console": false,
+    "no-debugger": false,
+    "no-empty": false,
+    "no-empty-interface": false,
+    "no-shadowed-variable": false,
+    "no-unused-variable": false,
+    "object-literal-key-quotes": false,
+    "object-literal-sort-keys": false,
+    "whitespace": {
+      "options": [
+        "check-branch",
+        "check-decl",
+        "check-separator",
+        "check-type",
+        "check-typecast"
+      ]
+    }
+  },
+  "linterOptions": {
+    "exclude": [
+      "app/config",
+      "app/node_modules",
+      "public/**/*.js",
+      "lib/**/*.js",
+      "config/**/*.js",
+      "build/**/*.js",
+      "node_modules/**/*.ts",
+      "sd.js/**/*.ts",
+      "runtime/**/*.ts"
+    ]
+  }
+}

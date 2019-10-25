@@ -1,0 +1,22 @@
+{
+  "public": "./public/",
+  "host": "systemdynamics.net",
+  "port": "PORT",
+  "mongodb": "mongodb://model-db-mongodb.default.svc.cluster.local:27017/model",
+  "authentication": {
+    "seshcookie": {
+      "key": "IN ENV",
+      "cookieName": "_Secure-model",
+      "cookiePath": "/",
+      "httpOnly": true,
+      "secure": true
+    },
+    "google": {
+      "successRedirect": "/",
+      "clientID": "IN ENV",
+      "clientSecret": ""
+    },
+    "path": "/authn",
+    "service": "users"
+  }
+}

@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee"/>
+		<name>smth3</name>
+		<uuid>65758527-4979-4e04-b61c-25c628175fd0</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="1.4.1" isee:build_number="1148" isee:saved_by_v1="true" lang="en">Stella Architect</product>
+	</header>
+	<sim_specs isee:simulation_delay="0.115385" method="Euler" time_units="time unit" isee:pause_after_rates="false" isee:instantaneous_flows="true">
+		<start>1</start>
+		<stop>13</stop>
+		<dt reciprocal="true">4</dt>
+	</sim_specs>
+	<isee:prefs show_module_prefix="true" live_update_on_drag="true" layer="model" saved_runs="5" keep="false" rifp="true"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" observer_start_page="home_page" enabled="false"/>
+	<model_units/>
+	<model name="stdlib·smth3">
+		<variables>
+			<flow name="flow 1">
+				<eqn>(input - Stock_1)/(delay_time/3)</eqn>
+				<units>unit/time unit</units>
+			</flow>
+			<stock name="Stock 1">
+				<eqn>IF (initial_value = NAN) THEN input ELSE initial_value</eqn>
+				<inflow>flow_1</inflow>
+				<units>unit</units>
+			</stock>
+			<stock name="Stock 2">
+				<eqn>IF (initial_value = NAN) THEN input ELSE initial_value</eqn>
+				<inflow>flow_2</inflow>
+				<units>unit</units>
+			</stock>
+			<flow name="flow 2">
+				<eqn>(Stock_1 - Stock_2)/(delay_time/3)</eqn>
+				<units>unit/time unit</units>
+			</flow>
+			<stock name="Output" access="output">
+				<eqn>IF (initial_value = NAN) THEN input ELSE initial_value</eqn>
+				<inflow>flow_3</inflow>
+				<units>unit</units>
+			</stock>
+			<flow name="flow 3">
+				<eqn>(Stock_2 - Output)/(delay_time/3)</eqn>
+				<units>unit/time unit</units>
+			</flow>
+			<aux name="delay time" access="input">
+				<eqn>1</eqn>
+				<units>time unit</units>
+			</aux>
+			<aux name="input" access="input">
+				<eqn>0</eqn>
+				<units>unit</units>
+			</aux>
+			<aux name="initial value" access="input">
+				<eqn>NAN</eqn>
+				<units>unit</units>
+			</aux>
+			<isee:dependencies>
+				<var name="flow_1">
+					<in>Stock_1</in>
+					<in>input</in>
+					<in>delay_time</in>
+				</var>
+				<var name="Stock_1">
+					<in>initial_value</in>
+					<in>input</in>
+				</var>
+				<var name="Stock_2">
+					<in>initial_value</in>
+					<in>input</in>
+				</var>
+				<var name="flow_2">
+					<in>Stock_1</in>
+					<in>Stock_2</in>
+					<in>delay_time</in>
+				</var>
+				<var name="Output">
+					<in>initial_value</in>
+					<in>input</in>
+				</var>
+				<var name="flow_3">
+					<in>Output</in>
+					<in>Stock_2</in>
+					<in>delay_time</in>
+				</var>
+			</isee:dependencies>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				<button color="black" background="#E0E0E0" font_size="12pt" transparent="false" corner_radius="0" isee:flat="false" icon_side="top"/>
+				<isee:annotation color="black" background="#E0E0E0" font_size="12pt" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" popup_background_color="#FFFECF"/>
+				<slider color="black" background="#E0E0E0" font_size="12pt" num_ticks="3" label_side="top" wrap_title="true" input_expands="true" input_width="100"/>
+				<isee:pie_input color="black" background="white" font_size="12pt" legend_position="bottom" isee:transparent="false"/>
+				<knob color="#66CC66" background="#E0E0E0" font_size="12pt" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="#E0E0E0" font_size="12pt" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="12pt" label_side="top" wrap_title="true" isee:appearance="switch"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="12pt"/>
+				<group_input color="black" background="#E0E0E0" font_size="12pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" font_size="9pt" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white" font_size="12pt"/>
+				<isee:animation_object color="black" background="white" font_size="12pt"/>
+			</style>
+			<view isee:show_pages="false" page_width="764" page_height="576" isee:popup_graphs_are_comparative="true" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<isee:loop_indicator color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<numeric_display color="blue" background="white" font_size="9pt" isee:transparent="false"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" isee:report_month_names="false" interval="1" report_balances="beginning" report_flows="instantaneous"/>
+				</style>
+				<connector uid="1" angle="238.57">
+					<from>Stock_1</from>
+					<to>flow_1</to>
+				</connector>
+				<connector uid="2" angle="273.18">
+					<from>Stock_1</from>
+					<to>flow_2</to>
+				</connector>
+				<connector uid="3" angle="246.038">
+					<from>Stock_2</from>
+					<to>flow_2</to>
+				</connector>
+				<connector uid="4" angle="214.287">
+					<from>Output</from>
+					<to>flow_3</to>
+				</connector>
+				<connector uid="5" angle="270">
+					<from>Stock_2</from>
+					<to>flow_3</to>
+				</connector>
+				<flow x="167.708" y="165.333" name="flow 1">
+					<pts>
+						<pt x="103.833" y="165.333"/>
+						<pt x="219.583" y="165.333"/>
+					</pts>
+				</flow>
+				<stock x="242.083" y="165.333" name="Stock 1"/>
+				<stock x="306.833" y="248.333" name="Stock 2"/>
+				<flow x="242.083" y="248.333" name="flow 2">
+					<pts>
+						<pt x="187.833" y="248.333"/>
+						<pt x="284.333" y="248.333"/>
+					</pts>
+				</flow>
+				<stock x="391.833" y="317.333" name="Output"/>
+				<flow x="306.833" y="320.333" name="flow 3">
+					<pts>
+						<pt x="232.333" y="320.333"/>
+						<pt x="369.333" y="320.333"/>
+					</pts>
+				</flow>
+				<aux x="118" y="274.833" name="delay time"/>
+				<aux x="106" y="117" name="input"/>
+				<connector uid="6" angle="321.93">
+					<from>input</from>
+					<to>flow_1</to>
+				</connector>
+				<connector uid="7" angle="62.0658">
+					<from>delay_time</from>
+					<to>flow_1</to>
+				</connector>
+				<connector uid="8" angle="6.2498">
+					<from>delay_time</from>
+					<to>flow_2</to>
+				</connector>
+				<connector uid="9" angle="344.229">
+					<from>delay_time</from>
+					<to>flow_3</to>
+				</connector>
+				<aux x="242.083" y="54" name="initial value"/>
+			</view>
+		</views>
+	</model>
+</xmile>

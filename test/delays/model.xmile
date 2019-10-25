@@ -1,0 +1,414 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee"/>
+		<name/>
+		<uuid>5d773e8c-1d7c-4d1d-955e-fadbb441a915</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="1.9.1(Online)" isee:build_number="1875" isee:saved_by_v1="false" lang="en"/>
+	</header>
+	<sim_specs isee:simulation_delay="0.1" isee:restore_on_start="false" method="Euler" time_units="months" isee:instantaneous_flows="false">
+		<start>1</start>
+		<stop>13</stop>
+		<dt reciprocal="true">4</dt>
+	</sim_specs>
+	<isee:prefs show_module_prefix="true" live_update_on_drag="true" show_restore_buttons="false" layer="model" interface_scale_ui="true" interface_max_page_width="10000" interface_max_page_height="10000" interface_min_page_width="0" interface_min_page_height="0" saved_runs="5" keep="false" rifp="true"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" observer_start_page="home_page" enabled="false"/>
+	<isee:time_formats default_format="Builtin">
+		<isee:time_format name="Builtin" type="adaptive"/>
+	</isee:time_formats>
+	<default_format/>
+	<isee:data_manager>102005;Input,0;delay3_output,1;Delay_Time,2;delay_1,3;delay3_inflow,4;delay3_outflow,5;delay3_flow_1,6;delay_2,7;delay_3,8;delay3_flow_2,9;smth3_change_1,10;smth3_output,11;smth_1,12;smth_2,13;smth_3,14;smth3_change_2,15;Average_Input,16;smth3_change_3,17;Change_in_Average,18;Trend_in_Input,19;trend_output,20;:1,Run 1,1,13,0.25,0.25,0,1,1,1,0,months,0,2019-Jul-15 23:18:05,0,0,16,-1,49,5,5,5,5,5,5,5,5,5,5,5.25,5.4875,5.713125,5.92746875,6.1310953125,6.324540546875,6.50831351953125,6.68289784355469,6.84875295137695,7.00631530380811,7.1559995386177,7.29819956168682,7.43328958360248,7.56162510442235,7.68354384920123,7.79936665674117,7.90939832390411,8.01392840770891,8.11323198732346,8.20757038795729,8.29719186855942,8.38233227513145,8.46321566137488,8.54005487830614,8.61305213439083,8.68239952767129,8.74827955128772,8.81086557372334,8.87032229503717,8.92680618028531,8.98046587127105,9.03144257770749,9.07987044882212,9.12587692638101,9.16958308006196,9.21110392605886,9.25054872975592,9.28802129326812,9.32362022860472,;3,-1,49,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,9.58333333333333,10.6458333333333,11.5489583333333,12.3166145833333,12.9691223958333,13.5237540364583,13.9951909309896,14.3959122913411,14.73652544764,15.026046630494,15.2721396359199,15.4813186905319,15.6591208869521,15.8102527539093,15.9387148408229,16.0479076146995,16.1407214724945,16.2196132516204,16.2866712638773,16.3436705742957,16.3921199881514,16.4333019899287,16.4683066914394,16.4980606877235,16.5233515845649,16.5448488468802,16.5631215198482,16.5786532918709,16.5918552980903,16.6030770033768,16.6126154528702,16.6207231349397,16.6276146646988,16.6334724649939,16.6384515952449,16.6426838559581,16.6462812775644,16.6493390859297,16.6519382230403,;11,-1,49,5,5,5,5,5,5,5,5,5,5,5,5,5.016875,5.05990625,5.133059375,5.23669296875,5.36882580078125,5.52606387089844,5.70426701703125,5.89901759816211,6.10594009061365,6.32090956888275,6.54017843671723,6.76044398122368,6.97887397952592,7.19310340093772,7.40121198173776,7.60168991457514,7.79339693785087,7.97551860996282,8.14752241140189,8.30911545643806,8.46020495354689,8.60086208061724,8.73128959844612,8.85179328339671,8.96275709328871,9.06462187076957,9.15786732092513,9.24299696338196,9.32052574490514,9.39096999984087,9.45483945764925,9.51263101544039,9.56482401607051,9.61187679694161,9.65422429972559,9.69227655579863,9.72641788555305,;8,-1,49,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.36145833333333,8.43317708333333,8.55509895833333,8.72782161458333,8.94804300130208,9.2101064514974,9.50711169505208,9.83169599693685,10.1765668176894,10.5348492814712,10.9002973945287,11.2674066353728,11.6314566325432,11.9885056682295,12.3353533028963,12.6694831909586,12.9889948964181,13.2925310166047,13.5792040190031,13.8485257607301,14.1003415892448,14.3347701343621,14.5521493307435,14.7529888056612,14.9379284888145,15.1077031179493,15.2631122015419,15.4049949389699,15.5342095748419,15.6516166664014,15.7580657627488,15.854385025734,15.9413733601175,16.0197946615693,16.090373832876,16.1537942596644,16.2106964759218,;18,-1,49,0,0,0,0,0,0,0,0,0,1,0.95,0.9025,0.857375,0.81450625,0.7737809375,0.735091890625,0.69833729609375,0.663420431289062,0.630249409724609,0.598736939238379,0.56880009227646,0.540360087662637,0.513342083279505,0.48767497911553,0.463291230159753,0.440126668651766,0.418120335219177,0.397214318458219,0.377353602535308,0.358485922408542,0.340561626288115,0.32353354497371,0.307356867725024,0.291989024338773,0.277389573121834,0.263520094465742,0.250344089742455,0.237826885255333,0.225935540992566,0.214638763942938,0.203906825745791,0.193711484458501,0.184025910235576,0.174824614723797,0.166083383987608,0.157779214788227,0.149890254048816,0.142395741346375,0.135275954279057,;12,-1,49,5,5,5,5,5,5,5,5,5,5,5.75,6.3875,6.929375,7.38996875,7.7814734375,8.114252421875,8.39711455859375,8.63754737480469,8.84191526858399,9.01562797829639,9.16328378155193,9.28879121431914,9.39547253217127,9.48615165234558,9.56322890449374,9.62874456881968,9.68443288349673,9.73176795097222,9.77200275832639,9.80620234457743,9.83527199289081,9.85998119395719,9.88098401486361,9.89883641263407,9.91401095073896,9.92690930812812,9.9378729119089,9.94719197512256,9.95511317885418,9.96184620202605,9.96756927172215,9.97243388096382,9.97656879881925,9.98008347899636,9.98307095714691,9.98561031357487,9.98776876653864,9.98960345155785,9.99116293382417,;7,-1,49,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.33333333333333,8.52083333333333,8.83958333333333,9.24598958333333,9.70658333333333,10.1959641927083,10.6951326692708,11.1901414085286,11.6710070409505,12.1308348019539,12.5651165762349,12.9711700351877,13.3476923334893,13.6944066165087,14.0117835371188,14.3008232326744,14.5628858899782,14.7995612273556,15.0125690309954,15.2036843659276,15.3746822971829,15.5272979508281,15.6631985566932,15.7839647769051,15.8910791635279,15.9859200266834,16.069759349713,16.1437636752332,16.2089971177289,16.2664258447831,16.3169235185722,16.3612773087169,16.4001941826503,16.4343072549576,16.464182036463,16.4903224702803,16.513176678132,16.5331423680468,16.5505718757293,;13,-1,49,5,5,5,5,5,5,5,5,5,5,5,5.1125,5.30375,5.54759375,5.82395,6.117578515625,6.4170796015625,6.71408484511719,7.00260422457031,7.27850088117236,7.53906994574097,7.78270202111261,8.00861540009359,8.21664396990524,8.4070701222713,8.58049393960466,8.73773153398691,8.87973673641339,9.00754141859721,9.12221061955659,9.22480937830972,9.31637877049688,9.39791913401593,9.47037886614308,9.53464749811673,9.59155201601006,9.64185560982777,9.68625820513994,9.72539827063733,9.75985550686986,9.79015411114329,9.81676638523012,9.84011650959017,9.86058435297454,9.87850922187781,9.89419348216817,9.90790600687918,9.9198854208281,9.93034312543756,;14,-1,49,5,5,5,5,5,5,5,5,5,5,5,5,5.016875,5.05990625,5.133059375,5.23669296875,5.36882580078125,5.52606387089844,5.70426701703125,5.89901759816211,6.10594009061365,6.32090956888275,6.54017843671723,6.76044398122368,6.97887397952592,7.19310340093772,7.40121198173776,7.60168991457514,7.79339693785087,7.97551860996282,8.14752241140189,8.30911545643806,8.46020495354689,8.60086208061724,8.73128959844612,8.85179328339671,8.96275709328871,9.06462187076957,9.15786732092513,9.24299696338196,9.32052574490514,9.39096999984087,9.45483945764925,9.51263101544039,9.56482401607051,9.61187679694161,9.65422429972559,9.69227655579863,9.72641788555305,;2,-1,49,5,;6,-1,49,5,5,5,5,5,5,5,5,5,5,5.75,6.3875,6.929375,7.38996875,7.7814734375,8.114252421875,8.39711455859375,8.63754737480469,8.84191526858398,9.01562797829639,9.16328378155193,9.28879121431914,9.39547253217127,9.48615165234558,9.56322890449374,9.62874456881968,9.68443288349673,9.73176795097222,9.77200275832639,9.80620234457743,9.83527199289081,9.85998119395719,9.88098401486361,9.89883641263407,9.91401095073896,9.92690930812812,9.9378729119089,9.94719197512257,9.95511317885418,9.96184620202605,9.96756927172215,9.97243388096383,9.97656879881925,9.98008347899636,9.98307095714691,9.98561031357487,9.98776876653864,9.98960345155785,9.99116293382417,;4,-1,49,5,5,5,5,5,5,5,5,5,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,;9,-1,49,5,5,5,5,5,5,5,5,5,5,5,5.1125,5.30375,5.54759375,5.82395,6.117578515625,6.4170796015625,6.71408484511719,7.00260422457031,7.27850088117236,7.53906994574097,7.78270202111261,8.00861540009359,8.21664396990524,8.40707012227129,8.58049393960466,8.73773153398691,8.87973673641339,9.00754141859721,9.12221061955659,9.22480937830971,9.31637877049688,9.39791913401593,9.47037886614308,9.53464749811673,9.59155201601006,9.64185560982777,9.68625820513994,9.72539827063733,9.75985550686986,9.79015411114329,9.81676638523012,9.84011650959018,9.86058435297454,9.87850922187781,9.89419348216818,9.90790600687918,9.9198854208281,9.93034312543756,;10,-1,49,0,0,0,0,0,0,0,0,0,3,2.55,2.1675,1.842375,1.56601875,1.3311159375,1.131448546875,0.961731264843749,0.817471575117187,0.694850838849609,0.590623213022167,0.502029731068842,0.426725271408515,0.362716480697238,0.308309008592652,0.262062657303754,0.222753258708192,0.189340269901962,0.160939229416668,0.136798345004168,0.116278593253543,0.0988368042655118,0.0840112836256853,0.0714095910818326,0.0606981524195579,0.0515934295566247,0.0438544151231309,0.0372762528546616,0.0316848149264626,0.0269320926874929,0.0228922787843686,0.0194584369667133,0.016539671421706,0.0140587207084504,0.0119499126021832,0.0101574257118557,0.00863381185507777,0.00733874007681621,0.00623792906529346,0.00530223970549955,;1,-1,49,5,5,5,5,5,5,5,5,5,5,5,5,5.016875,5.05990625,5.133059375,5.23669296875,5.36882580078125,5.52606387089844,5.70426701703125,5.89901759816211,6.10594009061365,6.32090956888275,6.54017843671723,6.76044398122368,6.97887397952591,7.19310340093772,7.40121198173776,7.60168991457513,7.79339693785087,7.97551860996282,8.14752241140189,8.30911545643806,8.46020495354689,8.60086208061724,8.73128959844612,8.85179328339671,8.96275709328871,9.06462187076957,9.15786732092512,9.24299696338195,9.32052574490514,9.39096999984086,9.45483945764925,9.51263101544039,9.56482401607051,9.61187679694161,9.65422429972559,9.69227655579863,9.72641788555305,;15,-1,49,0,0,0,0,0,0,0,0,0,0,0.45,0.765,0.975375,1.105425,1.1745140625,1.19800434375,1.18802097421875,1.1540775178125,1.1035866264082,1.04227625827441,0.974528301486578,0.903653515923918,0.832114279246607,0.761704609464202,0.693695269333469,0.628950377529011,0.568020809705889,0.5112187287353,0.458676803837505,0.410395035012504,0.366277568748659,0.326161454076187,0.289838928508612,0.257074527894595,0.227618071573339,0.201214375270832,0.177610381248676,0.156560261989574,0.137828944930107,0.121194417093715,0.106449096347313,0.0934004974402235,0.0818713735374459,0.0716994756130962,0.0627370411614596,0.0548500988440182,0.0479176557956766,0.0418308184378475,0.0364918850319647,;5,-1,49,5,5,5,5,5,5,5,5,5,5,5,5,5.016875,5.05990625,5.133059375,5.23669296875,5.36882580078125,5.52606387089844,5.70426701703125,5.89901759816211,6.10594009061365,6.32090956888275,6.54017843671723,6.76044398122368,6.97887397952591,7.19310340093772,7.40121198173776,7.60168991457513,7.79339693785087,7.97551860996282,8.14752241140189,8.30911545643806,8.46020495354689,8.60086208061724,8.73128959844612,8.85179328339671,8.96275709328871,9.06462187076957,9.15786732092512,9.24299696338195,9.32052574490514,9.39096999984086,9.45483945764925,9.51263101544039,9.56482401607051,9.61187679694161,9.65422429972559,9.69227655579863,9.72641788555305,;17,-1,49,0,0,0,0,0,0,0,0,0,0,0,0.0674999999999999,0.172125,0.2926125,0.414534375,0.528531328125,0.62895228046875,0.712812584531251,0.779002324523438,0.827689969806152,0.859877913076392,0.87707547133792,0.88106217802582,0.873719993208937,0.856917685647227,0.832434323200163,0.80191173134949,0.76682809310295,0.728486688447803,0.688015205756258,0.646372180144695,0.60435798843529,0.562628508281424,0.521710071315503,0.482014739802367,0.443855239568013,0.407459109923435,0.372981800622221,0.340518569827324,0.310115126092742,0.281777019742889,0.255477831233552,0.231166231164553,0.208772002520487,0.188211123484378,0.16939001113594,0.152209024292153,0.136565319017681,0.122355143930705,;0,-1,49,5,5,5,5,5,5,5,5,5,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,;19,-1,49,0,0,0,0,0,0,0,0,0,0.2,0.180952380952381,0.164464692482916,0.150071108193852,0.137412154218443,0.126205987357989,0.116228504691651,0.107299271001322,0.099271371015928,0.0920239661437776,0.0854567505565944,0.0794857642467558,0.0740401907477774,0.069059879546724,0.064493408808421,0.0602965557628615,0.0564310780634161,0.0528637347743022,0.0495654937566104,0.0465108853197967,0.0436774715858103,0.0410454080950697,0.0385970794707772,0.0363167949421123,0.0341905325550656,0.0322057232202569,0.0303510675390932,0.0286163797435583,0.026992454176648,0.0254709506010818,0.0240442953065301,0.0227055955301939,0.0214485651424772,0.0202674599018589,0.0191570208686922,0.0181124248002871,0.0171292405399812,0.0162033905693258,0.0153311170216182,0.0145089515619729,;20,-1,49,0,0,0,0,0,0,0,0,0,0.2,0.180952380952381,0.164464692482916,0.150071108193852,0.137412154218443,0.126205987357989,0.116228504691651,0.107299271001322,0.099271371015928,0.0920239661437776,0.0854567505565944,0.0794857642467558,0.0740401907477774,0.069059879546724,0.064493408808421,0.0602965557628615,0.0564310780634161,0.0528637347743022,0.0495654937566104,0.0465108853197967,0.0436774715858103,0.0410454080950697,0.0385970794707772,0.0363167949421123,0.0341905325550656,0.0322057232202569,0.0303510675390932,0.0286163797435583,0.026992454176648,0.0254709506010818,0.0240442953065301,0.0227055955301939,0.0214485651424772,0.0202674599018589,0.0191570208686922,0.0181124248002871,0.0171292405399812,0.0162033905693258,0.0153311170216182,0.0145089515619729,;:</isee:data_manager>
+	<model_units/>
+	<model>
+		<isee:extra_collection_variables>
+			<isee:extra_collection_variable name="delay3_output"/>
+			<isee:extra_collection_variable name="delay3_outflow"/>
+			<isee:extra_collection_variable name="smth3_output"/>
+			<isee:extra_collection_variable name="smth_3"/>
+			<isee:extra_collection_variable name="Trend_in_Input"/>
+			<isee:extra_collection_variable name="trend_output"/>
+		</isee:extra_collection_variables>
+		<variables>
+			<aux name="Input">
+				<eqn>IF (TIME &gt; 3) THEN 10 ELSE 5</eqn>
+			</aux>
+			<aux name="delay3 output">
+				<eqn>DELAY3(Input, Delay_Time)</eqn>
+			</aux>
+			<aux name="Delay Time">
+				<eqn>5</eqn>
+			</aux>
+			<stock name="delay 1">
+				<eqn>Input*(Delay_Time/3)</eqn>
+				<inflow>delay3_inflow</inflow>
+				<outflow>delay3_flow_1</outflow>
+			</stock>
+			<flow name="delay3 inflow">
+				<eqn>Input</eqn>
+			</flow>
+			<flow name="delay3 outflow">
+				<eqn>delay_3/(Delay_Time/3)</eqn>
+			</flow>
+			<flow name="delay3 flow 1">
+				<eqn>delay_1/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="delay 2">
+				<eqn>Input*(Delay_Time/3)</eqn>
+				<inflow>delay3_flow_1</inflow>
+				<outflow>delay3_flow_2</outflow>
+			</stock>
+			<flow name="delay3 flow 2">
+				<eqn>delay_2/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="delay 3">
+				<eqn>Input*(Delay_Time/3)</eqn>
+				<inflow>delay3_flow_2</inflow>
+				<outflow>delay3_outflow</outflow>
+			</stock>
+			<aux name="smth3 output">
+				<eqn>SMTH3(Input, Delay_Time)</eqn>
+			</aux>
+			<flow name="smth3 change 1">
+				<eqn>(Input - smth_1)/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="smth 1">
+				<eqn>Input</eqn>
+				<inflow>smth3_change_1</inflow>
+			</stock>
+			<stock name="smth 2">
+				<eqn>Input</eqn>
+				<inflow>smth3_change_2</inflow>
+			</stock>
+			<flow name="smth3 change 2">
+				<eqn>(smth_1 - smth_2)/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="smth 3">
+				<eqn>Input</eqn>
+				<inflow>smth3_change_3</inflow>
+			</stock>
+			<flow name="smth3 change 3">
+				<eqn>(smth_2 - smth_3)/(Delay_Time/3)</eqn>
+			</flow>
+			<stock name="Average Input">
+				<eqn>Input</eqn>
+				<inflow>Change_in_Average</inflow>
+			</stock>
+			<flow name="Change in Average">
+				<eqn>(Input-Average_Input)/Delay_Time</eqn>
+			</flow>
+			<aux name="Trend in Input">
+				<eqn>(Input-Average_Input)/(Average_Input*Delay_Time)</eqn>
+			</aux>
+			<aux name="trend output">
+				<eqn>TREND(Input, Delay_Time)</eqn>
+			</aux>
+		</variables>
+		<views>
+			<style color="#000000" background="#FFFFFF" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="#000000" font_family="Arial" font_size="10pt" padding="2" border_color="#000000" border_width="thin" border_style="none">
+				<text_box color="#000000" background="#FFFFFF" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:loop_indicator color="#000000" background="#FFFFFF" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="#0000FF" background="#FFFFFF" font_size="9pt" isee:transparent="false"/>
+				<graph color="#000000" background="#FFFFFF" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="#FFFFFF" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="#000000" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="#000000" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="#000000" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="#000000" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+					<isee:series_styles>
+						<isee:series_style color="#0000FF" thickness="1"/>
+						<isee:series_style color="#FF0000" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#FF00FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#00FF00" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="#00FFFF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#000000" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="#000000" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="#000000" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="#000000" header_text_border_width="thin" header_text_border_style="none"/>
+				<button color="#000000" background="#E0E0E0" font_size="12pt" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595"/>
+				<isee:annotation color="#000000" background="#E0E0E0" font_size="12pt" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595" popup_background_color="#FFFECF"/>
+				<slider color="#000000" background="#E0E0E0" font_size="12pt" num_ticks="3" label_side="top" wrap_title="true" vertical="false" isee:fancy_appearance="false" isee:show_hover_tip="when_deciding" input_expands="true" input_width="100"/>
+				<isee:sim_speed_slider color="#000000" background="#FFFFFF"/>
+				<isee:time_slider color="#000000" background="#FFFFFF"/>
+				<isee:pie_input color="#000000" background="#FFFFFF" font_size="12pt" legend_position="bottom" isee:transparent="false"/>
+				<knob color="#66CC66" background="#E0E0E0" font_size="12pt" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="#000000" background="#E0E0E0" font_size="12pt" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="#000000" background="#E0E0E0" font_size="12pt" label_side="top" wrap_title="true" isee:appearance="switch" isee:on_color="#008000"/>
+				<options color="#000000" background="#FFFFFF" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="#000000" background="#E0E0E0" font_size="12pt" isee:show_hover_tip="true"/>
+				<group_input color="#000000" background="#E0E0E0" font_size="12pt"/>
+				<lamp color="#000000" background="#FFFFFF" font_size="9pt"/>
+				<gauge color="#000000" background="#FFFFFF" font_size="9pt" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="#000000" appearance="radial" num_major_ticks="11" num_minor_ticks="11" show_numeric_value="true"/>
+				<isee:spatial_map color="#000000" background="#FFFFFF" font_size="12pt"/>
+				<isee:animation_object color="#000000" background="#FFFFFF" font_size="12pt"/>
+				<isee:navigation_widget color="#000000" background="#FFFFFF" item_spacing="6" appearance="tabs" corner_radius="4" selected_item_color="#000000" selected_item_background="#FFFFFF" item_background="#DDDDDD"/>
+				<isee:shape color="#000000" background="#FFFFFF" opacity="1" transparent_background="true"/>
+				<isee:selector color="#000000" background="#FFFFFF"/>
+				<isee:iframe color="#000000" background="#FFFFFF"/>
+				<isee:financial_table color="#000000" background="#FFFFFF" auto_fit="true" first_column_width="250" other_column_width="100" header_font_style="normal" header_font_weight="bold" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="#000000" header_font_family="Arial" header_font_size="14pt" header_text_padding="2" header_text_border_color="#000000" header_text_border_width="thin" header_text_border_style="none"/>
+			</style>
+			<view isee:show_pages="false" background="#FFFFFF" page_width="576" page_height="764" isee:page_cols="3" isee:page_rows="2" isee:scroll_x="30.4832" isee:scroll_y="67.2916" zoom="80" isee:popup_graphs_are_comparative="true" type="stock_flow">
+				<style color="#000000" background="#FFFFFF" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="#000000" font_family="Arial" font_size="10pt" padding="2" border_color="#000000" border_width="thin" border_style="none">
+					<stock color="#0000FF" background="#FFFFFF" font_color="#0000FF" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="#0000FF" background="#FFFFFF" font_color="#0000FF" font_size="9pt" label_side="bottom"/>
+					<isee:placeholder color="#228B22" background="#FFFFFF" font_color="#228B22" label_side="bottom"/>
+					<module color="#0000FF" background="#FFFFFF" font_color="#0000FF" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="#0000FF" background="#FFFFFF" font_color="#0000FF" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="#FF0000" background="#FFFFFF" font_color="#FF0000" font_size="9pt"/>
+					<connector color="#FF007F" background="#FFFFFF" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="#0000FF" background="#FFFFFF" text_align="left" vertical_text_align="top" font_size="9pt"/>
+					<isee:loop_indicator color="#0000FF" background="#FFFFFF" font_color="#0000FF" font_size="9pt"/>
+					<numeric_display color="#0000FF" background="#FFFFFF" text_align="left" vertical_text_align="top" font_size="9pt" isee:transparent="false"/>
+					<graph color="#000000" background="#FFFFFF" font_size="12pt" axis_color="#666666" grid_color="#666666" isee:graph_area_color="#FFFFFF" legend_position="right" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="#000000" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="#000000" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="#000000" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="#000000" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="#0000FF" thickness="1"/>
+							<isee:series_style color="#FF0000" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#FF00FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#00FF00" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="#00FFFF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#000000" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="#000000" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="#000000" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="#000000" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<connector uid="1" angle="6.34019">
+					<from>Input</from>
+					<to>delay3_output</to>
+				</connector>
+				<connector uid="2" angle="167.471">
+					<from>Delay_Time</from>
+					<to>delay3_output</to>
+				</connector>
+				<stacked_container uid="3" x="703.833" y="62.3333" width="350" height="250">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" title="Delay3" isee:fill_intensity="0.1" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="true" right_axis_auto_scale="true">
+						<plot color="#FF0000" pen_width="1" index="0" show_y_axis="true">
+							<entity name="delay3_output"/>
+						</plot>
+						<plot color="#FF00FF" pen_width="1" index="1" show_y_axis="true">
+							<entity name="delay3_outflow"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<connector uid="4" angle="102.529">
+					<from>Input</from>
+					<to>delay3_inflow</to>
+				</connector>
+				<connector uid="5" angle="0">
+					<from>Delay_Time</from>
+					<to>delay3_outflow</to>
+				</connector>
+				<connector uid="6" angle="296.565">
+					<from>delay_1</from>
+					<to>delay3_flow_1</to>
+				</connector>
+				<connector uid="7" angle="139.399">
+					<from>Delay_Time</from>
+					<to>delay3_flow_1</to>
+				</connector>
+				<connector uid="8" angle="32.0054">
+					<from>Delay_Time</from>
+					<to>delay3_flow_2</to>
+				</connector>
+				<connector uid="9" angle="313.363">
+					<from>delay_2</from>
+					<to>delay3_flow_2</to>
+				</connector>
+				<connector uid="10" angle="313.363">
+					<from>delay_3</from>
+					<to>delay3_outflow</to>
+				</connector>
+				<connector uid="11" angle="282.529">
+					<from>Input</from>
+					<to>smth3_output</to>
+				</connector>
+				<connector uid="12" angle="243.435">
+					<from>Delay_Time</from>
+					<to>smth3_output</to>
+				</connector>
+				<connector uid="13" angle="263.66">
+					<from>Delay_Time</from>
+					<to>smth3_change_1</to>
+				</connector>
+				<connector uid="14" angle="263.66">
+					<from>Input</from>
+					<to>smth3_change_1</to>
+				</connector>
+				<connector uid="15" angle="238.57">
+					<from>smth_1</from>
+					<to>smth3_change_1</to>
+				</connector>
+				<connector uid="16" angle="273.18">
+					<from>smth_1</from>
+					<to>smth3_change_2</to>
+				</connector>
+				<connector uid="17" angle="276.34">
+					<from>Delay_Time</from>
+					<to>smth3_change_2</to>
+				</connector>
+				<connector uid="18" angle="246.038">
+					<from>smth_2</from>
+					<to>smth3_change_2</to>
+				</connector>
+				<connector uid="19" angle="214.287">
+					<from>smth_3</from>
+					<to>smth3_change_3</to>
+				</connector>
+				<connector uid="20" angle="310.601">
+					<from>Delay_Time</from>
+					<to>smth3_change_3</to>
+				</connector>
+				<connector uid="21" angle="270">
+					<from>smth_2</from>
+					<to>smth3_change_3</to>
+				</connector>
+				<stacked_container uid="22" x="706.833" y="360.333" width="350" height="250">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="true" right_axis_auto_scale="true">
+						<plot color="#FF0000" pen_width="1" index="0" show_y_axis="true">
+							<entity name="smth3_output"/>
+						</plot>
+						<plot color="#FF00FF" pen_width="1" index="1" show_y_axis="true">
+							<entity name="smth_3"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<connector uid="23" angle="341.565">
+					<from>Delay_Time</from>
+					<to>Change_in_Average</to>
+				</connector>
+				<connector uid="24" angle="234.462">
+					<from>Input</from>
+					<to>Change_in_Average</to>
+				</connector>
+				<connector uid="25" angle="225">
+					<from>Average_Input</from>
+					<to>Change_in_Average</to>
+				</connector>
+				<connector uid="26" angle="302.905">
+					<from>Average_Input</from>
+					<to>Trend_in_Input</to>
+				</connector>
+				<connector uid="27" angle="234.462">
+					<from>Input</from>
+					<to>Trend_in_Input</to>
+				</connector>
+				<connector uid="28" angle="0">
+					<from>Delay_Time</from>
+					<to>Trend_in_Input</to>
+				</connector>
+				<stacked_container uid="29" x="706.833" y="662.333" width="350" height="250">
+					<graph width="350" height="250" type="time_series" isee:points_only="false" show_grid="false" include_units_in_legend="false" plot_numbers="false" isee:label_pie_slices="false" num_x_grid_lines="0" num_y_grid_lines="0" num_x_labels="5" num_y_labels="3" isee:fill_intensity="0.1" left_axis_multi_scale="false" left_axis_auto_scale="true" right_axis_multi_scale="true" right_axis_auto_scale="true">
+						<plot color="#FF0000" pen_width="1" index="0" show_y_axis="true">
+							<entity name="Trend_in_Input"/>
+						</plot>
+						<plot color="#FF00FF" pen_width="1" index="1" show_y_axis="true">
+							<entity name="trend_output"/>
+						</plot>
+					</graph>
+				</stacked_container>
+				<connector uid="30" angle="49.3987">
+					<from>Input</from>
+					<to>trend_output</to>
+				</connector>
+				<connector uid="31" angle="139.399">
+					<from>Delay_Time</from>
+					<to>trend_output</to>
+				</connector>
+				<aux x="100.333" y="199.333" name="Input"/>
+				<aux x="203.333" y="199.333" name="delay3 output"/>
+				<aux x="342.083" y="199.333" name="Delay Time"/>
+				<stock x="220.833" y="87.3333" name="delay 1"/>
+				<flow x="149.833" y="87.3333" name="delay3 inflow">
+					<pts>
+						<pt x="89.3333" y="87.3333"/>
+						<pt x="198.333" y="87.3333"/>
+					</pts>
+				</flow>
+				<flow x="544.833" y="87.3333" name="delay3 outflow">
+					<pts>
+						<pt x="498.333" y="87.3333"/>
+						<pt x="603.333" y="87.3333"/>
+					</pts>
+				</flow>
+				<flow x="285.583" y="87.3333" name="delay3 flow 1">
+					<pts>
+						<pt x="243.333" y="87.3333"/>
+						<pt x="327.833" y="87.3333"/>
+					</pts>
+				</flow>
+				<stock x="350.333" y="87.3333" name="delay 2"/>
+				<flow label_angle="260.722" x="413.083" y="87.3333" name="delay3 flow 2">
+					<pts>
+						<pt x="372.833" y="87.3333"/>
+						<pt x="453.333" y="87.3333"/>
+					</pts>
+				</flow>
+				<stock x="475.833" y="87.3333" name="delay 3"/>
+				<aux x="203.333" y="271.333" name="smth3 output"/>
+				<flow x="206.708" y="386.333" name="smth3 change 1">
+					<pts>
+						<pt x="142.833" y="386.333"/>
+						<pt x="258.583" y="386.333"/>
+					</pts>
+				</flow>
+				<stock x="281.083" y="386.333" name="smth 1"/>
+				<stock x="345.833" y="469.333" name="smth 2"/>
+				<flow x="281.083" y="469.333" name="smth3 change 2">
+					<pts>
+						<pt x="226.833" y="469.333"/>
+						<pt x="323.333" y="469.333"/>
+					</pts>
+				</flow>
+				<stock x="430.833" y="538.333" name="smth 3"/>
+				<flow x="345.833" y="541.333" name="smth3 change 3">
+					<pts>
+						<pt x="271.333" y="541.333"/>
+						<pt x="408.333" y="541.333"/>
+					</pts>
+				</flow>
+				<stock x="477.833" y="648.833" width="45" height="35" name="Average Input"/>
+				<flow x="428.083" y="666.333" name="Change in Average">
+					<pts>
+						<pt x="366.333" y="666.333"/>
+						<pt x="477.833" y="666.333"/>
+					</pts>
+				</flow>
+				<aux x="527.333" y="722.333" name="Trend in Input"/>
+				<aux x="203.333" y="145.333" name="trend output"/>
+				<stacked_container uid="32" x="1131.25" y="91.583" width="350" height="250">
+					<table width="350" height="250">
+						<item type="time"/>
+						<item>
+							<format precision="full"/>
+							<entity name="delay3_outflow"/>
+						</item>
+						<item>
+							<format precision="full"/>
+							<entity name="delay3_output"/>
+						</item>
+					</table>
+				</stacked_container>
+			</view>
+			<view type="interface" home_view="true" page_height="600" page_width="800" background="white" isee:show_pages="false">
+				<style/>
+			</view>
+			<isee:templates/>
+			<isee:stories/>
+		</views>
+	</model>
+</xmile>
+

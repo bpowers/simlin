@@ -1,0 +1,29 @@
+{
+  "x-powered-by": false,
+  "host": "localhost",
+  "port": 3030,
+  "public": "./public/",
+  "paginate": {
+    "default": 10,
+    "max": 50
+  },
+  "defaultProjectsDir": "./default_projects",
+  "mongodb": "mongodb://model:wKarPlhiHdlazqx5BUCA46dl@localhost:27017/admin",
+  "userAllowlist": "IN ENV",
+  "authentication": {
+    "seshcookie": {
+      "key": "",
+      "cookieName": "model",
+      "cookiePath": "/",
+      "httpOnly": true,
+      "secure": false
+    },
+    "google": {
+      "successRedirect": "/",
+      "clientID": "",
+      "clientSecret": ""
+    },
+    "path": "/authn",
+    "service": "users"
+  }
+}

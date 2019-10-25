@@ -1,0 +1,19 @@
+#!/bin/bash
+set -euxo pipefail
+
+if [ $# != '1' ]; then
+   echo "$0: need an argument for new version number"
+   exit 1
+fi
+
+new_version="$1"
+
+perl -pi -e 's/(\s*"version":\s*")([^"]*)/${1}'"$new_version"'/' package.json
+git commit -a -m "build: $new_version"
+git tag "v$new_version"
+
+read -p "Press enter to release $new_version"
+
+git push
+git push --tags
+npm publish

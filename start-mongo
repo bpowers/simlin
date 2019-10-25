@@ -1,0 +1,3 @@
+#!/bin/bash
+
+exec docker run -it --rm -v mongo_data:/data/db -e MONGO_INITDB_ROOT_USERNAME=model -e MONGO_INITDB_ROOT_PASSWORD=wKarPlhiHdlazqx5BUCA46dl -e MONGO_INITDB_DATABASE=model -p 27017:27017 mongo:4.2

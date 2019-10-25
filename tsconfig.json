@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "outDir": "lib",
+    "module": "commonjs",
+    "target": "es2017",
+    "lib": ["es2018", "dom", "dom.iterable"],
+    "sourceMap": true,
+    "jsx": "react",
+    "moduleResolution": "node",
+    "rootDir": "src",
+    "removeComments": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitReturns": true,
+    "noImplicitThis": true,
+    "noImplicitAny": true,
+    "strict": true,
+    "strictNullChecks": true,
+    "suppressImplicitAnyIndexErrors": true,
+    "noUnusedLocals": false
+  },
+  "exclude": [
+    "src/app/**/*.test.tsx",
+    "app",
+    "public",
+    "node_modules",
+    "build",
+    "build-component",
+    "build-rt",
+    "scripts",
+    "acceptance-tests",
+    "webpack",
+    "jest",
+    "lib",
+    "runtime/*.ts",
+    "test"
+  ]
+}

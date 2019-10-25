@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <smile version="1.0" namespace="std"></smile>
+        <name>Simple Population</name>
+        <uuid>d79f68be-1299-47eb-9603-acaef9948921</uuid>
+        <vendor>SDLabs</vendor>
+        <product version="0.1">go-xmile</product>
+    </header>
+    <sim_specs method="Euler" time_units="Year">
+        <start>1</start>
+        <stop>25</stop>
+        <dt>0.5</dt>
+    </sim_specs>
+    <model_units/>
+    <model>
+        <variables>
+            <stock name="population">
+                <eqn>100 </eqn>
+                <non_negative></non_negative>
+                <inflow>births</inflow>
+                <outflow>deaths</outflow>
+                <units>people</units>
+            </stock>
+            <flow name="births">
+                <eqn>Population * Birth_Rate </eqn>
+                <non_negative></non_negative>
+                <units>people/year</units>
+            </flow>
+            <flow name="deaths">
+                <eqn>population / average_lifespan </eqn>
+                <non_negative></non_negative>
+                <units>people/year</units>
+            </flow>
+            <aux name="birth_rate">
+                <eqn>0.1 </eqn>
+                <units>1/year</units>
+            </aux>
+            <aux name="average\nlifespan">
+                <eqn>80 </eqn>
+                <units>year</units>
+            </aux>
+        </variables>
+        <views>
+            <view scroll_x="226" scroll_y="300" zoom="333.7" page_width="576" page_height="734">
+                <stock x="211" y="127" name="population"></stock>
+                <aux x="100" y="185" name="birth_rate"></aux>
+                <aux x="324" y="184" name="average\nlifespan"></aux>
+                <flow x="137" y="128" name="births">
+                    <pts>
+                        <pt x="85" y="128"></pt>
+                        <pt x="189" y="128"></pt>
+                    </pts>
+                </flow>
+                <flow x="282" y="128" name="deaths">
+                    <pts>
+                        <pt x="234" y="128"></pt>
+                        <pt x="354" y="128"></pt>
+                    </pts>
+                </flow>
+                <connector x="189" y="113" color="#FF007F" uid="1">
+                    <from>population</from>
+                    <to>births</to>
+                    <font-color x="0" y="0"></font-color>
+                </connector>
+                <connector x="234" y="113" color="#FF007F" uid="2">
+                    <from>population</from>
+                    <to>deaths</to>
+                    <font-color x="0" y="0"></font-color>
+                </connector>
+                <connector x="103" y="177" color="#FF007F" uid="3">
+                    <from>birth_rate</from>
+                    <to>births</to>
+                    <font-color x="0" y="0"></font-color>
+                </connector>
+                <connector x="319" y="177" color="#FF007F" uid="4">
+                    <from>average_lifespan</from>
+                    <to>deaths</to>
+                    <font-color x="0" y="0"></font-color>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>
