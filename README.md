@@ -1,5 +1,9 @@
 # system dynamics Model editor
 
+[![Dependency Status](https://david-dm.org/bpowers/model-app/status.svg)](https://david-dm.org/bpowers/model-app)
+[![devDependency Status](https://david-dm.org/bpowers/model-app/dev-status.svg)](https://david-dm.org/bpowers/model-app?type=dev)
+
+
 ![simple example model](doc/population-model.png)
 
 ## Local development
