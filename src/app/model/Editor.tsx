@@ -190,12 +190,13 @@ export const Editor = withStyles(styles)(
       });
     }
 
-    private project(): Project | undefined {
+    private project(optionalOffset?: number): Project | undefined {
       if (this.state.projectHistory.size === 0) {
         return undefined;
       }
 
-      return this.state.projectHistory.get(this.state.projectOffset);
+      const off = optionalOffset !== undefined ? optionalOffset : this.state.projectOffset;
+      return this.state.projectHistory.get(off);
     }
 
     private scheduleSimRun(): void {
@@ -243,8 +244,13 @@ export const Editor = withStyles(styles)(
         projectHistory: priorHistory.unshift(project).slice(0, MaxUndoSize),
         projectOffset: 0,
       });
+      this.scheduleSave(project);
+    }
+
+    private scheduleSave(project: Project): void {
+      const { projectVersion } = this.state;
       setTimeout(async () => {
-        await this.save(project, this.state.projectVersion);
+        await this.save(project, projectVersion);
       });
     }
 
@@ -1115,6 +1121,7 @@ export const Editor = withStyles(styles)(
       projectOffset = Math.max(projectOffset, 0);
       this.setState({ projectOffset });
       this.scheduleSimRun();
+      this.scheduleSave(defined(this.project(projectOffset)));
     };
 
     getUndoRedoBar() {
