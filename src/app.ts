@@ -86,6 +86,8 @@ export class App {
 
     this.loadConfig();
 
+    // put the redirect before the request logger to remove noise
+    this.app.use(redirectToHttps);
     this.app.use(requestLogger);
     this.app.use(cookieParser());
     this.app.use(seshcookie(this.app.get('authentication').seshcookie));
@@ -98,7 +100,6 @@ export class App {
         } as any, // FIXME: this avoids a hsts runtime deprecation warning
       }),
     );
-    this.app.use(redirectToHttps);
     this.app.use(
       cors({
         methods: ['GET'],
