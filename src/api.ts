@@ -286,7 +286,7 @@ export const apiRouter = (app: Application): Router => {
       // a different browser tab
       if (result === null) {
         res.status(409).json({
-          error: `version in DB doesn't match request; try reloading`,
+          error: `error saving model: changes based on old version. refresh page to reload`,
         });
         return;
       }

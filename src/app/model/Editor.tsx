@@ -148,7 +148,6 @@ interface EditorState {
   sim?: Sim;
   data: Map<string, Series>;
   selection: Set<UID>;
-  snackbarErrors: List<string>;
   drawerOpen: boolean;
   projectVersion: number;
 }
@@ -176,7 +175,6 @@ export const Editor = withStyles(styles)(
         selectedTool: undefined,
         data: Map(),
         selection: Set(),
-        snackbarErrors: List<string>(),
         drawerOpen: false,
         projectVersion: -1,
       };
@@ -363,12 +361,7 @@ export const Editor = withStyles(styles)(
       try {
         newProject = project.rename(this.state.modelName, oldName, newName);
       } catch (err) {
-        // if we don't do this, react yells because "update functions should be pure"
-        setTimeout(() => {
-          this.setState(prevState => ({
-            snackbarErrors: prevState.snackbarErrors.push(err.message),
-          }));
-        });
+        this.appendModelError(err.message);
         return;
       }
       this.scheduleSimRun();
@@ -937,7 +930,7 @@ export const Editor = withStyles(styles)(
 
     handleCloseSnackbar = (msg: string) => {
       this.setState(prevState => ({
-        snackbarErrors: prevState.snackbarErrors.filter(message => message !== msg),
+        modelErrors: prevState.modelErrors.filter(err => err.message !== msg),
       }));
     };
 
@@ -954,12 +947,12 @@ export const Editor = withStyles(styles)(
             vertical: 'bottom',
             horizontal: 'left',
           }}
-          open={this.state.snackbarErrors.size > 0}
+          open={this.state.modelErrors.size > 0}
           autoHideDuration={6000}
         >
           <div>
-            {this.state.snackbarErrors.map((msg, i) => (
-              <Toast variant="warning" onClose={this.handleCloseSnackbar} message={msg} key={i} />
+            {this.state.modelErrors.map((err, i) => (
+              <Toast variant="warning" onClose={this.handleCloseSnackbar} message={err.message} key={i} />
             ))}
           </div>
         </Snackbar>
