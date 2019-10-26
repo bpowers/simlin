@@ -4,10 +4,11 @@
 
 import * as React from 'react';
 
-import { List, Map, Set } from 'immutable';
+import { List, Map, Set, Stack } from 'immutable';
 
 import { History } from 'history';
 
+import { Model } from '../../engine/model';
 import { Project, stdProject } from '../../engine/project';
 import { Sim } from '../../engine/sim';
 import { Stock as StockVar } from '../../engine/vars';
@@ -41,10 +42,13 @@ import { LinkIcon } from './LinkIcon';
 import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
 import { Status } from './Status';
 import { StockIcon } from './StockIcon';
+import { UndoRedoBar } from './UndoRedoBar';
+import { VariableDetails } from './VariableDetails';
 
 import { createStyles, Theme } from '@material-ui/core/styles';
 import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
-import { VariableDetails } from './VariableDetails';
+
+const MaxUndoSize = 5;
 
 function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
@@ -53,6 +57,11 @@ function radToDeg(r: number): number {
 const styles = ({ spacing, palette }: Theme) =>
   createStyles({
     root: {},
+    undoRedoBar: {
+      position: 'absolute',
+      bottom: spacing(3.5),
+      right: spacing(12),
+    },
     speedDial: {
       position: 'absolute',
       bottom: spacing(2),
@@ -130,7 +139,8 @@ class ModelError implements Error {
 
 interface EditorState {
   modelErrors: List<Error>;
-  project?: Project;
+  projectHistory: Stack<Project>;
+  projectOffset: number;
   modelName: string;
   dialOpen: boolean;
   dialVisible: boolean;
@@ -157,6 +167,8 @@ export const Editor = withStyles(styles)(
       super(props);
 
       this.state = {
+        projectHistory: Stack(),
+        projectOffset: 0,
         modelErrors: List(),
         modelName: 'main',
         dialOpen: false,
@@ -178,15 +190,26 @@ export const Editor = withStyles(styles)(
       });
     }
 
+    private project(): Project | undefined {
+      if (this.state.projectHistory.size === 0) {
+        return undefined;
+      }
+
+      return this.state.projectHistory.get(this.state.projectOffset);
+    }
+
     private scheduleSimRun(): void {
       setTimeout(async () => {
-        if (!this.state.project) {
+        const project = this.project();
+        if (!project) {
           return;
         }
         try {
-          await this.loadSim(this.state.project);
+          await this.loadSim(project);
         } catch (err) {
-          console.log(`TODO: surface sim error '${err.message}'`);
+          this.setState({
+            modelErrors: this.state.modelErrors.push(err),
+          });
         }
       });
     }
@@ -209,13 +232,24 @@ export const Editor = withStyles(styles)(
     }
 
     private updateProject(project: Project) {
-      this.setState({ project });
+      // ignore the update if nothing has changed
+      if (project.equals(this.project())) {
+        return;
+      }
+
+      const priorHistory = this.state.projectHistory.slice(this.state.projectOffset);
+
+      this.setState({
+        projectHistory: priorHistory.unshift(project).slice(0, MaxUndoSize),
+        projectOffset: 0,
+      });
       setTimeout(async () => {
         await this.save(project, this.state.projectVersion);
       });
     }
 
     private async save(project: Project, currVersion: number): Promise<void> {
+      console.log(`saving project version ${currVersion + 1}`);
       const file = project.toFile();
       // ensure we've converted to plain-old JavaScript objects
       const projectJSON = JSON.parse(JSON.stringify(file));
@@ -290,7 +324,8 @@ export const Editor = withStyles(styles)(
       // POST a new version up when we've just downloaded it.
       this.setState({
         projectVersion: defined(projectResponse.version),
-        project,
+        projectHistory: Stack([project]),
+        projectOffset: 0,
       });
 
       return project;
@@ -314,7 +349,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleRename = (oldName: string, newName: string) => {
-      const { project } = this.state;
+      const project = this.project();
       if (!project) {
         return;
       }
@@ -344,7 +379,7 @@ export const Editor = withStyles(styles)(
       const selection = this.state.selection;
       const { modelName } = this.state;
       const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      const project = defined(this.state.project).updateIn(
+      const project = defined(this.project()).updateIn(
         updatePath,
         (view: View): View => {
           const getName = (ident: string) => {
@@ -378,7 +413,7 @@ export const Editor = withStyles(styles)(
       let uidToDelete: number | undefined;
       let updatedCloud: ViewElement | undefined;
       let newClouds = List<ViewElement>();
-      let project = defined(this.state.project).updateIn(
+      let project = defined(this.project()).updateIn(
         updatePath,
         (view: View): View => {
           let nextUid = view.nextUid;
@@ -558,7 +593,7 @@ export const Editor = withStyles(styles)(
       let { selection } = this.state;
       const { modelName } = this.state;
       const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      const project = defined(this.state.project).updateIn(
+      const project = defined(this.project()).updateIn(
         updatePath,
         (view: View): View => {
           const getName = (ident: string) => {
@@ -624,7 +659,7 @@ export const Editor = withStyles(styles)(
 
     handleCreateVariable = (element: ViewElement) => {
       const updatePath = ['models', this.state.modelName, 'xModel', 'views', 0];
-      let project = defined(this.state.project).updateIn(
+      let project = defined(this.project()).updateIn(
         updatePath,
         (view: View): View => {
           let nextUid = view.nextUid;
@@ -643,7 +678,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleSelectionMove = (delta: Point, arcPoint?: Point) => {
-      const origElements = defined(defined(defined(this.state.project).model(this.state.modelName)).view(0)).elements;
+      const origElements = defined(defined(defined(this.project()).model(this.state.modelName)).view(0)).elements;
       let origNamedElements = Map<string, ViewElement>();
       for (const e of origElements) {
         if (e.hasName) {
@@ -652,7 +687,7 @@ export const Editor = withStyles(styles)(
       }
       const selection = this.state.selection;
       const updatePath = ['models', this.state.modelName, 'xModel', 'views', 0];
-      const project = defined(this.state.project).updateIn(
+      const project = defined(this.project()).updateIn(
         updatePath,
         (view: View): View => {
           const getName = (ident: string) => {
@@ -783,7 +818,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const { project } = this.state;
+      const project = this.project();
       if (!project) {
         return;
       }
@@ -793,7 +828,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleStopTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const { project } = this.state;
+      const project = this.project();
       if (!project) {
         return;
       }
@@ -803,7 +838,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleDtChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const { project } = this.state;
+      const project = this.project();
       if (!project) {
         return;
       }
@@ -813,7 +848,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleTimeUnitsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const { project } = this.state;
+      const project = this.project();
       if (!project) {
         return;
       }
@@ -823,16 +858,17 @@ export const Editor = withStyles(styles)(
     };
 
     getDrawer() {
-      if (!this.state.project || this.props.embedded) {
+      const project = this.project();
+      if (!project || this.props.embedded) {
         return;
       }
 
-      const model = this.state.project.model(this.state.modelName);
+      const model = project.model(this.state.modelName);
       if (!model) {
         return;
       }
 
-      const simSpec = defined(this.state.project.simSpec);
+      const simSpec = defined(project.simSpec);
 
       return (
         <ModelPropertiesDrawer
@@ -851,16 +887,18 @@ export const Editor = withStyles(styles)(
       );
     }
 
-    getModel() {
-      if (!this.state.project) {
+    getModel(): Model | undefined {
+      const project = this.project();
+      if (!project) {
         return;
       }
       const modelName = this.state.modelName;
-      return this.state.project.model(modelName);
+      return project.model(modelName);
     }
 
     getCanvas() {
-      if (!this.state.project) {
+      const project = this.project();
+      if (!project) {
         return;
       }
 
@@ -873,7 +911,7 @@ export const Editor = withStyles(styles)(
       return (
         <Canvas
           embedded={!!embedded}
-          project={this.state.project}
+          project={project}
           model={model}
           view={defined(model.view(0))}
           data={this.state.data}
@@ -928,12 +966,8 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      if (!this.state.project || !this.state.modelName) {
-        return;
-      }
-
       const uid = defined(this.state.selection.first());
-      const model = this.state.project.model(this.state.modelName);
+      const model = this.getModel();
       if (!model) {
         return;
       }
@@ -993,16 +1027,17 @@ export const Editor = withStyles(styles)(
     }
 
     handleEquationChange = (ident: string, newEquation: string) => {
-      if (!this.state.project) {
+      const project = this.project();
+      if (!project) {
         return;
       }
 
-      const project = this.state.project.setEquation(this.state.modelName, ident, newEquation);
-      this.updateProject(project);
+      this.updateProject(project.setEquation(this.state.modelName, ident, newEquation));
       this.scheduleSimRun();
     };
 
     getVariableDetails() {
+      const project = this.project();
       const { embedded } = this.props;
       const classes = this.props.classes;
 
@@ -1015,7 +1050,7 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      const model = defined(this.state.project).model(this.state.modelName);
+      const model = defined(project).model(this.state.modelName);
       if (!model) {
         return;
       }
@@ -1071,6 +1106,34 @@ export const Editor = withStyles(styles)(
         selectedTool: 'link',
       });
     };
+
+    handleUndoRedo = (kind: 'undo' | 'redo') => {
+      const delta = kind === 'undo' ? 1 : -1;
+      let projectOffset = this.state.projectOffset + delta;
+      // ensure our offset is always valid
+      projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
+      projectOffset = Math.max(projectOffset, 0);
+      this.setState({ projectOffset });
+      this.scheduleSimRun();
+    };
+
+    getUndoRedoBar() {
+      const { embedded } = this.props;
+      const classes = this.props.classes;
+      if (embedded) {
+        return undefined;
+      }
+
+      const undoEnabled =
+        this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
+      const redoEnabled = this.state.projectOffset > 0;
+
+      return (
+        <div className={classes.undoRedoBar}>
+          <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
+        </div>
+      );
+    }
 
     getEditorControls() {
       const { embedded } = this.props;
@@ -1132,6 +1195,7 @@ export const Editor = withStyles(styles)(
           {this.getCanvas()}
           {this.getSnackbar()}
           {this.getEditorControls()}
+          {this.getUndoRedoBar()}
         </div>
       );
     }
