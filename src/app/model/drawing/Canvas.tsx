@@ -604,6 +604,8 @@ export const Canvas = withStyles(styles)(
       if (clearSelection) {
         this.props.onSetSelection(Set());
       }
+
+      this.focusCanvas();
     }
 
     handlePointerCancel = (e: React.PointerEvent<SVGElement>): void => {
@@ -945,6 +947,16 @@ export const Canvas = withStyles(styles)(
 
       this.clearPointerState();
     };
+
+    focusCanvas() {
+      // an SVG element can't actually be focused.  Instead, blur any _other_
+      // focused element.
+      if (typeof document !== 'undefined' && document && document.activeElement) {
+        const e: any = document.activeElement;
+        // blur doesn't exist on "Element" but it definitely is a real thing
+        e.blur();
+      }
+    }
 
     render() {
       const { view, embedded, classes } = this.props;
