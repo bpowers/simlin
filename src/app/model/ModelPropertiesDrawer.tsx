@@ -4,7 +4,6 @@
 
 import * as React from 'react';
 
-import FormControl from '@material-ui/core/FormControl';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import SwipeableDrawer from '@material-ui/core/SwipeableDrawer';
 import TextField from '@material-ui/core/TextField';
@@ -78,8 +77,6 @@ interface ModelPropertiesDrawerPropsFull extends WithStyles<typeof styles> {
   onTimeUnitsChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
 }
 
-export type ModelPropertiesDrawerProps = Pick<ModelPropertiesDrawerPropsFull, 'modelName'>;
-
 export const ModelPropertiesDrawer = withStyles(styles)(
   class InnerModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDrawerPropsFull> {
     constructor(props: ModelPropertiesDrawerPropsFull) {
@@ -111,15 +108,15 @@ export const ModelPropertiesDrawer = withStyles(styles)(
         >
           <div className={classes.content}>
             <div>
-              <IconButton className={classes.menuButton} color="inherit" aria-label="Exit" onClick={this.handleExit}>
-                <ArrowBackIcon />
-              </IconButton>
               <div className={classes.modelApp}>
                 <div className={classes.imageWrap}>
                   <Logo />
                 </div>
                 <div className={classes.modelName}>Model</div>
               </div>
+              <IconButton className={classes.menuButton} color="inherit" aria-label="Exit" onClick={this.handleExit}>
+                <ArrowBackIcon />
+              </IconButton>
               <IconButton className={classes.closeButton} color="inherit" aria-label="Close" onClick={this.handleClose}>
                 <ClearIcon />
               </IconButton>
