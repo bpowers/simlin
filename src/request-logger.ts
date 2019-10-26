@@ -12,15 +12,25 @@ function now(): number {
   return time[0] + time[1] / 1.0e9;
 }
 
+function maybeGetUser(req: Request): string {
+  if (!req.session || !req.session.passport || !req.session.passport.user) {
+    return '';
+  }
+  return ` user="${req.session.passport.user.email}"`;
+}
+
 export function requestLogger(req: Request, res: Response, next: NextFunction): void {
   const start = now();
   let headersWritten = false;
 
   interceptWriteHeaders(res, (statusCode: number) => {
-    const durationS = now() - start;
+    const durationMs = ((now() - start) * 1000).toFixed(1);
+    const log =
+      `API-LINE status=${statusCode} method="${req.method}" path="${req.originalUrl}" duration_ms=${durationMs}` +
+      maybeGetUser(req);
     logger.log({
       level: 'info',
-      message: `API-LINE status=${statusCode} method="${req.method}" path="${req.originalUrl}" duration_s=${durationS}`,
+      message: log,
     });
     headersWritten = true;
   });
