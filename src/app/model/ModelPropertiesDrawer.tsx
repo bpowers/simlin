@@ -4,12 +4,12 @@
 
 import * as React from 'react';
 
+import { Link } from 'react-router-dom';
+
+import IconButton from '@material-ui/core/IconButton';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import SwipeableDrawer from '@material-ui/core/SwipeableDrawer';
 import TextField from '@material-ui/core/TextField';
-
-import IconButton from '@material-ui/core/IconButton';
-
 import ArrowBackIcon from '@material-ui/icons/ArrowBack';
 import ClearIcon from '@material-ui/icons/Clear';
 
@@ -60,12 +60,14 @@ const styles = createStyles({
   propsForm: {
     padding: 32,
   },
+  exitLink: {
+    color: 'inherit',
+  },
 });
 
 interface ModelPropertiesDrawerPropsFull extends WithStyles<typeof styles> {
   modelName: string;
   open: boolean;
-  onExit: () => void;
   onDrawerToggle: (isOpen: boolean) => void;
   startTime: number;
   stopTime: number;
@@ -91,10 +93,6 @@ export const ModelPropertiesDrawer = withStyles(styles)(
       this.props.onDrawerToggle(false);
     };
 
-    handleExit = () => {
-      this.props.onExit();
-    };
-
     render() {
       const { classes } = this.props;
       const { modelName, open } = this.props;
@@ -114,9 +112,11 @@ export const ModelPropertiesDrawer = withStyles(styles)(
                 </div>
                 <div className={classes.modelName}>Model</div>
               </div>
-              <IconButton className={classes.menuButton} color="inherit" aria-label="Exit" onClick={this.handleExit}>
-                <ArrowBackIcon />
-              </IconButton>
+              <Link to="/" className={classes.exitLink}>
+                <IconButton className={classes.menuButton} color="inherit" aria-label="Exit">
+                  <ArrowBackIcon />
+                </IconButton>
+              </Link>
               <IconButton className={classes.closeButton} color="inherit" aria-label="Close" onClick={this.handleClose}>
                 <ClearIcon />
               </IconButton>

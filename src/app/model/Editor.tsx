@@ -776,12 +776,6 @@ export const Editor = withStyles(styles)(
       this.updateProject(project);
     };
 
-    handleExitEditor = () => {
-      if (this.props.history) {
-        this.props.history.push('/');
-      }
-    };
-
     handleDrawerToggle = (isOpen: boolean) => {
       this.setState({
         drawerOpen: isOpen,
@@ -844,7 +838,6 @@ export const Editor = withStyles(styles)(
         <ModelPropertiesDrawer
           modelName={this.props.projectName}
           open={this.state.drawerOpen}
-          onExit={this.handleExitEditor}
           onDrawerToggle={this.handleDrawerToggle}
           startTime={simSpec.start}
           stopTime={simSpec.stop}
