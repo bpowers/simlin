@@ -248,7 +248,6 @@ export const Editor = withStyles(styles)(
       const projectResponse = await response.json();
       const projectVersion: number = defined(projectResponse.version);
 
-      console.log(`successfully updated project to version ${projectVersion}!`);
       this.setState({ projectVersion });
     }
 
