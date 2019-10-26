@@ -789,7 +789,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      let { project } = this.state;
+      const { project } = this.state;
       if (!project) {
         return;
       }
@@ -799,7 +799,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleStopTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      let { project } = this.state;
+      const { project } = this.state;
       if (!project) {
         return;
       }
@@ -809,7 +809,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleDtChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      let { project } = this.state;
+      const { project } = this.state;
       if (!project) {
         return;
       }
@@ -819,7 +819,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleTimeUnitsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      let { project } = this.state;
+      const { project } = this.state;
       if (!project) {
         return;
       }
