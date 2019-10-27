@@ -39,7 +39,12 @@ const styles = createStyles({
       fill: 'none',
     },
   },
+  editorActions: {},
   eqnEditor: {
+    backgroundColor: 'rgba(245, 245, 245)',
+    borderRadius: 4,
+    marginTop: 4,
+    padding: 4,
     height: 80,
     fontFamily: "'Roboto Mono', monospace",
   },
@@ -52,48 +57,22 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   data: Series | undefined;
 }
 
-export type VariableDetailsProps = Pick<VariableDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
+// export type VariableDetailsProps = Pick<VariableDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
 
 interface VariableDetailsState {
   equation: Value;
 }
 
-function valueFromEquation(eqn: string): Value {
-  return Plain.deserialize(eqn);
-  /*
-  const lines = eqn.split('\\n');
-  const textNodes = lines.map(line => {
-    return {
-      object: 'block',
-      type: 'code_line',
-      nodes: [
-        {
-          object: 'text',
-          text: line,
-        },
-      ],
-    };
-  });
+function equationFromValue(value: Value): string {
+  return Plain.serialize(value).trim();
+}
 
-  const doc: ValueJSON = {
-    object: 'value',
-    document: {
-      object: 'document',
-      nodes: [
-        {
-          object: 'block',
-          type: 'code',
-          data: {
-            language: 'js',
-          },
-          nodes: textNodes,
-        },
-      ],
-    },
-  };
+function valueFromEquation(equation: string): Value {
+  return Plain.deserialize(equation);
+}
 
-  return Value.fromJSON(doc);
-   */
+function equationFor(variable: Variable) {
+  return (defined(variable.xmile).eqn || '').trim();
 }
 
 export const VariableDetails = withStyles(styles)(
@@ -104,24 +83,44 @@ export const VariableDetails = withStyles(styles)(
       const { variable } = props;
 
       this.state = {
-        equation: valueFromEquation(defined(variable.xmile).eqn || ''),
+        equation: valueFromEquation(equationFor(variable)),
       };
     }
 
     handleEquationChange = (change: { operations: List<Operation>; value: Value }): any => {
       this.setState({ equation: change.value });
-      this.props.onEquationChange(this.props.viewElement.ident, Plain.serialize(this.state.equation));
     };
 
     handleNotesChange = (event: React.ChangeEvent<HTMLInputElement>) => {};
 
+    handleEquationCancel = () => {
+      this.setState({
+        equation: valueFromEquation(equationFor(this.props.variable)),
+      });
+    };
+
+    handleEquationSave = () => {
+      const { equation } = this.state;
+      const initialEquation = equationFor(this.props.variable);
+
+      const newEquation = equationFromValue(equation);
+      if (initialEquation !== newEquation) {
+        this.props.onEquationChange(this.props.viewElement.ident, newEquation);
+      }
+    };
+
     render() {
-      const { data, viewElement, variable, classes } = this.props;
+      const { data, viewElement, classes } = this.props;
+      const { equation } = this.state;
+      const initialEquation = equationFor(this.props.variable);
 
       const series: Array<{ x: number; y: number }> = [];
       for (let i = 0; data && i < data.time.length; i++) {
         series.push({ x: data.time[i], y: data.values[i] });
       }
+
+      // enable saving and canceling if the equation has changed
+      const equationActionsEnabled = initialEquation !== equationFromValue(equation);
 
       const equationType = viewElement.type === 'stock' ? 'Initial Value' : 'Equation';
 
@@ -132,11 +131,27 @@ export const VariableDetails = withStyles(styles)(
               {equationType}:
             </Typography>
             <Editor
+              autoFocus
               className={classes.eqnEditor}
-              placeholder="Write an equation..."
+              placeholder="Enter an equation..."
               value={this.state.equation}
               onChange={this.handleEquationChange}
+              onBlur={this.handleEquationSave}
             />
+
+            <CardActions className={classes.editorActions}>
+              <Button
+                size="small"
+                color="primary"
+                disabled={!equationActionsEnabled}
+                onClick={this.handleEquationCancel}
+              >
+                Cancel
+              </Button>
+              <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationSave}>
+                Save
+              </Button>
+            </CardActions>
 
             <TextField
               label="Units"
