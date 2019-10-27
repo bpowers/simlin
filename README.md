@@ -36,12 +36,12 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 ## Local development
 
 ```bash
-# dependencies; ignore warning about immutable
-$ (yarn install; cd app && yarn install)
-# start mongo
+# dependencies; ignore warnings
+$ yarn install
+# start a local MongoDB instance using Docker
 $ ./start-mongo
 # in another tab:
-$ . ~/model-oauth # (get out of band)
+$ . ~/model-oauth # (sets some environmental variables; get out of band)
 $ yarn start:backend
 # in third and final tab:
 $ yarn start:frontend
@@ -50,4 +50,4 @@ $ yarn start:frontend
 
 Now to the browser!
 
-Visit http://localhost:3030/auth/google to kick off an oauth request.  Once that is done, you can start local development + iteration on http://localhost:3000/
+Visit http://localhost:3030/auth/google to kick off an oauth request.  Once that is done, you can start local development + iteration on http://localhost:3000/ (any saves of the TypeScript files will automatically recompile + reload the service + React app).
