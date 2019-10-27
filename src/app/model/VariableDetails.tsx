@@ -153,28 +153,28 @@ export const VariableDetails = withStyles(styles)(
               </Button>
             </CardActions>
 
-            <TextField
-              label="Units"
-              fullWidth
-              InputLabelProps={{
-                shrink: true,
-              }}
-              value={''}
-              margin="normal"
-            />
+            {/*<TextField*/}
+            {/*  label="Units"*/}
+            {/*  fullWidth*/}
+            {/*  InputLabelProps={{*/}
+            {/*    shrink: true,*/}
+            {/*  }}*/}
+            {/*  value={''}*/}
+            {/*  margin="normal"*/}
+            {/*/>*/}
 
-            <TextField
-              label="Notes"
-              fullWidth
-              InputLabelProps={{
-                shrink: true,
-              }}
-              value={defined(this.props.variable.xmile).doc}
-              onChange={this.handleNotesChange}
-              margin="normal"
-            />
+            {/*<TextField*/}
+            {/*  label="Notes"*/}
+            {/*  fullWidth*/}
+            {/*  InputLabelProps={{*/}
+            {/*    shrink: true,*/}
+            {/*  }}*/}
+            {/*  value={defined(this.props.variable.xmile).doc}*/}
+            {/*  onChange={this.handleNotesChange}*/}
+            {/*  margin="normal"*/}
+            {/*/>*/}
 
-            <br />
+            {/*<br />*/}
             <hr />
             <br />
             <div className={classes.plotFixup}>
