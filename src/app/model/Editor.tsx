@@ -1060,7 +1060,7 @@ export const Editor = withStyles(styles)(
       return (
         <div className={classes.varDetails}>
           <VariableDetails
-            key={`vd-${namedElement.ident}`}
+            key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${namedElement.ident}`}
             variable={variable}
             viewElement={namedElement}
             data={series}
