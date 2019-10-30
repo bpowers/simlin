@@ -99,6 +99,21 @@ export class Project extends Record(projectDefaults) implements varsProject {
     return file.set('models', models);
   }
 
+  isSimulatable(modelName: string): boolean {
+    const model = this.model(modelName);
+    if (!model) {
+      return false;
+    }
+
+    for (const [_, variable] of model.vars) {
+      if (variable.errors.size > 0) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   addNewVariable(modelName: string, type: ViewElementType, name: string): Project {
     let model = this.model(modelName);
     if (!model) {

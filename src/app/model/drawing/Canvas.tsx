@@ -328,6 +328,7 @@ export const Canvas = withStyles(styles)(
     }
 
     private aux = (element: ViewElement, isGhost: boolean = false): React.ReactElement => {
+      const variable = defined(this.props.model.vars.get(element.ident));
       const isSelected = this.isSelected(element);
       const series = this.props.data.get(element.ident);
       const props: AuxProps = {
@@ -337,6 +338,7 @@ export const Canvas = withStyles(styles)(
         isEditingName: isSelected && this.state.isEditingName,
         isValidTarget: this.isValidTarget(element),
         onSelection: this.handleSetSelection,
+        hasWarning: variable.errors.size > 0,
       };
 
       this.elementBounds = this.elementBounds.push(auxBounds(element));
@@ -345,6 +347,7 @@ export const Canvas = withStyles(styles)(
     };
 
     private stock = (element: ViewElement): React.ReactElement => {
+      const variable = defined(this.props.model.vars.get(element.ident));
       const isSelected = this.isSelected(element);
       const series = this.props.data.get(element.ident);
       const props: StockProps = {
@@ -354,6 +357,7 @@ export const Canvas = withStyles(styles)(
         isEditingName: isSelected && this.state.isEditingName,
         isValidTarget: this.isValidTarget(element),
         onSelection: this.handleSetSelection,
+        hasWarning: variable.errors.size > 0,
       };
       this.elementBounds = this.elementBounds.push(stockBounds(element));
       return <Stock key={element.ident} {...props} />;
@@ -441,6 +445,7 @@ export const Canvas = withStyles(styles)(
     }
 
     private flow = (element: ViewElement) => {
+      const variable = defined(this.props.model.vars.get(element.ident));
       const { isMovingArrow } = this.state;
       const isSelected = this.isSelected(element);
       const data = this.props.data.get(element.ident);
@@ -469,6 +474,7 @@ export const Canvas = withStyles(styles)(
           source={source}
           sink={sink}
           isSelected={isSelected}
+          hasWarning={variable.errors.size > 0}
           isMovingArrow={isSelected && isMovingArrow}
           isEditingName={isSelected && this.state.isEditingName}
           isValidTarget={this.isValidTarget(element)}

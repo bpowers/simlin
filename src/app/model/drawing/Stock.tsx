@@ -66,7 +66,7 @@ interface StockPropsFull extends WithStyles<typeof styles> {
 
 export type StockProps = Pick<
   StockPropsFull,
-  'element' | 'series' | 'isSelected' | 'isValidTarget' | 'isEditingName' | 'onSelection'
+  'element' | 'series' | 'isSelected' | 'isValidTarget' | 'isEditingName' | 'hasWarning' | 'onSelection'
 >;
 
 export function stockContains(element: ViewElement, point: Point): boolean {

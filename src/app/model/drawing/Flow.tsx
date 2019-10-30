@@ -404,6 +404,7 @@ export type FlowProps = Pick<
   | 'isMovingArrow'
   | 'isEditingName'
   | 'isValidTarget'
+  | 'hasWarning'
   | 'series'
   | 'onSelection'
   | 'source'

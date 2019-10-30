@@ -214,6 +214,9 @@ export const Editor = withStyles(styles)(
     }
 
     private async loadSim(project: Project): Promise<void> {
+      if (!project.isSimulatable(this.state.modelName)) {
+        return;
+      }
       try {
         const sim = new Sim(project, defined(project.main), false);
         await sim.runToEnd();
@@ -1003,6 +1006,9 @@ export const Editor = withStyles(styles)(
         placeholder = undefined;
       }
 
+      const project = this.project();
+      const status = !project || project.isSimulatable(this.state.modelName) ? 'ok' : 'error';
+
       return (
         <Paper className={classes.paper} elevation={2}>
           <IconButton className={classes.menuButton} color="inherit" aria-label="Menu" onClick={this.handleShowDrawer}>
@@ -1020,7 +1026,7 @@ export const Editor = withStyles(styles)(
             endAdornment={name ? undefined : <SearchIcon className={classes.searchButton} />}
           />
           <div className={classes.divider} />
-          <Status status="ok" />
+          <Status status={status} />
         </Paper>
       );
     }

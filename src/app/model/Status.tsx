@@ -31,10 +31,11 @@ export const Status = withStyles(styles)(
     }
 
     render() {
-      const { classes } = this.props;
+      const { classes, status } = this.props;
+      const fill = status === 'ok' ? '#81c784' : 'rgb(255, 152, 0)';
       return (
         <svg className={classes.status}>
-          <circle cx={12} cy={12} r={12} fill="#81c784" />
+          <circle cx={12} cy={12} r={12} fill={fill} />
         </svg>
       );
     }

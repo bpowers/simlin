@@ -9,7 +9,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import { ViewElement } from '../../../engine/xmile';
 
 import { displayName, mergeBounds, Point, Rect, square } from './common';
-import { AuxRadius, CloudRadius } from './default';
+import { AuxRadius } from './default';
 import { findSide, Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
@@ -59,7 +59,7 @@ export interface AuxPropsFull extends WithStyles<typeof styles> {
 
 export type AuxProps = Pick<
   AuxPropsFull,
-  'isSelected' | 'isEditingName' | 'isValidTarget' | 'series' | 'onSelection' | 'element'
+  'isSelected' | 'isEditingName' | 'isValidTarget' | 'hasWarning' | 'series' | 'onSelection' | 'element'
 >;
 
 export function auxContains(element: ViewElement, point: Point): boolean {
@@ -104,7 +104,7 @@ export const Aux = withStyles(styles)(
       super(props);
     }
 
-    handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {};
+    handlePointerUp = (_: React.PointerEvent<SVGElement>): void => {};
 
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       e.preventDefault();

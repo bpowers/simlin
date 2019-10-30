@@ -128,6 +128,7 @@ interface OrdinaryProps {
   xmile?: xmile.Variable;
   valid: boolean;
   ast?: ast.Node;
+  errors: List<string>;
   deps: Set<string>;
 }
 
@@ -136,6 +137,7 @@ const variableDefaults: OrdinaryProps = {
   xmile: undefined,
   valid: false,
   ast: undefined,
+  errors: List<string>(),
   deps: Set<string>(),
 };
 
@@ -153,6 +155,13 @@ function variableFrom(xVar: xmile.Variable | undefined, kind: VariableKind): Ord
       variable.ast = ast || undefined;
       variable.valid = true;
     }
+    if (errs) {
+      variable.errors = variable.errors.concat(List(errs));
+    }
+  }
+
+  if (!eqn) {
+    variable.errors = variable.errors.push('Missing equation');
   }
 
   // for a flow or aux, we depend on variables that aren't built-in
