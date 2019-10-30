@@ -21,7 +21,12 @@ export const mongoose = (app: Application): void => {
 
   (mongoosedb as any).Promise = global.Promise;
 
-  mongoosedb.connect(url, { useNewUrlParser: true });
+  mongoosedb.set('useNewUrlParser', true);
+  mongoosedb.set('useFindAndModify', false);
+  mongoosedb.set('useCreateIndex', true);
+  mongoosedb.set('useUnifiedTopology', true);
+
+  mongoosedb.connect(url);
 
   app.set('mongooseClient', mongoosedb);
 };
