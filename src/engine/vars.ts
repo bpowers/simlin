@@ -338,6 +338,10 @@ export class Reference extends Record(referenceDefaults) {
   get ptr(): string {
     return this.xmileConn.from;
   }
+
+  get ident(): string | undefined {
+    return this.ptr;
+  }
 }
 
 export type Variable = Ordinary | Stock | Table | Module | Reference;
@@ -660,6 +664,11 @@ export function getDeps(context: Context, variable: Variable): Set<string> {
     ident = ident.split('.')[0];
 
     if (allDeps.has(ident)) {
+      continue;
+    }
+
+    // if a user has written an invalid equation, don't blow stack
+    if (ident === variable.ident) {
       continue;
     }
 

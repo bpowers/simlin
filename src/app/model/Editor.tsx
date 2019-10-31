@@ -203,13 +203,7 @@ export const Editor = withStyles(styles)(
         if (!project) {
           return;
         }
-        try {
-          await this.loadSim(project);
-        } catch (err) {
-          this.setState({
-            modelErrors: this.state.modelErrors.push(err),
-          });
-        }
+        await this.loadSim(project);
       });
     }
 
