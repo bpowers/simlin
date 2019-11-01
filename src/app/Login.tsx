@@ -7,7 +7,7 @@ import * as React from 'react';
 import Button from '@material-ui/core/Button';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import Logo from './model-icon.svg';
+import { ModelIcon } from '../ModelIcon';
 
 import { exists } from './common';
 
@@ -30,6 +30,10 @@ const styles = createStyles({
   loginDisabled: {
     pointerEvents: 'none',
     opacity: 0,
+  },
+  logo: {
+    width: 160,
+    height: 160,
   },
 });
 
@@ -57,7 +61,7 @@ export const Login = withStyles(styles)(
         <div className={classes.loginOuter}>
           <div className={classes.loginMiddle}>
             <div className={classes.loginInner}>
-              <Logo />
+              <ModelIcon className={classes.logo} />
               <br />
               <div className={disabledClass}>
                 <Button variant="contained" color="primary" onClick={this.loginClick}>
