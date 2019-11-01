@@ -43,13 +43,12 @@ function emptyProject(name: string, userName: string): XmileFile {
   } as any);
 }
 
-export const getUser = async (req: Request, res: Response): Promise<UserDocument> => {
-  const email = req.session.passport.user.email;
-  const user = await User.findOne({ email }).exec();
+export const getUser = (req: Request, res: Response): UserDocument => {
+  const user: UserDocument | undefined = req.user as any;
   if (!user) {
-    logger.warn(`user not found for '${email}', but passed authz?`);
+    logger.warn(`user not found, but passed authz?`);
     res.status(500).json({});
-    throw new Error(`user not found for '${email}', but passed authz?`);
+    throw new Error(`user not found, but passed authz?`);
   }
   return user;
 };
@@ -57,19 +56,16 @@ export const getUser = async (req: Request, res: Response): Promise<UserDocument
 export const apiRouter = (app: Application): Router => {
   const api = Router();
 
-  api.get(
-    '/user',
-    async (req: Request, res: Response): Promise<void> => {
-      const user = await getUser(req, res);
-      res.status(200).json(user.toJSON());
-    },
-  );
+  api.get('/user', (req: Request, res: Response): void => {
+    const user = getUser(req, res);
+    res.status(200).json(user.toJSON());
+  });
 
   // create a new project
   api.post(
     '/projects',
     async (req: Request, res: Response): Promise<void> => {
-      const user = await getUser(req, res);
+      const user = getUser(req, res);
 
       if (!req.body.projectName) {
         res.status(400).json({ error: 'projectName is required' });
@@ -121,7 +117,7 @@ export const apiRouter = (app: Application): Router => {
   api.get(
     '/projects',
     async (req: Request, res: Response): Promise<void> => {
-      const user = await getUser(req, res);
+      const user = getUser(req, res);
       const projectModels = await Project.find({ owner: user._id }).exec();
       const projects = await Promise.all(projectModels.map(async (project: ProjectDocument) => project.toJSON()));
       res.status(200).json(projects);
@@ -222,7 +218,7 @@ export const apiRouter = (app: Application): Router => {
   api.post(
     '/projects/:username/:projectName',
     async (req: Request, res: Response): Promise<void> => {
-      const user = await getUser(req, res);
+      const user = getUser(req, res);
       // TODO
       if (user.username !== req.params.username) {
         res.status(401).json({});
@@ -298,7 +294,7 @@ export const apiRouter = (app: Application): Router => {
   api.patch(
     '/user',
     async (req: Request, res: Response): Promise<void> => {
-      const userModel = await getUser(req, res);
+      const userModel = getUser(req, res);
 
       if (Object.keys(req.body).length !== 1 || !req.body.username) {
         res.status(400).json({ error: 'only username can be patched' });
