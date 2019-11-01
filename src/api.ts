@@ -127,7 +127,10 @@ export const apiRouter = (app: Application): Router => {
   api.get(
     '/projects/:username/:projectName',
     async (req: Request, res: Response): Promise<void> => {
-      const authorUser = await User.findOne({ username: req.params.username }).exec();
+      let authorUser: UserDocument | null = req.user ? getUser(req, res) : null;
+      if (!authorUser || authorUser.username !== req.params.username) {
+        authorUser = await User.findOne({ username: req.params.username }).exec();
+      }
       if (!authorUser) {
         res.status(404).json({});
         return;
@@ -137,7 +140,7 @@ export const apiRouter = (app: Application): Router => {
       const projectModel = await Project.findOne({ owner: authorUser._id, name: projectName }).exec();
 
       // the username check is skipped if the model exists and is public
-      if (!(projectModel && projectModel.isPublic)) {
+      if (projectModel && !projectModel.isPublic) {
         // TODO: implement collaborators
         if (
           !req.session ||
@@ -171,7 +174,10 @@ export const apiRouter = (app: Application): Router => {
   api.get(
     '/preview/:username/:projectName',
     async (req: Request, res: Response): Promise<void> => {
-      const authorUser = await User.findOne({ username: req.params.username }).exec();
+      let authorUser: UserDocument | null = getUser(req, res);
+      if (authorUser.username !== req.params.username) {
+        authorUser = await User.findOne({ username: req.params.username }).exec();
+      }
       if (!authorUser) {
         res.status(404).json({});
         return;
