@@ -13,7 +13,7 @@ import TextField from '@material-ui/core/TextField';
 import ArrowBackIcon from '@material-ui/icons/ArrowBack';
 import ClearIcon from '@material-ui/icons/Clear';
 
-import Logo from '../model-icon-small.svg';
+import { ModelIcon } from '../ModelIcon';
 
 const iOS = typeof navigator !== undefined && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
@@ -56,6 +56,10 @@ const styles = createStyles({
     top: 8,
     right: 8,
     marginRight: 4,
+  },
+  modelIcon: {
+    width: 48,
+    height: 48,
   },
   propsForm: {
     padding: 32,
@@ -108,7 +112,7 @@ export const ModelPropertiesDrawer = withStyles(styles)(
             <div>
               <div className={classes.modelApp}>
                 <div className={classes.imageWrap}>
-                  <Logo />
+                  <ModelIcon className={classes.modelIcon} />
                 </div>
                 <div className={classes.modelName}>Model</div>
               </div>
