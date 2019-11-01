@@ -164,7 +164,9 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      const project = await projectModel.toJSON();
+      const project = await projectModel.toJSON({
+        user: authorUser,
+      } as any);
       project.file = file.contents;
 
       res.status(200).json(project);

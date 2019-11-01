@@ -71,9 +71,10 @@ ProjectSchema.set('toJSON', {
     for (const key of toRemove) {
       delete ret[key];
     }
-    // TODO: we have already loaded this document; find a way to
-    // restructure this to avoid this second mongo lookup
-    const owner = await User.findById(doc.owner).exec();
+    let owner: UserDocument | null = options.user;
+    if (!owner) {
+      owner = await User.findById(doc.owner).exec();
+    }
     if (!owner) {
       throw new Error(`Failed finding owner of Project(${doc._id})`);
     }

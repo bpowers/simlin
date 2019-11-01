@@ -23,7 +23,7 @@ import { defined } from './app/common';
 import { authn } from './authn';
 import { authz } from './authz';
 import { Project } from './models/project';
-import { User } from './models/user';
+import { UserDocument } from './models/user';
 import { mongoose } from './mongoose';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
@@ -129,7 +129,7 @@ export class App {
       authz,
       async (req: Request, res: Response, next: NextFunction): Promise<void> => {
         const email = req.session.passport.user.email;
-        const user = await User.findOne({ email }).exec();
+        const user: UserDocument | undefined = req.user as any;
         if (!user) {
           logger.warn(`user not found for '${email}', but passed authz?`);
           res.status(500).json({});
