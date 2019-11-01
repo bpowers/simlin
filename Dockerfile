@@ -48,7 +48,7 @@ FROM node:12-alpine
 
 RUN apk update \
  && apk upgrade \
- && apk add --no-cache cairo pango pixman libjpeg-turbo \
+ && apk add --no-cache ca-certificates cairo pango pixman libjpeg-turbo \
  && rm -rf /var/cache/apk/*
 
 ENV NODE_ENV production
