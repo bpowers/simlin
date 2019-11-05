@@ -20,6 +20,11 @@ export interface Rect {
   bottom: number;
 }
 
+export interface Box {
+  readonly width: number;
+  readonly height: number;
+}
+
 export function mergeBounds(a: Rect, b: Rect): Rect {
   return {
     top: Math.min(a.top, b.top),

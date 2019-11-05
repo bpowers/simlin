@@ -8,6 +8,8 @@ import { List, Map, Set, Stack } from 'immutable';
 
 import { History } from 'history';
 
+import { Canvg } from 'canvg';
+
 import { Model } from '../../engine/model';
 import { Project, stdProject } from '../../engine/project';
 import { Sim } from '../../engine/sim';
@@ -19,7 +21,7 @@ import { Point } from './drawing/common';
 import { canvasToXmileAngle, takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 
-import { baseURL, defined, Series } from '../common';
+import { baseURL, defined, exists, Series } from '../common';
 
 import IconButton from '@material-ui/core/IconButton';
 import Input from '@material-ui/core/Input';
@@ -40,6 +42,7 @@ import { Toast } from './ErrorToast';
 import { FlowIcon } from './FlowIcon';
 import { LinkIcon } from './LinkIcon';
 import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
+import { Snapshotter } from './Snapshotter';
 import { Status } from './Status';
 import { StockIcon } from './StockIcon';
 import { UndoRedoBar } from './UndoRedoBar';
@@ -47,6 +50,12 @@ import { VariableDetails } from './VariableDetails';
 
 import { createStyles, Theme } from '@material-ui/core/styles';
 import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
+import { renderSvgToString } from '../../render-common';
+
+import { Card } from '@material-ui/core';
+import Button from '@material-ui/core/Button';
+import CardActions from '@material-ui/core/CardActions';
+import CardContent from '@material-ui/core/CardContent';
 
 const MaxUndoSize = 5;
 
@@ -58,6 +67,7 @@ const styles = ({ spacing, palette }: Theme) =>
   createStyles({
     root: {},
     undoRedoBar: {
+      display: 'flex',
       position: 'absolute',
       bottom: spacing(3.5),
       right: spacing(12),
@@ -66,6 +76,18 @@ const styles = ({ spacing, palette }: Theme) =>
       position: 'absolute',
       bottom: spacing(2),
       right: spacing(3),
+    },
+    snapshotCard: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      width: 240,
+      marginTop: 12,
+      marginRight: 12,
+    },
+    snapshotImg: {
+      width: '100%',
+      objectFit: 'scale-down',
     },
     searchbox: {
       position: 'relative',
@@ -150,6 +172,7 @@ interface EditorState {
   selection: Set<UID>;
   drawerOpen: boolean;
   projectVersion: number;
+  snapshotBlob: Blob | undefined;
 }
 
 interface EditorProps extends WithStyles<typeof styles> {
@@ -177,6 +200,7 @@ export const Editor = withStyles(styles)(
         selection: Set(),
         drawerOpen: false,
         projectVersion: -1,
+        snapshotBlob: undefined,
       };
 
       setTimeout(async () => {
@@ -1117,6 +1141,36 @@ export const Editor = withStyles(styles)(
       this.scheduleSave(defined(this.project(projectOffset)));
     };
 
+    async takeSnapshot() {
+      const project = this.project();
+      if (!project || !this.state.modelName) {
+        return;
+      }
+      const { modelName } = this.state;
+
+      const [svg, viewbox] = renderSvgToString(project, modelName);
+      const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
+      const ctx = osCanvas.getContext('2d');
+      const canvas = Canvg.fromString(exists(ctx), svg, {
+        ignoreMouse: true,
+        ignoreAnimation: true,
+        // ignoreDimensions: false,
+      });
+
+      await canvas.render();
+
+      const snapshotBlob = await osCanvas.convertToBlob();
+
+      this.setState({ snapshotBlob });
+    }
+    handleSnapshot = (kind: 'show' | 'close') => {
+      if (kind === 'show') {
+        setTimeout(async () => {
+          await this.takeSnapshot();
+        });
+      }
+    };
+
     getUndoRedoBar() {
       const { embedded } = this.props;
       const classes = this.props.classes;
@@ -1130,6 +1184,7 @@ export const Editor = withStyles(styles)(
 
       return (
         <div className={classes.undoRedoBar}>
+          <Snapshotter onSnapshot={this.handleSnapshot} />
           <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
         </div>
       );
@@ -1182,6 +1237,33 @@ export const Editor = withStyles(styles)(
       );
     }
 
+    getSnapshot() {
+      const { embedded } = this.props;
+      const classes = this.props.classes;
+      const { snapshotBlob } = this.state;
+
+      if (embedded || !snapshotBlob) {
+        return undefined;
+      }
+
+      return (
+        <Card className={classes.snapshotCard} elevation={2}>
+          <CardContent>
+            <img src={URL.createObjectURL(snapshotBlob)} className={classes.snapshotImg} />
+          </CardContent>
+          <CardActions>
+            <Button size="small" color="primary" onClick={this.handleClearSnapshot}>
+              Close
+            </Button>
+          </CardActions>
+        </Card>
+      );
+    }
+
+    handleClearSnapshot = () => {
+      this.setState({ snapshotBlob: undefined });
+    };
+
     render() {
       const { embedded, classes } = this.props;
 
@@ -1196,6 +1278,7 @@ export const Editor = withStyles(styles)(
           {this.getSnackbar()}
           {this.getEditorControls()}
           {this.getUndoRedoBar()}
+          {this.getSnapshot()}
         </div>
       );
     }

@@ -59,9 +59,12 @@ const styles = createStyles({
   },
   preview: {
     textAlign: 'center',
+    height: 200,
   },
   previewImg: {
+    width: '100%',
     maxHeight: 200,
+    objectFit: 'scale-down',
   },
   modelLink: {
     color: 'white',
