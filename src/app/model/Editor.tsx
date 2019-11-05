@@ -1146,9 +1146,9 @@ export const Editor = withStyles(styles)(
       if (!project || !this.state.modelName) {
         return;
       }
-      const { modelName } = this.state;
+      const { data, modelName } = this.state;
 
-      const [svg, viewbox] = renderSvgToString(project, modelName);
+      const [svg, viewbox] = renderSvgToString(project, modelName, data);
       const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
       const ctx = osCanvas.getContext('2d');
       const canvas = Canvg.fromString(exists(ctx), svg, {

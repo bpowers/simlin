@@ -21,8 +21,12 @@ const theme = createMuiTheme({
   palette: {},
 });
 
-export function renderSvgToString(project: Project, modelName: string): [string, Box] {
+export function renderSvgToString(project: Project, modelName: string, data?: Map<string, Series>): [string, Box] {
   const model = defined(project.model(modelName));
+
+  if (!data) {
+    data = Map<string, Series>();
+  }
 
   const renameVariable = (oldName: string, newName: string) => {};
   const onSelection = (selected: Set<UID>) => {};
@@ -40,7 +44,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
       project={defined(project)}
       model={model}
       view={defined(model.view(0))}
-      data={Map<string, Series>()}
+      data={data}
       selectedTool={undefined}
       selection={Set()}
       onRenameVariable={renameVariable}
