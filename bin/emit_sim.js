@@ -4,7 +4,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 const fs = require('fs');
-const sd = require('../lib/sd');
+const sd = require('../lib/engine/sd');
 
 const DOMParser = require('xmldom').DOMParser;
 const promisify = require('util').promisify;

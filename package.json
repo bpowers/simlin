@@ -35,6 +35,7 @@
     "build:runtime1": "node support/build-runtime.js src/engine/runtime.ts",
     "build:runtime": "npm-run-all build:pre build:runtime0 build:runtime1",
     "test": "tsc -p .tsconfig.test.json && mocha",
+    "rtest": "./test/test-models/regression-test.py -x '(subscript|macro|xscale|initial_function|stocks_with_expressions|active_initial|smooth_and_stock|euler_step_vs_saveper|special_characters)' ./bin/mdl.js test/test-models",
     "mocha": "mocha test/ --recursive --exit",
     "start": "npm-run-all -p start:backend start:frontend",
     "start:backend": "node_modules/.bin/ts-node-dev --no-notify --respawn src/index.ts",
