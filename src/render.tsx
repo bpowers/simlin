@@ -4,6 +4,8 @@
 
 import * as React from 'react';
 
+import * as logger from 'winston';
+
 // import { isMainThread, parentPort, Worker, workerData } from 'worker_threads';
 
 import * as canvas from 'canvas';
@@ -39,7 +41,9 @@ export async function renderToPNG(fileDoc: FileDocument): Promise<Buffer> {
 
   canvas.registerFont('fonts/Roboto-Light.ttf', { family: 'Roboto' });
 
-  const c = canvas.createCanvas(viewbox.width * 2, viewbox.height * 2);
+  const scale = Math.ceil((2 * 800) / viewbox.width);
+  logger.error(`scale ${scale} (w:${viewbox.width * scale})`);
+  const c = canvas.createCanvas(viewbox.width * scale, viewbox.height * scale);
   const ctx = c.getContext('2d');
   // const ctx = c.getContext('2d');
   // (ctx as any).parentNode = {
