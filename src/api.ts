@@ -107,8 +107,8 @@ export const apiRouter = (app: Application): Router => {
           res.status(400).json({ error: 'project name already taken' });
           return;
         }
-        console.log(':ohno:');
-        console.log(err);
+        logger.error(':ohno:');
+        logger.error(err);
         throw err;
       }
     },

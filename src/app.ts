@@ -2,9 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// tslint:disable-next-line
-require('@google-cloud/trace-agent').start();
-
 import * as fs from 'fs';
 import * as path from 'path';
 
