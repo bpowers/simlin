@@ -704,10 +704,10 @@ export const Canvas = withStyles(styles)(
       }
 
       const element = this.getElementByUid(uid);
-      const delta = this.state.moveDelta || { x: 0, y: 0 };
+      const delta = this.state.canvasOffset || { x: 0, y: 0 };
       const pointer = {
-        x: delta.x + e.clientX,
-        y: delta.y + e.clientY,
+        x: e.clientX - delta.x,
+        y: e.clientY - delta.y,
       };
 
       const cx = element.cx;
