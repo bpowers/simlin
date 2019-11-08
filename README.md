@@ -17,10 +17,11 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 * Click on a variable name to edit the name.
 * In equations, you can either refer to the variables like `"var name"` (with quotes), or like `var_name` (replacing spaces with underscores).
 * The arrows in the bottom right are Undo and Redo - there is currently a 10-change limit for undos, and if you undo into the past + make a change (like moving something), you won't be able to redo-back those changes.
+* If you mouse-down and drag a label you can adjust its position relative to the variable.
 
 ## Known issues
 
-* Invalid equations aren't surfaced.
+* Equations error details aren't surfaced.
 * The search box doesn't actually search/work yet.
 * If you select a variable that is under the "search" box, the sheet showing variable details will cover that part of the model (you can manually shift-click the background and reposition the diagram to get out of/around this).
 * Drag selection isn't implemented yet.
@@ -29,7 +30,6 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 * Undo/redo only applies within a browser tab.  If you restart your browser (or reload the page), you will lose the ability to undo to before the reload.
 * Only straight-line flows are supported for now.
 * Its possible to (nonsensically) create multiple connectors between two variables.  Just maybe don't do that for now.
-* Re-positioning labels isn't implemented yet.
 * Units aren't implemented.
 * Maybe more!  See the [Issues page](https://github.com/bpowers/model-app/issues) for additional info (or to highlight new bugs and problems)
 
