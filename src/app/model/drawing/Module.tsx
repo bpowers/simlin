@@ -68,7 +68,15 @@ export const Module = withStyles(styles)(
             rx={ModuleRadius}
             ry={ModuleRadius}
           />
-          <Label cx={cx} cy={cy} side={side} text={displayName(defined(element.name))} rw={w / 2} rh={h / 2} />
+          <Label
+            uid={element.uid}
+            cx={cx}
+            cy={cy}
+            side={side}
+            text={displayName(defined(element.name))}
+            rw={w / 2}
+            rh={h / 2}
+          />
         </g>
       );
     }

@@ -61,12 +61,13 @@ interface StockPropsFull extends WithStyles<typeof styles> {
   hasWarning?: boolean;
   series: Series | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
+  onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: ViewElement;
 }
 
 export type StockProps = Pick<
   StockPropsFull,
-  'element' | 'series' | 'isSelected' | 'isValidTarget' | 'isEditingName' | 'hasWarning' | 'onSelection'
+  'element' | 'series' | 'isSelected' | 'isValidTarget' | 'isEditingName' | 'hasWarning' | 'onSelection' | 'onLabelDrag'
 >;
 
 export function stockContains(element: ViewElement, point: Point): boolean {
@@ -174,6 +175,7 @@ export const Stock = withStyles(styles)(
         undefined
       ) : (
         <Label
+          uid={element.uid}
           cx={cx}
           cy={cy}
           side={side}
@@ -181,6 +183,7 @@ export const Stock = withStyles(styles)(
           rh={h / 2}
           text={displayName(defined(element.name))}
           onSelection={this.handleLabelSelection}
+          onLabelDrag={this.props.onLabelDrag}
         />
       );
 

@@ -149,13 +149,15 @@ export function labelBounds(props: LabelProps): Rect {
 interface LabelPropsFull extends CommonLabelProps, WithStyles<typeof styles> {
   text: string;
   onSelection?: (e: React.PointerEvent<SVGElement>) => void;
+  onLabelDrag?: (uid: number, e: React.PointerEvent<SVGElement>) => void;
 }
 
 export type LabelProps = Pick<LabelPropsFull, 'text' | 'onSelection' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
 
 export const Label = withStyles(styles)(
-  class ALabel extends React.PureComponent<LabelPropsFull> {
-    inPointerDown = false;
+  class LabelInner extends React.PureComponent<LabelPropsFull> {
+    pointerId: number | undefined;
+    inMove = false;
 
     constructor(props: LabelPropsFull) {
       super(props);
@@ -164,28 +166,33 @@ export const Label = withStyles(styles)(
     }
 
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      this.inPointerDown = true;
-    };
-
-    handlePointerOut = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      this.inPointerDown = false;
-    };
-
-    handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      this.inPointerDown = false;
-
-      if (this.props.onSelection) {
-        this.props.onSelection(e);
+      if (!e.isPrimary) {
+        return;
       }
+      e.preventDefault();
+      e.stopPropagation();
+
+      this.pointerId = e.pointerId;
+    };
+
+    handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
+      if (this.pointerId !== e.pointerId) {
+        return;
+      }
+      this.inMove = true;
+      (e.target as any).setPointerCapture(e.pointerId);
+      this.props.onLabelDrag?.(this.props.uid, e);
+    };
+
+    handleClick = (e: React.PointerEvent<SVGElement>): void => {
+      if (this.pointerId !== e.pointerId) {
+        return;
+      }
+      if (!this.inMove) {
+        this.props.onSelection?.(e);
+      }
+      this.pointerId = undefined;
+      this.inMove = false;
     };
 
     render() {
@@ -208,8 +215,8 @@ export const Label = withStyles(styles)(
             y={textY}
             style={align ? { textAnchor: align } : undefined}
             onPointerDown={this.handlePointerDown}
-            onPointerOut={this.handlePointerOut}
-            onPointerUp={this.handlePointerUp}
+            onPointerMove={this.handlePointerMove}
+            onPointerUp={this.handleClick}
             textRendering="optimizeLegibility"
           >
             {lines.map((l, i) => {

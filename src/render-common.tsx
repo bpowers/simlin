@@ -32,6 +32,7 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
   const onSelection = (selected: Set<UID>) => {};
   const moveSelection = (position: Point) => {};
   const moveFlow = (element: ViewElement, target: number, position: Point) => {};
+  const moveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {};
   const attachLink = (element: ViewElement, to: string) => {};
   const createCb = (element: ViewElement) => {};
   const nullCb = () => {};
@@ -51,6 +52,7 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
       onSetSelection={onSelection}
       onMoveSelection={moveSelection}
       onMoveFlow={moveFlow}
+      onMoveLabel={moveLabel}
       onAttachLink={attachLink}
       onCreateVariable={createCb}
       onClearSelectedTool={nullCb}

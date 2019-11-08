@@ -422,6 +422,24 @@ export const Editor = withStyles(styles)(
       this.updateProject(project);
     };
 
+    handleMoveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {
+      const { modelName } = this.state;
+      const updatePath = ['models', modelName, 'xModel', 'views', 0];
+      const project = defined(this.project()).updateIn(
+        updatePath,
+        (view: View): View => {
+          const elements = view.elements.map((element: ViewElement) => {
+            if (element.uid !== uid) {
+              return element;
+            }
+            return element.set('labelSide', side);
+          });
+
+          return view.set('elements', elements);
+        });
+      this.updateProject(project);
+    };
+
     handleFlowAttach = (flow: ViewElement, targetUid: number, cursorMoveDelta: Point) => {
       let { selection } = this.state;
       const { modelName } = this.state;
@@ -945,6 +963,7 @@ export const Editor = withStyles(styles)(
           onCreateVariable={this.handleCreateVariable}
           onClearSelectedTool={this.handleClearSelectedTool}
           onDeleteSelection={this.handleSelectionDelete}
+          onMoveLabel={this.handleMoveLabel}
         />
       );
     }

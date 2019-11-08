@@ -393,6 +393,7 @@ export interface FlowPropsFull extends WithStyles<typeof styles> {
   hasWarning?: boolean;
   series: Series | undefined;
   onSelection: (el: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean, isArrowhead?: boolean) => void;
+  onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   source: ViewElement;
   element: ViewElement;
   sink: ViewElement;
@@ -407,6 +408,7 @@ export type FlowProps = Pick<
   | 'hasWarning'
   | 'series'
   | 'onSelection'
+  | 'onLabelDrag'
   | 'source'
   | 'element'
   | 'sink'
@@ -556,11 +558,13 @@ export const Flow = withStyles(styles)(
         undefined
       ) : (
         <Label
+          uid={element.uid}
           cx={cx}
           cy={cy}
           side={side}
           text={displayName(defined(element.name))}
           onSelection={this.handleLabelSelection}
+          onLabelDrag={this.props.onLabelDrag}
         />
       );
 

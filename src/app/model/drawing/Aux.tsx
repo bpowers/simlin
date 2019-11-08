@@ -54,12 +54,13 @@ export interface AuxPropsFull extends WithStyles<typeof styles> {
   hasWarning?: boolean;
   series: Series | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
+  onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: ViewElement;
 }
 
 export type AuxProps = Pick<
   AuxPropsFull,
-  'isSelected' | 'isEditingName' | 'isValidTarget' | 'hasWarning' | 'series' | 'onSelection' | 'element'
+  'isSelected' | 'isEditingName' | 'isValidTarget' | 'hasWarning' | 'series' | 'onSelection' | 'onLabelDrag' | 'element'
 >;
 
 export function auxContains(element: ViewElement, point: Point): boolean {
@@ -172,11 +173,13 @@ export const Aux = withStyles(styles)(
         undefined
       ) : (
         <Label
+          uid={element.uid}
           cx={cx}
           cy={cy}
           side={side}
           text={displayName(defined(element.name))}
           onSelection={this.handleLabelSelection}
+          onLabelDrag={this.props.onLabelDrag}
         />
       );
 

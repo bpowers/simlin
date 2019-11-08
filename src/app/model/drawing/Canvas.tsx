@@ -118,6 +118,8 @@ interface CanvasState {
   isDragSelecting: boolean;
   isEditingName: boolean;
   isMovingArrow: boolean;
+  isMovingLabel: boolean;
+  labelSide: 'right' | 'bottom' | 'left' | 'top' | undefined;
   editingName: Value | undefined;
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
@@ -138,6 +140,7 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   onSetSelection: (selected: Set<UID>) => void;
   onMoveSelection: (position: Point, arcPoint?: Point) => void;
   onMoveFlow: (link: ViewElement, targetUid: number, moveDetla: Point) => void;
+  onMoveLabel: (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => void;
   onAttachLink: (link: ViewElement, newTarget: string) => void;
   onCreateVariable: (element: ViewElement) => void;
   onClearSelectedTool: () => void;
@@ -206,6 +209,8 @@ export const Canvas = withStyles(styles)(
         isMovingCanvas: false,
         isDragSelecting: false,
         isEditingName: false,
+        isMovingLabel: false,
+        labelSide: undefined,
         editingName: undefined,
         dragSelectionPoint: undefined,
         moveDelta: undefined,
@@ -338,6 +343,7 @@ export const Canvas = withStyles(styles)(
         isEditingName: isSelected && this.state.isEditingName,
         isValidTarget: this.isValidTarget(element),
         onSelection: this.handleSetSelection,
+        onLabelDrag: this.handleLabelDrag,
         hasWarning: variableErrors > 0,
       };
 
@@ -357,6 +363,7 @@ export const Canvas = withStyles(styles)(
         isEditingName: isSelected && this.state.isEditingName,
         isValidTarget: this.isValidTarget(element),
         onSelection: this.handleSetSelection,
+        onLabelDrag: this.handleLabelDrag,
         hasWarning: variableErrors > 0,
       };
       this.elementBounds = this.elementBounds.push(stockBounds(element));
@@ -479,6 +486,7 @@ export const Canvas = withStyles(styles)(
           isEditingName={isSelected && this.state.isEditingName}
           isValidTarget={this.isValidTarget(element)}
           onSelection={this.handleSetSelection}
+          onLabelDrag={this.handleLabelDrag}
         />
       );
     };
@@ -559,6 +567,11 @@ export const Canvas = withStyles(styles)(
       }
 
       this.selectionUpdates = InnerCanvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
+      if (this.state.labelSide) {
+        this.selectionUpdates = this.selectionUpdates.map(el => {
+          return el.set('labelSide', this.state.labelSide);
+        });
+      }
       if (this.state.moveDelta) {
         let otherUpdates = List<ViewElement>();
         const { x, y } = defined(this.state.moveDelta);
@@ -602,6 +615,8 @@ export const Canvas = withStyles(styles)(
         isMovingArrow: false,
         isEditingName: false,
         isDragSelecting: false,
+        isMovingLabel: false,
+        labelSide: undefined,
         dragSelectionPoint: undefined,
         inCreation: undefined,
         inCreationCloud: undefined,
@@ -622,6 +637,13 @@ export const Canvas = withStyles(styles)(
       e.stopPropagation();
 
       this.pointerId = undefined;
+
+      if (this.state.isMovingLabel && this.state.labelSide) {
+        const selected = defined(this.props.selection.first());
+        this.props.onMoveLabel(selected, this.state.labelSide);
+        this.clearPointerState(false);
+        return;
+      }
 
       if (this.selectionCenterOffset) {
         if (this.state.moveDelta) {
@@ -670,6 +692,44 @@ export const Canvas = withStyles(styles)(
 
       const clearSelection = !this.state.isMovingCanvas;
       this.clearPointerState(clearSelection);
+    };
+
+
+    handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>) => {
+      this.pointerId = e.pointerId;
+
+      const selectionSet = Set([uid]);
+      if (!this.props.selection.equals(selectionSet)) {
+        this.props.onSetSelection(selectionSet);
+      }
+
+      const element = this.getElementByUid(uid);
+      const delta = this.state.moveDelta || { x: 0, y: 0 };
+      const pointer = {
+        x: delta.x + e.clientX,
+        y: delta.y + e.clientY,
+      };
+
+      const cx = element.cx;
+      const cy = element.cy;
+
+      const angle = radToDeg(Math.atan2(cy - pointer.y, cx - pointer.x));
+
+      let side: 'top' | 'left' | 'bottom' | 'right';
+      if (-45 < angle && angle <= 45) {
+        side = 'left';
+      } else if (45 < angle && angle <= 135) {
+        side = 'top';
+      } else if (-135 < angle && angle <= -45) {
+        side = 'bottom';
+      } else {
+        side = 'right';
+      }
+
+      this.setState({
+        isMovingLabel: true,
+        labelSide: side,
+      });
     };
 
     handleSelectionMove(e: React.PointerEvent<SVGElement>): void {
@@ -1040,6 +1100,7 @@ export const Canvas = withStyles(styles)(
         const offset = this.state.canvasOffset;
         nameEditor = (
           <EditableLabel
+            uid={editingUid}
             cx={editingElement.cx + offset.x}
             cy={editingElement.cy + offset.y}
             side={side}
