@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+message File {
+  string id = 1; // hex sha256 of rest of message
+  repeated string prevId = 2; // id of previous file; multiple in case of merge
+  string projectId = 3;
+  string userId = 4; // user who created this content
+  google.protobuf.Timestamp created = 5;
+  string jsonContents = 6;
+}
