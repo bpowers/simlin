@@ -694,7 +694,6 @@ export const Canvas = withStyles(styles)(
       this.clearPointerState(clearSelection);
     };
 
-
     handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>) => {
       this.pointerId = e.pointerId;
 
@@ -744,7 +743,7 @@ export const Canvas = withStyles(styles)(
         moveDelta: {
           x: dx,
           y: dy,
-        } as (Point | undefined),
+        } as Point | undefined,
       });
     }
 

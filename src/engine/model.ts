@@ -100,9 +100,15 @@ export class Model extends Record(modelDefaults) implements varModel {
       const variables = xModel.variables.map((v: XmileVariable) => {
         if (v.type === 'stock' && v.ident === stock) {
           if (dir === 'in') {
-            v = v.set('inflows', (v.inflows || List()).filter(id => id !== flow));
+            v = v.set(
+              'inflows',
+              (v.inflows || List()).filter(id => id !== flow),
+            );
           } else {
-            v = v.set('outflows', (v.outflows || List()).filter(id => id !== flow));
+            v = v.set(
+              'outflows',
+              (v.outflows || List()).filter(id => id !== flow),
+            );
           }
         }
         return v;
@@ -206,10 +212,16 @@ export class Model extends Record(modelDefaults) implements varModel {
           v = v.set('name', newIdent);
         }
         if (v.inflows) {
-          v = v.set('inflows', v.inflows.map(id => (id === oldIdent ? newIdent : id)));
+          v = v.set(
+            'inflows',
+            v.inflows.map(id => (id === oldIdent ? newIdent : id)),
+          );
         }
         if (v.outflows) {
-          v = v.set('outflows', v.outflows.map(id => (id === oldIdent ? newIdent : id)));
+          v = v.set(
+            'outflows',
+            v.outflows.map(id => (id === oldIdent ? newIdent : id)),
+          );
         }
         return handleRenameInAST(v, oldIdent, newIdent);
       });

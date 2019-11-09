@@ -436,7 +436,8 @@ export const Editor = withStyles(styles)(
           });
 
           return view.set('elements', elements);
-        });
+        },
+      );
       this.updateProject(project);
     };
 

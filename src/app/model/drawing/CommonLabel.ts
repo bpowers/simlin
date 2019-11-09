@@ -21,8 +21,12 @@ export interface CommonLabelProps {
 
 export const LabelPadding = 4;
 
-const SideMap = Map<number, string>([[0, 'right'], [1, 'bottom'], [2, 'left'], [3, 'top']]);
-
+const SideMap = Map<number, string>([
+  [0, 'right'],
+  [1, 'bottom'],
+  [2, 'left'],
+  [3, 'top'],
+]);
 
 export const findSide = (element: ViewElement, defaultSide = 'bottom'): string => {
   if (element.labelSide) {
