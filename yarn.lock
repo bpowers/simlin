@@ -2776,10 +2776,10 @@ canvas@^2.6.0:
     node-pre-gyp "^0.11.0"
     simple-get "^3.0.3"
 
-canvg@3.0.0-beta.0:
-  version "3.0.0-beta.0"
-  resolved "https://registry.yarnpkg.com/canvg/-/canvg-3.0.0-beta.0.tgz#5f8d3ab65e558981bbd98047f63ecd3840ba3a33"
-  integrity sha512-n/dzAvvz6P2PDDUG3jMgVHMuSKyRmImJtr8J+2K2nuHwkgF7wTYKSCMiCk9ftURjjXU5+pveUVT78+3guB+3RA==
+canvg@^3.0.0-beta.2:
+  version "3.0.0-beta.2"
+  resolved "https://registry.yarnpkg.com/canvg/-/canvg-3.0.0-beta.2.tgz#7be4c7684b7e4a4b6f070bcc103d4244e90f1faa"
+  integrity sha512-xPrkQnUdG9PCG/2i4YSPKZWhoyTiElbYuO1UvY5FZLSfBRnQU8MlOzp9+vvYabAS3vY4H5a8KjzIu8TWlJddrA==
   dependencies:
     "@babel/runtime" "^7.6.3"
     "@types/raf" "^3.4.0"
@@ -5071,6 +5071,11 @@ google-p12-pem@^2.0.0:
   integrity sha512-UfnEARfJKI6pbmC1hfFFm+UAcZxeIwTiEcHfqKe/drMsXD/ilnVjF7zgOGpHXyhuvX6jNJK3S8A0hOQjwtFxEw==
   dependencies:
     node-forge "^0.9.0"
+
+google-protobuf@^3.10.0, google-protobuf@^3.6.1:
+  version "3.10.0"
+  resolved "https://registry.yarnpkg.com/google-protobuf/-/google-protobuf-3.10.0.tgz#f36171128090615049f9b0e42252b1a10a4bc534"
+  integrity sha512-d0cMO8TJ6xtB/WrVHCv5U81L2ulX+aCD58IljyAN6mHwdHHJ2jbcauX5glvivi3s3hx7EYEo7eUA9WftzamMnw==
 
 graceful-fs@^4.1.11, graceful-fs@^4.1.15, graceful-fs@^4.1.2, graceful-fs@^4.1.6, graceful-fs@^4.2.0, graceful-fs@^4.2.2:
   version "4.2.3"
@@ -9930,6 +9935,13 @@ ts-pnp@^1.1.2:
   version "1.1.4"
   resolved "https://registry.yarnpkg.com/ts-pnp/-/ts-pnp-1.1.4.tgz#ae27126960ebaefb874c6d7fa4729729ab200d90"
   integrity sha512-1J/vefLC+BWSo+qe8OnJQfWTYRS6ingxjwqmHMqaMxXMj7kFtKLgAaYW3JeX3mktjgUL+etlU8/B4VUAUI9QGw==
+
+ts-protoc-gen@^0.12.0:
+  version "0.12.0"
+  resolved "https://registry.yarnpkg.com/ts-protoc-gen/-/ts-protoc-gen-0.12.0.tgz#932e5738f14b67e7202825b06f8c548cb7d8ef34"
+  integrity sha512-V7jnICJxKqalBrnJSMTW5tB9sGi48gOC325bfcM7TDNUItVOlaMM//rQmuo49ybipk/SyJTnWXgtJnhHCevNJw==
+  dependencies:
+    google-protobuf "^3.6.1"
 
 tsconfig-paths@^3.9.0:
   version "3.9.0"
