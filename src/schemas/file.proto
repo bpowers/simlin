@@ -4,9 +4,9 @@ import "google/protobuf/timestamp.proto";
 
 message File {
   string id = 1; // hex sha256 of rest of message
-  repeated string prevId = 2; // id of previous file; multiple in case of merge
-  string projectId = 3;
-  string userId = 4; // user who created this content
+  repeated string prev_id = 2; // id of previous file; multiple in case of merge
+  string project_id = 3;
+  string user_id = 4; // user who created this content
   google.protobuf.Timestamp created = 5;
-  string jsonContents = 6;
+  string json_contents = 6;
 }

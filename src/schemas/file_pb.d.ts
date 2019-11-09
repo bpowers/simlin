@@ -8,24 +8,24 @@ export class File extends jspb.Message {
   getId(): string;
   setId(value: string): void;
 
-  clearPrevidList(): void;
-  getPrevidList(): Array<string>;
-  setPrevidList(value: Array<string>): void;
-  addPrevid(value: string, index?: number): string;
+  clearPrevIdList(): void;
+  getPrevIdList(): Array<string>;
+  setPrevIdList(value: Array<string>): void;
+  addPrevId(value: string, index?: number): string;
 
-  getProjectid(): string;
-  setProjectid(value: string): void;
+  getProjectId(): string;
+  setProjectId(value: string): void;
 
-  getUserid(): string;
-  setUserid(value: string): void;
+  getUserId(): string;
+  setUserId(value: string): void;
 
   hasCreated(): boolean;
   clearCreated(): void;
   getCreated(): google_protobuf_timestamp_pb.Timestamp | undefined;
   setCreated(value?: google_protobuf_timestamp_pb.Timestamp): void;
 
-  getJsoncontents(): string;
-  setJsoncontents(value: string): void;
+  getJsonContents(): string;
+  setJsonContents(value: string): void;
 
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): File.AsObject;
@@ -40,10 +40,10 @@ export class File extends jspb.Message {
 export namespace File {
   export type AsObject = {
     id: string;
-    previdList: Array<string>;
-    projectid: string;
-    userid: string;
+    prevIdList: Array<string>;
+    projectId: string;
+    userId: string;
     created?: google_protobuf_timestamp_pb.Timestamp.AsObject;
-    jsoncontents: string;
+    jsonContents: string;
   };
 }

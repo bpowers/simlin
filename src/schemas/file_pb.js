@@ -68,11 +68,11 @@ proto.File.prototype.toObject = function(opt_includeInstance) {
 proto.File.toObject = function(includeInstance, msg) {
   var f, obj = {
     id: jspb.Message.getFieldWithDefault(msg, 1, ""),
-    previdList: jspb.Message.getRepeatedField(msg, 2),
-    projectid: jspb.Message.getFieldWithDefault(msg, 3, ""),
-    userid: jspb.Message.getFieldWithDefault(msg, 4, ""),
+    prevIdList: jspb.Message.getRepeatedField(msg, 2),
+    projectId: jspb.Message.getFieldWithDefault(msg, 3, ""),
+    userId: jspb.Message.getFieldWithDefault(msg, 4, ""),
     created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
-    jsoncontents: jspb.Message.getFieldWithDefault(msg, 6, "")
+    jsonContents: jspb.Message.getFieldWithDefault(msg, 6, "")
   };
 
   if (includeInstance) {
@@ -115,15 +115,15 @@ proto.File.deserializeBinaryFromReader = function(msg, reader) {
       break;
     case 2:
       var value = /** @type {string} */ (reader.readString());
-      msg.addPrevid(value);
+      msg.addPrevId(value);
       break;
     case 3:
       var value = /** @type {string} */ (reader.readString());
-      msg.setProjectid(value);
+      msg.setProjectId(value);
       break;
     case 4:
       var value = /** @type {string} */ (reader.readString());
-      msg.setUserid(value);
+      msg.setUserId(value);
       break;
     case 5:
       var value = new google_protobuf_timestamp_pb.Timestamp;
@@ -132,7 +132,7 @@ proto.File.deserializeBinaryFromReader = function(msg, reader) {
       break;
     case 6:
       var value = /** @type {string} */ (reader.readString());
-      msg.setJsoncontents(value);
+      msg.setJsonContents(value);
       break;
     default:
       reader.skipField();
@@ -170,21 +170,21 @@ proto.File.serializeBinaryToWriter = function(message, writer) {
       f
     );
   }
-  f = message.getPrevidList();
+  f = message.getPrevIdList();
   if (f.length > 0) {
     writer.writeRepeatedString(
       2,
       f
     );
   }
-  f = message.getProjectid();
+  f = message.getProjectId();
   if (f.length > 0) {
     writer.writeString(
       3,
       f
     );
   }
-  f = message.getUserid();
+  f = message.getUserId();
   if (f.length > 0) {
     writer.writeString(
       4,
@@ -199,7 +199,7 @@ proto.File.serializeBinaryToWriter = function(message, writer) {
       google_protobuf_timestamp_pb.Timestamp.serializeBinaryToWriter
     );
   }
-  f = message.getJsoncontents();
+  f = message.getJsonContents();
   if (f.length > 0) {
     writer.writeString(
       6,
@@ -225,16 +225,16 @@ proto.File.prototype.setId = function(value) {
 
 
 /**
- * repeated string prevId = 2;
+ * repeated string prev_id = 2;
  * @return {!Array<string>}
  */
-proto.File.prototype.getPrevidList = function() {
+proto.File.prototype.getPrevIdList = function() {
   return /** @type {!Array<string>} */ (jspb.Message.getRepeatedField(this, 2));
 };
 
 
 /** @param {!Array<string>} value */
-proto.File.prototype.setPrevidList = function(value) {
+proto.File.prototype.setPrevIdList = function(value) {
   jspb.Message.setField(this, 2, value || []);
 };
 
@@ -243,42 +243,42 @@ proto.File.prototype.setPrevidList = function(value) {
  * @param {!string} value
  * @param {number=} opt_index
  */
-proto.File.prototype.addPrevid = function(value, opt_index) {
+proto.File.prototype.addPrevId = function(value, opt_index) {
   jspb.Message.addToRepeatedField(this, 2, value, opt_index);
 };
 
 
-proto.File.prototype.clearPrevidList = function() {
-  this.setPrevidList([]);
+proto.File.prototype.clearPrevIdList = function() {
+  this.setPrevIdList([]);
 };
 
 
 /**
- * optional string projectId = 3;
+ * optional string project_id = 3;
  * @return {string}
  */
-proto.File.prototype.getProjectid = function() {
+proto.File.prototype.getProjectId = function() {
   return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 3, ""));
 };
 
 
 /** @param {string} value */
-proto.File.prototype.setProjectid = function(value) {
+proto.File.prototype.setProjectId = function(value) {
   jspb.Message.setProto3StringField(this, 3, value);
 };
 
 
 /**
- * optional string userId = 4;
+ * optional string user_id = 4;
  * @return {string}
  */
-proto.File.prototype.getUserid = function() {
+proto.File.prototype.getUserId = function() {
   return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 4, ""));
 };
 
 
 /** @param {string} value */
-proto.File.prototype.setUserid = function(value) {
+proto.File.prototype.setUserId = function(value) {
   jspb.Message.setProto3StringField(this, 4, value);
 };
 
@@ -314,16 +314,16 @@ proto.File.prototype.hasCreated = function() {
 
 
 /**
- * optional string jsonContents = 6;
+ * optional string json_contents = 6;
  * @return {string}
  */
-proto.File.prototype.getJsoncontents = function() {
+proto.File.prototype.getJsonContents = function() {
   return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 6, ""));
 };
 
 
 /** @param {string} value */
-proto.File.prototype.setJsoncontents = function(value) {
+proto.File.prototype.setJsonContents = function(value) {
   jspb.Message.setProto3StringField(this, 6, value);
 };
 
