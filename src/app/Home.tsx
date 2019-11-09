@@ -74,6 +74,12 @@ const styles = createStyles({
     margin: 32,
     padding: 12,
   },
+  projectGrid: {
+    boxSizing: 'border-box',
+    marginLeft: 'auto',
+    marginRight: 'auto',
+    maxWidth: 1024,
+  },
 });
 
 interface HomeState {
@@ -168,23 +174,25 @@ const Home = withWidth()(
         const { classes } = this.props;
         const { projects } = this.state;
         return (
-          <GridList cols={this.getGridListCols()} spacing={0}>
-            {projects.map(project => (
-              <GridListTile key={project.path} style={{ height: 'auto' }}>
-                <Link to={`/${project.path}`} className={classes.modelLink}>
-                  <Paper className={classes.paper} elevation={4}>
-                    <div className={classes.preview}>
-                      <img src={`/api/preview/${project.path}`} className={classes.previewImg} />
-                    </div>
-                    <Typography variant="h5" component="h3">
-                      {project.name}
-                    </Typography>
-                    <Typography component="p">{project.description}&nbsp;</Typography>
-                  </Paper>
-                </Link>
-              </GridListTile>
-            ))}
-          </GridList>
+          <div className={classes.projectGrid}>
+            <GridList cols={this.getGridListCols()} spacing={0}>
+              {projects.map(project => (
+                <GridListTile key={project.path} style={{ height: 'auto' }}>
+                  <Link to={`/${project.path}`} className={classes.modelLink}>
+                    <Paper className={classes.paper} elevation={4}>
+                      <div className={classes.preview}>
+                        <img src={`/api/preview/${project.path}`} className={classes.previewImg} />
+                      </div>
+                      <Typography variant="h5" component="h3">
+                        {project.name}
+                      </Typography>
+                      <Typography component="p">{project.description}&nbsp;</Typography>
+                    </Paper>
+                  </Link>
+                </GridListTile>
+              ))}
+            </GridList>
+          </div>
         );
       }
 
