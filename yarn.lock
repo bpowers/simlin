@@ -1492,7 +1492,7 @@
   resolved "https://registry.yarnpkg.com/@types/mocha/-/mocha-5.2.7.tgz#315d570ccb56c53452ff8638738df60726d5b6ea"
   integrity sha512-NYrtPht0wGzhwe9+/idPaBB+TqkY9AhTvOLMkThm0IoEfLaiVQZwBwyJ5puCkO3AUCWrmcoePjp2mbFocKy4SQ==
 
-"@types/mongodb@*":
+"@types/mongodb@*", "@types/mongodb@^3.3.10":
   version "3.3.10"
   resolved "https://registry.yarnpkg.com/@types/mongodb/-/mongodb-3.3.10.tgz#ef8255cc78b32ecd8afd901796e458f4379d9bc2"
   integrity sha512-0irlIjqs0UVcs+1ih7qdA9Rs4gkN9hBX7PI6IBWYu/kcMQ52L+oLW19gKT8wBJD2uMBkgT4mVKDmEo6ygObnHA==

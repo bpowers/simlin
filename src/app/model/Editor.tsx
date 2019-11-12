@@ -57,6 +57,8 @@ import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
 
+import { File as FilePb } from '../../schemas/file_pb';
+
 const MaxUndoSize = 5;
 
 function radToDeg(r: number): number {

@@ -9,12 +9,7 @@ if (process.env.NODE_ENV === 'production') {
 
 import * as logger from 'winston';
 
-import { App } from './app';
-
-const app = new App().app;
-const port = app.get('port');
-
-const server = app.listen(port);
+import { createApp } from './app';
 
 process.on('unhandledRejection', (reason, p) => {
   logger.error(`Unhandled Rejection at: Promise ${p}: ${reason}`);
@@ -22,6 +17,9 @@ process.on('unhandledRejection', (reason, p) => {
   console.log(reason);
 });
 
-server.on('listening', () => {
-  logger.info(`model-service started on http://${app.get('host')}:${port}`);
-});
+async function main() {
+  const app = await createApp();
+  app.listen();
+}
+
+setImmediate(main);

@@ -9,7 +9,7 @@ import * as bodyParser from 'body-parser';
 import * as cookieParser from 'cookie-parser';
 import * as cors from 'cors';
 import * as express from 'express';
-import { Application, NextFunction, Request, Response } from 'express';
+import { NextFunction, Request, Response } from 'express';
 import * as helmet from 'helmet';
 import * as favicon from 'serve-favicon';
 import { seshcookie } from 'seshcookie';
@@ -17,21 +17,37 @@ import * as logger from 'winston';
 
 import { apiRouter } from './api';
 import { defined } from './app/common';
+import { Application } from './application';
 import { authn } from './authn';
 import { authz } from './authz';
+import { createDatabase } from './models/db';
 import { Project } from './models/project';
 import { UserDocument } from './models/user';
 import { mongoose } from './mongoose';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
 
-export class App {
-  app: Application;
+export async function createApp(): Promise<App> {
+  const app = new App();
+  await app.setup();
+
+  return app;
+}
+
+class App {
+  private readonly app: Application;
 
   constructor() {
-    this.app = express();
+    this.app = express() as any;
+  }
 
-    this.setup();
+  listen(): void {
+    const port = this.app.get('port');
+    const server = this.app.listen(port);
+
+    server.on('listening', () => {
+      logger.info(`model-service started on http://${this.app.get('host')}:${port}`);
+    });
   }
 
   private loadConfig(): void {
@@ -75,7 +91,18 @@ export class App {
     }
   }
 
-  private setup(): void {
+  private mongoUrl(): string {
+    let url = this.app.get('mongodb');
+    if (process.env.MODEL_MONGO_USERNAME && process.env.MODEL_MONGO_PASSWORD) {
+      const exploded = new URL(url);
+      exploded.username = process.env.MODEL_MONGO_USERNAME;
+      exploded.password = process.env.MODEL_MONGO_PASSWORD;
+      url = exploded.toString();
+    }
+    return url;
+  }
+
+  async setup(): Promise<void> {
     const { combine, timestamp, json } = logger.format;
     logger.configure({
       format: combine(timestamp(), json()),
@@ -85,6 +112,11 @@ export class App {
     const oneYearInSeconds = 365 * 24 * 60 * 60;
 
     this.loadConfig();
+
+    this.app.db = await createDatabase({
+      url: this.mongoUrl(),
+      backend: 'mongo',
+    });
 
     // put the redirect before the request logger to remove noise
     this.app.use(redirectToHttps);
@@ -168,5 +200,9 @@ export class App {
     // /static for CSS, JS, etc
     // /, /login serve index.js
     this.app.use(express.static('public'));
+
+    if (!this.app.db) {
+      throw new Error('expected DB to be initialized');
+    }
   }
 }

@@ -1,0 +1,18 @@
+// Copyright 2019 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+message User {
+  string id = 1; // username
+  string email = 2;
+  string display_name = 3;
+  string photo_url = 4;
+  string provider = 5;
+  bool is_admin = 6;
+  bool is_deactivated = 7;
+  google.protobuf.Timestamp created = 8;
+}

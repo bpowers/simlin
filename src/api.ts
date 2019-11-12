@@ -2,9 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Application, Request, Response, Router } from 'express';
+import { Request, Response, Router } from 'express';
 import { List } from 'immutable';
 import * as logger from 'winston';
+
+import { Application } from './application';
 
 import {
   File as XmileFile,

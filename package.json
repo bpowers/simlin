@@ -97,6 +97,7 @@
     "@types/google-protobuf": "^3.7.2",
     "@types/helmet": "^0.0.44",
     "@types/mocha": "^5.2.7",
+    "@types/mongodb": "^3.3.10",
     "@types/mongoose": "^5.5.20",
     "@types/mustache": "^0.8.32",
     "@types/node": "^12.7.12",
