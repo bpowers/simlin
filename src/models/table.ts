@@ -4,15 +4,13 @@
 
 import { Collection, Db } from 'mongodb';
 
+import { Message } from 'google-protobuf';
+
 import { defined } from '../engine/common';
 
-interface Serializable {
-  serializeBinary(): Uint8Array;
-}
-
 interface SerializableClass {
-  new (): Serializable;
-  deserializeBinary(bytes: Uint8Array): Serializable;
+  new (): Message;
+  deserializeBinary(bytes: Uint8Array): Message;
 }
 
 export interface Table<T extends SerializableClass> {

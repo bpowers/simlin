@@ -49,8 +49,8 @@ export class MongoDatabase {
     const db = client.db();
 
     this.file = new MongoTable(File, { db, name: 'files2' });
-    this.project = new MongoTable(Project, { db, name: 'project2' });
+    this.project = new MongoTable(Project, { db, name: 'project2', hoistColumns: ['version'] });
     this.preview = new MongoTable(Preview, { db, name: 'preview2' });
-    this.user = new MongoTable(User, { db, name: 'user2' });
+    this.user = new MongoTable(User, { db, name: 'user2', hoistColumns: ['email'] });
   }
 }
