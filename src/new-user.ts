@@ -5,12 +5,35 @@
 import { parse as parseToml } from '@iarna/toml';
 import * as fs from 'fs-extra';
 import * as logger from 'winston';
+import { DOMParser } from 'xmldom';
 
-import { fileFromXmile } from './models/file';
-import { newProject } from './models/project';
-import { UserDocument } from './models/user';
+import { stdProject } from './engine/project';
+import { Database } from './models/db';
+import { Table } from './models/table';
+import { createFile, createProject } from './project-creation';
+import { File } from './schemas/file_pb';
+import { User } from './schemas/user_pb';
 
-async function populateExample(user: UserDocument, exampleModelPath: string): Promise<void> {
+async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
+  const xml = new DOMParser().parseFromString(xmile, 'application/xml');
+  const [project, err] = stdProject.addXmileFile(xml);
+  if (err) {
+    throw err;
+  }
+  if (!project) {
+    throw new Error('project not defined');
+  }
+
+  const sdFile = project.toFile();
+  const sdJson = JSON.stringify(sdFile);
+
+  const file = createFile(projectId, userId, undefined, sdJson);
+  await files.create(file.getId(), file);
+
+  return file;
+}
+
+async function populateExample(db: Database, user: User, exampleModelPath: string): Promise<void> {
   const metadataPath = `${exampleModelPath}/project.toml`;
   const metadataContents = await fs.readFile(metadataPath, 'utf8');
   const metadata = parseToml(metadataContents);
@@ -24,18 +47,18 @@ async function populateExample(user: UserDocument, exampleModelPath: string): Pr
   const projectMeta: { name: string; description: string } = metadata.project as any;
   const projectName = projectMeta.name;
   const projectDescription = projectMeta.description;
-  const userId = user._id;
+  const userId = user.getId();
 
-  const project = await newProject(user, projectName, projectDescription);
-  const file = await fileFromXmile(project._id, userId, modelContents);
+  const project = await createProject(user, projectName, projectDescription, false);
+  const file = await fileFromXmile(db.file, project.getId(), userId, modelContents);
 
-  project.fileId = file._id;
-  await project.save();
+  project.setFileId(file.getId());
+  await db.project.create(project.getId(), project);
 
   return Promise.resolve(undefined);
 }
 
-export async function populateExamples(user: UserDocument, examplesDirName: string): Promise<void> {
+export async function populateExamples(db: Database, user: User, examplesDirName: string): Promise<void> {
   let files = await fs.readdir(examplesDirName);
   files = files.filter(async (file: string) => {
     const path = `${examplesDirName}/${file}`;
@@ -53,9 +76,9 @@ export async function populateExamples(user: UserDocument, examplesDirName: stri
     // if an individual example fails, continue trying with any
     // other examples we have left
     try {
-      await populateExample(user, path);
+      await populateExample(db, user, path);
     } catch (err) {
-      logger.error(`populateExample(${user.email}, ${path}): ${err}`);
+      logger.error(`populateExample(${user.getId()}, ${path}): ${err}`);
       continue;
     }
   }

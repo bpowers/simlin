@@ -65,9 +65,10 @@ proto.User.toObject = function(includeInstance, msg) {
     displayName: jspb.Message.getFieldWithDefault(msg, 3, ""),
     photoUrl: jspb.Message.getFieldWithDefault(msg, 4, ""),
     provider: jspb.Message.getFieldWithDefault(msg, 5, ""),
+    created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
     isAdmin: jspb.Message.getFieldWithDefault(msg, 6, false),
     isDeactivated: jspb.Message.getFieldWithDefault(msg, 7, false),
-    created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f)
+    canCreateProjects: jspb.Message.getFieldWithDefault(msg, 9, false)
   };
 
   if (includeInstance) {
@@ -124,6 +125,11 @@ proto.User.deserializeBinaryFromReader = function(msg, reader) {
       var value = /** @type {string} */ (reader.readString());
       msg.setProvider(value);
       break;
+    case 8:
+      var value = new google_protobuf_timestamp_pb.Timestamp;
+      reader.readMessage(value,google_protobuf_timestamp_pb.Timestamp.deserializeBinaryFromReader);
+      msg.setCreated(value);
+      break;
     case 6:
       var value = /** @type {boolean} */ (reader.readBool());
       msg.setIsAdmin(value);
@@ -132,10 +138,9 @@ proto.User.deserializeBinaryFromReader = function(msg, reader) {
       var value = /** @type {boolean} */ (reader.readBool());
       msg.setIsDeactivated(value);
       break;
-    case 8:
-      var value = new google_protobuf_timestamp_pb.Timestamp;
-      reader.readMessage(value,google_protobuf_timestamp_pb.Timestamp.deserializeBinaryFromReader);
-      msg.setCreated(value);
+    case 9:
+      var value = /** @type {boolean} */ (reader.readBool());
+      msg.setCanCreateProjects(value);
       break;
     default:
       reader.skipField();
@@ -201,6 +206,14 @@ proto.User.serializeBinaryToWriter = function(message, writer) {
       f
     );
   }
+  f = message.getCreated();
+  if (f != null) {
+    writer.writeMessage(
+      8,
+      f,
+      google_protobuf_timestamp_pb.Timestamp.serializeBinaryToWriter
+    );
+  }
   f = message.getIsAdmin();
   if (f) {
     writer.writeBool(
@@ -215,12 +228,11 @@ proto.User.serializeBinaryToWriter = function(message, writer) {
       f
     );
   }
-  f = message.getCreated();
-  if (f != null) {
-    writer.writeMessage(
-      8,
-      f,
-      google_protobuf_timestamp_pb.Timestamp.serializeBinaryToWriter
+  f = message.getCanCreateProjects();
+  if (f) {
+    writer.writeBool(
+      9,
+      f
     );
   }
 };
@@ -302,6 +314,36 @@ proto.User.prototype.setProvider = function(value) {
 
 
 /**
+ * optional google.protobuf.Timestamp created = 8;
+ * @return {?proto.google.protobuf.Timestamp}
+ */
+proto.User.prototype.getCreated = function() {
+  return /** @type{?proto.google.protobuf.Timestamp} */ (
+    jspb.Message.getWrapperField(this, google_protobuf_timestamp_pb.Timestamp, 8));
+};
+
+
+/** @param {?proto.google.protobuf.Timestamp|undefined} value */
+proto.User.prototype.setCreated = function(value) {
+  jspb.Message.setWrapperField(this, 8, value);
+};
+
+
+proto.User.prototype.clearCreated = function() {
+  this.setCreated(undefined);
+};
+
+
+/**
+ * Returns whether this field is set.
+ * @return {!boolean}
+ */
+proto.User.prototype.hasCreated = function() {
+  return jspb.Message.getField(this, 8) != null;
+};
+
+
+/**
  * optional bool is_admin = 6;
  * Note that Boolean fields may be set to 0/1 when serialized from a Java server.
  * You should avoid comparisons like {@code val === true/false} in those cases.
@@ -336,32 +378,19 @@ proto.User.prototype.setIsDeactivated = function(value) {
 
 
 /**
- * optional google.protobuf.Timestamp created = 8;
- * @return {?proto.google.protobuf.Timestamp}
+ * optional bool can_create_projects = 9;
+ * Note that Boolean fields may be set to 0/1 when serialized from a Java server.
+ * You should avoid comparisons like {@code val === true/false} in those cases.
+ * @return {boolean}
  */
-proto.User.prototype.getCreated = function() {
-  return /** @type{?proto.google.protobuf.Timestamp} */ (
-    jspb.Message.getWrapperField(this, google_protobuf_timestamp_pb.Timestamp, 8));
+proto.User.prototype.getCanCreateProjects = function() {
+  return /** @type {boolean} */ (jspb.Message.getFieldWithDefault(this, 9, false));
 };
 
 
-/** @param {?proto.google.protobuf.Timestamp|undefined} value */
-proto.User.prototype.setCreated = function(value) {
-  jspb.Message.setWrapperField(this, 8, value);
-};
-
-
-proto.User.prototype.clearCreated = function() {
-  this.setCreated(undefined);
-};
-
-
-/**
- * Returns whether this field is set.
- * @return {!boolean}
- */
-proto.User.prototype.hasCreated = function() {
-  return jspb.Message.getField(this, 8) != null;
+/** @param {boolean} value */
+proto.User.prototype.setCanCreateProjects = function(value) {
+  jspb.Message.setProto3BooleanField(this, 9, value);
 };
 
 

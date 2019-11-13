@@ -19,9 +19,8 @@ import { stdProject } from './engine/project';
 import { FileFromJSON } from './engine/xmile';
 
 import { defined } from './app/common';
-import { FileDocument } from './models/file';
-
 import { renderSvgToString } from './render-common';
+import { File } from './schemas/file_pb';
 
 const preset = presets.node({
   DOMParser,
@@ -29,8 +28,8 @@ const preset = presets.node({
   fetch: fetch as any,
 });
 
-export async function renderToPNG(fileDoc: FileDocument): Promise<Buffer> {
-  const sdFile = FileFromJSON(JSON.parse(fileDoc.contents));
+export async function renderToPNG(fileDoc: File): Promise<Buffer> {
+  const sdFile = FileFromJSON(JSON.parse(fileDoc.getJsonContents()));
 
   const [sdProject, err2] = stdProject.addFile(defined(sdFile) as any);
   if (err2) {

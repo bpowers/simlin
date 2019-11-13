@@ -201,7 +201,7 @@ export const NewProject = withStyles(styles)(
             onKeyPress={this.handleKeyPress}
             fullWidth
             InputProps={{
-              startAdornment: <InputAdornment position="start">{this.props.user.username}/</InputAdornment>,
+              startAdornment: <InputAdornment position="start">{this.props.user.id}/</InputAdornment>,
             }}
           />
           <br />

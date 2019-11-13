@@ -68,6 +68,7 @@ proto.Project.prototype.toObject = function(opt_includeInstance) {
 proto.Project.toObject = function(includeInstance, msg) {
   var f, obj = {
     id: jspb.Message.getFieldWithDefault(msg, 1, ""),
+    displayName: jspb.Message.getFieldWithDefault(msg, 11, ""),
     ownerId: jspb.Message.getFieldWithDefault(msg, 2, ""),
     isPublic: jspb.Message.getFieldWithDefault(msg, 3, false),
     description: jspb.Message.getFieldWithDefault(msg, 4, ""),
@@ -116,6 +117,10 @@ proto.Project.deserializeBinaryFromReader = function(msg, reader) {
     case 1:
       var value = /** @type {string} */ (reader.readString());
       msg.setId(value);
+      break;
+    case 11:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setDisplayName(value);
       break;
     case 2:
       var value = /** @type {string} */ (reader.readString());
@@ -188,6 +193,13 @@ proto.Project.serializeBinaryToWriter = function(message, writer) {
   if (f.length > 0) {
     writer.writeString(
       1,
+      f
+    );
+  }
+  f = message.getDisplayName();
+  if (f.length > 0) {
+    writer.writeString(
+      11,
       f
     );
   }
@@ -271,6 +283,21 @@ proto.Project.prototype.getId = function() {
 /** @param {string} value */
 proto.Project.prototype.setId = function(value) {
   jspb.Message.setProto3StringField(this, 1, value);
+};
+
+
+/**
+ * optional string display_name = 11;
+ * @return {string}
+ */
+proto.Project.prototype.getDisplayName = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 11, ""));
+};
+
+
+/** @param {string} value */
+proto.Project.prototype.setDisplayName = function(value) {
+  jspb.Message.setProto3StringField(this, 11, value);
 };
 
 

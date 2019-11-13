@@ -2,18 +2,24 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Application } from 'express';
+import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import { Set } from 'immutable';
 import * as passport from 'passport';
 import { OAuth2Strategy } from 'passport-google-oauth';
+import * as uuidV4 from 'uuid/v4';
 import * as logger from 'winston';
 
+import { Application } from './application';
 import { MongoDuplicateKeyCode } from './models/common';
-import { User, UserDocument } from './models/user';
+import { Table } from './models/table';
+import { User } from './schemas/user_pb';
 
 let AllowedUsers = Set<string>();
 
-async function getOrCreateUserFromProfile(profile: any): Promise<[UserDocument, undefined] | [undefined, Error]> {
+async function getOrCreateUserFromProfile(
+  users: Table<User>,
+  profile: any,
+): Promise<[User, undefined] | [undefined, Error]> {
   if (!profile) {
     return [undefined, new Error('no profile returned from Google OAuth2?')];
   }
@@ -48,23 +54,25 @@ async function getOrCreateUserFromProfile(profile: any): Promise<[UserDocument, 
     photoUrl = profile.photos[0].value;
   }
 
-  let user: UserDocument | null = null;
-  try {
-    // unconditionally try to create to avoid TOCTOU races
-    user = await User.create({
-      displayName,
-      email,
-      photoUrl,
-      provider: 'google',
-    });
-  } catch (err) {
-    // we expect duplicate key exceptions, anything else is a surprise
-    if (err.code !== MongoDuplicateKeyCode) {
-      throw err;
+  // since a document with the email already exists, just get the
+  // document with it
+  let user: User | undefined = await users.findOneByScan({ email });
+  if (!user) {
+    const created = new Timestamp();
+    created.fromDate(new Date());
+
+    user = new User();
+    user.setId(`temp-${uuidV4()}`);
+    user.setEmail(email);
+    user.setDisplayName(displayName);
+    user.setProvider('google');
+    if (photoUrl) {
+      user.setPhotoUrl(photoUrl);
     }
-    // since a document with the email already exists, just get the
-    // document with it
-    user = await User.findOne({ email }).exec();
+    user.setCreated(created);
+    user.setCanCreateProjects(false);
+
+    await users.create(user.getId(), user);
   }
 
   if (!user) {
@@ -106,7 +114,7 @@ export const authn = (app: Application): void => {
         callbackURL,
       },
       async (accessToken: string, refreshToken: string, profile: any, done: (error: any, user?: any) => void) => {
-        const [user, err] = await getOrCreateUserFromProfile(profile);
+        const [user, err] = await getOrCreateUserFromProfile(app.db.user, profile);
         if (err !== undefined) {
           logger.error(err);
           done(err);
@@ -119,24 +127,23 @@ export const authn = (app: Application): void => {
     ),
   );
 
-  passport.serializeUser((user: any, done: (error: any, user?: any) => void) => {
+  passport.serializeUser((rawUser: any, done: (error: any, user?: any) => void) => {
+    const user: User = rawUser;
+    console.log(`serialize user: ${user.getId()}`);
     const serializedUser: any = {
-      email: user.email,
+      id: user.getId(),
     };
-    if (user.username) {
-      serializedUser.username = user.username;
-    }
     done(undefined, serializedUser);
   });
 
   passport.deserializeUser(async (user: any, done: (error: any, user?: any) => void) => {
-    if (!user || !user.email) {
+    if (!user || !user.id) {
       done(new Error(`no or incorrectly serialized User: ${user}`));
       return;
     }
 
     try {
-      const userModel = await User.findOne({ email: user.email }).exec();
+      const userModel = await app.db.user.findOne(user.id);
       done(undefined, userModel);
     } catch (err) {
       done(err);

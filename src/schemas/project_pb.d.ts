@@ -8,6 +8,9 @@ export class Project extends jspb.Message {
   getId(): string;
   setId(value: string): void;
 
+  getDisplayName(): string;
+  setDisplayName(value: string): void;
+
   getOwnerId(): string;
   setOwnerId(value: string): void;
 
@@ -56,6 +59,7 @@ export class Project extends jspb.Message {
 export namespace Project {
   export type AsObject = {
     id: string;
+    displayName: string;
     ownerId: string;
     isPublic: boolean;
     description: string;

@@ -20,16 +20,19 @@ export class User extends jspb.Message {
   getProvider(): string;
   setProvider(value: string): void;
 
+  hasCreated(): boolean;
+  clearCreated(): void;
+  getCreated(): google_protobuf_timestamp_pb.Timestamp | undefined;
+  setCreated(value?: google_protobuf_timestamp_pb.Timestamp): void;
+
   getIsAdmin(): boolean;
   setIsAdmin(value: boolean): void;
 
   getIsDeactivated(): boolean;
   setIsDeactivated(value: boolean): void;
 
-  hasCreated(): boolean;
-  clearCreated(): void;
-  getCreated(): google_protobuf_timestamp_pb.Timestamp | undefined;
-  setCreated(value?: google_protobuf_timestamp_pb.Timestamp): void;
+  getCanCreateProjects(): boolean;
+  setCanCreateProjects(value: boolean): void;
 
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): User.AsObject;
@@ -48,8 +51,9 @@ export namespace User {
     displayName: string;
     photoUrl: string;
     provider: string;
+    created?: google_protobuf_timestamp_pb.Timestamp.AsObject;
     isAdmin: boolean;
     isDeactivated: boolean;
-    created?: google_protobuf_timestamp_pb.Timestamp.AsObject;
+    canCreateProjects: boolean;
   };
 }

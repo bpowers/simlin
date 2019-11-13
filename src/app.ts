@@ -21,11 +21,9 @@ import { Application } from './application';
 import { authn } from './authn';
 import { authz } from './authz';
 import { createDatabase } from './models/db';
-import { Project } from './models/project';
-import { UserDocument } from './models/user';
-import { mongoose } from './mongoose';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
+import { User as UserPb } from './schemas/user_pb';
 
 export async function createApp(): Promise<App> {
   const app = new App();
@@ -145,7 +143,6 @@ class App {
 
     this.app.use(favicon(path.join(this.app.get('public'), 'favicon.ico')));
 
-    mongoose(this.app);
     authn(this.app);
 
     // authenticated:
@@ -158,14 +155,14 @@ class App {
       authz,
       async (req: Request, res: Response, next: NextFunction): Promise<void> => {
         const email = req.session.passport.user.email;
-        const user: UserDocument | undefined = req.user as any;
+        const user: UserPb | undefined = req.user as any;
         if (!user) {
           logger.warn(`user not found for '${email}', but passed authz?`);
           res.status(500).json({});
           return;
         }
         // TODO
-        if (user.username !== req.params.username) {
+        if (user.getId() !== req.params.username) {
           res.status(401).json({});
           return;
         }
@@ -179,8 +176,9 @@ class App {
         }
 
         const projectName: string = req.params.projectName;
-        const projectModel = await Project.findOne({ owner: user._id, name: projectName }).exec();
-        if (!projectModel || !projectModel.fileId) {
+        const projectId = `${user.getId()}/${projectName}`;
+        const projectModel = await this.app.db.project.findOne(projectId);
+        if (!projectModel || !projectModel.getFileId()) {
           res.status(404).json({});
           return;
         }

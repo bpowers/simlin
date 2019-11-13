@@ -34,7 +34,11 @@ export async function createDatabase(opts: DatabaseOptions): Promise<Database> {
   });
   await client.connect();
 
-  return new MongoDatabase(client);
+  const db = new MongoDatabase(client);
+
+  await db.init();
+
+  return db;
 }
 
 export class MongoDatabase {
@@ -52,5 +56,9 @@ export class MongoDatabase {
     this.project = new MongoTable(Project, { db, name: 'project2', hoistColumns: { version: 7 } });
     this.preview = new MongoTable(Preview, { db, name: 'preview2' });
     this.user = new MongoTable(User, { db, name: 'user2', hoistColumns: { email: 2 } });
+  }
+
+  async init(): Promise<void> {
+    await Promise.all([this.file.init(), this.project.init(), this.preview.init(), this.user.init()]);
   }
 }

@@ -5,6 +5,7 @@
     "module": "commonjs",
     "target": "es2017",
     "lib": ["es2018", "dom", "dom.iterable"],
+    "allowJs": true,
     "sourceMap": true,
     "jsx": "react",
     "moduleResolution": "node",
@@ -33,7 +34,10 @@
     "webpack",
     "jest",
     "lib",
+    "bin",
     "runtime/*.ts",
-    "test"
+    "test",
+    "config",
+    "support"
   ]
 }

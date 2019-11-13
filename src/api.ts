@@ -3,50 +3,48 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import { Request, Response, Router } from 'express';
-import { List } from 'immutable';
+import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import * as logger from 'winston';
 
 import { Application } from './application';
-
-import {
-  File as XmileFile,
-  Header as XmileHeader,
-  Model as XmileModel,
-  SimSpec as XmileSimSpec,
-  View as XmileView,
-  ViewDefaults,
-} from './engine/xmile';
-
 import { MongoDuplicateKeyCode } from './models/common';
-import { File } from './models/file';
-import { Preview, updatePreview } from './models/preview';
-import { newProject, Project, ProjectDocument } from './models/project';
-import { User, UserDocument } from './models/user';
+import { Database } from './models/db';
 import { populateExamples } from './new-user';
+import { createFile, createProject, emptyProject } from './project-creation';
+import { renderToPNG } from './render';
+import { Preview as PreviewPb } from './schemas/preview_pb';
+import { Project as ProjectPb } from './schemas/project_pb';
+import { User as UserPb } from './schemas/user_pb';
 import { UsernameDenylist } from './usernames';
 
-function emptyProject(name: string, userName: string): XmileFile {
-  return new XmileFile({
-    header: new XmileHeader({
-      vendor: 'systemdynamics.net',
-      product: 'Model v1.0',
-      name,
-      author: userName,
-    } as any),
-    simSpec: new XmileSimSpec({
-      start: 0,
-      stop: 100,
-    } as any),
-    models: List([
-      new XmileModel({
-        views: List([new XmileView(ViewDefaults)]),
-      } as any),
-    ]),
-  } as any);
+export async function updatePreview(db: Database, project: ProjectPb): Promise<PreviewPb> {
+  const fileDoc = await db.file.findOne(project.getFileId());
+  if (!fileDoc) {
+    throw new Error(`no File document found for project ${project.getId()}`);
+  }
+
+  let png: Buffer;
+  try {
+    png = await renderToPNG(fileDoc);
+  } catch (err) {
+    throw new Error(`renderToPNG: ${err.message}`);
+  }
+
+  const created = new Timestamp();
+  created.fromDate(new Date());
+
+  const preview = new PreviewPb();
+  preview.setId(project.getId());
+  preview.setPng(png);
+  preview.setCreated(created);
+
+  await db.preview.create(preview.getId(), preview);
+
+  return preview;
 }
 
-export const getUser = (req: Request, res: Response): UserDocument => {
-  const user: UserDocument | undefined = req.user as any;
+export const getUser = (req: Request, res: Response): UserPb => {
+  const user: UserPb | undefined = req.user as any;
   if (!user) {
     logger.warn(`user not found, but passed authz?`);
     res.status(500).json({});
@@ -60,7 +58,7 @@ export const apiRouter = (app: Application): Router => {
 
   api.get('/user', (req: Request, res: Response): void => {
     const user = getUser(req, res);
-    res.status(200).json(user.toJSON());
+    res.status(200).json(user.toObject());
   });
 
   // create a new project
@@ -76,32 +74,25 @@ export const apiRouter = (app: Application): Router => {
 
       const projectName = req.body.projectName;
       const projectDescription = req.body.description || '';
+      const isPublic = req.body.isPublic ? true : false;
 
       try {
-        const project = await newProject(user, projectName, projectDescription);
-        const json = await project.toJSON();
-
-        if (req.body.isPublic) {
-          project.isPublic = true;
-        }
+        const project = createProject(user, projectName, projectDescription, isPublic);
+        const json = await project.toObject();
 
         let sdJSON: string;
         if (req.body.projectJSON) {
           // TODO: ensure this is really a valid project...
           sdJSON = JSON.stringify(req.body.projectJSON);
         } else {
-          sdJSON = JSON.stringify(emptyProject(projectName, user.displayName));
+          sdJSON = JSON.stringify(emptyProject(projectName, user.getDisplayName()));
         }
 
-        const file = await File.create({
-          project: project._id,
-          user: user._id,
-          created: new Date(Date.now()),
-          contents: sdJSON,
-        });
+        const filePb = createFile(project.getId(), user.getId(), undefined, sdJSON);
+        await app.db.file.create(filePb.getId(), filePb);
 
-        project.fileId = file._id;
-        await project.save();
+        project.setFileId(filePb.getId());
+        await app.db.project.create(project.getId(), project);
 
         res.status(200).json(json);
       } catch (err) {
@@ -120,8 +111,8 @@ export const apiRouter = (app: Application): Router => {
     '/projects',
     async (req: Request, res: Response): Promise<void> => {
       const user = getUser(req, res);
-      const projectModels = await Project.find({ owner: user._id }).exec();
-      const projects = await Promise.all(projectModels.map(async (project: ProjectDocument) => project.toJSON()));
+      const projectModels = await app.db.project.find(user.getId() + '/');
+      const projects = await Promise.all(projectModels.map(async (project: ProjectPb) => project.toObject()));
       res.status(200).json(projects);
     },
   );
@@ -129,47 +120,47 @@ export const apiRouter = (app: Application): Router => {
   api.get(
     '/projects/:username/:projectName',
     async (req: Request, res: Response): Promise<void> => {
-      let authorUser: UserDocument | null = req.user ? getUser(req, res) : null;
-      if (!authorUser || authorUser.username !== req.params.username) {
-        authorUser = await User.findOne({ username: req.params.username }).exec();
+      let authorUser: UserPb | undefined = getUser(req, res);
+      if (authorUser.getId() !== req.params.username) {
+        authorUser = await app.db.user.findOne(req.params.username);
       }
       if (!authorUser) {
         res.status(404).json({});
         return;
       }
 
-      const projectName: string = req.params.projectName;
-      const projectModel = await Project.findOne({ owner: authorUser._id, name: projectName }).exec();
+      const projectSlug = `${req.params.username}/${req.params.projectName}`;
+      const projectModel = await app.db.project.findOne(projectSlug);
+      console.log(`finding '${projectSlug}': ${projectModel?.toObject()}`);
 
       // the username check is skipped if the model exists and is public
-      if (projectModel && !projectModel.isPublic) {
+      if (!projectModel?.getIsPublic()) {
         // TODO: implement collaborators
         if (
           !req.session ||
           !req.session.passport ||
           !req.session.passport.user ||
-          authorUser.email !== req.session.passport.user.email
+          authorUser.getId() !== req.session.passport.user.id
         ) {
           res.status(401).json({});
           return;
         }
       }
 
-      if (!projectModel || !projectModel.fileId) {
+      if (!projectModel || !projectModel.getFileId()) {
         res.status(404).json({});
         return;
       }
 
-      const file = await File.findById(projectModel.fileId).exec();
+      const file = await app.db.file.findOne(projectModel.getFileId());
       if (!file) {
         res.status(404).json({});
         return;
       }
 
-      const project = await projectModel.toJSON({
-        user: authorUser,
-      } as any);
-      project.file = file.contents;
+      const project: any = projectModel.toObject();
+      project.user = authorUser;
+      project.file = file.getJsonContents();
 
       res.status(200).json(project);
     },
@@ -178,41 +169,41 @@ export const apiRouter = (app: Application): Router => {
   api.get(
     '/preview/:username/:projectName',
     async (req: Request, res: Response): Promise<void> => {
-      let authorUser: UserDocument | null = getUser(req, res);
-      if (authorUser.username !== req.params.username) {
-        authorUser = await User.findOne({ username: req.params.username }).exec();
+      let authorUser: UserPb | undefined = getUser(req, res);
+      if (authorUser.getId() !== req.params.username) {
+        authorUser = await app.db.user.findOne(req.params.username);
       }
       if (!authorUser) {
         res.status(404).json({});
         return;
       }
 
-      const projectName: string = req.params.projectName;
-      const projectModel = await Project.findOne({ owner: authorUser._id, name: projectName }).exec();
+      const projectSlug = `${req.params.username}/${req.params.projectName}`;
+      const projectModel = await app.db.project.findOne(projectSlug);
 
       // the username check is skipped if the model exists and is public
-      if (!(projectModel && projectModel.isPublic)) {
+      if (!projectModel?.getIsPublic()) {
         // TODO: implement collaborators
         if (
           !req.session ||
           !req.session.passport ||
           !req.session.passport.user ||
-          authorUser.email !== req.session.passport.user.email
+          authorUser.getId() !== req.session.passport.user.id
         ) {
           res.status(401).json({});
           return;
         }
       }
 
-      if (!projectModel || !projectModel.fileId) {
+      if (!projectModel || !projectModel.getFileId()) {
         res.status(404).json({});
         return;
       }
 
-      let previewModel = await Preview.findOne({ project: projectModel.id });
+      let previewModel = await app.db.preview.findOne(projectSlug);
       if (!previewModel) {
         try {
-          previewModel = await updatePreview(projectModel);
+          previewModel = await updatePreview(app.db, projectModel);
         } catch (err) {
           logger.error(`updatePreview: ${err}`);
           res.status(500).json({});
@@ -220,8 +211,10 @@ export const apiRouter = (app: Application): Router => {
         }
       }
 
+      const png = Buffer.from(previewModel.getPng() as Uint8Array);
+
       res.contentType('image/png');
-      res.status(200).send(previewModel.png);
+      res.status(200).send(png);
     },
   );
 
@@ -230,13 +223,13 @@ export const apiRouter = (app: Application): Router => {
     async (req: Request, res: Response): Promise<void> => {
       const user = getUser(req, res);
       // TODO
-      if (user.username !== req.params.username) {
+      if (user.getId() !== req.params.username) {
         res.status(401).json({});
         return;
       }
-      const projectName: string = req.params.projectName;
-      const projectModel = await Project.findOne({ owner: user._id, name: projectName }).exec();
-      if (!projectModel || !projectModel.fileId) {
+      const projectSlug = `${req.params.username}/${req.params.projectName}`;
+      const projectModel = await app.db.project.findOne(projectSlug);
+      if (!projectModel || !projectModel.getFileId()) {
         res.status(404).json({});
         return;
       }
@@ -255,33 +248,27 @@ export const apiRouter = (app: Application): Router => {
       const newVersion = projectVersion + 1;
       const fileContents: string = req.body.file;
 
-      const file = await File.create({
-        project: projectModel._id,
-        user: user._id,
-        created: new Date(Date.now()),
-        contents: JSON.stringify(fileContents),
-      });
+      const jsonContents = JSON.stringify(fileContents);
+
+      const file = await createFile(projectModel.getId(), user.getId(), undefined, jsonContents);
+      await app.db.file.create(file.getId(), file);
 
       // only update if the version matches
-      const result = await Project.findOneAndUpdate(
+      projectModel.setFileId(file.getId());
+      projectModel.setVersion(newVersion);
+
+      const result = await app.db.project.update(
+        projectModel.getId(),
         {
-          owner: user._id,
-          name: projectName,
           version: projectVersion,
         },
-        {
-          version: newVersion,
-          fileId: file._id,
-        },
-        {
-          new: true,
-        },
-      ).exec();
+        projectModel,
+      );
 
       // remove our preview
       setTimeout(async () => {
         try {
-          await Preview.deleteOne({ project: projectModel.id });
+          await app.db.preview.deleteOne(projectModel.getId());
         } catch (err) {
           logger.warn(`unable to delete preview for ${req.params.projectName}`);
         }
@@ -318,14 +305,19 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      if (userModel.username) {
+      if (!userModel.getId().startsWith(`temp-`)) {
         res.status(403).json({ error: 'username already set' });
         return;
       }
 
-      userModel.username = proposedUsername;
+      const origUserId = userModel.getId();
+
+      userModel.setId(proposedUsername);
+      userModel.setCanCreateProjects(true);
       try {
-        await userModel.save();
+        // updating the primary key of a user doesn't work in mongo
+        await app.db.user.create(userModel.getId(), userModel);
+        await app.db.user.deleteOne(origUserId);
       } catch (err) {
         if (err.code === MongoDuplicateKeyCode) {
           res.status(400).json({ error: 'username already taken' });
@@ -338,9 +330,9 @@ export const apiRouter = (app: Application): Router => {
       // this error shouldn't ever happen, but also shouldn't be fatal
       if (defaultProjectsDir) {
         try {
-          await populateExamples(userModel, defaultProjectsDir);
+          await populateExamples(app.db, userModel, defaultProjectsDir);
         } catch (err) {
-          logger.error(`populateExamples(${userModel.username}, ${defaultProjectsDir}): ${err}`);
+          logger.error(`populateExamples(${userModel.getId()}, ${defaultProjectsDir}): ${err}`);
         }
       } else {
         logger.error('missing defaultProjectsDir in config');

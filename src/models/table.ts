@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+import { Binary } from 'bson';
 import { Collection, Db } from 'mongodb';
 
 import { Message } from 'google-protobuf';
@@ -14,10 +15,14 @@ interface SerializableClass<T extends Message> {
 }
 
 export interface Table<T extends Message> {
-  findOne(id: string): Promise<T>;
+  init(): Promise<void>;
+
+  findOne(id: string): Promise<T | undefined>;
+  findOneByScan(query: any): Promise<T | undefined>;
   find(idPrefix: string): Promise<T[]>;
   create(id: string, pb: T): Promise<void>;
-  update(id: string, cond: any, pb: T): Promise<void>;
+  update(id: string, cond: any, pb: T): Promise<T | null>;
+  deleteOne(id: string): Promise<void>;
 }
 
 interface MongoTableOptions {
@@ -29,7 +34,7 @@ interface MongoTableOptions {
 interface Schema<T> {
   _id: string;
   // additional stuff
-  value: Uint8Array;
+  value: Binary;
 }
 
 export class MongoTable<T extends Message> implements Table<T> {
@@ -51,27 +56,41 @@ export class MongoTable<T extends Message> implements Table<T> {
     this.collectionPromise = undefined;
   }
 
-  async findOne(id: string): Promise<T> {
-    const row = await defined(this.collection).findOne({ id });
+  private deserialize(row: Schema<T>): T {
+    const value = row.value;
+    return this.kind.deserializeBinary(value.read(0, value.length()));
+  }
+
+  async findOne(id: string): Promise<T | undefined> {
+    const row = await defined(this.collection).findOne({ _id: id });
     if (!row || !row.value) {
-      throw new Error('not found');
+      return undefined;
     }
-    return this.kind.deserializeBinary(row.value);
+    return this.deserialize(row);
+  }
+
+  async findOneByScan(query: any): Promise<T | undefined> {
+    const row = await defined(this.collection).findOne(query);
+    if (!row || !row.value) {
+      return undefined;
+    }
+    return this.deserialize(row);
   }
 
   async find(idPrefix: string): Promise<T[]> {
-    const cursor = await defined(this.collection).find({ id: new RegExp(`^${idPrefix}`) });
+    const cursor = await defined(this.collection).find({ _id: new RegExp(`^${idPrefix}`) });
     if (!cursor) {
       throw new Error('not found');
     }
     const rows = await cursor.toArray();
-    return rows.map(r => this.kind.deserializeBinary(r.value));
+    return rows.map(row => this.deserialize(row));
   }
 
   private doc(id: string, pb: T): Schema<T> {
+    const serializedPb = pb.serializeBinary();
     const doc: Schema<T> = {
       _id: id,
-      value: pb.serializeBinary(),
+      value: new Binary(Buffer.from(serializedPb)),
     };
     if (this.opts.hoistColumns) {
       const cols = this.opts.hoistColumns;
@@ -87,11 +106,16 @@ export class MongoTable<T extends Message> implements Table<T> {
 
   async create(id: string, pb: T): Promise<void> {
     await defined(this.collection).insertOne(this.doc(id, pb));
-    return;
   }
 
-  async update(id: string, cond: any, pb: T): Promise<void> {
-    await defined(this.collection).findOneAndUpdate(Object.assign({ _id: id }, cond), this.doc(id, pb));
-    return;
+  async update(id: string, cond: any, pb: T): Promise<T | null> {
+    const result = await defined(this.collection).findOneAndUpdate(Object.assign({ _id: id }, cond), {
+      $set: this.doc(id, pb),
+    });
+    return result.value ? this.deserialize(result.value) : null;
+  }
+
+  async deleteOne(id: string): Promise<void> {
+    await defined(this.collection).deleteOne({ _id: id });
   }
 }

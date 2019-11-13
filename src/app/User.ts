@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 export interface User {
+  id: string;
   displayName: string;
   email: string;
-  username?: string;
   photoUrl?: string;
 }

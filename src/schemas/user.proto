@@ -12,7 +12,8 @@ message User {
   string display_name = 3;
   string photo_url = 4;
   string provider = 5;
+  google.protobuf.Timestamp created = 8;
   bool is_admin = 6;
   bool is_deactivated = 7;
-  google.protobuf.Timestamp created = 8;
+  bool can_create_projects = 9;
 }

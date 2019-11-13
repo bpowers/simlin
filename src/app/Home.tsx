@@ -177,14 +177,14 @@ const Home = withWidth()(
           <div className={classes.projectGrid}>
             <GridList cols={this.getGridListCols()} spacing={0}>
               {projects.map(project => (
-                <GridListTile key={project.path} style={{ height: 'auto' }}>
-                  <Link to={`/${project.path}`} className={classes.modelLink}>
+                <GridListTile key={project.id} style={{ height: 'auto' }}>
+                  <Link to={`/${project.id}`} className={classes.modelLink}>
                     <Paper className={classes.paper} elevation={4}>
                       <div className={classes.preview}>
-                        <img src={`/api/preview/${project.path}`} className={classes.previewImg} />
+                        <img src={`/api/preview/${project.id}`} className={classes.previewImg} />
                       </div>
                       <Typography variant="h5" component="h3">
-                        {project.name}
+                        {project.displayName}
                       </Typography>
                       <Typography component="p">{project.description}&nbsp;</Typography>
                     </Paper>

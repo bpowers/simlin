@@ -38,6 +38,7 @@
   },
   "linterOptions": {
     "exclude": [
+      "src/schemas/*.js",
       "app/config",
       "app/node_modules",
       "public/**/*.js",

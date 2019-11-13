@@ -8,6 +8,7 @@ import "google/protobuf/timestamp.proto";
 
 message Project {
   string id = 1; // "owner/project-name"
+  string display_name = 11;
   string owner_id = 2;
   bool is_public = 3;
   string description = 4;

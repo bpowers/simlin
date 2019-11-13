@@ -76,7 +76,7 @@ const InnerApp = withStyles(styles)(
         return;
       }
       const user: User = await response.json();
-      const isNewUser = user.username === undefined;
+      const isNewUser = user.id.startsWith(`temp-`);
       this.setState(prevState => ({
         authUnknown: false,
         isNewUser,
