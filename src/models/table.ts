@@ -8,12 +8,12 @@ import { Message } from 'google-protobuf';
 
 import { defined } from '../engine/common';
 
-interface SerializableClass {
-  new (): Message;
-  deserializeBinary(bytes: Uint8Array): Message;
+interface SerializableClass<T extends Message> {
+  new (): T;
+  deserializeBinary(bytes: Uint8Array): T;
 }
 
-export interface Table<T extends SerializableClass> {
+export interface Table<T extends Message> {
   findOne(id: string): Promise<T>;
   find(idPrefix: string): Promise<T[]>;
   create(id: string, pb: T): Promise<void>;
@@ -23,22 +23,22 @@ export interface Table<T extends SerializableClass> {
 interface MongoTableOptions {
   readonly db?: Db;
   readonly name: string;
-  readonly hoistColumns?: string[];
+  readonly hoistColumns?: { [col: string]: number };
 }
 
 interface Schema<T> {
   _id: string;
   // additional stuff
-  value: T;
+  value: Uint8Array;
 }
 
-export class MongoTable<T extends SerializableClass> implements Table<T> {
-  readonly kind: T;
+export class MongoTable<T extends Message> implements Table<T> {
+  readonly kind: SerializableClass<T>;
   readonly opts: MongoTableOptions;
   collection?: Collection<Schema<T>>;
   private collectionPromise?: Promise<Collection<Schema<T>>>;
 
-  constructor(t: T, opts: MongoTableOptions) {
+  constructor(t: SerializableClass<T>, opts: MongoTableOptions) {
     this.kind = t;
     this.opts = opts;
 
@@ -56,7 +56,7 @@ export class MongoTable<T extends SerializableClass> implements Table<T> {
     if (!row || !row.value) {
       throw new Error('not found');
     }
-    return row.value;
+    return this.kind.deserializeBinary(row.value);
   }
 
   async find(idPrefix: string): Promise<T[]> {
@@ -65,15 +65,23 @@ export class MongoTable<T extends SerializableClass> implements Table<T> {
       throw new Error('not found');
     }
     const rows = await cursor.toArray();
-    return rows.map(r => r.value);
+    return rows.map(r => this.kind.deserializeBinary(r.value));
   }
 
   private doc(id: string, pb: T): Schema<T> {
     const doc: Schema<T> = {
       _id: id,
-      value: pb,
+      value: pb.serializeBinary(),
     };
-    // TODO: pull fields from PB out onto doc
+    if (this.opts.hoistColumns) {
+      const cols = this.opts.hoistColumns;
+      for (const prop in cols) {
+        if (!cols.hasOwnProperty(prop)) {
+          continue;
+        }
+        doc[prop] = Message.getFieldWithDefault(pb, cols[prop], undefined);
+      }
+    }
     return doc;
   }
 

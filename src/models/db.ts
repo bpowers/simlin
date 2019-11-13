@@ -18,10 +18,10 @@ export interface DatabaseOptions {
 }
 
 export interface Database {
-  readonly file: Table<typeof File>;
-  readonly project: Table<typeof Project>;
-  readonly preview: Table<typeof Preview>;
-  readonly user: Table<typeof User>;
+  readonly file: Table<File>;
+  readonly project: Table<Project>;
+  readonly preview: Table<Preview>;
+  readonly user: Table<User>;
 }
 
 export async function createDatabase(opts: DatabaseOptions): Promise<Database> {
@@ -39,18 +39,18 @@ export async function createDatabase(opts: DatabaseOptions): Promise<Database> {
 
 export class MongoDatabase {
   private readonly client: MongoClient;
-  readonly file: Table<typeof File>;
-  readonly project: Table<typeof Project>;
-  readonly preview: Table<typeof Preview>;
-  readonly user: Table<typeof User>;
+  readonly file: Table<File>;
+  readonly project: Table<Project>;
+  readonly preview: Table<Preview>;
+  readonly user: Table<User>;
 
   constructor(client: MongoClient) {
     this.client = client;
     const db = client.db();
 
     this.file = new MongoTable(File, { db, name: 'files2' });
-    this.project = new MongoTable(Project, { db, name: 'project2', hoistColumns: ['version'] });
+    this.project = new MongoTable(Project, { db, name: 'project2', hoistColumns: { version: 7 } });
     this.preview = new MongoTable(Preview, { db, name: 'preview2' });
-    this.user = new MongoTable(User, { db, name: 'user2', hoistColumns: ['email'] });
+    this.user = new MongoTable(User, { db, name: 'user2', hoistColumns: { email: 2 } });
   }
 }
