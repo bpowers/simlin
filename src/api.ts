@@ -326,6 +326,8 @@ export const apiRouter = (app: Application): Router => {
         throw err;
       }
 
+      req.session.passport.user.id = userModel.getId();
+
       const defaultProjectsDir = app.get('defaultProjectsDir');
       // this error shouldn't ever happen, but also shouldn't be fatal
       if (defaultProjectsDir) {

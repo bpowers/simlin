@@ -142,12 +142,13 @@ export const authn = (app: Application): void => {
       return;
     }
 
-    try {
-      const userModel = await app.db.user.findOne(user.id);
-      done(undefined, userModel);
-    } catch (err) {
-      done(err);
+    const userModel = await app.db.user.findOne(user.id);
+    if (!userModel) {
+      logger.info(`couldn't find user '${user.id}' in DB`);
+      done(undefined, null);
+      return;
     }
+    done(undefined, userModel);
   });
 
   app.use(passport.initialize());
