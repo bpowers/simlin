@@ -133,7 +133,6 @@ export const VariableDetails = withStyles(styles)(
 
       const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
       const yAxisWidth = Math.max(40, 20 + charWidth * 6);
-      console.log(`yaw(${yAxisWidth.toFixed(1)}) = charWidth(${charWidth})`);
 
       // enable saving and canceling if the equation has changed
       const equationActionsEnabled = initialEquation !== equationFromValue(equation);

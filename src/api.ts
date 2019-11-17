@@ -131,7 +131,6 @@ export const apiRouter = (app: Application): Router => {
 
       const projectSlug = `${req.params.username}/${req.params.projectName}`;
       const projectModel = await app.db.project.findOne(projectSlug);
-      console.log(`finding '${projectSlug}': ${projectModel?.toObject()}`);
 
       // the username check is skipped if the model exists and is public
       if (!projectModel?.getIsPublic()) {
