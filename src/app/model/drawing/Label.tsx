@@ -184,15 +184,18 @@ export const Label = withStyles(styles)(
       this.props.onLabelDrag?.(this.props.uid, e);
     };
 
-    handleClick = (e: React.PointerEvent<SVGElement>): void => {
+    handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
       if (this.pointerId !== e.pointerId) {
         return;
       }
-      if (!this.inMove) {
-        this.props.onSelection?.(e);
-      }
       this.pointerId = undefined;
       this.inMove = false;
+    };
+
+    handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
+      if (!this.inMove) {
+        this.props.onSelection?.((e as unknown) as React.PointerEvent<SVGElement>);
+      }
     };
 
     render() {
@@ -216,7 +219,8 @@ export const Label = withStyles(styles)(
             style={align ? { textAnchor: align } : undefined}
             onPointerDown={this.handlePointerDown}
             onPointerMove={this.handlePointerMove}
-            onPointerUp={this.handleClick}
+            onPointerUp={this.handlePointerUp}
+            onDoubleClick={this.handleDoubleClick}
             textRendering="optimizeLegibility"
           >
             {lines.map((l, i) => {

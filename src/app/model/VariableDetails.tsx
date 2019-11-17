@@ -4,6 +4,8 @@
 
 import * as React from 'react';
 
+import { CartesianGrid, Label, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
+
 import { Node, Operation, Text, Value, ValueJSON } from 'slate';
 import Plain from 'slate-plain-serializer';
 import { Editor } from 'slate-react';
@@ -25,8 +27,6 @@ import { ViewElement } from '../../engine/xmile';
 
 import { defined, Series } from '../common';
 
-import { HorizontalGridLines, LineSeries, VerticalGridLines, XAxis, XYPlot, YAxis } from 'react-vis';
-
 const styles = createStyles({
   card: {
     width: 359,
@@ -34,11 +34,7 @@ const styles = createStyles({
   cardInner: {
     paddingTop: 64,
   },
-  plotFixup: {
-    '& path': {
-      fill: 'none',
-    },
-  },
+  plotFixup: {},
   editorActions: {},
   eqnEditor: {
     backgroundColor: 'rgba(245, 245, 245)',
@@ -109,20 +105,48 @@ export const VariableDetails = withStyles(styles)(
       }
     };
 
+    formatValue = (value: string | number | Array<string | number>) => {
+      return typeof value === 'number' ? value.toFixed(3) : value;
+    };
+
     render() {
       const { data, viewElement, classes } = this.props;
       const { equation } = this.state;
       const initialEquation = equationFor(this.props.variable);
 
+      let yMin = 0;
+      let yMax = 0;
       const series: Array<{ x: number; y: number }> = [];
       for (let i = 0; data && i < data.time.length; i++) {
-        series.push({ x: data.time[i], y: data.values[i] });
+        const x = data.time[i];
+        const y = data.values[i];
+        series.push({ x, y });
+        if (y < yMin) {
+          yMin = y;
+        }
+        if (y > yMax) {
+          yMax = y;
+        }
       }
+      yMin = Math.floor(yMin);
+      yMax = Math.ceil(yMax);
+
+      const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
+      const yAxisWidth = Math.max(40, 20 + charWidth * 6);
+      console.log(`yaw(${yAxisWidth.toFixed(1)}) = charWidth(${charWidth})`);
 
       // enable saving and canceling if the equation has changed
       const equationActionsEnabled = initialEquation !== equationFromValue(equation);
 
       const equationType = viewElement.type === 'stock' ? 'Initial Value' : 'Equation';
+
+      const { left, right, top, bottom, animation } = {
+        left: 'dataMin',
+        right: 'dataMax',
+        bottom: 'dataMin',
+        top: 'dataMax',
+        animation: true,
+      };
 
       return (
         <Card className={classes.card} elevation={1}>
@@ -178,13 +202,27 @@ export const VariableDetails = withStyles(styles)(
             <hr />
             <br />
             <div className={classes.plotFixup}>
-              <XYPlot width={300} height={300}>
-                <HorizontalGridLines />
-                <VerticalGridLines />
-                <XAxis />
-                <YAxis marginLeft={50} />
-                <LineSeries data={series} />
-              </XYPlot>
+              <LineChart
+                width={327}
+                height={300}
+                data={series}
+                // onMouseDown = { (e) => this.setState({refAreaLeft:e.activeLabel}) }
+                // onMouseMove = { (e) => this.state.refAreaLeft && this.setState({refAreaRight:e.activeLabel}) }
+                // onMouseUp = { this.zoom.bind( this ) }
+              >
+                <CartesianGrid horizontal={true} vertical={false} />
+                <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+                <YAxis
+                  width={yAxisWidth}
+                  allowDataOverflow={true}
+                  domain={[yMin, yMax]}
+                  type="number"
+                  dataKey="y"
+                  yAxisId="1"
+                />
+                <Tooltip formatter={this.formatValue} />
+                <Line yAxisId="1" type="natural" dataKey="y" stroke="#8884d8" animationDuration={300} />
+              </LineChart>
             </div>
           </CardContent>
         </Card>

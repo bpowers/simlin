@@ -926,7 +926,9 @@ export const Canvas = withStyles(styles)(
         y: e.clientY,
       };
 
-      (e.target as any).setPointerCapture(e.pointerId);
+      if (!isText) {
+        (e.target as any).setPointerCapture(e.pointerId);
+      }
 
       const { selectedTool } = this.props;
       let inCreation: ViewElement | undefined;
