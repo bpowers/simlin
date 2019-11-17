@@ -221,7 +221,7 @@ export const VariableDetails = withStyles(styles)(
                   yAxisId="1"
                 />
                 <Tooltip formatter={this.formatValue} />
-                <Line yAxisId="1" type="natural" dataKey="y" stroke="#8884d8" animationDuration={300} />
+                <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} />
               </LineChart>
             </div>
           </CardContent>
