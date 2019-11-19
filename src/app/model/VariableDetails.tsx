@@ -4,9 +4,9 @@
 
 import * as React from 'react';
 
-import { CartesianGrid, Label, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
+import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 
-import { Node, Operation, Text, Value, ValueJSON } from 'slate';
+import { Operation, Value } from 'slate';
 import Plain from 'slate-plain-serializer';
 import { Editor } from 'slate-react';
 
@@ -14,13 +14,11 @@ import { List } from 'immutable';
 
 import Button from '@material-ui/core/Button';
 import Card from '@material-ui/core/Card';
-import CardActionArea from '@material-ui/core/CardActionArea';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
-import CardMedia from '@material-ui/core/CardMedia';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
-import TextField from '@material-ui/core/TextField';
-import Typography from '@material-ui/core/Typography';
+import Tab from '@material-ui/core/Tab';
+import Tabs from '@material-ui/core/Tabs';
 
 import { Variable } from '../../engine/vars';
 import { ViewElement } from '../../engine/xmile';
@@ -32,7 +30,7 @@ const styles = createStyles({
     width: 359,
   },
   cardInner: {
-    paddingTop: 64,
+    paddingTop: 52,
   },
   plotFixup: {},
   editorActions: {},
@@ -57,6 +55,7 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 
 interface VariableDetailsState {
   equation: Value;
+  activeTab: number;
 }
 
 function equationFromValue(value: Value): string {
@@ -80,6 +79,7 @@ export const VariableDetails = withStyles(styles)(
 
       this.state = {
         equation: valueFromEquation(equationFor(variable)),
+        activeTab: 0,
       };
     }
 
@@ -109,8 +109,12 @@ export const VariableDetails = withStyles(styles)(
       return typeof value === 'number' ? value.toFixed(3) : value;
     };
 
-    render() {
-      const { data, viewElement, classes } = this.props;
+    handleTabChange = (event: React.ChangeEvent<{}>, newValue: number) => {
+      this.setState({ activeTab: newValue });
+    };
+
+    renderEquation() {
+      const { data, classes } = this.props;
       const { equation } = this.state;
       const initialEquation = equationFor(this.props.variable);
 
@@ -137,93 +141,110 @@ export const VariableDetails = withStyles(styles)(
       // enable saving and canceling if the equation has changed
       const equationActionsEnabled = initialEquation !== equationFromValue(equation);
 
-      const equationType = viewElement.type === 'stock' ? 'Initial Value' : 'Equation';
-
-      const { left, right, top, bottom, animation } = {
+      const { left, right } = {
         left: 'dataMin',
         right: 'dataMax',
-        bottom: 'dataMin',
-        top: 'dataMax',
-        animation: true,
       };
 
       return (
+        <div>
+          <Editor
+            autoFocus
+            className={classes.eqnEditor}
+            placeholder="Enter an equation..."
+            value={this.state.equation}
+            onChange={this.handleEquationChange}
+            onBlur={this.handleEquationSave}
+          />
+
+          <CardActions className={classes.editorActions}>
+            <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationCancel}>
+              Cancel
+            </Button>
+            <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationSave}>
+              Save
+            </Button>
+          </CardActions>
+
+          {/*<TextField*/}
+          {/*  label="Units"*/}
+          {/*  fullWidth*/}
+          {/*  InputLabelProps={{*/}
+          {/*    shrink: true,*/}
+          {/*  }}*/}
+          {/*  value={''}*/}
+          {/*  margin="normal"*/}
+          {/*/>*/}
+
+          {/*<TextField*/}
+          {/*  label="Notes"*/}
+          {/*  fullWidth*/}
+          {/*  InputLabelProps={{*/}
+          {/*    shrink: true,*/}
+          {/*  }}*/}
+          {/*  value={defined(this.props.variable.xmile).doc}*/}
+          {/*  onChange={this.handleNotesChange}*/}
+          {/*  margin="normal"*/}
+          {/*/>*/}
+
+          {/*<br />*/}
+          <hr />
+          <br />
+          <div className={classes.plotFixup}>
+            <LineChart
+              width={327}
+              height={300}
+              data={series}
+              // onMouseDown = { (e) => this.setState({refAreaLeft:e.activeLabel}) }
+              // onMouseMove = { (e) => this.state.refAreaLeft && this.setState({refAreaRight:e.activeLabel}) }
+              // onMouseUp = { this.zoom.bind( this ) }
+            >
+              <CartesianGrid horizontal={true} vertical={false} />
+              <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+              <YAxis
+                width={yAxisWidth}
+                allowDataOverflow={true}
+                domain={[yMin, yMax]}
+                type="number"
+                dataKey="y"
+                yAxisId="1"
+              />
+              <Tooltip formatter={this.formatValue} />
+              <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} />
+            </LineChart>
+          </div>
+        </div>
+      );
+    }
+
+    renderLookup() {
+      return undefined;
+    }
+
+    render() {
+      const { classes, viewElement } = this.props;
+      const { activeTab } = this.state;
+
+      const equationType = viewElement.type === 'stock' ? 'Initial Value' : 'Equation';
+      const content = activeTab === 0 ? this.renderEquation() : this.renderLookup();
+      const lookupTab = viewElement.type === 'stock' ? undefined : <Tab label="Lookup Function" />;
+
+      return (
         <Card className={classes.card} elevation={1}>
-          <CardContent className={classes.cardInner}>
-            <Typography variant="body1" color="textSecondary" component="h3">
-              {equationType}:
-            </Typography>
-            <Editor
-              autoFocus
-              className={classes.eqnEditor}
-              placeholder="Enter an equation..."
-              value={this.state.equation}
-              onChange={this.handleEquationChange}
-              onBlur={this.handleEquationSave}
-            />
+          <Tabs
+            className={classes.cardInner}
+            variant="fullWidth"
+            value={activeTab}
+            indicatorColor="primary"
+            textColor="primary"
+            onChange={this.handleTabChange}
+            aria-label="Equation details selector"
+          >
+            <Tab label={equationType} />
+            {lookupTab}
+          </Tabs>
 
-            <CardActions className={classes.editorActions}>
-              <Button
-                size="small"
-                color="primary"
-                disabled={!equationActionsEnabled}
-                onClick={this.handleEquationCancel}
-              >
-                Cancel
-              </Button>
-              <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationSave}>
-                Save
-              </Button>
-            </CardActions>
-
-            {/*<TextField*/}
-            {/*  label="Units"*/}
-            {/*  fullWidth*/}
-            {/*  InputLabelProps={{*/}
-            {/*    shrink: true,*/}
-            {/*  }}*/}
-            {/*  value={''}*/}
-            {/*  margin="normal"*/}
-            {/*/>*/}
-
-            {/*<TextField*/}
-            {/*  label="Notes"*/}
-            {/*  fullWidth*/}
-            {/*  InputLabelProps={{*/}
-            {/*    shrink: true,*/}
-            {/*  }}*/}
-            {/*  value={defined(this.props.variable.xmile).doc}*/}
-            {/*  onChange={this.handleNotesChange}*/}
-            {/*  margin="normal"*/}
-            {/*/>*/}
-
-            {/*<br />*/}
-            <hr />
-            <br />
-            <div className={classes.plotFixup}>
-              <LineChart
-                width={327}
-                height={300}
-                data={series}
-                // onMouseDown = { (e) => this.setState({refAreaLeft:e.activeLabel}) }
-                // onMouseMove = { (e) => this.state.refAreaLeft && this.setState({refAreaRight:e.activeLabel}) }
-                // onMouseUp = { this.zoom.bind( this ) }
-              >
-                <CartesianGrid horizontal={true} vertical={false} />
-                <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-                <YAxis
-                  width={yAxisWidth}
-                  allowDataOverflow={true}
-                  domain={[yMin, yMax]}
-                  type="number"
-                  dataKey="y"
-                  yAxisId="1"
-                />
-                <Tooltip formatter={this.formatValue} />
-                <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} />
-              </LineChart>
-            </div>
-          </CardContent>
+          <CardContent>{content}</CardContent>
         </Card>
       );
     }
