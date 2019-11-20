@@ -16,11 +16,12 @@ import Button from '@material-ui/core/Button';
 import Card from '@material-ui/core/Card';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
+import Checkbox from '@material-ui/core/Checkbox';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import Tab from '@material-ui/core/Tab';
 import Tabs from '@material-ui/core/Tabs';
 
-import { Variable } from '../../engine/vars';
+import { Table, Variable } from '../../engine/vars';
 import { ViewElement } from '../../engine/xmile';
 
 import { defined, Series } from '../common';
@@ -32,7 +33,6 @@ const styles = createStyles({
   cardInner: {
     paddingTop: 52,
   },
-  plotFixup: {},
   editorActions: {},
   eqnEditor: {
     backgroundColor: 'rgba(245, 245, 245)',
@@ -56,6 +56,7 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 interface VariableDetailsState {
   equation: Value;
   activeTab: number;
+  hasLookupTable: boolean;
 }
 
 function equationFromValue(value: Value): string {
@@ -80,6 +81,7 @@ export const VariableDetails = withStyles(styles)(
       this.state = {
         equation: valueFromEquation(equationFor(variable)),
         activeTab: 0,
+        hasLookupTable: variable instanceof Table,
       };
     }
 
@@ -111,6 +113,10 @@ export const VariableDetails = withStyles(styles)(
 
     handleTabChange = (event: React.ChangeEvent<{}>, newValue: number) => {
       this.setState({ activeTab: newValue });
+    };
+
+    handleToggleLookupTable = (): void => {
+      this.setState(state => ({ hasLookupTable: !state.hasLookupTable }));
     };
 
     renderEquation() {
@@ -190,35 +196,87 @@ export const VariableDetails = withStyles(styles)(
           {/*<br />*/}
           <hr />
           <br />
-          <div className={classes.plotFixup}>
-            <LineChart
-              width={327}
-              height={300}
-              data={series}
-              // onMouseDown = { (e) => this.setState({refAreaLeft:e.activeLabel}) }
-              // onMouseMove = { (e) => this.state.refAreaLeft && this.setState({refAreaRight:e.activeLabel}) }
-              // onMouseUp = { this.zoom.bind( this ) }
-            >
-              <CartesianGrid horizontal={true} vertical={false} />
-              <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-              <YAxis
-                width={yAxisWidth}
-                allowDataOverflow={true}
-                domain={[yMin, yMax]}
-                type="number"
-                dataKey="y"
-                yAxisId="1"
-              />
-              <Tooltip formatter={this.formatValue} />
-              <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} />
-            </LineChart>
-          </div>
+          <LineChart width={327} height={300} data={series}>
+            <CartesianGrid horizontal={true} vertical={false} />
+            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+            <YAxis
+              width={yAxisWidth}
+              allowDataOverflow={true}
+              domain={[yMin, yMax]}
+              type="number"
+              dataKey="y"
+              yAxisId="1"
+            />
+            <Tooltip formatter={this.formatValue} />
+            <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} dot={false} />
+          </LineChart>
         </div>
       );
     }
 
     renderLookup() {
-      return undefined;
+      const { data, classes, variable } = this.props;
+      const { equation, hasLookupTable } = this.state;
+      const initialEquation = equationFor(variable);
+
+      let table;
+      if (hasLookupTable && variable instanceof Table) {
+        let yMin = 0;
+        let yMax = 0;
+        const series: Array<{ x: number; y: number }> = [];
+        for (let i = 0; i < variable.x.size; i++) {
+          const x = defined(variable.x.get(i));
+          const y = defined(variable.y.get(i));
+          series.push({ x, y });
+          if (y < yMin) {
+            yMin = y;
+          }
+          if (y > yMax) {
+            yMax = y;
+          }
+        }
+        yMin = Math.floor(yMin);
+        yMax = Math.ceil(yMax);
+
+        const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
+        const yAxisWidth = Math.max(40, 20 + charWidth * 6);
+
+        // enable saving and canceling if the equation has changed
+        const equationActionsEnabled = initialEquation !== equationFromValue(equation);
+
+        const { left, right } = {
+          left: 'dataMin',
+          right: 'dataMax',
+        };
+
+        table = (
+          <LineChart width={327} height={300} data={series}>
+            <CartesianGrid horizontal={true} vertical={false} />
+            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+            <YAxis
+              width={yAxisWidth}
+              allowDataOverflow={true}
+              domain={[yMin, yMax]}
+              type="number"
+              dataKey="y"
+              yAxisId="1"
+            />
+            <Tooltip formatter={this.formatValue} />
+            <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} dot={false} />
+          </LineChart>
+        );
+      }
+
+      return (
+        <div>
+          <div>
+            <Checkbox checked={hasLookupTable} onChange={this.handleToggleLookupTable} />
+            Has Lookup Table
+          </div>
+          <br />
+          {table}
+        </div>
+      );
     }
 
     render() {
