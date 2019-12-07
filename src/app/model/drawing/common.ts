@@ -4,6 +4,22 @@
 
 import { List } from 'immutable';
 
+import { Node } from 'slate';
+
+export function plainDeserialize(str: string): Node[] {
+  return str.split('\n').map(
+    (line: string): Node => {
+      return {
+        children: [{ text: line }],
+      };
+    },
+  );
+}
+
+export function plainSerialize(value: Node[]): string {
+  return value.map(n => Node.text(n)).join('\n');
+}
+
 export interface Point {
   x: number;
   y: number;

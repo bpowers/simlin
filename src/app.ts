@@ -6,12 +6,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import * as bodyParser from 'body-parser';
-import * as cookieParser from 'cookie-parser';
-import * as cors from 'cors';
-import * as express from 'express';
+import cookieParser from 'cookie-parser';
+import cors from 'cors';
+import express from 'express';
 import { NextFunction, Request, Response } from 'express';
-import * as helmet from 'helmet';
-import * as favicon from 'serve-favicon';
+import helmet from 'helmet';
+import favicon from 'serve-favicon';
 import { seshcookie } from 'seshcookie';
 import * as logger from 'winston';
 

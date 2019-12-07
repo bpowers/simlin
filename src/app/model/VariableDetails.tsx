@@ -6,11 +6,9 @@ import * as React from 'react';
 
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 
-import { Operation, Value } from 'slate';
-import Plain from 'slate-plain-serializer';
-import { Editor } from 'slate-react';
-
-import { List } from 'immutable';
+import { createEditor, Editor, Node, Range } from 'slate';
+import { withHistory } from 'slate-history';
+import { Editable, Slate, withReact } from 'slate-react';
 
 import Button from '@material-ui/core/Button';
 import Card from '@material-ui/core/Card';
@@ -25,6 +23,7 @@ import { Table, Variable } from '../../engine/vars';
 import { ViewElement } from '../../engine/xmile';
 
 import { defined, Series } from '../common';
+import { plainDeserialize, plainSerialize } from './drawing/common';
 
 const styles = createStyles({
   card: {
@@ -54,17 +53,19 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 // export type VariableDetailsProps = Pick<VariableDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
 
 interface VariableDetailsState {
-  equation: Value;
+  equation: Node[];
+  editor: Editor;
+  selection: Range | null;
   activeTab: number;
   hasLookupTable: boolean;
 }
 
-function equationFromValue(value: Value): string {
-  return Plain.serialize(value).trim();
+function equationFromValue(children: Node[]): string {
+  return plainSerialize(children);
 }
 
-function valueFromEquation(equation: string): Value {
-  return Plain.deserialize(equation);
+function valueFromEquation(equation: string): Node[] {
+  return plainDeserialize(equation);
 }
 
 function equationFor(variable: Variable) {
@@ -79,14 +80,16 @@ export const VariableDetails = withStyles(styles)(
       const { variable } = props;
 
       this.state = {
+        editor: withHistory(withReact(createEditor())),
         equation: valueFromEquation(equationFor(variable)),
+        selection: null,
         activeTab: 0,
         hasLookupTable: variable instanceof Table,
       };
     }
 
-    handleEquationChange = (change: { operations: List<Operation>; value: Value }): any => {
-      this.setState({ equation: change.value });
+    handleEquationChange = (equation: Node[], selection: Range | null): void => {
+      this.setState({ equation, selection });
     };
 
     handleNotesChange = (event: React.ChangeEvent<HTMLInputElement>) => {};
@@ -154,14 +157,15 @@ export const VariableDetails = withStyles(styles)(
 
       return (
         <div>
-          <Editor
-            autoFocus
-            className={classes.eqnEditor}
-            placeholder="Enter an equation..."
+          <Slate
+            editor={this.state.editor}
             value={this.state.equation}
+            selection={this.state.selection}
             onChange={this.handleEquationChange}
             onBlur={this.handleEquationSave}
-          />
+          >
+            <Editable className={classes.eqnEditor} placeholder="Enter an equation..." />
+          </Slate>
 
           <CardActions className={classes.editorActions}>
             <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationCancel}>

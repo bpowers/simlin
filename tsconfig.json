@@ -5,6 +5,7 @@
     "module": "commonjs",
     "target": "es2017",
     "lib": ["es2018", "dom", "dom.iterable"],
+    "esModuleInterop": true,
     "allowJs": true,
     "sourceMap": true,
     "jsx": "react",

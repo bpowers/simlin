@@ -6,8 +6,7 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { Operation, Value } from 'slate';
-import Plain from 'slate-plain-serializer';
+import { Node } from 'slate';
 
 import { List, Map, Set } from 'immutable';
 
@@ -20,7 +19,7 @@ import { Point as XmilePoint, UID, View, ViewElement } from '../../../engine/xmi
 
 import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
-import { calcViewBox, displayName, Point, Rect } from './common';
+import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect } from './common';
 import { findSide } from './CommonLabel';
 import { Connector, ConnectorProps } from './Connector';
 import { AuxRadius } from './default';
@@ -120,7 +119,7 @@ interface CanvasState {
   isMovingArrow: boolean;
   isMovingLabel: boolean;
   labelSide: 'right' | 'bottom' | 'left' | 'top' | undefined;
-  editingName: Value | undefined;
+  editingName: Node[];
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
   canvasOffset: Point;
@@ -211,7 +210,7 @@ export const Canvas = withStyles(styles)(
         isEditingName: false,
         isMovingLabel: false,
         labelSide: undefined,
-        editingName: undefined,
+        editingName: [],
         dragSelectionPoint: undefined,
         moveDelta: undefined,
         canvasOffset: { x: 0, y: 0 },
@@ -667,7 +666,7 @@ export const Canvas = withStyles(styles)(
               if (this.state.inCreation) {
                 this.setState({
                   isEditingName: true,
-                  editingName: Plain.deserialize(displayName(defined(element.name))),
+                  editingName: plainDeserialize(displayName(defined(element.name))),
                 });
               }
             } else if (!foundInvalidTarget || this.state.inCreation) {
@@ -812,7 +811,7 @@ export const Canvas = withStyles(styles)(
           name: selectedTool === 'stock' ? 'New Stock' : 'New Variable',
           labelSide: selectedTool === 'aux' ? 'right' : undefined,
         });
-        const editingName = Plain.deserialize(displayName(defined(inCreation.name)));
+        const editingName = plainDeserialize(displayName(defined(inCreation.name)));
         this.setState({
           isEditingName: true,
           editingName,
@@ -917,7 +916,7 @@ export const Canvas = withStyles(styles)(
       isArrowhead?: boolean,
     ): void => {
       let isEditingName = !!isText;
-      let editingName: Value | undefined;
+      let editingName: Node[] = [];
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
@@ -969,7 +968,7 @@ export const Canvas = withStyles(styles)(
         if (isEditingName) {
           const uid = defined(selection.first());
           const editingElement = this.getElementByUid(uid);
-          editingName = Plain.deserialize(displayName(defined(editingElement.name)));
+          editingName = plainDeserialize(displayName(defined(editingElement.name)));
         }
       }
 
@@ -987,8 +986,8 @@ export const Canvas = withStyles(styles)(
       this.props.onSetSelection(Set([element.uid]));
     };
 
-    handleEditingNameChange = (change: { operations: List<Operation>; value: Value }): any => {
-      this.setState({ editingName: change.value });
+    handleEditingNameChange = (value: Node[]): void => {
+      this.setState({ editingName: value });
     };
 
     handleEditingNameDone = (isCancel: boolean) => {
@@ -1004,7 +1003,7 @@ export const Canvas = withStyles(styles)(
       const uid = defined(this.props.selection.first());
       const element = this.getElementByUid(uid);
       const oldName = displayName(defined(element.name));
-      const newName = Plain.serialize(defined(this.state.editingName));
+      const newName = plainSerialize(defined(this.state.editingName));
 
       if (uid === inCreationUid) {
         this.props.onCreateVariable(element.set('name', newName));

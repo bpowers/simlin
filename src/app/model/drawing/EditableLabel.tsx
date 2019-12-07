@@ -6,10 +6,9 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { List } from 'immutable';
-import { Operation, Value } from 'slate';
-import Plain from 'slate-plain-serializer';
-import { Editor } from 'slate-react';
+import { createEditor, Editor, Node, Range } from 'slate';
+import { withHistory } from 'slate-history';
+import { Editable, Slate, withReact } from 'slate-react';
 
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
 import { AuxRadius } from './default';
@@ -32,21 +31,32 @@ const styles = createStyles({
 });
 
 interface EditingLabelPropsFull extends CommonLabelProps, WithStyles<typeof styles> {
-  value: Value;
-  onChange: (change: { operations: List<Operation>; value: Value }) => any;
+  value: Node[];
+  onChange: (value: Node[]) => void;
   onDone: (isCancel: true) => void;
+}
+
+interface EditingLabelState {
+  editor: Editor;
+  selection: Range | null;
 }
 
 export type EditingLabelProps = Pick<EditingLabelPropsFull, 'value' | 'onChange' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
 
 export const EditableLabel = withStyles(styles)(
-  class extends React.PureComponent<EditingLabelPropsFull> {
+  class extends React.PureComponent<EditingLabelPropsFull, EditingLabelState> {
     constructor(props: EditingLabelPropsFull) {
       super(props);
+
+      this.state = {
+        editor: withHistory(withReact(createEditor())),
+        selection: null,
+      };
     }
 
-    handleChange = (change: { operations: List<Operation>; value: Value }): any => {
-      this.setState({ name: change.value });
+    handleChange = (value: Node[], selection: Range | null): void => {
+      this.setState({ selection });
+      this.props.onChange(value);
     };
 
     handlePointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
@@ -54,7 +64,7 @@ export const EditableLabel = withStyles(styles)(
     };
 
     render() {
-      const lines = Plain.serialize(this.props.value).split('\n');
+      const lines: string[] = this.props.value.map(n => Node.text(n));
       const linesCount = lines.length;
 
       const maxWidthChars = lines.reduce((prev, curr) => (curr.length > prev ? curr.length : prev), 0);
@@ -127,7 +137,14 @@ export const EditableLabel = withStyles(styles)(
 
       return (
         <div className={classes.editor} style={style} onPointerDown={this.handlePointerDown}>
-          <Editor value={this.props.value} autoFocus={true} onChange={this.props.onChange} />
+          <Slate
+            editor={this.state.editor}
+            value={this.props.value}
+            selection={this.state.selection}
+            onChange={this.handleChange}
+          >
+            <Editable autoFocus={true} placeholder="Enter an equation..." />
+          </Slate>
         </div>
       );
     }
