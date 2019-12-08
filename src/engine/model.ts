@@ -194,7 +194,8 @@ export class Model extends Record(modelDefaults) implements varModel {
 
         if (element.from === oldIdent) {
           element = element.set('from', newIdent);
-        } else if (element.to === oldIdent) {
+        }
+        if (element.to === oldIdent) {
           element = element.set('to', newIdent);
         }
 

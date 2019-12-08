@@ -833,8 +833,14 @@ export const Editor = withStyles(styles)(
             if (!(selectedElements.has(fromName) || selectedElements.has(toName))) {
               return element;
             }
-            const from = defined(selectedElements.get(fromName) || namedElements.get(fromName));
-            const to = defined(selectedElements.get(toName) || namedElements.get(toName));
+            const from = selectedElements.get(fromName) || namedElements.get(fromName);
+            if (!from) {
+              return element;
+            }
+            const to = selectedElements.get(toName) || namedElements.get(toName);
+            if (!to) {
+              return element;
+            }
             const atan2 = Math.atan2;
             const oldTo = defined(origNamedElements.get(toName));
             const oldFrom = defined(origNamedElements.get(fromName));

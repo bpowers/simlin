@@ -143,7 +143,7 @@ export const EditableLabel = withStyles(styles)(
             selection={this.state.selection}
             onChange={this.handleChange}
           >
-            <Editable autoFocus={true} placeholder="Enter an equation..." />
+            <Editable autoFocus={true} />
           </Slate>
         </div>
       );

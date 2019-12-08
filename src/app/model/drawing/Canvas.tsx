@@ -249,7 +249,10 @@ export const Canvas = withStyles(styles)(
     }
 
     private getNamedElement(name: string): ViewElement | undefined {
-      const uid = defined(this.nameMap.get(name));
+      const uid = this.nameMap.get(name);
+      if (!uid) {
+        return undefined;
+      }
       return this.selectionUpdates.get(uid) || this.elements.get(uid);
     }
 
@@ -313,6 +316,11 @@ export const Canvas = withStyles(styles)(
           break;
       }
       if (!isTarget) {
+        return undefined;
+      }
+
+      // don't allow connectors from and to the same element
+      if (arrow.type === 'connector' && arrow.from === element.ident) {
         return undefined;
       }
 
@@ -390,7 +398,7 @@ export const Canvas = withStyles(styles)(
       }
       let to = this.getNamedElement(defined(element.to));
       if (!to) {
-        console.log(`connector with unknown to ${element.from}`);
+        console.log(`connector with unknown to ${element.to}`);
         return;
       }
       const toUid = to.uid;
