@@ -1,14 +1,15 @@
 # docker build -t bpowers/model-service:latest .
 
 # first compile our TypeScript
-FROM node:12-alpine as builder
+FROM node:13-alpine as builder
 
 RUN apk update \
  && apk upgrade \
- && apk add --no-cache --virtual .build-deps git perl python make g++ cairo-dev pixman-dev pango-dev libjpeg-turbo-dev \
+ && apk add --no-cache ca-certificates cairo pango pixman libjpeg-turbo \
  && rm -rf /var/cache/apk/*
 
-RUN npm install -g yarn
+RUN apk add --no-cache --virtual .build-deps git perl python make g++ cairo-dev pixman-dev pango-dev libjpeg-turbo-dev \
+ && rm -rf /var/cache/apk/*
 
 WORKDIR /model
 
@@ -24,14 +25,15 @@ ENV GENERATE_SOURCEMAP false
 RUN yarn build
 
 # next build the /node_env environment we'll run in production
-FROM node:12-alpine as prod-node-modules
+FROM node:13-alpine as prod-node-modules
 
 RUN apk update \
  && apk upgrade \
- && apk add --no-cache --virtual .build-deps git perl python make g++ cairo-dev pixman-dev pango-dev libjpeg-turbo-dev \
+ && apk add --no-cache ca-certificates cairo pango pixman libjpeg-turbo \
  && rm -rf /var/cache/apk/*
 
-RUN npm install -g yarn
+RUN apk add --no-cache --virtual .build-deps git perl python make g++ cairo-dev pixman-dev pango-dev libjpeg-turbo-dev \
+ && rm -rf /var/cache/apk/*
 
 WORKDIR /model
 
@@ -44,7 +46,7 @@ ENV NODE_ENV production
 RUN rm -rf node_modules; yarn install
 
 # finally put the production container together
-FROM node:12-alpine
+FROM node:13-alpine
 
 RUN apk update \
  && apk upgrade \
