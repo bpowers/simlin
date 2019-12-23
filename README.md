@@ -29,7 +29,6 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 * Moving flows can be somewhat funky.
 * Undo/redo only applies within a browser tab.  If you restart your browser (or reload the page), you will lose the ability to undo to before the reload.
 * Only straight-line flows are supported for now.
-* Its possible to (nonsensically) create multiple connectors between two variables.  Just maybe don't do that for now.
 * Units aren't implemented.
 * Maybe more!  See the [Issues page](https://github.com/bpowers/model-app/issues) for additional info (or to highlight new bugs and problems)
 

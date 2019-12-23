@@ -324,6 +324,21 @@ export const Canvas = withStyles(styles)(
         return undefined;
       }
 
+      // dont allow duplicate links between the same two elements
+      if (arrow.type === 'connector') {
+        const { view } = this.props;
+        for (const e of view.elements) {
+          // skip if its not a connector, or if it is the currently selected connector
+          if (e.type !== 'connector' || e.uid === arrow.uid) {
+            continue;
+          }
+
+          if (e.from === arrow.from && e.to === element.ident) {
+            return false;
+          }
+        }
+      }
+
       if (arrow.type === 'flow') {
         if (element.type !== 'stock') {
           return false;
