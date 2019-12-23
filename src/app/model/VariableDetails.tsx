@@ -6,9 +6,9 @@ import * as React from 'react';
 
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 
-import { createEditor, Editor, Node, Range } from 'slate';
+import { createEditor, Node } from 'slate';
 import { withHistory } from 'slate-history';
-import { Editable, Slate, withReact } from 'slate-react';
+import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 
 import Button from '@material-ui/core/Button';
 import Card from '@material-ui/core/Card';
@@ -62,8 +62,7 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 
 interface VariableDetailsState {
   equation: Node[];
-  editor: Editor;
-  selection: Range | null;
+  editor: ReactEditor;
   activeTab: number;
   hasLookupTable: boolean;
 }
@@ -90,14 +89,13 @@ export const VariableDetails = withStyles(styles)(
       this.state = {
         editor: withHistory(withReact(createEditor())),
         equation: valueFromEquation(equationFor(variable)),
-        selection: null,
         activeTab: 0,
         hasLookupTable: variable instanceof Table,
       };
     }
 
-    handleEquationChange = (equation: Node[], selection: Range | null): void => {
-      this.setState({ equation, selection });
+    handleEquationChange = (equation: Node[]): void => {
+      this.setState({ equation });
     };
 
     handleVariableDelete = () => {
@@ -172,7 +170,6 @@ export const VariableDetails = withStyles(styles)(
           <Slate
             editor={this.state.editor}
             value={this.state.equation}
-            selection={this.state.selection}
             onChange={this.handleEquationChange}
             onBlur={this.handleEquationSave}
           >

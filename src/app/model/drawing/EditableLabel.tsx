@@ -6,9 +6,9 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { createEditor, Editor, Node, Range } from 'slate';
+import { createEditor, Node } from 'slate';
 import { withHistory } from 'slate-history';
-import { Editable, Slate, withReact } from 'slate-react';
+import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
 import { AuxRadius } from './default';
@@ -37,8 +37,7 @@ interface EditingLabelPropsFull extends CommonLabelProps, WithStyles<typeof styl
 }
 
 interface EditingLabelState {
-  editor: Editor;
-  selection: Range | null;
+  editor: ReactEditor;
 }
 
 export type EditingLabelProps = Pick<EditingLabelPropsFull, 'value' | 'onChange' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
@@ -50,12 +49,10 @@ export const EditableLabel = withStyles(styles)(
 
       this.state = {
         editor: withHistory(withReact(createEditor())),
-        selection: null,
       };
     }
 
-    handleChange = (value: Node[], selection: Range | null): void => {
-      this.setState({ selection });
+    handleChange = (value: Node[]): void => {
       this.props.onChange(value);
     };
 
@@ -64,7 +61,7 @@ export const EditableLabel = withStyles(styles)(
     };
 
     render() {
-      const lines: string[] = this.props.value.map(n => Node.text(n));
+      const lines: string[] = this.props.value.map(n => Node.string(n));
       const linesCount = lines.length;
 
       const maxWidthChars = lines.reduce((prev, curr) => (curr.length > prev ? curr.length : prev), 0);
@@ -137,12 +134,7 @@ export const EditableLabel = withStyles(styles)(
 
       return (
         <div className={classes.editor} style={style} onPointerDown={this.handlePointerDown}>
-          <Slate
-            editor={this.state.editor}
-            value={this.props.value}
-            selection={this.state.selection}
-            onChange={this.handleChange}
-          >
+          <Slate editor={this.state.editor} value={this.props.value} onChange={this.handleChange}>
             <Editable autoFocus={true} />
           </Slate>
         </div>
