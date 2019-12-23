@@ -416,14 +416,44 @@ export const Editor = withStyles(styles)(
             return false;
           };
 
-          const elements = view.elements.filter((element: ViewElement) => {
+          // this will remove the selected elements, clouds, and connectors
+          let elements = view.elements.filter((element: ViewElement) => {
             const remove =
               selection.contains(element.uid) ||
               (element.type === 'cloud' && selection.contains(defined(element.flowUid))) ||
               (element.type === 'connector' && (isSelected(element.to) || isSelected(element.from)));
             return !remove;
           });
-          return view.merge({ elements });
+
+          // next we have to potentially make new clouds if we've deleted a stock
+          let { nextUid } = view;
+          const clouds: ViewElement[] = [];
+          elements = elements.map((element: ViewElement) => {
+            if (element.type !== 'flow' || !element.pts) {
+              return element;
+            }
+            const pts = element.pts.map(pt => {
+              if (!pt.uid || !selection.contains(pt.uid)) {
+                return pt;
+              }
+
+              const cloud = new ViewElement({
+                type: 'cloud',
+                uid: nextUid++,
+                x: pt.x,
+                y: pt.y,
+                flowUid: element.uid,
+              });
+
+              clouds.push(cloud);
+
+              return pt.set('uid', cloud.uid);
+            });
+            element = element.set('pts', pts);
+            return element;
+          });
+          elements = elements.concat(clouds);
+          return view.merge({ elements, nextUid });
         },
       );
       project = project.deleteVariables(this.state.modelName, this.getSelectionIdents());
