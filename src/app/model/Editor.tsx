@@ -401,23 +401,32 @@ export const Editor = withStyles(styles)(
       const selection = this.state.selection;
       const { modelName } = this.state;
       const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      const project = defined(this.project()).updateIn(
+      let project = defined(this.project()).updateIn(
         updatePath,
         (view: View): View => {
-          const getName = (ident: string) => {
+          const isSelected = (ident: string | undefined): boolean => {
+            if (ident === undefined) {
+              return false;
+            }
             for (const e of view.elements) {
               if (e.hasName && e.ident === ident) {
-                return e;
+                return selection.contains(e.uid);
               }
             }
-            throw new Error(`unknown name ${ident}`);
+            return false;
           };
+
           const elements = view.elements.filter((element: ViewElement) => {
-            return !selection.contains(element.uid);
+            const remove =
+              selection.contains(element.uid) ||
+              (element.type === 'cloud' && selection.contains(defined(element.flowUid))) ||
+              (element.type === 'connector' && (isSelected(element.to) || isSelected(element.from)));
+            return !remove;
           });
           return view.merge({ elements });
         },
       );
+      project = project.deleteVariables(this.state.modelName, this.getSelectionIdents());
       this.setState({
         selection: Set(),
       });
@@ -1008,6 +1017,24 @@ export const Editor = withStyles(styles)(
       );
     }
 
+    getSelectionIdents(): string[] {
+      const names: string[] = [];
+      const { selection } = this.state;
+      const model = this.getModel();
+      if (!model) {
+        return names;
+      }
+      const view = defined(model.xModel.views.get(0));
+
+      for (const e of view.elements) {
+        if (selection.contains(e.uid) && e.hasName) {
+          names.push(e.ident);
+        }
+      }
+
+      return names;
+    }
+
     // FIXME: use a map
     getNamedSelectedElement(): ViewElement | undefined {
       if (this.state.selection.size !== 1) {
@@ -1116,11 +1143,25 @@ export const Editor = withStyles(styles)(
             variable={variable}
             viewElement={namedElement}
             data={series}
+            onDelete={this.handleVariableDelete}
             onEquationChange={this.handleEquationChange}
           />
         </div>
       );
     }
+
+    handleVariableDelete = (ident: string) => {
+      const namedElement = this.getNamedSelectedElement();
+      if (!namedElement) {
+        return;
+      }
+
+      if (namedElement.ident !== ident) {
+        return;
+      }
+
+      this.handleSelectionDelete();
+    };
 
     handleClearSelectedTool = () => {
       this.setState({ selectedTool: undefined });

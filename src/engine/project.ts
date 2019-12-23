@@ -126,6 +126,18 @@ export class Project extends Record(projectDefaults) implements varsProject {
     return this.set('models', this.models.set(modelName, model));
   }
 
+  deleteVariables(modelName: string, names: readonly string[]): Project {
+    let model = this.model(modelName);
+    if (!model) {
+      console.log(`setEquation: unknown model ${modelName}`);
+      return this;
+    }
+
+    model = model.deleteVariables(this, names);
+
+    return this.set('models', this.models.set(modelName, model));
+  }
+
   removeStocksFlow(modelName: string, stock: string, flow: string, dir: 'in' | 'out'): Project {
     let model = this.model(modelName);
     if (!model) {

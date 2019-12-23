@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List, Map, Record } from 'immutable';
+import { List, Map, Record, Set } from 'immutable';
 
 import * as common from './common';
 
@@ -138,6 +138,24 @@ export class Model extends Record(modelDefaults) implements varModel {
         eqn: '',
       });
       const variables = xModel.variables.push(newVariable);
+      return xModel.merge({ variables });
+    });
+
+    // TODO: this should be made incremental
+    const [vars, modules, tables] = parseVars(project, model.xModel.variables);
+
+    return model.merge({
+      vars,
+      modules,
+      tables,
+    });
+  }
+
+  deleteVariables(project: Project, names: readonly string[]): Model {
+    const toDelete = Set(names);
+    const updatePath = ['xModel'];
+    const model = this.updateIn(updatePath, (xModel: XmileModel) => {
+      const variables = xModel.variables.filter((v: XmileVariable) => v.ident && !toDelete.contains(v.ident));
       return xModel.merge({ variables });
     });
 

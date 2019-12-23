@@ -41,11 +41,19 @@ const styles = createStyles({
     height: 80,
     fontFamily: "'Roboto Mono', monospace",
   },
+  buttonLeft: {
+    float: 'left',
+    marginRight: 'auto',
+  },
+  buttonRight: {
+    float: 'right',
+  },
 });
 
 interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   variable: Variable;
   viewElement: ViewElement;
+  onDelete: (ident: string) => void;
   onEquationChange: (ident: string, newEquation: string) => void;
   data: Series | undefined;
 }
@@ -90,6 +98,10 @@ export const VariableDetails = withStyles(styles)(
 
     handleEquationChange = (equation: Node[], selection: Range | null): void => {
       this.setState({ equation, selection });
+    };
+
+    handleVariableDelete = () => {
+      this.props.onDelete(this.props.viewElement.ident);
     };
 
     handleNotesChange = (event: React.ChangeEvent<HTMLInputElement>) => {};
@@ -168,12 +180,22 @@ export const VariableDetails = withStyles(styles)(
           </Slate>
 
           <CardActions className={classes.editorActions}>
-            <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationCancel}>
-              Cancel
+            <Button size="small" color="secondary" onClick={this.handleVariableDelete} className={classes.buttonLeft}>
+              Delete
             </Button>
-            <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationSave}>
-              Save
-            </Button>
+            <div className={classes.buttonRight}>
+              <Button
+                size="small"
+                color="primary"
+                disabled={!equationActionsEnabled}
+                onClick={this.handleEquationCancel}
+              >
+                Cancel
+              </Button>
+              <Button size="small" color="primary" disabled={!equationActionsEnabled} onClick={this.handleEquationSave}>
+                Save
+              </Button>
+            </div>
           </CardActions>
 
           {/*<TextField*/}
