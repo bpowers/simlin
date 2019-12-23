@@ -75,12 +75,12 @@
     "saslprep": "^1.0.3",
     "serve-favicon": "^2.5.0",
     "seshcookie": "^1.0.1",
-    "slate": "^0.52.3",
-    "slate-history": "^0.52.3",
-    "slate-react": "^0.52.3",
+    "slate": "^0.57.1",
+    "slate-history": "^0.57.1",
+    "slate-react": "^0.57.1",
     "uuid": "^3.3.3",
     "winston": "^3.2.1",
-    "xmldom": "^0.1.27"
+    "xmldom": "^0.2.1"
   },
   "resolutions": {
     "@types/slate*/**/immutable": "4.0.0-rc.12"
