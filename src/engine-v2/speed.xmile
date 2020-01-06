@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0" level="3">
+    <header>
+        <smile version="1.0"></smile>
+        <name>speed</name>
+        <uuid>3152f4c6-db2c-43a4-844d-b4c3b4afa057</uuid>
+        <vendor>SDLabs</vendor>
+        <product version="0.1">go-xmile</product>
+    </header>
+    <sim_specs time_units="Time">
+        <start>0</start>
+        <stop>1e+07</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions></dimensions>
+    <model_units></model_units>
+    <behavior non_negative="false"></behavior>
+    <model>
+        <variables>
+            <stock name="stock">
+                <eqn>Initial</eqn>
+                <inflow>Input </inflow>
+            </stock>
+            <flow name="input">
+                <eqn>1</eqn>
+            </flow>
+            <aux name="initial">
+                <eqn>1</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view scroll_x="0" scroll_y="0" zoom="0" converter_size="medium">
+                <stock x="291" y="131" color="blue" name="stock"></stock>
+                <flow x="206" y="133" color="blue" name="input">
+                    <pts>
+                        <pt x="144" y="133"></pt>
+                        <pt x="269" y="133"></pt>
+                    </pts>
+                </flow>
+                <aux x="293" y="211" color="blue" name="initial"></aux>
+            </view>
+            <view name="interface" scroll_x="0" scroll_y="0" zoom="0" page_width="788" page_height="528">
+                <simulation_delay>0.1</simulation_delay>
+            </view>
+        </views>
+    </model>
+</xmile>

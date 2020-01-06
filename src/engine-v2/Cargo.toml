@@ -1,0 +1,21 @@
+[package]
+name = "sd-engine"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2018"
+build = "build.rs" # LALRPOP preprocessing
+
+[dependencies]
+lazy_static = "1"
+libc = "0.2"
+regex = "1"
+serde = "1"
+unicode-xid = "0.2"
+prost = "0.5"
+bytes = "0.5"
+lalrpop-util = "0.17"
+
+[build-dependencies]
+prost-build = "0.5"
+lalrpop = "0.17"
