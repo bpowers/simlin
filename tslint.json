@@ -38,6 +38,7 @@
   },
   "linterOptions": {
     "exclude": [
+      "src/engine-v2/pkg/**/*.js",
       "src/schemas/*.js",
       "app/config",
       "app/node_modules",
@@ -47,6 +48,7 @@
       "build/**/*.js",
       "node_modules/**/*.ts",
       "sd.js/**/*.ts",
+      "target/**/*.js",
       "runtime/**/*.ts"
     ]
   }

@@ -210,6 +210,10 @@ export const Editor = withStyles(styles)(
         if (!project) {
           return;
         }
+
+        // const { greet } = await import('../../engine-v2/pkg');
+        // greet();
+
         await this.loadSim(project);
       });
     }

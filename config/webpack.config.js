@@ -246,6 +246,10 @@ module.exports = function(webpackEnv) {
                 },
               ],
             },
+            {
+              test: /\.wasm$/,
+              type: "webassembly/experimental"
+            },
             // Process application JS with Babel.
             // The preset includes JSX, Flow, TypeScript, and some ESnext features.
             {
