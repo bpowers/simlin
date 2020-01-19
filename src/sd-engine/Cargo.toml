@@ -12,10 +12,11 @@ libc = "0.2"
 regex = "1"
 serde = "1"
 unicode-xid = "0.2"
-prost = "0.5"
+prost = "0.6"
+prost-types = "0.6"
 bytes = "0.5"
 lalrpop-util = "0.17"
 
 [build-dependencies]
-prost-build = "0.5"
+prost-build = "0.6"
 lalrpop = "0.17"

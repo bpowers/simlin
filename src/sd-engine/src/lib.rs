@@ -7,7 +7,6 @@ extern crate unicode_xid;
 
 #[macro_use]
 mod common;
-mod ast;
 mod enum_set;
 mod eqn;
 mod sim;
