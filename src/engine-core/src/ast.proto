@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package sd.ast;
+
+enum UnaryOp {
+  POSITIVE = 0;
+  NEGATIVE = 1;
+  NOT = 2;
+}
+
+enum BinaryOp {
+  ADD = 0;
+  SUB = 1;
+  NEG = 2;
+  EXP = 3;
+  MUL = 4;
+  DIV = 5;
+  MOD = 6;
+  GT = 7;
+  LT = 8;
+  GTE = 9;
+  LTE = 10;
+  EQ = 11;
+  NEQ = 12;
+  AND = 13;
+  OR = 14;
+}
+
+message Expr {
+  message Call {
+    string fun = 1;
+    repeated Expr args = 2;
+  }
+  message If {
+    Expr cond = 1;
+    Expr t = 2;
+    Expr f = 3;
+  }
+  message Op1 {
+    UnaryOp op = 1;
+    Expr l = 2;
+  }
+  message Op2 {
+    BinaryOp op = 1;
+    Expr l = 2;
+    Expr r = 3;
+  }
+  message Table {
+    string table = 1;
+    Expr idx = 2;
+  }
+
+  oneof v {
+    string ident = 1;
+    double constant = 2;
+    Call call = 3;
+    If if = 4;
+    Op1 op1 = 5;
+    Op2 op2 = 6;
+    Table table = 7;
+  }
+}

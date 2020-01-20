@@ -2,7 +2,7 @@
 
 members = [
     "src/engine-v2",
-    "src/sd-engine",
+    "src/engine-core",
 ]
 
 [profile.release]

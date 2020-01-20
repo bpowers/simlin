@@ -1,7 +1,11 @@
+// Copyright 2019 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
 // derived from both the LALRPOP whitespace tokenizer, and LALRPOP's
 // internal tokenizer
 
-use sd::unicode_xid::UnicodeXID;
+use unicode_xid::UnicodeXID;
 use std::str::{CharIndices, FromStr};
 
 use self::ErrorCode::*;
@@ -67,7 +71,7 @@ pub struct Tokenizer<'input> {
     lookahead: Option<(usize, char)>,
 }
 
-const KEYWORDS: &'static [(&'static str, Tok<'static>)] = &[
+const KEYWORDS: &[(&str, Tok<'static>)] = &[
     ("if", If),
     ("then", Then),
     ("else", Else),

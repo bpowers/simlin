@@ -1,240 +1,325 @@
-use xml5ever::rcdom::NodeEnum::*;
-use xml5ever::rcdom::{self, Handle};
-use xml5ever::tokenizer::{Attribute, QName};
+// Copyright 2019 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
-use sd::common::{canonicalize, Ident, Result};
-use sd::enum_set::{CLike, EnumSet};
 use std::fmt;
-use std::rc::Rc;
-use xml5ever::tendril::StrTendril;
 
-static VERSION: &'static str = "1.0";
-static NS_HTTPS: &'static str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
-static NS_HTTP: &'static str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+use serde::{Deserialize, Serialize};
 
-pub trait XmileNode {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>>;
+static VERSION: &str = "1.0";
+static NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+static NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename = "xmile")]
+pub struct File {
+    #[serde(default)]
+    pub version: String,
+    #[serde(rename = "xmlns", default)]
+    pub namespace: String, // 'https://docs.oasis-open.org/xmile/ns/XMILE/v1.0'
+    pub header: Option<Header>,
+    pub sim_specs: Option<SimSpecs>,
+    #[serde(rename = "model_units")]
+    pub units: Option<Units>,
+    pub dimensions: Option<Dimensions>,
+    pub behavior: Option<Behavior>,
+    pub style: Option<Style>,
+    pub data: Option<Data>,
+    #[serde(rename = "model", default)]
+    pub models: Vec<Model>,
+    #[serde(rename = "macro", default)]
+    pub macros: Vec<Macro>,
 }
 
-pub struct File {
-    version: String,
-    namespace: String, // 'https://docs.oasis-open.org/xmile/ns/XMILE/v1.0'
-    header: Rc<Header>,
-    sim_spec: Option<Rc<SimSpec>>,
-    dimensions: Vec<Dimension>,
-    units: Vec<Unit>,
-    behavior: Behavior,
-    style: Style,
-    models: Vec<Rc<Model>>,
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Data {
+    // TODO
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Macro {
+    // TODO
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VarDimensions {
+    #[serde(rename = "dim")]
+    pub dimensions: Option<Vec<VarDimension>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VarDimension {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Dimensions {
+    #[serde(rename = "dimension")]
+    pub dimensions: Option<Vec<Dimension>>,
 }
 
 impl File {
-    pub fn get_models(&self) -> &Vec<Rc<Model>> {
+    pub fn get_models(&self) -> &Vec<Model> {
         &self.models
     }
 }
 
 impl fmt::Debug for File {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "File{{\n")?;
-        write!(f, "      version:    {}\n", self.version)?;
-        write!(f, "      namespace:  {}\n", self.namespace)?;
-        write!(f, "      header:     {:?}\n", self.header)?;
-        write!(f, "      sim_spec:   {:?}\n", self.sim_spec)?;
-        write!(f, "      dimensions: {:?}\n", self.dimensions)?;
-        write!(f, "      units:      {:?}\n", self.units)?;
-        write!(f, "      behavior:   {:?}\n", self.behavior)?;
-        write!(f, "      style:      {:?}\n", self.style)?;
-        write!(f, "      models: [\n")?;
+        writeln!(f, "File{{")?;
+        writeln!(f, "      version:    {}", self.version)?;
+        writeln!(f, "      namespace:  {}", self.namespace)?;
+        writeln!(f, "      header:     {:?}", self.header)?;
+        writeln!(f, "      sim_specs:  {:?}", self.sim_specs)?;
+        writeln!(f, "      dimensions: {:?}", self.dimensions)?;
+        writeln!(f, "      units:      {:?}", self.units)?;
+        writeln!(f, "      behavior:   {:?}", self.behavior)?;
+        writeln!(f, "      style:      {:?}", self.style)?;
+        writeln!(f, "      models: [")?;
         for m in &self.models {
-            write!(f, "        {:?}\n", m)?;
+            writeln!(f, "        {:?}", m)?;
         }
-        write!(f, "      ]\n    }}")
+        writeln!(f, "      ]    }}")
     }
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct Header {
-    vendor: String,
-    product: Product,
-    options: Option<Rc<Options>>,
-    name: Option<String>,
-    version: Option<String>,
-    author: Option<String>,
-    affiliation: Option<String>,
-    client: Option<String>,
-    copyright: Option<String>,
-    created: Option<String>,  // ISO 8601 date format, e.g. “ 2014-08-10”
-    modified: Option<String>, // ISO 8601 date format
-    uuid: Option<String>,     // IETF RFC4122 format (84-4-4-12 hex digits with the dashes)
+    pub vendor: String,
+    pub product: Product,
+    pub options: Option<Options>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub caption: Option<Caption>,
+    pub image: Option<Image>,
+    pub author: Option<String>,
+    pub affiliation: Option<String>,
+    pub client: Option<String>,
+    pub copyright: Option<String>,
+    pub created: Option<String>, // ISO 8601 date format, e.g. “ 2014-08-10”
+    pub modified: Option<String>, // ISO 8601 date format
+    pub uuid: Option<String>,    // IETF RFC4122 format (84-4-4-12 hex digits with the dashes)
+    pub includes: Option<Includes>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Caption {}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Includes {}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Image {
+    #[serde(default)]
+    pub resource: String, // "JPG, GIF, TIF, or PNG" path, URL, or image embedded in base64 data URI
 }
 
 impl fmt::Debug for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Header{{\n")?;
-        write!(f, "        vendor:      {}\n", self.vendor)?;
-        write!(f, "        product:     {:?}\n", self.product)?;
-        write!(f, "        options:     {:?}\n", self.options)?;
-        write!(f, "        name:        {:?}\n", self.name)?;
-        write!(f, "        versions:    {:?}\n", self.version)?;
-        write!(f, "        author:      {:?}\n", self.author)?;
-        write!(f, "        affiliation: {:?}\n", self.affiliation)?;
-        write!(f, "        client:      {:?}\n", self.client)?;
-        write!(f, "        copyright:   {:?}\n", self.copyright)?;
-        write!(f, "        created:     {:?}\n", self.created)?;
-        write!(f, "        modified:    {:?}\n", self.modified)?;
-        write!(f, "        uuid:        {:?}\n", self.uuid)?;
+        writeln!(f, "Header{{")?;
+        writeln!(f, "        vendor:      {}", self.vendor)?;
+        writeln!(f, "        product:     {:?}", self.product)?;
+        writeln!(f, "        options:     {:?}", self.options)?;
+        writeln!(f, "        name:        {:?}", self.name)?;
+        writeln!(f, "        version:     {:?}", self.version)?;
+        writeln!(f, "        caption:     {:?}", self.caption)?;
+        writeln!(f, "        image:       {:?}", self.image)?;
+        writeln!(f, "        author:      {:?}", self.author)?;
+        writeln!(f, "        affiliation: {:?}", self.affiliation)?;
+        writeln!(f, "        client:      {:?}", self.client)?;
+        writeln!(f, "        copyright:   {:?}", self.copyright)?;
+        writeln!(f, "        created:     {:?}", self.created)?;
+        writeln!(f, "        modified:    {:?}", self.modified)?;
+        writeln!(f, "        uuid:        {:?}", self.uuid)?;
+        writeln!(f, "        includes:    {:?}", self.includes)?;
         write!(f, "      }}")
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Product {
-    name: String,
-    language: Option<String>,
-    version: String,
+    #[serde(rename = "$value")]
+    pub name: Option<String>,
+    #[serde(rename = "lang")]
+    pub language: Option<String>,
+    pub version: String,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, Clone)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Clone)]
+#[serde(rename_all = "snake_case")]
 pub enum Feature {
-    UsesArrays,
-    UsesMacros,
-    UsesConveyor,
-    UsesQueue,
-    UsesEventPosters,
+    UsesArrays {
+        maximum_dimensions: Option<i64>,
+        invalid_index_value: Option<String>, // e.g. "NaN" or "0"; string for Eq + Hash},
+    },
+    UsesMacros {
+        recursive_macros: Option<bool>,
+        option_filters: Option<bool>,
+    },
+    UsesConveyor {
+        arrest: Option<bool>,
+        leak: Option<bool>,
+    },
+    UsesQueue {
+        overflow: Option<bool>,
+    },
+    UsesEventPosters {
+        messages: Option<bool>,
+    },
     HasModelView,
-    UsesOutputs,
-    UsesInputs,
+    UsesOutputs {
+        numeric_display: Option<bool>,
+        lamp: Option<bool>,
+        gauge: Option<bool>,
+    },
+    UsesInputs {
+        numeric_input: Option<bool>,
+        list: Option<bool>,
+        graphical_input: Option<bool>,
+    },
     UsesAnnotation,
-    // macros
-    RecursiveMacros,
-    OptionFilters,
-    // conveyors
-    Arrest,
-    Leak,
-    // queues
-    Overflow,
-    // event posters
-    Messages,
-    // outputs
-    NumericDisplay,
-    Lamp,
-    Gauge,
-    // inputs
-    NumericInput,
-    List,
-    GraphicalInput,
 }
 
-impl CLike for Feature {
-    fn to_usize(&self) -> usize {
-        self.clone() as usize
-    }
-    fn from_usize(v: usize) -> Feature {
-        use sd::core::mem;
-
-        assert!(
-            v < mem::size_of::<Feature>() * 8,
-            "USize {} can't fit in feature.",
-            v
-        );
-
-        unsafe { mem::transmute(v as u8) }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Options {
-    namespaces: Vec<String>,
-    features: EnumSet<Feature>,
-    // arrays
-    maximum_dimensions: Option<i32>,
-    invalid_index_value: Option<f64>, // only 0 or NaN
+    pub namespace: Option<String>, // string of comma separated namespaces
+    #[serde(rename = "$value")]
+    pub features: Vec<Feature>,
 }
 
-#[derive(Debug)]
-pub struct SimSpec {
-    start: f64,
-    stop: f64,
-    dt: Option<f64>,
-    dt_reciprocal: Option<f64>,
-    savestep: Option<f64>,
-    method: Option<String>,
-    time_units: Option<String>,
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SimSpecs {
+    pub start: f64,
+    pub stop: f64,
+    pub dt: Option<Dt>,
+    #[serde(rename = "savestep")]
+    pub save_step: Option<f64>,
+    pub method: Option<String>,
+    pub time_units: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Dt {
+    #[serde(rename = "$value")]
+    pub value: f64,
+    pub reciprocal: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Dimension {
-    name: String,
-    size: u32,
-    elements: Option<Vec<String>>,
+    pub name: String,
+    pub size: Option<u32>,
+    #[serde(rename = "elem")]
+    pub elements: Option<Vec<Index>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Index {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TableType {
     Continuous,
     Extrapolate,
     Discrete,
 }
 
-#[derive(Debug)]
-pub struct Table {
-    kind: TableType,
-    x: Vec<f64>,
-    y: Vec<f64>,
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Scale {
+    pub min: f64,
+    pub max: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GF {
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<TableType>,
+    #[serde(rename = "xscale")]
+    pub x_scale: Option<Scale>,
+    #[serde(rename = "yscale")]
+    pub y_scale: Option<Scale>,
+    #[serde(rename = "xpts")]
+    pub x_pts: Option<String>, // comma separated list of points
+    #[serde(rename = "ypts")]
+    pub y_pts: Option<String>, // comma separated list of points
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Behavior {
-    all_non_negative: Option<bool>,
-    stock_non_negative: Option<bool>,
-    flow_non_negative: Option<bool>,
+    // TODO
 }
 
-#[derive(Debug)]
-pub struct Style {}
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Style {
+    // TODO
+}
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Units {
+    pub unit: Option<Vec<Unit>>,
+}
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Unit {
-    name: String,
-    eqn: String,
-    alias: String,
+    pub name: String,
+    pub eqn: Option<String>,
+    pub alias: Option<Vec<String>>,
+    pub disabled: Option<bool>,
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct Model {
-    name: String,
-    run: bool, // false
-    namespaces: Vec<String>,
-    resource: Option<String>, // path or URL to separate resource file
-    sim_spec: Option<Rc<SimSpec>>,
-    vars: Vec<Rc<Var>>,
-    views: Vec<Rc<View>>,
+    pub name: Option<String>,
+    pub run: Option<bool>, // false
+    #[serde(rename = "namespace")]
+    pub namespaces: Option<String>, // comma separated list of namespaces
+    pub resource: Option<String>, // path or URL to separate resource file
+    pub sim_specs: Option<SimSpecs>,
+    pub variables: Option<Variables>,
+    pub views: Option<Views>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Variables {
+    #[serde(rename = "$value")]
+    pub variables: Vec<Var>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Views {
+    pub view: Vec<View>,
 }
 
 impl Model {
-    pub fn get_name(&self) -> &String {
-        &self.name
+    pub fn get_name(&self) -> &str {
+        &self.name.as_deref().unwrap_or("main")
     }
 }
 
 impl fmt::Debug for Model {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Model{{\n")?;
-        write!(f, "          name:       {}\n", self.name)?;
-        write!(f, "          run:        {}\n", self.run)?;
-        write!(f, "          namespaces: {:?}\n", self.namespaces)?;
-        write!(f, "          resource:   {:?}\n", self.resource)?;
-        write!(f, "          sim_spec:   {:?}\n", self.sim_spec)?;
-        write!(f, "          vars: [\n")?;
-        for v in &self.vars {
-            write!(f, "            {:?}\n", v)?;
+        writeln!(f, "Model{{")?;
+        writeln!(f, "          name:       {}", self.get_name())?;
+        writeln!(f, "          run:        {}", self.run.unwrap_or(false))?;
+        writeln!(f, "          namespaces: {:?}", self.namespaces)?;
+        writeln!(f, "          resource:   {:?}", self.resource)?;
+        writeln!(f, "          sim_specs:  {:?}", self.sim_specs)?;
+        writeln!(f, "          vars: [")?;
+        if let Some(vars) = &self.variables {
+            for v in &vars.variables {
+                writeln!(f, "            {:?}", v)?;
+            }
         }
-        write!(f, "          ]\n")?;
-        write!(f, "          views:      {:?}\n", self.views)?;
+        writeln!(f, "          ]")?;
+        writeln!(f, "          views:      {:?}", self.views)?;
         write!(f, "        }}")
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViewType {
     StockFlow,
     Interface,
@@ -242,88 +327,167 @@ pub enum ViewType {
     VendorSpecific,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelSide {
+    Top,
+    Left,
+    Center,
+    Bottom,
+    Right,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Point {
+    x: f64,
+    y: f64,
+    uid: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Points {
+    #[serde(rename = "pt")]
+    points: Vec<Point>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewObject {
+    Stock {
+        name: String,
+        uid: Option<i32>,
+        x: f64,
+        y: f64,
+        width: Option<f64>,
+        height: Option<f64>,
+        label_side: Option<LabelSide>,
+        label_angle: Option<f64>,
+    },
+    Flow {
+        name: String,
+        uid: Option<i32>,
+        x: f64,
+        y: f64,
+        width: Option<f64>,
+        height: Option<f64>,
+        label_side: Option<LabelSide>,
+        label_angle: Option<f64>,
+        #[serde(rename = "pts")]
+        points: Option<Points>,
+    },
+    Aux {
+        name: String,
+        uid: Option<i32>,
+        x: f64,
+        y: f64,
+        width: Option<f64>,
+        height: Option<f64>,
+        label_side: Option<LabelSide>,
+        label_angle: Option<f64>,
+    },
+    Connector {
+        uid: Option<i32>,
+        label_side: Option<LabelSide>,
+        label_angle: Option<f64>,
+        from: String,
+        to: String,
+        angle: f64,
+        #[serde(rename = "pts")]
+        points: Option<Points>, // for multi-point connectors
+    },
+    Style(Style),
+    StackedContainer,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct View {
-    kind: ViewType,
+    #[serde(rename = "type")]
+    pub kind: Option<ViewType>,
+    pub background: Option<String>,
+    pub page_width: Option<String>,
+    pub page_height: Option<String>,
+    pub show_pages: Option<bool>,
+    #[serde(rename = "$value", default)]
+    pub objects: Vec<ViewObject>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ArrayElement {
+    pub subscript: String,
+    pub eqn: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Module {
-    pub name: Ident,
-    pub refs: Vec<Rc<Var>>,
+    pub name: String,
+    pub doc: Option<String>,
+    pub units: Option<String>,
+    pub refs: Option<Vec<Ref>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Ref {
-    pub src: Ident,
-    pub dst: Ident,
+    pub src: String,
+    pub dst: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct NonNegative {}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Stock {
-    pub name: Ident,
-    pub eqn: String,
-    pub inflows: Vec<Ident>,
-    pub outflows: Vec<Ident>,
-    pub non_negative: Option<bool>,
+    pub name: String,
+    pub eqn: Option<String>,
+    pub doc: Option<String>,
+    pub units: Option<String>,
+    pub inflows: Option<Vec<String>>,
+    pub outflows: Option<Vec<String>>,
+    pub non_negative: Option<NonNegative>,
+    pub dimensions: Option<VarDimensions>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Flow {
-    pub name: Ident,
-    pub eqn: String,
-    pub table: Option<Rc<Table>>,
-    pub non_negative: Option<bool>,
+    pub name: String,
+    pub eqn: Option<String>,
+    pub doc: Option<String>,
+    pub units: Option<String>,
+    pub gf: Option<GF>,
+    pub non_negative: Option<NonNegative>,
+    pub dimensions: Option<VarDimensions>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Aux {
-    pub name: Ident,
-    pub eqn: String,
-    pub table: Option<Rc<Table>>,
+    pub name: String,
+    pub eqn: Option<String>,
+    pub doc: Option<String>,
+    pub units: Option<String>,
+    pub gf: Option<GF>,
+    pub dimensions: Option<VarDimensions>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Var {
     Stock(Stock),
     Flow(Flow),
     Aux(Aux),
     Module(Module),
-    Ref(Ref),
 }
 
 impl fmt::Debug for Var {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &Var::Stock(ref stock) => write!(f, "{:?}", stock),
-            &Var::Flow(ref flow) => write!(f, "{:?}", flow),
-            &Var::Aux(ref aux) => write!(f, "{:?}", aux),
-            &Var::Module(ref module) => write!(f, "{:?}", module),
-            &Var::Ref(ref reference) => write!(f, "{:?}", reference),
+        match *self {
+            Var::Stock(ref stock) => write!(f, "{:?}", stock),
+            Var::Flow(ref flow) => write!(f, "{:?}", flow),
+            Var::Aux(ref aux) => write!(f, "{:?}", aux),
+            Var::Module(ref module) => write!(f, "{:?}", module),
         }
     }
 }
 
-fn named(qname: &QName, local: &str) -> bool {
-    &qname.prefix[..] == "" && &qname.local[..] == local
-}
-
-fn attr<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a StrTendril> {
-    for attr in attrs {
-        if named(&attr.name, name) {
-            return Some(&attr.value);
-        }
-    }
-    None
-}
-
-fn element_named(h: &Handle, tag_name: &str) -> bool {
-    let node = h.borrow();
-    match node.node {
-        Element(ref name, _) if named(name, tag_name) => true,
-        _ => false,
-    }
-}
-
+/*
 macro_rules! ensure {
     (element: $xmile: expr) => {{
         match $xmile.node {
@@ -412,7 +576,7 @@ macro_rules! required {
         if all_tags.len() != 1 {
             return err!("expected 1 {}, not {}", $name, all_tags.len());
         }
-        $ty::deserialize(all_tags[0])?
+        $ty::Deserialize, Serialize(all_tags[0])?
     }};
     ($xmile: expr, text) => {{
         let mut text: String = "".to_string();
@@ -427,7 +591,7 @@ macro_rules! required {
         text.trim().to_string()
     }};
     ($xmile: expr, $ty: tt) => {{
-        $ty::deserialize($xmile)?
+        $ty::Deserialize, Serialize($xmile)?
     }};
     ($xmile: expr, attr: $name: expr, text) => {{
         if let Element(_, ref attrs) = $xmile.node {
@@ -511,7 +675,7 @@ macro_rules! optional {
             .collect();
         match all_tags.len() {
             0 => None,
-            1 => Some($ty::deserialize(all_tags[0])?),
+            1 => Some($ty::Deserialize, Serialize(all_tags[0])?),
             _ => {
                 return err!("expected 0 or 1 {}, not {}", $name, all_tags.len());
             }
@@ -528,35 +692,35 @@ macro_rules! optional {
         }
     }};
     ($xmile: expr, children: $name: expr, text) => {{
-        let mut deserialized: Vec<_> = Vec::new();
+        let mut Deserialize, Serialized: Vec<_> = Vec::new();
         for r in $xmile.children.iter().filter(|h| element_named(h, $name)) {
-            deserialized.push(required!(r.borrow(), text));
+            Deserialize, Serialized.push(required!(r.borrow(), text));
         }
 
-        deserialized
+        Deserialize, Serialized
     }};
     ($xmile: expr, children: $name: expr, $ty: tt) => {{
-        let mut deserialized: Vec<_> = Vec::new();
+        let mut Deserialize, Serialized: Vec<_> = Vec::new();
         for r in $xmile
             .children
             .iter()
             .filter(|h| element_named(h, $name))
-            .map($ty::deserialize)
+            .map($ty::Deserialize, Serialize)
         {
             match r {
-                Ok(el) => deserialized.push(el),
+                Ok(el) => Deserialize, Serialized.push(el),
                 Err(err) => {
                     return err!("consume_many('{}'): {:?}", $name, err);
                 }
             };
         }
 
-        deserialized
+        Deserialize, Serialized
     }};
 }
 
 impl XmileNode for Product {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let xmile = handle.borrow();
         ensure!(element: xmile);
 
@@ -570,7 +734,7 @@ impl XmileNode for Product {
 }
 
 impl XmileNode for Options {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let xmile = handle.borrow();
         ensure!(element: xmile);
 
@@ -586,7 +750,7 @@ impl XmileNode for Options {
 }
 
 impl XmileNode for Table {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let xmile = handle.borrow();
         ensure!(element: xmile);
 
@@ -624,7 +788,7 @@ impl XmileNode for Table {
 }
 
 impl XmileNode for Header {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let xmile = handle.borrow();
         ensure!(element: xmile);
 
@@ -647,7 +811,7 @@ impl XmileNode for Header {
 }
 
 impl XmileNode for SimSpec {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let xmile = handle.borrow();
 
         let mut dt = None;
@@ -687,7 +851,7 @@ impl XmileNode for SimSpec {
 }
 
 impl XmileNode for Var {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let xmile = handle.borrow();
         ensure!(element: xmile);
 
@@ -737,7 +901,7 @@ impl XmileNode for Var {
 }
 
 impl XmileNode for Model {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let xmile = handle.borrow();
         ensure!(element: xmile);
 
@@ -770,7 +934,7 @@ impl XmileNode for Model {
 }
 
 impl XmileNode for File {
-    fn deserialize(handle: &Handle) -> Result<Rc<Self>> {
+    fn Deserialize, Serialize(handle: &Handle) -> Result<Rc<Self>> {
         let node = handle.borrow();
         if let rcdom::Document = node.node {
         } else {
@@ -823,3 +987,4 @@ impl XmileNode for File {
         }
     }
 }
+*/

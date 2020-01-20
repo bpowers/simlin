@@ -1,9 +1,15 @@
+// Copyright 2019 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+use core;
+
 use std;
 use std::convert::From;
 use std::fmt;
 use std::{error, result};
 
-use sd::core;
+use regex::Regex;
 
 pub type Ident = String;
 
@@ -28,7 +34,7 @@ macro_rules! die(
 #[macro_export]
 macro_rules! err(
     ($($arg:tt)*) => { {
-        use sd::common::SDError;
+        use crate::common::SDError;
         Err(SDError::new(format!($($arg)*)))
     } }
 );
@@ -40,7 +46,7 @@ pub struct SDError {
 
 impl SDError {
     pub fn new(msg: String) -> SDError {
-        SDError { msg: msg }
+        SDError { msg }
     }
 }
 
@@ -80,8 +86,7 @@ pub fn canonicalize(name: &str) -> String {
     let name = name.trim();
 
     let bytes = name.as_bytes();
-    let quoted: bool =
-        { bytes.len() >= 2 && bytes[0] == '"' as u8 && bytes[bytes.len() - 1] == '"' as u8 };
+    let quoted: bool = { bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' };
 
     let name = if quoted {
         &name[1..bytes.len() - 1]
@@ -90,11 +95,10 @@ pub fn canonicalize(name: &str) -> String {
     };
 
     lazy_static! {
-        static ref BACKSLASH_RE: Regex = Regex::new(r"\\\\").unwrap();
         // TODO: \x{C2AO} ?
         static ref UNDERSCORE_RE: Regex = Regex::new(r"\\n|\\r|\n|\r| |\x{00A0}").unwrap();
     }
-    let name = BACKSLASH_RE.replace_all(name, "\\");
+    let name = name.replace("\\\\", "\\");
     let name = UNDERSCORE_RE.replace_all(&name, "_");
 
     name.to_lowercase()

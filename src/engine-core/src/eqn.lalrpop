@@ -1,12 +1,12 @@
 use sd::common;
-use sd::ast::Op2::*;
-use sd::ast::Op1::*;
+use sd::ast::UnaryOp::*
+use sd::ast::BinaryOp::*;
 use sd::ast::Expr;
-use sd::ast::Expr::*;
+use sd::ast::node::*;
 use sd::tok::{self, Tok};
+use std::Option::Some;
 
-#[LALR]
-grammar<'input>(text: &'input str);
+grammar;
 
 pub Program: Box<Expr> = {
     Expr,
@@ -18,7 +18,7 @@ Expr: Box<Expr> = {
 };
 
 LCmp: Box<Expr> = {
-    <l:ACmp> "&&" <r:LCmp> => Box::new(Op2(And, l, r)),
+    <l:ACmp> "&&" <r:LCmp> => Expr::new(Op2(And, l, r))),
     <l:ACmp> "||" <r:LCmp> => Box::new(Op2(Or, l, r)),
     ACmp,
 };
@@ -26,6 +26,7 @@ LCmp: Box<Expr> = {
 ACmp: Box<Expr> = {
     <l:Eq> "=" <r:ACmp>  => Box::new(Op2(Eq, l, r)),
     <l:Eq> "<>" <r:ACmp>  => Box::new(Op2(Neq, l, r)),
+    <l:Eq> "!=" <r:ACmp>  => Box::new(Op2(Neq, l, r)),
 };
 
 Eq: Box<Expr> = {
@@ -96,6 +97,7 @@ extern {
         "else" => Tok::Else,
         "," => Tok::Comma,
         "=" => Tok::Eq,
+        "!=" => Tok::Neq,
         "<>" => Tok::Neq,
         "<" => Tok::Lt,
         "<=" => Tok::Lte,
