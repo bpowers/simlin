@@ -22,11 +22,11 @@ mod ast {
 // mod eqn;
 mod sim;
 mod tok;
-mod xmile;
+pub mod xmile;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::rc::Rc;
 
 use quick_xml::de;
@@ -64,7 +64,7 @@ impl<'a> Project {
             }
         };
 
-        writeln!(&mut ::std::io::stderr(), "{:?}\n", file).unwrap();
+        // writeln!(&mut ::std::io::stderr(), "{:?}\n", file).unwrap();
 
         //        se::to_writer(::std::io::stderr(), &file).unwrap();
         //        ::std::io::stderr().flush().unwrap();

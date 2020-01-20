@@ -142,7 +142,7 @@ pub struct Product {
     pub name: Option<String>,
     #[serde(rename = "lang")]
     pub language: Option<String>,
-    pub version: String,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Clone)]
@@ -184,7 +184,7 @@ pub enum Feature {
 pub struct Options {
     pub namespace: Option<String>, // string of comma separated namespaces
     #[serde(rename = "$value")]
-    pub features: Vec<Feature>,
+    pub features: Option<Vec<Feature>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -391,12 +391,19 @@ pub enum ViewObject {
         label_angle: Option<f64>,
         from: String,
         to: String,
-        angle: f64,
+        angle: Option<f64>,
         #[serde(rename = "pts")]
         points: Option<Points>, // for multi-point connectors
     },
+    Module {
+        name: String,
+        uid: Option<i32>,
+        x: f64,
+        y: f64,
+    },
     Style(Style),
     StackedContainer,
+    SimulationDelay,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

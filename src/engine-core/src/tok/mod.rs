@@ -5,8 +5,8 @@
 // derived from both the LALRPOP whitespace tokenizer, and LALRPOP's
 // internal tokenizer
 
-use unicode_xid::UnicodeXID;
 use std::str::{CharIndices, FromStr};
+use unicode_xid::UnicodeXID;
 
 use self::ErrorCode::*;
 use self::Tok::*;
