@@ -272,7 +272,6 @@ pub struct Unit {
 #[derive(Deserialize, Serialize)]
 pub struct Model {
     pub name: Option<String>,
-    pub run: Option<bool>, // false
     #[serde(rename = "namespace")]
     pub namespaces: Option<String>, // comma separated list of namespaces
     pub resource: Option<String>, // path or URL to separate resource file
@@ -302,7 +301,6 @@ impl fmt::Debug for Model {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "Model{{")?;
         writeln!(f, "          name:       {}", self.get_name())?;
-        writeln!(f, "          run:        {}", self.run.unwrap_or(false))?;
         writeln!(f, "          namespaces: {:?}", self.namespaces)?;
         writeln!(f, "          resource:   {:?}", self.resource)?;
         writeln!(f, "          sim_specs:  {:?}", self.sim_specs)?;

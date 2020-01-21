@@ -27,7 +27,7 @@ enum BinaryOp {
 }
 
 message Expr {
-  message Call {
+  message App {
     string fun = 1;
     repeated Expr args = 2;
   }
@@ -53,7 +53,7 @@ message Expr {
   oneof v {
     string ident = 1;
     double constant = 2;
-    Call call = 3;
+    App app = 3;
     If if = 4;
     Op1 op1 = 5;
     Op2 op2 = 6;

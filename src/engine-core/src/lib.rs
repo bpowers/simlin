@@ -19,6 +19,8 @@ mod ast {
     include!(concat!(env!("OUT_DIR"), "/sd.ast.rs"));
 }
 
+mod model;
+
 // mod eqn;
 mod sim;
 mod tok;
