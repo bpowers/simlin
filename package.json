@@ -90,7 +90,6 @@
     "@babel/plugin-proposal-class-properties": "^7.5.5",
     "@babel/plugin-proposal-optional-chaining": "^7.6.0",
     "@babel/preset-typescript": "^7.6.0",
-    "@svgr/webpack": "^4.3.3",
     "@types/chai": "^4.2.3",
     "@types/cookie-parser": "^1.4.2",
     "@types/cors": "^2.8.6",
