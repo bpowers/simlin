@@ -60,7 +60,7 @@
     "google-protobuf": "^3.10.0",
     "helmet": "^3.21.1",
     "immutable": "^4.0.0-rc.12",
-    "jsdom": "^15.1.1",
+    "jsdom": "^16.0.1",
     "mongodb": "^3.3.4",
     "mustache": "^4.0.0",
     "node-fetch": "^2.6.0",
