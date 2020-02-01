@@ -78,7 +78,7 @@ function binaryLevel(n: number, p: Parser, ops: string): (maxLevel: number) => N
 class Parser {
   lexer: Lexer;
   errs: string[] = [];
-  levels: Array<(maxLevel: number) => Node | null> = [];
+  levels: ((maxLevel: number) => Node | null)[] = [];
 
   constructor(eqn: string) {
     this.lexer = new Lexer(eqn);

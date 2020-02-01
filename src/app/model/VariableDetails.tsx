@@ -120,7 +120,7 @@ export const VariableDetails = withStyles(styles)(
       }
     };
 
-    formatValue = (value: string | number | Array<string | number>) => {
+    formatValue = (value: string | number | (string | number)[]) => {
       return typeof value === 'number' ? value.toFixed(3) : value;
     };
 
@@ -139,7 +139,7 @@ export const VariableDetails = withStyles(styles)(
 
       let yMin = 0;
       let yMax = 0;
-      const series: Array<{ x: number; y: number }> = [];
+      const series: { x: number; y: number }[] = [];
       for (let i = 0; data && i < data.time.length; i++) {
         const x = data.time[i];
         const y = data.values[i];
@@ -246,7 +246,7 @@ export const VariableDetails = withStyles(styles)(
       if (hasLookupTable && variable instanceof Table) {
         let yMin = 0;
         let yMax = 0;
-        const series: Array<{ x: number; y: number }> = [];
+        const series: { x: number; y: number }[] = [];
         for (let i = 0; i < variable.x.size; i++) {
           const x = defined(variable.x.get(i));
           const y = defined(variable.y.get(i));
