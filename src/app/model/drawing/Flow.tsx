@@ -11,7 +11,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import { Point as XmilePoint, ViewElement } from '../../../engine/xmile';
 
 import { Arrowhead } from './Arrowhead';
-import { displayName, Point, square } from './common';
+import { displayName, Point } from './common';
 import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default';
 import { findSide, Label } from './Label';
 import { Sparkline } from './Sparkline';
@@ -416,10 +416,6 @@ export type FlowProps = Pick<
 
 export const Flow = withStyles(styles)(
   class extends React.PureComponent<FlowPropsFull> {
-    constructor(props: FlowPropsFull) {
-      super(props);
-    }
-
     handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
       // e.preventDefault();
       // e.stopPropagation();

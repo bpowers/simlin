@@ -181,7 +181,7 @@ const Home = withWidth()(
                   <Link to={`/${project.id}`} className={classes.modelLink}>
                     <Paper className={classes.paper} elevation={4}>
                       <div className={classes.preview}>
-                        <img src={`/api/preview/${project.id}`} className={classes.previewImg} />
+                        <img src={`/api/preview/${project.id}`} alt="model preview" className={classes.previewImg} />
                       </div>
                       <Typography variant="h5" component="h3">
                         {project.displayName}

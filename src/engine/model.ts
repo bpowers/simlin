@@ -31,9 +31,6 @@ import {
   ViewElementType,
 } from './xmile';
 
-const FlowSource = 0;
-const FlowSink = 1;
-
 const modelDefaults = {
   valid: false,
   shouldPersist: false,

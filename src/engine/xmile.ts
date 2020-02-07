@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { List, Map, Record, Set } from 'immutable';
+import { List, Map, Record } from 'immutable';
 
 import { canonicalize, defined, exists } from './common';
 
@@ -43,20 +43,6 @@ const attr = (el: Element, name: string): string | undefined => {
     }
   }
   return undefined;
-};
-
-const parseText = (val: string): string | boolean | number | undefined => {
-  val = val.trim();
-  if (/^\s*$/.test(val)) {
-    return undefined;
-  }
-  if (/^(?:true|false)$/i.test(val)) {
-    return val.toLowerCase() === 'true';
-  }
-  if (isFinite(val)) {
-    return parseFloat(val);
-  }
-  return val;
 };
 
 const content = (el: Element): string => {
@@ -130,10 +116,6 @@ interface PointConstruction {
 }
 
 export class Point extends Record(PointDefaults) implements XNode {
-  constructor(point: PointConstruction) {
-    super(point);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Point',
@@ -194,10 +176,6 @@ const FileDefaults = {
 };
 
 export class File extends Record(FileDefaults) implements XNode {
-  constructor(file: typeof FileDefaults) {
-    super(file);
-  }
-
   toJSON(): any {
     return {
       '@class': 'File',
@@ -286,10 +264,6 @@ const SimSpecDefaults = {
 };
 
 export class SimSpec extends Record(SimSpecDefaults) implements XNode {
-  constructor(simSpec: typeof SimSpecDefaults) {
-    super(simSpec);
-  }
-
   toJSON(): any {
     return {
       '@class': 'SimSpec',
@@ -345,7 +319,8 @@ export class SimSpec extends Record(SimSpecDefaults) implements XNode {
       case 'rk2':
       case 'rk45':
       case 'gear':
-        console.log('valid but unsupported integration ' + 'method: ' + simSpec.method + '. using euler');
+        // FIXME:
+        console.log(`valid but unsupported integration method: ${simSpec.method}; using 'euler'`);
         simSpec.method = 'euler';
         break;
       // unknown
@@ -368,10 +343,6 @@ const UnitDefaults = {
 };
 
 export class Unit extends Record(UnitDefaults) implements XNode {
-  constructor(unit: typeof UnitDefaults) {
-    super(unit);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Unit',
@@ -397,10 +368,6 @@ const ProductDefaults = {
 };
 
 export class Product extends Record(ProductDefaults) implements XNode {
-  constructor(product: typeof ProductDefaults) {
-    super(product);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Product',
@@ -453,10 +420,6 @@ const HeaderDefaults = {
 };
 
 export class Header extends Record(HeaderDefaults) implements XNode {
-  constructor(header: typeof HeaderDefaults) {
-    super(header);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Header',
@@ -536,10 +499,6 @@ const DimensionDefaults = {
 };
 
 export class Dimension extends Record(DimensionDefaults) implements XNode {
-  constructor(dimension: typeof DimensionDefaults) {
-    super(dimension);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Dimension',
@@ -595,10 +554,6 @@ const OptionsDefaults = {
 };
 
 export class Options extends Record(OptionsDefaults) implements XNode {
-  constructor(options: typeof OptionsDefaults) {
-    super(options);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Options',
@@ -689,10 +644,6 @@ const BehaviorDefaults = {
 };
 
 export class Behavior extends Record(BehaviorDefaults) implements XNode {
-  constructor(behavior: typeof BehaviorDefaults) {
-    super(behavior);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Behavior',
@@ -714,10 +665,6 @@ export class Behavior extends Record(BehaviorDefaults) implements XNode {
 const DataDefaults = {};
 
 export class Data extends Record(DataDefaults) implements XNode {
-  constructor(data: typeof DataDefaults) {
-    super(data);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Data',
@@ -775,10 +722,6 @@ export function cloudFor(flow: ViewElement, dir: 'source' | 'sink', uid: number)
 }
 
 export class Model extends Record(ModelDefaults) implements XNode {
-  constructor(model: typeof ModelDefaults) {
-    super(model);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Model',
@@ -985,10 +928,6 @@ const ArrayElementDefaults = {
 // the 'Element' name is defined by the TypeScript lib.d.ts, so we're
 // forced to be more verbose.
 export class ArrayElement extends Record(ArrayElementDefaults) implements XNode {
-  constructor(arrayElement: typeof ArrayElementDefaults) {
-    super(arrayElement);
-  }
-
   toJSON(): any {
     return {
       '@class': 'ArrayElement',
@@ -1017,10 +956,6 @@ const RangeDefaults = {
 
 // Section 4.1.1 - Ranges, Scales, Number Formats
 export class Range extends Record(RangeDefaults) implements XNode {
-  constructor(range: typeof RangeDefaults) {
-    super(range);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Range',
@@ -1047,10 +982,6 @@ const FormatDefaults = {
 
 // Section 4.1.1 - Ranges, Scales, Number Formats
 export class Format extends Record(FormatDefaults) implements XNode {
-  constructor(format: typeof FormatDefaults) {
-    super(format);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Format',
@@ -1110,10 +1041,6 @@ const VariableDefaults = {
 
 // TODO: split into multiple subclasses?
 export class Variable extends Record(VariableDefaults) implements XNode {
-  constructor(variable: Partial<typeof VariableDefaults>) {
-    super(variable);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Variable',
@@ -1216,10 +1143,6 @@ const ShapeDefaults = {
 };
 
 export class Shape extends Record(ShapeDefaults) implements XNode {
-  constructor(shape: typeof ShapeDefaults) {
-    super(shape);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Shape',
@@ -1289,10 +1212,6 @@ const StyleDefaults = {
 };
 
 export class Style extends Record(StyleDefaults) implements XNode {
-  constructor(view: typeof StyleDefaults) {
-    super(view);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Style',
@@ -1335,10 +1254,6 @@ const ViewElementDefaults = {
 };
 
 export class ViewElement extends Record(ViewElementDefaults) implements XNode {
-  constructor(viewElement: Partial<typeof ViewElementDefaults>) {
-    super(viewElement);
-  }
-
   get hasUid(): boolean {
     return !!(this.uid && this.uid !== -1);
   }
@@ -1740,10 +1655,6 @@ const GFDefaults = {
 };
 
 export class GF extends Record(GFDefaults) implements XNode {
-  constructor(gf: typeof GFDefaults) {
-    super(gf);
-  }
-
   toJSON(): any {
     return {
       '@class': 'GF',
@@ -1819,10 +1730,6 @@ const ScaleDefaults = {
 };
 
 export class Scale extends Record(ScaleDefaults) implements XNode {
-  constructor(scale: typeof ScaleDefaults) {
-    super(scale);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Scale',
@@ -1870,10 +1777,6 @@ const ConnectionDefaults = {
 };
 
 export class Connection extends Record(ConnectionDefaults) implements XNode {
-  constructor(conn: typeof ConnectionDefaults) {
-    super(conn);
-  }
-
   toJSON(): any {
     return {
       '@class': 'Connection',

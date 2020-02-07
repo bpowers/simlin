@@ -8,7 +8,7 @@ import { BinaryExpr, CallExpr, Constant, Ident, IfExpr, Node, ParenExpr, UnaryEx
 import { Lexer } from './lex';
 import { SourceLoc, Token, TokenType } from './token';
 
-const WORD_OPS = {
+const _WORD_OPS = {
   not: '!',
   and: '&',
   or: '|',

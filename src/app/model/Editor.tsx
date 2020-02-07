@@ -57,8 +57,6 @@ import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
 
-import { File as FilePb } from '../../schemas/file_pb';
-
 const MaxUndoSize = 5;
 
 function radToDeg(r: number): number {
@@ -688,14 +686,6 @@ export const Editor = withStyles(styles)(
             }
             throw new Error(`unknown name ${ident}`);
           };
-          const getUid = (uid: number) => {
-            for (const e of view.elements) {
-              if (e.uid === uid) {
-                return e;
-              }
-            }
-            throw new Error(`unknown uid ${uid}`);
-          };
           let elements = view.elements.map((element: ViewElement) => {
             if (element.uid !== link.uid) {
               return element;
@@ -780,7 +770,7 @@ export const Editor = withStyles(styles)(
                 return e;
               }
             }
-            throw new Error(`unknown name ${name}`);
+            throw new Error(`unknown name ${ident}`);
           };
           const getUid = (uid: UID) => {
             for (const e of view.elements) {
@@ -1352,7 +1342,7 @@ export const Editor = withStyles(styles)(
       return (
         <Card className={classes.snapshotCard} elevation={2}>
           <CardContent>
-            <img src={URL.createObjectURL(snapshotBlob)} className={classes.snapshotImg} />
+            <img src={URL.createObjectURL(snapshotBlob)} className={classes.snapshotImg} alt="profile snapshot" />
           </CardContent>
           <CardActions>
             <Button size="small" color="primary" onClick={this.handleClearSnapshot}>

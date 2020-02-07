@@ -101,10 +101,6 @@ export function auxBounds(element: ViewElement): Rect {
 
 export const Aux = withStyles(styles)(
   class extends React.PureComponent<AuxPropsFull> {
-    constructor(props: AuxPropsFull) {
-      super(props);
-    }
-
     handlePointerUp = (_: React.PointerEvent<SVGElement>): void => {};
 
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {

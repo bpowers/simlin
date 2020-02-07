@@ -10,16 +10,7 @@ import { Error } from './common';
 import { Model } from './model';
 import { defined } from './util';
 import { Module, Project as varsProject } from './vars';
-import {
-  File,
-  FileFromJSON,
-  Model as XmileModel,
-  SimSpec,
-  Variable as XmileVariable,
-  View,
-  ViewElement,
-  ViewElementType,
-} from './xmile';
+import { File, FileFromJSON, Model as XmileModel, SimSpec, Variable as XmileVariable, ViewElementType } from './xmile';
 
 const getXmileElement = (xmileDoc: XMLDocument): Element | undefined => {
   // in Chrome/Firefox, item 0 is xmile.  Under node's XML DOM
@@ -51,7 +42,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
     let models = Map<string, Model>();
 
     if (!omitStdlib) {
-      for (const [name, modelJSON] of stdlib.xmileModels) {
+      for (const [_name, modelJSON] of stdlib.xmileModels) {
         let file;
         try {
           file = FileFromJSON(modelJSON);
@@ -90,7 +81,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
     }
     const file = defined(this.files.get(0));
     let models = List<XmileModel>();
-    for (const [name, model] of this.models) {
+    for (const [_name, model] of this.models) {
       if (!model.shouldPersist) {
         continue;
       }

@@ -45,11 +45,8 @@ export type LoginProps = Pick<LoginPropsFull, 'disabled'>;
 
 export const Login = withStyles(styles)(
   class extends React.Component<LoginPropsFull> {
-    constructor(props: LoginPropsFull) {
-      super(props);
-    }
-
     loginClick = (): void => {
+      // eslint-disable-next-line
       const location = exists(/http(s?):\/\/[^\/]*/.exec(window.location.href))[0];
       window.location.href = `${location}/auth/google`;
     };

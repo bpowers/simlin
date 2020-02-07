@@ -61,10 +61,6 @@ export type ToastProps = Pick<ToastPropsFull, 'className' | 'message' | 'onClose
 
 export const Toast = withStyles(styles)(
   class InnerToast extends React.PureComponent<ToastPropsFull> {
-    constructor(props: ToastPropsFull) {
-      super(props);
-    }
-
     handleClose = () => {
       this.props.onClose(this.props.message);
     };

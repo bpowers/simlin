@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-'use strict';
-
 import { List, Map, Set } from 'immutable';
 
 import * as Mustache from 'mustache';
@@ -211,6 +209,7 @@ export class SimBuilder {
     }
 
     // compile the models after we've named all of our monomorphizations
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const [n, modelDef] of models) {
       const monomorphizations = modelDef.monomorphizations();
       for (const [inputs, modelName] of monomorphizations) {

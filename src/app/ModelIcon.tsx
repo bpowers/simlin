@@ -30,10 +30,6 @@ interface ModelIconPropsFull extends WithStyles<typeof styles> {
 
 export const ModelIcon = withStyles(styles)(
   class extends React.PureComponent<ModelIconPropsFull> {
-    constructor(props: ModelIconPropsFull) {
-      super(props);
-    }
-
     render() {
       const { classes, className } = this.props;
 

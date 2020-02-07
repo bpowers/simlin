@@ -2,9 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { Map, Set } from 'immutable';
+import { Map } from 'immutable';
 
-import { builtins, reserved } from './common';
+import { reserved } from './common';
 import { SourceLoc, Token, TokenType } from './token';
 import { defined, exists } from './util';
 
@@ -25,13 +25,14 @@ function isNumberStart(ch: string | null): boolean {
   if (ch === null) {
     return false;
   }
-  return /[\d\.]/.test(ch);
+  return /[\d.]/.test(ch);
 }
 // For use in isIdentifierStart.  See below.
 function isOperator(ch: string | null): boolean {
   if (ch === null) {
     return false;
   }
+  // eslint-disable-next-line
   return /[=><\[\]\(\)\^\+\-\*\/,]/.test(ch);
 }
 // It is the year 2015, but JS regex's don't support Unicode. The \w
@@ -40,7 +41,7 @@ function isOperator(ch: string | null): boolean {
 // not an operator or number or space.  I think this should be ok, but
 // I can also imagine it missing something important.
 function isIdentifierStart(ch: string): boolean {
-  return !isNumberStart(ch) && !isWhitespace(ch) && (/[_\"]/.test(ch) || !isOperator(ch));
+  return !isNumberStart(ch) && !isWhitespace(ch) && (/[_"]/.test(ch) || !isOperator(ch));
 }
 
 // TODO(bp) better errors
@@ -203,15 +204,14 @@ export class Lexer {
   private lexIdentifier(startPos: SourceLoc): Token {
     const quoted = this.rpeek === '"';
 
-    const line = this.line;
     const pos = this.pos;
 
     if (quoted) {
       this.nextRune();
     }
 
-    let r: string | null;
-    while ((r = this.nextRune())) {
+    while (true) {
+      const r = this.nextRune();
       if (r === null) {
         break;
       }

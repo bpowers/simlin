@@ -176,5 +176,6 @@ export function qsa(e: any, s: any): any {
 }
 
 export function isNaN(n: number): boolean {
+  // eslint-disable-next-line no-self-compare
   return n !== n;
 }

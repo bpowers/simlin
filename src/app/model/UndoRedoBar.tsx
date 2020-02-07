@@ -46,10 +46,6 @@ interface UndoRedoBarPropsFull extends WithStyles<typeof styles> {
 
 export const UndoRedoBar = withStyles(styles)(
   class InnerVariableDetails extends React.PureComponent<UndoRedoBarPropsFull> {
-    constructor(props: UndoRedoBarPropsFull) {
-      super(props);
-    }
-
     handleUndo = () => {
       this.props.onUndoRedo('undo');
     };

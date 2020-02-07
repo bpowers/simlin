@@ -62,12 +62,12 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
 
   let svg = renderToString(sheets.collect(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>));
 
-  const viewboxStr = exists(svg.match(/viewBox=\"[^"]*\"/))[0]
+  const viewboxStr = exists(svg.match(/viewBox="[^"]*"/))[0]
     .split('"')[1]
     .trim();
-  const [x, y, w, h] = viewboxStr.split(' ').map(Number);
-  const width = w;
-  const height = h;
+  const viewboxParts = viewboxStr.split(' ').map(Number);
+  const width = viewboxParts[2];
+  const height = viewboxParts[3];
 
   const styles = `<style>\n${sheets.toString()}\n</style>\n<defs>\n`;
 

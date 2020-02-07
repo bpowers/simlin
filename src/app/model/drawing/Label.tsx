@@ -38,9 +38,8 @@ interface LabelLayout {
 
 function labelLayout(props: LabelPropsFull): LabelLayout {
   const lines = props.text.split('\n');
-  const linesCount = lines.length;
   // TODO: figure this out dynamically
-  const maxH = 13;
+  // const maxH = 13;
 
   const { cx, cy, side } = props;
   const rw: number = props.rw || AuxRadius;
@@ -101,15 +100,11 @@ export function labelBounds(props: LabelProps): Rect {
   const rh: number = props.rh || AuxRadius;
   let x = cx;
   let y = cy;
-  // for things on the top, we need to reverse the line-spacing we calculate
-  let reverseBaseline = false;
   const textX = Math.round(x);
   let textY = y;
   let left = 0;
-  let textAlign: 'center' | 'left' | 'right' = 'center';
   switch (side) {
     case 'top':
-      reverseBaseline = true;
       y = cy - rh - LabelPadding - lineSpacing * linesCount;
       left = textX - editorWidth / 2;
       textY = y;
@@ -121,13 +116,11 @@ export function labelBounds(props: LabelProps): Rect {
       break;
     case 'left':
       x = cx - rw - LabelPadding + 1;
-      textAlign = 'right';
       left = x - editorWidth;
       textY = y - (12 + (lines.length - 1) * 14) / 2 - 3;
       break;
     case 'right':
       x = cx + rw + LabelPadding - 1;
-      textAlign = 'left';
       left = x;
       textY = y - (12 + (lines.length - 1) * 14) / 2 - 3;
       break;
@@ -199,7 +192,7 @@ export const Label = withStyles(styles)(
     };
 
     render() {
-      const { textX, textY, x, y, lines, reverseBaseline, align } = labelLayout(this.props);
+      const { textX, textY, x, lines, reverseBaseline, align } = labelLayout(this.props);
       const linesCount = lines.length;
 
       /*

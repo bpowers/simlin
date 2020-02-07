@@ -94,6 +94,7 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
     // to set the sweep flag.
     const side1 = (circ.x - from.cx) * (to.cy - from.cy) - (circ.y - from.cy) * (to.cx - from.cx);
     const side2 = (arcPoint.x - from.cx) * (to.cy - from.cy) - (arcPoint.y - from.cy) * (to.cx - from.cx);
+    // eslint-disable-next-line no-mixed-operators
     const sweep = side1 < 0 === side2 < 0;
 
     return fromθ + degToRad(((sweep && inv) || (!sweep && !inv) ? -1 : 1) * 90);
@@ -179,10 +180,6 @@ export type ConnectorProps = Pick<
 
 export const Connector = withStyles(styles)(
   class Conn extends React.PureComponent<ConnectorPropsFull> {
-    constructor(props: ConnectorPropsFull) {
-      super(props);
-    }
-
     handlePointerDownArc = (e: React.PointerEvent<SVGElement>): void => {
       e.preventDefault();
       e.stopPropagation();
@@ -348,6 +345,7 @@ export const Connector = withStyles(styles)(
         y: from.cy + startR * sin(takeoffAngle),
       };
       const side2 = (takeoffPoint.x - from.cx) * (to.cy - from.cy) - (takeoffPoint.y - from.cy) * (to.cx - from.cx);
+      // eslint-disable-next-line no-mixed-operators
       const sweep = side1 < 0 === side2 < 0;
 
       if (sweep) {

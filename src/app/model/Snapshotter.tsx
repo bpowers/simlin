@@ -27,10 +27,6 @@ interface SnapshotterPropsFull extends WithStyles<typeof styles> {
 
 export const Snapshotter = withStyles(styles)(
   class InnerVariableDetails extends React.PureComponent<SnapshotterPropsFull> {
-    constructor(props: SnapshotterPropsFull) {
-      super(props);
-    }
-
     handleSnapshot = () => {
       this.props.onSnapshot('show');
     };

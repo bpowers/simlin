@@ -85,10 +85,6 @@ interface ModelPropertiesDrawerPropsFull extends WithStyles<typeof styles> {
 
 export const ModelPropertiesDrawer = withStyles(styles)(
   class InnerModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDrawerPropsFull> {
-    constructor(props: ModelPropertiesDrawerPropsFull) {
-      super(props);
-    }
-
     handleOpen = () => {
       this.props.onDrawerToggle(true);
     };

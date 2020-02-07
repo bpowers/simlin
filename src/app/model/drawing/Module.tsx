@@ -9,7 +9,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import { ViewElement } from '../../../engine/xmile';
 
 import { displayName, Rect } from './common';
-import { AuxRadius, ModuleRadius } from './default';
+import { ModuleRadius } from './default';
 import { findSide, Label } from './Label';
 
 import { defined } from '../../common';
@@ -44,10 +44,6 @@ export function moduleBounds(props: ModuleProps): Rect {
 
 export const Module = withStyles(styles)(
   class extends React.PureComponent<ModulePropsFull> {
-    constructor(props: ModulePropsFull) {
-      super(props);
-    }
-
     render() {
       const { element, classes } = this.props;
       const w = element.width ? element.width : 55;

@@ -123,10 +123,6 @@ const InnerApp = withStyles(styles)(
 );
 
 export class App extends React.PureComponent {
-  constructor(props: AppProps) {
-    super(props);
-  }
-
   render() {
     return (
       <StylesProvider generateClassName={generateClassName}>

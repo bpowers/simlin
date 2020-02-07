@@ -47,10 +47,6 @@ const modelDefDefaults: ModelDefProps = {
 };
 
 export class ModelDef extends Record(modelDefDefaults) {
-  constructor(params: ModelDefProps) {
-    super(params);
-  }
-
   get<T extends keyof ModelDefProps>(key: T): ModelDefProps[T] {
     return super.get(key);
   }
@@ -146,7 +142,6 @@ function variableFrom(xVar: xmile.Variable | undefined, kind: VariableKind): Ord
   variable.kind = kind;
   variable.xmile = xVar;
 
-  const ident = xVar && xVar.name ? xVar.ident : undefined;
   const eqn: string | undefined = xVar && xVar.eqn;
 
   if (eqn !== undefined) {
@@ -700,7 +695,7 @@ export function referencedModels(project: Project, mod: Module, all?: Map<string
       }),
     );
   }
-  for (const [name, module] of mdl.modules) {
+  for (const [_name, module] of mdl.modules) {
     all = referencedModels(project, module, all);
   }
   return all;

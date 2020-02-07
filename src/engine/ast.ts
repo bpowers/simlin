@@ -5,7 +5,7 @@
 import { List, Record } from 'immutable';
 
 import { canonicalize } from './common';
-import { SourceLoc, Token, UnknownSourceLoc } from './token';
+import { SourceLoc, UnknownSourceLoc } from './token';
 
 // this is a gross hack to work around the mismatch of TypeScript
 // and immutable JS.

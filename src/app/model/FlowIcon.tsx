@@ -22,10 +22,6 @@ interface FlowIconProps extends WithStyles<typeof styles> {}
 
 export const FlowIcon = withStyles(styles)(
   class FlowIconInner extends React.PureComponent<FlowIconProps> {
-    constructor(props: FlowIconProps) {
-      super(props);
-    }
-
     render() {
       const { classes } = this.props;
       return (

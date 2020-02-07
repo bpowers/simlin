@@ -102,7 +102,7 @@ export const VariableDetails = withStyles(styles)(
       this.props.onDelete(this.props.viewElement.ident);
     };
 
-    handleNotesChange = (event: React.ChangeEvent<HTMLInputElement>) => {};
+    handleNotesChange = (_event: React.ChangeEvent<HTMLInputElement>) => {};
 
     handleEquationCancel = () => {
       this.setState({
@@ -238,9 +238,8 @@ export const VariableDetails = withStyles(styles)(
     }
 
     renderLookup() {
-      const { data, classes, variable } = this.props;
-      const { equation, hasLookupTable } = this.state;
-      const initialEquation = equationFor(variable);
+      const { variable } = this.props;
+      const { hasLookupTable } = this.state;
 
       let table;
       if (hasLookupTable && variable instanceof Table) {
@@ -263,9 +262,6 @@ export const VariableDetails = withStyles(styles)(
 
         const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
         const yAxisWidth = Math.max(40, 20 + charWidth * 6);
-
-        // enable saving and canceling if the equation has changed
-        const equationActionsEnabled = initialEquation !== equationFromValue(equation);
 
         const { left, right } = {
           left: 'dataMin',

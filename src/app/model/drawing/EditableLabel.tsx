@@ -72,15 +72,12 @@ export const EditableLabel = withStyles(styles)(
       const rh: number = this.props.rh || AuxRadius;
       let x = cx;
       let y = cy;
-      // for things on the top, we need to reverse the line-spacing we calculate
-      let reverseBaseline = false;
       const textX = Math.round(x);
       let textY = y;
       let left = 0;
       let textAlign: 'center' | 'left' | 'right' = 'center';
       switch (side) {
         case 'top':
-          reverseBaseline = true;
           y = cy - rh - LabelPadding - lineSpacing * linesCount;
           left = textX - editorWidth / 2;
           textY = y;

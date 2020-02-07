@@ -26,10 +26,6 @@ interface LinkIconProps extends WithStyles<typeof styles> {}
 
 export const LinkIcon = withStyles(styles)(
   class LinkIconInner extends React.PureComponent<LinkIconProps> {
-    constructor(props: LinkIconProps) {
-      super(props);
-    }
-
     render() {
       const { classes } = this.props;
       return (
