@@ -8,6 +8,7 @@ import { BinaryExpr, CallExpr, Constant, Ident, IfExpr, Node, ParenExpr, UnaryEx
 import { Lexer } from './lex';
 import { SourceLoc, Token, TokenType } from './token';
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const _WORD_OPS = {
   not: '!',
   and: '&',

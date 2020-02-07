@@ -42,6 +42,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
     let models = Map<string, Model>();
 
     if (!omitStdlib) {
+      // eslint-disable-next-line
       for (const [_name, modelJSON] of stdlib.xmileModels) {
         let file;
         try {

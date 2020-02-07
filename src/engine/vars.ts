@@ -695,6 +695,7 @@ export function referencedModels(project: Project, mod: Module, all?: Map<string
       }),
     );
   }
+  // eslint-disable-next-line
   for (const [_name, module] of mdl.modules) {
     all = referencedModels(project, module, all);
   }
