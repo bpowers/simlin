@@ -37,7 +37,7 @@ export class BuiltinVisitor implements Visitor<Node> {
   variable: Variable;
   modules: Map<string, Module> = Map();
   vars: Map<string, Variable> = Map();
-  n: number = 0;
+  n = 0;
 
   constructor(project: Project, v: Variable) {
     this.project = project;

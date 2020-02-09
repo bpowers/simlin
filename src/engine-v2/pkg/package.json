@@ -13,6 +13,6 @@
   ],
   "module": "engine_v2.js",
   "types": "engine_v2.d.ts",
-  "sideEffects": "false",
+  "sideEffects": false,
   "main": "engine_v2_main.js"
 }

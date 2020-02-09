@@ -18,7 +18,7 @@ export type Series = Readonly<SeriesProps>;
 export class Sim {
   root: vars.Module;
   project: vars.Project;
-  seq: number = 1; // unique message ids
+  seq = 1; // unique message ids
   // callback storage, keyed by message id
   promised: Map<number, (result: any, err: any) => void> = Map();
   worker?: Worker;
@@ -62,11 +62,11 @@ export class Sim {
     });
   }
 
-  async close(): Promise<void> {
+  close(): void {
     if (!this.worker) {
       return;
     }
-    await this.worker.terminate();
+    this.worker.terminate();
     this.worker = undefined;
   }
 
@@ -106,7 +106,7 @@ export class Sim {
     return this.post('var_names', includeHidden);
   }
 
-  async csv(delim: string = ','): Promise<string> {
+  async csv(delim = ','): Promise<string> {
     const names = await this.varNames();
     const data = await this.series(...names);
 

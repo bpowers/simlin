@@ -95,7 +95,7 @@ export class Context extends Record(contextDefaults) {
   }
 
   lookup(ident: string): Variable | undefined {
-    if (ident[0] === '.') {
+    if (ident.startsWith('.')) {
       ident = ident.substr(1);
       return new Context(this.project, this.mainModel, this.isInitials).lookup(ident);
     }
@@ -613,7 +613,7 @@ export function initialEquation(parent: Model, offsets: Map<string, number>, var
 function getModuleDeps(context: Context, variable: Module): Set<string> {
   let allDeps = Set<string>();
   for (let ident of variable.deps) {
-    if (ident[0] === '.') {
+    if (ident.startsWith('.')) {
       if (context.parent === context.mainModel) {
         ident = ident.substr(1);
       } else {
@@ -646,7 +646,7 @@ export function getDeps(context: Context, variable: Variable): Set<string> {
 
   let allDeps = Set<string>();
   for (let ident of variable.deps) {
-    if (ident[0] === '.') {
+    if (ident.startsWith('.')) {
       if (context.parent === context.mainModel) {
         ident = ident.substr(1);
       } else {
@@ -712,7 +712,7 @@ export class IdentifierSetVisitor implements ast.Visitor<Set<string>> {
     // TODO: I don't think this is necessary, but it can't hurt
     return Set<string>([n.ident]);
   }
-  constant(n: ast.Constant): Set<string> {
+  constant(_n: ast.Constant): Set<string> {
     return Set<string>();
   }
   call(n: ast.CallExpr): Set<string> {

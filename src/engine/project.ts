@@ -82,6 +82,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
     }
     const file = defined(this.files.get(0));
     let models = List<XmileModel>();
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const [_name, model] of this.models) {
       if (!model.shouldPersist) {
         continue;
@@ -97,6 +98,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
       return false;
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for (const [_, variable] of model.vars) {
       if (variable.errors.size > 0) {
         return false;
@@ -198,6 +200,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
     return this.addFile(defined(file), isMain);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   addFile(file: File, isMain = false): [Project, undefined] | [undefined, Error] {
     const xModels = file.models.map(model => model.fixupClouds());
     file.set('models', xModels);

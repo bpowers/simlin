@@ -49,9 +49,10 @@ class App {
   }
 
   private loadConfig(): void {
-    const setConfig = async (filename: string) => {
+    const setConfig = (filename: string): void => {
       const contents = fs.readFileSync(filename).toString();
       const config = JSON.parse(contents);
+      // eslint-disable-next-line prefer-const
       for (let [key, value] of Object.entries(config)) {
         // FML
         if (key === 'port' && value === 'PORT' && process.env.PORT) {
@@ -185,6 +186,7 @@ class App {
 
         req.url = '/';
 
+        // eslint-disable-next-line @typescript-eslint/await-thenable
         await next();
       },
       express.static('public'),

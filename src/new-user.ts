@@ -44,12 +44,12 @@ async function populateExample(db: Database, user: User, exampleModelPath: strin
   if (!metadata.project) {
     throw new Error(`expected [project] section in ${metadataPath}`);
   }
-  const projectMeta: { name: string; description: string } = metadata.project as any;
+  const projectMeta = (metadata.project as unknown) as { name: string; description: string };
   const projectName = projectMeta.name;
   const projectDescription = projectMeta.description;
   const userId = user.getId();
 
-  const project = await createProject(user, projectName, projectDescription, false);
+  const project = createProject(user, projectName, projectDescription, false);
   const file = await fileFromXmile(db.file, project.getId(), userId, modelContents);
 
   project.setFileId(file.getId());
@@ -79,7 +79,6 @@ export async function populateExamples(db: Database, user: User, examplesDirName
       await populateExample(db, user, path);
     } catch (err) {
       logger.error(`populateExample(${user.getId()}, ${path}): ${err}`);
-      continue;
     }
   }
 

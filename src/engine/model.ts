@@ -41,7 +41,7 @@ const modelDefaults = {
 };
 
 export class Model extends Record(modelDefaults) implements varModel {
-  constructor(project: Project, xModel: XmileModel, shouldPersist: boolean = false) {
+  constructor(project: Project, xModel: XmileModel, shouldPersist = false) {
     const [vars, modules, tables] = parseVars(project, xModel.variables);
 
     super({
@@ -283,7 +283,7 @@ export function isModel(model: any): model is Model {
 export class RenameVisitor implements Visitor<Node> {
   oldIdent: string;
   newIdent: string;
-  n: number = 0;
+  n = 0;
 
   constructor(oldIdent: string, newIdent: string) {
     this.oldIdent = oldIdent;

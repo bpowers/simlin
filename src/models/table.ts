@@ -18,9 +18,11 @@ export interface Table<T extends Message> {
   init(): Promise<void>;
 
   findOne(id: string): Promise<T | undefined>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   findOneByScan(query: any): Promise<T | undefined>;
   find(idPrefix: string): Promise<T[]>;
   create(id: string, pb: T): Promise<void>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   update(id: string, cond: any, pb: T): Promise<T | null>;
   deleteOne(id: string): Promise<void>;
 }
@@ -69,6 +71,7 @@ export class MongoTable<T extends Message> implements Table<T> {
     return this.deserialize(row);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async findOneByScan(query: any): Promise<T | undefined> {
     const row = await defined(this.collection).findOne(query);
     if (!row || !row.value) {
@@ -78,6 +81,7 @@ export class MongoTable<T extends Message> implements Table<T> {
   }
 
   async find(idPrefix: string): Promise<T[]> {
+    // eslint-disable-next-line @typescript-eslint/await-thenable
     const cursor = await defined(this.collection).find({ _id: new RegExp(`^${idPrefix}`) });
     if (!cursor) {
       throw new Error('not found');
@@ -108,6 +112,7 @@ export class MongoTable<T extends Message> implements Table<T> {
     await defined(this.collection).insertOne(this.doc(id, pb));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async update(id: string, cond: any, pb: T): Promise<T | null> {
     const result = await defined(this.collection).findOneAndUpdate(Object.assign({ _id: id }, cond), {
       $set: this.doc(id, pb),

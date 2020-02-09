@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import { List, Map, Record } from 'immutable';
 
 import { canonicalize, defined, exists } from './common';
@@ -98,9 +100,7 @@ const bool = (v: any): [boolean, undefined] | [false, Error] => {
   return [false, new Error('not boolean: ' + v)];
 };
 
-export interface XNode {
-  // constructor(args: any): XNode;
-}
+type XNode = {};
 
 const PointDefaults = {
   x: -1,
@@ -589,9 +589,9 @@ export class Options extends Record(OptionsDefaults) implements XNode {
       }
       let name = child.nodeName.toLowerCase();
       let plen: number | undefined;
-      if (name.slice(0, 5) === 'uses_') {
+      if (name.startsWith('uses_')) {
         plen = 4;
-      } else if (name.substring(0, 4) !== 'has_') {
+      } else if (name.startsWith('has_')) {
         plen = 3;
       }
       if (!plen) {

@@ -1,24 +1,36 @@
 module.exports = {
-    "env": {
-        "browser": true,
-        "es6": true,
-        "node": true
-    },
-    "extends": [
-        "plugin:@typescript-eslint/recommended",
-        "plugin:@typescript-eslint/recommended-requiring-type-checking",
-        "plugin:react/recommended",
-        "prettier"
+  "env": {
+    "browser": true,
+    "es6": true,
+    "node": true
+  },
+  "extends": [
+    "plugin:@typescript-eslint/recommended",
+    "plugin:@typescript-eslint/recommended-requiring-type-checking",
+    "plugin:react/recommended",
+    "prettier"
+  ],
+  "parser": "@typescript-eslint/parser",
+  "parserOptions": {
+    "project": "tsconfig.eslint.json"
+  },
+  "rules": {
+    "@typescript-eslint/no-use-before-define": "off",
+    "@typescript-eslint/no-explicit-any": "off",
+    "@typescript-eslint/no-unused-vars": [
+      "warn",
+      {
+        "argsIgnorePattern": "^_",
+      },
     ],
-    "parser": "@typescript-eslint/parser",
-    "parserOptions": {
-        "project": "tsconfig.eslint.json"
-    },
-    "rules": {
-    },
-    "settings": {
-        "react": {
-            "version": "detect"
-        }
+  },
+  "settings": {
+    "react": {
+      "version": "detect"
     }
+  },
+  "ignorePatterns": [
+    "src/engine-v2/",
+    "src/schemas/",
+  ],
 };

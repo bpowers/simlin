@@ -77,10 +77,6 @@ export const displayName = (name: string): string => {
   return name.replace(/\\n/g, '\n').replace(/_/g, ' ');
 };
 
-export const isEqual = (a: number, b: number, tolerance = 0.0000001): boolean => {
-  return isZero(a - b, tolerance);
-};
-
 // FIXME: this is sort of gross, but works.  The main use is to check
 // the result
 export const isInf = (n: number): boolean => {
@@ -89,6 +85,10 @@ export const isInf = (n: number): boolean => {
 
 export const isZero = (n: number, tolerance = 0.0000001): boolean => {
   return Math.abs(n) < tolerance;
+};
+
+export const isEqual = (a: number, b: number, tolerance = 0.0000001): boolean => {
+  return isZero(a - b, tolerance);
 };
 
 export const square = (n: number): number => {

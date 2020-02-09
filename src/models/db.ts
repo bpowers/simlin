@@ -24,23 +24,6 @@ export interface Database {
   readonly user: Table<User>;
 }
 
-export async function createDatabase(opts: DatabaseOptions): Promise<Database> {
-  if (opts.backend !== 'mongo') {
-    throw new Error('not implemented yet');
-  }
-
-  const client = new MongoClient(opts.url, {
-    useUnifiedTopology: true,
-  });
-  await client.connect();
-
-  const db = new MongoDatabase(client);
-
-  await db.init();
-
-  return db;
-}
-
 export class MongoDatabase {
   private readonly client: MongoClient;
   readonly file: Table<File>;
@@ -61,4 +44,21 @@ export class MongoDatabase {
   async init(): Promise<void> {
     await Promise.all([this.file.init(), this.project.init(), this.preview.init(), this.user.init()]);
   }
+}
+
+export async function createDatabase(opts: DatabaseOptions): Promise<Database> {
+  if (opts.backend !== 'mongo') {
+    throw new Error('not implemented yet');
+  }
+
+  const client = new MongoClient(opts.url, {
+    useUnifiedTopology: true,
+  });
+  await client.connect();
+
+  const db = new MongoDatabase(client);
+
+  await db.init();
+
+  return db;
 }

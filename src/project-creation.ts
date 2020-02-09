@@ -10,6 +10,7 @@ import {
   File as XmileFile,
   Header as XmileHeader,
   Model as XmileModel,
+  Product as XmileProduct,
   SimSpec as XmileSimSpec,
   View as XmileView,
   ViewDefaults,
@@ -23,20 +24,20 @@ export function emptyProject(name: string, userName: string): XmileFile {
   return new XmileFile({
     header: new XmileHeader({
       vendor: 'systemdynamics.net',
-      product: 'Model v1.0',
+      product: new XmileProduct({ name: 'Model v1.0' }),
       name,
       author: userName,
-    } as any),
+    }),
     simSpec: new XmileSimSpec({
       start: 0,
       stop: 100,
-    } as any),
+    }),
     models: List([
       new XmileModel({
         views: List([new XmileView(ViewDefaults)]),
-      } as any),
+      }),
     ]),
-  } as any);
+  });
 }
 
 const whitespace = /\s/gi;

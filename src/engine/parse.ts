@@ -89,7 +89,7 @@ class Parser {
 
     // after all of the binary operator precedence levels,
     // look for lower precedence factors (if,call,etc)
-    this.levels.push((maxLevel: number): Node | null => {
+    this.levels.push((_maxLevel: number): Node | null => {
       return this.factor();
     });
   }

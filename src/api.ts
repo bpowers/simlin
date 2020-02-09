@@ -44,7 +44,7 @@ export async function updatePreview(db: Database, project: ProjectPb): Promise<P
 }
 
 export const getUser = (req: Request, res: Response): UserPb => {
-  const user: UserPb | undefined = req.user as any;
+  const user = (req.user as unknown) as UserPb | undefined;
   if (!user) {
     logger.warn(`user not found, but passed authz?`);
     res.status(500).json({});
@@ -74,11 +74,11 @@ export const apiRouter = (app: Application): Router => {
 
       const projectName = req.body.projectName;
       const projectDescription = req.body.description || '';
-      const isPublic = req.body.isPublic ? true : false;
+      const isPublic = !!req.body.isPublic;
 
       try {
         const project = createProject(user, projectName, projectDescription, isPublic);
-        const json = await project.toObject();
+        const json = project.toObject();
 
         let sdJSON: string;
         if (req.body.projectJSON) {
@@ -112,7 +112,7 @@ export const apiRouter = (app: Application): Router => {
     async (req: Request, res: Response): Promise<void> => {
       const user = getUser(req, res);
       const projectModels = await app.db.project.find(user.getId() + '/');
-      const projects = await Promise.all(projectModels.map(async (project: ProjectPb) => project.toObject()));
+      const projects = await Promise.all(projectModels.map((project: ProjectPb) => project.toObject()));
       res.status(200).json(projects);
     },
   );
@@ -157,6 +157,7 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const project: any = projectModel.toObject();
       project.user = authorUser;
       project.file = file.getJsonContents();
@@ -249,7 +250,7 @@ export const apiRouter = (app: Application): Router => {
 
       const jsonContents = JSON.stringify(fileContents);
 
-      const file = await createFile(projectModel.getId(), user.getId(), undefined, jsonContents);
+      const file = createFile(projectModel.getId(), user.getId(), undefined, jsonContents);
       await app.db.file.create(file.getId(), file);
 
       // only update if the version matches
@@ -265,6 +266,7 @@ export const apiRouter = (app: Application): Router => {
       );
 
       // remove our preview
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         try {
           await app.db.preview.deleteOne(projectModel.getId());

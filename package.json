@@ -25,7 +25,7 @@
     "format": "prettier --write \"**/*.ts\" \"src/**/*.tsx\"",
     "precommit": "npm-run-all -p needs-format lint",
     "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../support/pre-commit.hook ./pre-commit",
-    "lint": "tslint -p .",
+    "lint": "eslint 'src/**/*.ts'",
     "build": "npm-run-all -p build:backend build:frontend build:webcomponent",
     "build:backend": "tsc",
     "build:frontend": "node scripts/build.js",

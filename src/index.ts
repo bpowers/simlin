@@ -17,9 +17,10 @@ process.on('unhandledRejection', (reason, p) => {
   console.log(reason);
 });
 
-async function main() {
+async function main(): Promise<void> {
   const app = await createApp();
   app.listen();
 }
 
+// eslint-disable-next-line @typescript-eslint/no-misused-promises
 setImmediate(main);

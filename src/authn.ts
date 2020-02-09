@@ -10,7 +10,6 @@ import uuidV4 from 'uuid/v4';
 import * as logger from 'winston';
 
 import { Application } from './application';
-import { MongoDuplicateKeyCode } from './models/common';
 import { Table } from './models/table';
 import { User } from './schemas/user_pb';
 
@@ -86,7 +85,7 @@ const emailRegExp = /^[^@]+@[^.]+(?:\.[^.]+)+$/;
 
 export const authn = (app: Application): void => {
   const config = app.get('authentication');
-  const { google, strategies } = config;
+  const { google } = config;
 
   const userAllowlistKey = 'userAllowlist';
   const userAllowlist: string[] = (app.get(userAllowlistKey) || '').split(',');
@@ -113,6 +112,7 @@ export const authn = (app: Application): void => {
         clientSecret: google.clientSecret,
         callbackURL,
       },
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       async (accessToken: string, refreshToken: string, profile: any, done: (error: any, user?: any) => void) => {
         const [user, err] = await getOrCreateUserFromProfile(app.db.user, profile);
         if (err !== undefined) {
@@ -136,6 +136,7 @@ export const authn = (app: Application): void => {
     done(undefined, serializedUser);
   });
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises
   passport.deserializeUser(async (user: any, done: (error: any, user?: any) => void) => {
     if (!user || !user.id) {
       done(new Error(`no or incorrectly serialized User: ${user}`));
@@ -156,11 +157,7 @@ export const authn = (app: Application): void => {
 
   app.get('/auth/google', passport.authenticate('google', { scope: ['email'] }));
 
-  app.get(
-    '/auth/google/callback',
-    passport.authenticate('google', { failureRedirect: '/login' }),
-    async (req, resp) => {
-      resp.redirect(google.successRedirect);
-    },
-  );
+  app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/login' }), (req, resp) => {
+    resp.redirect(google.successRedirect);
+  });
 };
