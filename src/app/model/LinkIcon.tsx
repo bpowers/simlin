@@ -22,10 +22,10 @@ const styles = createStyles({
   },
 });
 
-interface LinkIconProps extends WithStyles<typeof styles> {}
+type LinkIconProps = WithStyles<typeof styles>;
 
 export const LinkIcon = withStyles(styles)(
-  class LinkIconInner extends React.PureComponent<LinkIconProps> {
+  class Link extends React.PureComponent<LinkIconProps> {
     render() {
       const { classes } = this.props;
       return (
@@ -48,5 +48,4 @@ export const LinkIcon = withStyles(styles)(
   },
 );
 
-LinkIcon.displayName = 'Flow';
-(LinkIcon as any).muiName = 'FlowIcon';
+(LinkIcon as any).muiName = 'LinkIcon';

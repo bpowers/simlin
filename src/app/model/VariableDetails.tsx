@@ -75,7 +75,7 @@ function valueFromEquation(equation: string): Node[] {
   return plainDeserialize(equation);
 }
 
-function equationFor(variable: Variable) {
+function equationFor(variable: Variable): string {
   return (defined(variable.xmile).eqn || '').trim();
 }
 
@@ -98,19 +98,19 @@ export const VariableDetails = withStyles(styles)(
       this.setState({ equation });
     };
 
-    handleVariableDelete = () => {
+    handleVariableDelete = (): void => {
       this.props.onDelete(this.props.viewElement.ident);
     };
 
-    handleNotesChange = (_event: React.ChangeEvent<HTMLInputElement>) => {};
+    handleNotesChange = (_event: React.ChangeEvent<HTMLInputElement>): void => {};
 
-    handleEquationCancel = () => {
+    handleEquationCancel = (): void => {
       this.setState({
         equation: valueFromEquation(equationFor(this.props.variable)),
       });
     };
 
-    handleEquationSave = () => {
+    handleEquationSave = (): void => {
       const { equation } = this.state;
       const initialEquation = equationFor(this.props.variable);
 
@@ -120,7 +120,7 @@ export const VariableDetails = withStyles(styles)(
       }
     };
 
-    formatValue = (value: string | number | (string | number)[]) => {
+    formatValue = (value: string | number | (string | number)[]): string | (string | number)[] => {
       return typeof value === 'number' ? value.toFixed(3) : value;
     };
 

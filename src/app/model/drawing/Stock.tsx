@@ -107,7 +107,7 @@ export function stockBounds(element: ViewElement): Rect {
 }
 
 export const Stock = withStyles(styles)(
-  class extends React.PureComponent<StockPropsFull> {
+  class StockInner extends React.PureComponent<StockPropsFull> {
     handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
       // e.preventDefault();
       // e.stopPropagation();

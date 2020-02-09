@@ -50,10 +50,10 @@ interface AppState {
   isNewUser?: boolean;
   user?: User;
 }
-interface AppProps extends WithStyles<typeof styles> {}
+type AppProps = WithStyles<typeof styles>;
 
 const InnerApp = withStyles(styles)(
-  class extends React.PureComponent<AppProps, AppState> {
+  class InnerApp extends React.PureComponent<AppProps, AppState> {
     state: AppState;
 
     constructor(props: AppProps) {
@@ -63,6 +63,7 @@ const InnerApp = withStyles(styles)(
         authUnknown: true,
       };
 
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.getUserInfo);
     }
 
@@ -85,6 +86,7 @@ const InnerApp = withStyles(styles)(
     };
 
     handleUsernameChanged = () => {
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.getUserInfo);
     };
 

@@ -18,10 +18,10 @@ const styles = createStyles({
   },
 });
 
-interface FlowIconProps extends WithStyles<typeof styles> {}
+type FlowIconProps = WithStyles<typeof styles>;
 
 export const FlowIcon = withStyles(styles)(
-  class FlowIconInner extends React.PureComponent<FlowIconProps> {
+  class Flow extends React.PureComponent<FlowIconProps> {
     render() {
       const { classes } = this.props;
       return (
@@ -43,5 +43,4 @@ export const FlowIcon = withStyles(styles)(
   },
 );
 
-FlowIcon.displayName = 'Flow';
 (FlowIcon as any).muiName = 'FlowIcon';

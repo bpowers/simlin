@@ -203,6 +203,7 @@ export const Editor = withStyles(styles)(
         snapshotBlob: undefined,
       };
 
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         const project = await this.loadModel();
         if (!project) {
@@ -226,6 +227,7 @@ export const Editor = withStyles(styles)(
     }
 
     private scheduleSimRun(): void {
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         const project = this.project();
         if (!project) {
@@ -244,8 +246,8 @@ export const Editor = withStyles(styles)(
         await sim.runToEnd();
         const names = await sim.varNames();
         const data = await sim.series(...names);
-        setTimeout(async () => {
-          await sim.close();
+        setTimeout(() => {
+          sim.close();
         });
         this.setState({ data });
       } catch (e) {
@@ -272,6 +274,7 @@ export const Editor = withStyles(styles)(
 
     private scheduleSave(project: Project): void {
       const { projectVersion } = this.state;
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         await this.save(project, projectVersion);
       });
@@ -1258,6 +1261,7 @@ export const Editor = withStyles(styles)(
     }
     handleSnapshot = (kind: 'show' | 'close') => {
       if (kind === 'show') {
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises
         setTimeout(async () => {
           await this.takeSnapshot();
         });

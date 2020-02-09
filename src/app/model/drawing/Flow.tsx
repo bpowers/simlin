@@ -415,7 +415,7 @@ export type FlowProps = Pick<
 >;
 
 export const Flow = withStyles(styles)(
-  class extends React.PureComponent<FlowPropsFull> {
+  class Flow extends React.PureComponent<FlowPropsFull> {
     handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
       // e.preventDefault();
       // e.stopPropagation();

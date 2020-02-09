@@ -49,7 +49,7 @@ interface ArrowheadProps extends WithStyles<typeof styles> {
 }
 
 export const Arrowhead = withStyles(styles)(
-  class extends React.PureComponent<ArrowheadProps> {
+  class Arrowhead extends React.PureComponent<ArrowheadProps> {
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       if (this.props.onSelection) {
         this.props.onSelection(e);

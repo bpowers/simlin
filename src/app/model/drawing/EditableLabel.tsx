@@ -43,7 +43,7 @@ interface EditingLabelState {
 export type EditingLabelProps = Pick<EditingLabelPropsFull, 'value' | 'onChange' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
 
 export const EditableLabel = withStyles(styles)(
-  class extends React.PureComponent<EditingLabelPropsFull, EditingLabelState> {
+  class EditableLabel extends React.PureComponent<EditingLabelPropsFull, EditingLabelState> {
     constructor(props: EditingLabelPropsFull) {
       super(props);
 

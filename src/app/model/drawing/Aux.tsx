@@ -100,9 +100,7 @@ export function auxBounds(element: ViewElement): Rect {
 }
 
 export const Aux = withStyles(styles)(
-  class extends React.PureComponent<AuxPropsFull> {
-    handlePointerUp = (_: React.PointerEvent<SVGElement>): void => {};
-
+  class AuxInner extends React.PureComponent<AuxPropsFull> {
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       e.preventDefault();
       e.stopPropagation();
@@ -189,14 +187,7 @@ export const Aux = withStyles(styles)(
 
       return (
         <g className={groupClassName}>
-          <circle
-            className={classes.aux}
-            cx={cx}
-            cy={cy}
-            r={r}
-            onPointerDown={this.handlePointerDown}
-            onPointerUp={this.handlePointerUp}
-          />
+          <circle className={classes.aux} cx={cx} cy={cy} r={r} onPointerDown={this.handlePointerDown} />
           {sparkline}
           {indicator}
           {label}

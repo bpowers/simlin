@@ -25,7 +25,7 @@ interface StatusPropsFull extends WithStyles<typeof styles> {
 export type StatusProps = Pick<StatusPropsFull, 'status'>;
 
 export const Status = withStyles(styles)(
-  class extends React.PureComponent<StatusPropsFull> {
+  class Status extends React.PureComponent<StatusPropsFull> {
     render() {
       const { classes, status } = this.props;
       const fill = status === 'ok' ? '#81c784' : 'rgb(255, 152, 0)';

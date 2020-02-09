@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// eslint-disable @typescript-eslint/no-empty-function
+
 import * as React from 'react';
 
 import { Map, Set } from 'immutable';
@@ -28,14 +30,14 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
     data = Map<string, Series>();
   }
 
-  const renameVariable = (oldName: string, newName: string) => {};
-  const onSelection = (selected: Set<UID>) => {};
-  const moveSelection = (position: Point) => {};
-  const moveFlow = (element: ViewElement, target: number, position: Point) => {};
-  const moveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {};
-  const attachLink = (element: ViewElement, to: string) => {};
-  const createCb = (element: ViewElement) => {};
-  const nullCb = () => {};
+  const renameVariable = (_oldName: string, _newName: string): void => {};
+  const onSelection = (_selected: Set<UID>): void => {};
+  const moveSelection = (_position: Point): void => {};
+  const moveFlow = (_element: ViewElement, _target: number, _position: Point): void => {};
+  const moveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right'): void => {};
+  const attachLink = (_element: ViewElement, to: string): void => {};
+  const createCb = (_element: ViewElement): void => {};
+  const nullCb = (): void => {};
 
   const sheets = new ServerStyleSheets();
 
@@ -62,6 +64,7 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
 
   let svg = renderToString(sheets.collect(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>));
 
+  // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
   const viewboxStr = exists(svg.match(/viewBox="[^"]*"/))[0]
     .split('"')[1]
     .trim();

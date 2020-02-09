@@ -59,7 +59,7 @@ const readFile = (file: any): Promise<string> => {
 };
 
 export const NewProject = withStyles(styles)(
-  class extends React.Component<NewProjectProps, NewProjectState> {
+  class NewProject extends React.Component<NewProjectProps, NewProjectState> {
     state: NewProjectState;
 
     constructor(props: NewProjectProps) {
@@ -131,6 +131,7 @@ export const NewProject = withStyles(styles)(
           errorMsg: 'Please give your project a non-empty name',
         });
       } else {
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises
         setTimeout(this.setProjectName);
       }
     };

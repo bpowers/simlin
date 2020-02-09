@@ -10,6 +10,8 @@ export function interceptWriteHeaders(res: Response, callback: (statusCode: numb
   // eslint-disable-next-line @typescript-eslint/unbound-method
   const realWriteHead = res.writeHead;
 
+  // eslint-disable-next-line
+  // @ts-ignore
   // eslint-disable-next-line @typescript-eslint/unbound-method
   res.writeHead = (
     statusCode: number,
@@ -35,6 +37,8 @@ export function interceptWriteHeaders(res: Response, callback: (statusCode: numb
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     realWriteHead.apply(res, args as any);
 
+    // eslint-disable-next-line @typescript-eslint/ban-ts-ignore
+    // @ts-ignore
     return this;
   };
 }

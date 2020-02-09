@@ -29,7 +29,7 @@ interface ModelIconPropsFull extends WithStyles<typeof styles> {
 }
 
 export const ModelIcon = withStyles(styles)(
-  class extends React.PureComponent<ModelIconPropsFull> {
+  class Model extends React.PureComponent<ModelIconPropsFull> {
     render() {
       const { classes, className } = this.props;
 

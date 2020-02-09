@@ -64,7 +64,7 @@ interface SparklineProps extends WithStyles<typeof styles> {
 }
 
 export const Sparkline = withStyles(styles)(
-  class extends React.PureComponent<SparklineProps> {
+  class Sparkline extends React.PureComponent<SparklineProps> {
     render() {
       const { classes } = this.props;
       const { time, values } = this.props.series;

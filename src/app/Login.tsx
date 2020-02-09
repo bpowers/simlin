@@ -44,7 +44,7 @@ interface LoginPropsFull extends WithStyles<typeof styles> {
 export type LoginProps = Pick<LoginPropsFull, 'disabled'>;
 
 export const Login = withStyles(styles)(
-  class extends React.Component<LoginPropsFull> {
+  class Login extends React.Component<LoginPropsFull> {
     loginClick = (): void => {
       // eslint-disable-next-line
       const location = exists(/http(s?):\/\/[^\/]*/.exec(window.location.href))[0];

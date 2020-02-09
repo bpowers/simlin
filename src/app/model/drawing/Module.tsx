@@ -43,7 +43,7 @@ export function moduleBounds(props: ModuleProps): Rect {
 }
 
 export const Module = withStyles(styles)(
-  class extends React.PureComponent<ModulePropsFull> {
+  class Module extends React.PureComponent<ModulePropsFull> {
     render() {
       const { element, classes } = this.props;
       const w = element.width ? element.width : 55;

@@ -351,7 +351,7 @@ export const Canvas = withStyles(styles)(
       return element.type === 'flow' || element.type === 'aux';
     }
 
-    private aux = (element: ViewElement, isGhost: boolean = false): React.ReactElement => {
+    private aux = (element: ViewElement, _isGhost = false): React.ReactElement => {
       const variableErrors = this.props.model.vars.get(element.ident)?.errors.size || 0;
       const isSelected = this.isSelected(element);
       const series = this.props.data.get(element.ident);
@@ -623,7 +623,7 @@ export const Canvas = withStyles(styles)(
       }
     }
 
-    clearPointerState(clearSelection: boolean = true): void {
+    clearPointerState(clearSelection = true): void {
       this.pointerId = undefined;
       this.mouseDownPoint = undefined;
       this.selectionCenterOffset = undefined;

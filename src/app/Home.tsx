@@ -100,7 +100,7 @@ const AnchorOrigin: PopoverOrigin = {
 
 const Home = withWidth()(
   withStyles(styles)(
-    class extends React.Component<HomeProps & WithWidthProps, HomeState> {
+    class HomeInner extends React.Component<HomeProps & WithWidthProps, HomeState> {
       state: HomeState;
 
       constructor(props: HomeProps) {
@@ -111,6 +111,7 @@ const Home = withWidth()(
           projects: List(),
         };
 
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises
         setTimeout(this.getProjects);
       }
 
