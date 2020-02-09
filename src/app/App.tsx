@@ -71,18 +71,18 @@ const InnerApp = withStyles(styles)(
       const response = await fetch('/api/user', { credentials: 'same-origin' });
       const status = response.status;
       if (!(status >= 200 && status < 400)) {
-        this.setState(prevState => ({
+        this.setState({
           authUnknown: false,
-        }));
+        });
         return;
       }
       const user: User = await response.json();
       const isNewUser = user.id.startsWith(`temp-`);
-      this.setState(prevState => ({
+      this.setState({
         authUnknown: false,
         isNewUser,
         user,
-      }));
+      });
     };
 
     handleUsernameChanged = () => {

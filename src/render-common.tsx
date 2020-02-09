@@ -35,7 +35,7 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
   const moveSelection = (_position: Point): void => {};
   const moveFlow = (_element: ViewElement, _target: number, _position: Point): void => {};
   const moveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right'): void => {};
-  const attachLink = (_element: ViewElement, to: string): void => {};
+  const attachLink = (_element: ViewElement, _to: string): void => {};
   const createCb = (_element: ViewElement): void => {};
   const nullCb = (): void => {};
 

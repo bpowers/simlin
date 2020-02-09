@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import * as React from 'react';
-
 import * as logger from 'winston';
 
 // import { isMainThread, parentPort, Worker, workerData } from 'worker_threads';

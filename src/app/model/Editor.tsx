@@ -363,7 +363,7 @@ export const Editor = withStyles(styles)(
       return project;
     }
 
-    handleDialClick = (event: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+    handleDialClick = (_event: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
       this.setState({
         dialOpen: !this.state.dialOpen,
         selectedTool: this.state.dialOpen ? undefined : this.state.selectedTool,
@@ -554,7 +554,7 @@ export const Editor = withStyles(styles)(
               x: oldTo.cx - to.cx,
               y: oldTo.cy - to.cy,
             };
-            const pts = (element.pts || List<XmilePoint>()).map((point, i) => {
+            const pts = (element.pts || List<XmilePoint>()).map((point, _i) => {
               if (point.uid !== oldTo.uid) {
                 return point;
               }

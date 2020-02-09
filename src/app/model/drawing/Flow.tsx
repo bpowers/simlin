@@ -103,7 +103,7 @@ function isAdjacent(stockEl: ViewElement, flow: ViewElement, side: 'left' | 'rig
   return false;
 }
 
-function getComparePoint(flow: ViewElement, stock: ViewElement): Point {
+function getComparePoint(flow: ViewElement, _stock: ViewElement): Point {
   if (defined(flow.pts).size !== 2) {
     console.log(`TODO: multipoint flows for ${flow.ident}`);
   }
@@ -416,7 +416,7 @@ export type FlowProps = Pick<
 
 export const Flow = withStyles(styles)(
   class Flow extends React.PureComponent<FlowPropsFull> {
-    handlePointerUp = (e: React.PointerEvent<SVGElement>): void => {
+    handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
       // e.preventDefault();
       // e.stopPropagation();
     };

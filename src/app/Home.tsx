@@ -140,7 +140,7 @@ const Home = withWidth()(
         });
       };
 
-      handleProjectCreated = (project: Project) => {
+      handleProjectCreated = (_project: Project) => {
         // TODO
         window.location.pathname = '/';
       };
