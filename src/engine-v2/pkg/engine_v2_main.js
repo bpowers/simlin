@@ -1,3 +1,4 @@
+let imports = {};
 let wasm;
 const { TextDecoder } = require(String.raw`util`);
 
@@ -60,5 +61,11 @@ module.exports.from = function(xmile_xml) {
     }
 };
 
-wasm = require('./engine_v2_bg');
+const path = require('path').join(__dirname, 'engine_v2_bg.wasm');
+const bytes = require('fs').readFileSync(path);
+
+const wasmModule = new WebAssembly.Module(bytes);
+const wasmInstance = new WebAssembly.Instance(wasmModule, imports);
+wasm = wasmInstance.exports;
+module.exports.__wasm = wasm;
 

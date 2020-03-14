@@ -8,11 +8,9 @@
   "files": [
     "engine_v2_bg.wasm",
     "engine_v2.js",
-    "engine_v2.d.ts",
-    "engine_v2_bg.js"
+    "engine_v2.d.ts"
   ],
   "module": "engine_v2.js",
   "types": "engine_v2.d.ts",
-  "sideEffects": false,
-  "main": "engine_v2_main.js"
+  "sideEffects": false
 }
