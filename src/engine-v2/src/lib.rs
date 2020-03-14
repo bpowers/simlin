@@ -10,7 +10,7 @@ pub fn from(xmile_xml: &str) -> String {
     let project = engine_core::Project::from_xmile_reader(&mut reader);
 
     if let Err(ref err) = project {
-        return String::from(err.description());
+        return err.to_string();
     }
 
     String::from("no problems here")
