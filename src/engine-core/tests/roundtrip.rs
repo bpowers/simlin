@@ -60,6 +60,4 @@ fn roundtrips_model() {
         }
         assert!(project.is_ok());
     }
-
-    // assert_eq!(4, adder::add_two(2));
 }

@@ -31,8 +31,6 @@ use std::fmt;
 use std::io::BufRead;
 use std::rc::Rc;
 
-use quick_xml::de;
-
 use self::common::Result;
 
 pub use self::sim::Simulation;
@@ -57,8 +55,9 @@ impl fmt::Debug for Project {
     }
 }
 
-impl<'a> Project {
+impl Project {
     pub fn from_xmile_reader(reader: &mut dyn BufRead) -> Result<Project> {
+        use quick_xml::de;
         let file: xmile::File = match de::from_reader(reader) {
             Ok(file) => file,
             Err(err) => {
