@@ -1,5 +1,5 @@
 use sd::common;
-use sd::ast::UnaryOp::*
+use sd::ast::UnaryOp::*;
 use sd::ast::BinaryOp::*;
 use sd::ast::Expr;
 use sd::ast::node::*;
@@ -18,7 +18,7 @@ Expr: Box<Expr> = {
 };
 
 LCmp: Box<Expr> = {
-    <l:ACmp> "&&" <r:LCmp> => Expr::new(Op2(And, l, r))),
+    <l:ACmp> "&&" <r:LCmp> => Expr::new(Op2(And, l, r)),
     <l:ACmp> "||" <r:LCmp> => Box::new(Op2(Or, l, r)),
     ACmp,
 };
