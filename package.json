@@ -46,6 +46,7 @@
     "test:frontend": "node scripts/test.js"
   },
   "dependencies": {
+    "@google-cloud/datastore": "^5.1.0",
     "@google-cloud/trace-agent": "^4.2.2",
     "@iarna/toml": "^2.2.3",
     "@material-ui/core": "^4.9.1",
