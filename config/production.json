@@ -2,6 +2,7 @@
   "public": "./public/",
   "host": "systemdynamics.net",
   "port": "PORT",
+  "trust proxy": true,
   "mongodb": "mongodb://model-db-mongodb.default.svc.cluster.local:27017/model",
   "authentication": {
     "seshcookie": {

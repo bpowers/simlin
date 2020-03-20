@@ -1,0 +1,12 @@
+/node_modules/
+*~
+.gcloudignore
+.git
+.gitignore
+.tsc*
+.prettier*
+.docker*
+.editor*
+.idea*
+/test/
+/target/

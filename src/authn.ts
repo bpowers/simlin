@@ -6,7 +6,7 @@ import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import { Set } from 'immutable';
 import passport from 'passport';
 import { OAuth2Strategy } from 'passport-google-oauth';
-import uuidV4 from 'uuid/v4';
+import { v4 as uuidV4 } from 'uuid';
 import * as logger from 'winston';
 
 import { Application } from './application';
