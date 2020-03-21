@@ -39,7 +39,6 @@ class SDModel extends HTMLElement {
     const projectName = this.getAttribute('projectName') || '';
     ReactDOM.render(
       <div className="model-Editor-full">
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Pacifico" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto+Mono&display=swap" />
         <StylesProvider jss={jss}>

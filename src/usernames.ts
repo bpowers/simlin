@@ -5,6 +5,8 @@
 import { Set } from 'immutable';
 
 export const UsernameDenylist = Set<string>([
+  'legal',
+  'privacy',
   'bobbypowers',
   'bobby',
   '0',

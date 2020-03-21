@@ -1,8 +1,20 @@
 runtime: nodejs12
 
 handlers:
-- url: /public
-  static_dir: public
+- url: /static
+  static_dir: public/static
+  secure: always
+
+- url: /images
+  static_dir: public/images
+  secure: always
+
+- url: /legal
+  static_dir: public/legal
+  secure: always
+
+- url: /privacy
+  static_dir: public/privacy
   secure: always
 
 - url: /.*
