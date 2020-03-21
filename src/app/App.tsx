@@ -45,23 +45,30 @@ const theme = createMuiTheme({
   },
 });
 
-let privateStatus: number | undefined;
-let privateUser: User | undefined;
-async function fetchUserInfo(): Promise<[User | undefined, number]> {
-  if (privateStatus !== undefined) {
-    return [privateUser, privateStatus];
+class UserInfoSingleton {
+  private resultPromise?: Promise<Response>;
+  private result?: [User | undefined, number];
+  constructor() {
+    // store this promise; we might race calling get() below, but all racers will
+    // await thins single fetch result.
+    this.resultPromise = fetch('/api/user', { credentials: 'same-origin' });
   }
 
-  const response = await fetch('/api/user', { credentials: 'same-origin' });
-  const status = response.status;
-  privateStatus = status;
-  if (status >= 200 && status < 400) {
-    const user: User = await response.json();
-    privateUser = user;
-  }
+  async get(): Promise<[User | undefined, number]> {
+    if (this.resultPromise) {
+      const response = await this.resultPromise;
+      const status = response.status;
+      const user = status >= 200 && status < 400 ? await response.json() : undefined;
 
-  return [privateUser, privateStatus];
+      this.result = [user, status];
+      this.resultPromise = undefined;
+    }
+
+    return defined(this.result);
+  }
 }
+
+const userInfo = new UserInfoSingleton();
 
 interface AppState {
   authUnknown: boolean;
@@ -86,7 +93,7 @@ const InnerApp = withStyles(styles)(
     }
 
     getUserInfo = async (): Promise<void> => {
-      const [user, status] = await fetchUserInfo();
+      const [user, status] = await userInfo.get();
       if (!(status >= 200 && status < 400) || !user) {
         this.setState({
           authUnknown: false,
