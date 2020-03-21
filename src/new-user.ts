@@ -3,12 +3,12 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import { parse as parseToml } from '@iarna/toml';
-import * as fs from 'fs-extra';
+import { promises as fs } from 'fs';
 import * as logger from 'winston';
 import { DOMParser } from 'xmldom';
 
 import { stdProject } from './engine/project';
-import { Database } from './models/db';
+import { Database } from './models/db-interfaces';
 import { Table } from './models/table';
 import { createFile, createProject } from './project-creation';
 import { File } from './schemas/file_pb';
