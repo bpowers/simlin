@@ -27,6 +27,7 @@
     "precommit": "npm-run-all -p needs-format lint",
     "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../support/pre-commit.hook ./pre-commit",
     "lint": "eslint 'src/**/*.ts' 'src/**/*.tsx'",
+    "deploy": "yarn build && cp -r build/* public && cp -r build-component/static/js/sd-component.js ./public/static/js/ && gcloud app deploy",
     "build": "npm-run-all -p build:backend build:frontend build:webcomponent",
     "build:backend": "tsc",
     "build:frontend": "node scripts/build.js",
