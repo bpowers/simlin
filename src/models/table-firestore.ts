@@ -6,7 +6,6 @@ import { CollectionReference, Firestore } from '@google-cloud/firestore';
 import { FieldPath } from '@google-cloud/firestore/build/src';
 import { Message } from 'google-protobuf';
 
-import { defined } from '../engine/common';
 import { SerializableClass, Table } from './table';
 
 interface FirestoreTableOptions {
@@ -37,12 +36,12 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   async init(): Promise<void> {}
 
-  private filterId(id: string): string {
+  private static filterId(id: string): string {
     return id.replace('/', '|');
   }
 
   private docRef(id: string) {
-    return this.collection.doc(this.filterId(id));
+    return this.collection.doc(FirestoreTable.filterId(id));
   }
 
   private deserialize(value: Buffer): T {
@@ -75,7 +74,9 @@ export class FirestoreTable<T extends Message> implements Table<T> {
   }
 
   async find(idPrefix: string): Promise<T[]> {
-    const querySnapshot = await this.collection.where(FieldPath.documentId(), '>=', this.filterId(idPrefix)).get();
+    const querySnapshot = await this.collection
+      .where(FieldPath.documentId(), '>=', FirestoreTable.filterId(idPrefix))
+      .get();
     if (!querySnapshot || querySnapshot.empty) {
       throw new Error('not found');
     }
@@ -83,7 +84,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     return querySnapshot.docs.map(docRef => this.deserialize(docRef.get('value')));
   }
 
-  private doc(id: string, pb: T): Schema<T> {
+  private doc(_id: string, pb: T): Schema<T> {
     const serializedPb = pb.serializeBinary();
     const doc: Schema<T> = {
       value: Buffer.from(serializedPb),
@@ -107,15 +108,24 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async update(id: string, cond: any, pb: T): Promise<T | null> {
-    const docRef = this.docRef(id);
-    const updateResult = await docRef.update(this.doc(id, pb), cond);
-    const docSnapshot = await docRef.get();
-
-    if (updateResult.writeTime.toMillis() > defined(docSnapshot.updateTime).toMillis()) {
-      throw new Error('stale read; very unexpected');
+    try {
+      await this.db.runTransaction(async tx => {
+        const docRef = this.docRef(id);
+        const doc = await tx.get(docRef);
+        for (const [key, expected] of Object.entries(cond)) {
+          const current = doc.get(key);
+          if (current !== expected) {
+            throw new Error(`precondition ${key} failed: ${expected} != ${current}`);
+          }
+        }
+        tx.update(docRef, this.doc(id, pb));
+      });
+    } catch (err) {
+      // our precondition failed
+      return null;
     }
 
-    return this.deserialize(docSnapshot.get('value'));
+    return pb;
   }
 
   async deleteOne(id: string): Promise<void> {
