@@ -18,6 +18,7 @@
     "test": "test/"
   },
   "engines": {
+    "node": ">=12",
     "yarn": ">= 0.18.0"
   },
   "scripts": {
@@ -39,8 +40,9 @@
     "rtest": "./test/test-models/regression-test.py -x '(subscript|macro|xscale|initial_function|stocks_with_expressions|active_initial|smooth_and_stock|euler_step_vs_saveper|special_characters)' ./bin/mdl.js test/test-models",
     "mocha": "mocha test/ --recursive --exit",
     "start": "node lib",
+    "start:datastore": "gcloud beta emulators datastore start",
     "start:testing": "npm-run-all -p start:backend start:frontend",
-    "start:backend": "node_modules/.bin/ts-node-dev --no-notify --respawn src/index.ts",
+    "start:backend": "$(gcloud beta emulators datastore env-init); exec node_modules/.bin/ts-node-dev --no-notify --respawn src/index.ts",
     "start:frontend": "node scripts/start.js",
     "test:backend": "yarn run build && yarn run mocha",
     "test:frontend": "node scripts/test.js"
