@@ -45,6 +45,24 @@ const theme = createMuiTheme({
   },
 });
 
+let privateStatus: number | undefined;
+let privateUser: User | undefined;
+async function fetchUserInfo(): Promise<[User | undefined, number]> {
+  if (privateStatus !== undefined) {
+    return [privateUser, privateStatus];
+  }
+
+  const response = await fetch('/api/user', { credentials: 'same-origin' });
+  const status = response.status;
+  privateStatus = status;
+  if (status >= 200 && status < 400) {
+    const user: User = await response.json();
+    privateUser = user;
+  }
+
+  return [privateUser, privateStatus];
+}
+
 interface AppState {
   authUnknown: boolean;
   isNewUser?: boolean;
@@ -68,15 +86,13 @@ const InnerApp = withStyles(styles)(
     }
 
     getUserInfo = async (): Promise<void> => {
-      const response = await fetch('/api/user', { credentials: 'same-origin' });
-      const status = response.status;
-      if (!(status >= 200 && status < 400)) {
+      const [user, status] = await fetchUserInfo();
+      if (!(status >= 200 && status < 400) || !user) {
         this.setState({
           authUnknown: false,
         });
         return;
       }
-      const user: User = await response.json();
       const isNewUser = user.id.startsWith(`temp-`);
       this.setState({
         authUnknown: false,
