@@ -1,7 +1,7 @@
 {
   "x-powered-by": false,
   "host": "localhost",
-  "port": 8080,
+  "port": 3030,
   "public": "./public/",
   "paginate": {
     "default": 10,
@@ -9,6 +9,7 @@
   },
   "defaultProjectsDir": "./default_projects",
   "mongodb": "mongodb://model:wKarPlhiHdlazqx5BUCA46dl@localhost:27017/admin",
+  "database": "firestore",
   "userAllowlist": "IN ENV",
   "authentication": {
     "seshcookie": {

@@ -114,7 +114,7 @@ class App {
 
     this.app.db = await createDatabase({
       url: this.mongoUrl(),
-      backend: 'mongo',
+      backend: this.app.get('database') === 'firestore' ? 'firestore' : 'mongo',
     });
 
     // put the redirect before the request logger to remove noise
