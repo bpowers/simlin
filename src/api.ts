@@ -8,7 +8,7 @@ import * as logger from 'winston';
 
 import { Application } from './application';
 import { MongoDuplicateKeyCode } from './models/common';
-import { Database } from './models/db';
+import { Database } from './models/db-interfaces';
 import { populateExamples } from './new-user';
 import { createFile, createProject, emptyProject } from './project-creation';
 import { renderToPNG } from './render';
