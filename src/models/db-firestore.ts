@@ -24,10 +24,10 @@ export class FirestoreDatabase implements Database {
     this.client = client;
     const db = this.client;
 
-    this.file = new FirestoreTable(File, { db, name: 'files2' });
-    this.project = new FirestoreTable(Project, { db, name: 'project2', hoistColumns: { version: 7 } });
-    this.preview = new FirestoreTable(Preview, { db, name: 'preview2' });
-    this.user = new FirestoreTable(User, { db, name: 'user2', hoistColumns: { email: 2 } });
+    this.file = new FirestoreTable(File, { db, name: 'files' });
+    this.project = new FirestoreTable(Project, { db, name: 'project', hoistColumns: { version: 7 } });
+    this.preview = new FirestoreTable(Preview, { db, name: 'preview' });
+    this.user = new FirestoreTable(User, { db, name: 'user', hoistColumns: { email: 2 } });
   }
 
   async init(): Promise<void> {
