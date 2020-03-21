@@ -34,6 +34,11 @@ handlers:
   upload: public/favicon.ico
   secure: always
 
+- url: /robots.txt$
+  static_files: public/robots.txt
+  upload: public/robots.txt
+  secure: always
+
 - url: /favicon.ico.png$
   static_files: public/favicon.ico.png
   upload: public/favicon.ico.png
