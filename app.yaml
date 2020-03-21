@@ -9,12 +9,39 @@ handlers:
   static_dir: public/images
   secure: always
 
-- url: /legal
-  static_dir: public/legal
+- url: /legal$
+  static_files: public/legal/index.html
+  upload: public/legal/index.html
   secure: always
 
-- url: /privacy
-  static_dir: public/privacy
+- url: /legal/cookies$
+  static_files: public/legal/cookies/index.html
+  upload: public/legal/cookies/index.html
+  secure: always
+
+- url: /privacy$
+  static_files: public/privacy/index.html
+  upload: public/privacy/index.html
+  secure: always
+
+- url: /$
+  static_files: public/index.html
+  upload: public/index.html
+  secure: always
+
+- url: /favicon.ico$
+  static_files: public/favicon.ico
+  upload: public/favicon.ico
+  secure: always
+
+- url: /favicon.ico.png$
+  static_files: public/favicon.ico.png
+  upload: public/favicon.ico.png
+  secure: always
+
+- url: /manifest.json$
+  static_files: public/manifest.json
+  upload: public/manifest.json
   secure: always
 
 - url: /.*
