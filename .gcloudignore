@@ -1,4 +1,5 @@
 /node_modules/
+/.app.prod.yaml
 *~
 /.gcloudignore
 .git
