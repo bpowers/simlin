@@ -46,7 +46,7 @@ const readFile = (file: any): Promise<string> => {
   const reader = new FileReader();
 
   return new Promise((resolve, reject) => {
-    reader.onerror = err => {
+    reader.onerror = (err) => {
       reader.abort();
       reject(new DOMException(`Problem parsing input file: ${err}`));
     };
@@ -137,11 +137,11 @@ export const NewProject = withStyles(styles)(
     };
 
     handleExpandClick = (): void => {
-      this.setState(state => ({ expanded: !state.expanded }));
+      this.setState((state) => ({ expanded: !state.expanded }));
     };
 
     handlePublicChecked = (): void => {
-      this.setState(state => ({ isPublic: !state.isPublic }));
+      this.setState((state) => ({ isPublic: !state.isPublic }));
     };
 
     uploadModel = async (event: React.ChangeEvent<HTMLInputElement>) => {

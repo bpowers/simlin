@@ -167,9 +167,7 @@ export const Stock = withStyles(styles)(
       const series = this.props.series;
 
       const side = findSide(element, 'top');
-      const label = isEditingName ? (
-        undefined
-      ) : (
+      const label = isEditingName ? undefined : (
         <Label
           uid={element.uid}
           cx={cx}

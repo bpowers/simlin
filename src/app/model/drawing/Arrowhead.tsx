@@ -62,8 +62,9 @@ export const Arrowhead = withStyles(styles)(
       let r = this.props.size;
       const path = `M${x},${y}L${x - r},${y + r / 2}A${r * 3},${r * 3} 0 0,1 ${x - r},${y - r / 2}z`;
       r *= 1.5;
-      const bgPath = `M${x + 0.5 * r},${y}L${x - 0.75 * r},${y + r / 2}A${r * 3},${r * 3} 0 0,1 ${x - 0.75 * r},${y -
-        r / 2}z`;
+      const bgPath = `M${x + 0.5 * r},${y}L${x - 0.75 * r},${y + r / 2}A${r * 3},${r * 3} 0 0,1 ${x - 0.75 * r},${
+        y - r / 2
+      }z`;
 
       let className: string;
       if (type === 'connector') {

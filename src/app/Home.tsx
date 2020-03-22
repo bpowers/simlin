@@ -177,7 +177,7 @@ const Home = withWidth()(
         return (
           <div className={classes.projectGrid}>
             <GridList cols={this.getGridListCols()} spacing={0}>
-              {projects.map(project => (
+              {projects.map((project) => (
                 <GridListTile key={project.id} style={{ height: 'auto' }}>
                   <Link to={`/${project.id}`} className={classes.modelLink}>
                     <Paper className={classes.paper} elevation={4}>

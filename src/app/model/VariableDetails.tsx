@@ -129,7 +129,7 @@ export const VariableDetails = withStyles(styles)(
     };
 
     handleToggleLookupTable = (): void => {
-      this.setState(state => ({ hasLookupTable: !state.hasLookupTable }));
+      this.setState((state) => ({ hasLookupTable: !state.hasLookupTable }));
     };
 
     renderEquation() {

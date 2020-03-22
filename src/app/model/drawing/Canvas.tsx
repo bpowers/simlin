@@ -570,31 +570,31 @@ export const Canvas = withStyles(styles)(
     private constrainStockMovement(stockEl: ViewElement, moveDelta: Point): [ViewElement, List<ViewElement>] {
       const stock = defined(this.props.model.vars.get(stockEl.ident)) as StockVar;
       const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-      const flows: List<ViewElement> = flowNames.map(ident => defined(this.getNamedElement(ident)));
+      const flows: List<ViewElement> = flowNames.map((ident) => defined(this.getNamedElement(ident)));
 
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
 
     private populateNamedElements(displayElements: List<ViewElement>): void {
       if (!this.cachedElements.equals(displayElements)) {
-        this.nameMap = Map(displayElements.filter(el => el.hasName).map(el => [el.ident, el.uid])).set(
+        this.nameMap = Map(displayElements.filter((el) => el.hasName).map((el) => [el.ident, el.uid])).set(
           fauxTarget.ident,
           fauxTarget.uid,
         );
-        this.elements = Map(displayElements.map(el => [el.uid, el])).set(fauxTarget.uid, fauxTarget);
+        this.elements = Map(displayElements.map((el) => [el.uid, el])).set(fauxTarget.uid, fauxTarget);
         this.cachedElements = displayElements;
       }
 
       this.selectionUpdates = InnerCanvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
       if (this.state.labelSide) {
-        this.selectionUpdates = this.selectionUpdates.map(el => {
+        this.selectionUpdates = this.selectionUpdates.map((el) => {
           return el.set('labelSide', this.state.labelSide);
         });
       }
       if (this.state.moveDelta) {
         let otherUpdates = List<ViewElement>();
         const { x, y } = defined(this.state.moveDelta);
-        this.selectionUpdates = this.selectionUpdates.map(initialEl => {
+        this.selectionUpdates = this.selectionUpdates.map((initialEl) => {
           // only constrain flow movement if we're not doing a group-move
           if (initialEl.type === 'flow' && this.selectionUpdates.size === 1) {
             const [flow, updatedClouds] = this.constrainFlowMovement(initialEl, defined(this.state.moveDelta));
@@ -1053,7 +1053,7 @@ export const Canvas = withStyles(styles)(
 
       // filter all the elements in this XMILE view down to just the ones
       // we know how to display.
-      let displayElements = view.elements.filter(e => KnownTypes.has(e.type));
+      let displayElements = view.elements.filter((e) => KnownTypes.has(e.type));
       if (this.state.inCreation) {
         displayElements = displayElements.push(this.state.inCreation);
       }
@@ -1149,9 +1149,7 @@ export const Canvas = withStyles(styles)(
         transform = `translate(${offset.x} ${offset.y})`;
       }
 
-      const overlay = embedded ? (
-        undefined
-      ) : (
+      const overlay = embedded ? undefined : (
         <div className={overlayClass} onPointerDown={this.handleEditingEnd}>
           {nameEditor}
         </div>

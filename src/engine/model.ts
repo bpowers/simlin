@@ -99,12 +99,12 @@ export class Model extends Record(modelDefaults) implements varModel {
           if (dir === 'in') {
             v = v.set(
               'inflows',
-              (v.inflows || List()).filter(id => id !== flow),
+              (v.inflows || List()).filter((id) => id !== flow),
             );
           } else {
             v = v.set(
               'outflows',
-              (v.outflows || List()).filter(id => id !== flow),
+              (v.outflows || List()).filter((id) => id !== flow),
             );
           }
         }
@@ -230,13 +230,13 @@ export class Model extends Record(modelDefaults) implements varModel {
         if (v.inflows) {
           v = v.set(
             'inflows',
-            v.inflows.map(id => (id === oldIdent ? newIdent : id)),
+            v.inflows.map((id) => (id === oldIdent ? newIdent : id)),
           );
         }
         if (v.outflows) {
           v = v.set(
             'outflows',
-            v.outflows.map(id => (id === oldIdent ? newIdent : id)),
+            v.outflows.map((id) => (id === oldIdent ? newIdent : id)),
           );
         }
         return handleRenameInAST(v, oldIdent, newIdent);
@@ -312,7 +312,7 @@ export class RenameVisitor implements Visitor<Node> {
     return n;
   }
   call(n: CallExpr): Node {
-    const args = n.args.map(arg => arg.walk(this));
+    const args = n.args.map((arg) => arg.walk(this));
     const fun = n.fun.walk(this);
 
     return n.merge({
@@ -362,7 +362,7 @@ function handleRenameInAST(v: XmileVariable, oldIdent: string, newIdent: string)
   if (v.inflows) {
     v = v.set(
       'inflows',
-      v.inflows.map(flow => {
+      v.inflows.map((flow) => {
         return flow === oldIdent ? newIdent : flow;
       }),
     );
@@ -370,7 +370,7 @@ function handleRenameInAST(v: XmileVariable, oldIdent: string, newIdent: string)
   if (v.outflows) {
     v = v.set(
       'outflows',
-      v.outflows.map(flow => {
+      v.outflows.map((flow) => {
         return flow === oldIdent ? newIdent : flow;
       }),
     );

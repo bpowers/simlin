@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import SvgIcon from '@material-ui/core/SvgIcon';
 
-export const StockIcon: React.FunctionComponent = props => {
+export const StockIcon: React.FunctionComponent = (props) => {
   return (
     <SvgIcon viewBox="0 0 50 50" {...props}>
       <g>

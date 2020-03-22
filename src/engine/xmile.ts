@@ -20,11 +20,11 @@ export const camelCase = (s: string): string => {
 };
 
 export const splitOnComma = (str: string): List<string> => {
-  return List(str.split(',').map(el => el.trim()));
+  return List(str.split(',').map((el) => el.trim()));
 };
 
 export const numberize = (arr: List<string>): List<number> => {
-  return List(arr.map(el => parseFloat(el)));
+  return List(arr.map((el) => parseFloat(el)));
 };
 
 export const i32 = (n: number): number => {
@@ -733,15 +733,15 @@ export class Model extends Record(ModelDefaults) implements XNode {
   // in here.
   getFlowEnds(stocks: Map<string, Variable>): Map<string, [UID | undefined, UID | undefined]> {
     const view = defined(this.views.get(0));
-    const displayElements = view.elements.filter(e => e.type === 'stock' || e.type === 'flow');
-    const flows = displayElements.filter(e => e.type === 'flow');
+    const displayElements = view.elements.filter((e) => e.type === 'stock' || e.type === 'flow');
+    const flows = displayElements.filter((e) => e.type === 'flow');
     const result = Map(
       flows.map((el: ViewElement): [string, [UID | undefined, UID | undefined]] => {
         return [el.ident, [undefined, undefined]];
       }),
     );
 
-    for (const element of displayElements.filter(e => e.type === 'stock')) {
+    for (const element of displayElements.filter((e) => e.type === 'stock')) {
       const stock = defined(stocks.get(element.ident));
       for (const inflow of stock.inflows || List<string>()) {
         if (!inflow) {
@@ -781,7 +781,7 @@ export class Model extends Record(ModelDefaults) implements XNode {
 
   getStocks(): Map<string, Variable> {
     return this.variables
-      .filter(v => v.type === 'stock')
+      .filter((v) => v.type === 'stock')
       .toMap()
       .mapKeys((_, v) => defined(v.ident));
   }
@@ -793,12 +793,12 @@ export class Model extends Record(ModelDefaults) implements XNode {
     }
     const stocks = this.getStocks();
     const flowEnds = this.getFlowEnds(stocks);
-    const views = this.views.map(view => {
+    const views = this.views.map((view) => {
       let nextUid = view.nextUid || 1;
       const byUid = view.elements.toMap().mapKeys((_, e) => e.uid);
       let clouds = List<ViewElement>();
 
-      const elements = view.elements.map(element => {
+      const elements = view.elements.map((element) => {
         if (element.type !== 'flow') {
           return element;
         }
@@ -1489,9 +1489,9 @@ export const ViewDefaults = {
 
 export class View extends Record(ViewDefaults) implements XNode {
   constructor(view: typeof ViewDefaults) {
-    const uids = view.elements.filter(e => e.hasUid).map(e => e.uid);
+    const uids = view.elements.filter((e) => e.hasUid).map((e) => e.uid);
     let nextUid = uids.reduce((a, b) => Math.max(a, b), 0) + 1;
-    view.elements = view.elements.map(e => {
+    view.elements = view.elements.map((e) => {
       if (e.hasUid) {
         return e;
       }

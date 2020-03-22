@@ -261,9 +261,9 @@ const LEX_TESTS: LexTestData[] = [
   },
 ];
 
-describe('lex', function(): void {
-  LEX_TESTS.forEach(function(t: LexTestData): void {
-    it('should lex ' + t.in, function(done): void {
+describe('lex', function (): void {
+  LEX_TESTS.forEach(function (t: LexTestData): void {
+    it('should lex ' + t.in, function (done): void {
       let lexer = new Lexer(t.in);
       let count = 0;
       for (let tok = lexer.nextTok(); tok !== null; tok = lexer.nextTok()) {

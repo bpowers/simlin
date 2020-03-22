@@ -437,7 +437,7 @@ export const Editor = withStyles(styles)(
             if (element.type !== 'flow' || !element.pts) {
               return element;
             }
-            const pts = element.pts.map(pt => {
+            const pts = element.pts.map((pt) => {
               if (!pt.uid || !selection.contains(pt.uid)) {
                 return pt;
               }
@@ -585,7 +585,7 @@ export const Editor = withStyles(styles)(
             return element;
           });
           // if we have something to delete, do it here
-          elements = elements.filter(e => e.uid !== uidToDelete);
+          elements = elements.filter((e) => e.uid !== uidToDelete);
           if (flow.uid === inCreationUid) {
             flow = flow.merge({
               uid: nextUid++,
@@ -603,7 +603,7 @@ export const Editor = withStyles(styles)(
               elements = elements.push(newCloud);
               flow = flow.set(
                 'pts',
-                (flow.pts || List()).map(pt => {
+                (flow.pts || List()).map((pt) => {
                   if (pt.uid === inCreationCloudUid) {
                     return pt.set('uid', newCloud.uid);
                   }
@@ -637,7 +637,7 @@ export const Editor = withStyles(styles)(
               }
               flow = flow.set(
                 'pts',
-                (flow.pts || List()).map(pt => {
+                (flow.pts || List()).map((pt) => {
                   if (pt.uid === fauxTargetUid) {
                     return pt.set('uid', to.uid);
                   }
@@ -711,8 +711,8 @@ export const Editor = withStyles(styles)(
           let nextUid = view.nextUid;
           if (link.uid === inCreationUid) {
             const fromName = defined(link.from);
-            const from = defined(elements.find(e => e.hasName && e.ident === fromName));
-            const to = defined(elements.find(e => e.hasName && e.ident === newTarget));
+            const from = defined(elements.find((e) => e.hasName && e.ident === fromName));
+            const to = defined(elements.find((e) => e.hasName && e.ident === newTarget));
 
             const oldθ = Math.atan2(0 - from.cy, 0 - from.cx);
             const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
@@ -811,7 +811,7 @@ export const Editor = withStyles(styles)(
             } else if (selection.size === 1 && element.type === 'stock') {
               const stock = defined(defined(this.getModel()).vars.get(element.ident)) as StockVar;
               const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-              const flows: List<ViewElement> = flowNames.map(ident => {
+              const flows: List<ViewElement> = flowNames.map((ident) => {
                 for (const element of view.elements) {
                   if (element.hasName && element.ident === ident) {
                     return element;
@@ -840,7 +840,7 @@ export const Editor = withStyles(styles)(
           });
 
           const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
-          elements = elements.map(element => {
+          elements = elements.map((element) => {
             if (updatedFlowsByUid.has(element.uid)) {
               return defined(updatedFlowsByUid.get(element.uid));
             }
@@ -884,7 +884,7 @@ export const Editor = withStyles(styles)(
             const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
             const diffθ = oldθ - newθ;
 
-            return element.update('angle', angle => {
+            return element.update('angle', (angle) => {
               return defined(angle) + radToDeg(diffθ);
             });
           });
@@ -1014,8 +1014,8 @@ export const Editor = withStyles(styles)(
     }
 
     handleCloseSnackbar = (msg: string) => {
-      this.setState(prevState => ({
-        modelErrors: prevState.modelErrors.filter(err => err.message !== msg),
+      this.setState((prevState) => ({
+        modelErrors: prevState.modelErrors.filter((err) => err.message !== msg),
       }));
     };
 

@@ -81,7 +81,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
       return [];
     }
 
-    return querySnapshot.docs.map(docRef => this.deserialize(docRef.get('value')));
+    return querySnapshot.docs.map((docRef) => this.deserialize(docRef.get('value')));
   }
 
   private doc(_id: string, pb: T): Schema<T> {
@@ -121,7 +121,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async update(id: string, cond: any, pb: T): Promise<T | null> {
     try {
-      await this.db.runTransaction(async tx => {
+      await this.db.runTransaction(async (tx) => {
         const docRef = this.docRef(id);
         const doc = await tx.get(docRef);
         for (const [key, expected] of Object.entries(cond)) {

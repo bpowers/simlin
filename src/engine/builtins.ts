@@ -58,7 +58,7 @@ export class BuiltinVisitor implements Visitor<Node> {
     return n;
   }
   call(n: CallExpr): Node {
-    let args = n.args.map(arg => arg.walk(this));
+    let args = n.args.map((arg) => arg.walk(this));
 
     if (!isIdent(n.fun)) {
       throw new Error('// for now, only idents can be used as fns.');
@@ -67,7 +67,7 @@ export class BuiltinVisitor implements Visitor<Node> {
     const fn = n.fun.ident;
     if (builtins.has(fn)) {
       if (fn === 'lookup') {
-        args = args.update(0, defined(args.get(0)), arg => TableFrom(arg));
+        args = args.update(0, defined(args.get(0)), (arg) => TableFrom(arg));
         this.n++;
       }
       return new CallExpr(n.fun, n.lParenPos, args, n.rParenPos);
@@ -115,7 +115,7 @@ export class BuiltinVisitor implements Visitor<Node> {
         to: defined(stdlibVars.get(i)),
         from: '.' + identArg,
       });
-      xMod = xMod.update('connections', conns => (conns || List()).push(conn));
+      xMod = xMod.update('connections', (conns) => (conns || List()).push(conn));
     });
 
     const module = new Module(xMod);
@@ -161,7 +161,7 @@ export class PrintVisitor implements Visitor<string> {
   }
   call(n: CallExpr): string {
     const fun = n.fun.walk(this);
-    const args = n.args.map(arg => arg.walk(this)).join(',');
+    const args = n.args.map((arg) => arg.walk(this)).join(',');
     return `${fun}(${args})`;
   }
   if(n: IfExpr): string {

@@ -69,7 +69,7 @@ export class MongoTable<T extends Message> implements Table<T> {
       throw new Error('not found');
     }
     const rows = await cursor.toArray();
-    return rows.map(row => this.deserialize(row));
+    return rows.map((row) => this.deserialize(row));
   }
 
   private doc(id: string, pb: T): Schema<T> {

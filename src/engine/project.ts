@@ -202,7 +202,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   addFile(file: File, isMain = false): [Project, undefined] | [undefined, Error] {
-    const xModels = file.models.map(model => model.fixupClouds());
+    const xModels = file.models.map((model) => model.fixupClouds());
     file.set('models', xModels);
     const files = this.files.push(file);
 

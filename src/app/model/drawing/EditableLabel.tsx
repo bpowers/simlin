@@ -61,7 +61,7 @@ export const EditableLabel = withStyles(styles)(
     };
 
     render() {
-      const lines: string[] = this.props.value.map(n => Node.string(n));
+      const lines: string[] = this.props.value.map((n) => Node.string(n));
       const linesCount = lines.length;
 
       const maxWidthChars = lines.reduce((prev, curr) => (curr.length > prev ? curr.length : prev), 0);

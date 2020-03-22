@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import SvgIcon from '@material-ui/core/SvgIcon';
 
-export const AuxIcon: React.FunctionComponent = props => {
+export const AuxIcon: React.FunctionComponent = (props) => {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>
       <g>

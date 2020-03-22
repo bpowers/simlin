@@ -210,10 +210,10 @@ export function UpdateStockAndFlows(
   flows: List<ViewElement>,
   moveDelta: Point,
 ): [ViewElement, List<ViewElement>] {
-  const left = flows.filter(e => isAdjacent(stockEl, e, 'left'));
-  const right = flows.filter(e => isAdjacent(stockEl, e, 'right'));
-  const top = flows.filter(e => isAdjacent(stockEl, e, 'top'));
-  const bottom = flows.filter(e => isAdjacent(stockEl, e, 'bottom'));
+  const left = flows.filter((e) => isAdjacent(stockEl, e, 'left'));
+  const right = flows.filter((e) => isAdjacent(stockEl, e, 'right'));
+  const top = flows.filter((e) => isAdjacent(stockEl, e, 'top'));
+  const bottom = flows.filter((e) => isAdjacent(stockEl, e, 'bottom'));
 
   let proposed = new XmilePoint({
     x: stockEl.cx - moveDelta.x,
@@ -254,12 +254,12 @@ function allEqual<T>(extractor: (pt: XmilePoint) => T): (flow: ViewElement) => b
     }
 
     const first = extractor(defined(flow.pts.get(0)));
-    return flow.pts.every(pt => extractor(pt) === first);
+    return flow.pts.every((pt) => extractor(pt) === first);
   };
 }
 
-const isHorizontal = allEqual(pt => pt.y);
-const isVertical = allEqual(pt => pt.x);
+const isHorizontal = allEqual((pt) => pt.y);
+const isVertical = allEqual((pt) => pt.x);
 
 export function UpdateCloudAndFlow(
   cloud: ViewElement,
@@ -309,8 +309,8 @@ export function UpdateFlow(
   ends: List<ViewElement>,
   moveDelta: Point,
 ): [ViewElement, List<ViewElement>] {
-  const stocks = ends.filter(e => e.type === 'stock');
-  const clouds = ends.filter(e => e.type === 'cloud');
+  const stocks = ends.filter((e) => e.type === 'stock');
+  const clouds = ends.filter((e) => e.type === 'cloud');
 
   const center = new XmilePoint({ x: flowEl.cx, y: flowEl.cy });
 
@@ -341,7 +341,7 @@ export function UpdateFlow(
     const y = Math.max(minY, Math.min(maxY, proposed.y));
     proposed = proposed.set('y', y);
 
-    points = points.map(p => p.set('x', proposed.x));
+    points = points.map((p) => p.set('x', proposed.x));
   } else if (center.y === start.y && center.y === end.y && stocks.size > 0) {
     proposed = stocks.reduce((p, stock: ViewElement) => {
       let y = p.y;
@@ -355,17 +355,17 @@ export function UpdateFlow(
     const x = Math.max(minX, Math.min(maxX, proposed.x));
     proposed = proposed.set('x', x);
 
-    points = points.map(p => p.set('y', proposed.y));
+    points = points.map((p) => p.set('y', proposed.y));
   } else if (stocks.size === 0) {
     // if it is a cloud -> cloud flow, move all points uniformly
-    points = points.map(p => p.merge({ x: p.x - moveDelta.x, y: p.y - moveDelta.y }));
+    points = points.map((p) => p.merge({ x: p.x - moveDelta.x, y: p.y - moveDelta.y }));
   } else {
     console.log('TODO: unknown constraint?');
   }
 
-  const updatedClouds = clouds.map(cloud => {
-    const origPoint = defined(origPoints.find(pt => pt.uid === cloud.uid));
-    const updatedPoint = defined(points.find(pt => pt.uid === cloud.uid));
+  const updatedClouds = clouds.map((cloud) => {
+    const origPoint = defined(origPoints.find((pt) => pt.uid === cloud.uid));
+    const updatedPoint = defined(points.find((pt) => pt.uid === cloud.uid));
     const delta = {
       x: updatedPoint.x - origPoint.x,
       y: updatedPoint.y - origPoint.y,
@@ -497,14 +497,14 @@ export const Flow = withStyles(styles)(
         const prevY = defined(pts.get(pts.size - 2)).y;
 
         if (prevX < x) {
-          pts = pts.update(pts.size - 1, pt => pt.set('x', x - CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => pt.set('x', x - CloudRadius));
         } else if (prevX > x) {
-          pts = pts.update(pts.size - 1, pt => pt.set('x', x + CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => pt.set('x', x + CloudRadius));
         }
         if (prevY < y) {
-          pts = pts.update(pts.size - 1, pt => pt.set('y', y - CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => pt.set('y', y - CloudRadius));
         } else if (prevY > y) {
-          pts = pts.update(pts.size - 1, pt => pt.set('y', y + CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => pt.set('y', y + CloudRadius));
         }
       }
 
@@ -550,9 +550,7 @@ export const Flow = withStyles(styles)(
 
       const lastPt = defined(pts.get(pts.size - 1));
       const side = findSide(element);
-      const label = isEditingName ? (
-        undefined
-      ) : (
+      const label = isEditingName ? undefined : (
         <Label
           uid={element.uid}
           cx={cx}

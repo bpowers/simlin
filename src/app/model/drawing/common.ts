@@ -17,7 +17,7 @@ export function plainDeserialize(str: string): Node[] {
 }
 
 export function plainSerialize(value: Node[]): string {
-  return value.map(n => Node.string(n)).join('\n');
+  return value.map((n) => Node.string(n)).join('\n');
 }
 
 export interface Point {

@@ -163,9 +163,7 @@ export const Aux = withStyles(styles)(
       const r = this.radius();
 
       const side = findSide(element);
-      const label = isEditingName ? (
-        undefined
-      ) : (
+      const label = isEditingName ? undefined : (
         <Label
           uid={element.uid}
           cx={cx}
