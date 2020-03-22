@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import * as logger from 'winston';
-
 // import { isMainThread, parentPort, Worker, workerData } from 'worker_threads';
 
 import * as canvas from 'canvas';
@@ -39,7 +37,7 @@ export async function renderToPNG(fileDoc: File): Promise<Buffer> {
   canvas.registerFont('fonts/Roboto-Light.ttf', { family: 'Roboto' });
 
   const scale = Math.ceil((2 * 800) / viewbox.width);
-  logger.error(`scale ${scale} (w:${viewbox.width * scale})`);
+  // logger.error(`scale ${scale} (w:${viewbox.width * scale})`);
   const c = canvas.createCanvas(viewbox.width * scale, viewbox.height * scale);
   const ctx = c.getContext('2d');
   // const ctx = c.getContext('2d');
@@ -70,13 +68,11 @@ export async function renderToPNG(fileDoc: File): Promise<Buffer> {
 
   await cvg.render();
 
-  const pngBuf = c.toBuffer('image/png', {
+  return c.toBuffer('image/png', {
     compressionLevel: 6,
     filters: c.PNG_ALL_FILTERS,
     resolution: 192,
   });
-
-  return pngBuf;
 }
 
 // TODO: revisit whe this works.
