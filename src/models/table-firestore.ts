@@ -78,7 +78,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
       .where(FieldPath.documentId(), '>=', FirestoreTable.filterId(idPrefix))
       .get();
     if (!querySnapshot || querySnapshot.empty) {
-      throw new Error('not found');
+      return [];
     }
 
     return querySnapshot.docs.map(docRef => this.deserialize(docRef.get('value')));
@@ -86,19 +86,31 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   private doc(_id: string, pb: T): Schema<T> {
     const serializedPb = pb.serializeBinary();
-    const doc: Schema<T> = {
-      value: Buffer.from(serializedPb),
-    };
-    if (this.opts.hoistColumns) {
-      const cols = this.opts.hoistColumns;
-      for (const prop in cols) {
-        if (!cols.hasOwnProperty(prop)) {
-          continue;
-        }
-        doc[prop] = Message.getFieldWithDefault(pb, cols[prop], undefined);
+    const doc = pb.toObject();
+
+    if (doc.hasOwnProperty('value')) {
+      throw new Error('we expect document to not have "value" property');
+    }
+
+    // firestore doesn't like JS 'undefined'
+    for (const [key, value] of Object.entries(doc)) {
+      if (value === undefined) {
+        doc[key] = null;
       }
     }
-    return doc;
+
+    doc['value'] = Buffer.from(serializedPb);
+
+    // if (this.opts.hoistColumns) {
+    //   const cols = this.opts.hoistColumns;
+    //   for (const prop in cols) {
+    //     if (!cols.hasOwnProperty(prop)) {
+    //       continue;
+    //     }
+    //     doc[prop] = Message.getFieldWithDefault(pb, cols[prop], undefined);
+    //   }
+    // }
+    return doc as Schema<T>;
   }
 
   async create(id: string, pb: T): Promise<void> {
