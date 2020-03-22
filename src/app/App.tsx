@@ -51,6 +51,10 @@ class UserInfoSingleton {
   constructor() {
     // store this promise; we might race calling get() below, but all racers will
     // await thins single fetch result.
+    this.fetch();
+  }
+
+  private fetch(): void {
     this.resultPromise = fetch('/api/user', { credentials: 'same-origin' });
   }
 
@@ -65,6 +69,16 @@ class UserInfoSingleton {
     }
 
     return defined(this.result);
+  }
+
+  async invalidate(): Promise<void> {
+    if (this.resultPromise) {
+      await this.resultPromise;
+      this.resultPromise = undefined;
+    }
+
+    this.result = undefined;
+    this.fetch();
   }
 }
 
@@ -110,7 +124,10 @@ const InnerApp = withStyles(styles)(
 
     handleUsernameChanged = () => {
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
-      setTimeout(this.getUserInfo);
+      setTimeout(async () => {
+        await userInfo.invalidate();
+        await this.getUserInfo();
+      });
     };
 
     editor = (props: RouteComponentProps<EditorMatchParams>) => {
