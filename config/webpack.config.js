@@ -325,7 +325,7 @@ module.exports = function(webpackEnv) {
                 // because it was compiled. Thus, we don't want the browser
                 // debugger to show the original code. Instead, the code
                 // being evaluated would be much more helpful.
-                sourceMaps: false,
+                sourceMaps: shouldUseSourceMap,
               },
             },
             // "file" loader makes sure those assets get served by WebpackDevServer.
