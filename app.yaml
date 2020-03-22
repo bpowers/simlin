@@ -1,5 +1,9 @@
 runtime: nodejs12
 
+instance_class: F4
+automatic_scaling:
+  max_concurrent_requests: 100
+
 handlers:
 - url: /static
   static_dir: public/static
