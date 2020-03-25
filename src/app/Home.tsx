@@ -42,7 +42,16 @@ const styles = createStyles({
   flex: {
     flex: 1,
   },
-  avatar: {},
+  profileIcon: {
+    padding: 8,
+  },
+  sdTitle: {
+    fontWeight: 300,
+  },
+  avatar: {
+    width: 32,
+    height: 32,
+  },
   menuButton: {
     marginLeft: -12,
     marginRight: 20,
@@ -51,7 +60,7 @@ const styles = createStyles({
     color: 'white',
     border: '1px solid rgba(255, 255, 255, 0.76)',
     textDecoration: 'none',
-    marginRight: 8,
+    marginRight: 16,
   },
   paper: {
     margin: 24,
@@ -214,7 +223,7 @@ const Home = withWidth()(
         return (
           <div className={classes.root}>
             <AppBar position="fixed">
-              <Toolbar>
+              <Toolbar variant="dense">
                 <IconButton className={classes.menuButton} color="inherit" aria-label="Menu">
                   <MenuIcon />
                 </IconButton>
@@ -222,6 +231,10 @@ const Home = withWidth()(
                   <Link to="/" className={classes.modelLink}>
                     Model
                   </Link>
+                  {/*&nbsp;*/}
+                  {/*<span className={classes.sdTitle}>*/}
+                  {/*  System Dynamics*/}
+                  {/*</span>*/}
                 </Typography>
                 <div>
                   <Link to="/new" className={classes.modelLink}>
@@ -231,6 +244,7 @@ const Home = withWidth()(
                   </Link>
 
                   <IconButton
+                    className={classes.profileIcon}
                     aria-owns={open ? 'menu-appbar' : undefined}
                     aria-haspopup="true"
                     onClick={this.handleMenu}
