@@ -79,12 +79,28 @@ function equationFor(variable: Variable): string {
   return (defined(variable.xmile).eqn || '').trim();
 }
 
+function getAnyElementOfObject(obj: any): any | undefined {
+  if (!obj) {
+    return undefined;
+  }
+
+  const keys = Object.keys(obj);
+  if (keys && keys.length) {
+    return obj[keys[0]];
+  }
+
+  return undefined;
+}
+
 export const VariableDetails = withStyles(styles)(
   class InnerVariableDetails extends React.PureComponent<VariableDetailsPropsFull, VariableDetailsState> {
+    readonly lookupRef: React.RefObject<LineChart>;
+
     constructor(props: VariableDetailsPropsFull) {
       super(props);
 
       const { variable } = props;
+      this.lookupRef = React.createRef();
 
       this.state = {
         editor: withHistory(withReact(createEditor())),
@@ -237,6 +253,41 @@ export const VariableDetails = withStyles(styles)(
       );
     }
 
+    handleMouseUp = (_e: React.MouseEvent<LineChart>) => {
+      console.log('mouse up!');
+    };
+
+    handleMouseDown = (_e: React.MouseEvent<LineChart>) => {
+      console.log('mouse down!');
+    };
+
+    handleMouseMove = (e: React.MouseEvent<LineChart>) => {
+      if (!e.hasOwnProperty('chartX') || !e.hasOwnProperty('chartY')) {
+        return;
+      }
+      const chart: any = this.lookupRef.current;
+      if (chart === null) {
+        return;
+      }
+      if (!chart.state.xAxisMap || !chart.state.yAxisMap) {
+        return;
+      }
+      const xAxisMap = getAnyElementOfObject(chart.state.xAxisMap);
+      const yAxisMap = getAnyElementOfObject(chart.state.yAxisMap);
+      const xScale = xAxisMap.scale;
+      const yScale = yAxisMap.scale;
+
+      if (!xScale || !xScale.invert || !yScale || !yScale.invert) {
+        debugger;
+        return;
+      }
+
+      const x = xScale.invert((e as any).chartX);
+      const y = yScale.invert((e as any).chartY);
+
+      console.log(`position: ${x.toFixed(3)},${y.toFixed(3)}`);
+    };
+
     renderLookup() {
       const { variable } = this.props;
       const { hasLookupTable } = this.state;
@@ -269,7 +320,16 @@ export const VariableDetails = withStyles(styles)(
         };
 
         table = (
-          <LineChart width={327} height={300} data={series}>
+          <LineChart
+            width={327}
+            height={300}
+            data={series}
+            onMouseDown={this.handleMouseDown}
+            onMouseMove={this.handleMouseMove}
+            onMouseUp={this.handleMouseUp}
+            ref={this.lookupRef}
+            layout={'horizontal'}
+          >
             <CartesianGrid horizontal={true} vertical={false} />
             <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
             <YAxis
