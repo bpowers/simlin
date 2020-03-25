@@ -13,44 +13,24 @@ handlers:
   static_dir: public/images
   secure: always
 
-- url: /legal$
-  static_files: public/legal/index.html
-  upload: public/legal/index.html
-  secure: always
-
-- url: /legal/cookies$
-  static_files: public/legal/cookies/index.html
-  upload: public/legal/cookies/index.html
-  secure: always
-
-- url: /privacy$
-  static_files: public/privacy/index.html
-  upload: public/privacy/index.html
-  secure: always
-
 - url: /$
   static_files: public/index.html
   upload: public/index.html
   secure: always
 
-- url: /favicon.ico$
-  static_files: public/favicon.ico
-  upload: public/favicon.ico
+- url: /(legal|legal/cookies|privacy)$
+  static_files: public/\1/index.html
+  upload: public/(legal|legal/cookies|privacy)/index.html
   secure: always
 
-- url: /robots.txt$
-  static_files: public/robots.txt
-  upload: public/robots.txt
+- url: /(robots|ads)\.txt$
+  static_files: public/\1.txt
+  upload: public/(robots|ads)\.txt
   secure: always
 
-- url: /ads.txt$
-  static_files: public/ads.txt
-  upload: public/ads.txt
-  secure: always
-
-- url: /favicon.ico.png$
-  static_files: public/favicon.ico.png
-  upload: public/favicon.ico.png
+- url: /(favicon.ico(.png)?)$
+  static_files: public/\1
+  upload: public/(favicon.ico(.png)?)
   secure: always
 
 - url: /manifest.json$
