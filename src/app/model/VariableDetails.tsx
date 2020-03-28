@@ -24,6 +24,7 @@ import { ViewElement } from '../../engine/xmile';
 
 import { defined, Series } from '../common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
+import { Coordinates, LookupEditor } from './LookupEditor';
 
 const styles = createStyles({
   card: {
@@ -77,19 +78,6 @@ function valueFromEquation(equation: string): Node[] {
 
 function equationFor(variable: Variable): string {
   return (defined(variable.xmile).eqn || '').trim();
-}
-
-function getAnyElementOfObject(obj: any): any | undefined {
-  if (!obj) {
-    return undefined;
-  }
-
-  const keys = Object.keys(obj);
-  if (keys && keys.length) {
-    return obj[keys[0]];
-  }
-
-  return undefined;
 }
 
 export const VariableDetails = withStyles(styles)(
@@ -253,39 +241,8 @@ export const VariableDetails = withStyles(styles)(
       );
     }
 
-    handleMouseUp = (_e: React.MouseEvent<LineChart>) => {
-      console.log('mouse up!');
-    };
-
-    handleMouseDown = (_e: React.MouseEvent<LineChart>) => {
-      console.log('mouse down!');
-    };
-
-    handleMouseMove = (e: React.MouseEvent<LineChart>) => {
-      if (!e.hasOwnProperty('chartX') || !e.hasOwnProperty('chartY')) {
-        return;
-      }
-      const chart: any = this.lookupRef.current;
-      if (chart === null) {
-        return;
-      }
-      if (!chart.state.xAxisMap || !chart.state.yAxisMap) {
-        return;
-      }
-      const xAxisMap = getAnyElementOfObject(chart.state.xAxisMap);
-      const yAxisMap = getAnyElementOfObject(chart.state.yAxisMap);
-      const xScale = xAxisMap.scale;
-      const yScale = yAxisMap.scale;
-
-      if (!xScale || !xScale.invert || !yScale || !yScale.invert) {
-        debugger;
-        return;
-      }
-
-      const x = xScale.invert((e as any).chartX);
-      const y = yScale.invert((e as any).chartY);
-
-      console.log(`position: ${x.toFixed(3)},${y.toFixed(3)}`);
+    handleLookupChange = (_ident: string, _newTable: Coordinates) => {
+      console.log('TODO: lookup table changed');
     };
 
     renderLookup() {
@@ -294,56 +251,7 @@ export const VariableDetails = withStyles(styles)(
 
       let table;
       if (hasLookupTable && variable instanceof Table) {
-        let yMin = 0;
-        let yMax = 0;
-        const series: { x: number; y: number }[] = [];
-        for (let i = 0; i < variable.x.size; i++) {
-          const x = defined(variable.x.get(i));
-          const y = defined(variable.y.get(i));
-          series.push({ x, y });
-          if (y < yMin) {
-            yMin = y;
-          }
-          if (y > yMax) {
-            yMax = y;
-          }
-        }
-        yMin = Math.floor(yMin);
-        yMax = Math.ceil(yMax);
-
-        const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
-        const yAxisWidth = Math.max(40, 20 + charWidth * 6);
-
-        const { left, right } = {
-          left: 'dataMin',
-          right: 'dataMax',
-        };
-
-        table = (
-          <LineChart
-            width={327}
-            height={300}
-            data={series}
-            onMouseDown={this.handleMouseDown}
-            onMouseMove={this.handleMouseMove}
-            onMouseUp={this.handleMouseUp}
-            ref={this.lookupRef}
-            layout={'horizontal'}
-          >
-            <CartesianGrid horizontal={true} vertical={false} />
-            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-            <YAxis
-              width={yAxisWidth}
-              allowDataOverflow={true}
-              domain={[yMin, yMax]}
-              type="number"
-              dataKey="y"
-              yAxisId="1"
-            />
-            <Tooltip formatter={this.formatValue} />
-            <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} dot={false} />
-          </LineChart>
-        );
+        table = <LookupEditor variable={variable} onLookupChange={this.handleLookupChange} />;
       }
 
       return (
