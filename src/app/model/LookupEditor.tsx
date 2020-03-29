@@ -227,7 +227,7 @@ export const LookupEditor = withStyles(styles)(
               yAxisId="1"
             />
             <Tooltip formatter={this.formatValue} />
-            <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} dot={false} />
+            <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" isAnimationActive={false} dot={false} />
           </LineChart>
         </div>
       );

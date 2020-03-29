@@ -173,6 +173,7 @@ interface EditorState {
   drawerOpen: boolean;
   projectVersion: number;
   snapshotBlob: Blob | undefined;
+  variableDetailsActiveTab: number;
 }
 
 interface EditorProps extends WithStyles<typeof styles> {
@@ -201,6 +202,7 @@ export const Editor = withStyles(styles)(
         drawerOpen: false,
         projectVersion: -1,
         snapshotBlob: undefined,
+        variableDetailsActiveTab: 0,
       };
 
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
@@ -1172,6 +1174,7 @@ export const Editor = withStyles(styles)(
 
       const variable = defined(model.vars.get(namedElement.ident));
       const series = this.state.data.get(namedElement.ident);
+      const activeTab = this.state.variableDetailsActiveTab;
 
       return (
         <div className={classes.varDetails}>
@@ -1180,6 +1183,8 @@ export const Editor = withStyles(styles)(
             variable={variable}
             viewElement={namedElement}
             data={series}
+            activeTab={activeTab}
+            onActiveTabChange={this.handleVariableDetailsActiveTabChange}
             onDelete={this.handleVariableDelete}
             onEquationChange={this.handleEquationChange}
             onTableChange={this.handleTableChange}
@@ -1187,6 +1192,10 @@ export const Editor = withStyles(styles)(
         </div>
       );
     }
+
+    handleVariableDetailsActiveTabChange = (variableDetailsActiveTab: number) => {
+      this.setState({ variableDetailsActiveTab });
+    };
 
     handleVariableDelete = (ident: string) => {
       const namedElement = this.getNamedSelectedElement();

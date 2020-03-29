@@ -58,6 +58,8 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   onEquationChange: (ident: string, newEquation: string) => void;
   onTableChange: (ident: string, newTable: Coordinates | null) => void;
   data: Series | undefined;
+  activeTab: number;
+  onActiveTabChange: (newActiveTab: number) => void;
 }
 
 // export type VariableDetailsProps = Pick<VariableDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
@@ -65,7 +67,6 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 interface VariableDetailsState {
   equation: Node[];
   editor: ReactEditor;
-  activeTab: number;
   hasLookupTable: boolean;
 }
 
@@ -94,7 +95,6 @@ export const VariableDetails = withStyles(styles)(
       this.state = {
         editor: withHistory(withReact(createEditor())),
         equation: valueFromEquation(equationFor(variable)),
-        activeTab: 0,
         hasLookupTable: variable instanceof Table,
       };
     }
@@ -130,7 +130,7 @@ export const VariableDetails = withStyles(styles)(
     };
 
     handleTabChange = (event: React.ChangeEvent<{}>, newValue: number) => {
-      this.setState({ activeTab: newValue });
+      this.props.onActiveTabChange(newValue);
     };
 
     handleToggleLookupTable = (): void => {
@@ -268,8 +268,7 @@ export const VariableDetails = withStyles(styles)(
     }
 
     render() {
-      const { classes, viewElement } = this.props;
-      const { activeTab } = this.state;
+      const { activeTab, classes, viewElement } = this.props;
 
       const equationType = viewElement.type === 'stock' ? 'Initial Value' : 'Equation';
       const content = activeTab === 0 ? this.renderEquation() : this.renderLookup();
