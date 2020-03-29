@@ -14,7 +14,7 @@ import { Model } from '../../engine/model';
 import { Project, stdProject } from '../../engine/project';
 import { Sim } from '../../engine/sim';
 import { Stock as StockVar } from '../../engine/vars';
-import { FileFromJSON, Point as XmilePoint, UID, View, ViewElement } from '../../engine/xmile';
+import { FileFromJSON, GF, Point as XmilePoint, UID, View, ViewElement } from '../../engine/xmile';
 
 import { Canvas, fauxTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
@@ -1143,7 +1143,7 @@ export const Editor = withStyles(styles)(
       this.scheduleSimRun();
     };
 
-    handleTableChange = (ident: string, newTable: { x: List<number>; y: List<number> } | null) => {
+    handleTableChange = (ident: string, newTable: GF | null) => {
       const project = this.project();
       if (!project) {
         return;

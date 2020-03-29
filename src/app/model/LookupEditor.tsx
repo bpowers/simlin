@@ -11,6 +11,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import { defined } from '../common';
 import { isEqual, Point } from './drawing/common';
 import { Table } from '../../engine/vars';
+import { GF, Scale } from '../../engine/xmile';
 
 const styles = createStyles({});
 
@@ -21,7 +22,7 @@ export interface Coordinates {
 
 interface LookupEditorPropsFull extends WithStyles<typeof styles> {
   variable: Table;
-  onLookupChange: (ident: string, newTable: Coordinates) => void;
+  onLookupChange: (ident: string, newTable: GF) => void;
 }
 
 // export type LookupEditorProps = Pick<LookupEditorPropsFull, 'variable' | 'viewElement' | 'data'>;
@@ -54,6 +55,8 @@ export const LookupEditor = withStyles(styles)(
       super(props);
 
       const { variable } = props;
+      const xVar = defined(variable.xmile);
+      const gf = defined(xVar.gf);
 
       let yMin = 0;
       let yMax = 0;
@@ -76,8 +79,8 @@ export const LookupEditor = withStyles(styles)(
       this.state = {
         inDrag: false,
         series,
-        yMin,
-        yMax,
+        yMin: gf.yScale ? gf.yScale.min : yMin,
+        yMax: gf.yScale ? gf.yScale.max : yMax,
       };
     }
 
@@ -120,15 +123,21 @@ export const LookupEditor = withStyles(styles)(
 
     endEditing() {
       this.setState({ inDrag: false });
-      const coords = {
-        x: List(this.state.series.map((p) => p.x)),
-        y: List(this.state.series.map((p) => p.y)),
-      };
-      this.props.onLookupChange(defined(this.props.variable.ident), coords);
+
+      const { series, yMin, yMax } = this.state;
+      const xPoints: List<number> = List(series.map((p: Point): number => p.x));
+      const yPoints: List<number> = List(series.map((p: Point): number => p.y));
+
+      const { variable } = this.props;
+      const xVar = defined(variable.xmile);
+      const yScale = new Scale({ min: yMin, max: yMax });
+      const gf = defined(xVar.gf).set('xPoints', xPoints).set('yPoints', yPoints).set('yScale', yScale);
+
+      this.props.onLookupChange(defined(this.props.variable.ident), gf);
     }
 
     updatePoint(details: any) {
-      if (!details.hasOwnProperty('chartX') || !details.hasOwnProperty('chartY')) {
+      if (!details || !details.hasOwnProperty('chartX') || !details.hasOwnProperty('chartY')) {
         return;
       }
 

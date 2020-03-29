@@ -10,7 +10,15 @@ import { Error } from './common';
 import { Model } from './model';
 import { defined } from './util';
 import { Module, Project as varsProject } from './vars';
-import { File, FileFromJSON, Model as XmileModel, SimSpec, Variable as XmileVariable, ViewElementType } from './xmile';
+import {
+  File,
+  FileFromJSON,
+  GF,
+  Model as XmileModel,
+  SimSpec,
+  Variable as XmileVariable,
+  ViewElementType,
+} from './xmile';
 
 const getXmileElement = (xmileDoc: XMLDocument): Element | undefined => {
   // in Chrome/Firefox, item 0 is xmile.  Under node's XML DOM
@@ -168,7 +176,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
     return this.set('models', this.models.set(modelName, model));
   }
 
-  setTable(modelName: string, ident: string, newTable: { x: List<number>; y: List<number> } | null): Project {
+  setTable(modelName: string, ident: string, newTable: GF | null): Project {
     let model = this.model(modelName);
     if (!model) {
       console.log(`setEquation: unknown model ${modelName}`);

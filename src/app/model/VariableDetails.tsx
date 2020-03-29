@@ -20,11 +20,11 @@ import Tab from '@material-ui/core/Tab';
 import Tabs from '@material-ui/core/Tabs';
 
 import { Table, Variable } from '../../engine/vars';
-import { ViewElement } from '../../engine/xmile';
+import { GF, ViewElement } from '../../engine/xmile';
 
 import { defined, Series } from '../common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
-import { Coordinates, LookupEditor } from './LookupEditor';
+import { LookupEditor } from './LookupEditor';
 
 const styles = createStyles({
   card: {
@@ -56,7 +56,7 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   viewElement: ViewElement;
   onDelete: (ident: string) => void;
   onEquationChange: (ident: string, newEquation: string) => void;
-  onTableChange: (ident: string, newTable: Coordinates | null) => void;
+  onTableChange: (ident: string, newTable: GF | null) => void;
   data: Series | undefined;
   activeTab: number;
   onActiveTabChange: (newActiveTab: number) => void;
@@ -242,7 +242,7 @@ export const VariableDetails = withStyles(styles)(
       );
     }
 
-    handleLookupChange = (ident: string, newTable: Coordinates) => {
+    handleLookupChange = (ident: string, newTable: GF) => {
       this.props.onTableChange(ident, newTable);
     };
 

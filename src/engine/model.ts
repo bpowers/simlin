@@ -190,15 +190,14 @@ export class Model extends Record(modelDefaults) implements varModel {
     });
   }
 
-  setTable(project: Project, ident: string, newTable: { x: List<number>; y: List<number> } | null): Model {
+  setTable(project: Project, ident: string, gf: GF | null): Model {
     const updatePath = ['xModel'];
     const model = this.updateIn(updatePath, (xModel: XmileModel) => {
       const variables = xModel.variables.map((v: XmileVariable) => {
         if (v.name && v.ident === ident) {
-          if (newTable === null) {
+          if (gf === null) {
             v = v.set('gf', undefined);
           } else {
-            const gf = (v.gf || new GF()).set('xPoints', newTable.x).set('yPoints', newTable.y);
             v = v.set('gf', gf);
           }
         }
