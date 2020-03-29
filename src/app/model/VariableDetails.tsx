@@ -56,6 +56,7 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   viewElement: ViewElement;
   onDelete: (ident: string) => void;
   onEquationChange: (ident: string, newEquation: string) => void;
+  onTableChange: (ident: string, newTable: Coordinates | null) => void;
   data: Series | undefined;
 }
 
@@ -241,8 +242,8 @@ export const VariableDetails = withStyles(styles)(
       );
     }
 
-    handleLookupChange = (_ident: string, _newTable: Coordinates) => {
-      console.log('TODO: lookup table changed');
+    handleLookupChange = (ident: string, newTable: Coordinates) => {
+      this.props.onTableChange(ident, newTable);
     };
 
     renderLookup() {

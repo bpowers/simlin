@@ -115,9 +115,17 @@ export const LookupEditor = withStyles(styles)(
     handleContainerTouchMove = (_e: React.PointerEvent<HTMLDivElement>) => {};
 
     handleMouseUp = () => {
-      this.setState({ inDrag: false });
-      console.log('mouse up!');
+      this.endEditing();
     };
+
+    endEditing() {
+      this.setState({ inDrag: false });
+      const coords = {
+        x: List(this.state.series.map((p) => p.x)),
+        y: List(this.state.series.map((p) => p.y)),
+      };
+      this.props.onLookupChange(defined(this.props.variable.ident), coords);
+    }
 
     updatePoint(details: any) {
       if (!details.hasOwnProperty('chartX') || !details.hasOwnProperty('chartY')) {
@@ -172,7 +180,7 @@ export const LookupEditor = withStyles(styles)(
       // if we were dragging in the chart, left the chart, stopped pressing the mouse,
       // then moused back in we might mistakenly think we were still inDrag
       if (event.hasOwnProperty('buttons') && event.buttons === 0) {
-        this.setState({ inDrag: false });
+        this.endEditing();
       }
 
       this.updatePoint(details);

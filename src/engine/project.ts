@@ -168,6 +168,18 @@ export class Project extends Record(projectDefaults) implements varsProject {
     return this.set('models', this.models.set(modelName, model));
   }
 
+  setTable(modelName: string, ident: string, newTable: { x: List<number>; y: List<number> } | null): Project {
+    let model = this.model(modelName);
+    if (!model) {
+      console.log(`setEquation: unknown model ${modelName}`);
+      return this;
+    }
+
+    model = model.setTable(this, ident, newTable);
+
+    return this.set('models', this.models.set(modelName, model));
+  }
+
   rename(modelName: string, oldName: string, newName: string): Project {
     let model = this.model(modelName);
     if (!model) {

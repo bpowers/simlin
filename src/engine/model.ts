@@ -22,6 +22,7 @@ import {
   Variable,
 } from './vars';
 import {
+  GF,
   Model as XmileModel,
   SimSpec,
   UID,
@@ -173,6 +174,33 @@ export class Model extends Record(modelDefaults) implements varModel {
         // TODO: check deps; if this model depends on the old one, update the equation
         if (v.name && v.ident === ident) {
           v = v.set('eqn', newEquation);
+        }
+        return v;
+      });
+      return xModel.merge({ variables });
+    });
+
+    // TODO: this should be made incremental
+    const [vars, modules, tables] = parseVars(project, model.xModel.variables);
+
+    return model.merge({
+      vars,
+      modules,
+      tables,
+    });
+  }
+
+  setTable(project: Project, ident: string, newTable: { x: List<number>; y: List<number> } | null): Model {
+    const updatePath = ['xModel'];
+    const model = this.updateIn(updatePath, (xModel: XmileModel) => {
+      const variables = xModel.variables.map((v: XmileVariable) => {
+        if (v.name && v.ident === ident) {
+          if (newTable === null) {
+            v = v.set('gf', undefined);
+          } else {
+            const gf = (v.gf || new GF()).set('xPoints', newTable.x).set('yPoints', newTable.y);
+            v = v.set('gf', gf);
+          }
         }
         return v;
       });

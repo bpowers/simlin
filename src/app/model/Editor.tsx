@@ -1141,6 +1141,16 @@ export const Editor = withStyles(styles)(
       this.scheduleSimRun();
     };
 
+    handleTableChange = (ident: string, newTable: { x: List<number>; y: List<number> } | null) => {
+      const project = this.project();
+      if (!project) {
+        return;
+      }
+
+      this.updateProject(project.setTable(this.state.modelName, ident, newTable));
+      this.scheduleSimRun();
+    };
+
     getVariableDetails() {
       const project = this.project();
       const { embedded } = this.props;
@@ -1172,6 +1182,7 @@ export const Editor = withStyles(styles)(
             data={series}
             onDelete={this.handleVariableDelete}
             onEquationChange={this.handleEquationChange}
+            onTableChange={this.handleTableChange}
           />
         </div>
       );
