@@ -261,7 +261,6 @@ export const VariableDetails = withStyles(styles)(
             <Checkbox checked={hasLookupTable} onChange={this.handleToggleLookupTable} />
             Has Lookup Table
           </div>
-          <br />
           {table}
         </div>
       );

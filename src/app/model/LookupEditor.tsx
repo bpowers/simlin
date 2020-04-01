@@ -6,6 +6,7 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
+import { TextField } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { defined } from '../common';
@@ -13,7 +14,21 @@ import { isEqual, Point } from './drawing/common';
 import { Table } from '../../engine/vars';
 import { GF, Scale } from '../../engine/xmile';
 
-const styles = createStyles({});
+const styles = createStyles({
+  xScaleMin: {
+    width: '30%',
+    paddingRight: 4,
+  },
+  xScaleMax: {
+    width: '30%',
+    paddingLeft: 4,
+    paddingRight: 4,
+  },
+  datapoints: {
+    width: '40%',
+    paddingLeft: 4,
+  },
+});
 
 export interface Coordinates {
   x: List<number>;
@@ -54,9 +69,8 @@ export const LookupEditor = withStyles(styles)(
     constructor(props: LookupEditorPropsFull) {
       super(props);
 
-      const { variable } = props;
-      const xVar = defined(variable.xmile);
-      const gf = defined(xVar.gf);
+      const { variable } = this.props;
+      const gf = this.gf();
 
       let yMin = 0;
       let yMax = 0;
@@ -82,6 +96,12 @@ export const LookupEditor = withStyles(styles)(
         yMin: gf.yScale ? gf.yScale.min : yMin,
         yMax: gf.yScale ? gf.yScale.max : yMax,
       };
+    }
+
+    gf(): GF {
+      const { variable } = this.props;
+      const xVar = defined(variable.xmile);
+      return defined(xVar.gf);
     }
 
     formatValue = (value: string | number | (string | number)[]): string | (string | number)[] => {
@@ -195,7 +215,16 @@ export const LookupEditor = withStyles(styles)(
       this.updatePoint(details);
     };
 
+    handleYMinChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+      this.setState({ yMin: Number(event.target.value) });
+    };
+
+    handleYMaxChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+      this.setState({ yMax: Number(event.target.value) });
+    };
+
     render() {
+      const { classes } = this.props;
       const { yMin, yMax, series } = this.state;
 
       const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
@@ -206,38 +235,85 @@ export const LookupEditor = withStyles(styles)(
         right: 'dataMax',
       };
 
+      const gf = this.gf();
+      const xMin = gf.xScale ? gf.xScale.min : 0;
+      const xMax = gf.xScale ? gf.xScale.max : 0;
+
       return (
-        <div
-          onMouseDown={this.handleContainerMouseDown}
-          onMouseUp={this.handleContainerMouseUp}
-          onMouseMove={this.handleContainerMouseMove}
-          onPointerDown={this.handleContainerTouchStart}
-          onPointerUp={this.handleContainerTouchEnd}
-          onPointerMove={this.handleContainerTouchMove}
-        >
-          <LineChart
-            width={327}
-            height={300}
-            data={series}
-            onMouseDown={this.handleMouseDown}
-            onMouseMove={this.handleMouseMove}
-            onMouseUp={this.handleMouseUp}
-            ref={this.lookupRef}
-            layout={'horizontal'}
+        <div>
+          <TextField
+            className={classes.xScaleMin}
+            label="Y axis max"
+            value={this.state.yMax}
+            onChange={this.handleYMaxChange}
+            type="number"
+            margin="normal"
+          />
+          <div
+            onMouseDown={this.handleContainerMouseDown}
+            onMouseUp={this.handleContainerMouseUp}
+            onMouseMove={this.handleContainerMouseMove}
+            onPointerDown={this.handleContainerTouchStart}
+            onPointerUp={this.handleContainerTouchEnd}
+            onPointerMove={this.handleContainerTouchMove}
           >
-            <CartesianGrid horizontal={true} vertical={false} />
-            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-            <YAxis
-              width={yAxisWidth}
-              allowDataOverflow={true}
-              domain={[yMin, yMax]}
-              type="number"
-              dataKey="y"
-              yAxisId="1"
-            />
-            <Tooltip formatter={this.formatValue} />
-            <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" isAnimationActive={false} dot={false} />
-          </LineChart>
+            <LineChart
+              width={327}
+              height={300}
+              data={series}
+              onMouseDown={this.handleMouseDown}
+              onMouseMove={this.handleMouseMove}
+              onMouseUp={this.handleMouseUp}
+              ref={this.lookupRef}
+              layout={'horizontal'}
+            >
+              <CartesianGrid horizontal={true} vertical={false} />
+              <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+              <YAxis
+                width={yAxisWidth}
+                allowDataOverflow={true}
+                domain={[yMin, yMax]}
+                type="number"
+                dataKey="y"
+                yAxisId="1"
+              />
+              <Tooltip formatter={this.formatValue} />
+              <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" isAnimationActive={false} dot={false} />
+            </LineChart>
+          </div>
+          <TextField
+            className={classes.xScaleMin}
+            label="Y axis min"
+            value={this.state.yMin}
+            onChange={this.handleYMinChange}
+            type="number"
+            margin="normal"
+          />
+          <br />
+          <TextField
+            className={classes.xScaleMin}
+            label="X axis min"
+            value={xMin}
+            // onChange={this.handleYMinChange}
+            type="number"
+            margin="normal"
+          />
+          <TextField
+            className={classes.xScaleMax}
+            label="X axis max"
+            value={xMax}
+            // onChange={this.handleYMinChange}
+            type="number"
+            margin="normal"
+          />
+          <TextField
+            className={classes.datapoints}
+            label="Datapoint Count"
+            value={xMax}
+            // onChange={this.handleYMinChange}
+            type="number"
+            margin="normal"
+          />
         </div>
       );
     }
