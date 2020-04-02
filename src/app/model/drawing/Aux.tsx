@@ -184,8 +184,8 @@ export const Aux = withStyles(styles)(
       }
 
       return (
-        <g className={groupClassName}>
-          <circle className={classes.aux} cx={cx} cy={cy} r={r} onPointerDown={this.handlePointerDown} />
+        <g className={groupClassName} onPointerDown={this.handlePointerDown}>
+          <circle className={classes.aux} cx={cx} cy={cy} r={r} />
           {sparkline}
           {indicator}
           {label}

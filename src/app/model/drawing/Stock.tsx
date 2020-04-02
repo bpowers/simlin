@@ -190,16 +190,8 @@ export const Stock = withStyles(styles)(
       }
 
       return (
-        <g className={groupClassName}>
-          <rect
-            className={classes.stock}
-            x={Math.ceil(cx - w / 2)}
-            y={Math.ceil(cy - h / 2)}
-            width={w}
-            height={h}
-            onPointerDown={this.handlePointerDown}
-            onPointerUp={this.handlePointerUp}
-          />
+        <g className={groupClassName} onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
+          <rect className={classes.stock} x={Math.ceil(cx - w / 2)} y={Math.ceil(cy - h / 2)} width={w} height={h} />
           {sparkline}
           {indicator}
           {label}

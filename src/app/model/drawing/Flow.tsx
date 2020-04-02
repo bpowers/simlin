@@ -587,15 +587,10 @@ export const Flow = withStyles(styles)(
             onSelection={this.handlePointerDownArrowhead}
           />
           <path d={spath} className={classes.flowInner} />
-          <circle
-            className={classes.aux}
-            cx={cx}
-            cy={cy}
-            r={r}
-            onPointerDown={this.handlePointerDown}
-            onPointerUp={this.handlePointerUp}
-          />
-          {sparkline}
+          <g onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
+            <circle className={classes.aux} cx={cx} cy={cy} r={r} />
+            {sparkline}
+          </g>
           {indicator}
           {label}
         </g>
