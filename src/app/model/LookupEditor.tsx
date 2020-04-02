@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
-import { TextField } from '@material-ui/core';
+import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { defined } from '../common';
@@ -27,6 +27,13 @@ const styles = createStyles({
   datapoints: {
     width: '40%',
     paddingLeft: 4,
+  },
+  buttonLeft: {
+    float: 'left',
+    marginRight: 'auto',
+  },
+  buttonRight: {
+    float: 'right',
   },
 });
 
@@ -223,6 +230,12 @@ export const LookupEditor = withStyles(styles)(
       this.setState({ yMax: Number(event.target.value) });
     };
 
+    handleLookupRemove = (): void => {};
+
+    handleEquationCancel = (): void => {};
+
+    handleEquationSave = (): void => {};
+
     render() {
       const { classes } = this.props;
       const { yMin, yMax, series } = this.state;
@@ -239,81 +252,98 @@ export const LookupEditor = withStyles(styles)(
       const xMin = gf.xScale ? gf.xScale.min : 0;
       const xMax = gf.xScale ? gf.xScale.max : 0;
 
+      const lookupActionsEnabled = false;
+
       return (
         <div>
-          <TextField
-            className={classes.xScaleMin}
-            label="Y axis max"
-            value={this.state.yMax}
-            onChange={this.handleYMaxChange}
-            type="number"
-            margin="normal"
-          />
-          <div
-            onMouseDown={this.handleContainerMouseDown}
-            onMouseUp={this.handleContainerMouseUp}
-            onMouseMove={this.handleContainerMouseMove}
-            onPointerDown={this.handleContainerTouchStart}
-            onPointerUp={this.handleContainerTouchEnd}
-            onPointerMove={this.handleContainerTouchMove}
-          >
-            <LineChart
-              width={327}
-              height={300}
-              data={series}
-              onMouseDown={this.handleMouseDown}
-              onMouseMove={this.handleMouseMove}
-              onMouseUp={this.handleMouseUp}
-              ref={this.lookupRef}
-              layout={'horizontal'}
+          <CardContent>
+            <TextField
+              className={classes.xScaleMin}
+              label="Y axis max"
+              value={this.state.yMax}
+              onChange={this.handleYMaxChange}
+              type="number"
+              margin="normal"
+            />
+            <div
+              onMouseDown={this.handleContainerMouseDown}
+              onMouseUp={this.handleContainerMouseUp}
+              onMouseMove={this.handleContainerMouseMove}
+              onPointerDown={this.handleContainerTouchStart}
+              onPointerUp={this.handleContainerTouchEnd}
+              onPointerMove={this.handleContainerTouchMove}
             >
-              <CartesianGrid horizontal={true} vertical={false} />
-              <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-              <YAxis
-                width={yAxisWidth}
-                allowDataOverflow={true}
-                domain={[yMin, yMax]}
-                type="number"
-                dataKey="y"
-                yAxisId="1"
-              />
-              <Tooltip formatter={this.formatValue} />
-              <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" isAnimationActive={false} dot={false} />
-            </LineChart>
-          </div>
-          <TextField
-            className={classes.xScaleMin}
-            label="Y axis min"
-            value={this.state.yMin}
-            onChange={this.handleYMinChange}
-            type="number"
-            margin="normal"
-          />
-          <br />
-          <TextField
-            className={classes.xScaleMin}
-            label="X axis min"
-            value={xMin}
-            // onChange={this.handleYMinChange}
-            type="number"
-            margin="normal"
-          />
-          <TextField
-            className={classes.xScaleMax}
-            label="X axis max"
-            value={xMax}
-            // onChange={this.handleYMinChange}
-            type="number"
-            margin="normal"
-          />
-          <TextField
-            className={classes.datapoints}
-            label="Datapoint Count"
-            value={xMax}
-            // onChange={this.handleYMinChange}
-            type="number"
-            margin="normal"
-          />
+              <LineChart
+                width={327}
+                height={300}
+                data={series}
+                onMouseDown={this.handleMouseDown}
+                onMouseMove={this.handleMouseMove}
+                onMouseUp={this.handleMouseUp}
+                ref={this.lookupRef}
+                layout={'horizontal'}
+              >
+                <CartesianGrid horizontal={true} vertical={false} />
+                <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+                <YAxis
+                  width={yAxisWidth}
+                  allowDataOverflow={true}
+                  domain={[yMin, yMax]}
+                  type="number"
+                  dataKey="y"
+                  yAxisId="1"
+                />
+                <Tooltip formatter={this.formatValue} />
+                <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" isAnimationActive={false} dot={false} />
+              </LineChart>
+            </div>
+            <TextField
+              className={classes.xScaleMin}
+              label="Y axis min"
+              value={this.state.yMin}
+              onChange={this.handleYMinChange}
+              type="number"
+              margin="normal"
+            />
+            <br />
+            <TextField
+              className={classes.xScaleMin}
+              label="X axis min"
+              value={xMin}
+              // onChange={this.handleYMinChange}
+              type="number"
+              margin="normal"
+            />
+            <TextField
+              className={classes.xScaleMax}
+              label="X axis max"
+              value={xMax}
+              // onChange={this.handleYMinChange}
+              type="number"
+              margin="normal"
+            />
+            <TextField
+              className={classes.datapoints}
+              label="Datapoint Count"
+              value={xMax}
+              // onChange={this.handleYMinChange}
+              type="number"
+              margin="normal"
+            />
+          </CardContent>
+          <CardActions>
+            <Button size="small" color="secondary" onClick={this.handleLookupRemove} className={classes.buttonLeft}>
+              Remove
+            </Button>
+            <div className={classes.buttonRight}>
+              <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleEquationCancel}>
+                Cancel
+              </Button>
+              <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleEquationSave}>
+                Save
+              </Button>
+            </div>
+          </CardActions>
         </div>
       );
     }

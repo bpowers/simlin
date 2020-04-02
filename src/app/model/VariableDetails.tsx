@@ -10,14 +10,8 @@ import { createEditor, Node } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 
-import Button from '@material-ui/core/Button';
-import Card from '@material-ui/core/Card';
-import CardActions from '@material-ui/core/CardActions';
-import CardContent from '@material-ui/core/CardContent';
-import Checkbox from '@material-ui/core/Checkbox';
+import { Button, Card, CardActions, CardContent, Tab, Tabs } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
-import Tab from '@material-ui/core/Tab';
-import Tabs from '@material-ui/core/Tabs';
 
 import { Table, Variable } from '../../engine/vars';
 import { GF, ViewElement } from '../../engine/xmile';
@@ -48,6 +42,11 @@ const styles = createStyles({
   },
   buttonRight: {
     float: 'right',
+  },
+  addLookupButton: {
+    display: 'block',
+    marginLeft: 'auto',
+    marginRight: 'auto',
   },
 });
 
@@ -133,8 +132,8 @@ export const VariableDetails = withStyles(styles)(
       this.props.onActiveTabChange(newValue);
     };
 
-    handleToggleLookupTable = (): void => {
-      this.setState((state) => ({ hasLookupTable: !state.hasLookupTable }));
+    handleAddLookupTable = (): void => {
+      this.setState({ hasLookupTable: true });
     };
 
     renderEquation() {
@@ -171,7 +170,7 @@ export const VariableDetails = withStyles(styles)(
       };
 
       return (
-        <div>
+        <CardContent>
           <Slate
             editor={this.state.editor}
             value={this.state.equation}
@@ -238,7 +237,7 @@ export const VariableDetails = withStyles(styles)(
             <Tooltip formatter={this.formatValue} />
             <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} dot={false} />
           </LineChart>
-        </div>
+        </CardContent>
       );
     }
 
@@ -247,23 +246,33 @@ export const VariableDetails = withStyles(styles)(
     };
 
     renderLookup() {
-      const { variable } = this.props;
+      const { classes, variable } = this.props;
       const { hasLookupTable } = this.state;
 
       let table;
       if (hasLookupTable && variable instanceof Table) {
         table = <LookupEditor variable={variable} onLookupChange={this.handleLookupChange} />;
+      } else {
+        table = (
+          <CardContent>
+            <Button
+              variant="contained"
+              color="secondary"
+              onChange={this.handleAddLookupTable}
+              className={classes.addLookupButton}
+            >
+              Add lookup table
+            </Button>
+            <br />
+            <i>
+              A lookup table is a non-linear function indexed by the variable{"'"}s equation. You edit the function by
+              dragging your mouse or finger across the graph.
+            </i>
+          </CardContent>
+        );
       }
 
-      return (
-        <div>
-          <div>
-            <Checkbox checked={hasLookupTable} onChange={this.handleToggleLookupTable} />
-            Has Lookup Table
-          </div>
-          {table}
-        </div>
-      );
+      return table;
     }
 
     render() {
@@ -288,7 +297,7 @@ export const VariableDetails = withStyles(styles)(
             {lookupTab}
           </Tabs>
 
-          <CardContent>{content}</CardContent>
+          {content}
         </Card>
       );
     }
