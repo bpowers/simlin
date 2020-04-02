@@ -15,6 +15,16 @@ import { Table } from '../../engine/vars';
 import { GF, Scale } from '../../engine/xmile';
 
 const styles = createStyles({
+  yAxisMax: {
+    width: '30%',
+    paddingRight: 4,
+    marginTop: 0,
+  },
+  yAxisMin: {
+    width: '30%',
+    paddingRight: 4,
+    marginTop: 4,
+  },
   xScaleMin: {
     width: '30%',
     paddingRight: 4,
@@ -258,7 +268,7 @@ export const LookupEditor = withStyles(styles)(
         <div>
           <CardContent>
             <TextField
-              className={classes.xScaleMin}
+              className={classes.yAxisMax}
               label="Y axis max"
               value={this.state.yMax}
               onChange={this.handleYMaxChange}
@@ -298,7 +308,7 @@ export const LookupEditor = withStyles(styles)(
               </LineChart>
             </div>
             <TextField
-              className={classes.xScaleMin}
+              className={classes.yAxisMin}
               label="Y axis min"
               value={this.state.yMin}
               onChange={this.handleYMinChange}
