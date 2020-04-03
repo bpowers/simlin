@@ -4,6 +4,7 @@
 
 import * as React from 'react';
 
+import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 
 import { createEditor, Node } from 'slate';
@@ -14,7 +15,7 @@ import { Button, Card, CardActions, CardContent, Tab, Tabs } from '@material-ui/
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { Table, Variable } from '../../engine/vars';
-import { GF, ViewElement } from '../../engine/xmile';
+import { GF, Scale, ViewElement } from '../../engine/xmile';
 
 import { defined, Series } from '../common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
@@ -66,7 +67,6 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 interface VariableDetailsState {
   equation: Node[];
   editor: ReactEditor;
-  hasLookupTable: boolean;
 }
 
 function equationFromValue(children: Node[]): string {
@@ -94,7 +94,6 @@ export const VariableDetails = withStyles(styles)(
       this.state = {
         editor: withHistory(withReact(createEditor())),
         equation: valueFromEquation(equationFor(variable)),
-        hasLookupTable: variable instanceof Table,
       };
     }
 
@@ -133,7 +132,13 @@ export const VariableDetails = withStyles(styles)(
     };
 
     handleAddLookupTable = (): void => {
-      this.setState({ hasLookupTable: true });
+      const ident = this.props.viewElement.ident;
+      const gf = new GF({
+        xScale: new Scale({ min: 0, max: 1 }),
+        yScale: new Scale({ min: 0, max: 1 }),
+        yPoints: List([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
+      });
+      this.props.onTableChange(ident, gf);
     };
 
     renderEquation() {
@@ -241,16 +246,15 @@ export const VariableDetails = withStyles(styles)(
       );
     }
 
-    handleLookupChange = (ident: string, newTable: GF) => {
+    handleLookupChange = (ident: string, newTable: GF | null) => {
       this.props.onTableChange(ident, newTable);
     };
 
     renderLookup() {
       const { classes, variable } = this.props;
-      const { hasLookupTable } = this.state;
 
       let table;
-      if (hasLookupTable && variable instanceof Table) {
+      if (variable instanceof Table) {
         table = <LookupEditor variable={variable} onLookupChange={this.handleLookupChange} />;
       } else {
         table = (
@@ -258,7 +262,7 @@ export const VariableDetails = withStyles(styles)(
             <Button
               variant="contained"
               color="secondary"
-              onChange={this.handleAddLookupTable}
+              onClick={this.handleAddLookupTable}
               className={classes.addLookupButton}
             >
               Add lookup table

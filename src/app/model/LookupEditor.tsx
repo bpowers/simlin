@@ -4,13 +4,12 @@
 
 import * as React from 'react';
 
-import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { defined } from '../common';
-import { isEqual, Point } from './drawing/common';
+import { isEqual } from './drawing/common';
 import { Table } from '../../engine/vars';
 import { GF, Scale } from '../../engine/xmile';
 
@@ -47,23 +46,17 @@ const styles = createStyles({
   },
 });
 
-export interface Coordinates {
-  x: List<number>;
-  y: List<number>;
-}
-
 interface LookupEditorPropsFull extends WithStyles<typeof styles> {
   variable: Table;
-  onLookupChange: (ident: string, newTable: GF) => void;
+  onLookupChange: (ident: string, newTable: GF | null) => void;
 }
 
 // export type LookupEditorProps = Pick<LookupEditorPropsFull, 'variable' | 'viewElement' | 'data'>;
 
 interface LookupEditorState {
   inDrag: boolean;
-  series: Point[];
-  yMin: number;
-  yMax: number;
+  hasChange: boolean;
+  gf: GF;
 }
 
 function getAnyElementOfObject(obj: any): any | undefined {
@@ -86,39 +79,41 @@ export const LookupEditor = withStyles(styles)(
     constructor(props: LookupEditorPropsFull) {
       super(props);
 
-      const { variable } = this.props;
-      const gf = this.gf();
-
-      let yMin = 0;
-      let yMax = 0;
-      const series: { x: number; y: number }[] = [];
-      for (let i = 0; i < variable.x.size; i++) {
-        const x = defined(variable.x.get(i));
-        const y = defined(variable.y.get(i));
-        series.push({ x, y });
-        if (y < yMin) {
-          yMin = y;
-        }
-        if (y > yMax) {
-          yMax = y;
-        }
-      }
-      yMin = Math.floor(yMin);
-      yMax = Math.ceil(yMax);
+      const gf = this.getVariableGF();
 
       this.lookupRef = React.createRef();
       this.state = {
         inDrag: false,
-        series,
-        yMin: gf.yScale ? gf.yScale.min : yMin,
-        yMax: gf.yScale ? gf.yScale.max : yMax,
+        hasChange: false,
+        gf,
       };
     }
 
-    gf(): GF {
+    getVariableGF(): GF {
       const { variable } = this.props;
       const xVar = defined(variable.xmile);
-      return defined(xVar.gf);
+      let gf = defined(xVar.gf);
+
+      // ensure yScale always exists
+      if (!gf.yScale) {
+        let min = 0;
+        let max = 0;
+        for (let i = 0; i < variable.x.size; i++) {
+          const y = defined(variable.y.get(i));
+          if (y < min) {
+            min = y;
+          }
+          if (y > max) {
+            max = y;
+          }
+        }
+        min = Math.floor(min);
+        max = Math.ceil(max);
+
+        gf = gf.set('yScale', new Scale({ min, max }));
+      }
+
+      return gf;
     }
 
     formatValue = (value: string | number | (string | number)[]): string | (string | number)[] => {
@@ -161,16 +156,16 @@ export const LookupEditor = withStyles(styles)(
     endEditing() {
       this.setState({ inDrag: false });
 
-      const { series, yMin, yMax } = this.state;
-      const xPoints: List<number> = List(series.map((p: Point): number => p.x));
-      const yPoints: List<number> = List(series.map((p: Point): number => p.y));
+      // const { series, yMin, yMax } = this.state;
+      // const xPoints: List<number> = List(series.map((p: Point): number => p.x));
+      // const yPoints: List<number> = List(series.map((p: Point): number => p.y));
+      //
+      // const { variable } = this.props;
+      // const xVar = defined(variable.xmile);
+      // const yScale = new Scale({ min: yMin, max: yMax });
+      // const gf = defined(xVar.gf).set('xPoints', xPoints).set('yPoints', yPoints).set('yScale', yScale);
 
-      const { variable } = this.props;
-      const xVar = defined(variable.xmile);
-      const yScale = new Scale({ min: yMin, max: yMax });
-      const gf = defined(xVar.gf).set('xPoints', xPoints).set('yPoints', yPoints).set('yScale', yScale);
-
-      this.props.onLookupChange(defined(this.props.variable.ident), gf);
+      // this.props.onLookupChange(defined(this.props.variable.ident), gf);
     }
 
     updatePoint(details: any) {
@@ -189,7 +184,10 @@ export const LookupEditor = withStyles(styles)(
         return;
       }
 
-      const { yMin, yMax } = this.state;
+      const { variable } = this.props;
+
+      const yMin = defined(this.state.gf.yScale).min;
+      const yMax = defined(this.state.gf.yScale).max;
 
       const x = details.activePayload[0].payload.x;
       let y = yScale.invert(details.chartY);
@@ -199,18 +197,25 @@ export const LookupEditor = withStyles(styles)(
         y = yMin;
       }
 
-      const series = this.state.series.map((p: Point) => {
-        if (isEqual(p.x, x)) {
-          return {
-            x,
-            y,
-          };
-        } else {
-          return p;
+      let off = -1;
+      for (let i = 0; i < variable.x.size; i++) {
+        if (isEqual(defined(variable.x.get(i)), x)) {
+          off = i;
+          break;
         }
-      });
+      }
 
-      this.setState({ series });
+      if (off < 0) {
+        // this is very unexpected
+        return;
+      }
+
+      const yPoints = defined(this.state.gf.yPoints).set(off, y);
+      const gf = this.state.gf.set('yPoints', yPoints);
+      this.setState({
+        hasChange: true,
+        gf,
+      });
     }
 
     handleMouseDown = (details: any) => {
@@ -233,23 +238,48 @@ export const LookupEditor = withStyles(styles)(
     };
 
     handleYMinChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      this.setState({ yMin: Number(event.target.value) });
+      const value = Number(event.target.value);
+      const yScale = defined(this.state.gf.yScale);
+      const gf = this.state.gf.set('yScale', yScale.set('min', value));
+      this.setState({
+        hasChange: true,
+        gf,
+      });
     };
 
     handleYMaxChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      this.setState({ yMax: Number(event.target.value) });
+      const value = Number(event.target.value);
+      const yScale = defined(this.state.gf.yScale);
+      const gf = this.state.gf.set('yScale', yScale.set('max', value));
+      this.setState({
+        hasChange: true,
+        gf,
+      });
     };
 
-    handleLookupRemove = (): void => {};
+    handleLookupRemove = (): void => {
+      this.props.onLookupChange(defined(this.props.variable.ident), null);
+    };
 
-    handleEquationCancel = (): void => {};
+    handleLookupCancel = (): void => {
+      const gf = this.getVariableGF();
+      this.setState({
+        hasChange: false,
+        gf,
+      });
+    };
 
-    handleEquationSave = (): void => {};
+    handleLookupSave = (): void => {
+      const gf = this.state.gf;
+      this.props.onLookupChange(defined(this.props.variable.ident), gf);
+    };
 
     render() {
       const { classes } = this.props;
-      const { yMin, yMax, series } = this.state;
+      const { gf } = this.state;
 
+      const yMin = defined(gf.yScale).min;
+      const yMax = defined(gf.yScale).max;
       const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
       const yAxisWidth = Math.max(40, 20 + charWidth * 6);
 
@@ -258,11 +288,19 @@ export const LookupEditor = withStyles(styles)(
         right: 'dataMax',
       };
 
-      const gf = this.gf();
       const xMin = gf.xScale ? gf.xScale.min : 0;
       const xMax = gf.xScale ? gf.xScale.max : 0;
 
-      const lookupActionsEnabled = false;
+      const lookupActionsEnabled = this.state.hasChange;
+
+      const { variable } = this.props;
+
+      const series: { x: number; y: number }[] = [];
+      for (let i = 0; i < variable.x.size; i++) {
+        const x = defined(variable.x.get(i));
+        const y = defined(defined(gf.yPoints).get(i));
+        series.push({ x, y });
+      }
 
       return (
         <div>
@@ -270,7 +308,7 @@ export const LookupEditor = withStyles(styles)(
             <TextField
               className={classes.yAxisMax}
               label="Y axis max"
-              value={this.state.yMax}
+              value={yMax}
               onChange={this.handleYMaxChange}
               type="number"
               margin="normal"
@@ -310,7 +348,7 @@ export const LookupEditor = withStyles(styles)(
             <TextField
               className={classes.yAxisMin}
               label="Y axis min"
-              value={this.state.yMin}
+              value={yMin}
               onChange={this.handleYMinChange}
               type="number"
               margin="normal"
@@ -346,10 +384,10 @@ export const LookupEditor = withStyles(styles)(
               Remove
             </Button>
             <div className={classes.buttonRight}>
-              <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleEquationCancel}>
+              <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleLookupCancel}>
                 Cancel
               </Button>
-              <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleEquationSave}>
+              <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleLookupSave}>
                 Save
               </Button>
             </div>
