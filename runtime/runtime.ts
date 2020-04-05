@@ -389,7 +389,7 @@ function lookup(table: any, index: number): number {
     }
   }
 
-  let i = low;
+  const i = low;
   if (x[i] === index) {
     return y[i];
   } else {

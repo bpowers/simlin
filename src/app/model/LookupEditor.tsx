@@ -59,6 +59,48 @@ interface LookupEditorState {
   hasChange: boolean;
   gf: GF;
   table: GFTable;
+  yMin: number;
+  yMax: number;
+  datapointCount: number;
+}
+
+function lookup(table: GFTable, index: number): number {
+  const size = table.size;
+  if (size <= 0) {
+    return NaN;
+  }
+
+  const x = table.x;
+  const y = table.y;
+
+  if (index <= x[0]) {
+    return y[0];
+  } else if (index >= x[size - 1]) {
+    return y[size - 1];
+  }
+
+  // binary search seems to be the most appropriate choice here.
+  let low = 0;
+  let high = size;
+  let mid: number;
+  while (low < high) {
+    mid = Math.floor(low + (high - low) / 2);
+    if (x[mid] < index) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  const i = low;
+  if (x[i] === index) {
+    return y[i];
+  } else {
+    // slope = deltaY/deltaX
+    const slope = (y[i] - y[i - 1]) / (x[i] - x[i - 1]);
+    // y = m*x + b
+    return (index - x[i - 1]) * slope + y[i - 1];
+  }
 }
 
 function getAnyElementOfObject(obj: any): any | undefined {
@@ -90,6 +132,9 @@ export const LookupEditor = withStyles(styles)(
         hasChange: false,
         gf,
         table,
+        yMin: defined(gf.yScale).min,
+        yMax: defined(gf.yScale).max,
+        datapointCount: table.size,
       };
     }
 
@@ -188,7 +233,6 @@ export const LookupEditor = withStyles(styles)(
         return;
       }
 
-      const { variable } = this.props;
       const { gf, table } = this.state;
 
       const newTable = Object.assign({}, table);
@@ -206,8 +250,8 @@ export const LookupEditor = withStyles(styles)(
       }
 
       let off = -1;
-      for (let i = 0; i < variable.x.size; i++) {
-        if (isEqual(defined(variable.x.get(i)), x)) {
+      for (let i = 0; i < newTable.size; i++) {
+        if (isEqual(newTable.x[i], x)) {
           off = i;
           break;
         }
@@ -246,21 +290,133 @@ export const LookupEditor = withStyles(styles)(
 
     handleYMinChange = (event: React.ChangeEvent<HTMLInputElement>) => {
       const value = Number(event.target.value);
-      const yScale = defined(this.state.gf.yScale);
-      const gf = this.state.gf.set('yScale', yScale.set('min', value));
       this.setState({
         hasChange: true,
-        gf,
+        yMin: value,
       });
+
+      const { yMax } = this.state;
+      if (value < yMax) {
+        this.setState({
+          gf: this.state.gf.set(
+            'yScale',
+            new Scale({
+              min: value,
+              max: yMax,
+            }),
+          ),
+        });
+      }
     };
 
     handleYMaxChange = (event: React.ChangeEvent<HTMLInputElement>) => {
       const value = Number(event.target.value);
-      const yScale = defined(this.state.gf.yScale);
-      const gf = this.state.gf.set('yScale', yScale.set('max', value));
+      this.setState({
+        hasChange: true,
+        yMax: value,
+      });
+
+      const { yMin } = this.state;
+      if (yMin < value) {
+        this.setState({
+          gf: this.state.gf.set(
+            'yScale',
+            new Scale({
+              min: yMin,
+              max: value,
+            }),
+          ),
+        });
+      }
+    };
+
+    static rescaleX(gf: GF, table: GFTable): GFTable {
+      const newTable = Object.assign({}, table);
+      newTable.x = new Float64Array(table.x);
+
+      if (table.size === 0) {
+        return newTable;
+      }
+
+      const size = table.size;
+      const xMin = defined(gf.xScale).min;
+      const xMax = defined(gf.xScale).max;
+      if (xMin >= xMax) {
+        return newTable;
+      }
+
+      for (let i = 0; i < table.size; i++) {
+        newTable.x[i] = (i / (size - 1)) * (xMax - xMin) + xMin;
+      }
+
+      return newTable;
+    }
+
+    handleXMinChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+      const value = Number(event.target.value);
+      const { table } = this.state;
+      const xScale = defined(this.state.gf.xScale);
+      const gf = this.state.gf.set('xScale', xScale.set('min', value));
+
+      const newTable = InnerLookupEditor.rescaleX(gf, table);
+
       this.setState({
         hasChange: true,
         gf,
+        table: newTable,
+      });
+    };
+
+    handleXMaxChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+      const value = Number(event.target.value);
+      const { table } = this.state;
+      const xScale = defined(this.state.gf.xScale);
+      const gf = this.state.gf.set('xScale', xScale.set('max', value));
+
+      const newTable = InnerLookupEditor.rescaleX(gf, table);
+
+      this.setState({
+        hasChange: true,
+        gf,
+        table: newTable,
+      });
+    };
+
+    handleDatapointCountChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+      const datapointCount = Number(event.target.value);
+      this.setState({
+        hasChange: true,
+        datapointCount,
+      });
+
+      // don't rescale things when the current count is obviously bad
+      if (datapointCount <= 0) {
+        return;
+      }
+
+      const { gf } = this.state;
+      const oldTable = this.state.table;
+      const newTable = Object.assign({}, oldTable);
+      newTable.x = new Float64Array(datapointCount);
+      newTable.y = new Float64Array(datapointCount);
+
+      const size = datapointCount;
+      const xMin = defined(gf.xScale).min;
+      const xMax = defined(gf.xScale).max;
+      if (xMin >= xMax) {
+        return;
+      }
+
+      for (let i = 0; i < size; i++) {
+        const x = (i / (size - 1)) * (xMax - xMin) + xMin;
+        newTable.x[i] = x;
+        newTable.y[i] = lookup(oldTable, x);
+      }
+      newTable.size = datapointCount;
+
+      this.setState({
+        hasChange: true,
+        table: newTable,
       });
     };
 
@@ -275,6 +431,9 @@ export const LookupEditor = withStyles(styles)(
         hasChange: false,
         gf,
         table,
+        yMin: defined(gf.yScale).min,
+        yMax: defined(gf.yScale).max,
+        datapointCount: table.size,
       });
     };
 
@@ -282,15 +441,17 @@ export const LookupEditor = withStyles(styles)(
       const { gf, table } = this.state;
       const yPoints = table.y.reduce((pts: List<number>, curr: number) => pts.push(curr), List());
       this.props.onLookupChange(defined(this.props.variable.ident), gf.set('yPoints', yPoints));
+      this.setState({ hasChange: false });
     };
 
     render() {
       const { classes } = this.props;
-      const { gf, table } = this.state;
+      const { datapointCount, gf, table, yMin, yMax } = this.state;
 
-      const yMin = defined(gf.yScale).min;
-      const yMax = defined(gf.yScale).max;
-      const charWidth = Math.max(yMin.toFixed(0).length, yMax.toFixed(0).length);
+      const yMinChart = defined(gf.yScale).min;
+      const yMaxChart = defined(gf.yScale).max;
+
+      const charWidth = Math.max(yMinChart.toFixed(0).length, yMaxChart.toFixed(0).length);
       const yAxisWidth = Math.max(40, 20 + charWidth * 6);
 
       const { left, right } = {
@@ -310,11 +471,18 @@ export const LookupEditor = withStyles(styles)(
         series.push({ x, y });
       }
 
+      const xScaleError = xMin >= xMax;
+      const yScaleError = yMin >= yMax;
+      const datapointCountError = datapointCount <= 0;
+
+      const isSaveDisabled = !lookupActionsEnabled || xScaleError || yScaleError || datapointCountError;
+
       return (
         <div>
           <CardContent>
             <TextField
               className={classes.yAxisMax}
+              error={yScaleError}
               label="Y axis max"
               value={yMax}
               onChange={this.handleYMaxChange}
@@ -344,7 +512,7 @@ export const LookupEditor = withStyles(styles)(
                 <YAxis
                   width={yAxisWidth}
                   allowDataOverflow={true}
-                  domain={[yMin, yMax]}
+                  domain={[yMinChart, yMaxChart]}
                   type="number"
                   dataKey="y"
                   yAxisId="1"
@@ -355,6 +523,7 @@ export const LookupEditor = withStyles(styles)(
             </div>
             <TextField
               className={classes.yAxisMin}
+              error={yScaleError}
               label="Y axis min"
               value={yMin}
               onChange={this.handleYMinChange}
@@ -364,25 +533,28 @@ export const LookupEditor = withStyles(styles)(
             <br />
             <TextField
               className={classes.xScaleMin}
+              error={xScaleError}
               label="X axis min"
               value={xMin}
-              // onChange={this.handleYMinChange}
+              onChange={this.handleXMinChange}
               type="number"
               margin="normal"
             />
             <TextField
               className={classes.xScaleMax}
+              error={xScaleError}
               label="X axis max"
               value={xMax}
-              // onChange={this.handleYMinChange}
+              onChange={this.handleXMaxChange}
               type="number"
               margin="normal"
             />
             <TextField
               className={classes.datapoints}
+              error={datapointCountError}
               label="Datapoint Count"
-              value={xMax}
-              // onChange={this.handleYMinChange}
+              value={datapointCount}
+              onChange={this.handleDatapointCountChange}
               type="number"
               margin="normal"
             />
@@ -395,7 +567,7 @@ export const LookupEditor = withStyles(styles)(
               <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleLookupCancel}>
                 Cancel
               </Button>
-              <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleLookupSave}>
+              <Button size="small" color="primary" disabled={isSaveDisabled} onClick={this.handleLookupSave}>
                 Save
               </Button>
             </div>
