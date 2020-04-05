@@ -11,7 +11,8 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import { defined } from '../common';
 import { isEqual } from './drawing/common';
 import { Table } from '../../engine/vars';
-import { GF, Scale } from '../../engine/xmile';
+import { GF, GFTable, Scale } from '../../engine/xmile';
+import { List } from 'immutable';
 
 const styles = createStyles({
   yAxisMax: {
@@ -57,6 +58,7 @@ interface LookupEditorState {
   inDrag: boolean;
   hasChange: boolean;
   gf: GF;
+  table: GFTable;
 }
 
 function getAnyElementOfObject(obj: any): any | undefined {
@@ -80,12 +82,14 @@ export const LookupEditor = withStyles(styles)(
       super(props);
 
       const gf = this.getVariableGF();
+      const table = defined(gf.table());
 
       this.lookupRef = React.createRef();
       this.state = {
         inDrag: false,
         hasChange: false,
         gf,
+        table,
       };
     }
 
@@ -185,9 +189,13 @@ export const LookupEditor = withStyles(styles)(
       }
 
       const { variable } = this.props;
+      const { gf, table } = this.state;
 
-      const yMin = defined(this.state.gf.yScale).min;
-      const yMax = defined(this.state.gf.yScale).max;
+      const newTable = Object.assign({}, table);
+      newTable.y = new Float64Array(table.y);
+
+      const yMin = defined(gf.yScale).min;
+      const yMax = defined(gf.yScale).max;
 
       const x = details.activePayload[0].payload.x;
       let y = yScale.invert(details.chartY);
@@ -210,11 +218,10 @@ export const LookupEditor = withStyles(styles)(
         return;
       }
 
-      const yPoints = defined(this.state.gf.yPoints).set(off, y);
-      const gf = this.state.gf.set('yPoints', yPoints);
+      newTable.y[off] = y;
       this.setState({
         hasChange: true,
-        gf,
+        table: newTable,
       });
     }
 
@@ -263,20 +270,23 @@ export const LookupEditor = withStyles(styles)(
 
     handleLookupCancel = (): void => {
       const gf = this.getVariableGF();
+      const table = defined(gf.table());
       this.setState({
         hasChange: false,
         gf,
+        table,
       });
     };
 
     handleLookupSave = (): void => {
-      const gf = this.state.gf;
-      this.props.onLookupChange(defined(this.props.variable.ident), gf);
+      const { gf, table } = this.state;
+      const yPoints = table.y.reduce((pts: List<number>, curr: number) => pts.push(curr), List());
+      this.props.onLookupChange(defined(this.props.variable.ident), gf.set('yPoints', yPoints));
     };
 
     render() {
       const { classes } = this.props;
-      const { gf } = this.state;
+      const { gf, table } = this.state;
 
       const yMin = defined(gf.yScale).min;
       const yMax = defined(gf.yScale).max;
@@ -293,12 +303,10 @@ export const LookupEditor = withStyles(styles)(
 
       const lookupActionsEnabled = this.state.hasChange;
 
-      const { variable } = this.props;
-
       const series: { x: number; y: number }[] = [];
-      for (let i = 0; i < variable.x.size; i++) {
-        const x = defined(variable.x.get(i));
-        const y = defined(defined(gf.yPoints).get(i));
+      for (let i = 0; i < table.size; i++) {
+        const x = table.x[i];
+        const y = table.y[i];
         series.push({ x, y });
       }
 

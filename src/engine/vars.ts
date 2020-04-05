@@ -229,34 +229,17 @@ export class Table extends Record(tableDefaults) {
     const variable = variableFrom(xVar, 'table');
 
     const gf = defined(xVar.gf);
-    const ypts = gf.yPoints;
-
-    // FIXME(bp) unit test
-    const xpts = gf.xPoints;
-    const xscale = gf.xScale;
-    const xmin = xscale ? xscale.min : 0;
-    const xmax = xscale ? xscale.max : 0;
+    const gfTable = gf.table();
+    const ok = gfTable !== undefined;
 
     let xList = List<number>();
     let yList = List<number>();
-    let ok = true;
 
-    if (ypts) {
-      for (let i = 0; i < ypts.size; i++) {
-        let x: number;
-        // either the x points have been explicitly specified, or
-        // it is a linear mapping of points between xmin and xmax,
-        // inclusive
-        if (xpts) {
-          x = defined(xpts.get(i));
-        } else {
-          x = (i / (ypts.size - 1)) * (xmax - xmin) + xmin;
-        }
-        xList = xList.push(x);
-        yList = yList.push(defined(ypts.get(i)));
+    if (gfTable !== undefined) {
+      for (let i = 0; i < gfTable.size; i++) {
+        xList = xList.push(gfTable.x[i]);
+        yList = yList.push(gfTable.y[i]);
       }
-    } else {
-      ok = false;
     }
 
     const table = {

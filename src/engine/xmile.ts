@@ -1643,6 +1643,15 @@ export class View extends Record(ViewDefaults) implements XNode {
   }
 }
 
+// GFTable is a consistent format for the data from a GF that can be
+// used for efficient lookup operations
+export interface GFTable {
+  type: GFType;
+  size: number;
+  x: Float64Array;
+  y: Float64Array;
+}
+
 type GFType = 'continuous' | 'extrapolate' | 'discrete';
 
 const GFDefaults = {
@@ -1721,6 +1730,38 @@ export class GF extends Record(GFDefaults) implements XNode {
     }
 
     return [new GF(table), undefined];
+  }
+
+  table(): GFTable | undefined {
+    const xpts = this.xPoints;
+    const xscale = this.xScale;
+    const xmin = xscale ? xscale.min : 0;
+    const xmax = xscale ? xscale.max : 0;
+
+    if (!this.yPoints) {
+      return undefined;
+    }
+    const ypts: List<number> = this.yPoints;
+
+    const size = this.yPoints.size;
+    const xList = new Float64Array(size);
+    const yList = new Float64Array(size);
+
+    for (let i = 0; i < ypts.size; i++) {
+      // either the x points have been explicitly specified, or
+      // it is a linear mapping of points between xmin and xmax,
+      // inclusive
+      const x = xpts ? defined(xpts.get(i)) : (i / (size - 1)) * (xmax - xmin) + xmin;
+      xList[i] = x;
+      yList[i] = defined(ypts.get(i));
+    }
+
+    return {
+      size,
+      type: this.type,
+      x: xList,
+      y: yList,
+    };
   }
 }
 
