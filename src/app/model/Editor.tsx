@@ -401,6 +401,7 @@ export const Editor = withStyles(styles)(
     handleSelection = (selection: Set<UID>) => {
       this.setState({
         selection,
+        variableDetailsActiveTab: 0,
       });
     };
 
