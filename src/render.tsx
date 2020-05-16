@@ -60,6 +60,7 @@ export async function renderToPNG(fileDoc: File): Promise<Buffer> {
     exists(ctx),
     svg,
     Object.assign({}, preset, {
+      window: undefined,
       ignoreMouse: true,
       ignoreAnimation: true,
       // ignoreDimensions: false,
