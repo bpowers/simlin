@@ -14,12 +14,12 @@ lazy_static = "1"
 libc = "0.2"
 regex = "1"
 unicode-xid = "0.2"
-lalrpop-util = "0.18"
+lalrpop-util = "0.19"
 serde = { version = "1", features = [ "derive" ] }
-quick-xml = { version = "0.17", features = [ "serialize" ] }
+quick-xml = { version = "0.18", features = [ "serialize" ] }
 prost = "0.6"
 prost-types = "0.6"
 
 [build-dependencies]
-lalrpop = "0.18"
+lalrpop = "0.19"
 prost-build = "0.6"
