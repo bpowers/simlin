@@ -160,6 +160,18 @@ export const NewProject = withStyles(styles)(
         return;
       }
 
+      // try {
+      //   const { from } = await import('../engine-v2/pkg');
+      //   debugger;
+      //   const result = from(contents);
+      //   console.log(result);
+      // } catch (e) {
+      //   this.setState({
+      //     errorMsg: `engine-v2: ${e}`,
+      //   });
+      //   return;
+      // }
+
       const [project, err] = stdProject.addXmileFile(doc, true);
       if (err) {
         console.log(err);
