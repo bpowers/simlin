@@ -39,7 +39,7 @@ use common::SDError;
 pub struct Project {
     name: String,
     file: xmile::File,
-    models: HashMap<String, Rc<xmile::Model>>,
+    models: HashMap<String, Rc<model::Model>>,
 }
 
 impl fmt::Debug for Project {
@@ -65,16 +65,18 @@ impl Project {
             }
         };
 
+        use model::Model;
+
         // writeln!(&mut ::std::io::stderr(), "{:?}\n", file).unwrap();
 
         //        se::to_writer(::std::io::stderr(), &file).unwrap();
         //        ::std::io::stderr().flush().unwrap();
 
-        let models = HashMap::new();
-
-        // for model in f.get_models() {
-        //   models.insert(model.get_name().clone(), model.clone());
-        // }
+        let models_list: Vec<Model> = file.models.iter().map(|m| Model::new(m)).collect();
+        let models = models_list
+            .into_iter()
+            .map(|m| (m.name.to_string(), Rc::new(m)))
+            .collect();
 
         let project = Project {
             name: "test".to_string(),
@@ -91,7 +93,7 @@ impl Project {
         }
 
         // get reference to model, increasing refcount
-        let model: Rc<xmile::Model> = self.models.get(model_name).unwrap().clone();
+        let model: Rc<model::Model> = self.models.get(model_name).unwrap().clone();
 
         Simulation::new(self, model)
     }

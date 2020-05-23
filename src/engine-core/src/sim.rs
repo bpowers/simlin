@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::common::Result;
-use crate::xmile;
+use crate::model;
 use crate::Project;
 
 pub struct Var {
@@ -9,7 +9,7 @@ pub struct Var {
 }
 
 pub struct Module {
-    model: Rc<xmile::Model>,
+    model: Rc<model::Model>,
     vars: Vec<Rc<Var>>,
 }
 
@@ -17,7 +17,7 @@ impl Module {
     fn new(
         _project: &Project,
         _parent: Option<Rc<Var>>,
-        _model: Rc<xmile::Model>,
+        _model: Rc<model::Model>,
         _vmodule: Option<Rc<Var>>,
     ) -> Result<Module> {
         return err!("Module::new not implemented");
@@ -39,7 +39,7 @@ pub struct Simulation {
 }
 
 impl Simulation {
-    pub fn new(project: &Project, model: Rc<xmile::Model>) -> Result<Simulation> {
+    pub fn new(project: &Project, model: Rc<model::Model>) -> Result<Simulation> {
         let _module = Module::new(project, None, model, None);
         // create AModule for model
         // creates avars for all vars in model + recursive submodules

@@ -430,7 +430,7 @@ pub struct Module {
     pub refs: Option<Vec<Ref>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Ref {
     pub src: String,
     pub dst: String,
