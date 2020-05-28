@@ -2,11 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use super::Tok::*;
-use super::{Tok, Tokenizer};
+use super::Token::*;
+use super::{Token, Tokenizer};
 
 // straight from LALRPOP
-fn test(input: &str, expected: Vec<(&str, Tok)>) {
+fn test(input: &str, expected: Vec<(&str, Token)>) {
     // use $ to signal EOL because it can be replaced with a single space
     // for spans, and because it applies also to r#XXX# style strings:
     let input = input.replace("$", "\n");

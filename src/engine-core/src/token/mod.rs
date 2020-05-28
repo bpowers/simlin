@@ -9,7 +9,7 @@ use std::str::{CharIndices, FromStr};
 use unicode_xid::UnicodeXID;
 
 use self::ErrorCode::*;
-use self::Tok::*;
+use self::Token::*;
 
 #[cfg(test)]
 mod test;
@@ -20,8 +20,8 @@ pub struct Error {
     pub code: ErrorCode,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Tok<'input> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Token<'input> {
     If,
     Then,
     Else,
@@ -71,7 +71,7 @@ pub struct Tokenizer<'input> {
     lookahead: Option<(usize, char)>,
 }
 
-const KEYWORDS: &[(&str, Tok<'static>)] = &[
+const KEYWORDS: &[(&str, Token<'static>)] = &[
     ("if", If),
     ("then", Then),
     ("else", Else),
@@ -131,7 +131,7 @@ impl<'input> Tokenizer<'input> {
         }
     }
 
-    fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Tok<'input>>, Error> {
+    fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, Error> {
         let (start, word, end) = self.word(idx0);
 
         // search for a keyword first; if none are found, this is
@@ -147,7 +147,7 @@ impl<'input> Tokenizer<'input> {
         Ok((start, tok, end))
     }
 
-    fn number(&mut self, idx0: usize) -> Result<Spanned<Tok<'input>>, Error> {
+    fn number(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, Error> {
         let (start, word, end) = match self.take_while(is_digit) {
             Some(end) => (idx0, &self.text[idx0..end], end),
             None => (idx0, &self.text[idx0..], self.text.len()),
@@ -175,7 +175,7 @@ macro_rules! consume {
 }
 
 impl<'input> Iterator for Tokenizer<'input> {
-    type Item = Result<Spanned<Tok<'input>>, Error>;
+    type Item = Result<Spanned<Token<'input>>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {

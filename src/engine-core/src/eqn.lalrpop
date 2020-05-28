@@ -1,12 +1,11 @@
-use sd::common;
-use sd::ast::UnaryOp::*;
-use sd::ast::BinaryOp::*;
-use sd::ast::Expr;
-use sd::ast::node::*;
-use sd::tok::{self, Tok};
-use std::Option::Some;
+use crate::common;
+use crate::ast::UnaryOp::*;
+use crate::ast::BinaryOp::*;
+use crate::ast::Expr;
+use crate::ast::Expr::*;
+use crate::token::{self, Token};
 
-grammar;
+grammar<'input>(input: &'input str);
 
 pub Program: Box<Expr> = {
     Expr,
@@ -18,7 +17,7 @@ Expr: Box<Expr> = {
 };
 
 LCmp: Box<Expr> = {
-    <l:ACmp> "&&" <r:LCmp> => Expr::new(Op2(And, l, r)),
+    <l:ACmp> "&&" <r:LCmp> => Box::new(Op2(And, l, r)),
     <l:ACmp> "||" <r:LCmp> => Box::new(Op2(Or, l, r)),
     ACmp,
 };
@@ -90,33 +89,33 @@ Num: i64 = {
 
 extern {
     type Location = usize;
-    type Error = tok::Error;
-    enum Tok<'input> {
-        "if" => Tok::If,
-        "then" => Tok::Then,
-        "else" => Tok::Else,
-        "," => Tok::Comma,
-        "=" => Tok::Eq,
-        "!=" => Tok::Neq,
-        "<>" => Tok::Neq,
-        "<" => Tok::Lt,
-        "<=" => Tok::Lte,
-        ">" => Tok::Gt,
-        ">=" => Tok::Gte,
-        "+" => Tok::Plus,
-        "-" => Tok::Minus,
-        "*" => Tok::Mul,
-        "/" => Tok::Div,
-        "!" => Tok::Not,
-        "(" => Tok::LParen,
-        ")" => Tok::RParen,
-        "[" => Tok::LBracket,
-        "]" => Tok::RBracket,
-        "^" => Tok::Exp,
-        "&&" => Tok::And,
-        "||" => Tok::Or,
+    type Error = token::Error;
+    enum Token<'input> {
+        "if" => Token::If,
+        "then" => Token::Then,
+        "else" => Token::Else,
+        "," => Token::Comma,
+        "=" => Token::Eq,
+        "!=" => Token::Neq,
+        "<>" => Token::Neq,
+        "<" => Token::Lt,
+        "<=" => Token::Lte,
+        ">" => Token::Gt,
+        ">=" => Token::Gte,
+        "+" => Token::Plus,
+        "-" => Token::Minus,
+        "*" => Token::Mul,
+        "/" => Token::Div,
+        "!" => Token::Not,
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+        "[" => Token::LBracket,
+        "]" => Token::RBracket,
+        "^" => Token::Exp,
+        "&&" => Token::And,
+        "||" => Token::Or,
 
-        "Iden" => Tok::Ident(<&'input str>),
-        "Num" => Tok::Num(<i64>),
+        "Iden" => Token::Ident(<&'input str>),
+        "Num" => Token::Num(<i64>),
     }
 }

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::ast;
+use crate::eqn::ProgramParser;
 use crate::xmile;
 
 #[derive(Debug)]
@@ -51,6 +52,32 @@ impl Variable {
             Variable::Module { name, .. } => name,
         }
     }
+
+    pub fn eqn(&self) -> Option<&String> {
+        match self {
+            Variable::Stock { eqn: Some(s), .. } => Some(s),
+            Variable::Var { eqn: Some(s), .. } => Some(s),
+            _ => None,
+        }
+    }
+
+    fn parse_eqn(&mut self) {
+        if let Variable::Module { .. } = self {
+            return;
+        }
+
+        let eqn = self.eqn();
+        if eqn.is_none() {
+            return;
+        }
+
+        let eqn = eqn.unwrap();
+        let lexer = crate::token::Tokenizer::new(eqn);
+        match ProgramParser::new().parse(eqn, lexer) {
+            Ok(ast) => (),
+            Err(err) => (),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -66,7 +93,7 @@ const EMPTY_VARS: xmile::Variables = xmile::Variables {
 
 impl Model {
     pub fn new(x_model: &xmile::Model) -> Self {
-        let variable_list: Vec<Variable> = x_model
+        let mut variable_list: Vec<Variable> = x_model
             .variables
             .as_ref()
             .unwrap_or(&EMPTY_VARS)
@@ -109,6 +136,10 @@ impl Model {
                 },
             })
             .collect();
+
+        for v in variable_list.iter_mut() {
+            v.parse_eqn()
+        }
 
         let m = Model {
             name: x_model.name.as_ref().unwrap_or(&"main".to_string()).clone(),

@@ -15,15 +15,19 @@ extern crate unicode_xid;
 
 #[macro_use]
 mod common;
-mod ast {
-    include!(concat!(env!("OUT_DIR"), "/sd.ast.rs"));
+mod ast;
+mod ast_io {
+    include!(concat!(env!("OUT_DIR"), "/ast_io.rs"));
+}
+mod eqn {
+    include!(concat!(env!("OUT_DIR"), "/eqn.rs"));
 }
 
 mod model;
 
 // mod eqn;
 mod sim;
-mod tok;
+mod token;
 pub mod xmile;
 
 use std::collections::HashMap;

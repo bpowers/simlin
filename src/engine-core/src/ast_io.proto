@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package sd.ast;
+package ast_io;
 
 enum UnaryOp {
   POSITIVE = 0;
@@ -11,7 +11,6 @@ enum UnaryOp {
 enum BinaryOp {
   ADD = 0;
   SUB = 1;
-  NEG = 2;
   EXP = 3;
   MUL = 4;
   DIV = 5;

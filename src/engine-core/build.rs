@@ -5,6 +5,6 @@
 extern crate lalrpop;
 
 fn main() {
-    prost_build::compile_protos(&["src/ast.proto"], &["src/"]).unwrap();
+    prost_build::compile_protos(&["src/ast_io.proto"], &["src/"]).unwrap();
     lalrpop::process_root().unwrap();
 }
