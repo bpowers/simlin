@@ -7,7 +7,7 @@ use crate::token::{self, Token};
 
 grammar<'input>(input: &'input str);
 
-pub Program: Box<Expr> = {
+pub Equation: Box<Expr> = {
     Expr,
 };
 

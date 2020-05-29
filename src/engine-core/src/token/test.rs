@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::Token::*;
-use super::{Token, Lexer};
+use super::{Lexer, Token};
 
 // straight from LALRPOP
 fn test(input: &str, expected: Vec<(&str, Token)>) {

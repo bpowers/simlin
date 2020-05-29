@@ -19,8 +19,8 @@ mod ast;
 mod ast_io {
     include!(concat!(env!("OUT_DIR"), "/ast_io.rs"));
 }
-mod eqn {
-    include!(concat!(env!("OUT_DIR"), "/eqn.rs"));
+mod equation {
+    include!(concat!(env!("OUT_DIR"), "/equation.rs"));
 }
 
 mod model;

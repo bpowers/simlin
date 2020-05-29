@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 
 use crate::ast;
-use crate::eqn::ProgramParser;
 use crate::xmile;
 
 #[derive(Debug)]
@@ -73,7 +72,7 @@ impl Variable {
 
         let eqn = eqn.unwrap();
         let lexer = crate::token::Lexer::new(eqn);
-        match ProgramParser::new().parse(eqn, lexer) {
+        match crate::equation::EquationParser::new().parse(eqn, lexer) {
             Ok(ast) => (),
             Err(err) => (),
         }
