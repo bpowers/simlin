@@ -2,9 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use core;
-
-use std;
 use std::convert::From;
 use std::fmt;
 use std::{error, result};
@@ -12,6 +9,22 @@ use std::{error, result};
 use regex::Regex;
 
 pub type Ident = String;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ErrorCode {
+    InvalidToken,
+    UnrecognizedEOF,
+    UnrecognizedToken,
+    ExtraToken,
+    UnclosedComment,
+    ExpectedNumber,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariableError {
+    pub location: usize,
+    pub code: ErrorCode,
+}
 
 // from https://stackoverflow.com/questions/27588416/how-to-send-output-to-stderr
 #[macro_export]

@@ -1,6 +1,5 @@
 use wasm_bindgen::prelude::*;
 
-use engine_core;
 use std::io::BufReader;
 
 #[wasm_bindgen]

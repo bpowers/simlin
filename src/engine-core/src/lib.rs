@@ -22,10 +22,7 @@ mod ast_io {
 mod equation {
     include!(concat!(env!("OUT_DIR"), "/equation.rs"));
 }
-
 mod model;
-
-// mod eqn;
 mod sim;
 mod token;
 pub mod xmile;

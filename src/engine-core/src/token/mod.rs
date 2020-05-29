@@ -8,17 +8,12 @@
 use std::str::{CharIndices, FromStr};
 use unicode_xid::UnicodeXID;
 
-use self::ErrorCode::*;
 use self::Token::*;
+use crate::common::ErrorCode::*;
+use crate::common::{ErrorCode, VariableError};
 
 #[cfg(test)]
 mod test;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Error {
-    pub location: usize,
-    pub code: ErrorCode,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Token<'input> {
@@ -49,15 +44,8 @@ pub enum Token<'input> {
     Num(i64),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ErrorCode {
-    UnrecognizedToken,
-    UnclosedComment,
-    ExpectedNumber,
-}
-
-fn error<T>(c: ErrorCode, l: usize) -> Result<T, Error> {
-    Err(Error {
+fn error<T>(c: ErrorCode, l: usize) -> Result<T, VariableError> {
+    Err(VariableError {
         location: l,
         code: c,
     })
@@ -131,7 +119,7 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, Error> {
+    fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
         let (start, word, end) = self.word(idx0);
 
         // search for a keyword first; if none are found, this is
@@ -140,14 +128,14 @@ impl<'input> Lexer<'input> {
         let tok = KEYWORDS
             .iter()
             .filter(|&&(w, _)| w == word)
-            .map(|&(_, ref t)| t.clone())
+            .map(|&(_, ref t)| *t)
             .next()
             .unwrap_or_else(|| Ident(word));
 
         Ok((start, tok, end))
     }
 
-    fn number(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, Error> {
+    fn number(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
         let (start, word, end) = match self.take_while(is_digit) {
             Some(end) => (idx0, &self.text[idx0..end], end),
             None => (idx0, &self.text[idx0..], self.text.len()),
@@ -156,7 +144,7 @@ impl<'input> Lexer<'input> {
         Ok((start, Num(i64::from_str(word).unwrap()), end))
     }
 
-    fn comment_end(&mut self) -> Result<(), Error> {
+    fn comment_end(&mut self) -> Result<(), VariableError> {
         match self.take_until(|c| c == '}') {
             Some(_) => {
                 self.bump(); // consume
@@ -175,7 +163,7 @@ macro_rules! consume {
 }
 
 impl<'input> Iterator for Lexer<'input> {
-    type Item = Result<Spanned<Token<'input>>, Error>;
+    type Item = Result<Spanned<Token<'input>>, VariableError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {

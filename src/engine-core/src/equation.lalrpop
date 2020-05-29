@@ -1,9 +1,9 @@
-use crate::common;
 use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
 use crate::ast::Expr;
 use crate::ast::Expr::*;
-use crate::token::{self, Token};
+use crate::common::{self, VariableError};
+use crate::token::Token;
 
 grammar<'input>(input: &'input str);
 
@@ -89,7 +89,7 @@ Num: i64 = {
 
 extern {
     type Location = usize;
-    type Error = token::Error;
+    type Error = VariableError;
     enum Token<'input> {
         "if" => Token::If,
         "then" => Token::Then,
