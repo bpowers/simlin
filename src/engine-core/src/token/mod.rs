@@ -65,7 +65,7 @@ fn error<T>(c: ErrorCode, l: usize) -> Result<T, Error> {
 
 pub type Spanned<T> = (usize, T, usize);
 
-pub struct Tokenizer<'input> {
+pub struct Lexer<'input> {
     text: &'input str,
     chars: CharIndices<'input>,
     lookahead: Option<(usize, char)>,
@@ -81,9 +81,9 @@ const KEYWORDS: &[(&str, Token<'static>)] = &[
     ("or", Or),
 ];
 
-impl<'input> Tokenizer<'input> {
+impl<'input> Lexer<'input> {
     pub fn new(input: &'input str) -> Self {
-        let mut t = Tokenizer {
+        let mut t = Lexer {
             text: input,
             chars: input.char_indices(),
             lookahead: None,
@@ -174,7 +174,7 @@ macro_rules! consume {
     }};
 }
 
-impl<'input> Iterator for Tokenizer<'input> {
+impl<'input> Iterator for Lexer<'input> {
     type Item = Result<Spanned<Token<'input>>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {

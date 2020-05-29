@@ -72,7 +72,7 @@ impl Variable {
         }
 
         let eqn = eqn.unwrap();
-        let lexer = crate::token::Tokenizer::new(eqn);
+        let lexer = crate::token::Lexer::new(eqn);
         match ProgramParser::new().parse(eqn, lexer) {
             Ok(ast) => (),
             Err(err) => (),

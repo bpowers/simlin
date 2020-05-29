@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::Token::*;
-use super::{Token, Tokenizer};
+use super::{Token, Lexer};
 
 // straight from LALRPOP
 fn test(input: &str, expected: Vec<(&str, Token)>) {
@@ -11,7 +11,7 @@ fn test(input: &str, expected: Vec<(&str, Token)>) {
     // for spans, and because it applies also to r#XXX# style strings:
     let input = input.replace("$", "\n");
 
-    let tokenizer = Tokenizer::new(&input);
+    let tokenizer = Lexer::new(&input);
     let len = expected.len();
     for (token, (expected_span, expected_tok)) in tokenizer.zip(expected.into_iter()) {
         println!("token: {:?}", token);
@@ -20,7 +20,7 @@ fn test(input: &str, expected: Vec<(&str, Token)>) {
         assert_eq!(Ok((expected_start, expected_tok, expected_end)), token);
     }
 
-    let tokenizer = Tokenizer::new(&input);
+    let tokenizer = Lexer::new(&input);
     assert_eq!(None, tokenizer.skip(len).next());
 }
 
