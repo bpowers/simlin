@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use lalrpop_util::ParseError;
 
 use crate::ast;
-use crate::common::VariableError;
+use crate::common::{canonicalize, VariableError};
 use crate::xmile;
 
 #[derive(Debug)]
@@ -108,15 +108,21 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<VariableError
                     location: l,
                     code: InvalidToken,
                 },
-                ParseError::UnrecognizedEOF { location: l, .. } => VariableError {
-                    location: l,
-                    code: UnrecognizedEOF,
+                ParseError::UnrecognizedEOF { location: l, expected: e } => {
+                    eprintln!("unrecognized eof, expected: {:?}", e);
+                    VariableError {
+                        location: l,
+                        code: UnrecognizedEOF,
+                    }
                 },
                 ParseError::UnrecognizedToken {
-                    token: (l, _, _), ..
-                } => VariableError {
-                    location: l,
-                    code: UnrecognizedToken,
+                    token: (l, t, r), ..
+                } => {
+                    eprintln!("unrecognized tok: {:?} {} {}", t, l, r);
+                    VariableError {
+                        location: l,
+                        code: UnrecognizedToken,
+                    }
                 },
                 ParseError::ExtraToken { .. } => VariableError {
                     location: eqn.len(),
@@ -137,7 +143,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
         xmile::Var::Stock(v) => {
             let (ast, errors) = parse_eqn(&v.eqn);
             Variable::Stock {
-                name: v.name.clone(),
+                name: canonicalize(v.name.as_ref()),
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -150,7 +156,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
         xmile::Var::Flow(v) => {
             let (ast, errors) = parse_eqn(&v.eqn);
             Variable::Var {
-                name: v.name.clone(),
+                name: canonicalize(v.name.as_ref()),
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -164,7 +170,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
         xmile::Var::Aux(v) => {
             let (ast, errors) = parse_eqn(&v.eqn);
             Variable::Var {
-                name: v.name.clone(),
+                name: canonicalize(v.name.as_ref()),
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -176,7 +182,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
             }
         }
         xmile::Var::Module(v) => Variable::Module {
-            name: v.name.clone(),
+            name: canonicalize(v.name.as_ref()),
             units: v.units.clone(),
             refs: v.refs.clone().unwrap_or_default(),
             errors: Vec::new(),

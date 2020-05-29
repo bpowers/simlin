@@ -38,9 +38,9 @@ pub use self::sim::Simulation;
 use common::SDError;
 
 pub struct Project {
-    name: String,
+    pub name: String,
     file: xmile::File,
-    models: HashMap<String, Rc<model::Model>>,
+    pub models: HashMap<String, Rc<model::Model>>,
 }
 
 impl fmt::Debug for Project {

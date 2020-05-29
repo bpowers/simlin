@@ -215,6 +215,10 @@ impl<'input> Iterator for Lexer<'input> {
     }
 }
 
+fn is_number_start(c: char) -> bool {
+    is_digit(c) || c == '.'
+}
+
 fn is_digit(c: char) -> bool {
     '9' >= c && c >= '0'
 }

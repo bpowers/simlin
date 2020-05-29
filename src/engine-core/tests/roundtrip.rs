@@ -59,5 +59,20 @@ fn roundtrips_model() {
             writeln!(::std::io::stderr(), "model '{}' error: {}", path, err).unwrap();
         }
         assert!(project.is_ok());
+
+        let project = project.unwrap();
+
+        for (model_name, model) in project.models.iter() {
+            for (var_name, var) in model.variables.iter() {
+                match var.errors() {
+                    Some(errors) => {
+                        for err in errors {
+                            writeln!(::std::io::stderr(), "  {}.{} error: {}", model_name, var_name, err).unwrap();
+                        }
+                    },
+                    None => (),
+                }
+            }
+        }
     }
 }

@@ -17,28 +17,29 @@ Expr: Box<Expr> = {
 };
 
 LCmp: Box<Expr> = {
-    <l:ACmp> "&&" <r:LCmp> => Box::new(Op2(And, l, r)),
-    <l:ACmp> "||" <r:LCmp> => Box::new(Op2(Or, l, r)),
+    <l:LCmp> "&&" <r:ACmp> => Box::new(Op2(And, l, r)),
+    <l:LCmp> "||" <r:ACmp> => Box::new(Op2(Or, l, r)),
     ACmp,
 };
 
 ACmp: Box<Expr> = {
-    <l:Eq> "=" <r:ACmp>  => Box::new(Op2(Eq, l, r)),
-    <l:Eq> "<>" <r:ACmp>  => Box::new(Op2(Neq, l, r)),
-    <l:Eq> "!=" <r:ACmp>  => Box::new(Op2(Neq, l, r)),
+    <l:ACmp> "=" <r:Eq>  => Box::new(Op2(Eq, l, r)),
+    <l:ACmp> "<>" <r:Eq>  => Box::new(Op2(Neq, l, r)),
+    <l:ACmp> "!=" <r:Eq>  => Box::new(Op2(Neq, l, r)),
+    Eq,
 };
 
 Eq: Box<Expr> = {
-    <l:Add> "<" <r:Eq>  => Box::new(Op2(Lt, l, r)),
-    <l:Add> "<=" <r:Eq> => Box::new(Op2(Lte, l, r)),
-    <l:Add> ">" <r:Eq>  => Box::new(Op2(Gt, l, r)),
-    <l:Add> ">=" <r:Eq> => Box::new(Op2(Gte, l, r)),
+    <l:Eq> "<" <r:Add>  => Box::new(Op2(Lt, l, r)),
+    <l:Eq> "<=" <r:Add> => Box::new(Op2(Lte, l, r)),
+    <l:Eq> ">" <r:Add>  => Box::new(Op2(Gt, l, r)),
+    <l:Eq> ">=" <r:Add> => Box::new(Op2(Gte, l, r)),
     Add,
 };
 
 Add: Box<Expr> = {
-    <l:Mul> "-" <r:Add> => Box::new(Op2(Sub, l, r)),
-    <l:Mul> "+" <r:Add> => Box::new(Op2(Add, l, r)),
+    <l:Add> "-" <r:Mul> => Box::new(Op2(Sub, l, r)),
+    <l:Add> "+" <r:Mul> => Box::new(Op2(Add, l, r)),
     Mul,
 };
 
@@ -68,23 +69,15 @@ App: Box<Expr> = {
 Atom: Box<Expr> = {
     <id:Ident>    => Box::new(Var(id)),
     "(" <Exprs> ")",
-    Int,
+    "Num" => Box::new(Const(<> as f64)),
 };
 
 Exprs: Box<Expr> = {
     Expr,
 };
 
-Int: Box<Expr> = {
-    Num => Box::new(Const(<> as f64)),
-};
-
 Ident: common::Ident = {
     <id:"Iden"> => String::from(id),
-};
-
-Num: i64 = {
-    "Num",
 };
 
 extern {

@@ -20,10 +20,32 @@ pub enum ErrorCode {
     ExpectedNumber,
 }
 
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use ErrorCode::*;
+        let name = match self {
+            InvalidToken => "invalid_token",
+            UnrecognizedEOF => "unrecognized_eof",
+            UnrecognizedToken=> "unrecognized_token",
+            ExtraToken => "extra_token",
+            UnclosedComment => "unclosed_comment",
+            ExpectedNumber => "expected_number",
+        };
+
+        write!(f, "{}", name)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VariableError {
     pub location: usize,
     pub code: ErrorCode,
+}
+
+impl fmt::Display for VariableError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}:{}", self.location, self.code)
+    }
 }
 
 // from https://stackoverflow.com/questions/27588416/how-to-send-output-to-stderr
