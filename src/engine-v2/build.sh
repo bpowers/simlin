@@ -26,7 +26,7 @@ PKG_NAME=$(jq -r .name pkg/package.json | sed 's/\-/_/g')
 
 # Merge nodejs & browser packages
 cp "pkg-node/${PKG_NAME}.js" "pkg/${PKG_NAME}_main.js"
-sed "s/require[\(]'\.\/${PKG_NAME}/require\('\.\/${PKG_NAME}_main/" "pkg-node/${PKG_NAME}_bg.js" > "pkg/${PKG_NAME}_bg.js"
+# sed "s/require[\(]'\.\/${PKG_NAME}/require\('\.\/${PKG_NAME}_main/" "pkg-node/${PKG_NAME}_bg.js" > "pkg/${PKG_NAME}_bg.js"
 jq ".files += [\"${PKG_NAME}_bg.js\"]" pkg/package.json \
     | jq ".main = \"${PKG_NAME}_main.js\"" > pkg/temp.json
 mv pkg/temp.json pkg/package.json
