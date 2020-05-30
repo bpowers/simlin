@@ -26,7 +26,7 @@ impl fmt::Display for ErrorCode {
         let name = match self {
             InvalidToken => "invalid_token",
             UnrecognizedEOF => "unrecognized_eof",
-            UnrecognizedToken=> "unrecognized_token",
+            UnrecognizedToken => "unrecognized_token",
             ExtraToken => "extra_token",
             UnclosedComment => "unclosed_comment",
             ExpectedNumber => "expected_number",

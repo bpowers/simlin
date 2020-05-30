@@ -108,13 +108,16 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<VariableError
                     location: l,
                     code: InvalidToken,
                 },
-                ParseError::UnrecognizedEOF { location: l, expected: e } => {
+                ParseError::UnrecognizedEOF {
+                    location: l,
+                    expected: e,
+                } => {
                     eprintln!("unrecognized eof, expected: {:?}", e);
                     VariableError {
                         location: l,
                         code: UnrecognizedEOF,
                     }
-                },
+                }
                 ParseError::UnrecognizedToken {
                     token: (l, t, r), ..
                 } => {
@@ -123,7 +126,7 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<VariableError
                         location: l,
                         code: UnrecognizedToken,
                     }
-                },
+                }
                 ParseError::ExtraToken { .. } => VariableError {
                     location: eqn.len(),
                     code: ExtraToken,

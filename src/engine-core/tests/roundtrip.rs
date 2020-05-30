@@ -67,9 +67,16 @@ fn roundtrips_model() {
                 match var.errors() {
                     Some(errors) => {
                         for err in errors {
-                            writeln!(::std::io::stderr(), "  {}.{} error: {}", model_name, var_name, err).unwrap();
+                            writeln!(
+                                ::std::io::stderr(),
+                                "  {}.{} error: {}",
+                                model_name,
+                                var_name,
+                                err
+                            )
+                            .unwrap();
                         }
-                    },
+                    }
                     None => (),
                 }
             }
