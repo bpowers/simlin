@@ -30,11 +30,11 @@ fn ifstmt() {
         "if 1    then 1 else 0",
         vec![
             ("~~                   ", If),
-            ("   ~                 ", Num(1)),
+            ("   ~                 ", Num("1")),
             ("        ~~~~         ", Then),
-            ("             ~       ", Num(1)),
+            ("             ~       ", Num("1")),
             ("               ~~~~  ", Else),
-            ("                    ~", Num(0)),
+            ("                    ~", Num("0")),
         ],
     );
 }
@@ -51,7 +51,7 @@ fn gte() {
 
 #[test]
 fn negative_num() {
-    test("-3", vec![("~ ", Minus), (" ~", Num(3))]);
+    test("-3", vec![("~ ", Minus), (" ~", Num("3"))]);
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn pairs() {
             (" ~     ", LParen),
             ("  ~    ", Ident("b")),
             ("   ~   ", RParen),
-            ("     ~ ", Num(1)),
+            ("     ~ ", Num("1")),
             ("      ~", RParen),
         ],
     );
@@ -73,7 +73,7 @@ fn pairs() {
 fn comment() {
     test(
         "a{ xx   }1",
-        vec![("~         ", Ident("a")), ("         ~", Num(1))],
+        vec![("~         ", Ident("a")), ("         ~", Num("1"))],
     );
 }
 
@@ -83,4 +83,10 @@ fn idents() {
         "_3 n3_",
         vec![("~~    ", Ident("_3")), ("   ~~~", Ident("n3_"))],
     );
+}
+
+#[test]
+fn numbers() {
+    test("4.0e5", vec![("~~~~~", Num("4.0e5"))]);
+    test("4.0e-5", vec![("~~~~~~", Num("4.0e-5"))]);
 }

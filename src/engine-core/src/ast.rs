@@ -2,7 +2,7 @@ use crate::common::Ident;
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
-    Const(f64),
+    Const(String, f64),
     Var(Ident),
     App(Ident, Vec<Box<Expr>>),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),

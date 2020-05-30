@@ -5,7 +5,7 @@
 // derived from both the LALRPOP whitespace tokenizer, and LALRPOP's
 // internal tokenizer
 
-use std::str::{CharIndices, FromStr};
+use std::str::CharIndices;
 use unicode_xid::UnicodeXID;
 
 use self::Token::*;
@@ -41,7 +41,7 @@ pub enum Token<'input> {
     RBracket,
     Comma,
     Ident(&'input str),
-    Num(i64),
+    Num(&'input str),
 }
 
 fn error<T>(c: ErrorCode, l: usize) -> Result<T, VariableError> {
@@ -81,7 +81,12 @@ impl<'input> Lexer<'input> {
     }
 
     fn bump(&mut self) -> Option<(usize, char)> {
-        self.lookahead = self.chars.next();
+        self.bump_n(1)
+    }
+
+    fn bump_n(&mut self, n: usize) -> Option<(usize, char)> {
+        assert!(n > 0);
+        self.lookahead = self.chars.nth(n - 1);
         self.lookahead
     }
 
@@ -136,12 +141,20 @@ impl<'input> Lexer<'input> {
     }
 
     fn number(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
-        let (start, word, end) = match self.take_while(is_digit) {
-            Some(end) => (idx0, &self.text[idx0..end], end),
-            None => (idx0, &self.text[idx0..], self.text.len()),
-        };
+        use regex::{Match, Regex};
 
-        Ok((start, Num(i64::from_str(word).unwrap()), end))
+        lazy_static! {
+            static ref NUMBER_RE: Regex =
+                Regex::new(r"\d*(\.\d*)?([eE]-?(\d?(\.\d*)?)?)?").unwrap();
+        }
+
+        let m: Match = NUMBER_RE.find(&self.text[idx0..]).unwrap();
+        assert_eq!(m.start(), 0);
+
+        self.bump_n(m.end());
+
+        let end = idx0 + m.end();
+        Ok((idx0, Num(&self.text[idx0..end]), end))
     }
 
     fn comment_end(&mut self) -> Result<(), VariableError> {
@@ -154,18 +167,17 @@ impl<'input> Lexer<'input> {
         }
     }
 }
-
-macro_rules! consume {
-    ($s: expr, $i:expr, $tok:expr, $len:expr) => {{
-        $s.bump();
-        Some(Ok(($i, $tok, $i + $len)))
-    }};
-}
-
 impl<'input> Iterator for Lexer<'input> {
     type Item = Result<Spanned<Token<'input>>, VariableError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        macro_rules! consume {
+            ($s: expr, $i:expr, $tok:expr, $len:expr) => {{
+                $s.bump();
+                Some(Ok(($i, $tok, $i + $len)))
+            }};
+        }
+
         loop {
             return match self.lookahead {
                 Some((i, '/')) => consume!(self, i, Div, 1),
@@ -202,7 +214,7 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, '[')) => consume!(self, i, LBracket, 1),
                 Some((i, ']')) => consume!(self, i, RBracket, 1),
                 Some((i, ',')) => consume!(self, i, Comma, 1),
-                Some((i, c)) if is_digit(c) => Some(self.number(i)),
+                Some((i, c)) if is_number_start(c) => Some(self.number(i)),
                 Some((i, c)) if is_identifier_start(c) => Some(self.identifierish(i)),
                 Some((_, c)) if c.is_whitespace() => {
                     self.bump();

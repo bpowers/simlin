@@ -69,7 +69,11 @@ App: Box<Expr> = {
 Atom: Box<Expr> = {
     <id:Ident>    => Box::new(Var(id)),
     "(" <Exprs> ")",
-    "Num" => Box::new(Const(<> as f64)),
+    "Num" => {
+        use std::str::FromStr;
+        let s = <>;
+        Box::new(Const(s.to_string(), f64::from_str(s).unwrap()))
+    },
 };
 
 Exprs: Box<Expr> = {
@@ -109,6 +113,6 @@ extern {
         "||" => Token::Or,
 
         "Iden" => Token::Ident(<&'input str>),
-        "Num" => Token::Num(<i64>),
+        "Num" => Token::Num(<&'input str>),
     }
 }
