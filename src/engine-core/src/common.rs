@@ -17,6 +17,7 @@ pub enum ErrorCode {
     UnrecognizedToken,
     ExtraToken,
     UnclosedComment,
+    UnclosedQuotedIdent,
     ExpectedNumber,
 }
 
@@ -29,6 +30,7 @@ impl fmt::Display for ErrorCode {
             UnrecognizedToken => "unrecognized_token",
             ExtraToken => "extra_token",
             UnclosedComment => "unclosed_comment",
+            UnclosedQuotedIdent => "unclosed_quoted_ident",
             ExpectedNumber => "expected_number",
         };
 

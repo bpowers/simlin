@@ -112,6 +112,11 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<VariableError
                     location: l,
                     expected: e,
                 } => {
+                    // if we get an EOF at position 0, that simply means
+                    // we have an empty (or comment-only) equation
+                    if l == 0 {
+                        return (None, errs);
+                    }
                     eprintln!("unrecognized eof, expected: {:?}", e);
                     VariableError {
                         location: l,

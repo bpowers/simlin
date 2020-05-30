@@ -97,6 +97,10 @@ impl<'input> Lexer<'input> {
         }
     }
 
+    fn peek(&self) -> (usize, char) {
+        self.lookahead.unwrap()
+    }
+
     fn take_while<F>(&mut self, mut keep_going: F) -> Option<usize>
     where
         F: FnMut(char) -> bool,
@@ -157,13 +161,31 @@ impl<'input> Lexer<'input> {
         Ok((idx0, Num(&self.text[idx0..end]), end))
     }
 
+    fn quoted_identifier(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
+        // eat the opening '"'
+        self.bump();
+
+        match self.take_until(|c| c == '"') {
+            Some(idx1) => {
+                // eat the trailing '"'
+                self.bump();
+                Ok((idx0, Ident(&self.text[idx0 + 1..idx1]), idx1 + 1))
+            }
+            None => Err(VariableError {
+                location: idx0,
+                code: UnclosedQuotedIdent,
+            }),
+        }
+    }
+
     fn comment_end(&mut self) -> Result<(), VariableError> {
+        let idx0 = self.peek().0;
         match self.take_until(|c| c == '}') {
             Some(_) => {
                 self.bump(); // consume
                 Ok(())
             }
-            None => error(UnclosedComment, 0),
+            None => error(UnclosedComment, idx0),
         }
     }
 }
@@ -214,8 +236,9 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, '[')) => consume!(self, i, LBracket, 1),
                 Some((i, ']')) => consume!(self, i, RBracket, 1),
                 Some((i, ',')) => consume!(self, i, Comma, 1),
-                Some((i, c)) if is_number_start(c) => Some(self.number(i)),
+                Some((i, '"')) => Some(self.quoted_identifier(i)),
                 Some((i, c)) if is_identifier_start(c) => Some(self.identifierish(i)),
+                Some((i, c)) if is_number_start(c) => Some(self.number(i)),
                 Some((_, c)) if c.is_whitespace() => {
                     self.bump();
                     continue;

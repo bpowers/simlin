@@ -62,13 +62,13 @@ Exp: Box<Expr> = {
 };
 
 App: Box<Expr> = {
-    <id:Ident> "(" <a:Add> "," <b:Add> ")" => Box::new(App(id, vec!(a, b))), // FIXME
+    <id:Ident> "(" <args:Exprs> ")" => Box::new(App(id, args)),
     Atom,
 };
 
 Atom: Box<Expr> = {
     <id:Ident>    => Box::new(Var(id)),
-    "(" <Exprs> ")",
+    "(" <Expr> ")",
     "Num" => {
         use std::str::FromStr;
         let s = <>;
@@ -76,9 +76,18 @@ Atom: Box<Expr> = {
     },
 };
 
-Exprs: Box<Expr> = {
-    Expr,
+Comma<T>: Vec<T> = {
+    <v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            let mut v = v;
+            v.push(e);
+            v
+        }
+    }
 };
+
+Exprs = Comma<Expr>;
 
 Ident: common::Ident = {
     <id:"Iden"> => String::from(id),
