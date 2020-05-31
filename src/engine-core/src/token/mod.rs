@@ -130,13 +130,14 @@ impl<'input> Lexer<'input> {
 
     fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
         let (start, word, end) = self.word(idx0);
+        let lower_word = word.to_lowercase();
 
         // search for a keyword first; if none are found, this is
         // either a MacroId or an Id, depending on whether there
         // is a `<` immediately afterwards
         let tok = KEYWORDS
             .iter()
-            .filter(|&&(w, _)| w == word)
+            .filter(|&&(w, _)| w == lower_word)
             .map(|&(_, ref t)| *t)
             .next()
             .unwrap_or_else(|| Ident(word));

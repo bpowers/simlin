@@ -230,3 +230,20 @@ impl Model {
         }
     }
 }
+
+#[test]
+fn test_parse() {
+    let cases = [
+        ("if 1 then 2 else 3", ()),
+        ("if blerg = foo then 2 else 3", ()),
+        ("IF quotient = quotient_target THEN 1 ELSE 0", ()),
+        ("(IF quotient = quotient_target THEN 1 ELSE 0)", ()),
+    ];
+
+    for case in cases.iter() {
+        let eqn = case.0;
+        let (ast, err) = parse_eqn(&Some(eqn.to_string()));
+        assert_eq!(err.len(), 0);
+        assert!(ast.is_some());
+    }
+}
