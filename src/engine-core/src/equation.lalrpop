@@ -2,7 +2,7 @@ use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
 use crate::ast::Expr;
 use crate::ast::Expr::*;
-use crate::common::{self, VariableError};
+use crate::common::{self, canonicalize, VariableError};
 use crate::token::Token;
 
 grammar<'input>(input: &'input str);
@@ -90,7 +90,7 @@ Comma<T>: Vec<T> = {
 Exprs = Comma<Expr>;
 
 Ident: common::Ident = {
-    <id:"Iden"> => String::from(id),
+    <id:"Iden"> => canonicalize(id),
 };
 
 extern {
