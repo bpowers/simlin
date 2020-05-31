@@ -12,7 +12,7 @@ pub Equation: Box<Expr> = {
 };
 
 Expr: Box<Expr> = {
-    "if" <c:Expr> "then" <t:Expr> "else" <f:Expr>    => Box::new(If(c, t, f)),
+    "if" <c:Expr> "then" <t:Expr> "else" <f:Expr> => Box::new(If(c, t, f)),
     LCmp,
 };
 
@@ -24,8 +24,8 @@ LCmp: Box<Expr> = {
 
 ACmp: Box<Expr> = {
     <l:ACmp> "=" <r:Eq>  => Box::new(Op2(Eq, l, r)),
-    <l:ACmp> "<>" <r:Eq>  => Box::new(Op2(Neq, l, r)),
-    <l:ACmp> "!=" <r:Eq>  => Box::new(Op2(Neq, l, r)),
+    <l:ACmp> "<>" <r:Eq> => Box::new(Op2(Neq, l, r)),
+    <l:ACmp> "!=" <r:Eq> => Box::new(Op2(Neq, l, r)),
     Eq,
 };
 
@@ -67,7 +67,7 @@ App: Box<Expr> = {
 };
 
 Atom: Box<Expr> = {
-    <id:Ident>    => Box::new(Var(id)),
+    <id:Ident> => Box::new(Var(id)),
     "(" <Expr> ")",
     "Num" => {
         use std::str::FromStr;
