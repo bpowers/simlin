@@ -29,6 +29,7 @@ pub enum Variable {
         outflows: Vec<String>,
         non_negative: bool,
         errors: Vec<VariableError>,
+        dependencies: Vec<String>,
     },
     Var {
         name: String,
@@ -40,12 +41,14 @@ pub enum Variable {
         is_flow: bool,
         is_table_only: bool,
         errors: Vec<VariableError>,
+        dependencies: Vec<String>,
     },
     Module {
         name: String,
         units: Option<String>,
         refs: Vec<xmile::Ref>,
         errors: Vec<VariableError>,
+        dependencies: Vec<String>,
     },
 }
 
@@ -63,6 +66,14 @@ impl Variable {
             Variable::Stock { eqn: Some(s), .. } => Some(s),
             Variable::Var { eqn: Some(s), .. } => Some(s),
             _ => None,
+        }
+    }
+
+    pub fn deps(&self) -> &Vec<String> {
+        match self {
+            Variable::Stock { dependencies: deps, .. } => deps,
+            Variable::Var { dependencies: deps, .. } => deps,
+            Variable::Module { dependencies: deps, .. } => deps,
         }
     }
 
@@ -159,6 +170,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
                 outflows: v.outflows.clone().unwrap_or_default(),
                 non_negative: v.non_negative.is_some(),
                 errors,
+                dependencies: Vec::new(),
             }
         }
         xmile::Var::Flow(v) => {
@@ -173,6 +185,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
                 is_table_only: false,
                 non_negative: v.non_negative.is_some(),
                 errors,
+                dependencies: Vec::new(),
             }
         }
         xmile::Var::Aux(v) => {
@@ -187,6 +200,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
                 is_table_only: false,
                 non_negative: false,
                 errors,
+                dependencies: Vec::new(),
             }
         }
         xmile::Var::Module(v) => Variable::Module {
@@ -194,6 +208,7 @@ fn parse_var(v: &xmile::Var) -> Variable {
             units: v.units.clone(),
             refs: v.refs.clone().unwrap_or_default(),
             errors: Vec::new(),
+            dependencies: Vec::new(),
         },
     }
 }
