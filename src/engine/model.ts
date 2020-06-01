@@ -475,13 +475,7 @@ function parseVars(
     }
   }
 
-  let vars2;
-  let modules2;
-  try {
-    [vars2, modules2] = instantiateImplicitModules(project, vars);
-  } catch (err) {
-    throw new Error(`instantiateImplicitModules: ${err.message}`);
-  }
+  const [vars2, modules2] = instantiateImplicitModules(project, vars);
 
   return [defined(vars2), defined(modules2).merge(modules), tables];
 }
