@@ -1,13 +1,15 @@
+use std::rc::Rc;
+
 use crate::common::Ident;
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(String, f64),
     Var(Ident),
-    App(Ident, Vec<Box<Expr>>),
-    Op2(BinaryOp, Box<Expr>, Box<Expr>),
-    Op1(UnaryOp, Box<Expr>),
-    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    App(Ident, Vec<Rc<Expr>>),
+    Op2(BinaryOp, Rc<Expr>, Rc<Expr>),
+    Op1(UnaryOp, Rc<Expr>),
+    If(Rc<Expr>, Rc<Expr>, Rc<Expr>),
 }
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]

@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use lalrpop_util::ParseError;
 
@@ -22,7 +23,7 @@ pub struct Table {
 pub enum Variable {
     Stock {
         name: String,
-        ast: Option<Box<ast::Expr>>,
+        ast: Option<Rc<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
         inflows: Vec<String>,
@@ -33,7 +34,7 @@ pub enum Variable {
     },
     Var {
         name: String,
-        ast: Option<Box<ast::Expr>>,
+        ast: Option<Rc<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
         table: Option<Table>,
@@ -71,9 +72,15 @@ impl Variable {
 
     pub fn deps(&self) -> &Vec<String> {
         match self {
-            Variable::Stock { dependencies: deps, .. } => deps,
-            Variable::Var { dependencies: deps, .. } => deps,
-            Variable::Module { dependencies: deps, .. } => deps,
+            Variable::Stock {
+                dependencies: deps, ..
+            } => deps,
+            Variable::Var {
+                dependencies: deps, ..
+            } => deps,
+            Variable::Module {
+                dependencies: deps, ..
+            } => deps,
         }
     }
 
@@ -100,7 +107,7 @@ impl Variable {
     }
 }
 
-fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<VariableError>) {
+fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<VariableError>) {
     let mut errs = Vec::new();
 
     if eqn.is_none() {
