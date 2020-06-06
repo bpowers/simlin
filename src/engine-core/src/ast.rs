@@ -12,6 +12,28 @@ pub enum Expr {
     If(Rc<Expr>, Rc<Expr>, Rc<Expr>),
 }
 
+#[test]
+fn test_rcs() {
+    fn rewrite_op1(e: Rc<Expr>) -> Rc<Expr> {
+        let mut e = e;
+        let e_mut = Rc::make_mut(&mut e);
+
+        if let Expr::Op1(op, ..) = e_mut {
+            *e_mut = Expr::Op1(*op, Rc::new(Expr::Const("3".to_string(), 3.0)))
+        }
+
+        e
+    }
+
+    let var_a = Rc::new(Expr::Var("a".to_string()));
+    let e = Rc::new(Expr::Op1(UnaryOp::Positive, var_a));
+
+    let e = rewrite_op1(e);
+
+    let e2 = Expr::Op1(UnaryOp::Positive, Rc::new(Expr::Const("3".to_string(), 3.0)));
+    assert_eq!(e.as_ref(), &e2);
+}
+
 pub trait Visitor {
     fn visit_const(&mut self, e: Expr) -> Expr;
     fn visit_var(&mut self, e: Expr) -> Expr;
