@@ -48,4 +48,5 @@ export const LinkIcon = withStyles(styles)(
   },
 );
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 (LinkIcon as any).muiName = 'LinkIcon';

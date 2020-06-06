@@ -535,7 +535,8 @@ export const Flow = withStyles(styles)(
             arrowθ = 270;
           }
         }
-        spath += (j === 0 ? 'M' : 'L') + x + ',' + y;
+        const prefix = j === 0 ? 'M' : 'L';
+        spath += `${prefix}${x},${y}`;
       }
 
       const cx = element.cx;

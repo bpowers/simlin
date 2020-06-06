@@ -34,7 +34,8 @@ export class Sim {
 
     this.worker = worker;
     this.worker.addEventListener('message', (e: MessageEvent): void => {
-      const id: number = e.data[0];
+      const id = e.data[0] as number;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const result = e.data[1];
       const cb = this.promised.get(id);
       this.promised = this.promised.delete(id);
@@ -44,10 +45,10 @@ export class Sim {
     });
   }
 
-  private post(...args: any[]): Promise<any> {
+  private post<T>(...args: any[]): Promise<T> {
     const id = this.seq++;
 
-    return new Promise<any>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       if (!this.worker) {
         return;
       }
@@ -80,14 +81,14 @@ export class Sim {
 
   async value(...names: string[]): Promise<Map<string, number>> {
     const args = ['get_val'].concat(names);
-    const values = await this.post(...args);
-    return Map(values);
+    const values: Iterable<[string, number]> = await this.post(...args);
+    return Map<string, number>(values);
   }
 
   async series(...names: string[]): Promise<Map<string, Series>> {
     const args = ['get_series'].concat(names);
-    const series = await this.post(...args);
-    return Map(series);
+    const series: Iterable<[string, Series]> = await this.post(...args);
+    return Map<string, Series>(series);
   }
 
   dominance(overrides: { [n: string]: number }, indicators: string[]): Promise<{ [name: string]: number }> {
@@ -148,9 +149,9 @@ export class Sim {
           continue;
         }
         if (msg === '') {
-          msg += series[v].time[i] + delim;
+          msg += `${series[v].time[i]}${delim}`;
         }
-        msg += series[v].values[i] + delim;
+        msg += `${series[v].values[i]}${delim}`;
       }
       file += msg.substr(0, msg.length - 1);
       file += '\n';

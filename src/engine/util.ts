@@ -12,7 +12,7 @@ export function dName(s: string): string {
 
 // swap the values at 2 indexes in the specified array, used for
 // quicksort.
-function swap(array: any[], a: number, b: number): void {
+function swap<T>(array: T[], a: number, b: number): void {
   const tmp = array[a];
   array[a] = array[b];
   array[b] = tmp;
@@ -54,6 +54,11 @@ export function sort<T>(array: T[], cmp: Comparator<T>, l = 0, r = array.length 
   sort(array, cmp, newPivot + 1, r, part);
 }
 
+interface Table {
+  x: number[];
+  y: number[];
+}
+
 /**
  * Interpolates the y-value of the given index in the table.  If
  * the index is outside the range of the table, the minimum or
@@ -63,7 +68,7 @@ export function sort<T>(array: T[], cmp: Comparator<T>, l = 0, r = array.length 
  * @param index The requested index into the given table.
  * @return The y-value of the given index.
  */
-export function lookup(table: any, index: number): number {
+export function lookup(table: Table, index: number): number {
   const size = table.x.length;
   if (size === 0) {
     return NaN;
@@ -117,18 +122,23 @@ export function numArr(arr: any[]): number[] {
   return arr.map(parseFloat);
 }
 
-export function floatAttr(o: any, n: any): number {
+// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+export function floatAttr(o: any, n: string): number {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
   return parseFloat(o.getAttribute(n));
 }
 
 // wrapper/re-implementation of querySelector that works under
 // Node with xmldom.
-export function qs(e: any, s: any): any {
+// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+export function qs(e: any, s: string): any {
   if (e.querySelector) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-return
     return e.querySelector(s);
   }
 
   const selectors = s.split('>');
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   let curr = e;
 
   outer: for (let i = 0; curr && i < selectors.length; i++) {
@@ -136,21 +146,26 @@ export function qs(e: any, s: any): any {
       if (!n.tagName) {
         continue;
       }
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
       if (n.tagName.toLowerCase() === selectors[i].toLowerCase()) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         curr = n;
         continue outer;
       }
     }
     curr = null;
   }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   return curr;
 }
 
-export function querySelectorInner(e: any, selectors: any): any {
+// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+export function querySelectorInner(e: any, selectors: string[]): any {
   const sel = selectors[0];
   const rest = selectors.slice(1);
   let result: any[] = [];
   for (const child of e.childNodes) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     if (child.tagName && child.tagName.toLowerCase() === sel) {
       if (rest.length) {
         result = result.concat(querySelectorInner(child, rest));
@@ -159,19 +174,23 @@ export function querySelectorInner(e: any, selectors: any): any {
       }
     }
   }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   return result;
 }
 
 // wrapper/re-implementation of querySelectorAll that works under
 // Node with xmldom
-export function qsa(e: any, s: any): any {
+// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+export function qsa(e: any, s: string): any[] {
   if (e.querySelectorAll) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return,@typescript-eslint/no-unsafe-call
     return e.querySelectorAll(s);
   }
   const selectors = s.split('>').map((sel: string): string => {
     return sel.toLowerCase();
   });
 
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   return querySelectorInner(e, selectors);
 }
 

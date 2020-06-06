@@ -21,7 +21,7 @@ import { File } from './schemas/file_pb';
 const preset = presets.node({
   DOMParser,
   canvas,
-  fetch: fetch as any,
+  fetch,
 });
 
 export async function renderToPNG(fileDoc: File): Promise<Buffer> {

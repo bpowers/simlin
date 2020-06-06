@@ -115,14 +115,14 @@ export class TemplateContext {
     project: vars.Project,
     modelName: string,
     model: vars.Model,
-    mods: any,
-    init: any,
-    initials: any,
-    tables: any,
+    mods: string[],
+    init: string[],
+    initials: { [p: string]: number },
+    tables: { [p: string]: Readonly<TableProps> },
     runtimeOffsets: Map<string, number>,
-    ci: any,
-    cf: any,
-    cs: any,
+    ci: string[],
+    cf: string[],
+    cs: string[],
     implicitRefs: Set<string>,
   ) {
     this.name = model.ident;
@@ -210,7 +210,7 @@ export class SimBuilder {
 
     // compile the models after we've named all of our monomorphizations
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    for (const [n, modelDef] of models) {
+    for (const [_n, modelDef] of models) {
       const monomorphizations = modelDef.monomorphizations();
       for (const [inputs, modelName] of monomorphizations) {
         compiledModels.push(this.compileModel(project, modelName, defined(modelDef.model), inputs));
@@ -238,7 +238,7 @@ export class SimBuilder {
   }
 
   modelNameFor(module: vars.Module): string {
-    const name = this.modelNames.getIn([module.modelName, Set(module.refs.keys())]);
+    const name = this.modelNames.getIn([module.modelName, Set(module.refs.keys())]) as string;
     if (!name) {
       throw new Error(`couldn't find model name for ${module.modelName}`);
     }

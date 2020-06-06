@@ -8,7 +8,8 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 export function redirectToHttps(req: Request, res: Response, next: NextFunction): void {
   if (isProduction && req.get('X-Forwarded-Proto') === 'http') {
-    const secureUrl = 'https://' + req.get('host') + req.originalUrl;
+    const host = req.get('host') || 'systemdynamics.net';
+    const secureUrl = 'https://' + host + req.originalUrl;
     res.removeHeader('Strict-Transport-Security');
     res.setHeader('Location', secureUrl);
     res.status(301).send();

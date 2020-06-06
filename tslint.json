@@ -1,8 +1,8 @@
 {
   "extends": [
-    "tslint:recommended",
-    "tslint-react",
-    "tslint-config-prettier"
+    "recommended",
+    "prettier",
+    "plugin:@typescript-eslint/recommended"
   ],
   "rules": {
     "interface-name": {
@@ -26,6 +26,7 @@
     "no-unused-variable": false,
     "object-literal-key-quotes": false,
     "object-literal-sort-keys": false,
+    "@typescript-eslint/restrict-template-expressions": false,
     "whitespace": {
       "options": [
         "check-branch",

@@ -58,7 +58,7 @@ export class ModelDef extends Record(modelDefDefaults) {
     for (const module of this.modules) {
       const inputs = Set(module.refs.keys());
       if (!mms.has(inputs)) {
-        const mononame = titleCase(defined(this.model).ident + '_' + n);
+        const mononame = titleCase(`${defined(this.model).ident}_${n}`);
         // console.log(`// mono: ${defined(this.model).ident}<${inputs.join(',')}>: ${n}`);
         mms = mms.set(inputs, mononame);
         n++;
@@ -465,7 +465,8 @@ export function isConst(variable: Variable): boolean {
 export function setAST(variable: Variable, node: ast.Node): Variable {
   // FIXME :\
   const v: any = variable;
-  return v.set('ast', node).set('deps', identifierSet(node));
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+  return v.set('ast', node).set('deps', identifierSet(node)) as Variable;
 }
 
 function isOrdinary(variable: Variable): variable is Ordinary {
@@ -506,11 +507,11 @@ function simpleEvalCode(parent: Model, offsets: Map<string, number>, node: ast.N
 export function code(parent: Model, offsets: Map<string, number>, variable: Variable): string | undefined {
   if (isOrdinary(variable)) {
     if (isConst(variable)) {
-      return "this.initials['" + variable.ident + "']";
+      return `this.initials['${variable.ident}']`;
     }
     return simpleEvalCode(parent, offsets, variable.ast);
   } else if (isStock(variable)) {
-    let eqn = 'curr[' + defined(offsets.get(defined(variable.ident))) + '] + (';
+    let eqn = `curr[${defined(offsets.get(defined(variable.ident)))}] + (`;
     if (variable.inflows.size > 0) {
       // FIXME(bpowers): this shouldn't require converting to a set + back again
       eqn += List(Set(variable.inflows))
@@ -549,7 +550,7 @@ export function code(parent: Model, offsets: Map<string, number>, variable: Vari
       return undefined;
     }
     const indexExpr = defined(simpleEvalCode(parent, offsets, variable.ast));
-    return "lookup(this.tables['" + variable.ident + "'], " + indexExpr + ')';
+    return `lookup(this.tables['${variable.ident}'], ${indexExpr})`;
   } else if (isModule(variable)) {
     throw new Error('code called for Module');
   } else if (isReference(variable)) {
@@ -678,7 +679,7 @@ export function referencedModels(project: Project, mod: Module, all?: Map<string
       }),
     );
   }
-  // eslint-disable-next-line
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   for (const [_name, module] of mdl.modules) {
     all = referencedModels(project, module, all);
   }

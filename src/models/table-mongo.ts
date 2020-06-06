@@ -53,7 +53,7 @@ export class MongoTable<T extends Message> implements Table<T> {
     return this.deserialize(row);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/explicit-module-boundary-types
   async findOneByScan(query: any): Promise<T | undefined> {
     const row = await defined(this.collection).findOne(query);
     if (!row || !row.value) {
@@ -94,7 +94,7 @@ export class MongoTable<T extends Message> implements Table<T> {
     await defined(this.collection).insertOne(this.doc(id, pb));
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/explicit-module-boundary-types
   async update(id: string, cond: any, pb: T): Promise<T | null> {
     const result = await defined(this.collection).findOneAndUpdate(Object.assign({ _id: id }, cond), {
       $set: this.doc(id, pb),

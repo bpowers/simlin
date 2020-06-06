@@ -173,6 +173,7 @@ export const Label = withStyles(styles)(
         return;
       }
       this.inMove = true;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
       (e.target as any).setPointerCapture(e.pointerId);
       this.props.onLabelDrag?.(this.props.uid, e);
     };

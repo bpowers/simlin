@@ -43,4 +43,5 @@ export const FlowIcon = withStyles(styles)(
   },
 );
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 (FlowIcon as any).muiName = 'FlowIcon';

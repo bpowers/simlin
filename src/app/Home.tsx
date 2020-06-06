@@ -117,7 +117,7 @@ const Home = withWidth()(
 
         this.state = {
           anchorEl: undefined,
-          projects: List(),
+          projects: List<Project>(),
         };
 
         // eslint-disable-next-line @typescript-eslint/no-misused-promises
@@ -131,7 +131,7 @@ const Home = withWidth()(
           console.log("couldn't fetch projects.");
           return;
         }
-        const projects: Project[] = await response.json();
+        const projects = (await response.json()) as Project[];
         this.setState({
           projects: List(projects),
         });

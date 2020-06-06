@@ -29,14 +29,16 @@ async function getOrCreateUserFromProfile(
   }
 
   // if we've gotten multiple emails back, just use the main one
-  const accountEmail =
-    profile.emails.length > 1 ? profile.emails.filter((entry: any) => entry.type === 'account') : profile.emails;
+  const accountEmail = (profile.emails.length > 1
+    ? // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      profile.emails.filter((entry: any) => entry.type === 'account')
+    : profile.emails) as any[];
   if (accountEmail.length !== 1) {
     const jsonEmails = JSON.stringify(profile.emails);
     return [undefined, new Error(`expected account email, but not in: ${jsonEmails}`)];
   }
 
-  const email = accountEmail[0].value;
+  const email = accountEmail[0].value as string;
   if (!emailRegExp.test(email)) {
     return [undefined, new Error(`email doesn't look like an email: ${email}`)];
   }
@@ -45,12 +47,12 @@ async function getOrCreateUserFromProfile(
     return [undefined, new Error(`user not in allowlist`)];
   }
 
-  const displayName = profile.displayName ? profile.displayName : email;
+  const displayName = profile.displayName ? (profile.displayName as string) : email;
 
   // we may not be lucky enough to get a photo URL
   let photoUrl: string | undefined;
   if (profile.photos && profile.photos.length && profile.photos[0].value) {
-    photoUrl = profile.photos[0].value;
+    photoUrl = profile.photos[0].value as string;
   }
 
   // since a document with the email already exists, just get the
@@ -84,11 +86,14 @@ async function getOrCreateUserFromProfile(
 const emailRegExp = /^[^@]+@[^.]+(?:\.[^.]+)+$/;
 
 export const authn = (app: Application): void => {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   const config = app.get('authentication');
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   const { google } = config;
 
   const userAllowlistKey = 'userAllowlist';
-  const userAllowlist: string[] = (app.get(userAllowlistKey) || '').split(',');
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+  const userAllowlist = (app.get(userAllowlistKey) || '').split(',') as string[];
   if (userAllowlist === undefined || userAllowlist.length === 0) {
     throw new Error(`expected ${userAllowlistKey} in config`);
   }
@@ -108,7 +113,9 @@ export const authn = (app: Application): void => {
   passport.use(
     new OAuth2Strategy(
       {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         clientID: google.clientID,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         clientSecret: google.clientSecret,
         callbackURL,
       },
@@ -128,7 +135,7 @@ export const authn = (app: Application): void => {
   );
 
   passport.serializeUser((rawUser: any, done: (error: any, user?: any) => void) => {
-    const user: User = rawUser;
+    const user = rawUser as User;
     console.log(`serialize user: ${user.getId()}`);
     const serializedUser: any = {
       id: user.getId(),

@@ -56,7 +56,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     return this.deserialize(docSnapshot.get('value'));
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/explicit-module-boundary-types
   async findOneByScan(query: any): Promise<T | undefined> {
     const keys = Object.keys(query);
     if (keys.length !== 1) {
@@ -118,13 +118,14 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     await docRef.create(this.doc(id, pb));
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/explicit-module-boundary-types
   async update(id: string, cond: any, pb: T): Promise<T | null> {
     try {
       await this.db.runTransaction(async (tx) => {
         const docRef = this.docRef(id);
         const doc = await tx.get(docRef);
         for (const [key, expected] of Object.entries(cond)) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           const current = doc.get(key);
           if (current !== expected) {
             throw new Error(`precondition ${key} failed: ${expected} != ${current}`);

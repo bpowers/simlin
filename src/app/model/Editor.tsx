@@ -190,15 +190,15 @@ export const Editor = withStyles(styles)(
       super(props);
 
       this.state = {
-        projectHistory: Stack(),
+        projectHistory: Stack<Project>(),
         projectOffset: 0,
-        modelErrors: List(),
+        modelErrors: List<Error>(),
         modelName: 'main',
         dialOpen: false,
         dialVisible: true,
         selectedTool: undefined,
         data: Map(),
-        selection: Set(),
+        selection: Set<number>(),
         drawerOpen: false,
         projectVersion: -1,
         snapshotBlob: undefined,
@@ -283,10 +283,12 @@ export const Editor = withStyles(styles)(
       console.log(`saving project version ${currVersion + 1}`);
       const file = project.toFile();
       // ensure we've converted to plain-old JavaScript objects
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectJSON = JSON.parse(JSON.stringify(file));
 
       const bodyContents = {
         currVersion,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         file: projectJSON,
       };
 
@@ -304,14 +306,17 @@ export const Editor = withStyles(styles)(
 
       const status = response.status;
       if (!(status >= 200 && status < 400)) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const body = await response.json();
-        const errorMsg = body && body.error ? body.error : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+        const errorMsg =
+          body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
         this.appendModelError(errorMsg);
         return;
       }
 
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectResponse = await response.json();
-      const projectVersion: number = defined(projectResponse.version);
+      const projectVersion = defined(projectResponse.version) as number;
 
       this.setState({ projectVersion });
     }
@@ -335,7 +340,9 @@ export const Editor = withStyles(styles)(
         return;
       }
 
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectResponse = await response.json();
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const fileJSON = JSON.parse(projectResponse.file);
       let file;
       try {
@@ -354,7 +361,7 @@ export const Editor = withStyles(styles)(
       // we don't call updateProject here because we don't want to
       // POST a new version up when we've just downloaded it.
       this.setState({
-        projectVersion: defined(projectResponse.version),
+        projectVersion: defined(projectResponse.version) as number,
         projectHistory: Stack([project]),
         projectOffset: 0,
       });
@@ -369,6 +376,7 @@ export const Editor = withStyles(styles)(
       });
     };
 
+    // eslint-disable-next-line @typescript-eslint/ban-types
     handleDialClose = (e: React.SyntheticEvent<{}>, reason: CloseReason) => {
       if (reason === 'mouseLeave' || reason === 'blur') {
         return;
@@ -463,7 +471,7 @@ export const Editor = withStyles(styles)(
       );
       project = project.deleteVariables(this.state.modelName, this.getSelectionIdents());
       this.setState({
-        selection: Set(),
+        selection: Set<number>(),
       });
       this.updateProject(project);
     };
@@ -603,7 +611,7 @@ export const Editor = withStyles(styles)(
               elements = elements.push(newCloud);
               flow = flow.set(
                 'pts',
-                (flow.pts || List()).map((pt) => {
+                (flow.pts || List<XmilePoint>()).map((pt) => {
                   if (pt.uid === inCreationCloudUid) {
                     return pt.set('uid', newCloud.uid);
                   }
@@ -637,7 +645,7 @@ export const Editor = withStyles(styles)(
               }
               flow = flow.set(
                 'pts',
-                (flow.pts || List()).map((pt) => {
+                (flow.pts || List<XmilePoint>()).map((pt) => {
                   if (pt.uid === fauxTargetUid) {
                     return pt.set('uid', to.uid);
                   }
@@ -749,7 +757,7 @@ export const Editor = withStyles(styles)(
       project = project.addNewVariable(this.state.modelName, element.type, defined(element.name));
 
       this.setState({
-        selection: Set(),
+        selection: Set<number>(),
       });
       this.updateProject(project);
     };

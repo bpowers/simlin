@@ -71,7 +71,7 @@ export const Toast = withStyles(styles)(
 
       return (
         <SnackbarContent
-          className={classes[variant] + ' ' + className}
+          className={classes[variant] + ' ' + (className || '')}
           aria-describedby="client-snackbar"
           message={
             <span id="client-snackbar" className={classes.message}>

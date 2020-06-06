@@ -37,8 +37,8 @@ export function interceptWriteHeaders(res: Response, callback: (statusCode: numb
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     realWriteHead.apply(res, args as any);
 
-    // eslint-disable-next-line @typescript-eslint/ban-ts-ignore
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore
-    return this;
+    return this as ServerResponse;
   };
 }

@@ -127,6 +127,7 @@ export const VariableDetails = withStyles(styles)(
       return typeof value === 'number' ? value.toFixed(3) : value;
     };
 
+    // eslint-disable-next-line @typescript-eslint/ban-types
     handleTabChange = (event: React.ChangeEvent<{}>, newValue: number) => {
       this.props.onActiveTabChange(newValue);
     };

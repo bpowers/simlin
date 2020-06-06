@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-/* eslint-disable @typescript-eslint/no-unused-vars */
-
 import { List, Map, Record } from 'immutable';
 
 import { canonicalize, defined, exists } from './common';
@@ -79,7 +77,7 @@ const num = (v: any): [number, undefined] | [number, Error] => {
   if (isFinite(n)) {
     return [n, undefined];
   }
-  return [NaN, new Error('not number: ' + v)];
+  return [NaN, new Error(`not number: ${v}`)];
 };
 
 const bool = (v: any): [boolean, undefined] | [false, Error] => {
@@ -97,9 +95,10 @@ const bool = (v: any): [boolean, undefined] | [false, Error] => {
     }
   }
   // XXX: should we accept 0 or 1?
-  return [false, new Error('not boolean: ' + v)];
+  return [false, new Error(`not boolean: ${v}`)];
 };
 
+// eslint-disable-next-line @typescript-eslint/ban-types
 type XNode = {};
 
 const PointDefaults = {
@@ -107,13 +106,6 @@ const PointDefaults = {
   y: -1,
   uid: undefined as number | undefined,
 };
-
-// when constructing a point, we always want an x and a y, but the UID is optional
-interface PointConstruction {
-  x: number;
-  y: number;
-  uid?: number;
-}
 
 export class Point extends Record(PointDefaults) implements XNode {
   toJSON(): any {
@@ -123,6 +115,7 @@ export class Point extends Record(PointDefaults) implements XNode {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   static FromJSON(obj: any): Point {
     if (obj['@class'] !== 'Point' || !obj.data) {
       throw new Error('bad object');
@@ -183,6 +176,7 @@ export class File extends Record(FileDefaults) implements XNode {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   static FromJSON(obj: any): File {
     if (obj['@class'] !== 'File' || !obj.data) {
       throw new Error('bad object');
@@ -218,7 +212,7 @@ export class File extends Record(FileDefaults) implements XNode {
         case 'header': {
           const [header, err] = Header.FromXML(child);
           if (err || !header) {
-            return [undefined, new Error('Header: ' + err)];
+            return [undefined, new Error(`Header: ${err}`)];
           }
           file.header = header;
           break;
@@ -226,7 +220,7 @@ export class File extends Record(FileDefaults) implements XNode {
         case 'sim_specs': {
           const [simSpec, err] = SimSpec.FromXML(child);
           if (err || !simSpec) {
-            return [undefined, new Error('SimSpec: ' + err)];
+            return [undefined, new Error(`SimSpec: ${err}`)];
           }
           file.simSpec = simSpec;
           break;
@@ -234,10 +228,10 @@ export class File extends Record(FileDefaults) implements XNode {
         case 'model': {
           const [model, err] = Model.FromXML(child);
           if (err || !model) {
-            return [undefined, new Error('SimSpec: ' + err)];
+            return [undefined, new Error(`SimSpec: ${err}`)];
           }
           if (!file.models) {
-            file.models = List();
+            file.models = List<Model>();
           }
           file.models = defined(file.models).push(defined(model));
           break;
@@ -246,10 +240,6 @@ export class File extends Record(FileDefaults) implements XNode {
     }
 
     return [new File(file), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -294,7 +284,7 @@ export class SimSpec extends Record(SimSpecDefaults) implements XNode {
       } else {
         const [val, err] = num(content(child));
         if (err || val === undefined) {
-          return [undefined, new Error(child.nodeName + ': ' + err)];
+          return [undefined, new Error(`${child.nodeName} : ${err}`)];
         }
         (simSpec as any)[name] = val;
         if (name === 'dt') {
@@ -330,10 +320,6 @@ export class SimSpec extends Record(SimSpecDefaults) implements XNode {
 
     return [new SimSpec(simSpec), undefined];
   }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
-  }
 }
 
 const UnitDefaults = {
@@ -350,14 +336,10 @@ export class Unit extends Record(UnitDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Unit, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [Unit, undefined] | [undefined, Error] {
     const unit = Object.assign({}, UnitDefaults);
     console.log('TODO: unit');
     return [new Unit(unit), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -393,10 +375,6 @@ export class Product extends Record(ProductDefaults) implements XNode {
       }
     }
     return [new Product(product), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -444,13 +422,13 @@ export class Header extends Record(HeaderDefaults) implements XNode {
         case 'product':
           [header.product, err] = Product.FromXML(child);
           if (err) {
-            return [undefined, new Error('Product: ' + err)];
+            return [undefined, new Error(`Product: ${err}`)];
           }
           break;
         case 'options':
           [header.options, err] = Options.FromXML(child);
           if (err) {
-            return [undefined, new Error('Options: ' + err)];
+            return [undefined, new Error(`Options: ${err}`)];
           }
           break;
         case 'name':
@@ -487,10 +465,6 @@ export class Header extends Record(HeaderDefaults) implements XNode {
     }
     return [new Header(header), undefined];
   }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
-  }
 }
 
 const DimensionDefaults = {
@@ -506,14 +480,10 @@ export class Dimension extends Record(DimensionDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Dimension, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [Dimension, undefined] | [undefined, Error] {
     const dim = Object.assign({}, DimensionDefaults);
     // TODO: implement
     return [new Dimension(dim), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -614,7 +584,7 @@ export class Options extends Record(OptionsDefaults) implements XNode {
           const [n, err] = num(val);
           if (err || !n) {
             // FIXME: real logging
-            console.log('bad max_dimensions( ' + val + '): ' + err);
+            console.log(`bad max_dimensions(${val}): ${err}`);
             options.maximumDimensions = 1;
           } else {
             if (n !== i32(n)) {
@@ -630,10 +600,6 @@ export class Options extends Record(OptionsDefaults) implements XNode {
       }
     }
     return [new Options(options), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -651,14 +617,10 @@ export class Behavior extends Record(BehaviorDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Behavior, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [Behavior, undefined] | [undefined, Error] {
     const behavior = Object.assign({}, BehaviorDefaults);
     // TODO
     return [new Behavior(behavior), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -672,14 +634,10 @@ export class Data extends Record(DataDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Data, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [Data, undefined] | [undefined, Error] {
     const data = Object.assign({}, DataDefaults);
     console.log('TODO: data');
     return [new Data(data), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -710,15 +668,13 @@ export function cloudFor(flow: ViewElement, dir: 'source' | 'sink', uid: number)
     }
   }
 
-  const element = new ViewElement({
+  return new ViewElement({
     type: 'cloud',
     x: defined(x),
     y: defined(y),
     flowUid: flow.uid,
     uid,
   } as any);
-
-  return element;
 }
 
 export class Model extends Record(ModelDefaults) implements XNode {
@@ -881,7 +837,7 @@ export class Model extends Record(ModelDefaults) implements XNode {
             const [v, err] = Variable.FromXML(vchild);
             // FIXME: real logging
             if (err || !v) {
-              return [undefined, new Error(child.nodeName + ' var: ' + err)];
+              return [undefined, new Error(`${child.nodeName} var: ${err}`)];
             }
             model.variables = model.variables.push(v);
           }
@@ -900,7 +856,7 @@ export class Model extends Record(ModelDefaults) implements XNode {
             const [view, err] = View.FromXML(vchild);
             // FIXME: real logging
             if (err || !view) {
-              return [undefined, new Error('view: ' + err)];
+              return [undefined, new Error(`view: ${err}`)];
             }
             model.views = model.views.push(view);
           }
@@ -912,10 +868,6 @@ export class Model extends Record(ModelDefaults) implements XNode {
 
   get ident(): string {
     return canonicalize(this.name);
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -935,14 +887,10 @@ export class ArrayElement extends Record(ArrayElementDefaults) implements XNode 
     };
   }
 
-  static FromXML(el: Element): [ArrayElement, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [ArrayElement, undefined] | [undefined, Error] {
     const arrayEl = Object.assign({}, ArrayElementDefaults);
     console.log('TODO: array element');
     return [new ArrayElement(arrayEl), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -963,13 +911,10 @@ export class Range extends Record(RangeDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Range, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [Range, undefined] | [undefined, Error] {
     const range = Object.assign({}, RangeDefaults);
     console.log('TODO: range element');
     return [new Range(range), undefined];
-  }
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -989,14 +934,10 @@ export class Format extends Record(FormatDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Format, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [Format, undefined] | [undefined, Error] {
     const fmt = Object.assign({}, FormatDefaults);
     console.log('TODO: format element');
     return [new Format(fmt), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -1104,7 +1045,7 @@ export class Variable extends Record(VariableDefaults) implements XNode {
         case 'gf': {
           const [gf, err] = GF.FromXML(child);
           if (err || !gf) {
-            return [undefined, new Error(v.name + ' GF: ' + err)];
+            return [undefined, new Error(`${v.name} GF: ${err}`)];
           }
           v.gf = gf;
           break;
@@ -1112,7 +1053,7 @@ export class Variable extends Record(VariableDefaults) implements XNode {
         case 'connect': {
           const [conn, err] = Connection.FromXML(child);
           if (err || !conn) {
-            return [undefined, new Error(v.name + ' conn: ' + err)];
+            return [undefined, new Error(`${v.name} conn: ${err}`)];
           }
           if (!v.connections) {
             v.connections = List<Connection>();
@@ -1128,10 +1069,6 @@ export class Variable extends Record(VariableDefaults) implements XNode {
 
   get ident(): string | undefined {
     return this.name ? canonicalize(this.name) : undefined;
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -1171,28 +1108,24 @@ export class Shape extends Record(ShapeDefaults) implements XNode {
         case 'width':
           [shape.width, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('bad width: ' + err)];
+            return [undefined, new Error(`bad width: ${err}`)];
           }
           break;
         case 'height':
           [shape.height, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('bad height: ' + err)];
+            return [undefined, new Error(`bad height: ${err}`)];
           }
           break;
         case 'radius':
           [shape.radius, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('bad radius: ' + err)];
+            return [undefined, new Error(`bad radius: ${err}`)];
           }
           break;
       }
     }
     return [new Shape(shape), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -1219,7 +1152,7 @@ export class Style extends Record(StyleDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Style, undefined] | [undefined, Error] {
+  static FromXML(_el: Element): [Style, undefined] | [undefined, Error] {
     return [new Style(Object.assign({}, StyleDefaults)), undefined];
   }
 }
@@ -1317,31 +1250,31 @@ export class ViewElement extends Record(ViewElementDefaults) implements XNode {
         case 'uid':
           [viewEl.uid, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('uid: ' + err)];
+            return [undefined, new Error(`uid: ${err}`)];
           }
           break;
         case 'x':
           [viewEl.x, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('x: ' + err)];
+            return [undefined, new Error(`x: ${err}`)];
           }
           break;
         case 'y':
           [viewEl.y, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('y: ' + err)];
+            return [undefined, new Error(`y: ${err}`)];
           }
           break;
         case 'width':
           [viewEl.width, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('width: ' + err)];
+            return [undefined, new Error(`width: ${err}`)];
           }
           break;
         case 'height':
           [viewEl.height, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('height: ' + err)];
+            return [undefined, new Error(`height: ${err}`)];
           }
           break;
         case 'label_side': {
@@ -1355,7 +1288,7 @@ export class ViewElement extends Record(ViewElementDefaults) implements XNode {
         case 'label_angle':
           [viewEl.labelAngle, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('label_angle: ' + err)];
+            return [undefined, new Error(`label_angle: ${err}`)];
           }
           break;
         case 'color':
@@ -1363,7 +1296,7 @@ export class ViewElement extends Record(ViewElementDefaults) implements XNode {
         case 'angle':
           [viewEl.angle, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('angle: ' + err)];
+            return [undefined, new Error(`angle: ${err}`)];
           }
           break;
       }
@@ -1399,7 +1332,7 @@ export class ViewElement extends Record(ViewElementDefaults) implements XNode {
             const [pt, err] = Point.FromXML(vchild);
             // FIXME: real logging
             if (err || !pt) {
-              return [undefined, new Error('pt: ' + err)];
+              return [undefined, new Error(`pt: ${err}`)];
             }
             if (!viewEl.pts) {
               viewEl.pts = List<Point>();
@@ -1410,7 +1343,7 @@ export class ViewElement extends Record(ViewElementDefaults) implements XNode {
         case 'shape':
           const [shape, err] = Shape.FromXML(child);
           if (err || !shape) {
-            return [undefined, new Error('shape: ' + err)];
+            return [undefined, new Error(`shape: ${err}`)];
           }
           viewEl.shape = shape;
           break;
@@ -1460,10 +1393,6 @@ export class ViewElement extends Record(ViewElementDefaults) implements XNode {
         }
     }
     return NaN;
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -1525,37 +1454,37 @@ export class View extends Record(ViewDefaults) implements XNode {
         case 'order':
           [view.order, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('order: ' + err)];
+            return [undefined, new Error(`order: ${err}`)];
           }
           break;
         case 'width':
           [view.width, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('width: ' + err)];
+            return [undefined, new Error(`width: ${err}`)];
           }
           break;
         case 'height':
           [view.height, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('height: ' + err)];
+            return [undefined, new Error(`height: ${err}`)];
           }
           break;
         case 'zoom':
           [view.zoom, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('zoom: ' + err)];
+            return [undefined, new Error(`zoom: ${err}`)];
           }
           break;
         case 'scroll_x':
           [view.scrollX, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('scroll_x: ' + err)];
+            return [undefined, new Error(`scroll_x: ${err}`)];
           }
           break;
         case 'scroll_y':
           [view.scrollY, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('scroll_y: ' + err)];
+            return [undefined, new Error(`scroll_y: ${err}`)];
           }
           break;
         case 'background':
@@ -1564,13 +1493,13 @@ export class View extends Record(ViewDefaults) implements XNode {
         case 'page_width':
           [view.pageWidth, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('page_width: ' + err)];
+            return [undefined, new Error(`page_width: ${err}`)];
           }
           break;
         case 'page_height':
           [view.pageHeight, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('page_height: ' + err)];
+            return [undefined, new Error(`page_height: ${err}`)];
           }
           break;
         case 'page_sequence': {
@@ -1592,19 +1521,19 @@ export class View extends Record(ViewDefaults) implements XNode {
         case 'show_pages':
           [view.showPages, err] = bool(attr.value);
           if (err) {
-            return [undefined, new Error('show_pages: ' + err)];
+            return [undefined, new Error(`show_pages: ${err}`)];
           }
           break;
         case 'home_page':
           [view.homePage, err] = num(attr.value);
           if (err) {
-            return [undefined, new Error('home_page: ' + err)];
+            return [undefined, new Error(`home_page: ${err}`)];
           }
           break;
         case 'home_view':
           [view.homeView, err] = bool(attr.value);
           if (err) {
-            return [undefined, new Error('home_view: ' + err)];
+            return [undefined, new Error(`home_view: ${err}`)];
           }
           break;
       }
@@ -1625,7 +1554,7 @@ export class View extends Record(ViewDefaults) implements XNode {
       let viewEl: ViewElement | undefined;
       [viewEl, err] = ViewElement.FromXML(child);
       if (err) {
-        return [undefined, new Error('viewEl: ' + err)];
+        return [undefined, new Error(`viewEl: ${err}`)];
       } else if (!viewEl) {
         continue;
       }
@@ -1636,10 +1565,6 @@ export class View extends Record(ViewDefaults) implements XNode {
     }
 
     return [new View(view), undefined];
-  }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
   }
 }
 
@@ -1850,10 +1775,6 @@ export class Connection extends Record(ConnectionDefaults) implements XNode {
 
     return [new Connection({ from, to }), undefined];
   }
-
-  toXml(doc: XMLDocument, parent: Element): boolean {
-    return true;
-  }
 }
 
 const TypeRegistry = Map<string, XNode>([
@@ -1905,7 +1826,7 @@ const FromJSON = (json: any): [any, undefined] | [undefined, Error] => {
     return [List(result), undefined];
   }
 
-  const className: string | undefined = json['@class'];
+  const className = json['@class'] as string | undefined;
   if (className === undefined) {
     return [undefined, new Error(`no class`)];
   } else if (!TypeRegistry.has(json['@class'])) {
@@ -1914,11 +1835,14 @@ const FromJSON = (json: any): [any, undefined] | [undefined, Error] => {
     return [undefined, new Error(`no data for class ${className}`)];
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   const data = Object.assign({}, json.data);
   for (const key in data) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     if (!data.hasOwnProperty(key)) {
       continue;
     }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const value = data[key];
     if (value === undefined || value === null) {
       continue;
@@ -1928,18 +1852,21 @@ const FromJSON = (json: any): [any, undefined] | [undefined, Error] => {
     if (err !== undefined) {
       return [undefined, err];
     }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     data[key] = newValue;
   }
   const Kind: any = defined(TypeRegistry.get(className));
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-unsafe-call
   const object = new Kind(data);
   return [object, undefined];
 };
 
+// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 export function FileFromJSON(json: any): File {
   const [file, err] = FromJSON(json);
   if (err) {
     throw err;
   }
 
-  return file;
+  return file as File;
 }

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 if (process.env.NODE_ENV === 'production') {
-  // tslint:disable-next-line
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-var-requires
   require('@google-cloud/trace-agent').start();
 }
 

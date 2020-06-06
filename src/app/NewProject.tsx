@@ -89,6 +89,7 @@ export const NewProject = withStyles(styles)(
         description: this.state.descriptionField,
       };
       if (this.state.projectJSON) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         bodyContents.projectJSON = this.state.projectJSON;
       }
       if (this.state.isPublic) {
@@ -106,15 +107,18 @@ export const NewProject = withStyles(styles)(
 
       const status = response.status;
       if (!(status >= 200 && status < 400)) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const body = await response.json();
-        const errorMsg = body && body.error ? body.error : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        const errorMsg =
+          body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
         this.setState({
           errorMsg,
         });
         return;
       }
 
-      const project = await response.json();
+      const project = (await response.json()) as Project;
       this.props.onProjectCreated(project);
     };
 
@@ -189,8 +193,10 @@ export const NewProject = withStyles(styles)(
 
       const file = project.toFile();
       // ensure we've converted to plain-old JavaScript objects
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectJSON = JSON.parse(JSON.stringify(file));
 
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       this.setState({ projectJSON });
     };
 

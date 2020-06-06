@@ -38,6 +38,7 @@ const CloudPath =
   '42.394553,10.092543 38.598118,10.092543 C 36.825927,10.092543 35.215888,10.918252 ' +
   '33.996078,12.248669 C 33.491655,7.5434856 29.994502,3.8741489 25.731189,3.8741489 z';
 
+// eslint-disable-next-line @typescript-eslint/ban-types
 type CloudState = {};
 
 export interface CloudPropsFull extends WithStyles<typeof styles> {

@@ -72,8 +72,8 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      const projectName = req.body.projectName;
-      const projectDescription = req.body.description || '';
+      const projectName = (req.body.projectName as string) || '';
+      const projectDescription = (req.body.description as string) || '';
       const isPublic = !!req.body.isPublic;
 
       try {
@@ -244,9 +244,9 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      const projectVersion: number = req.body.currVersion;
+      const projectVersion = req.body.currVersion as number;
       const newVersion = projectVersion + 1;
-      const fileContents: string = req.body.file;
+      const fileContents = req.body.file as string;
 
       const jsonContents = JSON.stringify(fileContents);
 
@@ -299,7 +299,7 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      const proposedUsername = req.body.username;
+      const proposedUsername = req.body.username as string;
 
       if (UsernameDenylist.has(proposedUsername)) {
         res.status(400).json({ error: 'username already taken' });
@@ -329,7 +329,7 @@ export const apiRouter = (app: Application): Router => {
 
       req.session.passport.user.id = userModel.getId();
 
-      const defaultProjectsDir = app.get('defaultProjectsDir');
+      const defaultProjectsDir = app.get('defaultProjectsDir') as string;
       // this error shouldn't ever happen, but also shouldn't be fatal
       if (defaultProjectsDir) {
         try {

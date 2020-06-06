@@ -62,6 +62,7 @@ class UserInfoSingleton {
     if (this.resultPromise) {
       const response = await this.resultPromise;
       const status = response.status;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const user = status >= 200 && status < 400 ? await response.json() : undefined;
 
       this.result = [user, status];
@@ -135,7 +136,7 @@ const InnerApp = withStyles(styles)(
       return <Editor username={username} projectName={projectName} baseURL="" history={props.history} />;
     };
 
-    home = (props: RouteComponentProps<{}>) => {
+    home = (props: RouteComponentProps) => {
       const isNewProject = props.location.pathname === '/new';
       return <Home isNewProject={isNewProject} user={defined(this.state.user)} />;
     };
@@ -165,7 +166,7 @@ const InnerApp = withStyles(styles)(
 );
 
 export class App extends React.PureComponent {
-  render() {
+  render(): JSX.Element {
     return (
       <StylesProvider generateClassName={generateClassName}>
         <MuiThemeProvider theme={theme}>

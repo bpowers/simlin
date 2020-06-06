@@ -36,11 +36,11 @@ class App {
   private readonly app: Application;
 
   constructor() {
-    this.app = express() as any;
+    this.app = (express() as any) as Application;
   }
 
   listen(): void {
-    const port = this.app.get('port');
+    const port = this.app.get('port') as number;
     const server = this.app.listen(port);
 
     server.on('listening', () => {
@@ -51,6 +51,7 @@ class App {
   private loadConfig(): void {
     const setConfig = (filename: string): void => {
       const contents = fs.readFileSync(filename).toString();
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const config = JSON.parse(contents);
       // eslint-disable-next-line prefer-const
       for (let [key, value] of Object.entries(config)) {
@@ -77,10 +78,12 @@ class App {
       } else {
         let component = defined(path[0]);
         path = path.slice(1);
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         let obj: any = this.app.get(component);
         while (obj && path.length > 1) {
           component = defined(path[0]);
           path = path.slice(1);
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           obj = obj[component];
         }
         if (obj) {
@@ -91,7 +94,7 @@ class App {
   }
 
   private mongoUrl(): string {
-    let url = this.app.get('mongodb');
+    let url = this.app.get('mongodb') as string;
     if (process.env.MODEL_MONGO_USERNAME && process.env.MODEL_MONGO_PASSWORD) {
       const exploded = new URL(url);
       exploded.username = process.env.MODEL_MONGO_USERNAME;
@@ -128,7 +131,7 @@ class App {
           maxAge: oneYearInSeconds,
           includeSubDomains: true,
           preload: true,
-        } as any, // FIXME: this avoids a hsts runtime deprecation warning
+        },
       }),
     );
     this.app.use(
@@ -155,8 +158,8 @@ class App {
       '/:username/:projectName',
       authz,
       async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-        const email = req.session.passport.user.email;
-        const user: UserPb | undefined = req.user as any;
+        const email = req.session.passport.user.email as string;
+        const user = (req.user as any) as UserPb | undefined;
         if (!user) {
           logger.warn(`user not found for '${email}', but passed authz?`);
           res.status(500).json({});

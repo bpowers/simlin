@@ -301,6 +301,7 @@ export class Model extends Record(modelDefaults) implements varModel {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 export function isModel(model: any): model is Model {
   return model.constructor === Model;
 }

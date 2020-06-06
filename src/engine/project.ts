@@ -280,7 +280,7 @@ export class Project extends Record(projectDefaults) implements varsProject {
     // correspondence to the XMILE doc
     const [file, err] = File.FromXML(xmileElement);
     if (err || !file) {
-      return [undefined, new Error(`File.Build: ${err}`)];
+      return [undefined, new Error(`File.Build: ${err || ''}`)];
     }
 
     // FIXME: compat translation of equations

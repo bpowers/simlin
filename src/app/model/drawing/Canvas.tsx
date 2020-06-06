@@ -513,7 +513,7 @@ export const Canvas = withStyles(styles)(
     private constrainFlowMovement(flow: ViewElement, moveDelta: Point): [ViewElement, List<ViewElement>] {
       if (!flow.pts || flow.pts.size !== 2) {
         console.log('TODO: non-simple flow');
-        return [flow, List()];
+        return [flow, List<ViewElement>()];
       }
 
       const sourceId = defined(defined(flow.pts.first()).uid);
@@ -946,6 +946,7 @@ export const Canvas = withStyles(styles)(
       };
 
       if (!isText) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         (e.target as any).setPointerCapture(e.pointerId);
       }
 
@@ -1040,6 +1041,7 @@ export const Canvas = withStyles(styles)(
       if (typeof document !== 'undefined' && document && document.activeElement) {
         const e: any = document.activeElement;
         // blur doesn't exist on "Element" but it definitely is a real thing
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         e.blur();
       }
     }
@@ -1062,7 +1064,7 @@ export const Canvas = withStyles(styles)(
       }
 
       // create different layers for each of the display types so that views compose together nicely
-      const zLayers: React.ReactElement[][] = new Array(ZMax);
+      const zLayers = new Array(ZMax) as React.ReactElement[][];
       for (let i = 0; i < ZMax; i++) {
         zLayers[i] = [];
       }
@@ -1071,7 +1073,7 @@ export const Canvas = withStyles(styles)(
       this.populateNamedElements(displayElements);
 
       // FIXME: this is so gross
-      this.elementBounds = List();
+      this.elementBounds = List<Rect | undefined>();
 
       // phase 3: create React components and add them to the appropriate layer
       for (let element of displayElements) {
@@ -1087,7 +1089,8 @@ export const Canvas = withStyles(styles)(
           continue;
         }
 
-        const component: React.ReactElement = this.builder[element.type](element);
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        const component = this.builder[element.type](element) as React.ReactElement;
         zLayers[defined(ZOrder.get(element.type))].push(component);
       }
 
@@ -1156,8 +1159,8 @@ export const Canvas = withStyles(styles)(
       );
 
       // we don't need these things anymore
-      this.elementBounds = List();
-      this.selectionUpdates = Map();
+      this.elementBounds = List<Rect | undefined>();
+      this.selectionUpdates = Map<UID, ViewElement>();
       // n.b. we don't want to clear this.elements or this.nameMap, as thats used when handling callbacks
 
       return (

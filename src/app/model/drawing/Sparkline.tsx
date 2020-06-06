@@ -82,16 +82,12 @@ export const Sparkline = withStyles(styles)(
       let p = '';
       for (let i = 0; i < values.length; i++) {
         if (isNaN(values[i])) {
-          console.log('NaN at ' + time[i]);
+          console.log(`NaN at ${time[i]}`);
         }
-        p +=
-          (i === 0 ? 'M' : 'L') +
-          (x + (w * (time[i] - xMin)) / xSpan) +
-          ',' +
-          (y + h - (h * (values[i] - yMin)) / ySpan);
+        const prefix = i === 0 ? 'M' : 'L';
+        p += `${prefix}${x + (w * (time[i] - xMin)) / xSpan},${y + h - (h * (values[i] - yMin)) / ySpan}`;
       }
-      const pAxis =
-        'M' + x + ',' + (y + h - (h * (0 - yMin)) / ySpan) + 'L' + (x + w) + ',' + (y + h - (h * (0 - yMin)) / ySpan);
+      const pAxis = `M${x},${y + h - (h * (0 - yMin)) / ySpan}L${x + w},${y + h - (h * (0 - yMin)) / ySpan}`;
 
       return (
         <g>

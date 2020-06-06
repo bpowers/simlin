@@ -55,8 +55,10 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
 
     const status = response.status;
     if (!(status >= 200 && status < 400)) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const body = await response.json();
-      const errorMsg = body && body.error ? body.error : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+      const errorMsg =
+        body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
       this.setState({
         errorMsg,
       });
@@ -66,7 +68,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     this.props.onUsernameChanged();
   };
 
-  handleKeyPress = (event: React.KeyboardEvent<HTMLDivElement>) => {
+  handleKeyPress = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     if (event.key === 'Enter') {
       event.preventDefault();
       this.handleClose();
@@ -84,7 +86,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     }
   };
 
-  render() {
+  render(): JSX.Element {
     const warningText = this.state.errorMsg || '';
     return (
       <div>

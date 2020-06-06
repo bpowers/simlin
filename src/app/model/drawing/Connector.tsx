@@ -105,7 +105,7 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
     // instead of up)
     return degToRad(xmileToCanvasAngle(element.angle));
   } else {
-    console.log(`connector from ${element.from} doesn't have x, y, or angle`);
+    console.log(`connector from ${element.from || ''} doesn't have x, y, or angle`);
     return NaN;
   }
 }
