@@ -12,6 +12,28 @@ pub enum Expr {
     If(Rc<Expr>, Rc<Expr>, Rc<Expr>),
 }
 
+pub trait Visitor {
+    fn visit_const(&mut self, e: Expr) -> Expr;
+    fn visit_var(&mut self, e: Expr) -> Expr;
+    fn visit_app(&mut self, e: Expr) -> Expr;
+    fn visit_op2(&mut self, e: Expr) -> Expr;
+    fn visit_op1(&mut self, e: Expr) -> Expr;
+    fn visit_if(&mut self, e: Expr) -> Expr;
+}
+
+impl Expr {
+    pub fn walk(self, v: &mut dyn Visitor) -> Self {
+        match self {
+            Expr::Const(..) => v.visit_const(self),
+            Expr::Var(..) => v.visit_var(self),
+            Expr::App(..) => v.visit_app(self),
+            Expr::Op2(..) => v.visit_op2(self),
+            Expr::Op1(..) => v.visit_op1(self),
+            Expr::If(..) => v.visit_if(self),
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum BinaryOp {
     Add,

@@ -22,9 +22,11 @@ mod ast_io {
 mod equation {
     include!(concat!(env!("OUT_DIR"), "/equation.rs"));
 }
+mod builtin;
 mod model;
 mod sim;
 mod token;
+mod variable;
 pub mod xmile;
 
 use std::collections::HashMap;

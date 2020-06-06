@@ -33,8 +33,8 @@ const stdlibArgs = Map<string, List<string>>([
 // An AST visitor to deal with desugaring calls to builtin functions
 // that are actually module instantiations
 export class BuiltinVisitor implements Visitor<Node> {
-  project: Project;
-  variable: Variable;
+  readonly project: Project;
+  readonly variable: Variable;
   modules: Map<string, Module> = Map();
   vars: Map<string, Variable> = Map();
   n = 0;
