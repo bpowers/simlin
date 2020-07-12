@@ -221,11 +221,70 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
 
 #[test]
 fn test_parse() {
+    use crate::ast::Expr::*;
+    use crate::ast::BinaryOp::*;
+
+    let if1 = Rc::new(If(
+        Rc::new(Const(
+            "1".to_string(),
+            1.0,
+        )),
+        Rc::new(Const(
+            "2".to_string(),
+            2.0,
+        )),
+        Rc::new(Const(
+            "3".to_string(),
+            3.0,
+        )),
+    ));
+
+    let if2 = Rc::new(If(
+        Rc::new(Op2(
+            Eq,
+            Rc::new(Var(
+                "blerg".to_string(),
+            )),
+            Rc::new(Var(
+                "foo".to_string(),
+            )),
+        )),
+        Rc::new(Const(
+            "2".to_string(),
+            2.0,
+        )),
+        Rc::new(Const(
+            "3".to_string(),
+            3.0,
+        )),
+    ));
+
+    let if3 = Rc::new(If(
+        Rc::new(Op2(
+            Eq,
+            Rc::new(Var(
+                "quotient".to_string(),
+            )),
+            Rc::new(Var(
+                "quotient_target".to_string(),
+            )),
+        )),
+        Rc::new(Const(
+            "1".to_string(),
+            1.0,
+        )),
+        Rc::new(Const(
+            "0".to_string(),
+            0.0,
+        )),
+    ));
+
+
     let cases = [
-        ("if 1 then 2 else 3", ()),
-        ("if blerg = foo then 2 else 3", ()),
-        ("IF quotient = quotient_target THEN 1 ELSE 0", ()),
-        ("(IF quotient = quotient_target THEN 1 ELSE 0)", ()),
+        ("if 1 then 2 else 3", if1),
+        ("if blerg = foo then 2 else 3", if2),
+        ("IF quotient = quotient_target THEN 1 ELSE 0", if3.clone()),
+        ("(IF quotient = quotient_target THEN 1 ELSE 0)", if3.clone()),
     ];
 
     for case in cases.iter() {
@@ -233,5 +292,6 @@ fn test_parse() {
         let (ast, err) = parse_eqn(&Some(eqn.to_string()));
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
+        assert_eq!(case.1, ast.unwrap());
     }
 }
