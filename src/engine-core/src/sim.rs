@@ -40,7 +40,14 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn new(project: &Project, model: Rc<model::Model>) -> Result<Simulation> {
-        let _module = Module::new(project, None, model, None);
+        // we start with a project and a root module (one with no references).
+        let _root = Module::new(project, None, model, None);
+
+        // next, we find all the models (like the main model, stdlib functions, and any
+        // user-defined modules) and create sim
+
+        // TODO: come up with monomorphizations based on what inputs are used
+
         // create AModule for model
         // creates avars for all vars in model + recursive submodules
 
