@@ -42,6 +42,12 @@ fn build_stdlib() -> io::Result<()> {
 
         let writer = io::BufWriter::new(fs::File::create(dest_path).unwrap());
         bincode::serialize_into(writer, file).unwrap();
+
+        let serialized = bincode::serialize(file).unwrap();
+        let file2: xmile::File = bincode::deserialize(serialized.as_slice()).unwrap();
+
+        // check that roundtripping through bincode is lossless
+        assert!(*file == file2);
     }
 
     // then write the contentx of the stdlib.rs module
