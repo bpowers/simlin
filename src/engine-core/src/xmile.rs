@@ -6,9 +6,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-static VERSION: &str = "1.0";
-static NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
-static NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+// const VERSION: &str = "1.0";
+// const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+// const NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename = "xmile")]
@@ -56,12 +56,6 @@ pub struct VarDimension {
 pub struct Dimensions {
     #[serde(rename = "dimension")]
     pub dimensions: Option<Vec<Dimension>>,
-}
-
-impl File {
-    pub fn get_models(&self) -> &Vec<Model> {
-        &self.models
-    }
 }
 
 impl fmt::Debug for File {
