@@ -10,6 +10,7 @@ build = "build.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+bincode = "1"
 lazy_static = "1"
 libc = "0.2"
 regex = "1"
@@ -21,5 +22,8 @@ prost = "0.6"
 prost-types = "0.6"
 
 [build-dependencies]
+bincode = "1"
 lalrpop = "0.19"
 prost-build = "0.6"
+quick-xml = { version = "0.18", features = [ "serialize" ] }
+serde = { version = "1", features = [ "derive" ] }

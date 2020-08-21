@@ -28,6 +28,9 @@ mod sim;
 mod token;
 mod variable;
 pub mod xmile;
+mod stdlib {
+    include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
+}
 
 use std::collections::HashMap;
 use std::fmt;
