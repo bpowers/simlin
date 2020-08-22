@@ -30,7 +30,10 @@ fn test_rcs() {
 
     let e = rewrite_op1(e);
 
-    let e2 = Expr::Op1(UnaryOp::Positive, Rc::new(Expr::Const("3".to_string(), 3.0)));
+    let e2 = Expr::Op1(
+        UnaryOp::Positive,
+        Rc::new(Expr::Const("3".to_string(), 3.0)),
+    );
     assert_eq!(e.as_ref(), &e2);
 }
 

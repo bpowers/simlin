@@ -2,18 +2,18 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-extern crate lalrpop;
 extern crate bincode;
+extern crate lalrpop;
 
 mod xmile {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/xmile.rs"));
 }
 
 use std::env;
-use std::io;
 use std::fs;
-use std::path::Path;
+use std::io;
 use std::io::Write;
+use std::path::Path;
 
 const XMILE_SUFFIX: &str = ".stmx";
 
@@ -30,8 +30,20 @@ fn build_stdlib() -> io::Result<()> {
 
     use quick_xml::de;
 
-    let files: Vec<(String, xmile::File)> = entries.iter()
-        .map(|path| (String::from(path.file_name().unwrap().to_string_lossy().strip_suffix(XMILE_SUFFIX).unwrap()), io::BufReader::new(fs::File::open(path).unwrap())))
+    let files: Vec<(String, xmile::File)> = entries
+        .iter()
+        .map(|path| {
+            (
+                String::from(
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .strip_suffix(XMILE_SUFFIX)
+                        .unwrap(),
+                ),
+                io::BufReader::new(fs::File::open(path).unwrap()),
+            )
+        })
         .map(|(file, reader)| (file, de::from_reader(reader).unwrap()))
         .collect();
 
@@ -41,7 +53,8 @@ fn build_stdlib() -> io::Result<()> {
         assert!(file.models.len() == 1);
     }
 
-    let models: Vec<(String, xmile::Model)> = files.iter()
+    let models: Vec<(String, xmile::Model)> = files
+        .iter()
         .map(|(name, f)| (name.clone(), f.models[0].clone()))
         .map(|(name, mut m)| {
             // this was the 1 hand-edit we did to stmx files, so lets just
@@ -70,31 +83,48 @@ fn build_stdlib() -> io::Result<()> {
     let dest_path = Path::new(&out_dir).join("stdlib.rs");
     let mut writer = io::BufWriter::new(fs::File::create(dest_path).unwrap());
 
-    writeln!(writer, "use crate::xmile;
+    writeln!(
+        writer,
+        "use crate::xmile;
 
-const MODEL_NAMES: [&'static str; {}] = [", models.len()).unwrap();
+const MODEL_NAMES: [&'static str; {}] = [",
+        models.len()
+    )
+    .unwrap();
 
     for (model_name, _) in files.iter() {
         writeln!(writer, "    \"{}\",", model_name).unwrap();
     }
 
-    writeln!(writer, "];
+    writeln!(
+        writer,
+        "];
 
 fn hydrate(bytes: &[u8]) -> Option<xmile::Model> {{
     Some(bincode::deserialize(bytes).unwrap())
 }}
 
 pub fn get(name: &str) -> Option<xmile::Model> {{
-    match name {{").unwrap();
+    match name {{"
+    )
+    .unwrap();
 
     for (model_name, _) in files.iter() {
-        writeln!(writer, "        \"{}\" => hydrate(include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}.bin\"))),", model_name, model_name).unwrap();
+        writeln!(
+            writer,
+            "        \"{}\" => hydrate(include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}.bin\"))),",
+            model_name, model_name
+        )
+        .unwrap();
     }
 
-    writeln!(writer, "        _ => None,
+    writeln!(
+        writer,
+        "        _ => None,
     }}
 }}
-")?;
+"
+    )?;
 
     Ok(())
 }
