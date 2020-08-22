@@ -2,12 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use lalrpop_util::ParseError;
 
-use crate::ast;
-use crate::common::{canonicalize, VariableError};
+use crate::ast::{self, Visitor, Expr};
+use crate::common::{canonicalize, Ident, VariableError};
 use crate::xmile;
 
 #[derive(Debug)]
@@ -216,6 +217,74 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
             errors: Vec::new(),
             dependencies: Vec::new(),
         },
+    }
+}
+
+struct IdentifierSetVisitor {
+    identifiers: HashSet<Ident>,
+}
+
+impl Visitor<()> for IdentifierSetVisitor {
+    fn visit_const(&mut self, _: &Expr) -> () {}
+    fn visit_var(&mut self, e: &Expr) -> () {
+        if let Expr::Var(id) = e {
+            self.identifiers.insert(id.clone());
+        }
+    }
+    fn visit_app(&mut self, e: &Expr) -> () {
+        if let Expr::App(func, args) = e {
+            self.identifiers.insert(func.clone());
+            for arg in args.iter() {
+                arg.walk(self);
+            }
+        }
+    }
+    fn visit_op2(&mut self, e: &Expr) -> () {
+        if let Expr::Op2(_, l, r) = e {
+            l.walk(self);
+            r.walk(self);
+        }
+    }
+    fn visit_op1(&mut self, e: &Expr) -> () {
+        if let Expr::Op1(_, l) = e {
+            l.walk(self);
+        }
+    }
+    fn visit_if(&mut self, e: &Expr) -> () {
+        if let Expr::If(cond, t, f) = e {
+            cond.walk(self);
+            t.walk(self);
+            f.walk(self);
+        }
+    }
+}
+
+pub fn identifier_set(e: &Expr) -> HashSet<Ident> {
+    let mut id_visitor = IdentifierSetVisitor{
+        identifiers: HashSet::new(),
+    };
+    e.walk(&mut id_visitor);
+
+    id_visitor.identifiers
+}
+
+#[test]
+fn test_identifier_sets() {
+    let cases: &[(&str, &[&str])] = &[
+        ("if a then b else c", &["a", "b", "c"]),
+        ("a(1, b, c)", &["a", "b", "c"]),
+        ("-(a)", &["a"]),
+        ("if a = 1 then -c else c(1, d, b)", &["a", "b", "c", "d"]),
+    ];
+
+    for (eqn, id_list) in cases.iter() {
+        let (ast, err) = parse_eqn(&Some(eqn.to_string()));
+        assert_eq!(err.len(), 0);
+        assert!(ast.is_some());
+        let ast = ast.unwrap();
+        let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
+        let id_set_test = identifier_set(&ast);
+        assert_eq!(id_set_expected, id_set_test);
     }
 }
 
