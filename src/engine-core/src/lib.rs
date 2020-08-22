@@ -99,7 +99,7 @@ impl Project {
         }
 
         // get reference to model, increasing refcount
-        let model: Rc<model::Model> = self.models.get(model_name).unwrap().clone();
+        let model: Rc<model::Model> = self.models[model_name].clone();
 
         Simulation::new(self, model)
     }
