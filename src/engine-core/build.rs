@@ -21,19 +21,19 @@ fn build_stdlib() -> io::Result<()> {
     let crate_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap();
     let stdlib_path = Path::new(&crate_dir).join("../../stdlib");
 
-    let mut entries = fs::read_dir(stdlib_path)?
+    let mut stdlib_model_paths = fs::read_dir(stdlib_path)?
         .map(|dent| dent.map(|e| e.path()))
         .collect::<Result<Vec<_>, io::Error>>()?;
 
     // ensure a stable order
-    entries.sort();
+    stdlib_model_paths.sort();
 
-    use quick_xml::de;
-
-    let files: Vec<(String, xmile::File)> = entries
+    // build a list of (model_name, xmile::File) pairs for the stdlib
+    let files: Vec<(String, xmile::File)> = stdlib_model_paths
         .iter()
         .map(|path| {
             (
+                // extract "model_name" from "blah/../model_name.stmx"
                 String::from(
                     path.file_name()
                         .unwrap()
@@ -44,15 +44,17 @@ fn build_stdlib() -> io::Result<()> {
                 io::BufReader::new(fs::File::open(path).unwrap()),
             )
         })
-        .map(|(file, reader)| (file, de::from_reader(reader).unwrap()))
+        .map(|(file, reader)| (file, quick_xml::de::from_reader(reader).unwrap()))
         .collect();
 
+    // integrity checks
     for (_, file) in files.iter() {
         // we expect a single model in each stdlib xmile file.
         // If we see something else, exit loudly.
         assert!(file.models.len() == 1);
     }
 
+    // we don't want to serialize the whole xmile::File, just the models
     let models: Vec<(String, xmile::Model)> = files
         .iter()
         .map(|(name, f)| (name.clone(), f.models[0].clone()))
@@ -64,7 +66,7 @@ fn build_stdlib() -> io::Result<()> {
         })
         .collect();
 
-    // write the binary serialized models to temporary files
+    // write the serialized binary models to temporary files
     let out_dir = env::var_os("OUT_DIR").unwrap();
     for (model_name, model) in models.iter() {
         let dest_path = Path::new(&out_dir).join(model_name.to_owned() + ".bin");
@@ -79,7 +81,14 @@ fn build_stdlib() -> io::Result<()> {
         assert!(*model == model2);
     }
 
-    // then write the contentx of the stdlib.rs module
+    // then materialize the contents of the crate::stdlib module, which provides
+    // access to the xmile::Model's on demand
+    write_stdlib_module(models)
+}
+
+fn write_stdlib_module(models: Vec<(String, xmile::Model)>) -> io::Result<()> {
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+
     let dest_path = Path::new(&out_dir).join("stdlib.rs");
     let mut writer = io::BufWriter::new(fs::File::create(dest_path).unwrap());
 
@@ -92,7 +101,7 @@ const MODEL_NAMES: [&'static str; {}] = [",
     )
     .unwrap();
 
-    for (model_name, _) in files.iter() {
+    for (model_name, _) in models.iter() {
         writeln!(writer, "    \"{}\",", model_name).unwrap();
     }
 
@@ -109,7 +118,7 @@ pub fn get(name: &str) -> Option<xmile::Model> {{
     )
     .unwrap();
 
-    for (model_name, _) in files.iter() {
+    for (model_name, _) in models.iter() {
         writeln!(
             writer,
             "        \"{}\" => hydrate(include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}.bin\"))),",
