@@ -72,6 +72,14 @@ fn build_stdlib() -> io::Result<()> {
 
     writeln!(writer, "use crate::xmile;
 
+const MODEL_NAMES: [&'static str; {}] = [", models.len()).unwrap();
+
+    for (model_name, _) in files.iter() {
+        writeln!(writer, "    \"{}\",", model_name).unwrap();
+    }
+
+    writeln!(writer, "];
+
 fn hydrate(bytes: &[u8]) -> Option<xmile::Model> {{
     Some(bincode::deserialize(bytes).unwrap())
 }}
