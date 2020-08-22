@@ -35,19 +35,35 @@ fn build_stdlib() -> io::Result<()> {
         .map(|(file, reader)| (file, de::from_reader(reader).unwrap()))
         .collect();
 
+    for (_, file) in files.iter() {
+        // we expect a single model in each stdlib xmile file.
+        // If we see something else, exit loudly.
+        assert!(file.models.len() == 1);
+    }
+
+    let models: Vec<(String, xmile::Model)> = files.iter()
+        .map(|(name, f)| (name.clone(), f.models[0].clone()))
+        .map(|(name, mut m)| {
+            // this was the 1 hand-edit we did to stmx files, so lets just
+            // automate adding it here when embedding them in the library
+            m.name = Some(format!("stdlib·{}", name));
+            (name, m)
+        })
+        .collect();
+
     // write the binary serialized models to temporary files
     let out_dir = env::var_os("OUT_DIR").unwrap();
-    for (model_name, file) in files.iter() {
+    for (model_name, model) in models.iter() {
         let dest_path = Path::new(&out_dir).join(model_name.to_owned() + ".bin");
 
         let writer = io::BufWriter::new(fs::File::create(dest_path).unwrap());
-        bincode::serialize_into(writer, file).unwrap();
+        bincode::serialize_into(writer, model).unwrap();
 
-        let serialized = bincode::serialize(file).unwrap();
-        let file2: xmile::File = bincode::deserialize(serialized.as_slice()).unwrap();
+        let serialized = bincode::serialize(model).unwrap();
+        let model2: xmile::Model = bincode::deserialize(serialized.as_slice()).unwrap();
 
         // check that roundtripping through bincode is lossless
-        assert!(*file == file2);
+        assert!(*model == model2);
     }
 
     // then write the contentx of the stdlib.rs module
@@ -56,11 +72,11 @@ fn build_stdlib() -> io::Result<()> {
 
     writeln!(writer, "use crate::xmile;
 
-fn hydrate(bytes: &[u8]) -> Option<xmile::File> {{
+fn hydrate(bytes: &[u8]) -> Option<xmile::Model> {{
     Some(bincode::deserialize(bytes).unwrap())
 }}
 
-pub fn get(name: &str) -> Option<xmile::File> {{
+pub fn get(name: &str) -> Option<xmile::Model> {{
     match name {{").unwrap();
 
     for (model_name, _) in files.iter() {

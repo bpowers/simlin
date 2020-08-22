@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
 // const NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
 
-#[derive(PartialEq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename = "xmile")]
 pub struct File {
     #[serde(default)]
@@ -31,28 +31,28 @@ pub struct File {
     pub macros: Vec<Macro>,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Data {
     // TODO
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Macro {
     // TODO
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct VarDimensions {
     #[serde(rename = "dim")]
     pub dimensions: Option<Vec<VarDimension>>,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct VarDimension {
     pub name: String,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Dimensions {
     #[serde(rename = "dimension")]
     pub dimensions: Option<Vec<Dimension>>,
@@ -77,7 +77,7 @@ impl fmt::Debug for File {
     }
 }
 
-#[derive(PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Header {
     pub vendor: String,
     pub product: Product,
@@ -96,13 +96,13 @@ pub struct Header {
     pub includes: Option<Includes>,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Caption {}
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Includes {}
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Image {
     #[serde(default)]
     pub resource: String, // "JPG, GIF, TIF, or PNG" path, URL, or image embedded in base64 data URI
@@ -130,7 +130,7 @@ impl fmt::Debug for Header {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Product {
     #[serde(rename = "$value")]
     pub name: Option<String>,
@@ -139,7 +139,7 @@ pub struct Product {
     pub version: Option<String>,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize, Hash, Clone)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
     UsesArrays {
@@ -174,14 +174,14 @@ pub enum Feature {
     UsesAnnotation,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Options {
     pub namespace: Option<String>, // string of comma separated namespaces
     #[serde(rename = "$value")]
     pub features: Option<Vec<Feature>>,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -192,14 +192,14 @@ pub struct SimSpecs {
     pub time_units: Option<String>,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Dt {
     #[serde(rename = "$value")]
     pub value: f64,
     pub reciprocal: Option<bool>,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Dimension {
     pub name: String,
     pub size: Option<u32>,
@@ -207,12 +207,12 @@ pub struct Dimension {
     pub elements: Option<Vec<Index>>,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Index {
     pub name: String,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TableType {
     Continuous,
@@ -220,13 +220,13 @@ pub enum TableType {
     Discrete,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Scale {
     pub min: f64,
     pub max: f64,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct GF {
     pub name: Option<String>,
     #[serde(rename = "type")]
@@ -241,21 +241,21 @@ pub struct GF {
     pub y_pts: Option<String>, // comma separated list of points
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Behavior {
     // TODO
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Style {
     // TODO
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Units {
     pub unit: Option<Vec<Unit>>,
 }
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Unit {
     pub name: String,
     pub eqn: Option<String>,
@@ -263,7 +263,7 @@ pub struct Unit {
     pub disabled: Option<bool>,
 }
 
-#[derive(PartialEq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Model {
     pub name: Option<String>,
     #[serde(rename = "namespace")]
@@ -274,13 +274,13 @@ pub struct Model {
     pub views: Option<Views>,
 }
 
-#[derive(PartialEq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
     #[serde(rename = "$value")]
     pub variables: Vec<Var>,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Views {
     pub view: Vec<View>,
 }
@@ -310,7 +310,7 @@ impl fmt::Debug for Model {
     }
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewType {
     StockFlow,
@@ -319,7 +319,7 @@ pub enum ViewType {
     VendorSpecific,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LabelSide {
     Top,
@@ -329,20 +329,20 @@ pub enum LabelSide {
     Right,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Point {
     x: f64,
     y: f64,
     uid: Option<i32>,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Points {
     #[serde(rename = "pt")]
     points: Vec<Point>,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewObject {
     Stock {
@@ -398,7 +398,7 @@ pub enum ViewObject {
     SimulationDelay,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct View {
     #[serde(rename = "type")]
     pub kind: Option<ViewType>,
@@ -410,13 +410,13 @@ pub struct View {
     pub objects: Vec<ViewObject>,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct ArrayElement {
     pub subscript: String,
     pub eqn: String,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Module {
     pub name: String,
     pub doc: Option<String>,
@@ -424,16 +424,16 @@ pub struct Module {
     pub refs: Option<Vec<Ref>>,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Ref {
     pub src: String,
     pub dst: String,
 }
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct NonNegative {}
 
-#[derive(PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Stock {
     pub name: String,
     pub eqn: Option<String>,
@@ -445,7 +445,7 @@ pub struct Stock {
     pub dimensions: Option<VarDimensions>,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Flow {
     pub name: String,
     pub eqn: Option<String>,
@@ -456,7 +456,7 @@ pub struct Flow {
     pub dimensions: Option<VarDimensions>,
 }
 
-#[derive(PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Aux {
     pub name: String,
     pub eqn: Option<String>,
@@ -466,7 +466,7 @@ pub struct Aux {
     pub dimensions: Option<VarDimensions>,
 }
 
-#[derive(PartialEq, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Var {
     Stock(Stock),
