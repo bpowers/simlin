@@ -32,7 +32,7 @@ impl Model {
             name: x_model.name.as_ref().unwrap_or(&"main".to_string()).clone(),
             variables: variable_list
                 .into_iter()
-                .map(|v| (v.name().clone(), v))
+                .map(|v| (v.ident().clone(), v))
                 .collect(),
         }
     }

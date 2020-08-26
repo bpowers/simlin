@@ -22,7 +22,7 @@ pub struct Table {
 #[derive(Debug)]
 pub enum Variable {
     Stock {
-        name: String,
+        ident: Ident,
         ast: Option<Rc<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
@@ -34,7 +34,7 @@ pub enum Variable {
         all_deps: Option<HashSet<String>>,
     },
     Var {
-        name: String,
+        ident: String,
         ast: Option<Rc<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
@@ -47,7 +47,7 @@ pub enum Variable {
         all_deps: Option<HashSet<String>>,
     },
     Module {
-        name: String,
+        ident: String,
         units: Option<String>,
         refs: Vec<xmile::Ref>,
         errors: Vec<VariableError>,
@@ -57,11 +57,11 @@ pub enum Variable {
 }
 
 impl Variable {
-    pub fn name(&self) -> &String {
+    pub fn ident(&self) -> &String {
         match self {
-            Variable::Stock { name, .. } => name,
-            Variable::Var { name, .. } => name,
-            Variable::Module { name, .. } => name,
+            Variable::Stock { ident: name, .. } => name,
+            Variable::Var { ident: name, .. } => name,
+            Variable::Module { ident: name, .. } => name,
         }
     }
 
@@ -176,7 +176,7 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 None => HashSet::new(),
             };
             Variable::Stock {
-                name: canonicalize(v.name.as_ref()),
+                ident: canonicalize(v.name.as_ref()),
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -195,7 +195,7 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 None => HashSet::new(),
             };
             Variable::Var {
-                name: canonicalize(v.name.as_ref()),
+                ident: canonicalize(v.name.as_ref()),
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -215,7 +215,7 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 None => HashSet::new(),
             };
             Variable::Var {
-                name: canonicalize(v.name.as_ref()),
+                ident: canonicalize(v.name.as_ref()),
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -229,7 +229,7 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
             }
         }
         xmile::Var::Module(v) => Variable::Module {
-            name: canonicalize(v.name.as_ref()),
+            ident: canonicalize(v.name.as_ref()),
             units: v.units.clone(),
             refs: v.refs.clone().unwrap_or_default(),
             errors: Vec::new(),
@@ -339,6 +339,7 @@ fn test_parse() {
         ("if blerg = foo then 2 else 3", if2),
         ("IF quotient = quotient_target THEN 1 ELSE 0", if3.clone()),
         ("(IF quotient = quotient_target THEN 1 ELSE 0)", if3.clone()),
+        ("\"oh dear\" = oh_dear", if3.clone()),
     ];
 
     for case in cases.iter() {
