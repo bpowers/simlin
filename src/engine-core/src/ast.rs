@@ -13,25 +13,7 @@ pub enum Expr {
 }
 
 pub trait Visitor<T> {
-    fn visit_const(&mut self, e: &Expr) -> T;
-    fn visit_var(&mut self, e: &Expr) -> T;
-    fn visit_app(&mut self, e: &Expr) -> T;
-    fn visit_op2(&mut self, e: &Expr) -> T;
-    fn visit_op1(&mut self, e: &Expr) -> T;
-    fn visit_if(&mut self, e: &Expr) -> T;
-}
-
-impl Expr {
-    pub fn walk<T>(&self, v: &mut dyn Visitor<T>) -> T {
-        match self {
-            Expr::Const(..) => v.visit_const(self),
-            Expr::Var(..) => v.visit_var(self),
-            Expr::App(..) => v.visit_app(self),
-            Expr::Op2(..) => v.visit_op2(self),
-            Expr::Op1(..) => v.visit_op1(self),
-            Expr::If(..) => v.visit_if(self),
-        }
-    }
+    fn walk(&mut self, e: &Expr) -> T;
 }
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]

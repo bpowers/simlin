@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use lalrpop_util::ParseError;
 
-use crate::ast::{self, Visitor, Expr};
+use crate::ast::{self, Expr, Visitor};
 use crate::common::{canonicalize, Ident, VariableError};
 use crate::xmile;
 
@@ -225,46 +225,39 @@ struct IdentifierSetVisitor {
 }
 
 impl Visitor<()> for IdentifierSetVisitor {
-    fn visit_const(&mut self, _: &Expr) -> () {}
-    fn visit_var(&mut self, e: &Expr) -> () {
-        if let Expr::Var(id) = e {
-            self.identifiers.insert(id.clone());
-        }
-    }
-    fn visit_app(&mut self, e: &Expr) -> () {
-        if let Expr::App(func, args) = e {
-            self.identifiers.insert(func.clone());
-            for arg in args.iter() {
-                arg.walk(self);
+    fn walk(&mut self, e: &Expr) {
+        match e {
+            Expr::Const(_, _) => (),
+            Expr::Var(id) => {
+                self.identifiers.insert(id.clone());
             }
-        }
-    }
-    fn visit_op2(&mut self, e: &Expr) -> () {
-        if let Expr::Op2(_, l, r) = e {
-            l.walk(self);
-            r.walk(self);
-        }
-    }
-    fn visit_op1(&mut self, e: &Expr) -> () {
-        if let Expr::Op1(_, l) = e {
-            l.walk(self);
-        }
-    }
-    fn visit_if(&mut self, e: &Expr) -> () {
-        if let Expr::If(cond, t, f) = e {
-            cond.walk(self);
-            t.walk(self);
-            f.walk(self);
+            Expr::App(func, args) => {
+                self.identifiers.insert(func.clone());
+                for arg in args.iter() {
+                    self.walk(arg);
+                }
+            }
+            Expr::Op2(_, l, r) => {
+                self.walk(l);
+                self.walk(r);
+            }
+            Expr::Op1(_, l) => {
+                self.walk(l);
+            }
+            Expr::If(cond, t, f) => {
+                self.walk(cond);
+                self.walk(t);
+                self.walk(f);
+            }
         }
     }
 }
 
 pub fn identifier_set(e: &Expr) -> HashSet<Ident> {
-    let mut id_visitor = IdentifierSetVisitor{
+    let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
     };
-    e.walk(&mut id_visitor);
-
+    id_visitor.walk(e);
     id_visitor.identifiers
 }
 
