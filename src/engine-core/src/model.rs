@@ -11,7 +11,6 @@ use crate::xmile;
 pub struct Model {
     pub name: String,
     pub variables: HashMap<String, Variable>,
-    pub views: Vec<xmile::Views>,
 }
 
 const EMPTY_VARS: xmile::Variables = xmile::Variables {
@@ -35,7 +34,6 @@ impl Model {
                 .into_iter()
                 .map(|v| (v.name().clone(), v))
                 .collect(),
-            views: Vec::new(),
         }
     }
 }

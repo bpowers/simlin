@@ -74,12 +74,15 @@ impl Project {
 
         use model::Model;
 
-        // writeln!(&mut ::std::io::stderr(), "{:?}\n", file).unwrap();
+        // first, pull in the models we need from the stdlib
+        let mut models_list: Vec<Model> = self::stdlib::MODEL_NAMES
+            .iter()
+            .map(|name| self::stdlib::get(name).unwrap())
+            .map(|x_model| Model::new(&x_model))
+            .collect();
 
-        //        se::to_writer(::std::io::stderr(), &file).unwrap();
-        //        ::std::io::stderr().flush().unwrap();
+        models_list.extend(file.models.iter().map(|m| Model::new(m)));
 
-        let models_list: Vec<Model> = file.models.iter().map(|m| Model::new(m)).collect();
         let models = models_list
             .into_iter()
             .map(|m| (m.name.to_string(), Rc::new(m)))

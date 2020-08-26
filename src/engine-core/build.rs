@@ -96,7 +96,7 @@ fn write_stdlib_module(models: Vec<(String, xmile::Model)>) -> io::Result<()> {
         writer,
         "use crate::xmile;
 
-const MODEL_NAMES: [&str; {}] = [",
+pub const MODEL_NAMES: [&str; {}] = [",
         models.len()
     )
     .unwrap();
