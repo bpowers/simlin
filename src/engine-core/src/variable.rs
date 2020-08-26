@@ -30,7 +30,8 @@ pub enum Variable {
         outflows: Vec<String>,
         non_negative: bool,
         errors: Vec<VariableError>,
-        dependencies: Vec<String>,
+        direct_deps: HashSet<String>,
+        all_deps: Option<HashSet<String>>,
     },
     Var {
         name: String,
@@ -42,14 +43,16 @@ pub enum Variable {
         is_flow: bool,
         is_table_only: bool,
         errors: Vec<VariableError>,
-        dependencies: Vec<String>,
+        direct_deps: HashSet<String>,
+        all_deps: Option<HashSet<String>>,
     },
     Module {
         name: String,
         units: Option<String>,
         refs: Vec<xmile::Ref>,
         errors: Vec<VariableError>,
-        dependencies: Vec<String>,
+        direct_deps: HashSet<String>,
+        all_deps: Option<HashSet<String>>,
     },
 }
 
@@ -70,16 +73,16 @@ impl Variable {
         }
     }
 
-    pub fn deps(&self) -> &Vec<String> {
+    pub fn direct_deps(&self) -> &HashSet<String> {
         match self {
             Variable::Stock {
-                dependencies: deps, ..
+                direct_deps: deps, ..
             } => deps,
             Variable::Var {
-                dependencies: deps, ..
+                direct_deps: deps, ..
             } => deps,
             Variable::Module {
-                dependencies: deps, ..
+                direct_deps: deps, ..
             } => deps,
         }
     }
@@ -168,6 +171,10 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
     match v {
         xmile::Var::Stock(v) => {
             let (ast, errors) = parse_eqn(&v.eqn);
+            let direct_deps = match &ast {
+                Some(ast) => identifier_set(ast),
+                None => HashSet::new(),
+            };
             Variable::Stock {
                 name: canonicalize(v.name.as_ref()),
                 ast,
@@ -177,11 +184,16 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 outflows: v.outflows.clone().unwrap_or_default(),
                 non_negative: v.non_negative.is_some(),
                 errors,
-                dependencies: Vec::new(),
+                direct_deps,
+                all_deps: None,
             }
         }
         xmile::Var::Flow(v) => {
             let (ast, errors) = parse_eqn(&v.eqn);
+            let direct_deps = match &ast {
+                Some(ast) => identifier_set(ast),
+                None => HashSet::new(),
+            };
             Variable::Var {
                 name: canonicalize(v.name.as_ref()),
                 ast,
@@ -192,11 +204,16 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 is_table_only: false,
                 non_negative: v.non_negative.is_some(),
                 errors,
-                dependencies: Vec::new(),
+                direct_deps,
+                all_deps: None,
             }
         }
         xmile::Var::Aux(v) => {
             let (ast, errors) = parse_eqn(&v.eqn);
+            let direct_deps = match &ast {
+                Some(ast) => identifier_set(ast),
+                None => HashSet::new(),
+            };
             Variable::Var {
                 name: canonicalize(v.name.as_ref()),
                 ast,
@@ -207,7 +224,8 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 is_table_only: false,
                 non_negative: false,
                 errors,
-                dependencies: Vec::new(),
+                direct_deps,
+                all_deps: None,
             }
         }
         xmile::Var::Module(v) => Variable::Module {
@@ -215,7 +233,11 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
             units: v.units.clone(),
             refs: v.refs.clone().unwrap_or_default(),
             errors: Vec::new(),
-            dependencies: Vec::new(),
+            direct_deps: match &v.refs {
+                Some(refs) => refs.iter().map(|r| r.src.clone()).collect(),
+                None => HashSet::new(),
+            },
+            all_deps: None,
         },
     }
 }
