@@ -264,5 +264,5 @@ fn is_identifier_start(c: char) -> bool {
 }
 
 fn is_identifier_continue(c: char) -> bool {
-    UnicodeXID::is_xid_continue(c)
+    UnicodeXID::is_xid_continue(c) || c == '.'
 }
