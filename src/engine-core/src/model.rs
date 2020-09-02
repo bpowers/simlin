@@ -29,42 +29,42 @@ const EMPTY_VARS: xmile::Variables = xmile::Variables {
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-fn all_deps(
-    vars: &Vec<Variable>,
+fn all_deps<'a>(
+    vars: &'a [Variable],
     _is_initial: bool,
 ) -> Result<HashMap<Ident, HashSet<Ident>>, ModelError> {
-    let mut processing: HashSet<Ident> = HashSet::new();
-    let mut all_vars: HashMap<Ident, &Variable> =
-        vars.iter().map(|v| (v.ident().clone(), v)).collect();
-    let mut all_var_deps: HashMap<Ident, Option<HashSet<Ident>>> =
-        vars.iter().map(|v| (v.ident().clone(), None)).collect();
+    let mut processing: HashSet<&'a str> = HashSet::new();
+    let mut all_vars: HashMap<&'a str, &'a Variable> =
+        vars.iter().map(|v| (v.ident().as_str(), v)).collect();
+    let mut all_var_deps: HashMap<&'a str, Option<HashSet<Ident>>> =
+        vars.iter().map(|v| (v.ident().as_str(), None)).collect();
 
-    fn all_deps_inner(
-        id: &Ident,
-        processing: &mut HashSet<Ident>,
-        all_vars: &mut HashMap<Ident, &Variable>,
-        all_var_deps: &mut HashMap<Ident, Option<HashSet<Ident>>>,
+    fn all_deps_inner<'a>(
+        id: &'a str,
+        processing: &mut HashSet<&'a str>,
+        all_vars: &mut HashMap<&'a str, &'a Variable>,
+        all_var_deps: &mut HashMap<&'a str, Option<HashSet<Ident>>>,
     ) -> Result<(), ModelError> {
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
-        if let Some(_) = all_var_deps[id] {
+        if all_var_deps[id].is_some() {
             return Ok(());
         }
 
         // dependency chains break at stocks, as we use their value from the
         // last dt timestep.
         if let Variable::Stock { .. } = var {
-            all_var_deps.insert(id.clone(), Some(HashSet::new()));
+            all_var_deps.insert(id, Some(HashSet::new()));
             return Ok(());
         }
 
-        processing.insert(id.clone());
+        processing.insert(id);
 
         // all deps start out as the direct deps
         let mut all_deps = var.direct_deps().clone();
 
-        for dep in var.direct_deps() {
+        for dep in var.direct_deps().iter().map(|d| d.as_str()) {
             if !all_vars.contains_key(dep) {
                 // TODO: this is probably an error
                 continue;
@@ -73,22 +73,22 @@ fn all_deps(
             // ensure we don't blow the stack
             if processing.contains(dep) {
                 return Err(ModelError {
-                    ident: Some(id.clone()),
+                    ident: Some(id.to_string()),
                     msg: format!("recursive dependency with {}", dep),
                 });
             }
 
-            if let None = all_var_deps[dep] {
+            if all_var_deps[dep].is_none() {
                 all_deps_inner(dep, processing, all_vars, all_var_deps)?;
             }
 
             let dep_deps = all_var_deps[dep].as_ref().unwrap();
-            all_deps.extend(dep_deps.iter().map(|id| id.clone()));
+            all_deps.extend(dep_deps.iter().cloned());
         }
 
         processing.remove(id);
 
-        all_var_deps.insert(id.clone(), Some(all_deps));
+        all_var_deps.insert(id, Some(all_deps));
 
         Ok(())
     };
@@ -105,7 +105,7 @@ fn all_deps(
     // this unwrap is safe, because of the full iteration over vars directly above
     let var_deps: HashMap<Ident, HashSet<Ident>> = all_var_deps
         .into_iter()
-        .map(|(k, v)| (k.clone(), v.unwrap()))
+        .map(|(k, v)| (k.to_string(), v.unwrap()))
         .collect();
 
     Ok(var_deps)
@@ -113,7 +113,7 @@ fn all_deps(
 
 impl Model {
     pub fn new(x_model: &xmile::Model) -> Self {
-        let mut variable_list: Vec<Variable> = x_model
+        let variable_list: Vec<Variable> = x_model
             .variables
             .as_ref()
             .unwrap_or(&EMPTY_VARS)
@@ -124,7 +124,10 @@ impl Model {
 
         let mut errors: Vec<ModelError> = Vec::new();
 
-        match all_deps(&mut variable_list, false) {
+        // TODO: this isn't actually needed here (but is tangentially useful
+        //   to surface errors earlier.  all_deps should take a list of idents (a runlist)
+        //   and sort them, which would also fix/use is_initial
+        match all_deps(&variable_list, false) {
             Ok(_) => (),
             Err(err) => errors.push(err),
         };
