@@ -69,6 +69,18 @@ fn all_deps<'a>(
         let mut all_deps: HashSet<Ident> = HashSet::new();
 
         for dep in var.direct_deps().iter().map(|d| d.as_str()) {
+            // TODO: we could potentially handle this by passing around some context
+            //   variable, but its just terrible.
+            if dep.starts_with("\\.") {
+                return Err(ModelError {
+                    ident: Some(id.to_string()),
+                    msg: format!("absolute references (like \"{}\") aren't supported", dep),
+                });
+            }
+
+            // if the dependency was e.g. "submodel.output", we only depend on submodel
+            let dep = dep.splitn(2, '.').next().unwrap();
+
             if !all_vars.contains_key(dep) {
                 // TODO: this is probably an error
                 continue;
@@ -175,9 +187,36 @@ fn optional_vec(slice: &[&str]) -> Option<Vec<String>> {
     }
 }
 
+fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
+    use xmile::{Module, Ref, Var};
+    let refs: Option<Vec<Ref>> = if refs.is_empty() {
+        None
+    } else {
+        Some(
+            refs.iter()
+                .map(|(src, dst)| Ref {
+                    src: src.to_string(),
+                    dst: dst.to_string(),
+                })
+                .collect(),
+        )
+    };
+
+    let x_module = Var::Module(Module {
+        name: ident.to_string(),
+        doc: None,
+        units: None,
+        refs,
+    });
+
+    let var = parse_var(&x_module);
+    assert!(var.errors().is_none());
+    var
+}
+
 fn flow(ident: &str, eqn: &str) -> Variable {
     use xmile::{Flow, Var};
-    let x_aux = Var::Flow(Flow {
+    let x_flow = Var::Flow(Flow {
         name: ident.to_string(),
         eqn: Some(eqn.to_string()),
         doc: None,
@@ -187,7 +226,7 @@ fn flow(ident: &str, eqn: &str) -> Variable {
         dimensions: None,
     });
 
-    let var = parse_var(&x_aux);
+    let var = parse_var(&x_flow);
     assert!(var.errors().is_none());
     var
 }
@@ -232,6 +271,59 @@ fn test_all_deps() {
     use rand::thread_rng;
     use std::iter::FromIterator;
 
+    fn verify_all_deps(expected_deps_list: &[(&Variable, &[&str])], is_initial: bool) {
+        let expected_deps: HashMap<Ident, HashSet<Ident>> = expected_deps_list
+            .iter()
+            .map(|(v, deps)| {
+                (
+                    v.ident().clone(),
+                    HashSet::from_iter(deps.iter().map(|s| s.to_string())),
+                )
+            })
+            .collect();
+
+        let mut all_vars: Vec<Variable> = expected_deps_list
+            .iter()
+            .map(|(v, _)| (*v).clone())
+            .collect();
+        let deps = all_deps(&all_vars, is_initial).unwrap();
+
+        if expected_deps != deps {
+            let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
+            eprintln!("failed order: {:?}", failed_dep_order);
+            for (v, expected) in expected_deps_list.iter() {
+                eprintln!("{}", v.ident());
+                let mut expected: Vec<_> = expected.iter().cloned().collect();
+                expected.sort();
+                eprintln!("  expected: {:?}", expected);
+                let mut actual: Vec<_> = deps[v.ident()].iter().collect();
+                actual.sort();
+                eprintln!("  actual  : {:?}", actual);
+            }
+        };
+        assert_eq!(expected_deps, deps);
+
+        let mut rng = thread_rng();
+        // no matter the order of variables in the list, we should get the same all_deps
+        // (even though the order of recursion might change)
+        for _ in 0..16 {
+            all_vars.shuffle(&mut rng);
+            let deps = all_deps(&all_vars, is_initial).unwrap();
+            assert_eq!(expected_deps, deps);
+        }
+    }
+
+    let mod_1 = module("mod_1", &[("aux_3", "input")]);
+    let aux_3 = aux("aux_3", "6");
+    let inflow = flow("inflow", "mod_1.output");
+    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
+        (&inflow, &["mod_1", "aux_3"]),
+        (&mod_1, &["aux_3"]),
+        (&aux_3, &[]),
+    ];
+
+    verify_all_deps(&expected_deps_list, false);
+
     let aux_used_in_initial = aux("aux_used_in_initial", "7");
     let aux_2 = aux("aux_2", "aux_used_in_initial");
     let aux_3 = aux("aux_3", "aux_2");
@@ -249,38 +341,19 @@ fn test_all_deps() {
         (&stock_1, &[]),
     ];
 
-    let expected_deps: HashMap<Ident, HashSet<Ident>> = expected_deps_list
-        .iter()
-        .map(|(v, deps)| {
-            (
-                v.ident().clone(),
-                HashSet::from_iter(deps.iter().map(|s| s.to_string())),
-            )
-        })
-        .collect();
-
-    let mut all_vars: Vec<Variable> = expected_deps_list
-        .iter()
-        .map(|(v, _)| (*v).clone())
-        .collect();
-    let deps = all_deps(&all_vars, false).unwrap();
-
-    assert_eq!(expected_deps, deps);
-
-    let mut rng = thread_rng();
-    // no matter the order of variables in the list, we should get the same all_deps
-    // (even though the order of recursion might change)
-    for _ in 0..16 {
-        all_vars.shuffle(&mut rng);
-        let deps = all_deps(&all_vars, false).unwrap();
-        assert_eq!(expected_deps, deps);
-    }
+    verify_all_deps(&expected_deps_list, false);
 
     // test circular references return an error and don't do something like infinitely
     // recurse
     let aux_a = aux("aux_a", "aux_b");
     let aux_b = aux("aux_b", "aux_a");
     let all_vars = vec![aux_a, aux_b];
+    let deps_result = all_deps(&all_vars, false);
+    assert!(deps_result.is_err());
+
+    // also self-references should return an error and not blow stock
+    let aux_a = aux("aux_a", "aux_a");
+    let all_vars = vec![aux_a];
     let deps_result = all_deps(&all_vars, false);
     assert!(deps_result.is_err());
 
@@ -295,24 +368,7 @@ fn test_all_deps() {
         (&stock_1, &["aux_used_in_initial"]),
     ];
 
-    let mut all_vars: Vec<Variable> = expected_deps_list
-        .iter()
-        .map(|(v, _)| (*v).clone())
-        .collect();
-    let deps = all_deps(&all_vars, false).unwrap();
-
-    assert_eq!(expected_deps, deps);
-
-    let mut rng = thread_rng();
-    // no matter the order of variables in the list, we should get the same all_deps
-    // (even though the order of recursion might change)
-    for _ in 0..16 {
-        all_vars.shuffle(&mut rng);
-        let deps = all_deps(&all_vars, false).unwrap();
-        assert_eq!(expected_deps, deps);
-    }
+    verify_all_deps(&expected_deps_list, true);
 
     // test non-existant variables
-
-    // TODO: test module/dotted references
 }
