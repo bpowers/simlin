@@ -26,15 +26,14 @@ pub enum Variable {
         ast: Option<Rc<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
-        inflows: Vec<String>,
-        outflows: Vec<String>,
+        inflows: Vec<Ident>,
+        outflows: Vec<Ident>,
         non_negative: bool,
         errors: Vec<VariableError>,
-        direct_deps: HashSet<String>,
-        all_deps: Option<HashSet<String>>,
+        direct_deps: HashSet<Ident>,
     },
     Var {
-        ident: String,
+        ident: Ident,
         ast: Option<Rc<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
@@ -43,21 +42,19 @@ pub enum Variable {
         is_flow: bool,
         is_table_only: bool,
         errors: Vec<VariableError>,
-        direct_deps: HashSet<String>,
-        all_deps: Option<HashSet<String>>,
+        direct_deps: HashSet<Ident>,
     },
     Module {
-        ident: String,
+        ident: Ident,
         units: Option<String>,
         refs: Vec<xmile::Ref>,
         errors: Vec<VariableError>,
-        direct_deps: HashSet<String>,
-        all_deps: Option<HashSet<String>>,
+        direct_deps: HashSet<Ident>,
     },
 }
 
 impl Variable {
-    pub fn ident(&self) -> &String {
+    pub fn ident(&self) -> &Ident {
         match self {
             Variable::Stock { ident: name, .. } => name,
             Variable::Var { ident: name, .. } => name,
@@ -73,7 +70,7 @@ impl Variable {
         }
     }
 
-    pub fn direct_deps(&self) -> &HashSet<String> {
+    pub fn direct_deps(&self) -> &HashSet<Ident> {
         match self {
             Variable::Stock {
                 direct_deps: deps, ..
@@ -185,7 +182,6 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 non_negative: v.non_negative.is_some(),
                 errors,
                 direct_deps,
-                all_deps: None,
             }
         }
         xmile::Var::Flow(v) => {
@@ -205,7 +201,6 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 non_negative: v.non_negative.is_some(),
                 errors,
                 direct_deps,
-                all_deps: None,
             }
         }
         xmile::Var::Aux(v) => {
@@ -225,7 +220,6 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 non_negative: false,
                 errors,
                 direct_deps,
-                all_deps: None,
             }
         }
         xmile::Var::Module(v) => Variable::Module {
@@ -237,7 +231,6 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 Some(refs) => refs.iter().map(|r| r.src.clone()).collect(),
                 None => HashSet::new(),
             },
-            all_deps: None,
         },
     }
 }
