@@ -334,12 +334,18 @@ fn test_parse() {
         Rc::new(Const("0".to_string(), 0.0)),
     ));
 
+    let quoting_eq = Rc::new(Op2(
+        Eq,
+        Rc::new(Var("oh_dear".to_string())),
+        Rc::new(Var("oh_dear".to_string())),
+    ));
+
     let cases = [
         ("if 1 then 2 else 3", if1),
         ("if blerg = foo then 2 else 3", if2),
         ("IF quotient = quotient_target THEN 1 ELSE 0", if3.clone()),
         ("(IF quotient = quotient_target THEN 1 ELSE 0)", if3.clone()),
-        ("\"oh dear\" = oh_dear", if3.clone()),
+        ("\"oh dear\" = oh_dear", quoting_eq.clone()),
     ];
 
     for case in cases.iter() {
