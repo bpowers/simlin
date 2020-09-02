@@ -228,6 +228,10 @@ fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variabl
 
 #[test]
 fn test_all_deps() {
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
+    use std::iter::FromIterator;
+
     let aux_used_in_initial = aux("aux_used_in_initial", "7");
     let aux_2 = aux("aux_2", "aux_used_in_initial");
     let aux_3 = aux("aux_3", "aux_2");
@@ -235,20 +239,15 @@ fn test_all_deps() {
     let inflow = flow("inflow", "aux_3 + aux_4");
     let outflow = flow("outflow", "stock_1");
     let stock_1 = stock("stock_1", "aux_used_in_initial", &["inflow"], &["outflow"]);
-    let expected_deps_list: Vec<(Variable, &[&str])> = vec![
-        (aux_used_in_initial.clone(), &[]),
-        (aux_2.clone(), &["aux_used_in_initial"]),
-        (aux_3.clone(), &["aux_used_in_initial", "aux_2"]),
-        (aux_4.clone(), &["aux_used_in_initial", "aux_2"]),
-        (
-            inflow.clone(),
-            &["aux_used_in_initial", "aux_2", "aux_3", "aux_4"],
-        ),
-        (outflow.clone(), &[]),
-        (stock_1.clone(), &[]),
+    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
+        (&aux_used_in_initial, &[]),
+        (&aux_2, &["aux_used_in_initial"]),
+        (&aux_3, &["aux_used_in_initial", "aux_2"]),
+        (&aux_4, &["aux_used_in_initial", "aux_2"]),
+        (&inflow, &["aux_used_in_initial", "aux_2", "aux_3", "aux_4"]),
+        (&outflow, &[]),
+        (&stock_1, &[]),
     ];
-
-    use std::iter::FromIterator;
 
     let expected_deps: HashMap<Ident, HashSet<Ident>> = expected_deps_list
         .iter()
@@ -260,49 +259,58 @@ fn test_all_deps() {
         })
         .collect();
 
-    let all_vars: Vec<Variable> = expected_deps_list.iter().map(|(v, _)| v.clone()).collect();
+    let mut all_vars: Vec<Variable> = expected_deps_list
+        .iter()
+        .map(|(v, _)| (*v).clone())
+        .collect();
     let deps = all_deps(&all_vars, false).unwrap();
 
     assert_eq!(expected_deps, deps);
-
-    use rand::seq::SliceRandom;
-    use rand::thread_rng;
 
     let mut rng = thread_rng();
     // no matter the order of variables in the list, we should get the same all_deps
     // (even though the order of recursion might change)
     for _ in 0..16 {
-        let mut all_vars: Vec<Variable> =
-            expected_deps_list.iter().map(|(v, _)| v.clone()).collect();
-        {
-            let names: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
-            eprintln!("# before shuffle: {:?}", names);
-        }
         all_vars.shuffle(&mut rng);
-        {
-            let names: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
-            eprintln!("# after  shuffle: {:?}", names);
-        }
         let deps = all_deps(&all_vars, false).unwrap();
-        if expected_deps != deps {
-            let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
-            eprintln!("failed order: {:?}", failed_dep_order);
-            for (v, expected) in expected_deps_list.iter() {
-                eprintln!("{}", v.ident());
-                let mut expected: Vec<_> = expected.iter().cloned().collect();
-                expected.sort();
-                eprintln!("  expected: {:?}", expected);
-                let mut actual: Vec<_> = deps[v.ident()].iter().collect();
-                actual.sort();
-                eprintln!("  actual  : {:?}", actual);
-            }
-        };
         assert_eq!(expected_deps, deps);
     }
 
-    // randomly sort list $n times, ensure each result is same as normal case
+    // test circular references return an error and don't do something like infinitely
+    // recurse
+    let aux_a = aux("aux_a", "aux_b");
+    let aux_b = aux("aux_b", "aux_a");
+    let all_vars = vec![aux_a, aux_b];
+    let deps_result = all_deps(&all_vars, false);
+    assert!(deps_result.is_err());
 
-    // test circular reference
+    // test initials
+    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
+        (&aux_used_in_initial, &[]),
+        (&aux_2, &["aux_used_in_initial"]),
+        (&aux_3, &["aux_used_in_initial", "aux_2"]),
+        (&aux_4, &["aux_used_in_initial", "aux_2"]),
+        (&inflow, &["aux_used_in_initial", "aux_2", "aux_3", "aux_4"]),
+        (&outflow, &["stock_1", "aux_used_in_initial"]),
+        (&stock_1, &["aux_used_in_initial"]),
+    ];
+
+    let mut all_vars: Vec<Variable> = expected_deps_list
+        .iter()
+        .map(|(v, _)| (*v).clone())
+        .collect();
+    let deps = all_deps(&all_vars, false).unwrap();
+
+    assert_eq!(expected_deps, deps);
+
+    let mut rng = thread_rng();
+    // no matter the order of variables in the list, we should get the same all_deps
+    // (even though the order of recursion might change)
+    for _ in 0..16 {
+        all_vars.shuffle(&mut rng);
+        let deps = all_deps(&all_vars, false).unwrap();
+        assert_eq!(expected_deps, deps);
+    }
 
     // test non-existant variables
 
