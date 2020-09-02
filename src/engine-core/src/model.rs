@@ -66,12 +66,16 @@ fn all_deps<'a>(
         processing.insert(id);
 
         // all deps start out as the direct deps
-        let mut all_deps = var.direct_deps().clone();
+        let mut all_deps: HashSet<Ident> = HashSet::new();
 
         for dep in var.direct_deps().iter().map(|d| d.as_str()) {
             if !all_vars.contains_key(dep) {
                 // TODO: this is probably an error
                 continue;
+            }
+
+            if !all_vars[dep].is_stock() || is_initial {
+                all_deps.insert(dep.to_string());
             }
 
             // ensure we don't blow the stack
@@ -161,4 +165,146 @@ impl Model {
             initial_deps,
         }
     }
+}
+
+fn optional_vec(slice: &[&str]) -> Option<Vec<String>> {
+    if slice.is_empty() {
+        None
+    } else {
+        Some(slice.iter().map(|id| id.to_string()).collect())
+    }
+}
+
+fn flow(ident: &str, eqn: &str) -> Variable {
+    use xmile::{Flow, Var};
+    let x_aux = Var::Flow(Flow {
+        name: ident.to_string(),
+        eqn: Some(eqn.to_string()),
+        doc: None,
+        units: None,
+        gf: None,
+        non_negative: None,
+        dimensions: None,
+    });
+
+    let var = parse_var(&x_aux);
+    assert!(var.errors().is_none());
+    var
+}
+
+fn aux(ident: &str, eqn: &str) -> Variable {
+    use xmile::{Aux, Var};
+    let x_aux = Var::Aux(Aux {
+        name: ident.to_string(),
+        eqn: Some(eqn.to_string()),
+        doc: None,
+        units: None,
+        gf: None,
+        dimensions: None,
+    });
+
+    let var = parse_var(&x_aux);
+    assert!(var.errors().is_none());
+    var
+}
+
+fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
+    use xmile::{Stock, Var};
+    let x_stock = Var::Stock(Stock {
+        name: ident.to_string(),
+        eqn: Some(eqn.to_string()),
+        doc: None,
+        units: None,
+        inflows: optional_vec(inflows),
+        outflows: optional_vec(outflows),
+        non_negative: None,
+        dimensions: None,
+    });
+
+    let var = parse_var(&x_stock);
+    assert!(var.errors().is_none());
+    var
+}
+
+#[test]
+fn test_all_deps() {
+    let aux_used_in_initial = aux("aux_used_in_initial", "7");
+    let aux_2 = aux("aux_2", "aux_used_in_initial");
+    let aux_3 = aux("aux_3", "aux_2");
+    let aux_4 = aux("aux_4", "aux_2");
+    let inflow = flow("inflow", "aux_3 + aux_4");
+    let outflow = flow("outflow", "stock_1");
+    let stock_1 = stock("stock_1", "aux_used_in_initial", &["inflow"], &["outflow"]);
+    let expected_deps_list: Vec<(Variable, &[&str])> = vec![
+        (aux_used_in_initial.clone(), &[]),
+        (aux_2.clone(), &["aux_used_in_initial"]),
+        (aux_3.clone(), &["aux_used_in_initial", "aux_2"]),
+        (aux_4.clone(), &["aux_used_in_initial", "aux_2"]),
+        (
+            inflow.clone(),
+            &["aux_used_in_initial", "aux_2", "aux_3", "aux_4"],
+        ),
+        (outflow.clone(), &[]),
+        (stock_1.clone(), &[]),
+    ];
+
+    use std::iter::FromIterator;
+
+    let expected_deps: HashMap<Ident, HashSet<Ident>> = expected_deps_list
+        .iter()
+        .map(|(v, deps)| {
+            (
+                v.ident().clone(),
+                HashSet::from_iter(deps.iter().map(|s| s.to_string())),
+            )
+        })
+        .collect();
+
+    let all_vars: Vec<Variable> = expected_deps_list.iter().map(|(v, _)| v.clone()).collect();
+    let deps = all_deps(&all_vars, false).unwrap();
+
+    assert_eq!(expected_deps, deps);
+
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
+
+    let mut rng = thread_rng();
+    // no matter the order of variables in the list, we should get the same all_deps
+    // (even though the order of recursion might change)
+    for _ in 0..16 {
+        let mut all_vars: Vec<Variable> =
+            expected_deps_list.iter().map(|(v, _)| v.clone()).collect();
+        {
+            let names: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
+            eprintln!("# before shuffle: {:?}", names);
+        }
+        all_vars.shuffle(&mut rng);
+        {
+            let names: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
+            eprintln!("# after  shuffle: {:?}", names);
+        }
+        let deps = all_deps(&all_vars, false).unwrap();
+        if expected_deps != deps {
+            let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
+            eprintln!("failed order: {:?}", failed_dep_order);
+            for (v, expected) in expected_deps_list.iter() {
+                eprintln!("{}", v.ident());
+                let mut expected: Vec<_> = expected.iter().cloned().collect();
+                expected.sort();
+                eprintln!("  expected: {:?}", expected);
+                let mut actual: Vec<_> = deps[v.ident()].iter().collect();
+                actual.sort();
+                eprintln!("  actual  : {:?}", actual);
+            }
+        };
+        assert_eq!(expected_deps, deps);
+    }
+
+    // randomly sort list $n times, ensure each result is same as normal case
+
+    // test circular reference
+
+    // test non-existant variables
+
+    // TODO: test module/dotted references
 }

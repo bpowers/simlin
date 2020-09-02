@@ -11,7 +11,7 @@ use crate::ast::{self, Expr, Visitor};
 use crate::common::{canonicalize, Ident, VariableError};
 use crate::xmile;
 
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Table {
     x: Vec<f64>,
     y: Vec<f64>,
@@ -19,7 +19,7 @@ pub struct Table {
     y_range: Option<(f64, f64)>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Variable {
     Stock {
         ident: Ident,

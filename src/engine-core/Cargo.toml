@@ -21,6 +21,9 @@ quick-xml = { version = "0.18", features = [ "serialize" ] }
 prost = "0.6"
 prost-types = "0.6"
 
+[dev-dependencies]
+rand = "0.7"
+
 [build-dependencies]
 bincode = "1"
 lalrpop = "0.19"
