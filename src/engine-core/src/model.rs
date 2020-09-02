@@ -19,6 +19,8 @@ pub struct Model {
     pub name: String,
     pub variables: HashMap<String, Variable>,
     pub errors: Option<Vec<ModelError>>,
+    pub dt_deps: Option<HashMap<Ident, HashSet<Ident>>>,
+    pub initial_deps: Option<HashMap<Ident, HashSet<Ident>>>,
 }
 
 const EMPTY_VARS: xmile::Variables = xmile::Variables {
@@ -31,7 +33,7 @@ const EMPTY_VARS: xmile::Variables = xmile::Variables {
 // in <= O(n*log(n)))
 fn all_deps<'a>(
     vars: &'a [Variable],
-    _is_initial: bool,
+    is_initial: bool,
 ) -> Result<HashMap<Ident, HashSet<Ident>>, ModelError> {
     let mut processing: HashSet<&'a str> = HashSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
@@ -41,6 +43,7 @@ fn all_deps<'a>(
 
     fn all_deps_inner<'a>(
         id: &'a str,
+        is_initial: bool,
         processing: &mut HashSet<&'a str>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
         all_var_deps: &mut HashMap<&'a str, Option<HashSet<Ident>>>,
@@ -53,8 +56,9 @@ fn all_deps<'a>(
         }
 
         // dependency chains break at stocks, as we use their value from the
-        // last dt timestep.
-        if let Variable::Stock { .. } = var {
+        // last dt timestep.  BUT if we are calculating dependencies in the
+        // initial dt, then we need to treat stocks as ordinary variables.
+        if var.is_stock() && !is_initial {
             all_var_deps.insert(id, Some(HashSet::new()));
             return Ok(());
         }
@@ -79,7 +83,7 @@ fn all_deps<'a>(
             }
 
             if all_var_deps[dep].is_none() {
-                all_deps_inner(dep, processing, all_vars, all_var_deps)?;
+                all_deps_inner(dep, is_initial, processing, all_vars, all_var_deps)?;
             }
 
             let dep_deps = all_var_deps[dep].as_ref().unwrap();
@@ -96,6 +100,7 @@ fn all_deps<'a>(
     for var in vars.iter() {
         all_deps_inner(
             var.ident(),
+            is_initial,
             &mut processing,
             &mut all_vars,
             &mut all_var_deps,
@@ -124,12 +129,20 @@ impl Model {
 
         let mut errors: Vec<ModelError> = Vec::new();
 
-        // TODO: this isn't actually needed here (but is tangentially useful
-        //   to surface errors earlier.  all_deps should take a list of idents (a runlist)
-        //   and sort them, which would also fix/use is_initial
-        match all_deps(&variable_list, false) {
-            Ok(_) => (),
-            Err(err) => errors.push(err),
+        let dt_deps = match all_deps(&variable_list, false) {
+            Ok(deps) => Some(deps),
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        };
+
+        let initial_deps = match all_deps(&variable_list, true) {
+            Ok(deps) => Some(deps),
+            Err(err) => {
+                errors.push(err);
+                None
+            }
         };
 
         let maybe_errors = match errors.len() {
@@ -144,6 +157,8 @@ impl Model {
                 .map(|v| (v.ident().clone(), v))
                 .collect(),
             errors: maybe_errors,
+            dt_deps,
+            initial_deps,
         }
     }
 }

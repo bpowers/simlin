@@ -70,6 +70,13 @@ impl Variable {
         }
     }
 
+    pub fn is_stock(&self) -> bool {
+        match self {
+            Variable::Stock { .. } => true,
+            _ => false,
+        }
+    }
+
     pub fn direct_deps(&self) -> &HashSet<Ident> {
         match self {
             Variable::Stock {
