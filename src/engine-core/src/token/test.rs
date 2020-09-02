@@ -84,6 +84,7 @@ fn idents() {
         vec![("~~    ", Ident("_3")), ("   ~~~", Ident("n3_"))],
     );
     test("\"oh no\"", vec![("~~~~~~~", Ident("oh no"))]);
+    test("oh.no", vec![("~~~~~", Ident("oh.no"))]);
 }
 
 #[test]
