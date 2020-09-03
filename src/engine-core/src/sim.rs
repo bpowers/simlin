@@ -1,31 +1,82 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::common::Result;
+use crate::common::{Ident, Result};
 use crate::model;
 use crate::Project;
 
-pub struct Var {
-    direct_deps: Vec<String>,
+// simplified/lowered from ast::BinaryOp version
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Exp,
+    Mul,
+    Div,
+    Mod,
+    Gt,
+    Gte,
+    Eq,
+    And,
+    Or,
 }
 
-pub struct Module {
+// simplified/lowered from ast::UnaryOp version
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum UnaryOp {
+    Not,
+}
+
+#[derive(PartialEq, Clone, Debug)]
+pub enum Expr<'a> {
+    Const(f64),
+    Var(usize), // offset
+    App(&'a str, Vec<Expr<'a>>),
+    Op2(BinaryOp, Box<Expr<'a>>, Box<Expr<'a>>),
+    Op1(UnaryOp, Box<Expr<'a>>),
+    If(Rc<Expr<'a>>, Box<Expr<'a>>, Box<Expr<'a>>),
+}
+
+pub struct Var<'a> {
+    off: usize,
+    ast: Rc<Expr<'a>>,
+}
+
+pub struct Module<'a> {
     model: Rc<model::Model>,
-    vars: Vec<Rc<Var>>,
+    // inputs: Vec<f64>,
+    base_off: usize, // base offset for this module
+    n_slots: usize,  // number of f64s we need storage for
+    runlist_initials: Vec<Var<'a>>,
+    runlist_flows: Vec<Var<'a>>,
+    runlist_stocks: Vec<Var<'a>>,
+    offsets: HashMap<Ident, usize>,
 }
 
-impl Module {
-    fn new(
-        _project: &Project,
-        _parent: Option<Rc<Var>>,
-        _model: Rc<model::Model>,
-        _vmodule: Option<Rc<Var>>,
-    ) -> Result<Module> {
-        return err!("Module::new not implemented");
+impl Module<'_> {
+    fn new(_project: &Project, model: Rc<model::Model>) -> Result<Self> {
+        // FIXME: not right -- needs to adjust for submodules
+        let n_slots = model.variables.len();
+        let runlist_initials = Vec::new();
+        let runlist_flows = Vec::new();
+        let runlist_stocks = Vec::new();
+
+        let offsets = HashMap::new();
+
+        Ok(Module {
+            model,
+            base_off: 0,
+            n_slots,
+            runlist_initials,
+            runlist_flows,
+            runlist_stocks,
+            offsets,
+        })
     }
 }
 
-pub struct Simulation {
-    module: Rc<Module>,
+pub struct Simulation<'a> {
+    root: Module<'a>,
     // spec
     // slab
     // curr
@@ -38,10 +89,10 @@ pub struct Simulation {
     // save_every
 }
 
-impl Simulation {
+impl Simulation<'_> {
     pub fn new(project: &Project, model: Rc<model::Model>) -> Result<Simulation> {
         // we start with a project and a root module (one with no references).
-        let _root = Module::new(project, None, model, None);
+        let root = Module::new(project, model).unwrap();
 
         // next, we find all the models (like the main model, stdlib functions, and any
         // user-defined modules) and create sim
@@ -59,6 +110,6 @@ impl Simulation {
 
         // reset
 
-        err!("Simulation::new not implemented")
+        Ok(Simulation { root })
     }
 }

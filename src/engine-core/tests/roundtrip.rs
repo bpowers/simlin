@@ -5,7 +5,7 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use engine_core;
+use engine_core::{self, Simulation};
 
 static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/SIR/SIR.xmile",
@@ -81,5 +81,8 @@ fn roundtrips_model() {
                 }
             }
         }
+
+        let model = project.models.get("main").unwrap().clone();
+        let _sim = Simulation::new(&project, model).unwrap();
     }
 }
