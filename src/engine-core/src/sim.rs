@@ -46,25 +46,122 @@ pub struct Context<'a> {
 }
 
 fn lower(ctx: &Context, expr: &ast::Expr) -> Result<Expr> {
-    match expr {
-        _ => Ok(Expr::Const(0.0)),
-    }
+    let expr = match expr {
+        ast::Expr::Var(id) => Expr::Var(ctx.offsets[id]),
+        ast::Expr::Const(_, n) => Expr::Const(*n),
+        _ => Expr::Const(0.0),
+    };
+
+    Ok(expr)
 }
 
 pub struct Var {
     off: usize,
-    ast: Rc<Expr>,
+    ast: Expr,
+}
+
+fn fold_flows(ctx: &Context, flows: &[String]) -> Option<Expr> {
+    if flows.is_empty() {
+        return None;
+    }
+
+    let mut loads = flows.iter().map(|flow| Expr::Var(ctx.offsets[flow]));
+
+    let first = loads.next().unwrap();
+    Some(loads.fold(first, |acc, flow| {
+        Expr::Op2(BinaryOp::Add, Box::new(acc), Box::new(flow))
+    }))
+}
+
+#[test]
+fn test_fold_flows() {
+    use std::iter::FromIterator;
+
+    let offsets: &[(&str, usize)] = &[("time", 0), ("a", 1), ("b", 2), ("c", 3), ("d", 4)];
+    let offsets: HashMap<String, usize> =
+        HashMap::from_iter(offsets.into_iter().map(|(k, v)| (k.to_string(), *v)));
+    let ctx = Context {
+        is_initial: false,
+        offsets: &offsets,
+        reverse_deps: HashMap::new(),
+    };
+
+    assert_eq!(None, fold_flows(&ctx, &[]));
+    assert_eq!(Some(Expr::Var(1)), fold_flows(&ctx, &["a".to_string()]));
+    assert_eq!(
+        Some(Expr::Op2(
+            BinaryOp::Add,
+            Box::new(Expr::Var(1)),
+            Box::new(Expr::Var(4))
+        )),
+        fold_flows(&ctx, &["a".to_string(), "d".to_string()])
+    );
+}
+
+fn build_stock_update_expr(ctx: &Context, var: &Variable) -> Result<Expr> {
+    if let Variable::Stock {
+        ident,
+        inflows,
+        outflows,
+        ..
+    } = var
+    {
+        // start off with stock = stock
+        let mut expr = Expr::Var(ctx.offsets[ident]);
+        match fold_flows(ctx, inflows) {
+            None => (),
+            Some(flows) => {
+                expr = Expr::Op2(BinaryOp::Add, Box::new(expr), Box::new(flows));
+            }
+        }
+        match fold_flows(ctx, outflows) {
+            None => (),
+            Some(flows) => {
+                expr = Expr::Op2(BinaryOp::Sub, Box::new(expr), Box::new(flows));
+            }
+        }
+
+        Ok(expr)
+    } else {
+        panic!(
+            "build_stock_update_expr called with non-stock {}",
+            var.ident()
+        );
+    }
 }
 
 impl Var {
     pub fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         let off = ctx.offsets[var.ident()];
         let ast = match var {
-            Variable::Module { .. } => (),
-            Variable::Stock { .. } => (),
-            Variable::Var { ast, .. } => {}
+            Variable::Module { .. } => {
+                return Err(SDError::new(format!(
+                    "TODO module AST building for {}",
+                    var.ident()
+                )));
+            }
+            Variable::Stock { ast, .. } => {
+                if ctx.is_initial {
+                    if ast.is_none() {
+                        return Err(SDError::new(format!(
+                            "missing initial AST for stock {}",
+                            var.ident()
+                        )));
+                    }
+                    lower(ctx, ast.as_ref().unwrap())?
+                } else {
+                    build_stock_update_expr(ctx, var)?
+                }
+            }
+            Variable::Var { ast, .. } => {
+                if let Some(ast) = ast {
+                    lower(ctx, ast)?
+                } else {
+                    return Err(SDError::new(format!("missing AST for {}", var.ident())));
+                }
+            }
         };
-        Err(SDError::new("not implemented".to_string()))
+        Ok(Var { off, ast })
     }
 }
 
@@ -97,9 +194,8 @@ fn invert_deps(forward: &HashMap<String, HashSet<String>>) -> HashMap<String, Ha
 
 #[test]
 fn test_invert_deps() {
-    use std::iter::FromIterator;
-
     fn mapify(input: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
+        use std::iter::FromIterator;
         input
             .into_iter()
             .map(|(k, v)| {
