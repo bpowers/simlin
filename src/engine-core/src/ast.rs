@@ -10,8 +10,8 @@ pub enum Expr {
     Const(String, f64),
     Var(Ident),
     App(Ident, Vec<Rc<Expr>>),
-    Op2(BinaryOp, Rc<Expr>, Rc<Expr>),
     Op1(UnaryOp, Rc<Expr>),
+    Op2(BinaryOp, Rc<Expr>, Rc<Expr>),
     If(Rc<Expr>, Rc<Expr>, Rc<Expr>),
 }
 

@@ -18,7 +18,10 @@ pub enum BinaryOp {
     Mod,
     Gt,
     Gte,
+    Lt,
+    Lte,
     Eq,
+    Neq,
     And,
     Or,
 }
@@ -29,14 +32,37 @@ pub enum UnaryOp {
     Not,
 }
 
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum BuiltinFn {
+    Lookup,
+    Abs,
+    Arccos,
+    Arcsin,
+    Arctan,
+    Cos,
+    Exp,
+    Inf,
+    Int,
+    Ln,
+    Log10,
+    Max,
+    Min,
+    Pi,
+    Pulse,
+    Safediv,
+    Sin,
+    Sqrt,
+    Tan,
+}
+
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(f64),
     Var(usize), // offset
-    App(String, Vec<Expr>),
+    App(BuiltinFn, Vec<Expr>),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     Op1(UnaryOp, Box<Expr>),
-    If(Rc<Expr>, Box<Expr>, Box<Expr>),
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
 pub struct Context<'a> {
@@ -47,14 +73,53 @@ pub struct Context<'a> {
 
 fn lower(ctx: &Context, expr: &ast::Expr) -> Result<Expr> {
     let expr = match expr {
-        ast::Expr::Var(id) => Expr::Var(ctx.offsets[id]),
         ast::Expr::Const(_, n) => Expr::Const(*n),
-        _ => Expr::Const(0.0),
+        ast::Expr::Var(id) => Expr::Var(ctx.offsets[id]),
+        ast::Expr::App(id, _args) => {
+            return Err(SDError::new(format!("TODO: apply {}", id)));
+        }
+        ast::Expr::Op1(op, l) => {
+            let l = lower(ctx, l)?;
+            match op {
+                ast::UnaryOp::Negative => {
+                    Expr::Op2(BinaryOp::Sub, Box::new(Expr::Const(0.0)), Box::new(l))
+                }
+                ast::UnaryOp::Positive => l,
+                ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l)),
+            }
+        }
+        ast::Expr::Op2(op, l, r) => {
+            let l = lower(ctx, l)?;
+            let r = lower(ctx, r)?;
+            match op {
+                ast::BinaryOp::Add => Expr::Op2(BinaryOp::Add, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Sub => Expr::Op2(BinaryOp::Sub, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Exp => Expr::Op2(BinaryOp::Exp, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Mul => Expr::Op2(BinaryOp::Mul, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Div => Expr::Op2(BinaryOp::Div, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Mod => Expr::Op2(BinaryOp::Mod, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Gt => Expr::Op2(BinaryOp::Gt, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Gte => Expr::Op2(BinaryOp::Gte, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Lt => Expr::Op2(BinaryOp::Lt, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Lte => Expr::Op2(BinaryOp::Lte, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Eq => Expr::Op2(BinaryOp::Eq, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Neq => Expr::Op2(BinaryOp::Neq, Box::new(l), Box::new(r)),
+                ast::BinaryOp::And => Expr::Op2(BinaryOp::Add, Box::new(l), Box::new(r)),
+                ast::BinaryOp::Or => Expr::Op2(BinaryOp::Or, Box::new(l), Box::new(r)),
+            }
+        }
+        ast::Expr::If(cond, t, f) => {
+            let cond = lower(ctx, cond)?;
+            let t = lower(ctx, t)?;
+            let f = lower(ctx, f)?;
+            Expr::If(Box::new(cond), Box::new(t), Box::new(f))
+        }
     };
 
     Ok(expr)
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Var {
     off: usize,
     ast: Expr,
@@ -165,6 +230,7 @@ impl Var {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Module {
     // inputs: Vec<f64>,
     base_off: usize, // base offset for this module
@@ -310,6 +376,7 @@ impl Module {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Simulation {
     root: Module,
     // spec
@@ -346,5 +413,9 @@ impl Simulation {
         // reset
 
         Ok(Simulation { root })
+    }
+
+    pub fn run_to_end(&self) -> Result<()> {
+        Ok(())
     }
 }
