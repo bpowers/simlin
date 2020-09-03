@@ -139,3 +139,30 @@ fn test_xml_stock_parsing() {
         assert!(false);
     }
 }
+
+#[test]
+fn test_sim_specs_parsing() {
+    let input = "<sim_specs method=\"Euler\" time_units=\"Time\">
+		<start>0</start>
+		<stop>100</stop>
+		<savestep>1</savestep>
+		<dt>0.03125</dt>
+	</sim_specs>";
+
+    let expected = xmile::SimSpecs {
+        start: 0.0,
+        stop: 100.0,
+        dt: Some(xmile::Dt {
+            value: 0.03125,
+            reciprocal: None,
+        }),
+        save_step: Some(1.0),
+        method: Some("Euler".to_string()),
+        time_units: Some("Time".to_string()),
+    };
+
+    use quick_xml::de;
+    let sim_specs: xmile::SimSpecs = de::from_reader(input.as_bytes()).unwrap();
+
+    assert_eq!(expected, sim_specs);
+}
