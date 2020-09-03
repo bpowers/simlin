@@ -2,6 +2,9 @@ use std::rc::Rc;
 
 use crate::common::Ident;
 
+// we use Rcs here because we may walk and update ASTs a number of times,
+// and we want to avoid copying and reallocating subexpressions all over
+// the place.
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(String, f64),

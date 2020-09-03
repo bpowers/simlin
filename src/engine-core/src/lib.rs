@@ -63,7 +63,7 @@ impl fmt::Debug for Project {
 }
 
 impl Project {
-    pub fn from_xmile_reader(reader: &mut dyn BufRead) -> Result<Project> {
+    pub fn from_xmile_reader(reader: &mut dyn BufRead) -> Result<Self> {
         use quick_xml::de;
         let file: xmile::File = match de::from_reader(reader) {
             Ok(file) => file,
@@ -103,7 +103,7 @@ impl Project {
         }
 
         // get reference to model, increasing refcount
-        let model: Rc<model::Model> = self.models[model_name].clone();
+        let model = Rc::clone(&self.models[model_name]);
 
         Simulation::new(self, model)
     }
