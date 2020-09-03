@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast;
-use crate::common::{Result, SDError};
+use crate::common::{Ident, Result, SDError};
 use crate::model::Model;
 use crate::variable::Variable;
 use crate::Project;
@@ -333,31 +333,60 @@ impl Module {
             offsets
         };
 
+        fn var_comparator<'a>(
+            deps: &'a HashMap<Ident, HashSet<Ident>>,
+        ) -> impl Fn(&&Variable, &&Variable) -> std::cmp::Ordering + 'a {
+            move |a: &&Variable, b: &&Variable| -> std::cmp::Ordering {
+                let a_name = a.ident();
+                let b_name = b.ident();
+                if deps[b_name].contains(a_name) {
+                    std::cmp::Ordering::Less
+                } else if deps[a_name].contains(b_name) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            }
+        }
+
+        let initial_deps = model.initial_deps.as_ref().unwrap();
         let ctx = Context {
             offsets: &offsets,
-            reverse_deps: invert_deps(&model.initial_deps.as_ref().unwrap()),
+            reverse_deps: invert_deps(initial_deps),
             is_initial: true,
         };
 
-        let runlist_initials: Result<Vec<Var>> = var_names
-            .iter()
-            .map(|id| &model.variables[*id])
+        let mut runlist_initials: Vec<&Variable> =
+            var_names.iter().map(|id| &model.variables[*id]).collect();
+
+        runlist_initials.sort_by(var_comparator(initial_deps));
+
+        let runlist_initials: Result<Vec<Var>> = runlist_initials
+            .into_iter()
             .map(|v| Var::new(&ctx, v))
             .collect();
 
+        let dt_deps = model.dt_deps.as_ref().unwrap();
         let ctx = Context {
             offsets: &offsets,
-            reverse_deps: invert_deps(&model.dt_deps.as_ref().unwrap()),
+            reverse_deps: invert_deps(dt_deps),
             is_initial: false,
         };
 
-        let runlist_flows: Result<Vec<Var>> = var_names
+        let mut runlist_flows: Vec<&Variable> = var_names
             .iter()
             .map(|id| &model.variables[*id])
             .filter(|v| !v.is_stock())
+            .collect();
+
+        runlist_flows.sort_by(var_comparator(dt_deps));
+
+        let runlist_flows: Result<Vec<Var>> = runlist_flows
+            .into_iter()
             .map(|v| Var::new(&ctx, v))
             .collect();
 
+        // no sorting needed for stocks
         let runlist_stocks: Result<Vec<Var>> = var_names
             .iter()
             .map(|id| &model.variables[*id])
@@ -396,19 +425,9 @@ impl Simulation {
         // we start with a project and a root module (one with no references).
         let root = Module::new(project, model, true).unwrap();
 
-        // next, we find all the models (like the main model, stdlib functions, and any
-        // user-defined modules) and create sim
-
         // TODO: come up with monomorphizations based on what inputs are used
 
-        // create AModule for model
-        // creates avars for all vars in model + recursive submodules
-
-        // avar_init(module)
-
         // module assign offsets
-
-        // sort runlists
 
         // reset
 
