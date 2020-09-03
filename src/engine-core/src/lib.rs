@@ -108,3 +108,34 @@ impl Project {
         Simulation::new(self, model)
     }
 }
+
+#[test]
+fn test_xml_stock_parsing() {
+    let input = "<stock name=\"susceptible\">
+        <eqn>total_population</eqn>
+        <outflow>succumbing</outflow>
+        <outflow>succumbing_2</outflow>
+        <doc>People who can contract the disease.</doc>
+        <units>people</units>
+    </stock>";
+
+    let expected = xmile::Stock {
+        name: "susceptible".to_string(),
+        eqn: Some("total_population".to_string()),
+        doc: Some("People who can contract the disease.".to_string()),
+        units: Some("people".to_string()),
+        inflows: None,
+        outflows: Some(vec!["succumbing".to_string(), "succumbing_2".to_string()]),
+        non_negative: None,
+        dimensions: None,
+    };
+
+    use quick_xml::de;
+    let stock: xmile::Var = de::from_reader(input.as_bytes()).unwrap();
+
+    if let xmile::Var::Stock(stock) = stock {
+        assert_eq!(expected, stock);
+    } else {
+        assert!(false);
+    }
+}

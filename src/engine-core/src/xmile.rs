@@ -439,7 +439,9 @@ pub struct Stock {
     pub eqn: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
+    #[serde(rename = "inflow")]
     pub inflows: Option<Vec<String>>,
+    #[serde(rename = "outflow")]
     pub outflows: Option<Vec<String>>,
     pub non_negative: Option<NonNegative>,
     pub dimensions: Option<VarDimensions>,
