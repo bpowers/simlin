@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use crate::ast;
 use crate::common::{Result, SDError};
 use crate::model::Model;
 use crate::variable::Variable;
@@ -38,13 +39,31 @@ pub enum Expr {
     If(Rc<Expr>, Box<Expr>, Box<Expr>),
 }
 
+pub struct Context<'a> {
+    is_initial: bool,
+    offsets: &'a HashMap<String, usize>,
+    reverse_deps: HashMap<String, HashSet<String>>,
+}
+
+fn lower(ctx: &Context, expr: &ast::Expr) -> Result<Expr> {
+    match expr {
+        _ => Ok(Expr::Const(0.0)),
+    }
+}
+
 pub struct Var {
     off: usize,
     ast: Rc<Expr>,
 }
 
 impl Var {
-    pub fn new(off: usize, var: &Variable, is_initial: bool) -> Result<Self> {
+    pub fn new(ctx: &Context, var: &Variable) -> Result<Self> {
+        let off = ctx.offsets[var.ident()];
+        let ast = match var {
+            Variable::Module { .. } => (),
+            Variable::Stock { .. } => (),
+            Variable::Var { ast, .. } => {}
+        };
         Err(SDError::new("not implemented".to_string()))
     }
 }
@@ -59,8 +78,70 @@ pub struct Module {
     offsets: HashMap<String, usize>,
 }
 
+fn invert_deps(forward: &HashMap<String, HashSet<String>>) -> HashMap<String, HashSet<String>> {
+    let mut reverse: HashMap<String, HashSet<String>> = HashMap::new();
+    for (ident, deps) in forward.iter() {
+        if !reverse.contains_key(ident) {
+            reverse.insert(ident.clone(), HashSet::new());
+        }
+        for dep in deps {
+            if !reverse.contains_key(dep) {
+                reverse.insert(dep.clone(), HashSet::new());
+            }
+
+            reverse.get_mut(dep).unwrap().insert(ident.clone());
+        }
+    }
+    reverse
+}
+
+#[test]
+fn test_invert_deps() {
+    use std::iter::FromIterator;
+
+    fn mapify(input: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
+        input
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    HashSet::from_iter(v.into_iter().map(|s| s.to_string())),
+                )
+            })
+            .collect()
+    }
+
+    let forward: &[(&str, &[&str])] = &[
+        ("a", &["b", "c"]),
+        ("b", &["d", "c"]),
+        ("f", &["a"]),
+        ("e", &[]),
+    ];
+    let forward = mapify(forward);
+
+    let reverse = invert_deps(&forward);
+
+    let expected: &[(&str, &[&str])] = &[
+        ("a", &["f"]),
+        ("b", &["a"]),
+        ("c", &["a", "b"]),
+        ("d", &["b"]),
+        ("f", &[]),
+        ("e", &[]),
+    ];
+    let expected = mapify(expected);
+
+    assert_eq!(expected, reverse);
+}
+
 impl Module {
     fn new(_project: &Project, model: Rc<Model>, is_root: bool) -> Result<Self> {
+        if model.dt_deps.is_none() || model.initial_deps.is_none() {
+            return Err(SDError::new(
+                "can't simulate if dependency building failed".to_string(),
+            ));
+        }
+
         // FIXME: not right -- needs to adjust for submodules
         let n_slots = model.variables.len();
 
@@ -90,21 +171,44 @@ impl Module {
             offsets
         };
 
-        let mut runlist_initials = Vec::new();
-        let mut runlist_flows = Vec::new();
-        let mut runlist_stocks = Vec::new();
-        for ident in var_names.into_iter() {
-            let off = offsets[ident];
-            let initial_var = Var::new(off, &model.variables[ident], true)?;
-            let var = Var::new(off, &model.variables[ident], false)?;
-        }
+        let ctx = Context {
+            offsets: &offsets,
+            reverse_deps: invert_deps(&model.initial_deps.as_ref().unwrap()),
+            is_initial: true,
+        };
+
+        let runlist_initials: Result<Vec<Var>> = var_names
+            .iter()
+            .map(|id| &model.variables[*id])
+            .map(|v| Var::new(&ctx, v))
+            .collect();
+
+        let ctx = Context {
+            offsets: &offsets,
+            reverse_deps: invert_deps(&model.dt_deps.as_ref().unwrap()),
+            is_initial: false,
+        };
+
+        let runlist_flows: Result<Vec<Var>> = var_names
+            .iter()
+            .map(|id| &model.variables[*id])
+            .filter(|v| !v.is_stock())
+            .map(|v| Var::new(&ctx, v))
+            .collect();
+
+        let runlist_stocks: Result<Vec<Var>> = var_names
+            .iter()
+            .map(|id| &model.variables[*id])
+            .filter(|v| v.is_stock())
+            .map(|v| Var::new(&ctx, v))
+            .collect();
 
         Ok(Module {
             base_off: 0,
             n_slots,
-            runlist_initials,
-            runlist_flows,
-            runlist_stocks,
+            runlist_initials: runlist_initials?,
+            runlist_flows: runlist_flows?,
+            runlist_stocks: runlist_stocks?,
             offsets,
         })
     }
