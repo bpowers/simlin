@@ -5,7 +5,66 @@ use crate::ast;
 use crate::common::{Ident, Result, SDError};
 use crate::model::Model;
 use crate::variable::Variable;
+use crate::xmile;
 use crate::Project;
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum Method {
+    Euler,
+}
+
+#[derive(Clone, Debug)]
+pub struct Specs {
+    pub start: f64,
+    pub stop: f64,
+    pub dt: f64,
+    pub save_step: f64,
+    pub method: Method,
+}
+
+const DEFAULT_DT: xmile::Dt = xmile::Dt {
+    value: 1.0,
+    reciprocal: None,
+};
+
+impl Specs {
+    pub fn from(specs: &xmile::SimSpecs) -> Self {
+        let dt: f64 = {
+            let spec_dt = specs.dt.as_ref().unwrap_or(&DEFAULT_DT);
+            if spec_dt.reciprocal.unwrap_or(false) {
+                1.0 / spec_dt.value
+            } else {
+                spec_dt.value
+            }
+        };
+
+        let save_step: f64 = specs.save_step.unwrap_or(dt);
+
+        let method = if specs.method.is_none() {
+            Method::Euler
+        } else {
+            let method_str = specs.method.as_ref().unwrap();
+            match method_str.to_lowercase().as_str() {
+                "euler" => Method::Euler,
+                _ => {
+                    eprintln!(
+                        "warning, simulation requested '{}' method, but only support Euler",
+                        method_str
+                    );
+                    Method::Euler
+                }
+            }
+        };
+
+        Specs {
+            start: specs.start,
+            stop: specs.stop,
+            dt,
+            save_step,
+            method,
+        }
+    }
+}
 
 // simplified/lowered from ast::BinaryOp version
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
@@ -405,10 +464,10 @@ impl Module {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Simulation {
     root: Module,
-    // spec
+    specs: Specs,
     // slab
     // curr
     // next
@@ -431,7 +490,9 @@ impl Simulation {
 
         // reset
 
-        Ok(Simulation { root })
+        let specs = Specs::from(project.file.sim_specs.as_ref().unwrap());
+
+        Ok(Simulation { root, specs })
     }
 
     pub fn run_to_end(&self) -> Result<()> {
