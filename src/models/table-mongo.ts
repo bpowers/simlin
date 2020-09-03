@@ -15,7 +15,7 @@ interface MongoTableOptions {
   readonly hoistColumns?: { [col: string]: number };
 }
 
-interface Schema<T> {
+interface Schema {
   _id: string;
   // additional stuff
   value: Binary;
@@ -24,8 +24,8 @@ interface Schema<T> {
 export class MongoTable<T extends Message> implements Table<T> {
   readonly kind: SerializableClass<T>;
   readonly opts: MongoTableOptions;
-  collection?: Collection<Schema<T>>;
-  private collectionPromise?: Promise<Collection<Schema<T>>>;
+  collection?: Collection<Schema>;
+  private collectionPromise?: Promise<Collection<Schema>>;
 
   constructor(t: SerializableClass<T>, opts: MongoTableOptions) {
     this.kind = t;
@@ -40,7 +40,7 @@ export class MongoTable<T extends Message> implements Table<T> {
     this.collectionPromise = undefined;
   }
 
-  private deserialize(row: Schema<T>): T {
+  private deserialize(row: Schema): T {
     const value = row.value;
     return this.kind.deserializeBinary(value.read(0, value.length()));
   }
@@ -72,9 +72,9 @@ export class MongoTable<T extends Message> implements Table<T> {
     return rows.map((row) => this.deserialize(row));
   }
 
-  private doc(id: string, pb: T): Schema<T> {
+  private doc(id: string, pb: T): Schema {
     const serializedPb = pb.serializeBinary();
-    const doc: Schema<T> = {
+    const doc: Schema = {
       _id: id,
       value: new Binary(Buffer.from(serializedPb)),
     };

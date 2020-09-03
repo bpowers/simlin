@@ -14,7 +14,7 @@ interface FirestoreTableOptions {
   readonly hoistColumns?: { [col: string]: number };
 }
 
-interface Schema<T> {
+interface Schema {
   // with Firestore, you specify the document name separately from the contents
   // _id: string;
   // additional stuff
@@ -84,7 +84,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     return querySnapshot.docs.map((docRef) => this.deserialize(docRef.get('value')));
   }
 
-  private doc(_id: string, pb: T): Schema<T> {
+  private doc(_id: string, pb: T): Schema {
     const serializedPb = pb.serializeBinary();
     const doc = pb.toObject();
 
@@ -110,7 +110,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     //     doc[prop] = Message.getFieldWithDefault(pb, cols[prop], undefined);
     //   }
     // }
-    return doc as Schema<T>;
+    return doc as Schema;
   }
 
   async create(id: string, pb: T): Promise<void> {
