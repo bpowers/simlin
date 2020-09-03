@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::common::Result;
+use crate::common::{Result, SDError};
 use crate::model::Model;
+use crate::variable::Variable;
 use crate::Project;
 
 // simplified/lowered from ast::BinaryOp version
@@ -42,6 +43,12 @@ pub struct Var {
     ast: Rc<Expr>,
 }
 
+impl Var {
+    pub fn new(off: usize, var: &Variable, is_initial: bool) -> Result<Self> {
+        Err(SDError::new("not implemented".to_string()))
+    }
+}
+
 pub struct Module {
     // inputs: Vec<f64>,
     base_off: usize, // base offset for this module
@@ -56,11 +63,7 @@ impl Module {
     fn new(_project: &Project, model: Rc<Model>, is_root: bool) -> Result<Self> {
         // FIXME: not right -- needs to adjust for submodules
         let n_slots = model.variables.len();
-        let mut runlist_initials = Vec::new();
-        let mut runlist_flows = Vec::new();
-        let mut runlist_stocks = Vec::new();
 
-        let mut offsets: HashMap<String, usize> = HashMap::new();
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
             // TODO: if we reorder based on dependencies, we could probably improve performance
@@ -69,15 +72,31 @@ impl Module {
             var_names
         };
 
-        let base: usize = if is_root {
-            offsets.insert("time".to_string(), 0);
-            1
-        } else {
-            0
+        let offsets: HashMap<String, usize> = {
+            let mut offsets = HashMap::new();
+            let base: usize = if is_root {
+                offsets.insert("time".to_string(), 0);
+                1
+            } else {
+                0
+            };
+            offsets.extend(
+                var_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ident)| (ident.to_string(), base + i)),
+            );
+
+            offsets
         };
 
-        for (i, ident) in var_names.iter().enumerate() {
-            offsets.insert(ident.to_string(), base + i);
+        let mut runlist_initials = Vec::new();
+        let mut runlist_flows = Vec::new();
+        let mut runlist_stocks = Vec::new();
+        for ident in var_names.into_iter() {
+            let off = offsets[ident];
+            let initial_var = Var::new(off, &model.variables[ident], true)?;
+            let var = Var::new(off, &model.variables[ident], false)?;
         }
 
         Ok(Module {
