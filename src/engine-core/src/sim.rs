@@ -528,6 +528,14 @@ fn eval(expr: &Expr, curr: &[f64]) -> f64 {
 }
 
 #[derive(Debug)]
+pub struct Results {
+    // one large allocation
+    data: Box<[f64]>,
+    step_size: usize,
+    step_count: usize,
+}
+
+#[derive(Debug)]
 pub struct Simulation {
     root: Module,
     specs: Specs,
@@ -573,7 +581,7 @@ impl Simulation {
         self.root.calc_stocks(dt, curr, next);
     }
 
-    pub fn run_to_end(&self) -> Result<()> {
+    pub fn run_to_end(&self) -> Result<Results> {
         let spec = &self.specs;
         if spec.stop < spec.start {
             return Err(SDError::new(format!(
@@ -581,32 +589,57 @@ impl Simulation {
                 spec.stop, spec.start
             )));
         }
-        // TODO: we _really_ only need to divide by save_steps, but the borrowing is hard
         let n_chunks: usize = ((spec.stop - spec.start) / spec.dt + 1.0) as usize;
-
-        // let mut step = 0;
-        // let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5) as i32);
-
-        let slab: Vec<f64> = vec![0.0; self.root.n_slots * (n_chunks + 1)];
-        let mut boxed_slab = slab.into_boxed_slice();
-        let mut slabs = boxed_slab.chunks_mut(self.root.n_slots);
-
-        // let mut results: Vec<&[f64]> = Vec::with_capacity(n_chunks + 1);
 
         let dt = spec.dt;
         let stop = spec.stop;
 
-        let mut curr = slabs.next().unwrap();
-        self.calc_initials(dt, curr);
+        let slab: Vec<f64> = vec![0.0; self.root.n_slots * (n_chunks + 1)];
+        let mut boxed_slab = slab.into_boxed_slice();
+        {
+            let mut slabs = boxed_slab.chunks_mut(self.root.n_slots);
 
-        for next in slabs {
-            self.calc_flows(dt, curr);
-            self.calc_stocks(dt, curr, next);
-            curr = next;
+            // let mut results: Vec<&[f64]> = Vec::with_capacity(n_chunks + 1);
+
+            let mut curr = slabs.next().unwrap();
+            self.calc_initials(dt, curr);
+
+            for next in slabs {
+                self.calc_flows(dt, curr);
+                self.calc_stocks(dt, curr, next);
+                curr = next;
+            }
+            // ensure we've calculated stock + flow values for the dt <= end_time
+            assert!(curr[TIME_OFF] > stop);
         }
-        // ensure we've calculated stock + flow values for the dt <= end_time
-        assert!(curr[TIME_OFF] > stop);
 
-        Ok(())
+        let mut step = 0;
+        let mut save_step_off = 0;
+        let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5) as usize);
+        let n_save_chunks: usize = ((spec.stop - spec.start) / spec.dt + 1.0) as usize;
+
+        let results_slab: Vec<f64> = vec![0.0; self.root.n_slots * n_save_chunks];
+        let mut boxed_results_slab = results_slab.into_boxed_slice();
+        {
+            let mut slabs: Vec<&mut [f64]> =
+                boxed_results_slab.chunks_mut(self.root.n_slots).collect();
+
+            for curr in boxed_slab.chunks(self.root.n_slots) {
+                if curr[TIME_OFF] >= stop {
+                    break;
+                }
+                if step % save_every == 0 {
+                    slabs[save_step_off].copy_from_slice(curr);
+                    save_step_off += 1;
+                }
+                step += 1;
+            }
+        }
+
+        Ok(Results {
+            data: boxed_results_slab,
+            step_size: self.root.n_slots,
+            step_count: n_save_chunks,
+        })
     }
 }
