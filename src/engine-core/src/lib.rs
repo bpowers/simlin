@@ -12,6 +12,8 @@ extern crate quick_xml;
 extern crate regex;
 extern crate serde;
 extern crate unicode_xid;
+#[macro_use]
+extern crate float_cmp;
 
 #[macro_use]
 mod common;

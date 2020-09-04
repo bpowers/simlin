@@ -8,6 +8,8 @@ use crate::variable::Variable;
 use crate::xmile;
 use crate::Project;
 
+const TIME_OFF: usize = 0;
+
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum Method {
     Euler,
@@ -224,28 +226,24 @@ fn test_fold_flows() {
 
 fn build_stock_update_expr(ctx: &Context, var: &Variable) -> Result<Expr> {
     if let Variable::Stock {
-        ident,
-        inflows,
-        outflows,
-        ..
+        inflows, outflows, ..
     } = var
     {
-        // start off with stock = stock
-        let mut expr = Expr::Var(ctx.offsets[ident]);
-        match fold_flows(ctx, inflows) {
-            None => (),
-            Some(flows) => {
-                expr = Expr::Op2(BinaryOp::Add, Box::new(expr), Box::new(flows));
-            }
-        }
-        match fold_flows(ctx, outflows) {
-            None => (),
-            Some(flows) => {
-                expr = Expr::Op2(BinaryOp::Sub, Box::new(expr), Box::new(flows));
-            }
-        }
+        // TODO: simplify the expressions we generate
+        let inflows = match fold_flows(ctx, inflows) {
+            None => Expr::Const(0.0),
+            Some(flows) => flows,
+        };
+        let outflows = match fold_flows(ctx, outflows) {
+            None => Expr::Const(0.0),
+            Some(flows) => flows,
+        };
 
-        Ok(expr)
+        Ok(Expr::Op2(
+            BinaryOp::Sub,
+            Box::new(inflows),
+            Box::new(outflows),
+        ))
     } else {
         panic!(
             "build_stock_update_expr called with non-stock {}",
@@ -364,7 +362,7 @@ impl Module {
         }
 
         // FIXME: not right -- needs to adjust for submodules
-        let n_slots = model.variables.len();
+        let n_slots = model.variables.len() + 1; // add time in there
 
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
@@ -462,6 +460,71 @@ impl Module {
             offsets,
         })
     }
+
+    fn calc_initials(&self, _dt: f64, curr: &mut [f64]) {
+        for v in self.runlist_initials.iter() {
+            curr[v.off] = eval(&v.ast, curr);
+        }
+    }
+
+    fn calc_flows(&self, _dt: f64, curr: &mut [f64]) {
+        for v in self.runlist_flows.iter() {
+            curr[v.off] = eval(&v.ast, curr);
+        }
+    }
+
+    fn calc_stocks(&self, dt: f64, curr: &[f64], next: &mut [f64]) {
+        for v in self.runlist_stocks.iter() {
+            next[v.off] = curr[v.off] + eval(&v.ast, curr) * dt;
+        }
+    }
+}
+
+fn is_truthy(n: f64) -> bool {
+    let is_false = approx_eq!(f64, n, 0.0);
+    !is_false
+}
+
+fn eval(expr: &Expr, curr: &[f64]) -> f64 {
+    match expr {
+        Expr::Const(n) => *n,
+        Expr::Var(off) => curr[*off],
+        Expr::If(cond, t, f) => {
+            let cond: f64 = eval(cond, curr);
+            if is_truthy(cond) {
+                eval(t, curr)
+            } else {
+                eval(f, curr)
+            }
+        }
+        Expr::Op1(op, l) => {
+            let l = eval(l, curr);
+            match op {
+                UnaryOp::Not => (!is_truthy(l)) as i8 as f64,
+            }
+        }
+        Expr::Op2(op, l, r) => {
+            let l = eval(l, curr);
+            let r = eval(r, curr);
+            match op {
+                BinaryOp::Add => l + r,
+                BinaryOp::Sub => l - r,
+                BinaryOp::Exp => l.powf(r),
+                BinaryOp::Mul => l * r,
+                BinaryOp::Div => l / r,
+                BinaryOp::Mod => l.rem_euclid(r),
+                BinaryOp::Gt => (l > r) as i8 as f64,
+                BinaryOp::Gte => (l >= r) as i8 as f64,
+                BinaryOp::Lt => (l < r) as i8 as f64,
+                BinaryOp::Lte => (l <= r) as i8 as f64,
+                BinaryOp::Eq => approx_eq!(f64, l, r) as i8 as f64,
+                BinaryOp::Neq => !approx_eq!(f64, l, r) as i8 as f64,
+                BinaryOp::And => panic!("TODO 'and'"),
+                BinaryOp::Or => panic!("TODO 'or'"),
+            }
+        }
+        _ => 0.0,
+    }
 }
 
 #[derive(Debug)]
@@ -495,7 +558,55 @@ impl Simulation {
         Ok(Simulation { root, specs })
     }
 
+    fn calc_initials(&self, dt: f64, curr: &mut [f64]) {
+        curr[TIME_OFF] = self.specs.start;
+
+        self.root.calc_initials(dt, curr);
+    }
+
+    fn calc_flows(&self, dt: f64, curr: &mut [f64]) {
+        self.root.calc_flows(dt, curr);
+    }
+
+    fn calc_stocks(&self, dt: f64, curr: &[f64], next: &mut [f64]) {
+        next[TIME_OFF] = curr[TIME_OFF] + dt;
+        self.root.calc_stocks(dt, curr, next);
+    }
+
     pub fn run_to_end(&self) -> Result<()> {
+        let spec = &self.specs;
+        if spec.stop < spec.start {
+            return Err(SDError::new(format!(
+                "sim spec stop ({}) < start ({})",
+                spec.stop, spec.start
+            )));
+        }
+        // TODO: we _really_ only need to divide by save_steps, but the borrowing is hard
+        let n_chunks: usize = ((spec.stop - spec.start) / spec.dt + 1.0) as usize;
+
+        // let mut step = 0;
+        // let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5) as i32);
+
+        let slab: Vec<f64> = vec![0.0; self.root.n_slots * (n_chunks + 1)];
+        let mut boxed_slab = slab.into_boxed_slice();
+        let mut slabs = boxed_slab.chunks_mut(self.root.n_slots);
+
+        // let mut results: Vec<&[f64]> = Vec::with_capacity(n_chunks + 1);
+
+        let dt = spec.dt;
+        let stop = spec.stop;
+
+        let mut curr = slabs.next().unwrap();
+        self.calc_initials(dt, curr);
+
+        for next in slabs {
+            self.calc_flows(dt, curr);
+            self.calc_stocks(dt, curr, next);
+            curr = next;
+        }
+        // ensure we've calculated stock + flow values for the dt <= end_time
+        assert!(curr[TIME_OFF] > stop);
+
         Ok(())
     }
 }
