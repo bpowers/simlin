@@ -542,19 +542,7 @@ impl Module {
         // TODO: we can cut this down to just things needed to initialize stocks,
         //   but thats just an optimization
         let runlist_initials: Vec<&Ident> = var_names.clone();
-
-        eprintln!("initials before:");
-        for ident in runlist_initials.iter() {
-            eprintln!("  {}", ident);
-        }
-
         let runlist_initials = topo_sort(&model.variables, initial_deps, runlist_initials);
-
-        eprintln!("initials after:");
-        for ident in runlist_initials.iter() {
-            eprintln!("  {}", ident);
-        }
-
         let runlist_initials: Result<Vec<Var>> = runlist_initials
             .into_iter()
             .map(|id| Var::new(&ctx, &model.variables[&id]))
