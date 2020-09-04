@@ -457,6 +457,44 @@ fn test_invert_deps() {
     assert_eq!(expected, reverse);
 }
 
+fn topo_sort(
+    vars: &HashMap<Ident, Variable>,
+    all_deps: &HashMap<Ident, HashSet<Ident>>,
+    runlist: Vec<&Ident>,
+) -> Vec<Ident> {
+    let runlist_len = runlist.len();
+    let mut result: Vec<Ident> = Vec::with_capacity(runlist_len);
+    // TODO: remove this allocation (should be &str)
+    let mut used: HashSet<Ident> = HashSet::new();
+
+    // We want to do a postorder, recursive traversal of variables to ensure
+    // dependencies are calculated before the variables that reference them.
+    // By this point, we have already errored out if we have e.g. a cycle
+    fn add(
+        vars: &HashMap<String, Variable>,
+        all_deps: &HashMap<Ident, HashSet<Ident>>,
+        result: &mut Vec<Ident>,
+        used: &mut HashSet<Ident>,
+        ident: &Ident,
+    ) {
+        if used.contains(ident) {
+            return;
+        }
+        used.insert(ident.clone());
+        for dep in all_deps[ident].iter() {
+            add(vars, all_deps, result, used, dep)
+        }
+        result.push(ident.clone());
+    }
+
+    for ident in runlist.into_iter() {
+        add(vars, all_deps, &mut result, &mut used, ident)
+    }
+
+    assert_eq!(runlist_len, result.len());
+    result
+}
+
 impl Module {
     fn new(_project: &Project, model: Rc<Model>, is_root: bool) -> Result<Self> {
         if model.dt_deps.is_none() || model.initial_deps.is_none() {
@@ -468,8 +506,8 @@ impl Module {
         // FIXME: not right -- needs to adjust for submodules
         let n_slots = model.variables.len() + 1; // add time in there
 
-        let var_names: Vec<&str> = {
-            let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
+        let var_names: Vec<&Ident> = {
+            let mut var_names: Vec<_> = model.variables.keys().collect();
             // TODO: if we reorder based on dependencies, we could probably improve performance
             //   through better cache behavior.
             var_names.sort();
@@ -494,22 +532,6 @@ impl Module {
             offsets
         };
 
-        fn var_comparator<'a>(
-            deps: &'a HashMap<Ident, HashSet<Ident>>,
-        ) -> impl Fn(&&Variable, &&Variable) -> std::cmp::Ordering + 'a {
-            move |a: &&Variable, b: &&Variable| -> std::cmp::Ordering {
-                let a_name = a.ident();
-                let b_name = b.ident();
-                if deps[b_name].contains(a_name) {
-                    std::cmp::Ordering::Less
-                } else if deps[a_name].contains(b_name) {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            }
-        }
-
         let initial_deps = model.initial_deps.as_ref().unwrap();
         let ctx = Context {
             offsets: &offsets,
@@ -517,14 +539,25 @@ impl Module {
             is_initial: true,
         };
 
-        let mut runlist_initials: Vec<&Variable> =
-            var_names.iter().map(|id| &model.variables[*id]).collect();
+        // TODO: we can cut this down to just things needed to initialize stocks,
+        //   but thats just an optimization
+        let runlist_initials: Vec<&Ident> = var_names.clone();
 
-        runlist_initials.sort_by(var_comparator(initial_deps));
+        eprintln!("initials before:");
+        for ident in runlist_initials.iter() {
+            eprintln!("  {}", ident);
+        }
+
+        let runlist_initials = topo_sort(&model.variables, initial_deps, runlist_initials);
+
+        eprintln!("initials after:");
+        for ident in runlist_initials.iter() {
+            eprintln!("  {}", ident);
+        }
 
         let runlist_initials: Result<Vec<Var>> = runlist_initials
             .into_iter()
-            .map(|v| Var::new(&ctx, v))
+            .map(|id| Var::new(&ctx, &model.variables[&id]))
             .collect();
 
         let dt_deps = model.dt_deps.as_ref().unwrap();
@@ -534,17 +567,15 @@ impl Module {
             is_initial: false,
         };
 
-        let mut runlist_flows: Vec<&Variable> = var_names
+        let runlist_flows: Vec<&Ident> = var_names
             .iter()
-            .map(|id| &model.variables[*id])
-            .filter(|v| !v.is_stock())
+            .cloned()
+            .filter(|id| !(&model.variables[*id]).is_stock())
             .collect();
-
-        runlist_flows.sort_by(var_comparator(dt_deps));
-
+        let runlist_flows = topo_sort(&model.variables, dt_deps, runlist_flows);
         let runlist_flows: Result<Vec<Var>> = runlist_flows
             .into_iter()
-            .map(|v| Var::new(&ctx, v))
+            .map(|id| Var::new(&ctx, &model.variables[&id]))
             .collect();
 
         // no sorting needed for stocks
@@ -624,15 +655,7 @@ fn eval(expr: &Expr, curr: &[f64]) -> f64 {
                 BinaryOp::Eq => approx_eq!(f64, l, r) as i8 as f64,
                 BinaryOp::Neq => !approx_eq!(f64, l, r) as i8 as f64,
                 BinaryOp::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-                BinaryOp::Or => {
-                    eprintln!(
-                        "evaluating '{} OR {}' to '{}'",
-                        l,
-                        r,
-                        (is_truthy(l) || is_truthy(r)) as i8 as f64
-                    );
-                    (is_truthy(l) || is_truthy(r)) as i8 as f64
-                }
+                BinaryOp::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
             }
         }
         _ => 0.0,
