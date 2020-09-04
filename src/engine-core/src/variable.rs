@@ -179,13 +179,21 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 Some(ast) => identifier_set(ast),
                 None => HashSet::new(),
             };
+            let inflows = match &v.inflows {
+                None => Vec::new(),
+                Some(inflows) => inflows.iter().map(|id| canonicalize(id)).collect(),
+            };
+            let outflows = match &v.outflows {
+                None => Vec::new(),
+                Some(outflows) => outflows.iter().map(|id| canonicalize(id)).collect(),
+            };
             Variable::Stock {
                 ident: canonicalize(v.name.as_ref()),
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
-                inflows: v.inflows.clone().unwrap_or_default(),
-                outflows: v.outflows.clone().unwrap_or_default(),
+                inflows,
+                outflows,
                 non_negative: v.non_negative.is_some(),
                 errors,
                 direct_deps,
@@ -356,4 +364,39 @@ fn test_parse() {
         assert!(ast.is_some());
         assert_eq!(case.1, ast.unwrap());
     }
+}
+
+#[test]
+fn test_canonicalize_stock_inflows() {
+    use std::iter::FromIterator;
+
+    let input = xmile::Var::Stock(xmile::Stock {
+        name: "Heat Loss To Room".to_string(),
+        eqn: Some("total_population".to_string()),
+        doc: Some("People who can contract the disease.".to_string()),
+        units: Some("people".to_string()),
+        inflows: Some(vec!["\"Solar Radiation\"".to_string()]),
+        outflows: Some(vec![
+            "\"succumbing\"".to_string(),
+            "\"succumbing 2\"".to_string(),
+        ]),
+        non_negative: None,
+        dimensions: None,
+    });
+
+    let expected = Variable::Stock {
+        ident: "heat_loss_to_room".to_string(),
+        ast: Some(Rc::new(Expr::Var("total_population".to_string()))),
+        eqn: Some("total_population".to_string()),
+        units: Some("people".to_string()),
+        inflows: vec!["solar_radiation".to_string()],
+        outflows: vec!["succumbing".to_string(), "succumbing_2".to_string()],
+        non_negative: false,
+        errors: vec![],
+        direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
+    };
+
+    let output = parse_var(&input);
+
+    assert_eq!(expected, output);
 }
