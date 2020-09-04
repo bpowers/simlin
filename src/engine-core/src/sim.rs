@@ -457,34 +457,34 @@ fn test_invert_deps() {
     assert_eq!(expected, reverse);
 }
 
-fn topo_sort(
-    vars: &HashMap<Ident, Variable>,
-    all_deps: &HashMap<Ident, HashSet<Ident>>,
-    runlist: Vec<&Ident>,
-) -> Vec<Ident> {
+fn topo_sort<'out>(
+    vars: &'out HashMap<Ident, Variable>,
+    all_deps: &'out HashMap<Ident, HashSet<Ident>>,
+    runlist: Vec<&'out str>,
+) -> Vec<&'out str> {
     let runlist_len = runlist.len();
-    let mut result: Vec<Ident> = Vec::with_capacity(runlist_len);
+    let mut result: Vec<&'out str> = Vec::with_capacity(runlist_len);
     // TODO: remove this allocation (should be &str)
-    let mut used: HashSet<Ident> = HashSet::new();
+    let mut used: HashSet<&str> = HashSet::new();
 
     // We want to do a postorder, recursive traversal of variables to ensure
     // dependencies are calculated before the variables that reference them.
     // By this point, we have already errored out if we have e.g. a cycle
-    fn add(
-        vars: &HashMap<String, Variable>,
-        all_deps: &HashMap<Ident, HashSet<Ident>>,
-        result: &mut Vec<Ident>,
-        used: &mut HashSet<Ident>,
-        ident: &Ident,
+    fn add<'a>(
+        vars: &HashMap<Ident, Variable>,
+        all_deps: &'a HashMap<Ident, HashSet<Ident>>,
+        result: &mut Vec<&'a str>,
+        used: &mut HashSet<&'a str>,
+        ident: &'a str,
     ) {
         if used.contains(ident) {
             return;
         }
-        used.insert(ident.clone());
+        used.insert(ident);
         for dep in all_deps[ident].iter() {
             add(vars, all_deps, result, used, dep)
         }
-        result.push(ident.clone());
+        result.push(ident);
     }
 
     for ident in runlist.into_iter() {
@@ -506,8 +506,8 @@ impl Module {
         // FIXME: not right -- needs to adjust for submodules
         let n_slots = model.variables.len() + 1; // add time in there
 
-        let var_names: Vec<&Ident> = {
-            let mut var_names: Vec<_> = model.variables.keys().collect();
+        let var_names: Vec<&str> = {
+            let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
             // TODO: if we reorder based on dependencies, we could probably improve performance
             //   through better cache behavior.
             var_names.sort();
@@ -541,11 +541,11 @@ impl Module {
 
         // TODO: we can cut this down to just things needed to initialize stocks,
         //   but thats just an optimization
-        let runlist_initials: Vec<&Ident> = var_names.clone();
+        let runlist_initials: Vec<&str> = var_names.clone();
         let runlist_initials = topo_sort(&model.variables, initial_deps, runlist_initials);
         let runlist_initials: Result<Vec<Var>> = runlist_initials
             .into_iter()
-            .map(|id| Var::new(&ctx, &model.variables[&id]))
+            .map(|id| Var::new(&ctx, &model.variables[id]))
             .collect();
 
         let dt_deps = model.dt_deps.as_ref().unwrap();
@@ -555,7 +555,7 @@ impl Module {
             is_initial: false,
         };
 
-        let runlist_flows: Vec<&Ident> = var_names
+        let runlist_flows: Vec<&str> = var_names
             .iter()
             .cloned()
             .filter(|id| !(&model.variables[*id]).is_stock())
@@ -563,7 +563,7 @@ impl Module {
         let runlist_flows = topo_sort(&model.variables, dt_deps, runlist_flows);
         let runlist_flows: Result<Vec<Var>> = runlist_flows
             .into_iter()
-            .map(|id| Var::new(&ctx, &model.variables[&id]))
+            .map(|id| Var::new(&ctx, &model.variables[id]))
             .collect();
 
         // no sorting needed for stocks
