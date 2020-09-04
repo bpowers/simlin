@@ -136,8 +136,37 @@ fn lower(ctx: &Context, expr: &ast::Expr) -> Result<Expr> {
     let expr = match expr {
         ast::Expr::Const(_, n) => Expr::Const(*n),
         ast::Expr::Var(id) => Expr::Var(ctx.offsets[id]),
-        ast::Expr::App(id, _args) => {
-            return Err(SDError::new(format!("TODO: apply {}", id)));
+        ast::Expr::App(id, args) => {
+            let args: Result<Vec<Expr>> = args.iter().map(|e| lower(ctx, e)).collect();
+            let args = args?;
+            // TODO: check args length
+            let builtin = match id.as_str() {
+                "lookup" => BuiltinFn::Lookup,
+                "abs" => BuiltinFn::Abs,
+                "arccos" => BuiltinFn::Arccos,
+                "arcsin" => BuiltinFn::Arcsin,
+                "arctan" => BuiltinFn::Arctan,
+                "cos" => BuiltinFn::Cos,
+                "exp" => BuiltinFn::Exp,
+                "inf" => BuiltinFn::Inf,
+                "int" => BuiltinFn::Int,
+                "ln" => BuiltinFn::Ln,
+                "log10" => BuiltinFn::Log10,
+                "max" => BuiltinFn::Max,
+                "min" => BuiltinFn::Min,
+                "pi" => {
+                    return Ok(Expr::Const(std::f64::consts::PI));
+                }
+                "pulse" => BuiltinFn::Pulse,
+                "safediv" => BuiltinFn::Safediv,
+                "sin" => BuiltinFn::Sin,
+                "sqrt" => BuiltinFn::Sqrt,
+                "tan" => BuiltinFn::Tan,
+                _ => {
+                    return Err(SDError::new(format!("TODO: builtin function '{}'", id)));
+                }
+            };
+            Expr::App(builtin, args)
         }
         ast::Expr::Op1(op, l) => {
             let l = lower(ctx, l)?;
@@ -165,7 +194,7 @@ fn lower(ctx: &Context, expr: &ast::Expr) -> Result<Expr> {
                 ast::BinaryOp::Lte => Expr::Op2(BinaryOp::Lte, Box::new(l), Box::new(r)),
                 ast::BinaryOp::Eq => Expr::Op2(BinaryOp::Eq, Box::new(l), Box::new(r)),
                 ast::BinaryOp::Neq => Expr::Op2(BinaryOp::Neq, Box::new(l), Box::new(r)),
-                ast::BinaryOp::And => Expr::Op2(BinaryOp::Add, Box::new(l), Box::new(r)),
+                ast::BinaryOp::And => Expr::Op2(BinaryOp::And, Box::new(l), Box::new(r)),
                 ast::BinaryOp::Or => Expr::Op2(BinaryOp::Or, Box::new(l), Box::new(r)),
             }
         }
@@ -178,6 +207,81 @@ fn lower(ctx: &Context, expr: &ast::Expr) -> Result<Expr> {
     };
 
     Ok(expr)
+}
+
+#[test]
+fn test_lower() {
+    let input = {
+        use ast::BinaryOp::*;
+        use ast::Expr::*;
+        Rc::new(If(
+            Rc::new(Op2(
+                And,
+                Rc::new(Var("true_input".to_string())),
+                Rc::new(Var("false_input".to_string())),
+            )),
+            Rc::new(Const("1".to_string(), 1.0)),
+            Rc::new(Const("0".to_string(), 0.0)),
+        ))
+    };
+
+    let mut offsets: HashMap<String, usize> = HashMap::new();
+    offsets.insert("true_input".to_string(), 7);
+    offsets.insert("false_input".to_string(), 8);
+    let context = Context {
+        is_initial: false,
+        offsets: &offsets,
+        reverse_deps: HashMap::new(),
+    };
+    let expected = Expr::If(
+        Box::new(Expr::Op2(
+            BinaryOp::And,
+            Box::new(Expr::Var(7)),
+            Box::new(Expr::Var(8)),
+        )),
+        Box::new(Expr::Const(1.0)),
+        Box::new(Expr::Const(0.0)),
+    );
+
+    let output = lower(&context, &input);
+    assert!(output.is_ok());
+    assert_eq!(expected, output.unwrap());
+
+    let input = {
+        use ast::BinaryOp::*;
+        use ast::Expr::*;
+        Rc::new(If(
+            Rc::new(Op2(
+                Or,
+                Rc::new(Var("true_input".to_string())),
+                Rc::new(Var("false_input".to_string())),
+            )),
+            Rc::new(Const("1".to_string(), 1.0)),
+            Rc::new(Const("0".to_string(), 0.0)),
+        ))
+    };
+
+    let mut offsets: HashMap<String, usize> = HashMap::new();
+    offsets.insert("true_input".to_string(), 7);
+    offsets.insert("false_input".to_string(), 8);
+    let context = Context {
+        is_initial: false,
+        offsets: &offsets,
+        reverse_deps: HashMap::new(),
+    };
+    let expected = Expr::If(
+        Box::new(Expr::Op2(
+            BinaryOp::Or,
+            Box::new(Expr::Var(7)),
+            Box::new(Expr::Var(8)),
+        )),
+        Box::new(Expr::Const(1.0)),
+        Box::new(Expr::Const(0.0)),
+    );
+
+    let output = lower(&context, &input);
+    assert!(output.is_ok());
+    assert_eq!(expected, output.unwrap());
 }
 
 #[derive(Debug, PartialEq)]
@@ -519,8 +623,16 @@ fn eval(expr: &Expr, curr: &[f64]) -> f64 {
                 BinaryOp::Lte => (l <= r) as i8 as f64,
                 BinaryOp::Eq => approx_eq!(f64, l, r) as i8 as f64,
                 BinaryOp::Neq => !approx_eq!(f64, l, r) as i8 as f64,
-                BinaryOp::And => panic!("TODO 'and'"),
-                BinaryOp::Or => panic!("TODO 'or'"),
+                BinaryOp::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
+                BinaryOp::Or => {
+                    eprintln!(
+                        "evaluating '{} OR {}' to '{}'",
+                        l,
+                        r,
+                        (is_truthy(l) || is_truthy(r)) as i8 as f64
+                    );
+                    (is_truthy(l) || is_truthy(r)) as i8 as f64
+                }
             }
         }
         _ => 0.0,

@@ -343,6 +343,16 @@ fn test_parse() {
         Rc::new(Const("0".to_string(), 0.0)),
     ));
 
+    let if4 = Rc::new(If(
+        Rc::new(Op2(
+            And,
+            Rc::new(Var("true_input".to_string())),
+            Rc::new(Var("false_input".to_string())),
+        )),
+        Rc::new(Const("1".to_string(), 1.0)),
+        Rc::new(Const("0".to_string(), 0.0)),
+    ));
+
     let quoting_eq = Rc::new(Op2(
         Eq,
         Rc::new(Var("oh_dear".to_string())),
@@ -354,6 +364,10 @@ fn test_parse() {
         ("if blerg = foo then 2 else 3", if2),
         ("IF quotient = quotient_target THEN 1 ELSE 0", if3.clone()),
         ("(IF quotient = quotient_target THEN 1 ELSE 0)", if3.clone()),
+        (
+            "( IF true_input and false_input THEN 1 ELSE 0 )",
+            if4.clone(),
+        ),
         ("\"oh dear\" = oh_dear", quoting_eq.clone()),
     ];
 
