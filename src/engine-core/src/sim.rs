@@ -529,10 +529,46 @@ fn eval(expr: &Expr, curr: &[f64]) -> f64 {
 
 #[derive(Debug)]
 pub struct Results {
+    offsets: HashMap<String, usize>,
     // one large allocation
     data: Box<[f64]>,
     step_size: usize,
     step_count: usize,
+}
+
+impl Results {
+    pub fn print_tsv(&self) {
+        let var_names = {
+            let offset_name_map: HashMap<usize, &str> =
+                self.offsets.iter().map(|(k, v)| (*v, k.as_str())).collect();
+            let mut var_names: Vec<&str> = Vec::with_capacity(self.step_size);
+            for i in 0..(self.step_size) {
+                var_names.push(offset_name_map[&i]);
+            }
+            var_names
+        };
+
+        // print header
+        for (i, id) in var_names.iter().enumerate() {
+            print!("{}", id);
+            if i == var_names.len() - 1 {
+                println!();
+            } else {
+                print!("\t");
+            }
+        }
+
+        for curr in self.data.chunks(self.step_size) {
+            for (i, val) in curr.iter().enumerate() {
+                print!("{}", val);
+                if i == var_names.len() - 1 {
+                    println!();
+                } else {
+                    print!("\t");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -625,7 +661,7 @@ impl Simulation {
                 boxed_results_slab.chunks_mut(self.root.n_slots).collect();
 
             for curr in boxed_slab.chunks(self.root.n_slots) {
-                if curr[TIME_OFF] >= stop {
+                if curr[TIME_OFF] > stop {
                     break;
                 }
                 if step % save_every == 0 {
@@ -637,6 +673,7 @@ impl Simulation {
         }
 
         Ok(Results {
+            offsets: self.root.offsets.clone(),
             data: boxed_results_slab,
             step_size: self.root.n_slots,
             step_count: n_save_chunks,

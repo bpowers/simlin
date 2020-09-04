@@ -85,6 +85,8 @@ fn roundtrips_model() {
         let model = project.models.get("main").unwrap().clone();
         let sim = Simulation::new(&project, model).unwrap();
         let results = sim.run_to_end();
-        assert!(results.is_ok());
+        let results = results.unwrap();
+        results.print_tsv();
+        assert!(true);
     }
 }
