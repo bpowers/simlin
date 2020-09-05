@@ -128,15 +128,15 @@ pub enum Expr {
 
 struct Context<'a> {
     is_initial: bool,
-    offsets: &'a HashMap<String, usize>,
-    reverse_deps: HashMap<String, HashSet<String>>,
+    offsets: &'a HashMap<&'a str, usize>,
+    reverse_deps: HashMap<&'a str, HashSet<&'a str>>,
 }
 
 impl<'a> Context<'a> {
     fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
         let expr = match expr {
             ast::Expr::Const(_, n) => Expr::Const(*n),
-            ast::Expr::Var(id) => Expr::Var(self.offsets[id]),
+            ast::Expr::Var(id) => Expr::Var(self.offsets[id.as_str()]),
             ast::Expr::App(id, args) => {
                 let args: Result<Vec<Expr>> = args.iter().map(|e| self.lower(e)).collect();
                 let args = args?;
@@ -215,7 +215,9 @@ impl<'a> Context<'a> {
             return None;
         }
 
-        let mut loads = flows.iter().map(|flow| Expr::Var(self.offsets[flow]));
+        let mut loads = flows
+            .iter()
+            .map(|flow| Expr::Var(self.offsets[flow.as_str()]));
 
         let first = loads.next().unwrap();
         Some(loads.fold(first, |acc, flow| {
@@ -268,9 +270,9 @@ fn test_lower() {
         ))
     };
 
-    let mut offsets: HashMap<String, usize> = HashMap::new();
-    offsets.insert("true_input".to_string(), 7);
-    offsets.insert("false_input".to_string(), 8);
+    let mut offsets: HashMap<&str, usize> = HashMap::new();
+    offsets.insert("true_input", 7);
+    offsets.insert("false_input", 8);
     let context = Context {
         is_initial: false,
         offsets: &offsets,
@@ -304,9 +306,9 @@ fn test_lower() {
         ))
     };
 
-    let mut offsets: HashMap<String, usize> = HashMap::new();
-    offsets.insert("true_input".to_string(), 7);
-    offsets.insert("false_input".to_string(), 8);
+    let mut offsets: HashMap<&str, usize> = HashMap::new();
+    offsets.insert("true_input", 7);
+    offsets.insert("false_input", 8);
     let context = Context {
         is_initial: false,
         offsets: &offsets,
@@ -338,8 +340,8 @@ fn test_fold_flows() {
     use std::iter::FromIterator;
 
     let offsets: &[(&str, usize)] = &[("time", 0), ("a", 1), ("b", 2), ("c", 3), ("d", 4)];
-    let offsets: HashMap<String, usize> =
-        HashMap::from_iter(offsets.into_iter().map(|(k, v)| (k.to_string(), *v)));
+    let offsets: HashMap<&str, usize> =
+        HashMap::from_iter(offsets.into_iter().map(|(k, v)| (*k, *v)));
     let ctx = Context {
         is_initial: false,
         offsets: &offsets,
@@ -360,7 +362,7 @@ fn test_fold_flows() {
 
 impl Var {
     fn new(ctx: &Context, var: &Variable) -> Result<Self> {
-        let off = ctx.offsets[var.ident()];
+        let off = ctx.offsets[var.ident().as_str()];
         let ast = match var {
             Variable::Module { .. } => {
                 return Err(SDError::new(format!(
@@ -404,18 +406,20 @@ pub struct Module {
     offsets: HashMap<String, usize>,
 }
 
-fn invert_deps(forward: &HashMap<String, HashSet<String>>) -> HashMap<String, HashSet<String>> {
-    let mut reverse: HashMap<String, HashSet<String>> = HashMap::new();
-    for (ident, deps) in forward.iter() {
+fn invert_deps<'a>(
+    forward: &'a HashMap<String, HashSet<String>>,
+) -> HashMap<&'a str, HashSet<&'a str>> {
+    let mut reverse: HashMap<&'a str, HashSet<&'a str>> = HashMap::new();
+    for (ident, deps) in forward.iter().map(|(id, deps)| (id.as_str(), deps)) {
         if !reverse.contains_key(ident) {
-            reverse.insert(ident.clone(), HashSet::new());
+            reverse.insert(ident, HashSet::new());
         }
-        for dep in deps {
+        for dep in deps.iter().map(|s| s.as_str()) {
             if !reverse.contains_key(dep) {
-                reverse.insert(dep.clone(), HashSet::new());
+                reverse.insert(dep, HashSet::new());
             }
 
-            reverse.get_mut(dep).unwrap().insert(ident.clone());
+            reverse.get_mut(dep).unwrap().insert(ident);
         }
     }
     reverse
@@ -423,16 +427,11 @@ fn invert_deps(forward: &HashMap<String, HashSet<String>>) -> HashMap<String, Ha
 
 #[test]
 fn test_invert_deps() {
-    fn mapify(input: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
+    fn mapify<'a>(input: &'a [(&'a str, &[&'a str])]) -> HashMap<&'a str, HashSet<&'a str>> {
         use std::iter::FromIterator;
         input
             .into_iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string(),
-                    HashSet::from_iter(v.into_iter().map(|s| s.to_string())),
-                )
-            })
+            .map(|(k, v)| (*k, HashSet::from_iter(v.into_iter().map(|s| *s))))
             .collect()
     }
 
@@ -443,6 +442,10 @@ fn test_invert_deps() {
         ("e", &[]),
     ];
     let forward = mapify(forward);
+    let forward: HashMap<String, HashSet<String>> = forward
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+        .collect();
 
     let reverse = invert_deps(&forward);
 
@@ -516,10 +519,10 @@ impl Module {
             var_names
         };
 
-        let offsets: HashMap<String, usize> = {
+        let offsets: HashMap<&str, usize> = {
             let mut offsets = HashMap::new();
             let base: usize = if is_root {
-                offsets.insert("time".to_string(), 0);
+                offsets.insert("time", 0);
                 1
             } else {
                 0
@@ -528,7 +531,7 @@ impl Module {
                 var_names
                     .iter()
                     .enumerate()
-                    .map(|(i, ident)| (ident.to_string(), base + i)),
+                    .map(|(i, ident)| (*ident, base + i)),
             );
 
             offsets
@@ -582,7 +585,10 @@ impl Module {
             runlist_initials: runlist_initials?,
             runlist_flows: runlist_flows?,
             runlist_stocks: runlist_stocks?,
-            offsets,
+            offsets: offsets
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
         })
     }
 
