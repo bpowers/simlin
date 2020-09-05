@@ -126,87 +126,89 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
-pub struct Context<'a> {
+struct Context<'a> {
     is_initial: bool,
     offsets: &'a HashMap<String, usize>,
     reverse_deps: HashMap<String, HashSet<String>>,
 }
 
-fn lower(ctx: &Context, expr: &ast::Expr) -> Result<Expr> {
-    let expr = match expr {
-        ast::Expr::Const(_, n) => Expr::Const(*n),
-        ast::Expr::Var(id) => Expr::Var(ctx.offsets[id]),
-        ast::Expr::App(id, args) => {
-            let args: Result<Vec<Expr>> = args.iter().map(|e| lower(ctx, e)).collect();
-            let args = args?;
-            // TODO: check args length
-            let builtin = match id.as_str() {
-                "lookup" => BuiltinFn::Lookup,
-                "abs" => BuiltinFn::Abs,
-                "arccos" => BuiltinFn::Arccos,
-                "arcsin" => BuiltinFn::Arcsin,
-                "arctan" => BuiltinFn::Arctan,
-                "cos" => BuiltinFn::Cos,
-                "exp" => BuiltinFn::Exp,
-                "inf" => BuiltinFn::Inf,
-                "int" => BuiltinFn::Int,
-                "ln" => BuiltinFn::Ln,
-                "log10" => BuiltinFn::Log10,
-                "max" => BuiltinFn::Max,
-                "min" => BuiltinFn::Min,
-                "pi" => {
-                    return Ok(Expr::Const(std::f64::consts::PI));
-                }
-                "pulse" => BuiltinFn::Pulse,
-                "safediv" => BuiltinFn::Safediv,
-                "sin" => BuiltinFn::Sin,
-                "sqrt" => BuiltinFn::Sqrt,
-                "tan" => BuiltinFn::Tan,
-                _ => {
-                    return Err(SDError::new(format!("TODO: builtin function '{}'", id)));
-                }
-            };
-            Expr::App(builtin, args)
-        }
-        ast::Expr::Op1(op, l) => {
-            let l = lower(ctx, l)?;
-            match op {
-                ast::UnaryOp::Negative => {
-                    Expr::Op2(BinaryOp::Sub, Box::new(Expr::Const(0.0)), Box::new(l))
-                }
-                ast::UnaryOp::Positive => l,
-                ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l)),
+impl<'a> Context<'a> {
+    fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
+        let expr = match expr {
+            ast::Expr::Const(_, n) => Expr::Const(*n),
+            ast::Expr::Var(id) => Expr::Var(self.offsets[id]),
+            ast::Expr::App(id, args) => {
+                let args: Result<Vec<Expr>> = args.iter().map(|e| self.lower(e)).collect();
+                let args = args?;
+                // TODO: check args length
+                let builtin = match id.as_str() {
+                    "lookup" => BuiltinFn::Lookup,
+                    "abs" => BuiltinFn::Abs,
+                    "arccos" => BuiltinFn::Arccos,
+                    "arcsin" => BuiltinFn::Arcsin,
+                    "arctan" => BuiltinFn::Arctan,
+                    "cos" => BuiltinFn::Cos,
+                    "exp" => BuiltinFn::Exp,
+                    "inf" => BuiltinFn::Inf,
+                    "int" => BuiltinFn::Int,
+                    "ln" => BuiltinFn::Ln,
+                    "log10" => BuiltinFn::Log10,
+                    "max" => BuiltinFn::Max,
+                    "min" => BuiltinFn::Min,
+                    "pi" => {
+                        return Ok(Expr::Const(std::f64::consts::PI));
+                    }
+                    "pulse" => BuiltinFn::Pulse,
+                    "safediv" => BuiltinFn::Safediv,
+                    "sin" => BuiltinFn::Sin,
+                    "sqrt" => BuiltinFn::Sqrt,
+                    "tan" => BuiltinFn::Tan,
+                    _ => {
+                        return Err(SDError::new(format!("TODO: builtin function '{}'", id)));
+                    }
+                };
+                Expr::App(builtin, args)
             }
-        }
-        ast::Expr::Op2(op, l, r) => {
-            let l = lower(ctx, l)?;
-            let r = lower(ctx, r)?;
-            match op {
-                ast::BinaryOp::Add => Expr::Op2(BinaryOp::Add, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Sub => Expr::Op2(BinaryOp::Sub, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Exp => Expr::Op2(BinaryOp::Exp, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Mul => Expr::Op2(BinaryOp::Mul, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Div => Expr::Op2(BinaryOp::Div, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Mod => Expr::Op2(BinaryOp::Mod, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Gt => Expr::Op2(BinaryOp::Gt, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Gte => Expr::Op2(BinaryOp::Gte, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Lt => Expr::Op2(BinaryOp::Lt, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Lte => Expr::Op2(BinaryOp::Lte, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Eq => Expr::Op2(BinaryOp::Eq, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Neq => Expr::Op2(BinaryOp::Neq, Box::new(l), Box::new(r)),
-                ast::BinaryOp::And => Expr::Op2(BinaryOp::And, Box::new(l), Box::new(r)),
-                ast::BinaryOp::Or => Expr::Op2(BinaryOp::Or, Box::new(l), Box::new(r)),
+            ast::Expr::Op1(op, l) => {
+                let l = self.lower(l)?;
+                match op {
+                    ast::UnaryOp::Negative => {
+                        Expr::Op2(BinaryOp::Sub, Box::new(Expr::Const(0.0)), Box::new(l))
+                    }
+                    ast::UnaryOp::Positive => l,
+                    ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l)),
+                }
             }
-        }
-        ast::Expr::If(cond, t, f) => {
-            let cond = lower(ctx, cond)?;
-            let t = lower(ctx, t)?;
-            let f = lower(ctx, f)?;
-            Expr::If(Box::new(cond), Box::new(t), Box::new(f))
-        }
-    };
+            ast::Expr::Op2(op, l, r) => {
+                let l = self.lower(l)?;
+                let r = self.lower(r)?;
+                match op {
+                    ast::BinaryOp::Add => Expr::Op2(BinaryOp::Add, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Sub => Expr::Op2(BinaryOp::Sub, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Exp => Expr::Op2(BinaryOp::Exp, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Mul => Expr::Op2(BinaryOp::Mul, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Div => Expr::Op2(BinaryOp::Div, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Mod => Expr::Op2(BinaryOp::Mod, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Gt => Expr::Op2(BinaryOp::Gt, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Gte => Expr::Op2(BinaryOp::Gte, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Lt => Expr::Op2(BinaryOp::Lt, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Lte => Expr::Op2(BinaryOp::Lte, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Eq => Expr::Op2(BinaryOp::Eq, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Neq => Expr::Op2(BinaryOp::Neq, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::And => Expr::Op2(BinaryOp::And, Box::new(l), Box::new(r)),
+                    ast::BinaryOp::Or => Expr::Op2(BinaryOp::Or, Box::new(l), Box::new(r)),
+                }
+            }
+            ast::Expr::If(cond, t, f) => {
+                let cond = self.lower(cond)?;
+                let t = self.lower(t)?;
+                let f = self.lower(f)?;
+                Expr::If(Box::new(cond), Box::new(t), Box::new(f))
+            }
+        };
 
-    Ok(expr)
+        Ok(expr)
+    }
 }
 
 #[test]
@@ -243,7 +245,7 @@ fn test_lower() {
         Box::new(Expr::Const(0.0)),
     );
 
-    let output = lower(&context, &input);
+    let output = context.lower(&input);
     assert!(output.is_ok());
     assert_eq!(expected, output.unwrap());
 
@@ -279,7 +281,7 @@ fn test_lower() {
         Box::new(Expr::Const(0.0)),
     );
 
-    let output = lower(&context, &input);
+    let output = context.lower(&input);
     assert!(output.is_ok());
     assert_eq!(expected, output.unwrap());
 }
@@ -357,7 +359,7 @@ fn build_stock_update_expr(ctx: &Context, var: &Variable) -> Result<Expr> {
 }
 
 impl Var {
-    pub fn new(ctx: &Context, var: &Variable) -> Result<Self> {
+    fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         let off = ctx.offsets[var.ident()];
         let ast = match var {
             Variable::Module { .. } => {
@@ -374,14 +376,14 @@ impl Var {
                             var.ident()
                         )));
                     }
-                    lower(ctx, ast.as_ref().unwrap())?
+                    ctx.lower(ast.as_ref().unwrap())?
                 } else {
                     build_stock_update_expr(ctx, var)?
                 }
             }
             Variable::Var { ast, .. } => {
                 if let Some(ast) = ast {
-                    lower(ctx, ast)?
+                    ctx.lower(ast)?
                 } else {
                     return Err(SDError::new(format!("missing AST for {}", var.ident())));
                 }
