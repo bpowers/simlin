@@ -12,6 +12,8 @@ pub type Ident = String;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
+    DoesNotExist, // the named entity doesn't exist
+    XmlDeserialization,
     InvalidToken,
     UnrecognizedEOF,
     UnrecognizedToken,
@@ -19,12 +21,19 @@ pub enum ErrorCode {
     UnclosedComment,
     UnclosedQuotedIdent,
     ExpectedNumber,
+    UnknownBuiltin,
+    EmptyEquation,
+    TODOModules,
+    NotSimulatable,
+    BadSimSpecs,
 }
 
 impl fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use ErrorCode::*;
         let name = match self {
+            DoesNotExist => "does_not_exist",
+            XmlDeserialization => "xml_deserialization",
             InvalidToken => "invalid_token",
             UnrecognizedEOF => "unrecognized_eof",
             UnrecognizedToken => "unrecognized_token",
@@ -32,6 +41,11 @@ impl fmt::Display for ErrorCode {
             UnclosedComment => "unclosed_comment",
             UnclosedQuotedIdent => "unclosed_quoted_ident",
             ExpectedNumber => "expected_number",
+            UnknownBuiltin => "unknown_builtin",
+            EmptyEquation => "empty_equation",
+            TODOModules => "TODO_modules",
+            NotSimulatable => "not_simulatable",
+            BadSimSpecs => "bad_sim_specs",
         };
 
         write!(f, "{}", name)
@@ -68,6 +82,7 @@ macro_rules! die(
         std::process::exit(1/*EXIT_FAILURE*/)
     } }
 );
+
 #[macro_export]
 macro_rules! err(
     ($($arg:tt)*) => { {
@@ -76,10 +91,63 @@ macro_rules! err(
     } }
 );
 
+macro_rules! import_err(
+    ($code:tt, $str:expr) => {{
+        use crate::common::{Error, ErrorCode};
+        Err(Error::ImportError(ErrorCode::$code, $str))
+    }}
+);
+
+macro_rules! model_err(
+    ($code:tt, $str:expr) => {{
+        use crate::common::{Error, ErrorCode};
+        Err(Error::ModelError(ErrorCode::$code, $str))
+    }}
+);
+
+macro_rules! var_err(
+    ($code:tt, $str:expr) => {{
+        use crate::common::{Error, ErrorCode};
+        Err(Error::VariableError(ErrorCode::$code, $str))
+    }}
+);
+
+macro_rules! sim_err(
+    ($code:tt, $str:expr) => {{
+        use crate::common::{Error, ErrorCode};
+        Err(Error::SimulationError(ErrorCode::$code, $str))
+    }}
+);
+
 #[derive(Debug)]
 pub struct SDError {
     msg: String,
 }
+
+type ModelName = String;
+type VariableName = String;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    // error reading XML file or hydrating xmile structures
+    ImportError(ErrorCode, String),
+    ModelError(ErrorCode, ModelName),
+    VariableError(ErrorCode, VariableName),
+    SimulationError(ErrorCode, VariableName),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::ImportError(code, msg) => write!(f, "ImportError{{{}: {}}}", msg, code),
+            Error::ModelError(code, model) => write!(f, "ModelError{{{}: {}}}", model, code),
+            Error::VariableError(code, var) => write!(f, "VariableError{{{}: {}}}", var, code),
+            Error::SimulationError(code, var) => write!(f, "SimulationError{{{}: {}}}", var, code),
+        }
+    }
+}
+
+impl error::Error for Error {}
 
 impl SDError {
     pub fn new(msg: String) -> SDError {
@@ -115,7 +183,7 @@ impl From<core::num::ParseFloatError> for SDError {
     }
 }
 
-pub type Result<T> = result::Result<T, SDError>;
+pub type Result<T> = result::Result<T, Error>;
 
 pub fn canonicalize(name: &str) -> String {
     // remove leading and trailing whitespace, do this before testing

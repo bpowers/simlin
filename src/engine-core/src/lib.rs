@@ -43,7 +43,6 @@ use std::rc::Rc;
 use self::common::Result;
 
 pub use self::sim::Simulation;
-use common::SDError;
 
 pub struct Project {
     pub name: String,
@@ -70,7 +69,7 @@ impl Project {
         let file: xmile::File = match de::from_reader(reader) {
             Ok(file) => file,
             Err(err) => {
-                return Err(SDError::new(err.to_string()));
+                return import_err!(XmlDeserialization, err.to_string());
             }
         };
 
@@ -101,7 +100,7 @@ impl Project {
 
     pub fn new_sim(&self, model_name: &str) -> Result<Simulation> {
         if !self.models.contains_key(model_name) {
-            return err!("unknown model");
+            return sim_err!(DoesNotExist, model_name.to_string());
         }
 
         // get reference to model, increasing refcount

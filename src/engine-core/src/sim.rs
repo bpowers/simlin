@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast;
-use crate::common::{Ident, Result, SDError};
+use crate::common::{Ident, Result};
 use crate::model::Model;
 use crate::variable::Variable;
 use crate::xmile;
@@ -127,9 +127,10 @@ pub enum Expr {
 }
 
 struct Context<'a> {
-    is_initial: bool,
+    ident: &'a str,
     offsets: &'a HashMap<&'a str, usize>,
-    reverse_deps: HashMap<&'a str, HashSet<&'a str>>,
+    reverse_deps: &'a HashMap<&'a str, HashSet<&'a str>>,
+    is_initial: bool,
 }
 
 impl<'a> Context<'a> {
@@ -164,7 +165,7 @@ impl<'a> Context<'a> {
                     "sqrt" => BuiltinFn::Sqrt,
                     "tan" => BuiltinFn::Tan,
                     _ => {
-                        return Err(SDError::new(format!("TODO: builtin function '{}'", id)));
+                        return sim_err!(UnknownBuiltin, self.ident.to_string());
                     }
                 };
                 Expr::App(builtin, args)
@@ -274,9 +275,10 @@ fn test_lower() {
     offsets.insert("true_input", 7);
     offsets.insert("false_input", 8);
     let context = Context {
-        is_initial: false,
+        ident: "test",
         offsets: &offsets,
-        reverse_deps: HashMap::new(),
+        reverse_deps: &HashMap::new(),
+        is_initial: false,
     };
     let expected = Expr::If(
         Box::new(Expr::Op2(
@@ -310,9 +312,10 @@ fn test_lower() {
     offsets.insert("true_input", 7);
     offsets.insert("false_input", 8);
     let context = Context {
-        is_initial: false,
+        ident: "test",
         offsets: &offsets,
-        reverse_deps: HashMap::new(),
+        reverse_deps: &HashMap::new(),
+        is_initial: false,
     };
     let expected = Expr::If(
         Box::new(Expr::Op2(
@@ -343,9 +346,10 @@ fn test_fold_flows() {
     let offsets: HashMap<&str, usize> =
         HashMap::from_iter(offsets.into_iter().map(|(k, v)| (*k, *v)));
     let ctx = Context {
-        is_initial: false,
+        ident: "test",
         offsets: &offsets,
-        reverse_deps: HashMap::new(),
+        reverse_deps: &HashMap::new(),
+        is_initial: false,
     };
 
     assert_eq!(None, ctx.fold_flows(&[]));
@@ -365,18 +369,12 @@ impl Var {
         let off = ctx.offsets[var.ident().as_str()];
         let ast = match var {
             Variable::Module { .. } => {
-                return Err(SDError::new(format!(
-                    "TODO module AST building for {}",
-                    var.ident()
-                )));
+                return sim_err!(TODOModules, var.ident().clone());
             }
             Variable::Stock { ast, .. } => {
                 if ctx.is_initial {
                     if ast.is_none() {
-                        return Err(SDError::new(format!(
-                            "missing initial AST for stock {}",
-                            var.ident()
-                        )));
+                        return sim_err!(EmptyEquation, var.ident().clone());
                     }
                     ctx.lower(ast.as_ref().unwrap())?
                 } else {
@@ -387,7 +385,7 @@ impl Var {
                 if let Some(ast) = ast {
                     ctx.lower(ast)?
                 } else {
-                    return Err(SDError::new(format!("missing AST for {}", var.ident())));
+                    return sim_err!(EmptyEquation, var.ident().clone());
                 }
             }
         };
@@ -503,9 +501,7 @@ fn topo_sort<'out>(
 impl Module {
     fn new(_project: &Project, model: Rc<Model>, is_root: bool) -> Result<Self> {
         if model.dt_deps.is_none() || model.initial_deps.is_none() {
-            return Err(SDError::new(
-                "can't simulate if dependency building failed".to_string(),
-            ));
+            return sim_err!(NotSimulatable, model.name.clone());
         }
 
         // FIXME: not right -- needs to adjust for submodules
@@ -538,11 +534,8 @@ impl Module {
         };
 
         let initial_deps = model.initial_deps.as_ref().unwrap();
-        let ctx = Context {
-            offsets: &offsets,
-            reverse_deps: invert_deps(initial_deps),
-            is_initial: true,
-        };
+        let reverse_deps = &invert_deps(initial_deps);
+        let is_initial = true;
 
         // TODO: we can cut this down to just things needed to initialize stocks,
         //   but thats just an optimization
@@ -550,15 +543,22 @@ impl Module {
         let runlist_initials = topo_sort(&model.variables, initial_deps, runlist_initials);
         let runlist_initials: Result<Vec<Var>> = runlist_initials
             .into_iter()
-            .map(|id| Var::new(&ctx, &model.variables[id]))
+            .map(|ident| {
+                Var::new(
+                    &Context {
+                        ident,
+                        offsets: &offsets,
+                        reverse_deps,
+                        is_initial,
+                    },
+                    &model.variables[ident],
+                )
+            })
             .collect();
 
         let dt_deps = model.dt_deps.as_ref().unwrap();
-        let ctx = Context {
-            offsets: &offsets,
-            reverse_deps: invert_deps(dt_deps),
-            is_initial: false,
-        };
+        let reverse_deps = &invert_deps(dt_deps);
+        let is_initial = false;
 
         let runlist_flows: Vec<&str> = var_names
             .iter()
@@ -568,7 +568,17 @@ impl Module {
         let runlist_flows = topo_sort(&model.variables, dt_deps, runlist_flows);
         let runlist_flows: Result<Vec<Var>> = runlist_flows
             .into_iter()
-            .map(|id| Var::new(&ctx, &model.variables[id]))
+            .map(|ident| {
+                Var::new(
+                    &Context {
+                        ident,
+                        offsets: &offsets,
+                        reverse_deps,
+                        is_initial,
+                    },
+                    &model.variables[ident],
+                )
+            })
             .collect();
 
         // no sorting needed for stocks
@@ -576,7 +586,17 @@ impl Module {
             .iter()
             .map(|id| &model.variables[*id])
             .filter(|v| v.is_stock())
-            .map(|v| Var::new(&ctx, v))
+            .map(|v| {
+                Var::new(
+                    &Context {
+                        ident: v.ident(),
+                        offsets: &offsets,
+                        reverse_deps,
+                        is_initial,
+                    },
+                    v,
+                )
+            })
             .collect();
 
         Ok(Module {
@@ -836,10 +856,7 @@ impl Simulation {
     pub fn run_to_end(&self) -> Result<Results> {
         let spec = &self.specs;
         if spec.stop < spec.start {
-            return Err(SDError::new(format!(
-                "sim spec stop ({}) < start ({})",
-                spec.stop, spec.start
-            )));
+            return sim_err!(BadSimSpecs, "".to_string());
         }
         let n_chunks: usize = ((spec.stop - spec.start) / spec.dt + 1.0) as usize;
 
