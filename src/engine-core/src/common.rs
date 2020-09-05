@@ -2,7 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::convert::From;
 use std::fmt;
 use std::{error, result};
 
@@ -65,29 +64,11 @@ impl fmt::Display for VariableError {
 }
 
 // from https://stackoverflow.com/questions/27588416/how-to-send-output-to-stderr
-#[macro_export]
 macro_rules! eprintln(
     ($($arg:tt)*) => { {
         use std::io::Write;
         let r = writeln!(&mut ::std::io::stderr(), $($arg)*);
         r.expect("failed printing to stderr");
-    } }
-);
-
-#[macro_export]
-macro_rules! die(
-    ($($arg:tt)*) => { {
-        use std;
-        eprintln!($($arg)*);
-        std::process::exit(1/*EXIT_FAILURE*/)
-    } }
-);
-
-#[macro_export]
-macro_rules! err(
-    ($($arg:tt)*) => { {
-        use crate::common::SDError;
-        Err(SDError::new(format!($($arg)*)))
     } }
 );
 
@@ -119,11 +100,6 @@ macro_rules! sim_err(
     }}
 );
 
-#[derive(Debug)]
-pub struct SDError {
-    msg: String,
-}
-
 type ModelName = String;
 type VariableName = String;
 
@@ -148,40 +124,6 @@ impl fmt::Display for Error {
 }
 
 impl error::Error for Error {}
-
-impl SDError {
-    pub fn new(msg: String) -> SDError {
-        SDError { msg }
-    }
-}
-
-impl fmt::Display for SDError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.msg)
-    }
-}
-
-impl error::Error for SDError {
-    fn description(&self) -> &str {
-        &self.msg
-    }
-}
-
-impl From<std::io::Error> for SDError {
-    fn from(err: std::io::Error) -> Self {
-        SDError {
-            msg: format!("io::Error: {:?}", err),
-        }
-    }
-}
-
-impl From<core::num::ParseFloatError> for SDError {
-    fn from(err: core::num::ParseFloatError) -> Self {
-        SDError {
-            msg: format!("ParseFloatError: {:?}", err),
-        }
-    }
-}
 
 pub type Result<T> = result::Result<T, Error>;
 
