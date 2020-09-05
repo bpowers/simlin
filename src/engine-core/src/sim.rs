@@ -697,11 +697,11 @@ fn eval(expr: &Expr, curr: &[f64]) -> f64 {
                     }
                 }
                 BuiltinFn::Lookup => {
-                    eprintln!("TODO: lookup builtin");
+                    // eprintln!("TODO: lookup builtin");
                     0.0
                 }
                 BuiltinFn::Pulse => {
-                    eprintln!("TODO: pulse builtin");
+                    // eprintln!("TODO: pulse builtin");
                     0.0
                 }
             }
