@@ -646,7 +646,66 @@ fn eval(expr: &Expr, curr: &[f64]) -> f64 {
                 BinaryOp::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
             }
         }
-        _ => 0.0,
+        Expr::App(builtin, args) => {
+            match builtin {
+                BuiltinFn::Abs => eval(&args[0], curr).abs(),
+                BuiltinFn::Cos => eval(&args[0], curr).cos(),
+                BuiltinFn::Sin => eval(&args[0], curr).sin(),
+                BuiltinFn::Tan => eval(&args[0], curr).tan(),
+                BuiltinFn::Arccos => eval(&args[0], curr).acos(),
+                BuiltinFn::Arcsin => eval(&args[0], curr).asin(),
+                BuiltinFn::Arctan => eval(&args[0], curr).atan(),
+                BuiltinFn::Exp => eval(&args[0], curr).exp(),
+                BuiltinFn::Inf => std::f64::INFINITY,
+                BuiltinFn::Pi => std::f64::consts::PI,
+                BuiltinFn::Int => eval(&args[0], curr).floor(),
+                BuiltinFn::Ln => eval(&args[0], curr).ln(),
+                BuiltinFn::Log10 => eval(&args[0], curr).log10(),
+                BuiltinFn::Safediv => {
+                    let a = eval(&args[0], curr);
+                    let b = eval(&args[1], curr);
+
+                    if b != 0.0 {
+                        a / b
+                    } else if args.len() > 2 {
+                        eval(&args[2], curr)
+                    } else {
+                        0.0
+                    }
+                }
+                BuiltinFn::Sqrt => eval(&args[0], curr).sqrt(),
+                BuiltinFn::Min => {
+                    let a = eval(&args[0], curr);
+                    let b = eval(&args[1], curr);
+                    // we can't use std::cmp::min here, becuase f64 is only
+                    // PartialOrd
+                    if a < b {
+                        a
+                    } else {
+                        b
+                    }
+                }
+                BuiltinFn::Max => {
+                    let a = eval(&args[0], curr);
+                    let b = eval(&args[1], curr);
+                    // we can't use std::cmp::min here, becuase f64 is only
+                    // PartialOrd
+                    if a > b {
+                        a
+                    } else {
+                        b
+                    }
+                }
+                BuiltinFn::Lookup => {
+                    eprintln!("TODO: lookup builtin");
+                    0.0
+                }
+                BuiltinFn::Pulse => {
+                    eprintln!("TODO: pulse builtin");
+                    0.0
+                }
+            }
+        }
     }
 }
 
