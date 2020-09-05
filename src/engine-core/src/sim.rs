@@ -209,6 +209,47 @@ impl<'a> Context<'a> {
 
         Ok(expr)
     }
+
+    fn fold_flows(&self, flows: &[String]) -> Option<Expr> {
+        if flows.is_empty() {
+            return None;
+        }
+
+        let mut loads = flows.iter().map(|flow| Expr::Var(self.offsets[flow]));
+
+        let first = loads.next().unwrap();
+        Some(loads.fold(first, |acc, flow| {
+            Expr::Op2(BinaryOp::Add, Box::new(acc), Box::new(flow))
+        }))
+    }
+
+    fn build_stock_update_expr(&self, var: &Variable) -> Result<Expr> {
+        if let Variable::Stock {
+            inflows, outflows, ..
+        } = var
+        {
+            // TODO: simplify the expressions we generate
+            let inflows = match self.fold_flows(inflows) {
+                None => Expr::Const(0.0),
+                Some(flows) => flows,
+            };
+            let outflows = match self.fold_flows(outflows) {
+                None => Expr::Const(0.0),
+                Some(flows) => flows,
+            };
+
+            Ok(Expr::Op2(
+                BinaryOp::Sub,
+                Box::new(inflows),
+                Box::new(outflows),
+            ))
+        } else {
+            panic!(
+                "build_stock_update_expr called with non-stock {}",
+                var.ident()
+            );
+        }
+    }
 }
 
 #[test]
@@ -292,19 +333,6 @@ pub struct Var {
     ast: Expr,
 }
 
-fn fold_flows(ctx: &Context, flows: &[String]) -> Option<Expr> {
-    if flows.is_empty() {
-        return None;
-    }
-
-    let mut loads = flows.iter().map(|flow| Expr::Var(ctx.offsets[flow]));
-
-    let first = loads.next().unwrap();
-    Some(loads.fold(first, |acc, flow| {
-        Expr::Op2(BinaryOp::Add, Box::new(acc), Box::new(flow))
-    }))
-}
-
 #[test]
 fn test_fold_flows() {
     use std::iter::FromIterator;
@@ -318,44 +346,16 @@ fn test_fold_flows() {
         reverse_deps: HashMap::new(),
     };
 
-    assert_eq!(None, fold_flows(&ctx, &[]));
-    assert_eq!(Some(Expr::Var(1)), fold_flows(&ctx, &["a".to_string()]));
+    assert_eq!(None, ctx.fold_flows(&[]));
+    assert_eq!(Some(Expr::Var(1)), ctx.fold_flows(&["a".to_string()]));
     assert_eq!(
         Some(Expr::Op2(
             BinaryOp::Add,
             Box::new(Expr::Var(1)),
             Box::new(Expr::Var(4))
         )),
-        fold_flows(&ctx, &["a".to_string(), "d".to_string()])
+        ctx.fold_flows(&["a".to_string(), "d".to_string()])
     );
-}
-
-fn build_stock_update_expr(ctx: &Context, var: &Variable) -> Result<Expr> {
-    if let Variable::Stock {
-        inflows, outflows, ..
-    } = var
-    {
-        // TODO: simplify the expressions we generate
-        let inflows = match fold_flows(ctx, inflows) {
-            None => Expr::Const(0.0),
-            Some(flows) => flows,
-        };
-        let outflows = match fold_flows(ctx, outflows) {
-            None => Expr::Const(0.0),
-            Some(flows) => flows,
-        };
-
-        Ok(Expr::Op2(
-            BinaryOp::Sub,
-            Box::new(inflows),
-            Box::new(outflows),
-        ))
-    } else {
-        panic!(
-            "build_stock_update_expr called with non-stock {}",
-            var.ident()
-        );
-    }
 }
 
 impl Var {
@@ -378,7 +378,7 @@ impl Var {
                     }
                     ctx.lower(ast.as_ref().unwrap())?
                 } else {
-                    build_stock_update_expr(ctx, var)?
+                    ctx.build_stock_update_expr(var)?
                 }
             }
             Variable::Var { ast, .. } => {
