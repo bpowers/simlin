@@ -584,21 +584,21 @@ impl Module {
         })
     }
 
-    fn calc_initials(&self, _dt: f64, curr: &mut [f64]) {
+    fn calc_initials(&self, dt: f64, curr: &mut [f64]) {
         for v in self.runlist_initials.iter() {
-            curr[v.off] = eval(&v.ast, curr);
+            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
         }
     }
 
-    fn calc_flows(&self, _dt: f64, curr: &mut [f64]) {
+    fn calc_flows(&self, dt: f64, curr: &mut [f64]) {
         for v in self.runlist_flows.iter() {
-            curr[v.off] = eval(&v.ast, curr);
+            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
         }
     }
 
     fn calc_stocks(&self, dt: f64, curr: &[f64], next: &mut [f64]) {
         for v in self.runlist_stocks.iter() {
-            next[v.off] = curr[v.off] + eval(&v.ast, curr) * dt;
+            next[v.off] = curr[v.off] + StepEvaluator { dt, curr }.eval(&v.ast) * dt;
         }
     }
 }
@@ -608,101 +608,127 @@ fn is_truthy(n: f64) -> bool {
     !is_false
 }
 
-fn eval(expr: &Expr, curr: &[f64]) -> f64 {
-    match expr {
-        Expr::Const(n) => *n,
-        Expr::Var(off) => curr[*off],
-        Expr::If(cond, t, f) => {
-            let cond: f64 = eval(cond, curr);
-            if is_truthy(cond) {
-                eval(t, curr)
-            } else {
-                eval(f, curr)
-            }
-        }
-        Expr::Op1(op, l) => {
-            let l = eval(l, curr);
-            match op {
-                UnaryOp::Not => (!is_truthy(l)) as i8 as f64,
-            }
-        }
-        Expr::Op2(op, l, r) => {
-            let l = eval(l, curr);
-            let r = eval(r, curr);
-            match op {
-                BinaryOp::Add => l + r,
-                BinaryOp::Sub => l - r,
-                BinaryOp::Exp => l.powf(r),
-                BinaryOp::Mul => l * r,
-                BinaryOp::Div => l / r,
-                BinaryOp::Mod => l.rem_euclid(r),
-                BinaryOp::Gt => (l > r) as i8 as f64,
-                BinaryOp::Gte => (l >= r) as i8 as f64,
-                BinaryOp::Lt => (l < r) as i8 as f64,
-                BinaryOp::Lte => (l <= r) as i8 as f64,
-                BinaryOp::Eq => approx_eq!(f64, l, r) as i8 as f64,
-                BinaryOp::Neq => !approx_eq!(f64, l, r) as i8 as f64,
-                BinaryOp::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-                BinaryOp::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
-            }
-        }
-        Expr::App(builtin, args) => {
-            match builtin {
-                BuiltinFn::Abs => eval(&args[0], curr).abs(),
-                BuiltinFn::Cos => eval(&args[0], curr).cos(),
-                BuiltinFn::Sin => eval(&args[0], curr).sin(),
-                BuiltinFn::Tan => eval(&args[0], curr).tan(),
-                BuiltinFn::Arccos => eval(&args[0], curr).acos(),
-                BuiltinFn::Arcsin => eval(&args[0], curr).asin(),
-                BuiltinFn::Arctan => eval(&args[0], curr).atan(),
-                BuiltinFn::Exp => eval(&args[0], curr).exp(),
-                BuiltinFn::Inf => std::f64::INFINITY,
-                BuiltinFn::Pi => std::f64::consts::PI,
-                BuiltinFn::Int => eval(&args[0], curr).floor(),
-                BuiltinFn::Ln => eval(&args[0], curr).ln(),
-                BuiltinFn::Log10 => eval(&args[0], curr).log10(),
-                BuiltinFn::Safediv => {
-                    let a = eval(&args[0], curr);
-                    let b = eval(&args[1], curr);
+pub struct StepEvaluator<'a> {
+    curr: &'a [f64],
+    dt: f64,
+}
 
-                    if b != 0.0 {
-                        a / b
-                    } else if args.len() > 2 {
-                        eval(&args[2], curr)
-                    } else {
+impl<'a> StepEvaluator<'a> {
+    fn eval(&self, expr: &Expr) -> f64 {
+        match expr {
+            Expr::Const(n) => *n,
+            Expr::Var(off) => self.curr[*off],
+            Expr::If(cond, t, f) => {
+                let cond: f64 = self.eval(cond);
+                if is_truthy(cond) {
+                    self.eval(t)
+                } else {
+                    self.eval(f)
+                }
+            }
+            Expr::Op1(op, l) => {
+                let l = self.eval(l);
+                match op {
+                    UnaryOp::Not => (!is_truthy(l)) as i8 as f64,
+                }
+            }
+            Expr::Op2(op, l, r) => {
+                let l = self.eval(l);
+                let r = self.eval(r);
+                match op {
+                    BinaryOp::Add => l + r,
+                    BinaryOp::Sub => l - r,
+                    BinaryOp::Exp => l.powf(r),
+                    BinaryOp::Mul => l * r,
+                    BinaryOp::Div => l / r,
+                    BinaryOp::Mod => l.rem_euclid(r),
+                    BinaryOp::Gt => (l > r) as i8 as f64,
+                    BinaryOp::Gte => (l >= r) as i8 as f64,
+                    BinaryOp::Lt => (l < r) as i8 as f64,
+                    BinaryOp::Lte => (l <= r) as i8 as f64,
+                    BinaryOp::Eq => approx_eq!(f64, l, r) as i8 as f64,
+                    BinaryOp::Neq => !approx_eq!(f64, l, r) as i8 as f64,
+                    BinaryOp::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
+                    BinaryOp::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+                }
+            }
+            Expr::App(builtin, args) => {
+                match builtin {
+                    BuiltinFn::Abs => self.eval(&args[0]).abs(),
+                    BuiltinFn::Cos => self.eval(&args[0]).cos(),
+                    BuiltinFn::Sin => self.eval(&args[0]).sin(),
+                    BuiltinFn::Tan => self.eval(&args[0]).tan(),
+                    BuiltinFn::Arccos => self.eval(&args[0]).acos(),
+                    BuiltinFn::Arcsin => self.eval(&args[0]).asin(),
+                    BuiltinFn::Arctan => self.eval(&args[0]).atan(),
+                    BuiltinFn::Exp => self.eval(&args[0]).exp(),
+                    BuiltinFn::Inf => std::f64::INFINITY,
+                    BuiltinFn::Pi => std::f64::consts::PI,
+                    BuiltinFn::Int => self.eval(&args[0]).floor(),
+                    BuiltinFn::Ln => self.eval(&args[0]).ln(),
+                    BuiltinFn::Log10 => self.eval(&args[0]).log10(),
+                    BuiltinFn::Safediv => {
+                        let a = self.eval(&args[0]);
+                        let b = self.eval(&args[1]);
+
+                        if b != 0.0 {
+                            a / b
+                        } else if args.len() > 2 {
+                            self.eval(&args[2])
+                        } else {
+                            0.0
+                        }
+                    }
+                    BuiltinFn::Sqrt => self.eval(&args[0]).sqrt(),
+                    BuiltinFn::Min => {
+                        let a = self.eval(&args[0]);
+                        let b = self.eval(&args[1]);
+                        // we can't use std::cmp::min here, becuase f64 is only
+                        // PartialOrd
+                        if a < b {
+                            a
+                        } else {
+                            b
+                        }
+                    }
+                    BuiltinFn::Max => {
+                        let a = self.eval(&args[0]);
+                        let b = self.eval(&args[1]);
+                        // we can't use std::cmp::min here, becuase f64 is only
+                        // PartialOrd
+                        if a > b {
+                            a
+                        } else {
+                            b
+                        }
+                    }
+                    BuiltinFn::Lookup => {
+                        // eprintln!("TODO: lookup builtin");
                         0.0
                     }
-                }
-                BuiltinFn::Sqrt => eval(&args[0], curr).sqrt(),
-                BuiltinFn::Min => {
-                    let a = eval(&args[0], curr);
-                    let b = eval(&args[1], curr);
-                    // we can't use std::cmp::min here, becuase f64 is only
-                    // PartialOrd
-                    if a < b {
-                        a
-                    } else {
-                        b
+                    BuiltinFn::Pulse => {
+                        let time = self.curr[TIME_OFF];
+                        let volume = self.eval(&args[0]);
+                        let first_pulse = self.eval(&args[1]);
+                        let interval = self.eval(&args[2]);
+
+                        if time < first_pulse {
+                            return 0.0;
+                        }
+
+                        let mut next_pulse = first_pulse;
+                        while time >= next_pulse {
+                            if time < next_pulse + self.dt {
+                                return volume / self.dt;
+                            } else if interval <= 0.0 {
+                                break;
+                            } else {
+                                next_pulse += interval;
+                            }
+                        }
+
+                        0.0
                     }
-                }
-                BuiltinFn::Max => {
-                    let a = eval(&args[0], curr);
-                    let b = eval(&args[1], curr);
-                    // we can't use std::cmp::min here, becuase f64 is only
-                    // PartialOrd
-                    if a > b {
-                        a
-                    } else {
-                        b
-                    }
-                }
-                BuiltinFn::Lookup => {
-                    // eprintln!("TODO: lookup builtin");
-                    0.0
-                }
-                BuiltinFn::Pulse => {
-                    // eprintln!("TODO: pulse builtin");
-                    0.0
                 }
             }
         }
