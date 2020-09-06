@@ -805,6 +805,10 @@ impl Results {
             }
         }
     }
+
+    pub fn iter(&self) -> std::slice::Chunks<f64> {
+        self.data.chunks(self.step_size)
+    }
 }
 
 #[derive(Debug)]
