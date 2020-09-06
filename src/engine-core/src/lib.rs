@@ -42,6 +42,7 @@ use std::rc::Rc;
 
 use self::common::Result;
 
+pub use self::common::canonicalize;
 pub use self::sim::Results;
 pub use self::sim::Simulation;
 

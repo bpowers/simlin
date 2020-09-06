@@ -3,14 +3,15 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::iter::FromIterator;
 use std::rc::Rc;
 
-use engine_core::{Project, Results, Simulation};
+use engine_core::{canonicalize, Project, Results, Simulation};
 
-const OUTPUT_FILES: &[&str] = &["output.csv", "output.tab"];
+const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
 // these columns are either Vendor specific or otherwise not important.
 const IGNORABLE_COLS: &[&str] = &[
@@ -62,25 +63,35 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/builtin_min/builtin_min.xmile",
 ];
 
-fn load_csv(file_path: &str) -> Result<Results, Box<dyn std::error::Error>> {
-    let mut rdr = csv::Reader::from_path(file_path)?;
-    let mut records = rdr.records();
+fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .from_path(file_path)?;
 
-    let header = records.next().unwrap()?;
+    let header = rdr.headers().unwrap();
     let offsets: HashMap<String, usize> =
-        HashMap::from_iter(header.iter().enumerate().map(|(i, r)| (r.to_string(), i)));
+        HashMap::from_iter(header.iter().enumerate().map(|(i, r)| (canonicalize(r), i)));
     let step_size = offsets.len();
+    for (id, off) in offsets.iter() {
+        eprintln!("  {}: {}", id, off);
+    }
 
     let mut step_data: Vec<Vec<f64>> = Vec::new();
 
     let mut step_count = 0;
-    for result in records {
+    for result in rdr.records() {
         let record = result?;
 
         let mut row = vec![0.0; step_size];
         for (i, field) in record.iter().enumerate() {
             use std::str::FromStr;
-            row[i] = f64::from_str(field).unwrap();
+            row[i] = match f64::from_str(field.trim()) {
+                Ok(n) => n,
+                Err(err) => {
+                    eprintln!("invalid: '{}'", field.trim());
+                    0.0
+                }
+            };
         }
 
         step_data.push(row);
@@ -97,13 +108,30 @@ fn load_csv(file_path: &str) -> Result<Results, Box<dyn std::error::Error>> {
     })
 }
 
-fn simulate_path(file_path: &str) {
-    let f = File::open(file_path).unwrap();
+fn load_expected_results(xmile_path: &str) -> Results {
+    let xmile_name = std::path::Path::new(xmile_path).file_name().unwrap();
+    let dir_path = &xmile_path[0..(xmile_path.len() - xmile_name.len())];
+    eprintln!("dir path: {}", dir_path);
+    let dir_path = std::path::Path::new(dir_path);
+
+    for (output_file, delimiter) in OUTPUT_FILES.iter() {
+        let output_path = dir_path.join(output_file);
+        if !output_path.exists() {
+            continue;
+        }
+        return load_csv(&output_path.to_string_lossy(), *delimiter).unwrap();
+    }
+
+    panic!("unreachable");
+}
+
+fn simulate_path(xmile_path: &str) {
+    let f = File::open(xmile_path).unwrap();
     let mut f = BufReader::new(f);
 
     let project = Project::from_xmile_reader(&mut f);
     if let Err(ref err) = project {
-        eprintln!("model '{}' error: {}", file_path, err);
+        eprintln!("model '{}' error: {}", xmile_path, err);
     }
     assert!(project.is_ok());
 
@@ -112,6 +140,8 @@ fn simulate_path(file_path: &str) {
     let sim = Simulation::new(&project, model).unwrap();
     let results = sim.run_to_end();
     assert!(results.is_ok());
+
+    let expected_results = load_expected_results(xmile_path);
 
     // verify simulation results
 
