@@ -24,6 +24,7 @@ float-cmp = "0.8"
 
 [dev-dependencies]
 rand = "0.7"
+csv = "1"
 
 [build-dependencies]
 bincode = "1"

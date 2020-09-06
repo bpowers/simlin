@@ -765,11 +765,11 @@ impl<'a> StepEvaluator<'a> {
 
 #[derive(Debug)]
 pub struct Results {
-    offsets: HashMap<String, usize>,
+    pub offsets: HashMap<String, usize>,
     // one large allocation
-    data: Box<[f64]>,
-    step_size: usize,
-    step_count: usize,
+    pub data: Box<[f64]>,
+    pub step_size: usize,
+    pub step_count: usize,
 }
 
 impl Results {
