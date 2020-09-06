@@ -1,3 +1,7 @@
+// Copyright 2020 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
 use std::rc::Rc;
 
 use crate::common::Ident;
@@ -6,10 +10,10 @@ use crate::common::Ident;
 // and we want to avoid copying and reallocating subexpressions all over
 // the place.
 #[derive(PartialEq, Clone, Debug)]
-pub enum Expr {
+pub enum Expr<AppId = Ident> {
     Const(String, f64),
     Var(Ident),
-    App(Ident, Vec<Rc<Expr>>),
+    App(AppId, Vec<Rc<Expr>>),
     Op1(UnaryOp, Rc<Expr>),
     Op2(BinaryOp, Rc<Expr>, Rc<Expr>),
     If(Rc<Expr>, Rc<Expr>, Rc<Expr>),
