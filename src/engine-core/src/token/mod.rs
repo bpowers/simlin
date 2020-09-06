@@ -10,7 +10,7 @@ use unicode_xid::UnicodeXID;
 
 use self::Token::*;
 use crate::common::ErrorCode::*;
-use crate::common::{ErrorCode, VariableError};
+use crate::common::{EquationError, ErrorCode};
 
 #[cfg(test)]
 mod test;
@@ -44,8 +44,8 @@ pub enum Token<'input> {
     Num(&'input str),
 }
 
-fn error<T>(c: ErrorCode, l: usize) -> Result<T, VariableError> {
-    Err(VariableError {
+fn error<T>(c: ErrorCode, l: usize) -> Result<T, EquationError> {
+    Err(EquationError {
         location: l,
         code: c,
     })
@@ -128,7 +128,7 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
+    fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
         let (start, word, end) = self.word(idx0);
         let lower_word = word.to_lowercase();
 
@@ -145,7 +145,7 @@ impl<'input> Lexer<'input> {
         Ok((start, tok, end))
     }
 
-    fn number(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
+    fn number(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
         use regex::{Match, Regex};
 
         lazy_static! {
@@ -162,7 +162,7 @@ impl<'input> Lexer<'input> {
         Ok((idx0, Num(&self.text[idx0..end]), end))
     }
 
-    fn quoted_identifier(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, VariableError> {
+    fn quoted_identifier(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
         // eat the opening '"'
         self.bump();
 
@@ -172,14 +172,14 @@ impl<'input> Lexer<'input> {
                 self.bump();
                 Ok((idx0, Ident(&self.text[idx0 + 1..idx1]), idx1 + 1))
             }
-            None => Err(VariableError {
+            None => Err(EquationError {
                 location: idx0,
                 code: UnclosedQuotedIdent,
             }),
         }
     }
 
-    fn comment_end(&mut self) -> Result<(), VariableError> {
+    fn comment_end(&mut self) -> Result<(), EquationError> {
         let idx0 = self.peek().0;
         match self.take_until(|c| c == '}') {
             Some(_) => {
@@ -191,7 +191,7 @@ impl<'input> Lexer<'input> {
     }
 }
 impl<'input> Iterator for Lexer<'input> {
-    type Item = Result<Spanned<Token<'input>>, VariableError>;
+    type Item = Result<Spanned<Token<'input>>, EquationError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         macro_rules! consume {

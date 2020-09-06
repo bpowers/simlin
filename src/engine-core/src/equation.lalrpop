@@ -4,7 +4,7 @@ use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
 use crate::ast::Expr;
 use crate::ast::Expr::*;
-use crate::common::{self, canonicalize, VariableError};
+use crate::common::{self, canonicalize, EquationError};
 use crate::token::Token;
 
 grammar<'input>(input: &'input str);
@@ -97,7 +97,7 @@ Ident: common::Ident = {
 
 extern {
     type Location = usize;
-    type Error = VariableError;
+    type Error = EquationError;
     enum Token<'input> {
         "if" => Token::If,
         "then" => Token::Then,

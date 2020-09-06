@@ -56,12 +56,12 @@ impl fmt::Display for ErrorCode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VariableError {
+pub struct EquationError {
     pub location: usize,
     pub code: ErrorCode,
 }
 
-impl fmt::Display for VariableError {
+impl fmt::Display for EquationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}", self.location, self.code)
     }
@@ -90,16 +90,16 @@ macro_rules! model_err(
     }}
 );
 
-macro_rules! var_err(
-    ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode};
-        Err(Error::VariableError(ErrorCode::$code, $str, None))
-    }};
-    ($code:tt, $str:expr, $loc:expr) => {{
-        use crate::common::{Error, ErrorCode};
-        Err(Error::VariableError(ErrorCode::$code, $str, Some($loc)))
-    }};
-);
+// macro_rules! var_err(
+//     ($code:tt, $str:expr) => {{
+//         use crate::common::{Error, ErrorCode};
+//         Err(Error::VariableError(ErrorCode::$code, $str, None))
+//     }};
+//     ($code:tt, $str:expr, $loc:expr) => {{
+//         use crate::common::{Error, ErrorCode};
+//         Err(Error::VariableError(ErrorCode::$code, $str, Some($loc)))
+//     }};
+// );
 
 macro_rules! sim_err(
     ($code:tt, $str:expr) => {{

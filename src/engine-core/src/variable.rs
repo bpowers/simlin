@@ -8,7 +8,7 @@ use std::rc::Rc;
 use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
-use crate::common::{canonicalize, Ident, VariableError};
+use crate::common::{canonicalize, EquationError, Error, Ident};
 use crate::xmile;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -29,7 +29,7 @@ pub enum Variable {
         inflows: Vec<Ident>,
         outflows: Vec<Ident>,
         non_negative: bool,
-        errors: Vec<VariableError>,
+        errors: Vec<Error>,
         direct_deps: HashSet<Ident>,
     },
     Var {
@@ -41,14 +41,14 @@ pub enum Variable {
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
-        errors: Vec<VariableError>,
+        errors: Vec<Error>,
         direct_deps: HashSet<Ident>,
     },
     Module {
         ident: Ident,
         units: Option<String>,
         refs: Vec<xmile::Ref>,
-        errors: Vec<VariableError>,
+        errors: Vec<Error>,
         direct_deps: HashSet<Ident>,
     },
 }
@@ -91,7 +91,7 @@ impl Variable {
         }
     }
 
-    pub fn errors(&self) -> Option<&Vec<VariableError>> {
+    pub fn errors(&self) -> Option<&Vec<Error>> {
         let errors = match self {
             Variable::Stock { errors: e, .. } => e,
             Variable::Var { errors: e, .. } => e,
@@ -104,17 +104,9 @@ impl Variable {
 
         Some(errors)
     }
-
-    fn add_error(&mut self, err: VariableError) {
-        match self {
-            Variable::Stock { errors: e, .. } => e.push(err),
-            Variable::Var { errors: e, .. } => e.push(err),
-            Variable::Module { errors: e, .. } => e.push(err),
-        };
-    }
 }
 
-fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<VariableError>) {
+fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<EquationError>) {
     let mut errs = Vec::new();
 
     if eqn.is_none() {
@@ -129,7 +121,7 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<VariableError>
         Err(err) => {
             use crate::common::ErrorCode::*;
             let err = match err {
-                ParseError::InvalidToken { location: l } => VariableError {
+                ParseError::InvalidToken { location: l } => EquationError {
                     location: l,
                     code: InvalidToken,
                 },
@@ -143,7 +135,7 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<VariableError>
                         return (None, errs);
                     }
                     eprintln!("unrecognized eof, expected: {:?}", e);
-                    VariableError {
+                    EquationError {
                         location: l,
                         code: UnrecognizedEOF,
                     }
@@ -152,12 +144,12 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<VariableError>
                     token: (l, t, r), ..
                 } => {
                     eprintln!("unrecognized tok: {:?} {} {}", t, l, r);
-                    VariableError {
+                    EquationError {
                         location: l,
                         code: UnrecognizedToken,
                     }
                 }
-                ParseError::ExtraToken { .. } => VariableError {
+                ParseError::ExtraToken { .. } => EquationError {
                     location: eqn.len(),
                     code: ExtraToken,
                 },
@@ -187,8 +179,13 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 None => Vec::new(),
                 Some(outflows) => outflows.iter().map(|id| canonicalize(id)).collect(),
             };
+            let ident = canonicalize(v.name.as_ref());
+            let errors = errors
+                .into_iter()
+                .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
+                .collect();
             Variable::Stock {
-                ident: canonicalize(v.name.as_ref()),
+                ident,
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -205,8 +202,13 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 Some(ast) => identifier_set(ast),
                 None => HashSet::new(),
             };
+            let ident = canonicalize(v.name.as_ref());
+            let errors = errors
+                .into_iter()
+                .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
+                .collect();
             Variable::Var {
-                ident: canonicalize(v.name.as_ref()),
+                ident,
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
@@ -224,8 +226,13 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 Some(ast) => identifier_set(ast),
                 None => HashSet::new(),
             };
+            let ident = canonicalize(v.name.as_ref());
+            let errors = errors
+                .into_iter()
+                .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
+                .collect();
             Variable::Var {
-                ident: canonicalize(v.name.as_ref()),
+                ident,
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
