@@ -4,21 +4,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::Ident;
+use crate::common::{Error, Ident, Result};
 use crate::variable::{parse_var, Variable};
 use crate::xmile;
-
-#[derive(Debug, PartialEq)]
-pub struct ModelError {
-    pub ident: Option<Ident>,
-    pub msg: String,
-}
 
 #[derive(Debug)]
 pub struct Model {
     pub name: String,
     pub variables: HashMap<String, Variable>,
-    pub errors: Option<Vec<ModelError>>,
+    pub errors: Option<Vec<Error>>,
     pub dt_deps: Option<HashMap<Ident, HashSet<Ident>>>,
     pub initial_deps: Option<HashMap<Ident, HashSet<Ident>>>,
 }
@@ -31,10 +25,7 @@ const EMPTY_VARS: xmile::Variables = xmile::Variables {
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-fn all_deps<'a>(
-    vars: &'a [Variable],
-    is_initial: bool,
-) -> Result<HashMap<Ident, HashSet<Ident>>, ModelError> {
+fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident, HashSet<Ident>>> {
     let mut processing: HashSet<&'a str> = HashSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
         vars.iter().map(|v| (v.ident().as_str(), v)).collect();
@@ -47,7 +38,7 @@ fn all_deps<'a>(
         processing: &mut HashSet<&'a str>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
         all_var_deps: &mut HashMap<&'a str, Option<HashSet<Ident>>>,
-    ) -> Result<(), ModelError> {
+    ) -> Result<()> {
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
@@ -72,10 +63,7 @@ fn all_deps<'a>(
             // TODO: we could potentially handle this by passing around some context
             //   variable, but its just terrible.
             if dep.starts_with("\\.") {
-                return Err(ModelError {
-                    ident: Some(id.to_string()),
-                    msg: format!("absolute references (like \"{}\") aren't supported", dep),
-                });
+                return model_err!(NoAbsoluteReferences, id.to_string());
             }
 
             // if the dependency was e.g. "submodel.output", we only depend on submodel
@@ -92,10 +80,7 @@ fn all_deps<'a>(
 
             // ensure we don't blow the stack
             if processing.contains(dep) {
-                return Err(ModelError {
-                    ident: Some(id.to_string()),
-                    msg: format!("recursive dependency with {}", dep),
-                });
+                return model_err!(CircularDependency, id.to_string());
             }
 
             if all_var_deps[dep].is_none() {
@@ -143,7 +128,7 @@ impl Model {
             .map(parse_var)
             .collect();
 
-        let mut errors: Vec<ModelError> = Vec::new();
+        let mut errors: Vec<Error> = Vec::new();
 
         let dt_deps = match all_deps(&variable_list, false) {
             Ok(deps) => Some(deps),
