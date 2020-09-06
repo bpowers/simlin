@@ -25,6 +25,8 @@ pub enum ErrorCode {
     TODOModules,
     NotSimulatable,
     BadSimSpecs,
+    NoAbsoluteReferences,
+    CircularDependency,
 }
 
 impl fmt::Display for ErrorCode {
@@ -45,6 +47,8 @@ impl fmt::Display for ErrorCode {
             TODOModules => "TODO_modules",
             NotSimulatable => "not_simulatable",
             BadSimSpecs => "bad_sim_specs",
+            NoAbsoluteReferences => "no_absolute_references",
+            CircularDependency => "circular_dependency",
         };
 
         write!(f, "{}", name)
@@ -89,8 +93,12 @@ macro_rules! model_err(
 macro_rules! var_err(
     ($code:tt, $str:expr) => {{
         use crate::common::{Error, ErrorCode};
-        Err(Error::VariableError(ErrorCode::$code, $str))
-    }}
+        Err(Error::VariableError(ErrorCode::$code, $str, None))
+    }};
+    ($code:tt, $str:expr, $loc:expr) => {{
+        use crate::common::{Error, ErrorCode};
+        Err(Error::VariableError(ErrorCode::$code, $str, Some($loc)))
+    }};
 );
 
 macro_rules! sim_err(
@@ -108,7 +116,7 @@ pub enum Error {
     // error reading XML file or hydrating xmile structures
     ImportError(ErrorCode, String),
     ModelError(ErrorCode, ModelName),
-    VariableError(ErrorCode, VariableName),
+    VariableError(ErrorCode, VariableName, Option<usize>),
     SimulationError(ErrorCode, VariableName),
 }
 
@@ -117,7 +125,9 @@ impl fmt::Display for Error {
         match self {
             Error::ImportError(code, msg) => write!(f, "ImportError{{{}: {}}}", msg, code),
             Error::ModelError(code, model) => write!(f, "ModelError{{{}: {}}}", model, code),
-            Error::VariableError(code, var) => write!(f, "VariableError{{{}: {}}}", var, code),
+            Error::VariableError(code, var, pos) => {
+                write!(f, "VariableError{{{}:{}: {}}}", var, pos.unwrap_or(0), code)
+            }
             Error::SimulationError(code, var) => write!(f, "SimulationError{{{}: {}}}", var, code),
         }
     }
