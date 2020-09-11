@@ -701,6 +701,7 @@ fn is_truthy(n: f64) -> bool {
 pub struct StepEvaluator<'a> {
     curr: &'a [f64],
     dt: f64,
+    tables: &'a HashMap<String, Table>,
 }
 
 impl<'a> StepEvaluator<'a> {
@@ -792,9 +793,51 @@ impl<'a> StepEvaluator<'a> {
                             b
                         }
                     }
-                    BuiltinFn::Lookup(_id, _a) => {
-                        // eprintln!("TODO: lookup builtin");
-                        0.0
+                    BuiltinFn::Lookup(id, index) => {
+                        let table = &self.tables[id].data;
+                        if table.is_empty() {
+                            return f64::NAN;
+                        }
+
+                        let index = self.eval(index);
+
+                        // check if index is below the start of the table
+                        {
+                            let (x, y) = table[0];
+                            if index < x {
+                                return y;
+                            }
+                        }
+
+                        let size = table.len();
+                        {
+                            let (x, y) = table[size - 1];
+                            if index > x {
+                                return y;
+                            }
+                        }
+                        // binary search seems to be the most appropriate choice here.
+                        let mut low = 0;
+                        let mut high = size;
+                        while low < high {
+                            let mid = low + (high - low) / 2;
+                            if table[mid].0 < index {
+                                low = mid + 1;
+                            } else {
+                                high = mid;
+                            }
+                        }
+
+                        let i = low;
+                        if approx_eq!(f64, table[i].0, index) {
+                            table[i].1
+                        } else {
+                            // slope = deltaY/deltaX
+                            let slope =
+                                (table[i].1 - table[i - 1].1) / (table[i].0 - table[i - 1].0);
+                            // y = m*x + b
+                            (index - table[i - 1].0) * slope + table[i - 1].1
+                        }
                     }
                     BuiltinFn::Pulse(a, b, c) => {
                         let time = self.curr[TIME_OFF];
@@ -905,14 +948,24 @@ impl Simulation {
         curr[TIME_OFF] = self.specs.start;
 
         for v in module.runlist_initials.iter() {
-            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
+            curr[v.off] = StepEvaluator {
+                dt,
+                curr,
+                tables: &module.tables,
+            }
+            .eval(&v.ast);
         }
     }
 
     fn calc_flows(&self, module_id: usize, dt: f64, curr: &mut [f64]) {
         let module = &self.modules[module_id];
         for v in module.runlist_flows.iter() {
-            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
+            curr[v.off] = StepEvaluator {
+                dt,
+                curr,
+                tables: &module.tables,
+            }
+            .eval(&v.ast);
         }
     }
 
@@ -920,7 +973,14 @@ impl Simulation {
         let module = &self.modules[module_id];
         next[TIME_OFF] = curr[TIME_OFF] + dt;
         for v in module.runlist_stocks.iter() {
-            next[v.off] = curr[v.off] + StepEvaluator { dt, curr }.eval(&v.ast) * dt;
+            next[v.off] = curr[v.off]
+                + StepEvaluator {
+                    dt,
+                    curr,
+                    tables: &module.tables,
+                }
+                .eval(&v.ast)
+                    * dt;
         }
     }
 
