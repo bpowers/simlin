@@ -29,6 +29,23 @@ const DEFAULT_DT: xmile::Dt = xmile::Dt {
     reciprocal: None,
 };
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Table {
+    pub data: Vec<(f64, f64)>,
+}
+
+impl Table {
+    fn new(ident: &str, t: &crate::variable::Table) -> Result<Self> {
+        if t.x.len() != t.y.len() {
+            return sim_err!(BadTable, ident.to_string());
+        }
+
+        let data: Vec<(f64, f64)> = t.x.iter().copied().zip(t.y.iter().copied()).collect();
+
+        Ok(Self { data })
+    }
+}
+
 impl Specs {
     pub fn from(specs: &xmile::SimSpecs) -> Self {
         let dt: f64 = {
@@ -381,7 +398,7 @@ fn test_lower() {
     assert_eq!(expected, output.unwrap());
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Var {
     off: usize,
     ast: Expr,
@@ -442,7 +459,7 @@ impl Var {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Module {
     // inputs: Vec<f64>,
     base_off: usize, // base offset for this module
@@ -451,6 +468,7 @@ pub struct Module {
     runlist_flows: Vec<Var>,
     runlist_stocks: Vec<Var>,
     offsets: HashMap<String, usize>,
+    tables: HashMap<String, Table>,
 }
 
 fn invert_deps<'a>(
@@ -648,6 +666,18 @@ impl Module {
             })
             .collect();
 
+        let tables: Result<HashMap<String, Table>> = var_names
+            .iter()
+            .map(|id| (id, &model.variables[*id]))
+            .filter(|(_, v)| v.table().is_some())
+            .map(|(id, v)| (id, Table::new(id, v.table().unwrap())))
+            .map(|(id, t)| match t {
+                Ok(table) => Ok((id.to_string(), table)),
+                Err(err) => Err(err),
+            })
+            .collect();
+        let tables = tables?;
+
         Ok(Module {
             base_off: 0,
             n_slots,
@@ -658,6 +688,7 @@ impl Module {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
+            tables,
         })
     }
 }

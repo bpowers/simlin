@@ -13,8 +13,8 @@ use crate::xmile;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
-    x: Vec<f64>,
-    y: Vec<f64>,
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
     x_range: Option<(f64, f64)>,
     y_range: Option<(f64, f64)>,
 }
@@ -79,23 +79,17 @@ impl Variable {
 
     pub fn direct_deps(&self) -> &HashSet<Ident> {
         match self {
-            Variable::Stock {
-                direct_deps: deps, ..
-            } => deps,
-            Variable::Var {
-                direct_deps: deps, ..
-            } => deps,
-            Variable::Module {
-                direct_deps: deps, ..
-            } => deps,
+            Variable::Stock { direct_deps, .. } => direct_deps,
+            Variable::Var { direct_deps, .. } => direct_deps,
+            Variable::Module { direct_deps, .. } => direct_deps,
         }
     }
 
     pub fn errors(&self) -> Option<&Vec<Error>> {
         let errors = match self {
-            Variable::Stock { errors: e, .. } => e,
-            Variable::Var { errors: e, .. } => e,
-            Variable::Module { errors: e, .. } => e,
+            Variable::Stock { errors, .. } => errors,
+            Variable::Var { errors, .. } => errors,
+            Variable::Module { errors, .. } => errors,
         };
 
         if errors.is_empty() {
@@ -103,6 +97,14 @@ impl Variable {
         }
 
         Some(errors)
+    }
+
+    pub fn table(&self) -> Option<&Table> {
+        match self {
+            Variable::Stock { .. } => None,
+            Variable::Var { table, .. } => table.as_ref(),
+            Variable::Module { .. } => None,
+        }
     }
 }
 
