@@ -108,6 +108,53 @@ impl Variable {
     }
 }
 
+fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>, crate::common::Error> {
+    use std::str::FromStr;
+
+    if gf.is_none() {
+        return Ok(None);
+    }
+    let gf = gf.as_ref().unwrap();
+
+    let x_range: Option<(f64, f64)> = gf.x_scale.as_ref().map(|scale| (scale.min, scale.max));
+    let y_range: Option<(f64, f64)> = gf.y_scale.as_ref().map(|scale| (scale.min, scale.max));
+
+    let y: Result<Vec<f64>, _> = match &gf.y_pts {
+        None => Ok(vec![]),
+        Some(y_pts) => y_pts.split(",").map(|n| f64::from_str(n.trim())).collect(),
+    };
+    if y.is_err() {
+        return var_err!(BadTable, ident.to_string());
+    }
+    let y = y.unwrap();
+
+    let x: Result<Vec<f64>, _> = match &gf.x_pts {
+        None => {
+            if let Some((x_min, x_max)) = x_range {
+                let size = y.len() as f64;
+                Ok(y.iter()
+                    .enumerate()
+                    .map(|(i, _)| ((i as f64) / (size - 1.0)) * (x_max - x_min) + x_min)
+                    .collect())
+            } else {
+                Ok(vec![])
+            }
+        }
+        Some(x_pts) => x_pts.split(",").map(|n| f64::from_str(n.trim())).collect(),
+    };
+    if x.is_err() {
+        return var_err!(BadTable, ident.to_string());
+    }
+    let x = x.unwrap();
+
+    Ok(Some(Table {
+        x,
+        y,
+        x_range,
+        y_range,
+    }))
+}
+
 fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<EquationError>) {
     let mut errs = Vec::new();
 
@@ -205,16 +252,23 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 None => HashSet::new(),
             };
             let ident = canonicalize(v.name.as_ref());
-            let errors = errors
+            let mut errors: Vec<Error> = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
                 .collect();
+            let table = match parse_table(ident.as_str(), &v.gf) {
+                Ok(table) => table,
+                Err(err) => {
+                    errors.push(err);
+                    None
+                }
+            };
             Variable::Var {
                 ident,
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
-                table: None,
+                table,
                 is_flow: true,
                 is_table_only: false,
                 non_negative: v.non_negative.is_some(),
@@ -229,16 +283,23 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 None => HashSet::new(),
             };
             let ident = canonicalize(v.name.as_ref());
-            let errors = errors
+            let mut errors: Vec<Error> = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
                 .collect();
+            let table = match parse_table(ident.as_str(), &v.gf) {
+                Ok(table) => table,
+                Err(err) => {
+                    errors.push(err);
+                    None
+                }
+            };
             Variable::Var {
                 ident,
                 ast,
                 eqn: v.eqn.clone(),
                 units: v.units.clone(),
-                table: None,
+                table,
                 is_flow: false,
                 is_table_only: false,
                 non_negative: false,
@@ -418,6 +479,59 @@ fn test_canonicalize_stock_inflows() {
         errors: vec![],
         direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
     };
+
+    let output = parse_var(&input);
+
+    assert_eq!(expected, output);
+}
+
+#[test]
+fn test_tables() {
+    let input = xmile::Var::Aux(xmile::Aux {
+        name: "lookup function table".to_string(),
+        eqn: Some("0".to_string()),
+        doc: None,
+        units: None,
+        gf: Some(xmile::GF {
+            name: None,
+            kind: None,
+            x_scale: None,
+            y_scale: Some(xmile::Scale {
+                min: -1.0,
+                max: 1.0,
+            }),
+            x_pts: Some("0,5,10,15,20,25,30,35,40,45".to_string()),
+            y_pts: Some("0,0,1,1,0,0,-1,-1,0,0".to_string()),
+        }),
+        dimensions: None,
+    });
+
+    let expected = Variable::Var {
+        ident: "lookup_function_table".to_string(),
+        ast: Some(Rc::new(Expr::Const("0".to_string(), 0.0))),
+        eqn: Some("0".to_string()),
+        units: None,
+        table: Some(Table {
+            x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],
+            y: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
+            x_range: None,
+            y_range: Some((-1.0, 1.0)),
+        }),
+        non_negative: false,
+        is_flow: false,
+        is_table_only: false,
+        errors: vec![],
+        direct_deps: HashSet::new(),
+    };
+
+    if let Variable::Var {
+        table: Some(table), ..
+    } = &expected
+    {
+        assert_eq!(table.x.len(), table.y.len());
+    } else {
+        assert!(false);
+    }
 
     let output = parse_var(&input);
 

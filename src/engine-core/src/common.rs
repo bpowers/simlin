@@ -94,16 +94,16 @@ macro_rules! model_err(
     }}
 );
 
-// macro_rules! var_err(
-//     ($code:tt, $str:expr) => {{
-//         use crate::common::{Error, ErrorCode};
-//         Err(Error::VariableError(ErrorCode::$code, $str, None))
-//     }};
-//     ($code:tt, $str:expr, $loc:expr) => {{
-//         use crate::common::{Error, ErrorCode};
-//         Err(Error::VariableError(ErrorCode::$code, $str, Some($loc)))
-//     }};
-// );
+macro_rules! var_err(
+    ($code:tt, $str:expr) => {{
+        use crate::common::{Error, ErrorCode};
+        Err(Error::VariableError(ErrorCode::$code, $str, None))
+    }};
+    ($code:tt, $str:expr, $loc:expr) => {{
+        use crate::common::{Error, ErrorCode};
+        Err(Error::VariableError(ErrorCode::$code, $str, Some($loc)))
+    }};
+);
 
 macro_rules! sim_err(
     ($code:tt, $str:expr) => {{

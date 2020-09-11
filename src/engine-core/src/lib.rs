@@ -144,6 +144,46 @@ fn test_xml_stock_parsing() {
 }
 
 #[test]
+fn test_xml_gf_parsing() {
+    let input = "            <aux name=\"lookup function table\">
+                <eqn>0</eqn>
+                <gf>
+                    <yscale min=\"-1\" max=\"1\"/>
+                    <xpts>0,5,10,15,20,25,30,35,40,45</xpts>
+                    <ypts>0,0,1,1,0,0,-1,-1,0,0</ypts>
+                </gf>
+            </aux>";
+
+    let expected = xmile::Aux {
+        name: "lookup function table".to_string(),
+        eqn: Some("0".to_string()),
+        doc: None,
+        units: None,
+        gf: Some(xmile::GF {
+            name: None,
+            kind: None,
+            x_scale: None,
+            y_scale: Some(xmile::Scale {
+                min: -1.0,
+                max: 1.0,
+            }),
+            x_pts: Some("0,5,10,15,20,25,30,35,40,45".to_string()),
+            y_pts: Some("0,0,1,1,0,0,-1,-1,0,0".to_string()),
+        }),
+        dimensions: None,
+    };
+
+    use quick_xml::de;
+    let aux: xmile::Var = de::from_reader(input.as_bytes()).unwrap();
+
+    if let xmile::Var::Aux(aux) = aux {
+        assert_eq!(expected, aux);
+    } else {
+        assert!(false);
+    }
+}
+
+#[test]
 fn test_sim_specs_parsing() {
     let input = "<sim_specs method=\"Euler\" time_units=\"Time\">
 		<start>0</start>

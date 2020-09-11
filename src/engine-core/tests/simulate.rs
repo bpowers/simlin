@@ -36,13 +36,13 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/teacup/teacup.xmile",
     "test/test-models/samples/teacup/teacup_w_diagram.xmile",
     "test/test-models/tests/trig/test_trig.xmile",
-    // "test/test-models/tests/lookups_inline/test_lookups_inline.xmile",
+    "test/test-models/tests/lookups_inline/test_lookups_inline.xmile",
     "test/test-models/tests/comparisons/comparisons.xmile",
     "test/test-models/tests/sqrt/test_sqrt.xmile",
     "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/tests/constant_expressions/test_constant_expressions.xmile",
-    // "test/test-models/tests/lookups/test_lookups.xmile",
-    // "test/test-models/tests/lookups/test_lookups_no-indirect.xmile",
+    "test/test-models/tests/lookups/test_lookups.xmile",
+    "test/test-models/tests/lookups/test_lookups_no-indirect.xmile",
     "test/test-models/tests/line_breaks/test_line_breaks.xmile",
     "test/test-models/tests/parentheses/test_parens.xmile",
     "test/test-models/tests/builtin_max/builtin_max.xmile",
@@ -147,11 +147,18 @@ fn simulate_path(xmile_path: &str) {
     let results = results.unwrap();
     let expected = load_expected_results(xmile_path);
 
+    eprintln!("results.offsets");
+    for (id, off) in results.offsets.iter() {
+        eprintln!("  {}: {}", id, off);
+    }
+
     assert_eq!(expected.step_count, results.step_count);
 
     let mut step = 0;
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
         for ident in expected.offsets.keys() {
+            eprintln!("ident: {}", ident);
+            eprintln!("  {}", results.offsets[ident]);
             let expected = expected_row[expected.offsets[ident]];
             let actual = results_row[results.offsets[ident]];
 

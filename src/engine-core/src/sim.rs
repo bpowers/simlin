@@ -155,8 +155,8 @@ impl<'a> Context<'a> {
         let expr = match expr {
             ast::Expr::Const(_, n) => Expr::Const(*n),
             ast::Expr::Var(id) => Expr::Var(self.offsets[id.as_str()]),
-            ast::Expr::App(id, args) => {
-                let args: Result<Vec<Expr>> = args.iter().map(|e| self.lower(e)).collect();
+            ast::Expr::App(id, orig_args) => {
+                let args: Result<Vec<Expr>> = orig_args.iter().map(|e| self.lower(e)).collect();
                 let mut args = args?;
 
                 macro_rules! check_arity {
@@ -211,7 +211,13 @@ impl<'a> Context<'a> {
                 }
 
                 let builtin = match id.as_str() {
-                    "lookup" => BuiltinFn::Lookup("TODO".to_string(), Box::new(args[0].clone())),
+                    "lookup" => {
+                        if let ast::Expr::Var(ident) = (&orig_args[0]).as_ref() {
+                            BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()))
+                        } else {
+                            return sim_err!(BadTable, id.clone());
+                        }
+                    }
                     "abs" => check_arity!(Abs, 1),
                     "arccos" => check_arity!(Arccos, 1),
                     "arcsin" => check_arity!(Arcsin, 1),
@@ -447,9 +453,16 @@ impl Var {
                     ctx.build_stock_update_expr(var)?
                 }
             }
-            Variable::Var { ast, .. } => {
+            Variable::Var {
+                ident, table, ast, ..
+            } => {
                 if let Some(ast) = ast {
-                    ctx.lower(ast)?
+                    let expr = ctx.lower(ast)?;
+                    if table.is_some() {
+                        Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
+                    } else {
+                        expr
+                    }
                 } else {
                     return sim_err!(EmptyEquation, var.ident().clone());
                 }
@@ -794,6 +807,10 @@ impl<'a> StepEvaluator<'a> {
                         }
                     }
                     BuiltinFn::Lookup(id, index) => {
+                        if !self.tables.contains_key(id) {
+                            eprintln!("bad lookup for {}", id);
+                            assert!(false);
+                        }
                         let table = &self.tables[id].data;
                         if table.is_empty() {
                             return f64::NAN;
@@ -926,7 +943,7 @@ pub struct Simulation {
 impl Simulation {
     pub fn new(project: &Project, model: Rc<Model>) -> Result<Self> {
         // we start with a project and a root module (one with no references).
-        let root = Module::new(project, model, true).unwrap();
+        let root = Module::new(project, model, true)?;
 
         // TODO: come up with monomorphizations based on what inputs are used
 
