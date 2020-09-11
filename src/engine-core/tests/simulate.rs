@@ -17,17 +17,17 @@ use engine_core::{canonicalize, Project, Results, Simulation};
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
 // these columns are either Vendor specific or otherwise not important.
-const IGNORABLE_COLS: &[&str] = &[
-    "saveper",
-    "initial_time",
-    "final_time",
-    "time_step",
-    "time",
-    "months",
-    "final time",
-    "intial time",
-    "time step",
-];
+// const IGNORABLE_COLS: &[&str] = &[
+//     "saveper",
+//     "initial_time",
+//     "final_time",
+//     "time_step",
+//     "time",
+//     "months",
+//     "final time",
+//     "intial time",
+//     "time step",
+// ];
 
 static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/SIR/SIR.xmile",
@@ -90,7 +90,7 @@ fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
             row[i] = match f64::from_str(field.trim()) {
                 Ok(n) => n,
                 Err(err) => {
-                    eprintln!("invalid: '{}'", field.trim());
+                    eprintln!("invalid: '{}': {}", field.trim(), err);
                     assert!(false);
                     0.0
                 }

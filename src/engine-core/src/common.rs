@@ -21,6 +21,7 @@ pub enum ErrorCode {
     UnclosedQuotedIdent,
     ExpectedNumber,
     UnknownBuiltin,
+    BadBuiltinArgs,
     EmptyEquation,
     TODOModules,
     NotSimulatable,
@@ -43,6 +44,7 @@ impl fmt::Display for ErrorCode {
             UnclosedQuotedIdent => "unclosed_quoted_ident",
             ExpectedNumber => "expected_number",
             UnknownBuiltin => "unknown_builtin",
+            BadBuiltinArgs => "bad_builtin_args",
             EmptyEquation => "empty_equation",
             TODOModules => "TODO_modules",
             NotSimulatable => "not_simulatable",
@@ -69,11 +71,11 @@ impl fmt::Display for EquationError {
 
 // from https://stackoverflow.com/questions/27588416/how-to-send-output-to-stderr
 macro_rules! eprintln(
-    ($($arg:tt)*) => { {
+    ($($arg:tt)*) => {{
         use std::io::Write;
         let r = writeln!(&mut ::std::io::stderr(), $($arg)*);
         r.expect("failed printing to stderr");
-    } }
+    }}
 );
 
 macro_rules! import_err(

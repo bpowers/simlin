@@ -93,34 +93,34 @@ pub enum UnaryOp {
     Not,
 }
 
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum BuiltinFn {
-    Lookup,
-    Abs,
-    Arccos,
-    Arcsin,
-    Arctan,
-    Cos,
-    Exp,
+    Lookup(String, Box<Expr>),
+    Abs(Box<Expr>),
+    Arccos(Box<Expr>),
+    Arcsin(Box<Expr>),
+    Arctan(Box<Expr>),
+    Cos(Box<Expr>),
+    Exp(Box<Expr>),
     Inf,
-    Int,
-    Ln,
-    Log10,
-    Max,
-    Min,
+    Int(Box<Expr>),
+    Ln(Box<Expr>),
+    Log10(Box<Expr>),
+    Max(Box<Expr>, Box<Expr>),
+    Min(Box<Expr>, Box<Expr>),
     Pi,
-    Pulse,
-    Safediv,
-    Sin,
-    Sqrt,
-    Tan,
+    Pulse(Box<Expr>, Box<Expr>, Box<Expr>),
+    SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    Sin(Box<Expr>),
+    Sqrt(Box<Expr>),
+    Tan(Box<Expr>),
 }
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(f64),
     Var(usize), // offset
-    App(BuiltinFn, Vec<Expr>),
+    App(BuiltinFn),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     Op1(UnaryOp, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -140,35 +140,84 @@ impl<'a> Context<'a> {
             ast::Expr::Var(id) => Expr::Var(self.offsets[id.as_str()]),
             ast::Expr::App(id, args) => {
                 let args: Result<Vec<Expr>> = args.iter().map(|e| self.lower(e)).collect();
-                let args = args?;
-                // TODO: check args length
+                let mut args = args?;
+
+                macro_rules! check_arity {
+                    ($builtin_fn:tt, 0) => {{
+                        if !args.is_empty() {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
+                        }
+
+                        BuiltinFn::$builtin_fn
+                    }};
+                    ($builtin_fn:tt, 1) => {{
+                        if args.len() != 1 {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
+                        }
+
+                        let a = args.remove(0);
+                        BuiltinFn::$builtin_fn(Box::new(a))
+                    }};
+                    ($builtin_fn:tt, 2) => {{
+                        if args.len() != 2 {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
+                        }
+
+                        let b = args.remove(1);
+                        let a = args.remove(0);
+                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b))
+                    }};
+                    ($builtin_fn:tt, 3) => {{
+                        if args.len() != 3 {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
+                        }
+
+                        let c = args.remove(2);
+                        let b = args.remove(1);
+                        let a = args.remove(0);
+                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Box::new(c))
+                    }};
+                    ($builtin_fn:tt, 2, 3) => {{
+                        if args.len() == 2 {
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), None)
+                        } else if args.len() == 3 {
+                            let c = args.remove(2);
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Some(Box::new(c)))
+                        } else {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
+                        }
+                    }};
+                }
+
                 let builtin = match id.as_str() {
-                    "lookup" => BuiltinFn::Lookup,
-                    "abs" => BuiltinFn::Abs,
-                    "arccos" => BuiltinFn::Arccos,
-                    "arcsin" => BuiltinFn::Arcsin,
-                    "arctan" => BuiltinFn::Arctan,
-                    "cos" => BuiltinFn::Cos,
-                    "exp" => BuiltinFn::Exp,
-                    "inf" => BuiltinFn::Inf,
-                    "int" => BuiltinFn::Int,
-                    "ln" => BuiltinFn::Ln,
-                    "log10" => BuiltinFn::Log10,
-                    "max" => BuiltinFn::Max,
-                    "min" => BuiltinFn::Min,
-                    "pi" => {
-                        return Ok(Expr::Const(std::f64::consts::PI));
-                    }
-                    "pulse" => BuiltinFn::Pulse,
-                    "safediv" => BuiltinFn::Safediv,
-                    "sin" => BuiltinFn::Sin,
-                    "sqrt" => BuiltinFn::Sqrt,
-                    "tan" => BuiltinFn::Tan,
+                    "lookup" => BuiltinFn::Lookup("TODO".to_string(), Box::new(args[0].clone())),
+                    "abs" => check_arity!(Abs, 1),
+                    "arccos" => check_arity!(Arccos, 1),
+                    "arcsin" => check_arity!(Arcsin, 1),
+                    "arctan" => check_arity!(Arctan, 1),
+                    "cos" => check_arity!(Cos, 1),
+                    "exp" => check_arity!(Exp, 1),
+                    "inf" => check_arity!(Inf, 0),
+                    "int" => check_arity!(Int, 1),
+                    "ln" => check_arity!(Ln, 1),
+                    "log10" => check_arity!(Log10, 1),
+                    "max" => check_arity!(Max, 2),
+                    "min" => check_arity!(Min, 2),
+                    "pi" => check_arity!(Pi, 0),
+                    "pulse" => check_arity!(Pulse, 3),
+                    "safediv" => check_arity!(SafeDiv, 2, 3),
+                    "sin" => check_arity!(Sin, 1),
+                    "sqrt" => check_arity!(Sqrt, 1),
+                    "tan" => check_arity!(Tan, 1),
                     _ => {
                         return sim_err!(UnknownBuiltin, self.ident.to_string());
                     }
                 };
-                Expr::App(builtin, args)
+                Expr::App(builtin)
             }
             ast::Expr::Op1(op, l) => {
                 let l = self.lower(l)?;
@@ -662,37 +711,37 @@ impl<'a> StepEvaluator<'a> {
                     BinaryOp::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
                 }
             }
-            Expr::App(builtin, args) => {
+            Expr::App(builtin) => {
                 match builtin {
-                    BuiltinFn::Abs => self.eval(&args[0]).abs(),
-                    BuiltinFn::Cos => self.eval(&args[0]).cos(),
-                    BuiltinFn::Sin => self.eval(&args[0]).sin(),
-                    BuiltinFn::Tan => self.eval(&args[0]).tan(),
-                    BuiltinFn::Arccos => self.eval(&args[0]).acos(),
-                    BuiltinFn::Arcsin => self.eval(&args[0]).asin(),
-                    BuiltinFn::Arctan => self.eval(&args[0]).atan(),
-                    BuiltinFn::Exp => self.eval(&args[0]).exp(),
+                    BuiltinFn::Abs(a) => self.eval(a).abs(),
+                    BuiltinFn::Cos(a) => self.eval(a).cos(),
+                    BuiltinFn::Sin(a) => self.eval(a).sin(),
+                    BuiltinFn::Tan(a) => self.eval(a).tan(),
+                    BuiltinFn::Arccos(a) => self.eval(a).acos(),
+                    BuiltinFn::Arcsin(a) => self.eval(a).asin(),
+                    BuiltinFn::Arctan(a) => self.eval(a).atan(),
+                    BuiltinFn::Exp(a) => self.eval(a).exp(),
                     BuiltinFn::Inf => std::f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
-                    BuiltinFn::Int => self.eval(&args[0]).floor(),
-                    BuiltinFn::Ln => self.eval(&args[0]).ln(),
-                    BuiltinFn::Log10 => self.eval(&args[0]).log10(),
-                    BuiltinFn::Safediv => {
-                        let a = self.eval(&args[0]);
-                        let b = self.eval(&args[1]);
+                    BuiltinFn::Int(a) => self.eval(a).floor(),
+                    BuiltinFn::Ln(a) => self.eval(a).ln(),
+                    BuiltinFn::Log10(a) => self.eval(a).log10(),
+                    BuiltinFn::SafeDiv(a, b, default) => {
+                        let a = self.eval(a);
+                        let b = self.eval(b);
 
                         if b != 0.0 {
                             a / b
-                        } else if args.len() > 2 {
-                            self.eval(&args[2])
+                        } else if let Some(c) = default {
+                            self.eval(c)
                         } else {
                             0.0
                         }
                     }
-                    BuiltinFn::Sqrt => self.eval(&args[0]).sqrt(),
-                    BuiltinFn::Min => {
-                        let a = self.eval(&args[0]);
-                        let b = self.eval(&args[1]);
+                    BuiltinFn::Sqrt(a) => self.eval(a).sqrt(),
+                    BuiltinFn::Min(a, b) => {
+                        let a = self.eval(a);
+                        let b = self.eval(b);
                         // we can't use std::cmp::min here, becuase f64 is only
                         // PartialOrd
                         if a < b {
@@ -701,9 +750,9 @@ impl<'a> StepEvaluator<'a> {
                             b
                         }
                     }
-                    BuiltinFn::Max => {
-                        let a = self.eval(&args[0]);
-                        let b = self.eval(&args[1]);
+                    BuiltinFn::Max(a, b) => {
+                        let a = self.eval(a);
+                        let b = self.eval(b);
                         // we can't use std::cmp::min here, becuase f64 is only
                         // PartialOrd
                         if a > b {
@@ -712,15 +761,15 @@ impl<'a> StepEvaluator<'a> {
                             b
                         }
                     }
-                    BuiltinFn::Lookup => {
+                    BuiltinFn::Lookup(_id, _a) => {
                         // eprintln!("TODO: lookup builtin");
                         0.0
                     }
-                    BuiltinFn::Pulse => {
+                    BuiltinFn::Pulse(a, b, c) => {
                         let time = self.curr[TIME_OFF];
-                        let volume = self.eval(&args[0]);
-                        let first_pulse = self.eval(&args[1]);
-                        let interval = self.eval(&args[2]);
+                        let volume = self.eval(a);
+                        let first_pulse = self.eval(b);
+                        let interval = self.eval(c);
 
                         if time < first_pulse {
                             return 0.0;
@@ -848,7 +897,7 @@ impl Simulation {
         self.modules[module_id].n_slots
     }
 
-    fn build_offsets(&self, module_id: usize, prefix: &str) -> HashMap<String, usize> {
+    fn build_offsets(&self, module_id: usize, _prefix: &str) -> HashMap<String, usize> {
         self.modules[module_id].offsets.clone()
     }
 
