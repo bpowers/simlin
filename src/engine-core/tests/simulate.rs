@@ -17,17 +17,7 @@ use engine_core::{canonicalize, Project, Results, Simulation};
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
 // these columns are either Vendor specific or otherwise not important.
-// const IGNORABLE_COLS: &[&str] = &[
-//     "saveper",
-//     "initial_time",
-//     "final_time",
-//     "time_step",
-//     "time",
-//     "months",
-//     "final time",
-//     "intial time",
-//     "time step",
-// ];
+const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
 
 static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/SIR/SIR.xmile",
@@ -73,14 +63,11 @@ fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
     let header = rdr.headers().unwrap();
     let offsets: HashMap<String, usize> =
         HashMap::from_iter(header.iter().enumerate().map(|(i, r)| (canonicalize(r), i)));
+
     let step_size = offsets.len();
-    for (id, off) in offsets.iter() {
-        eprintln!("  {}: {}", id, off);
-    }
-
     let mut step_data: Vec<Vec<f64>> = Vec::new();
-
     let mut step_count = 0;
+
     for result in rdr.records() {
         let record = result?;
 
@@ -114,7 +101,6 @@ fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
 fn load_expected_results(xmile_path: &str) -> Results {
     let xmile_name = std::path::Path::new(xmile_path).file_name().unwrap();
     let dir_path = &xmile_path[0..(xmile_path.len() - xmile_name.len())];
-    eprintln!("dir path: {}", dir_path);
     let dir_path = std::path::Path::new(dir_path);
 
     for (output_file, delimiter) in OUTPUT_FILES.iter() {
@@ -129,6 +115,7 @@ fn load_expected_results(xmile_path: &str) -> Results {
 }
 
 fn simulate_path(xmile_path: &str) {
+    eprintln!("model: {}", xmile_path);
     let f = File::open(xmile_path).unwrap();
     let mut f = BufReader::new(f);
 
@@ -147,19 +134,15 @@ fn simulate_path(xmile_path: &str) {
     let results = results.unwrap();
     let expected = load_expected_results(xmile_path);
 
-    eprintln!("results.offsets");
-    for (id, off) in results.offsets.iter() {
-        eprintln!("  {}: {}", id, off);
-    }
-
     assert_eq!(expected.step_count, results.step_count);
 
     let mut step = 0;
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
         for ident in expected.offsets.keys() {
-            eprintln!("ident: {}", ident);
-            eprintln!("  {}", results.offsets[ident]);
             let expected = expected_row[expected.offsets[ident]];
+            if !results.offsets.contains_key(ident) && IGNORABLE_COLS.contains(&ident.as_str()) {
+                continue;
+            }
             let actual = results_row[results.offsets[ident]];
 
             let around_zero = approx_eq!(f64, expected, 0.0, epsilon = 3e-6)
