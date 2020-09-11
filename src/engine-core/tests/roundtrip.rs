@@ -8,10 +8,10 @@ use std::io::BufReader;
 use engine_core::{self, Simulation};
 
 static TEST_MODELS: &[&str] = &[
+    // "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
     "test/test-models/tests/logicals/test_logicals.xmile",
     "test/test-models/samples/SIR/SIR.xmile",
     "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
-    // "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
     "test/test-models/samples/teacup/teacup.xmile",
     "test/test-models/samples/teacup/teacup_w_diagram.xmile",
     "test/test-models/tests/trig/test_trig.xmile",

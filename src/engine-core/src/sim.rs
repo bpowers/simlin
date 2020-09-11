@@ -611,24 +611,6 @@ impl Module {
                 .collect(),
         })
     }
-
-    fn calc_initials(&self, dt: f64, curr: &mut [f64]) {
-        for v in self.runlist_initials.iter() {
-            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
-        }
-    }
-
-    fn calc_flows(&self, dt: f64, curr: &mut [f64]) {
-        for v in self.runlist_flows.iter() {
-            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
-        }
-    }
-
-    fn calc_stocks(&self, dt: f64, curr: &[f64], next: &mut [f64]) {
-        for v in self.runlist_stocks.iter() {
-            next[v.off] = curr[v.off] + StepEvaluator { dt, curr }.eval(&v.ast) * dt;
-        }
-    }
 }
 
 fn is_truthy(n: f64) -> bool {
@@ -813,17 +795,9 @@ impl Results {
 
 #[derive(Debug)]
 pub struct Simulation {
-    root: Module,
+    modules: Vec<Module>,
     specs: Specs,
-    // slab
-    // curr
-    // next
-    // nvars
-    // nsaves
-    // nsteps
-    // step
-    // save_step
-    // save_every
+    root: usize, // offset into modules
 }
 
 impl Simulation {
@@ -839,22 +813,43 @@ impl Simulation {
 
         let specs = Specs::from(project.file.sim_specs.as_ref().unwrap());
 
-        Ok(Simulation { root, specs })
+        Ok(Simulation {
+            modules: vec![root],
+            specs,
+            root: 0,
+        })
     }
 
-    fn calc_initials(&self, dt: f64, curr: &mut [f64]) {
+    fn calc_initials(&self, module_id: usize, dt: f64, curr: &mut [f64]) {
+        let module = &self.modules[module_id];
         curr[TIME_OFF] = self.specs.start;
 
-        self.root.calc_initials(dt, curr);
+        for v in module.runlist_initials.iter() {
+            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
+        }
     }
 
-    fn calc_flows(&self, dt: f64, curr: &mut [f64]) {
-        self.root.calc_flows(dt, curr);
+    fn calc_flows(&self, module_id: usize, dt: f64, curr: &mut [f64]) {
+        let module = &self.modules[module_id];
+        for v in module.runlist_flows.iter() {
+            curr[v.off] = StepEvaluator { dt, curr }.eval(&v.ast);
+        }
     }
 
-    fn calc_stocks(&self, dt: f64, curr: &[f64], next: &mut [f64]) {
+    fn calc_stocks(&self, module_id: usize, dt: f64, curr: &[f64], next: &mut [f64]) {
+        let module = &self.modules[module_id];
         next[TIME_OFF] = curr[TIME_OFF] + dt;
-        self.root.calc_stocks(dt, curr, next);
+        for v in module.runlist_stocks.iter() {
+            next[v.off] = curr[v.off] + StepEvaluator { dt, curr }.eval(&v.ast) * dt;
+        }
+    }
+
+    fn n_slots(&self, module_id: usize) -> usize {
+        self.modules[module_id].n_slots
+    }
+
+    fn build_offsets(&self, module_id: usize, prefix: &str) -> HashMap<String, usize> {
+        self.modules[module_id].offsets.clone()
     }
 
     pub fn run_to_end(&self) -> Result<Results> {
@@ -867,19 +862,22 @@ impl Simulation {
         let dt = spec.dt;
         let stop = spec.stop;
 
-        let slab: Vec<f64> = vec![0.0; self.root.n_slots * (n_chunks + 1)];
+        let n_slots = self.n_slots(self.root);
+
+        let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
         let mut boxed_slab = slab.into_boxed_slice();
         {
-            let mut slabs = boxed_slab.chunks_mut(self.root.n_slots);
+            let mut slabs = boxed_slab.chunks_mut(n_slots);
 
             // let mut results: Vec<&[f64]> = Vec::with_capacity(n_chunks + 1);
+            let module_id = self.root;
 
             let mut curr = slabs.next().unwrap();
-            self.calc_initials(dt, curr);
+            self.calc_initials(module_id, dt, curr);
 
             for next in slabs {
-                self.calc_flows(dt, curr);
-                self.calc_stocks(dt, curr, next);
+                self.calc_flows(module_id, dt, curr);
+                self.calc_stocks(module_id, dt, curr, next);
                 curr = next;
             }
             // ensure we've calculated stock + flow values for the dt <= end_time
@@ -891,13 +889,12 @@ impl Simulation {
         let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5) as usize);
         let n_save_chunks: usize = ((spec.stop - spec.start) / spec.dt + 1.0) as usize;
 
-        let results_slab: Vec<f64> = vec![0.0; self.root.n_slots * n_save_chunks];
+        let results_slab: Vec<f64> = vec![0.0; n_slots * n_save_chunks];
         let mut boxed_results_slab = results_slab.into_boxed_slice();
         {
-            let mut slabs: Vec<&mut [f64]> =
-                boxed_results_slab.chunks_mut(self.root.n_slots).collect();
+            let mut slabs: Vec<&mut [f64]> = boxed_results_slab.chunks_mut(n_slots).collect();
 
-            for curr in boxed_slab.chunks(self.root.n_slots) {
+            for curr in boxed_slab.chunks(n_slots) {
                 if curr[TIME_OFF] > stop {
                     break;
                 }
@@ -910,9 +907,9 @@ impl Simulation {
         }
 
         Ok(Results {
-            offsets: self.root.offsets.clone(),
+            offsets: self.build_offsets(self.root, ""),
             data: boxed_results_slab,
-            step_size: self.root.n_slots,
+            step_size: n_slots,
             step_count: n_save_chunks,
         })
     }
