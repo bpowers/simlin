@@ -809,7 +809,7 @@ impl<'a> StepEvaluator<'a> {
                     BuiltinFn::Lookup(id, index) => {
                         if !self.tables.contains_key(id) {
                             eprintln!("bad lookup for {}", id);
-                            assert!(false);
+                            unreachable!();
                         }
                         let table = &self.tables[id].data;
                         if table.is_empty() {

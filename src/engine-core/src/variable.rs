@@ -121,7 +121,7 @@ fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>, cra
 
     let y: Result<Vec<f64>, _> = match &gf.y_pts {
         None => Ok(vec![]),
-        Some(y_pts) => y_pts.split(",").map(|n| f64::from_str(n.trim())).collect(),
+        Some(y_pts) => y_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
     };
     if y.is_err() {
         return var_err!(BadTable, ident.to_string());
@@ -140,7 +140,7 @@ fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>, cra
                 Ok(vec![])
             }
         }
-        Some(x_pts) => x_pts.split(",").map(|n| f64::from_str(n.trim())).collect(),
+        Some(x_pts) => x_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
     };
     if x.is_err() {
         return var_err!(BadTable, ident.to_string());
