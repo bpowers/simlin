@@ -27,6 +27,7 @@ pub enum UnaryOp {
     Not,
 }
 
+/*
 #[derive(PartialEq, Clone, Debug)]
 pub enum Builtin1Fn {}
 
@@ -46,3 +47,4 @@ pub enum Bytecode {
     Op2(BinaryOp),
     Op1(BinaryOp),
 }
+*/

@@ -5,10 +5,10 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use engine_core::{self, Simulation};
+use engine_core;
 
 static TEST_MODELS: &[&str] = &[
-    // "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+    "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
     "test/test-models/tests/logicals/test_logicals.xmile",
     "test/test-models/samples/SIR/SIR.xmile",
     "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
@@ -83,8 +83,6 @@ fn roundtrips_model() {
             }
         }
 
-        let model = project.models.get("main").unwrap().clone();
-        let _sim = Simulation::new(&project, model).unwrap();
-        assert!(true);
+        assert!(project.models.get("main").is_some());
     }
 }
