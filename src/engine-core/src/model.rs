@@ -164,6 +164,7 @@ impl Model {
     }
 }
 
+#[cfg(test)]
 fn optional_vec(slice: &[&str]) -> Option<Vec<String>> {
     if slice.is_empty() {
         None
@@ -172,6 +173,7 @@ fn optional_vec(slice: &[&str]) -> Option<Vec<String>> {
     }
 }
 
+#[cfg(test)]
 fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
     use xmile::{Module, Ref, Var};
     let refs: Option<Vec<Ref>> = if refs.is_empty() {
@@ -199,6 +201,7 @@ fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
     var
 }
 
+#[cfg(test)]
 fn flow(ident: &str, eqn: &str) -> Variable {
     use xmile::{Flow, Var};
     let x_flow = Var::Flow(Flow {
@@ -216,6 +219,7 @@ fn flow(ident: &str, eqn: &str) -> Variable {
     var
 }
 
+#[cfg(test)]
 fn aux(ident: &str, eqn: &str) -> Variable {
     use xmile::{Aux, Var};
     let x_aux = Var::Aux(Aux {
@@ -232,6 +236,7 @@ fn aux(ident: &str, eqn: &str) -> Variable {
     var
 }
 
+#[cfg(test)]
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     use xmile::{Stock, Var};
     let x_stock = Var::Stock(Stock {

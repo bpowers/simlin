@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-#![allow(dead_code)]
-
 extern crate core;
 #[macro_use]
 extern crate lazy_static;
@@ -34,6 +32,8 @@ pub mod xmile;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
+
+mod interpreter;
 
 use std::collections::HashMap;
 use std::fmt;
