@@ -7,6 +7,7 @@ use crate::model::Model;
 use crate::variable::Variable;
 use crate::xmile;
 use crate::Project;
+use std::borrow::BorrowMut;
 
 const TIME_OFF: usize = 0;
 
@@ -988,7 +989,6 @@ impl Simulation {
 
     fn calc_stocks(&self, module_id: usize, dt: f64, curr: &[f64], next: &mut [f64]) {
         let module = &self.modules[module_id];
-        next[TIME_OFF] = curr[TIME_OFF] + dt;
         for v in module.runlist_stocks.iter() {
             next[v.off] = curr[v.off]
                 + StepEvaluator {
@@ -1014,7 +1014,13 @@ impl Simulation {
         if spec.stop < spec.start {
             return sim_err!(BadSimSpecs, "".to_string());
         }
-        let n_chunks: usize = ((spec.stop - spec.start) / spec.dt + 1.0) as usize;
+        let save_step = if spec.save_step > spec.dt {
+            spec.save_step
+        } else {
+            spec.dt
+        };
+        let n_chunks: usize = ((spec.stop - spec.start) / save_step + 1.0) as usize;
+        let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5) as usize);
 
         let dt = spec.dt;
         let stop = spec.stop;
@@ -1032,42 +1038,35 @@ impl Simulation {
             let mut curr = slabs.next().unwrap();
             self.calc_initials(module_id, dt, curr);
 
-            for next in slabs {
+            let mut step = 0;
+            let mut next = slabs.next().unwrap();
+            loop {
                 self.calc_flows(module_id, dt, curr);
                 self.calc_stocks(module_id, dt, curr, next);
-                curr = next;
+                next[TIME_OFF] = curr[TIME_OFF] + dt;
+                step += 1;
+                if step != save_every {
+                    let curr = curr.borrow_mut();
+                    curr.copy_from_slice(next);
+                } else {
+                    curr = next;
+                    let maybe_next = slabs.next();
+                    if maybe_next.is_none() {
+                        break;
+                    }
+                    next = maybe_next.unwrap();
+                    step = 0;
+                }
             }
             // ensure we've calculated stock + flow values for the dt <= end_time
             assert!(curr[TIME_OFF] > stop);
         }
 
-        let mut step = 0;
-        let mut save_step_off = 0;
-        let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5) as usize);
-        let n_save_chunks: usize = ((spec.stop - spec.start) / spec.dt + 1.0) as usize;
-
-        let results_slab: Vec<f64> = vec![0.0; n_slots * n_save_chunks];
-        let mut boxed_results_slab = results_slab.into_boxed_slice();
-        {
-            let mut slabs: Vec<&mut [f64]> = boxed_results_slab.chunks_mut(n_slots).collect();
-
-            for curr in boxed_slab.chunks(n_slots) {
-                if curr[TIME_OFF] > stop {
-                    break;
-                }
-                if step % save_every == 0 {
-                    slabs[save_step_off].copy_from_slice(curr);
-                    save_step_off += 1;
-                }
-                step += 1;
-            }
-        }
-
         Ok(Results {
             offsets: self.build_offsets(self.root, ""),
-            data: boxed_results_slab,
+            data: boxed_slab,
             step_size: n_slots,
-            step_count: n_save_chunks,
+            step_count: n_chunks,
         })
     }
 }
