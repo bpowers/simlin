@@ -174,7 +174,7 @@ fn optional_vec(slice: &[&str]) -> Option<Vec<String>> {
 }
 
 #[cfg(test)]
-fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
+fn x_module(ident: &str, refs: &[(&str, &str)]) -> xmile::Var {
     use xmile::{Connect, Module, Reference, Var};
     let refs: Vec<Reference> = refs
         .iter()
@@ -186,22 +186,26 @@ fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
         })
         .collect();
 
-    let x_module = Var::Module(Module {
+    Var::Module(Module {
         name: ident.to_string(),
         doc: None,
         units: None,
         refs,
-    });
+    })
+}
 
-    let var = parse_var(&x_module);
+#[cfg(test)]
+fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
+    let var = x_module(ident, refs);
+    let var = parse_var(&var);
     assert!(var.errors().is_none());
     var
 }
 
 #[cfg(test)]
-fn flow(ident: &str, eqn: &str) -> Variable {
+fn x_flow(ident: &str, eqn: &str) -> xmile::Var {
     use xmile::{Flow, Var};
-    let x_flow = Var::Flow(Flow {
+    Var::Flow(Flow {
         name: ident.to_string(),
         eqn: Some(eqn.to_string()),
         doc: None,
@@ -209,34 +213,42 @@ fn flow(ident: &str, eqn: &str) -> Variable {
         gf: None,
         non_negative: None,
         dimensions: None,
-    });
+    })
+}
 
-    let var = parse_var(&x_flow);
+#[cfg(test)]
+fn flow(ident: &str, eqn: &str) -> Variable {
+    let var = x_flow(ident, eqn);
+    let var = parse_var(&var);
     assert!(var.errors().is_none());
     var
 }
 
 #[cfg(test)]
-fn aux(ident: &str, eqn: &str) -> Variable {
+fn x_aux(ident: &str, eqn: &str) -> xmile::Var {
     use xmile::{Aux, Var};
-    let x_aux = Var::Aux(Aux {
+    Var::Aux(Aux {
         name: ident.to_string(),
         eqn: Some(eqn.to_string()),
         doc: None,
         units: None,
         gf: None,
         dimensions: None,
-    });
+    })
+}
 
-    let var = parse_var(&x_aux);
+#[cfg(test)]
+fn aux(ident: &str, eqn: &str) -> Variable {
+    let var = x_aux(ident, eqn);
+    let var = parse_var(&var);
     assert!(var.errors().is_none());
     var
 }
 
 #[cfg(test)]
-fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
+fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> xmile::Var {
     use xmile::{Stock, Var};
-    let x_stock = Var::Stock(Stock {
+    Var::Stock(Stock {
         name: ident.to_string(),
         eqn: Some(eqn.to_string()),
         doc: None,
@@ -245,11 +257,63 @@ fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variabl
         outflows: optional_vec(outflows),
         non_negative: None,
         dimensions: None,
-    });
+    })
+}
 
-    let var = parse_var(&x_stock);
+#[cfg(test)]
+fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
+    let var = x_stock(ident, eqn, inflows, outflows);
+    let var = parse_var(&var);
     assert!(var.errors().is_none());
     var
+}
+
+#[cfg(test)]
+fn x_model(ident: &str, variables: Vec<xmile::Var>) -> xmile::Model {
+    xmile::Model {
+        name: Some(ident.to_string()),
+        namespaces: None,
+        resource: None,
+        sim_specs: None,
+        variables: Some(xmile::Variables { variables }),
+        views: None,
+    }
+}
+
+#[test]
+fn test_module_dependency() {
+    let lynxes_model = x_model(
+        "lynxes",
+        vec![
+            x_aux("init", "5"),
+            x_stock("lynxes_stock", "100 * init", &["inflow"], &[]),
+            x_flow("inflow", "1"),
+        ],
+    );
+    let hares_model = x_model(
+        "hares",
+        vec![
+            x_aux("lynxes", "0"),
+            x_stock("hares_stock", "100", &[], &["outflow"]),
+            x_flow("outflow", ".1 * hares_stock"),
+        ],
+    );
+    let main_model = x_model(
+        "main",
+        vec![
+            x_aux("main_init", "7"),
+            x_module("lynxes", &[("main_init", "lynxes.init")]),
+            x_module("hares", &[("lynxes.lynxes", "hares.lynxes")]),
+        ],
+    );
+
+    let _models: HashMap<String, &xmile::Model> = vec![
+        ("main".to_string(), &main_model),
+        ("lynxes".to_string(), &lynxes_model),
+        ("hares".to_string(), &hares_model),
+    ]
+    .into_iter()
+    .collect();
 }
 
 #[test]
