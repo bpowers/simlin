@@ -186,6 +186,55 @@ fn test_xml_gf_parsing() {
 }
 
 #[test]
+fn test_module_parsing() {
+    let input = "<module name=\"hares\" isee:label=\"\">
+				<connect to=\"hares.area\" from=\".area\"/>
+				<connect2 to=\"hares.area\" from=\"area\"/>
+				<connect to=\"lynxes.hare_density\" from=\"hares.hare_density\"/>
+				<connect2 to=\"lynxes.hare_density\" from=\"hares.hare_density\"/>
+				<connect to=\"hares.lynxes\" from=\"lynxes.lynxes\"/>
+				<connect2 to=\"hares.lynxes\" from=\"lynxes.lynxes\"/>
+			</module>";
+
+    let expected = xmile::Module {
+        name: "hares".to_string(),
+        doc: None,
+        units: None,
+        refs: vec![
+            xmile::Reference::Connect(xmile::Connect {
+                src: ".area".to_string(),
+                dst: "hares.area".to_string(),
+            }),
+            xmile::Reference::Connect2(xmile::Connect {
+                src: "area".to_string(),
+                dst: "hares.area".to_string(),
+            }),
+            xmile::Reference::Connect(xmile::Connect {
+                src: "hares.hare_density".to_string(),
+                dst: "lynxes.hare_density".to_string(),
+            }),
+            xmile::Reference::Connect2(xmile::Connect {
+                src: "hares.hare_density".to_string(),
+                dst: "lynxes.hare_density".to_string(),
+            }),
+            xmile::Reference::Connect(xmile::Connect {
+                src: "lynxes.lynxes".to_string(),
+                dst: "hares.lynxes".to_string(),
+            }),
+            xmile::Reference::Connect2(xmile::Connect {
+                src: "lynxes.lynxes".to_string(),
+                dst: "hares.lynxes".to_string(),
+            }),
+        ],
+    };
+
+    use quick_xml::de;
+    let actual: xmile::Module = de::from_reader(input.as_bytes()).unwrap();
+
+    assert_eq!(expected, actual);
+}
+
+#[test]
 fn test_sim_specs_parsing() {
     let input = "<sim_specs method=\"Euler\" time_units=\"Time\">
 		<start>0</start>

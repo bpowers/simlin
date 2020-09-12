@@ -421,12 +421,22 @@ pub struct Module {
     pub name: String,
     pub doc: Option<String>,
     pub units: Option<String>,
-    pub refs: Option<Vec<Ref>>,
+    #[serde(rename = "$value", default)]
+    pub refs: Vec<Reference>,
+}
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reference {
+    // these only differ in the semantics of their contents
+    Connect(Connect),
+    Connect2(Connect),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
-pub struct Ref {
+pub struct Connect {
+    #[serde(rename = "from")]
     pub src: String,
+    #[serde(rename = "to")]
     pub dst: String,
 }
 

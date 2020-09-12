@@ -20,6 +20,14 @@ pub struct Table {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct ModuleInput {
+    // the Variable identifier in the current model we will use for input
+    pub src: Ident,
+    // the Variable identifier in the module's model we will override
+    pub dst: Ident,
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum Variable {
     Stock {
         ident: Ident,
@@ -45,9 +53,10 @@ pub enum Variable {
         direct_deps: HashSet<Ident>,
     },
     Module {
+        // the current spec has ident == model name
         ident: Ident,
         units: Option<String>,
-        refs: Vec<xmile::Ref>,
+        inputs: Vec<ModuleInput>,
         errors: Vec<Error>,
         direct_deps: HashSet<Ident>,
     },
@@ -307,16 +316,41 @@ pub fn parse_var(v: &xmile::Var) -> Variable {
                 direct_deps,
             }
         }
-        xmile::Var::Module(v) => Variable::Module {
-            ident: canonicalize(v.name.as_ref()),
-            units: v.units.clone(),
-            refs: v.refs.clone().unwrap_or_default(),
-            errors: Vec::new(),
-            direct_deps: match &v.refs {
-                Some(refs) => refs.iter().map(|r| r.src.clone()).collect(),
-                None => HashSet::new(),
-            },
-        },
+        xmile::Var::Module(v) => {
+            let ident = canonicalize(v.name.as_ref());
+            let input_prefix = format!("{}.", ident);
+            let inputs: Vec<ModuleInput> = v
+                .refs
+                .iter()
+                .filter(|r| {
+                    if let xmile::Reference::Connect(_) = r {
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .map(|r| {
+                    if let xmile::Reference::Connect(r) = r {
+                        (r.src.as_str(), r.dst.as_str())
+                    } else {
+                        unreachable!();
+                    }
+                })
+                .filter(|(_src, dst)| (*dst).starts_with(&input_prefix))
+                .map(|(src, dst)| ModuleInput {
+                    src: canonicalize(src.strip_prefix('.').unwrap_or(src)),
+                    dst: canonicalize(dst.strip_prefix(&input_prefix).unwrap()),
+                })
+                .collect();
+            let direct_deps = inputs.iter().map(|r| r.src.clone()).collect();
+            Variable::Module {
+                ident,
+                units: v.units.clone(),
+                inputs,
+                errors: Vec::new(),
+                direct_deps,
+            }
+        }
     }
 }
 

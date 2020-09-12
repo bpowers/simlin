@@ -175,19 +175,16 @@ fn optional_vec(slice: &[&str]) -> Option<Vec<String>> {
 
 #[cfg(test)]
 fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
-    use xmile::{Module, Ref, Var};
-    let refs: Option<Vec<Ref>> = if refs.is_empty() {
-        None
-    } else {
-        Some(
-            refs.iter()
-                .map(|(src, dst)| Ref {
-                    src: src.to_string(),
-                    dst: dst.to_string(),
-                })
-                .collect(),
-        )
-    };
+    use xmile::{Connect, Module, Reference, Var};
+    let refs: Vec<Reference> = refs
+        .iter()
+        .map(|(src, dst)| {
+            Reference::Connect(Connect {
+                src: src.to_string(),
+                dst: dst.to_string(),
+            })
+        })
+        .collect();
 
     let x_module = Var::Module(Module {
         name: ident.to_string(),
@@ -303,7 +300,7 @@ fn test_all_deps() {
         }
     }
 
-    let mod_1 = module("mod_1", &[("aux_3", "input")]);
+    let mod_1 = module("mod_1", &[("aux_3", "mod_1.input")]);
     let aux_3 = aux("aux_3", "6");
     let inflow = flow("inflow", "mod_1.output");
     let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
