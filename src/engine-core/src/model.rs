@@ -253,6 +253,35 @@ fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variabl
 }
 
 #[test]
+fn test_module_parse() {
+    use crate::variable::ModuleInput;
+    let inputs: Vec<ModuleInput> = vec![
+        ModuleInput {
+            src: "area".to_string(),
+            dst: "area".to_string(),
+        },
+        ModuleInput {
+            src: "lynxes.lynxes".to_string(),
+            dst: "lynxes".to_string(),
+        },
+    ];
+    let direct_deps = inputs.iter().map(|mi| mi.src.clone()).collect();
+    let expected = Variable::Module {
+        ident: "hares".to_string(),
+        units: None,
+        inputs,
+        errors: vec![],
+        direct_deps,
+    };
+
+    let actual = module(
+        "hares",
+        &[("area", "hares.area"), ("lynxes.lynxes", "hares.lynxes")],
+    );
+    assert_eq!(expected, actual);
+}
+
+#[test]
 fn test_all_deps() {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
