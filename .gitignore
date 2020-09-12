@@ -2,6 +2,9 @@
 
 /.app.prod.yaml
 
+perf.data
+perf.data.old
+
 /target
 
 # See https://help.github.com/ignore-files/ for more about ignoring files.
