@@ -127,7 +127,6 @@ pub enum Expr {
 struct Context<'a> {
     ident: &'a str,
     offsets: &'a HashMap<&'a str, usize>,
-    reverse_deps: &'a HashMap<&'a str, HashSet<&'a str>>,
     is_initial: bool,
 }
 
@@ -330,7 +329,6 @@ fn test_lower() {
     let context = Context {
         ident: "test",
         offsets: &offsets,
-        reverse_deps: &HashMap::new(),
         is_initial: false,
     };
     let expected = Expr::If(
@@ -367,7 +365,6 @@ fn test_lower() {
     let context = Context {
         ident: "test",
         offsets: &offsets,
-        reverse_deps: &HashMap::new(),
         is_initial: false,
     };
     let expected = Expr::If(
@@ -401,7 +398,6 @@ fn test_fold_flows() {
     let ctx = Context {
         ident: "test",
         offsets: &offsets,
-        reverse_deps: &HashMap::new(),
         is_initial: false,
     };
 
@@ -463,62 +459,6 @@ pub struct Module {
     runlist_stocks: Vec<Var>,
     offsets: HashMap<String, usize>,
     tables: HashMap<String, Table>,
-}
-
-fn invert_deps<'a>(
-    forward: &'a HashMap<String, HashSet<String>>,
-) -> HashMap<&'a str, HashSet<&'a str>> {
-    let mut reverse: HashMap<&'a str, HashSet<&'a str>> = HashMap::new();
-    for (ident, deps) in forward.iter().map(|(id, deps)| (id.as_str(), deps)) {
-        if !reverse.contains_key(ident) {
-            reverse.insert(ident, HashSet::new());
-        }
-        for dep in deps.iter().map(|s| s.as_str()) {
-            if !reverse.contains_key(dep) {
-                reverse.insert(dep, HashSet::new());
-            }
-
-            reverse.get_mut(dep).unwrap().insert(ident);
-        }
-    }
-    reverse
-}
-
-#[test]
-fn test_invert_deps() {
-    fn mapify<'a>(input: &'a [(&'a str, &[&'a str])]) -> HashMap<&'a str, HashSet<&'a str>> {
-        use std::iter::FromIterator;
-        input
-            .into_iter()
-            .map(|(k, v)| (*k, HashSet::from_iter(v.into_iter().map(|s| *s))))
-            .collect()
-    }
-
-    let forward: &[(&str, &[&str])] = &[
-        ("a", &["b", "c"]),
-        ("b", &["d", "c"]),
-        ("f", &["a"]),
-        ("e", &[]),
-    ];
-    let forward = mapify(forward);
-    let forward: HashMap<String, HashSet<String>> = forward
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
-        .collect();
-
-    let reverse = invert_deps(&forward);
-
-    let expected: &[(&str, &[&str])] = &[
-        ("a", &["f"]),
-        ("b", &["a"]),
-        ("c", &["a", "b"]),
-        ("d", &["b"]),
-        ("f", &[]),
-        ("e", &[]),
-    ];
-    let expected = mapify(expected);
-
-    assert_eq!(expected, reverse);
 }
 
 fn topo_sort<'out>(
@@ -595,7 +535,6 @@ impl Module {
         };
 
         let initial_deps = model.initial_deps.as_ref().unwrap();
-        let reverse_deps = &invert_deps(initial_deps);
         let is_initial = true;
 
         // TODO: we can cut this down to just things needed to initialize stocks,
@@ -609,7 +548,6 @@ impl Module {
                     &Context {
                         ident,
                         offsets: &offsets,
-                        reverse_deps,
                         is_initial,
                     },
                     &model.variables[ident],
@@ -618,7 +556,6 @@ impl Module {
             .collect();
 
         let dt_deps = model.dt_deps.as_ref().unwrap();
-        let reverse_deps = &invert_deps(dt_deps);
         let is_initial = false;
 
         let runlist_flows: Vec<&str> = var_names
@@ -634,7 +571,6 @@ impl Module {
                     &Context {
                         ident,
                         offsets: &offsets,
-                        reverse_deps,
                         is_initial,
                     },
                     &model.variables[ident],
@@ -652,7 +588,6 @@ impl Module {
                     &Context {
                         ident: v.ident(),
                         offsets: &offsets,
-                        reverse_deps,
                         is_initial,
                     },
                     v,
