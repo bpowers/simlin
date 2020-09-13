@@ -274,7 +274,7 @@ pub struct Model {
     pub views: Option<Views>,
 }
 
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
     #[serde(rename = "$value")]
     pub variables: Vec<Var>,
@@ -485,6 +485,18 @@ pub enum Var {
     Flow(Flow),
     Aux(Aux),
     Module(Module),
+}
+
+impl Var {
+    #[allow(dead_code)] // this is a false-positive lint
+    pub fn get_noncanonical_name(&self) -> &str {
+        match self {
+            Var::Stock(stock) => stock.name.as_str(),
+            Var::Flow(flow) => flow.name.as_str(),
+            Var::Aux(aux) => aux.name.as_str(),
+            Var::Module(module) => module.name.as_str(),
+        }
+    }
 }
 
 impl fmt::Debug for Var {

@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Error, Ident, Result};
-use crate::variable::{parse_var, Variable};
+use crate::variable::{parse_var, ModuleInput, Variable};
 use crate::xmile;
 
 #[derive(Debug)]
@@ -16,10 +16,6 @@ pub struct Model {
     pub dt_deps: Option<HashMap<Ident, HashSet<Ident>>>,
     pub initial_deps: Option<HashMap<Ident, HashSet<Ident>>>,
 }
-
-const EMPTY_VARS: xmile::Variables = xmile::Variables {
-    variables: Vec::new(),
-};
 
 // to ensure we sort the list of variables in O(n*log(n)) time, we
 // need to iterate over the set of variables we have and compute
@@ -117,15 +113,68 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
     Ok(var_deps)
 }
 
+pub fn resolve_relative<'a>(
+    models: &HashMap<String, HashMap<Ident, &'a xmile::Var>>,
+    model_name: &str,
+    ident: &str,
+) -> Option<&'a xmile::Var> {
+    let model = models.get(model_name)?;
+
+    let input_prefix = format!("{}.", model_name);
+    // TODO: this is weird to do here and not before we call into this fn
+    let ident = ident.strip_prefix(&input_prefix).unwrap_or(ident);
+
+    // if the identifier is still dotted, its a further submodel reference
+    // TODO: this will have to change when we break `module ident == model name`
+    if let Some(pos) = ident.find('.') {
+        let submodel_name = &ident[..pos];
+        let submodel_var = &ident[pos + 1..];
+        resolve_relative(models, submodel_name, submodel_var)
+    } else {
+        Some(model.get(ident)?)
+    }
+}
+
+pub fn resolve_module_input(
+    models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
+    model_name: &str,
+    ident: &str,
+    orig_src: &str,
+    orig_dst: &str,
+) -> Result<ModuleInput> {
+    use crate::common::canonicalize;
+    let input_prefix = format!("{}.", ident);
+    let src: Ident = canonicalize(orig_src);
+    let dst: Ident = canonicalize(orig_dst);
+
+    let dst = dst.strip_prefix(&input_prefix);
+    if dst.is_none() {
+        return var_err!(BadModuleInputDst, orig_dst.to_string());
+    }
+    let dst = dst.unwrap().to_string();
+
+    match resolve_relative(models, model_name, &src) {
+        Some(_) => Ok(ModuleInput { src, dst }),
+        None => var_err!(BadModuleInputSrc, orig_src.to_string()),
+    }
+}
+
 impl Model {
-    pub fn new(x_model: &xmile::Model, models: &HashMap<String, &xmile::Model>) -> Self {
+    pub fn new(
+        models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
+        x_model: &xmile::Model,
+    ) -> Self {
+        let empty_vars: xmile::Variables = xmile::Variables {
+            variables: Vec::new(),
+        };
+
         let variable_list: Vec<Variable> = x_model
             .variables
             .as_ref()
-            .unwrap_or(&EMPTY_VARS)
+            .unwrap_or(&empty_vars)
             .variables
             .iter()
-            .map(|v| parse_var(v, x_model.get_name(), models))
+            .map(|v| parse_var(models, x_model.get_name(), v))
             .collect();
 
         let mut errors: Vec<Error> = Vec::new();
@@ -195,14 +244,6 @@ fn x_module(ident: &str, refs: &[(&str, &str)]) -> xmile::Var {
 }
 
 #[cfg(test)]
-fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
-    let var = x_module(ident, refs);
-    let var = parse_var(&var, "main", &HashMap::new());
-    assert!(var.errors().is_none());
-    var
-}
-
-#[cfg(test)]
 fn x_flow(ident: &str, eqn: &str) -> xmile::Var {
     use xmile::{Flow, Var};
     Var::Flow(Flow {
@@ -219,7 +260,7 @@ fn x_flow(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
-    let var = parse_var(&var, "main", &HashMap::new());
+    let var = parse_var(&HashMap::new(), "main", &var);
     assert!(var.errors().is_none());
     var
 }
@@ -240,7 +281,7 @@ fn x_aux(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
-    let var = parse_var(&var, "main", &HashMap::new());
+    let var = parse_var(&HashMap::new(), "main", &var);
     assert!(var.errors().is_none());
     var
 }
@@ -263,7 +304,7 @@ fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> xmile
 #[cfg(test)]
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows);
-    let var = parse_var(&var, "main", &HashMap::new());
+    let var = parse_var(&HashMap::new(), "main", &var);
     assert!(var.errors().is_none());
     var
 }
@@ -325,7 +366,7 @@ fn test_module_parse() {
             dst: "area".to_string(),
         },
         ModuleInput {
-            src: "lynxes.lynxes".to_string(),
+            src: "lynxes.lynxes_stock".to_string(),
             dst: "lynxes".to_string(),
         },
     ];
@@ -361,26 +402,46 @@ fn test_module_parse() {
             x_module("lynxes", &[]),
             x_module(
                 "hares",
-                &[("area", "hares.area"), ("lynxes.lynxes", "hares.lynxes")],
+                &[
+                    ("area", "hares.area"),
+                    ("lynxes.lynxes_stock", "hares.lynxes"),
+                ],
             ),
         ],
     );
 
-    let models: HashMap<String, &xmile::Model> = vec![
+    let models: HashMap<String, HashMap<Ident, &xmile::Var>> = vec![
         ("main".to_string(), &main_model),
         ("lynxes".to_string(), &lynxes_model),
         ("hares".to_string(), &hares_model),
     ]
     .into_iter()
+    .map(|(name, m)| build_xvars_map(name, m))
     .collect();
 
-    let actual = x_module(
-        "hares",
-        &[("area", "hares.area"), ("lynxes.lynxes", "hares.lynxes")],
-    );
-    let actual = parse_var(&actual, "main", &models);
+    let actual = parse_var(&models, "main", models["main"]["hares"]);
     assert!(actual.errors().is_none());
     assert_eq!(expected, actual);
+}
+
+#[allow(dead_code)] // false positive
+pub fn build_xvars_map<'a>(
+    name: Ident,
+    m: &'a xmile::Model,
+) -> (Ident, HashMap<Ident, &'a xmile::Var>) {
+    use crate::common::canonicalize;
+
+    (
+        name,
+        match m.variables.as_ref() {
+            Some(vars) => vars
+                .variables
+                .iter()
+                .map(|v| (canonicalize(v.get_noncanonical_name()), v))
+                .collect(),
+            None => HashMap::new(),
+        },
+    )
 }
 
 #[test]
@@ -431,7 +492,21 @@ fn test_all_deps() {
         }
     }
 
-    let mod_1 = module("mod_1", &[("aux_3", "mod_1.input")]);
+    let main_model = x_model(
+        "main",
+        vec![
+            x_module("mod_1", &[("aux_3", "mod_1.input")]),
+            x_aux("aux_3", "6"),
+            x_flow("inflow", "mod_1.output"),
+        ],
+    );
+    let models: HashMap<String, HashMap<Ident, &xmile::Var>> =
+        vec![("main".to_string(), &main_model)]
+            .into_iter()
+            .map(|(name, m)| build_xvars_map(name, m))
+            .collect();
+
+    let mod_1 = parse_var(&models, "main", models["main"]["mod_1"]);
     let aux_3 = aux("aux_3", "6");
     let inflow = flow("inflow", "mod_1.output");
     let expected_deps_list: Vec<(&Variable, &[&str])> = vec![

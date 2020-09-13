@@ -44,7 +44,7 @@ use std::rc::Rc;
 
 use self::common::Result;
 
-pub use self::common::canonicalize;
+pub use self::common::{canonicalize, Ident};
 pub use self::sim::Results;
 pub use self::sim::Simulation;
 
@@ -79,22 +79,22 @@ impl Project {
 
         use model::Model;
 
-        let models: HashMap<String, &xmile::Model> = HashMap::new();
+        let models: HashMap<String, HashMap<Ident, &xmile::Var>> = HashMap::new();
 
         // first, pull in the models we need from the stdlib
         let mut models_list: Vec<Model> = self::stdlib::MODEL_NAMES
             .iter()
             .map(|name| self::stdlib::get(name).unwrap())
-            .map(|x_model| Model::new(&x_model, &models))
+            .map(|x_model| Model::new(&models, &x_model))
             .collect();
 
-        let models: HashMap<String, &xmile::Model> = file
+        let models: HashMap<String, HashMap<Ident, &xmile::Var>> = file
             .models
             .iter()
-            .map(|m| (m.get_name().to_string(), m))
+            .map(|m| model::build_xvars_map(m.get_name().to_string(), m))
             .collect();
 
-        models_list.extend(file.models.iter().map(|m| Model::new(m, &models)));
+        models_list.extend(file.models.iter().map(|m| Model::new(&models, m)));
 
         let models = models_list
             .into_iter()

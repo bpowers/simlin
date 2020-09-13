@@ -8,7 +8,7 @@ use std::rc::Rc;
 use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
-use crate::common::{canonicalize, EquationError, Error, Ident};
+use crate::common::{canonicalize, EquationError, Error, Ident, Result};
 use crate::xmile;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -117,7 +117,7 @@ impl Variable {
     }
 }
 
-fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>, crate::common::Error> {
+fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>> {
     use std::str::FromStr;
 
     if gf.is_none() {
@@ -128,7 +128,7 @@ fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>, cra
     let x_range: Option<(f64, f64)> = gf.x_scale.as_ref().map(|scale| (scale.min, scale.max));
     let y_range: Option<(f64, f64)> = gf.y_scale.as_ref().map(|scale| (scale.min, scale.max));
 
-    let y: Result<Vec<f64>, _> = match &gf.y_pts {
+    let y: std::result::Result<Vec<f64>, _> = match &gf.y_pts {
         None => Ok(vec![]),
         Some(y_pts) => y_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
     };
@@ -137,7 +137,7 @@ fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>, cra
     }
     let y = y.unwrap();
 
-    let x: Result<Vec<f64>, _> = match &gf.x_pts {
+    let x: std::result::Result<Vec<f64>, _> = match &gf.x_pts {
         None => {
             if let Some((x_min, x_max)) = x_range {
                 let size = y.len() as f64;
@@ -222,9 +222,9 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<EquationError>
 }
 
 pub fn parse_var(
-    v: &xmile::Var,
+    models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
     model_name: &str,
-    models: &HashMap<String, &xmile::Model>,
+    v: &xmile::Var,
 ) -> Variable {
     match v {
         xmile::Var::Stock(v) => {
@@ -323,7 +323,7 @@ pub fn parse_var(
         xmile::Var::Module(v) => {
             let ident = canonicalize(v.name.as_ref());
             let input_prefix = format!("{}.", ident);
-            let inputs: Vec<ModuleInput> = v
+            let inputs: Vec<Result<ModuleInput>> = v
                 .refs
                 .iter()
                 .filter(|r| {
@@ -341,17 +341,41 @@ pub fn parse_var(
                     }
                 })
                 .filter(|(_src, dst)| (*dst).starts_with(&input_prefix))
-                .map(|(src, dst)| ModuleInput {
-                    src: canonicalize(src.strip_prefix('.').unwrap_or(src)),
-                    dst: canonicalize(dst.strip_prefix(&input_prefix).unwrap()),
+                .map(|(src, dst)| {
+                    crate::model::resolve_module_input(models, model_name, &ident, src, dst)
                 })
                 .collect();
-            let direct_deps = inputs.iter().map(|r| r.src.clone()).collect();
+            let (inputs, errors): (Vec<_>, Vec<_>) = inputs.into_iter().partition(Result::is_ok);
+            let inputs: Vec<ModuleInput> = inputs.into_iter().map(|i| i.unwrap()).collect();
+            let errors: Vec<Error> = errors.into_iter().map(|e| e.unwrap_err()).collect();
+
+            let direct_deps = inputs
+                .iter()
+                .map(|r| {
+                    let src = &r.src;
+                    let direct_dep = match src.find('.') {
+                        Some(pos) => &src[..pos],
+                        None => src,
+                    };
+
+                    if let xmile::Var::Stock(_) =
+                        crate::model::resolve_relative(models, model_name, src).unwrap()
+                    {
+                        // if our input is a stock, we don't have any flow dependencies to
+                        // order before us this dt
+                        None
+                    } else {
+                        Some(direct_dep.to_string())
+                    }
+                })
+                .filter(|d| d.is_some())
+                .map(|d| d.unwrap())
+                .collect();
             Variable::Module {
                 ident,
                 units: v.units.clone(),
                 inputs,
-                errors: Vec::new(),
+                errors,
                 direct_deps,
             }
         }
@@ -518,7 +542,7 @@ fn test_canonicalize_stock_inflows() {
         direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
     };
 
-    let output = parse_var(&input, "main", &HashMap::new());
+    let output = parse_var(&HashMap::new(), "main", &input);
 
     assert_eq!(expected, output);
 }
@@ -571,7 +595,7 @@ fn test_tables() {
         assert!(false);
     }
 
-    let output = parse_var(&input, "main", &HashMap::new());
+    let output = parse_var(&HashMap::new(), "main", &input);
 
     assert_eq!(expected, output);
 }
