@@ -143,7 +143,11 @@ fn simulate_path(xmile_path: &str) {
             if !results.offsets.contains_key(ident) && IGNORABLE_COLS.contains(&ident.as_str()) {
                 continue;
             }
-            let actual = results_row[results.offsets[ident]];
+            if !results.offsets.contains_key(ident) {
+                panic!("output missing variable '{}'", ident);
+            }
+            let off = results.offsets[ident];
+            let actual = results_row[off];
 
             let around_zero = approx_eq!(f64, expected, 0.0, epsilon = 3e-6)
                 && approx_eq!(f64, actual, 0.0, epsilon = 1e-6);

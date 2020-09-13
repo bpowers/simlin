@@ -118,7 +118,9 @@ pub enum BuiltinFn {
 pub enum Expr {
     Const(f64),
     Var(usize), // offset
+    GlobalVar(Ident),
     App(BuiltinFn),
+    EvalModule(Ident, Vec<Expr>),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     Op1(UnaryOp, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -417,8 +419,12 @@ impl Var {
     fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         let off = ctx.offsets[var.ident().as_str()];
         let ast = match var {
-            Variable::Module { .. } => {
-                return sim_err!(TODOModules, var.ident().clone());
+            Variable::Module { ident, inputs, .. } => {
+                let inputs: Vec<Expr> = inputs
+                    .iter()
+                    .map(|mi| Expr::GlobalVar(mi.src.clone()))
+                    .collect();
+                Expr::EvalModule(ident.clone(), inputs)
             }
             Variable::Stock { ast, .. } => {
                 if ctx.is_initial {
@@ -499,14 +505,33 @@ fn topo_sort<'out>(
     result
 }
 
+fn calc_n_slots(project: &Project, model_name: &str) -> usize {
+    let model = Rc::clone(&project.models[model_name]);
+
+    model
+        .variables
+        .iter()
+        .map(|(_name, var)| {
+            if let Variable::Module { ident, .. } = var {
+                calc_n_slots(project, ident)
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
 impl Module {
-    fn new(_project: &Project, model: Rc<Model>, is_root: bool) -> Result<Self> {
+    fn new(project: &Project, model: Rc<Model>, is_root: bool) -> Result<Self> {
         if model.dt_deps.is_none() || model.initial_deps.is_none() {
             return sim_err!(NotSimulatable, model.name.clone());
         }
 
+        let model_name: &str = &model.name;
+        let n_slots_start_off = if model_name == "main" { 1 } else { 0 };
+
         // FIXME: not right -- needs to adjust for submodules
-        let n_slots = model.variables.len() + 1; // add time in there
+        let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
 
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
@@ -629,6 +654,7 @@ fn is_truthy(n: f64) -> bool {
 
 pub struct StepEvaluator<'a> {
     curr: &'a [f64],
+    off: usize,
     dt: f64,
     tables: &'a HashMap<String, Table>,
 }
@@ -637,6 +663,12 @@ impl<'a> StepEvaluator<'a> {
     fn eval(&self, expr: &Expr) -> f64 {
         match expr {
             Expr::Const(n) => *n,
+            Expr::GlobalVar(id) => 0.0,
+            Expr::EvalModule(ident, args) => {
+                let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
+
+                0.0
+            }
             Expr::Var(off) => self.curr[*off],
             Expr::If(cond, t, f) => {
                 let cond: f64 = self.eval(cond);
@@ -883,6 +915,7 @@ impl Simulation {
         for v in module.runlist_initials.iter() {
             curr[v.off] = StepEvaluator {
                 dt,
+                off: 0,
                 curr,
                 tables: &module.tables,
             }
@@ -890,11 +923,18 @@ impl Simulation {
         }
     }
 
-    fn calc_flows(&self, module_id: usize, dt: f64, curr: &mut [f64]) {
+    fn calc_flows(
+        &self,
+        offsets: &HashMap<Ident, usize>,
+        module_id: usize,
+        dt: f64,
+        curr: &mut [f64],
+    ) {
         let module = &self.modules[module_id];
         for v in module.runlist_flows.iter() {
             curr[v.off] = StepEvaluator {
                 dt,
+                off: 0,
                 curr,
                 tables: &module.tables,
             }
@@ -902,12 +942,20 @@ impl Simulation {
         }
     }
 
-    fn calc_stocks(&self, module_id: usize, dt: f64, curr: &[f64], next: &mut [f64]) {
+    fn calc_stocks(
+        &self,
+        offsets: &HashMap<Ident, usize>,
+        module_id: usize,
+        dt: f64,
+        curr: &[f64],
+        next: &mut [f64],
+    ) {
         let module = &self.modules[module_id];
         for v in module.runlist_stocks.iter() {
             next[v.off] = curr[v.off]
                 + StepEvaluator {
                     dt,
+                    off: 0,
                     curr,
                     tables: &module.tables,
                 }
@@ -942,6 +990,8 @@ impl Simulation {
 
         let n_slots = self.n_slots(self.root);
 
+        let offsets = self.build_offsets(self.root, "");
+
         let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
         let mut boxed_slab = slab.into_boxed_slice();
         {
@@ -956,8 +1006,8 @@ impl Simulation {
             let mut step = 0;
             let mut next = slabs.next().unwrap();
             loop {
-                self.calc_flows(module_id, dt, curr);
-                self.calc_stocks(module_id, dt, curr, next);
+                self.calc_flows(&offsets, module_id, dt, curr);
+                self.calc_stocks(&offsets, module_id, dt, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 step += 1;
                 if step != save_every {
@@ -978,7 +1028,7 @@ impl Simulation {
         }
 
         Ok(Results {
-            offsets: self.build_offsets(self.root, ""),
+            offsets,
             data: boxed_slab,
             step_size: n_slots,
             step_count: n_chunks,
