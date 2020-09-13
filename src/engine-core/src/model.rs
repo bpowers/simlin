@@ -125,7 +125,7 @@ impl Model {
             .unwrap_or(&EMPTY_VARS)
             .variables
             .iter()
-            .map(|v| parse_var(v, models))
+            .map(|v| parse_var(v, x_model.get_name(), models))
             .collect();
 
         let mut errors: Vec<Error> = Vec::new();
@@ -197,7 +197,7 @@ fn x_module(ident: &str, refs: &[(&str, &str)]) -> xmile::Var {
 #[cfg(test)]
 fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
     let var = x_module(ident, refs);
-    let var = parse_var(&var, &HashMap::new());
+    let var = parse_var(&var, "main", &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
@@ -219,7 +219,7 @@ fn x_flow(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
-    let var = parse_var(&var, &HashMap::new());
+    let var = parse_var(&var, "main", &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
@@ -240,7 +240,7 @@ fn x_aux(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
-    let var = parse_var(&var, &HashMap::new());
+    let var = parse_var(&var, "main", &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
@@ -263,7 +263,7 @@ fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> xmile
 #[cfg(test)]
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows);
-    let var = parse_var(&var, &HashMap::new());
+    let var = parse_var(&var, "main", &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
@@ -329,7 +329,7 @@ fn test_module_parse() {
             dst: "lynxes".to_string(),
         },
     ];
-    let direct_deps = inputs.iter().map(|mi| mi.src.clone()).collect();
+    let direct_deps = vec!["area".to_string()].into_iter().collect();
     let expected = Variable::Module {
         ident: "hares".to_string(),
         units: None,
@@ -338,10 +338,48 @@ fn test_module_parse() {
         direct_deps,
     };
 
-    let actual = module(
+    let lynxes_model = x_model(
+        "lynxes",
+        vec![
+            x_aux("init", "5"),
+            x_stock("lynxes_stock", "100 * init", &["inflow"], &[]),
+            x_flow("inflow", "1"),
+        ],
+    );
+    let hares_model = x_model(
+        "hares",
+        vec![
+            x_aux("lynxes", "0"),
+            x_stock("hares_stock", "100", &[], &["outflow"]),
+            x_flow("outflow", ".1 * hares_stock"),
+        ],
+    );
+    let main_model = x_model(
+        "main",
+        vec![
+            x_aux("area", "time"),
+            x_module("lynxes", &[]),
+            x_module(
+                "hares",
+                &[("area", "hares.area"), ("lynxes.lynxes", "hares.lynxes")],
+            ),
+        ],
+    );
+
+    let models: HashMap<String, &xmile::Model> = vec![
+        ("main".to_string(), &main_model),
+        ("lynxes".to_string(), &lynxes_model),
+        ("hares".to_string(), &hares_model),
+    ]
+    .into_iter()
+    .collect();
+
+    let actual = x_module(
         "hares",
         &[("area", "hares.area"), ("lynxes.lynxes", "hares.lynxes")],
     );
+    let actual = parse_var(&actual, "main", &models);
+    assert!(actual.errors().is_none());
     assert_eq!(expected, actual);
 }
 

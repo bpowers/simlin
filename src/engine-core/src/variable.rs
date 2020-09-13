@@ -221,7 +221,11 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<EquationError>
     }
 }
 
-pub fn parse_var(v: &xmile::Var, models: &HashMap<String, &xmile::Model>) -> Variable {
+pub fn parse_var(
+    v: &xmile::Var,
+    model_name: &str,
+    models: &HashMap<String, &xmile::Model>,
+) -> Variable {
     match v {
         xmile::Var::Stock(v) => {
             let (ast, errors) = parse_eqn(&v.eqn);
@@ -514,7 +518,7 @@ fn test_canonicalize_stock_inflows() {
         direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
     };
 
-    let output = parse_var(&input, &HashMap::new());
+    let output = parse_var(&input, "main", &HashMap::new());
 
     assert_eq!(expected, output);
 }
@@ -567,7 +571,7 @@ fn test_tables() {
         assert!(false);
     }
 
-    let output = parse_var(&input, &HashMap::new());
+    let output = parse_var(&input, "main", &HashMap::new());
 
     assert_eq!(expected, output);
 }
