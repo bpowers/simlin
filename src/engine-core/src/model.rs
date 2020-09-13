@@ -118,14 +118,14 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
 }
 
 impl Model {
-    pub fn new(x_model: &xmile::Model) -> Self {
+    pub fn new(x_model: &xmile::Model, models: &HashMap<String, &xmile::Model>) -> Self {
         let variable_list: Vec<Variable> = x_model
             .variables
             .as_ref()
             .unwrap_or(&EMPTY_VARS)
             .variables
             .iter()
-            .map(parse_var)
+            .map(|v| parse_var(v, models))
             .collect();
 
         let mut errors: Vec<Error> = Vec::new();
@@ -197,7 +197,7 @@ fn x_module(ident: &str, refs: &[(&str, &str)]) -> xmile::Var {
 #[cfg(test)]
 fn module(ident: &str, refs: &[(&str, &str)]) -> Variable {
     let var = x_module(ident, refs);
-    let var = parse_var(&var);
+    let var = parse_var(&var, &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
@@ -219,7 +219,7 @@ fn x_flow(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
-    let var = parse_var(&var);
+    let var = parse_var(&var, &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
@@ -240,7 +240,7 @@ fn x_aux(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
-    let var = parse_var(&var);
+    let var = parse_var(&var, &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
@@ -263,7 +263,7 @@ fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> xmile
 #[cfg(test)]
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows);
-    let var = parse_var(&var);
+    let var = parse_var(&var, &HashMap::new());
     assert!(var.errors().is_none());
     var
 }
