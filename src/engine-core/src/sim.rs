@@ -118,17 +118,20 @@ pub enum BuiltinFn {
 pub enum Expr {
     Const(f64),
     Var(usize), // offset
+    Dt,
     GlobalVar(Ident),
     App(BuiltinFn),
     EvalModule(Ident, Vec<Expr>),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     Op1(UnaryOp, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+    AssignCurr(usize, Box<Expr>),
+    AssignNext(usize, Box<Expr>),
 }
 
 struct Context<'a> {
     ident: &'a str,
-    offsets: &'a HashMap<&'a str, usize>,
+    offsets: &'a HashMap<String, usize>,
     is_initial: bool,
 }
 
@@ -280,7 +283,7 @@ impl<'a> Context<'a> {
         }))
     }
 
-    fn build_stock_update_expr(&self, var: &Variable) -> Result<Expr> {
+    fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Result<Expr> {
         if let Variable::Stock {
             inflows, outflows, ..
         } = var
@@ -295,10 +298,20 @@ impl<'a> Context<'a> {
                 Some(flows) => flows,
             };
 
+            let dt_update = Expr::Op2(
+                BinaryOp::Mul,
+                Box::new(Expr::Op2(
+                    BinaryOp::Sub,
+                    Box::new(inflows),
+                    Box::new(outflows),
+                )),
+                Box::new(Expr::Dt),
+            );
+
             Ok(Expr::Op2(
-                BinaryOp::Sub,
-                Box::new(inflows),
-                Box::new(outflows),
+                BinaryOp::Add,
+                Box::new(Expr::Var(stock_off)),
+                Box::new(dt_update),
             ))
         } else {
             panic!(
@@ -325,9 +338,9 @@ fn test_lower() {
         ))
     };
 
-    let mut offsets: HashMap<&str, usize> = HashMap::new();
-    offsets.insert("true_input", 7);
-    offsets.insert("false_input", 8);
+    let mut offsets: HashMap<String, usize> = HashMap::new();
+    offsets.insert("true_input".to_string(), 7);
+    offsets.insert("false_input".to_string(), 8);
     let context = Context {
         ident: "test",
         offsets: &offsets,
@@ -361,9 +374,9 @@ fn test_lower() {
         ))
     };
 
-    let mut offsets: HashMap<&str, usize> = HashMap::new();
-    offsets.insert("true_input", 7);
-    offsets.insert("false_input", 8);
+    let mut offsets: HashMap<String, usize> = HashMap::new();
+    offsets.insert("true_input".to_string(), 7);
+    offsets.insert("false_input".to_string(), 8);
     let context = Context {
         ident: "test",
         offsets: &offsets,
@@ -386,7 +399,6 @@ fn test_lower() {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Var {
-    off: usize,
     ast: Expr,
 }
 
@@ -395,8 +407,8 @@ fn test_fold_flows() {
     use std::iter::FromIterator;
 
     let offsets: &[(&str, usize)] = &[("time", 0), ("a", 1), ("b", 2), ("c", 3), ("d", 4)];
-    let offsets: HashMap<&str, usize> =
-        HashMap::from_iter(offsets.into_iter().map(|(k, v)| (*k, *v)));
+    let offsets: HashMap<String, usize> =
+        HashMap::from_iter(offsets.into_iter().map(|(k, v)| ((*k).to_string(), *v)));
     let ctx = Context {
         ident: "test",
         offsets: &offsets,
@@ -417,7 +429,6 @@ fn test_fold_flows() {
 
 impl Var {
     fn new(ctx: &Context, var: &Variable) -> Result<Self> {
-        let off = ctx.offsets[var.ident().as_str()];
         let ast = match var {
             Variable::Module { ident, inputs, .. } => {
                 let inputs: Vec<Expr> = inputs
@@ -427,31 +438,34 @@ impl Var {
                 Expr::EvalModule(ident.clone(), inputs)
             }
             Variable::Stock { ast, .. } => {
+                let off = ctx.offsets[var.ident().as_str()];
                 if ctx.is_initial {
                     if ast.is_none() {
                         return sim_err!(EmptyEquation, var.ident().clone());
                     }
-                    ctx.lower(ast.as_ref().unwrap())?
+                    Expr::AssignCurr(off, Box::new(ctx.lower(ast.as_ref().unwrap())?))
                 } else {
-                    ctx.build_stock_update_expr(var)?
+                    Expr::AssignNext(off, Box::new(ctx.build_stock_update_expr(off, var)?))
                 }
             }
             Variable::Var {
                 ident, table, ast, ..
             } => {
+                let off = ctx.offsets[var.ident().as_str()];
                 if let Some(ast) = ast {
                     let expr = ctx.lower(ast)?;
-                    if table.is_some() {
+                    let expr = if table.is_some() {
                         Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
                     } else {
                         expr
-                    }
+                    };
+                    Expr::AssignCurr(off, Box::new(expr))
                 } else {
                     return sim_err!(EmptyEquation, var.ident().clone());
                 }
             }
         };
-        Ok(Var { off, ast })
+        Ok(Var { ast })
     }
 }
 
@@ -505,6 +519,44 @@ fn topo_sort<'out>(
     result
 }
 
+fn calc_offsets(project: &Project, model_name: &str) -> HashMap<Ident, usize> {
+    let is_root = model_name == "main";
+
+    let mut offsets: HashMap<Ident, usize> = HashMap::new();
+    let mut base = 0;
+    if is_root {
+        offsets.insert("time".to_string(), 0);
+        base += 1;
+    }
+
+    let model = Rc::clone(&project.models[model_name]);
+    let var_names: Vec<&str> = {
+        let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
+        // TODO: if we reorder based on dependencies, we could probably improve performance
+        //   through better cache behavior.
+        var_names.sort();
+        var_names
+    };
+
+    for (i, ident) in var_names.iter().enumerate() {
+        if let Variable::Module { .. } = &model.variables[*ident] {
+            let sub_offsets = calc_offsets(project, *ident);
+            let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
+            sub_var_names.sort();
+            for (j, sub_ident) in sub_var_names.iter().enumerate() {
+                offsets.insert(format!("{}.{}", *ident, sub_ident), base + i + j);
+            }
+            // TODO: -1 because we didn't use the "slot" reserved for the
+            //   module in the parent model
+            base += sub_offsets.len() - 1;
+        } else {
+            offsets.insert(ident.to_string(), base + i);
+        }
+    }
+
+    offsets
+}
+
 fn calc_n_slots(project: &Project, model_name: &str) -> usize {
     let model = Rc::clone(&project.models[model_name]);
 
@@ -528,9 +580,8 @@ impl Module {
         }
 
         let model_name: &str = &model.name;
-        let n_slots_start_off = if model_name == "main" { 1 } else { 0 };
+        let n_slots_start_off = if is_root { 1 } else { 0 };
 
-        // FIXME: not right -- needs to adjust for submodules
         let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
 
         let var_names: Vec<&str> = {
@@ -541,23 +592,7 @@ impl Module {
             var_names
         };
 
-        let offsets: HashMap<&str, usize> = {
-            let mut offsets = HashMap::new();
-            let base: usize = if is_root {
-                offsets.insert("time", 0);
-                1
-            } else {
-                0
-            };
-            offsets.extend(
-                var_names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, ident)| (*ident, base + i)),
-            );
-
-            offsets
-        };
+        let offsets = calc_offsets(project, model_name);
 
         let initial_deps = model.initial_deps.as_ref().unwrap();
         let is_initial = true;
@@ -638,10 +673,7 @@ impl Module {
             runlist_initials: runlist_initials?,
             runlist_flows: runlist_flows?,
             runlist_stocks: runlist_stocks?,
-            offsets: offsets
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
+            offsets,
             tables,
         })
     }
@@ -653,23 +685,34 @@ fn is_truthy(n: f64) -> bool {
 }
 
 pub struct StepEvaluator<'a> {
-    curr: &'a [f64],
+    curr: &'a mut [f64],
+    next: &'a mut [f64],
     off: usize,
     dt: f64,
+    offsets: &'a HashMap<Ident, usize>,
     tables: &'a HashMap<String, Table>,
 }
 
 impl<'a> StepEvaluator<'a> {
-    fn eval(&self, expr: &Expr) -> f64 {
+    fn eval(&mut self, expr: &Expr) -> f64 {
         match expr {
             Expr::Const(n) => *n,
-            Expr::GlobalVar(id) => 0.0,
-            Expr::EvalModule(ident, args) => {
-                let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
+            Expr::GlobalVar(id) => self.curr[self.offsets[id]],
+            Expr::Dt => self.dt,
+            Expr::EvalModule(_ident, args) => {
+                let _args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
 
                 0.0
             }
             Expr::Var(off) => self.curr[*off],
+            Expr::AssignCurr(off, r) => {
+                self.curr[self.off + *off] = self.eval(r);
+                0.0
+            }
+            Expr::AssignNext(off, r) => {
+                self.next[self.off + *off] = self.eval(r);
+                0.0
+            }
             Expr::If(cond, t, f) => {
                 let cond: f64 = self.eval(cond);
                 if is_truthy(cond) {
@@ -908,68 +951,55 @@ impl Simulation {
         })
     }
 
-    fn calc_initials(&self, module_id: usize, dt: f64, curr: &mut [f64]) {
+    fn calc_initials(&self, module_id: usize, dt: f64, curr: &mut [f64], next: &mut [f64]) {
         let module = &self.modules[module_id];
         curr[TIME_OFF] = self.specs.start;
 
         for v in module.runlist_initials.iter() {
-            curr[v.off] = StepEvaluator {
+            StepEvaluator {
                 dt,
                 off: 0,
                 curr,
+                next,
                 tables: &module.tables,
+                offsets: &module.offsets,
             }
             .eval(&v.ast);
         }
     }
 
-    fn calc_flows(
-        &self,
-        offsets: &HashMap<Ident, usize>,
-        module_id: usize,
-        dt: f64,
-        curr: &mut [f64],
-    ) {
+    fn calc_flows(&self, module_id: usize, dt: f64, curr: &mut [f64], next: &mut [f64]) {
         let module = &self.modules[module_id];
         for v in module.runlist_flows.iter() {
-            curr[v.off] = StepEvaluator {
+            StepEvaluator {
                 dt,
                 off: 0,
                 curr,
+                next,
                 tables: &module.tables,
+                offsets: &module.offsets,
             }
             .eval(&v.ast);
         }
     }
 
-    fn calc_stocks(
-        &self,
-        offsets: &HashMap<Ident, usize>,
-        module_id: usize,
-        dt: f64,
-        curr: &[f64],
-        next: &mut [f64],
-    ) {
+    fn calc_stocks(&self, module_id: usize, dt: f64, curr: &mut [f64], next: &mut [f64]) {
         let module = &self.modules[module_id];
         for v in module.runlist_stocks.iter() {
-            next[v.off] = curr[v.off]
-                + StepEvaluator {
-                    dt,
-                    off: 0,
-                    curr,
-                    tables: &module.tables,
-                }
-                .eval(&v.ast)
-                    * dt;
+            StepEvaluator {
+                dt,
+                off: 0,
+                curr,
+                next,
+                tables: &module.tables,
+                offsets: &module.offsets,
+            }
+            .eval(&v.ast);
         }
     }
 
     fn n_slots(&self, module_id: usize) -> usize {
         self.modules[module_id].n_slots
-    }
-
-    fn build_offsets(&self, module_id: usize, _prefix: &str) -> HashMap<String, usize> {
-        self.modules[module_id].offsets.clone()
     }
 
     pub fn run_to_end(&self) -> Result<Results> {
@@ -990,7 +1020,7 @@ impl Simulation {
 
         let n_slots = self.n_slots(self.root);
 
-        let offsets = self.build_offsets(self.root, "");
+        let offsets = &self.modules[self.root].offsets;
 
         let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
         let mut boxed_slab = slab.into_boxed_slice();
@@ -1001,13 +1031,13 @@ impl Simulation {
             let module_id = self.root;
 
             let mut curr = slabs.next().unwrap();
-            self.calc_initials(module_id, dt, curr);
+            let mut next = slabs.next().unwrap();
+            self.calc_initials(module_id, dt, curr, next);
 
             let mut step = 0;
-            let mut next = slabs.next().unwrap();
             loop {
-                self.calc_flows(&offsets, module_id, dt, curr);
-                self.calc_stocks(&offsets, module_id, dt, curr, next);
+                self.calc_flows(module_id, dt, curr, next);
+                self.calc_stocks(module_id, dt, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 step += 1;
                 if step != save_every {
@@ -1028,7 +1058,7 @@ impl Simulation {
         }
 
         Ok(Results {
-            offsets,
+            offsets: offsets.clone(),
             data: boxed_slab,
             step_size: n_slots,
             step_count: n_chunks,
