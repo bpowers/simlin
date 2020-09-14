@@ -471,6 +471,7 @@ impl Var {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
+    ident: Ident,
     // inputs: Vec<f64>,
     base_off: usize, // base offset for this module
     n_slots: usize,  // number of f64s we need storage for
@@ -546,6 +547,8 @@ fn calc_offsets(project: &Project, model_name: &str) -> HashMap<Ident, usize> {
             for (j, sub_ident) in sub_var_names.iter().enumerate() {
                 offsets.insert(format!("{}.{}", *ident, sub_ident), base + i + j);
             }
+            // so we can find the module offset when evaling the submodule
+            offsets.insert(ident.to_string(), base + i);
             // TODO: -1 because we didn't use the "slot" reserved for the
             //   module in the parent model
             base += sub_offsets.len() - 1;
@@ -668,6 +671,7 @@ impl Module {
         let tables = tables?;
 
         Ok(Module {
+            ident: model_name.to_string(),
             base_off: 0,
             n_slots,
             runlist_initials: runlist_initials?,
@@ -691,6 +695,7 @@ pub struct StepEvaluator<'a> {
     dt: f64,
     offsets: &'a HashMap<Ident, usize>,
     tables: &'a HashMap<String, Table>,
+    modules: &'a HashMap<&'a str, &'a Module>,
 }
 
 impl<'a> StepEvaluator<'a> {
@@ -699,8 +704,21 @@ impl<'a> StepEvaluator<'a> {
             Expr::Const(n) => *n,
             Expr::GlobalVar(id) => self.curr[self.offsets[id]],
             Expr::Dt => self.dt,
-            Expr::EvalModule(_ident, args) => {
+            Expr::EvalModule(ident, args) => {
                 let _args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
+                let off = self.offsets[ident];
+
+                let module = self.modules[ident.as_str()];
+
+                StepEvaluator {
+                    curr: self.curr,
+                    next: self.next,
+                    off,
+                    dt: self.dt,
+                    offsets: &module.offsets,
+                    tables: &module.tables,
+                    modules: self.modules,
+                };
 
                 0.0
             }
@@ -951,7 +969,14 @@ impl Simulation {
         })
     }
 
-    fn calc_initials(&self, module_id: usize, dt: f64, curr: &mut [f64], next: &mut [f64]) {
+    fn calc_initials(
+        &self,
+        modules: &HashMap<&str, &Module>,
+        module_id: usize,
+        dt: f64,
+        curr: &mut [f64],
+        next: &mut [f64],
+    ) {
         let module = &self.modules[module_id];
         curr[TIME_OFF] = self.specs.start;
 
@@ -963,12 +988,20 @@ impl Simulation {
                 next,
                 tables: &module.tables,
                 offsets: &module.offsets,
+                modules,
             }
             .eval(&v.ast);
         }
     }
 
-    fn calc_flows(&self, module_id: usize, dt: f64, curr: &mut [f64], next: &mut [f64]) {
+    fn calc_flows(
+        &self,
+        modules: &HashMap<&str, &Module>,
+        module_id: usize,
+        dt: f64,
+        curr: &mut [f64],
+        next: &mut [f64],
+    ) {
         let module = &self.modules[module_id];
         for v in module.runlist_flows.iter() {
             StepEvaluator {
@@ -978,12 +1011,20 @@ impl Simulation {
                 next,
                 tables: &module.tables,
                 offsets: &module.offsets,
+                modules,
             }
             .eval(&v.ast);
         }
     }
 
-    fn calc_stocks(&self, module_id: usize, dt: f64, curr: &mut [f64], next: &mut [f64]) {
+    fn calc_stocks(
+        &self,
+        modules: &HashMap<&str, &Module>,
+        module_id: usize,
+        dt: f64,
+        curr: &mut [f64],
+        next: &mut [f64],
+    ) {
         let module = &self.modules[module_id];
         for v in module.runlist_stocks.iter() {
             StepEvaluator {
@@ -993,6 +1034,7 @@ impl Simulation {
                 next,
                 tables: &module.tables,
                 offsets: &module.offsets,
+                modules,
             }
             .eval(&v.ast);
         }
@@ -1021,6 +1063,8 @@ impl Simulation {
         let n_slots = self.n_slots(self.root);
 
         let offsets = &self.modules[self.root].offsets;
+        let modules: HashMap<&str, &Module> =
+            self.modules.iter().map(|m| (m.ident.as_str(), m)).collect();
 
         let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
         let mut boxed_slab = slab.into_boxed_slice();
@@ -1032,12 +1076,12 @@ impl Simulation {
 
             let mut curr = slabs.next().unwrap();
             let mut next = slabs.next().unwrap();
-            self.calc_initials(module_id, dt, curr, next);
+            self.calc_initials(&modules, module_id, dt, curr, next);
 
             let mut step = 0;
             loop {
-                self.calc_flows(module_id, dt, curr, next);
-                self.calc_stocks(module_id, dt, curr, next);
+                self.calc_flows(&modules, module_id, dt, curr, next);
+                self.calc_stocks(&modules, module_id, dt, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 step += 1;
                 if step != save_every {
