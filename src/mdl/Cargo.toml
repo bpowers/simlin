@@ -2,7 +2,8 @@
 name = "mdl"
 version = "0.1.0"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
 edition = "2018"
 
 [dependencies]
-engine-core = { path = "../engine-core" }
+engine-core = { version = "0.1", path = "../engine-core" }

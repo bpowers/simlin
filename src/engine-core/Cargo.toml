@@ -18,8 +18,8 @@ unicode-xid = "0.2"
 lalrpop-util = "0.19"
 serde = { version = "1", features = [ "derive" ] }
 quick-xml = { version = "0.18", features = [ "serialize" ] }
-prost = "0.6"
-prost-types = "0.6"
+prost = { version = "0.6", git = "https://github.com/danburkert/prost", rev = "4ded4a98ef339da0b7babd4efee3fbe8adaf746b"}
+prost-types = { version = "0.6", git = "https://github.com/danburkert/prost", rev = "4ded4a98ef339da0b7babd4efee3fbe8adaf746b"}
 float-cmp = "0.8"
 
 [dev-dependencies]
@@ -29,6 +29,6 @@ csv = "1"
 [build-dependencies]
 bincode = "1"
 lalrpop = "0.19"
-prost-build = "0.6"
+prost-build = { version = "0.6", git = "https://github.com/danburkert/prost", rev = "4ded4a98ef339da0b7babd4efee3fbe8adaf746b"}
 quick-xml = { version = "0.18", features = [ "serialize" ] }
 serde = { version = "1", features = [ "derive" ] }
