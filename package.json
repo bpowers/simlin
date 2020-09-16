@@ -161,7 +161,7 @@
     "terser-webpack-plugin": "^4.1.0",
     "ts-node": "^9.0.0",
     "ts-node-dev": "^1.0.0-pre.58",
-    "ts-protoc-gen": "^0.12.0",
+    "ts-protoc-gen": "^0.13.0",
     "tsconfig-paths": "^3.9.0",
     "typescript": "^4.0.2",
     "url-loader": "^4.0.0",
