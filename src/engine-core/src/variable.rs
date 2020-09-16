@@ -185,28 +185,26 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<EquationError>
                 },
                 ParseError::UnrecognizedEOF {
                     location: l,
-                    expected: e,
+                    expected: _e,
                 } => {
                     // if we get an EOF at position 0, that simply means
                     // we have an empty (or comment-only) equation
                     if l == 0 {
                         return (None, errs);
                     }
-                    eprintln!("unrecognized eof, expected: {:?}", e);
+                    // TODO: we can give a more precise error message here, including what
+                    //   types of tokens would be ok
                     EquationError {
                         location: l,
                         code: UnrecognizedEOF,
                     }
                 }
                 ParseError::UnrecognizedToken {
-                    token: (l, t, r), ..
-                } => {
-                    eprintln!("unrecognized tok: {:?} {} {}", t, l, r);
-                    EquationError {
-                        location: l,
-                        code: UnrecognizedToken,
-                    }
-                }
+                    token: (l, _t, _r), ..
+                } => EquationError {
+                    location: l,
+                    code: UnrecognizedToken,
+                },
                 ParseError::ExtraToken { .. } => EquationError {
                     location: eqn.len(),
                     code: ExtraToken,
@@ -509,6 +507,29 @@ fn test_parse() {
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         assert_eq!(case.1, ast.unwrap());
+    }
+}
+
+#[test]
+fn test_parse_failures() {
+    let failures = &[
+        "(",
+        "(3",
+        "3 +",
+        "3 *",
+        "(3 +)",
+        "call(a,",
+        "call(a,1+",
+        "if if",
+        "if 1 then",
+        "if then",
+        "if 1 then 2 else",
+    ];
+
+    for case in failures {
+        let (ast, err) = parse_eqn(&Some(case.to_string()));
+        assert!(ast.is_none());
+        assert!(err.len() > 0);
     }
 }
 
