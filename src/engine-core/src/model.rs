@@ -8,7 +8,7 @@ use crate::common::{Error, Ident, Result};
 use crate::variable::{parse_var, ModuleInput, Variable};
 use crate::xmile;
 
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
     pub variables: HashMap<String, Variable>,

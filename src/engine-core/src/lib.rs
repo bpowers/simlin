@@ -38,7 +38,6 @@ mod stdlib {
 mod interpreter;
 
 use std::collections::HashMap;
-use std::fmt;
 use std::io::BufRead;
 use std::rc::Rc;
 
@@ -48,23 +47,11 @@ pub use self::common::{canonicalize, Ident};
 pub use self::sim::Results;
 pub use self::sim::Simulation;
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub name: String,
     file: xmile::File,
     pub models: HashMap<String, Rc<model::Model>>,
-}
-
-impl fmt::Debug for Project {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "Project{{")?;
-        writeln!(f, "  name: {}", self.name)?;
-        writeln!(f, "  files: {{")?;
-        for (name, model) in &self.models {
-            writeln!(f, "    {:?}: {:?}", name, model)?;
-        }
-        writeln!(f, "  }}")?;
-        write!(f, "}}")
-    }
 }
 
 impl Project {
