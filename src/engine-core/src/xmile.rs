@@ -2,15 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 
 // const VERSION: &str = "1.0";
 // const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
 // const NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
 
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename = "xmile")]
 pub struct File {
     #[serde(default)]
@@ -58,26 +56,7 @@ pub struct Dimensions {
     pub dimensions: Option<Vec<Dimension>>,
 }
 
-impl fmt::Debug for File {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "File{{")?;
-        writeln!(f, "      version:    {}", self.version)?;
-        writeln!(f, "      namespace:  {}", self.namespace)?;
-        writeln!(f, "      header:     {:?}", self.header)?;
-        writeln!(f, "      sim_specs:  {:?}", self.sim_specs)?;
-        writeln!(f, "      dimensions: {:?}", self.dimensions)?;
-        writeln!(f, "      units:      {:?}", self.units)?;
-        writeln!(f, "      behavior:   {:?}", self.behavior)?;
-        writeln!(f, "      style:      {:?}", self.style)?;
-        writeln!(f, "      models: [")?;
-        for m in &self.models {
-            writeln!(f, "        {:?}", m)?;
-        }
-        writeln!(f, "      ]    }}")
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Header {
     pub vendor: String,
     pub product: Product,
@@ -106,28 +85,6 @@ pub struct Includes {}
 pub struct Image {
     #[serde(default)]
     pub resource: String, // "JPG, GIF, TIF, or PNG" path, URL, or image embedded in base64 data URI
-}
-
-impl fmt::Debug for Header {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "Header{{")?;
-        writeln!(f, "        vendor:      {}", self.vendor)?;
-        writeln!(f, "        product:     {:?}", self.product)?;
-        writeln!(f, "        options:     {:?}", self.options)?;
-        writeln!(f, "        name:        {:?}", self.name)?;
-        writeln!(f, "        version:     {:?}", self.version)?;
-        writeln!(f, "        caption:     {:?}", self.caption)?;
-        writeln!(f, "        image:       {:?}", self.image)?;
-        writeln!(f, "        author:      {:?}", self.author)?;
-        writeln!(f, "        affiliation: {:?}", self.affiliation)?;
-        writeln!(f, "        client:      {:?}", self.client)?;
-        writeln!(f, "        copyright:   {:?}", self.copyright)?;
-        writeln!(f, "        created:     {:?}", self.created)?;
-        writeln!(f, "        modified:    {:?}", self.modified)?;
-        writeln!(f, "        uuid:        {:?}", self.uuid)?;
-        writeln!(f, "        includes:    {:?}", self.includes)?;
-        write!(f, "      }}")
-    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -263,7 +220,7 @@ pub struct Unit {
     pub disabled: Option<bool>,
 }
 
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Model {
     pub name: Option<String>,
     #[serde(rename = "namespace")]
@@ -286,27 +243,9 @@ pub struct Views {
 }
 
 impl Model {
+    #[allow(dead_code)] // TODO: false positive
     pub fn get_name(&self) -> &str {
         &self.name.as_deref().unwrap_or("main")
-    }
-}
-
-impl fmt::Debug for Model {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "Model{{")?;
-        writeln!(f, "          name:       {}", self.get_name())?;
-        writeln!(f, "          namespaces: {:?}", self.namespaces)?;
-        writeln!(f, "          resource:   {:?}", self.resource)?;
-        writeln!(f, "          sim_specs:  {:?}", self.sim_specs)?;
-        writeln!(f, "          vars: [")?;
-        if let Some(vars) = &self.variables {
-            for v in &vars.variables {
-                writeln!(f, "            {:?}", v)?;
-            }
-        }
-        writeln!(f, "          ]")?;
-        writeln!(f, "          views:      {:?}", self.views)?;
-        write!(f, "        }}")
     }
 }
 
@@ -478,7 +417,7 @@ pub struct Aux {
     pub dimensions: Option<VarDimensions>,
 }
 
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Var {
     Stock(Stock),
@@ -495,17 +434,6 @@ impl Var {
             Var::Flow(flow) => flow.name.as_str(),
             Var::Aux(aux) => aux.name.as_str(),
             Var::Module(module) => module.name.as_str(),
-        }
-    }
-}
-
-impl fmt::Debug for Var {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Var::Stock(ref stock) => write!(f, "{:?}", stock),
-            Var::Flow(ref flow) => write!(f, "{:?}", flow),
-            Var::Aux(ref aux) => write!(f, "{:?}", aux),
-            Var::Module(ref module) => write!(f, "{:?}", module),
         }
     }
 }
