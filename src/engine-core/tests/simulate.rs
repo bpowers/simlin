@@ -7,12 +7,11 @@ use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::iter::FromIterator;
-use std::rc::Rc;
 
 #[macro_use]
 extern crate float_cmp;
 
-use engine_core::{canonicalize, Project, Results, Simulation};
+use engine_core::{canonicalize, Project, Results};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
@@ -126,8 +125,7 @@ fn simulate_path(xmile_path: &str) {
     assert!(project.is_ok());
 
     let project = project.unwrap();
-    let model = Rc::clone(project.models.get("main").unwrap());
-    let sim = Simulation::new(&project, model).unwrap();
+    let sim = project.new_sim("main").unwrap();
     let results = sim.run_to_end();
     assert!(results.is_ok());
 
@@ -178,4 +176,12 @@ fn simulates_models_correctly() {
         let file_path = format!("../../{}", path);
         simulate_path(file_path.as_str());
     }
+}
+
+#[test]
+fn bad_model_name() {
+    let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
+    let mut f = BufReader::new(f);
+    let project = Project::from_xmile_reader(&mut f).unwrap();
+    assert!(project.new_sim("blerg").is_err());
 }

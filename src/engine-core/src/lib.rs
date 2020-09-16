@@ -110,6 +110,19 @@ impl Project {
 }
 
 #[test]
+fn test_bad_xml() {
+    let input = "<stock name=\"susceptible\">
+        <eqn>total_population</eqn>
+        <outflow>succumbing</outflow>
+        <outflow>succumbing_2";
+
+    use quick_xml::de;
+    let stock: std::result::Result<xmile::Var, _> = de::from_reader(input.as_bytes());
+
+    assert!(stock.is_err());
+}
+
+#[test]
 fn test_xml_stock_parsing() {
     let input = "<stock name=\"susceptible\">
         <eqn>total_population</eqn>
