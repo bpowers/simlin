@@ -23,6 +23,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
+        with:
           submodules: true
 
       - name: Install Rust toolchain
@@ -48,6 +49,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
+        with:
           submodules: true
 
       - name: Install Rust toolchain
