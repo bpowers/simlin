@@ -706,19 +706,18 @@ impl<'a> StepEvaluator<'a> {
             Expr::Dt => self.dt,
             Expr::EvalModule(ident, args) => {
                 let _args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
-                let off = self.offsets[ident];
+                let _off = self.offsets[ident];
+                let _module = self.modules[ident.as_str()];
 
-                let module = self.modules[ident.as_str()];
-
-                StepEvaluator {
-                    curr: self.curr,
-                    next: self.next,
-                    off,
-                    dt: self.dt,
-                    offsets: &module.offsets,
-                    tables: &module.tables,
-                    modules: self.modules,
-                };
+                // StepEvaluator {
+                //     curr: self.curr,
+                //     next: self.next,
+                //     off,
+                //     dt: self.dt,
+                //     offsets: &module.offsets,
+                //     tables: &module.tables,
+                //     modules: self.modules,
+                // };
 
                 0.0
             }
