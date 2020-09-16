@@ -172,10 +172,7 @@ impl<'input> Lexer<'input> {
                 self.bump();
                 Ok((idx0, Ident(&self.text[idx0 + 1..idx1]), idx1 + 1))
             }
-            None => Err(EquationError {
-                location: idx0,
-                code: UnclosedQuotedIdent,
-            }),
+            None => error(UnclosedQuotedIdent, idx0),
         }
     }
 
@@ -244,7 +241,10 @@ impl<'input> Iterator for Lexer<'input> {
                     self.bump();
                     continue;
                 }
-                Some((i, _)) => Some(error(UnrecognizedToken, i)),
+                Some((i, _)) => {
+                    self.bump(); // eat whatever is killing us
+                    Some(error(UnrecognizedToken, i))
+                }
                 None => None,
             };
         }
