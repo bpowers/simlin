@@ -186,54 +186,53 @@ impl<'input> Lexer<'input> {
             None => error(UnclosedComment, idx0),
         }
     }
+
+    fn consume(
+        &mut self,
+        i: usize,
+        tok: Token<'input>,
+        len: usize,
+    ) -> Option<Result<Spanned<Token<'input>>, EquationError>> {
+        self.bump();
+        Some(Ok((i, tok, i + len)))
+    }
 }
 impl<'input> Iterator for Lexer<'input> {
     type Item = Result<Spanned<Token<'input>>, EquationError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        macro_rules! consume {
-            ($s: expr, $i:expr, $tok:expr, $len:expr) => {{
-                $s.bump();
-                Some(Ok(($i, $tok, $i + $len)))
-            }};
-        }
-
         loop {
             return match self.lookahead {
-                Some((i, '/')) => consume!(self, i, Div, 1),
-                Some((i, '=')) => consume!(self, i, Eq, 1),
-                Some((i, '^')) => consume!(self, i, Exp, 1),
+                Some((i, '/')) => self.consume(i, Div, 1),
+                Some((i, '=')) => self.consume(i, Eq, 1),
+                Some((i, '^')) => self.consume(i, Exp, 1),
                 Some((i, '<')) => {
                     match self.bump() {
-                        Some((_, '>')) => consume!(self, i, Neq, 2),
-                        Some((_, '=')) => consume!(self, i, Lte, 2),
-                        _ => {
-                            // we've already bumped, don't consume
-                            Some(Ok((i, Lt, i + 1)))
-                        }
+                        Some((_, '>')) => self.consume(i, Neq, 2),
+                        Some((_, '=')) => self.consume(i, Lte, 2),
+                        // we've already bumped, don't consume
+                        _ => Some(Ok((i, Lt, i + 1))),
                     }
                 }
                 Some((i, '>')) => {
                     match self.bump() {
-                        Some((_, '=')) => consume!(self, i, Gte, 2),
-                        _ => {
-                            // we've already bumped, don't consume
-                            Some(Ok((i, Gt, i + 1)))
-                        }
+                        Some((_, '=')) => self.consume(i, Gte, 2),
+                        // we've already bumped, don't consume
+                        _ => Some(Ok((i, Gt, i + 1))),
                     }
                 }
-                Some((i, '-')) => consume!(self, i, Minus, 1),
-                Some((i, '+')) => consume!(self, i, Plus, 1),
-                Some((i, '*')) => consume!(self, i, Mul, 1),
+                Some((i, '-')) => self.consume(i, Minus, 1),
+                Some((i, '+')) => self.consume(i, Plus, 1),
+                Some((i, '*')) => self.consume(i, Mul, 1),
                 Some((i, '{')) => match self.comment_end() {
                     Ok(()) => self.next(),
                     Err(_) => Some(error(UnclosedComment, i)),
                 },
-                Some((i, '(')) => consume!(self, i, LParen, 1),
-                Some((i, ')')) => consume!(self, i, RParen, 1),
-                Some((i, '[')) => consume!(self, i, LBracket, 1),
-                Some((i, ']')) => consume!(self, i, RBracket, 1),
-                Some((i, ',')) => consume!(self, i, Comma, 1),
+                Some((i, '(')) => self.consume(i, LParen, 1),
+                Some((i, ')')) => self.consume(i, RParen, 1),
+                Some((i, '[')) => self.consume(i, LBracket, 1),
+                Some((i, ']')) => self.consume(i, RBracket, 1),
+                Some((i, ',')) => self.consume(i, Comma, 1),
                 Some((i, '"')) => Some(self.quoted_identifier(i)),
                 Some((i, c)) if is_identifier_start(c) => Some(self.identifierish(i)),
                 Some((i, c)) if is_number_start(c) => Some(self.number(i)),
