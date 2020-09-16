@@ -67,5 +67,25 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           args: --workspace
 
-      - name: cargo deny
+      - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v1
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+
+      - name: Run cargo-tarpaulin
+        uses: actions-rs/tarpaulin@v0.1
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
