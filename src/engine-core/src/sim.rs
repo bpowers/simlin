@@ -497,9 +497,7 @@ impl Var {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
     ident: Ident,
-    // inputs: Vec<f64>,
-    base_off: usize, // base offset for this module
-    n_slots: usize,  // number of f64s we need storage for
+    n_slots: usize, // number of f64s we need storage for
     runlist_initials: Vec<Var>,
     runlist_flows: Vec<Var>,
     runlist_stocks: Vec<Var>,
@@ -701,7 +699,6 @@ impl Module {
 
         Ok(Module {
             ident: model_name.to_string(),
-            base_off: 0,
             n_slots,
             runlist_initials: runlist_initials?,
             runlist_flows: runlist_flows?,
@@ -717,18 +714,17 @@ fn is_truthy(n: f64) -> bool {
     !is_false
 }
 
-pub struct StepEvaluator<'a> {
+pub struct ModuleEvaluator<'a> {
+    off: usize,
+    inputs: &'a [f64],
     curr: &'a mut [f64],
     next: &'a mut [f64],
-    off: usize,
     dt: f64,
-    offsets: &'a HashMap<Ident, usize>,
-    tables: &'a HashMap<String, Table>,
+    module: &'a Module,
     modules: &'a HashMap<&'a str, &'a Module>,
-    inputs: &'a [f64],
 }
 
-impl<'a> StepEvaluator<'a> {
+impl<'a> ModuleEvaluator<'a> {
     fn eval(&mut self, expr: &Expr) -> f64 {
         match expr {
             Expr::Const(n) => *n,
@@ -736,10 +732,10 @@ impl<'a> StepEvaluator<'a> {
             Expr::ModuleInput(off) => self.inputs[*off],
             Expr::EvalModule(ident, args) => {
                 let _args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
-                let _off = self.offsets[ident];
+                let _off = self.off + self.module.offsets[ident];
                 let _module = self.modules[ident.as_str()];
 
-                // StepEvaluator {
+                // ModuleEvaluator {
                 //     curr: self.curr,
                 //     next: self.next,
                 //     off,
@@ -845,11 +841,11 @@ impl<'a> StepEvaluator<'a> {
                         }
                     }
                     BuiltinFn::Lookup(id, index) => {
-                        if !self.tables.contains_key(id) {
+                        if !self.module.tables.contains_key(id) {
                             eprintln!("bad lookup for {}", id);
                             unreachable!();
                         }
-                        let table = &self.tables[id].data;
+                        let table = &self.module.tables[id].data;
                         if table.is_empty() {
                             return f64::NAN;
                         }
@@ -1059,13 +1055,12 @@ impl Simulation {
         curr[TIME_OFF] = self.specs.start;
 
         for v in module.runlist_initials.iter() {
-            StepEvaluator {
+            ModuleEvaluator {
                 dt,
                 off: 0,
                 curr,
                 next,
-                tables: &module.tables,
-                offsets: &module.offsets,
+                module,
                 modules,
                 inputs: module_inputs,
             }
@@ -1084,13 +1079,12 @@ impl Simulation {
     ) {
         let module = &self.modules[module_id];
         for v in module.runlist_flows.iter() {
-            StepEvaluator {
+            ModuleEvaluator {
                 dt,
                 off: 0,
                 curr,
                 next,
-                tables: &module.tables,
-                offsets: &module.offsets,
+                module,
                 modules,
                 inputs: module_inputs,
             }
@@ -1109,13 +1103,12 @@ impl Simulation {
     ) {
         let module = &self.modules[module_id];
         for v in module.runlist_stocks.iter() {
-            StepEvaluator {
+            ModuleEvaluator {
                 dt,
                 off: 0,
                 curr,
                 next,
-                tables: &module.tables,
-                offsets: &module.offsets,
+                module,
                 modules,
                 inputs: module_inputs,
             }
