@@ -63,11 +63,11 @@ pub enum Variable {
 }
 
 impl Variable {
-    pub fn ident(&self) -> &Ident {
+    pub fn ident(&self) -> &str {
         match self {
-            Variable::Stock { ident: name, .. } => name,
-            Variable::Var { ident: name, .. } => name,
-            Variable::Module { ident: name, .. } => name,
+            Variable::Stock { ident: name, .. } => name.as_str(),
+            Variable::Var { ident: name, .. } => name.as_str(),
+            Variable::Module { ident: name, .. } => name.as_str(),
         }
     }
 

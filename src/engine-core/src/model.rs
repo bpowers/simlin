@@ -24,9 +24,9 @@ pub struct Model {
 fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident, HashSet<Ident>>> {
     let mut processing: HashSet<&'a str> = HashSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
-        vars.iter().map(|v| (v.ident().as_str(), v)).collect();
+        vars.iter().map(|v| (v.ident(), v)).collect();
     let mut all_var_deps: HashMap<&'a str, Option<HashSet<Ident>>> =
-        vars.iter().map(|v| (v.ident().as_str(), None)).collect();
+        vars.iter().map(|v| (v.ident(), None)).collect();
 
     fn all_deps_inner<'a>(
         id: &'a str,
@@ -118,6 +118,11 @@ pub fn resolve_relative<'a>(
     model_name: &str,
     ident: &str,
 ) -> Option<&'a xmile::Var> {
+    let ident = if model_name == "main" && ident.starts_with('.') {
+        &ident[1..]
+    } else {
+        ident
+    };
     let model = models.get(model_name)?;
 
     let input_prefix = format!("{}.", model_name);
@@ -135,17 +140,24 @@ pub fn resolve_relative<'a>(
     }
 }
 
-pub fn resolve_module_input(
+pub fn resolve_module_input<'a>(
     models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
     model_name: &str,
     ident: &str,
-    orig_src: &str,
-    orig_dst: &str,
+    orig_src: &'a str,
+    orig_dst: &'a str,
 ) -> Result<ModuleInput> {
     use crate::common::canonicalize;
     let input_prefix = format!("{}.", ident);
-    let src: Ident = canonicalize(orig_src);
-    let dst: Ident = canonicalize(orig_dst);
+    let maybe_strip_leading_dot = |s: &'a str| -> &'a str {
+        if model_name == "main" && s.starts_with('.') {
+            &s[1..]
+        } else {
+            s
+        }
+    };
+    let src: Ident = canonicalize(maybe_strip_leading_dot(orig_src));
+    let dst: Ident = canonicalize(maybe_strip_leading_dot(orig_dst));
 
     let dst = dst.strip_prefix(&input_prefix);
     if dst.is_none() {
@@ -204,7 +216,7 @@ impl Model {
             name: x_model.name.as_ref().unwrap_or(&"main".to_string()).clone(),
             variables: variable_list
                 .into_iter()
-                .map(|v| (v.ident().clone(), v))
+                .map(|v| (v.ident().to_string(), v))
                 .collect(),
             errors: maybe_errors,
             dt_deps,
@@ -455,7 +467,7 @@ fn test_all_deps() {
             .iter()
             .map(|(v, deps)| {
                 (
-                    v.ident().clone(),
+                    v.ident().to_string(),
                     HashSet::from_iter(deps.iter().map(|s| s.to_string())),
                 )
             })

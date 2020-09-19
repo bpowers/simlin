@@ -119,9 +119,9 @@ pub enum Expr {
     Const(f64),
     Var(usize), // offset
     Dt,
-    GlobalVar(Ident),
     App(BuiltinFn),
     EvalModule(Ident, Vec<Expr>),
+    ModuleInput(usize),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     Op1(UnaryOp, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -133,9 +133,18 @@ struct Context<'a> {
     ident: &'a str,
     offsets: &'a HashMap<String, usize>,
     is_initial: bool,
+    inputs: &'a [Ident],
 }
 
 impl<'a> Context<'a> {
+    fn get_offset(&self, ident: &str) -> Result<usize> {
+        if self.offsets.contains_key(ident) {
+            Ok(self.offsets[ident])
+        } else {
+            unreachable!();
+        }
+    }
+
     fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
         let expr = match expr {
             ast::Expr::Const(_, n) => Expr::Const(*n),
@@ -338,6 +347,7 @@ fn test_lower() {
         ))
     };
 
+    let inputs = &[];
     let mut offsets: HashMap<String, usize> = HashMap::new();
     offsets.insert("true_input".to_string(), 7);
     offsets.insert("false_input".to_string(), 8);
@@ -345,6 +355,7 @@ fn test_lower() {
         ident: "test",
         offsets: &offsets,
         is_initial: false,
+        inputs,
     };
     let expected = Expr::If(
         Box::new(Expr::Op2(
@@ -374,6 +385,7 @@ fn test_lower() {
         ))
     };
 
+    let inputs = &[];
     let mut offsets: HashMap<String, usize> = HashMap::new();
     offsets.insert("true_input".to_string(), 7);
     offsets.insert("false_input".to_string(), 8);
@@ -381,6 +393,7 @@ fn test_lower() {
         ident: "test",
         offsets: &offsets,
         is_initial: false,
+        inputs,
     };
     let expected = Expr::If(
         Box::new(Expr::Op2(
@@ -406,6 +419,7 @@ pub struct Var {
 fn test_fold_flows() {
     use std::iter::FromIterator;
 
+    let inputs = &[];
     let offsets: &[(&str, usize)] = &[("time", 0), ("a", 1), ("b", 2), ("c", 3), ("d", 4)];
     let offsets: HashMap<String, usize> =
         HashMap::from_iter(offsets.into_iter().map(|(k, v)| ((*k).to_string(), *v)));
@@ -413,6 +427,7 @@ fn test_fold_flows() {
         ident: "test",
         offsets: &offsets,
         is_initial: false,
+        inputs,
     };
 
     assert_eq!(None, ctx.fold_flows(&[]));
@@ -429,39 +444,49 @@ fn test_fold_flows() {
 
 impl Var {
     fn new(ctx: &Context, var: &Variable) -> Result<Self> {
-        let ast = match var {
-            Variable::Module { ident, inputs, .. } => {
-                let inputs: Vec<Expr> = inputs
-                    .iter()
-                    .map(|mi| Expr::GlobalVar(mi.src.clone()))
-                    .collect();
-                Expr::EvalModule(ident.clone(), inputs)
-            }
-            Variable::Stock { ast, .. } => {
-                let off = ctx.offsets[var.ident().as_str()];
-                if ctx.is_initial {
-                    if ast.is_none() {
-                        return sim_err!(EmptyEquation, var.ident().clone());
-                    }
-                    Expr::AssignCurr(off, Box::new(ctx.lower(ast.as_ref().unwrap())?))
-                } else {
-                    Expr::AssignNext(off, Box::new(ctx.build_stock_update_expr(off, var)?))
+        // if this variable is overriden by a module input, our expression is easy
+        let ast = if let Some((off, _)) = ctx
+            .inputs
+            .iter()
+            .enumerate()
+            .find(|(_i, n)| *n == var.ident())
+        {
+            Expr::AssignCurr(off, Box::new(Expr::ModuleInput(off)))
+        } else {
+            match var {
+                Variable::Module { ident, inputs, .. } => {
+                    let inputs: Vec<Expr> = inputs
+                        .iter()
+                        .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap()))
+                        .collect();
+                    Expr::EvalModule(ident.clone(), inputs)
                 }
-            }
-            Variable::Var {
-                ident, table, ast, ..
-            } => {
-                let off = ctx.offsets[var.ident().as_str()];
-                if let Some(ast) = ast {
-                    let expr = ctx.lower(ast)?;
-                    let expr = if table.is_some() {
-                        Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
+                Variable::Stock { ast, .. } => {
+                    let off = ctx.offsets[var.ident()];
+                    if ctx.is_initial {
+                        if ast.is_none() {
+                            return sim_err!(EmptyEquation, var.ident().to_string());
+                        }
+                        Expr::AssignCurr(off, Box::new(ctx.lower(ast.as_ref().unwrap())?))
                     } else {
-                        expr
-                    };
-                    Expr::AssignCurr(off, Box::new(expr))
-                } else {
-                    return sim_err!(EmptyEquation, var.ident().clone());
+                        Expr::AssignNext(off, Box::new(ctx.build_stock_update_expr(off, var)?))
+                    }
+                }
+                Variable::Var {
+                    ident, table, ast, ..
+                } => {
+                    let off = ctx.offsets[var.ident()];
+                    if let Some(ast) = ast {
+                        let expr = ctx.lower(ast)?;
+                        let expr = if table.is_some() {
+                            Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
+                        } else {
+                            expr
+                        };
+                        Expr::AssignCurr(off, Box::new(expr))
+                    } else {
+                        return sim_err!(EmptyEquation, var.ident().to_string());
+                    }
                 }
             }
         };
@@ -577,12 +602,13 @@ fn calc_n_slots(project: &Project, model_name: &str) -> usize {
 }
 
 impl Module {
-    fn new(project: &Project, model: Rc<Model>, is_root: bool) -> Result<Self> {
+    fn new(project: &Project, model: Rc<Model>, inputs: &[Ident], is_root: bool) -> Result<Self> {
         if model.dt_deps.is_none() || model.initial_deps.is_none() {
             return sim_err!(NotSimulatable, model.name.clone());
         }
 
         let model_name: &str = &model.name;
+        eprintln!("new module {} with inputs {:?}", model_name, inputs);
         let n_slots_start_off = if is_root { 1 } else { 0 };
 
         let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
@@ -612,6 +638,7 @@ impl Module {
                         ident,
                         offsets: &offsets,
                         is_initial,
+                        inputs,
                     },
                     &model.variables[ident],
                 )
@@ -635,6 +662,7 @@ impl Module {
                         ident,
                         offsets: &offsets,
                         is_initial,
+                        inputs,
                     },
                     &model.variables[ident],
                 )
@@ -652,6 +680,7 @@ impl Module {
                         ident: v.ident(),
                         offsets: &offsets,
                         is_initial,
+                        inputs,
                     },
                     v,
                 )
@@ -696,14 +725,15 @@ pub struct StepEvaluator<'a> {
     offsets: &'a HashMap<Ident, usize>,
     tables: &'a HashMap<String, Table>,
     modules: &'a HashMap<&'a str, &'a Module>,
+    inputs: &'a [f64],
 }
 
 impl<'a> StepEvaluator<'a> {
     fn eval(&mut self, expr: &Expr) -> f64 {
         match expr {
             Expr::Const(n) => *n,
-            Expr::GlobalVar(id) => self.curr[self.offsets[id]],
             Expr::Dt => self.dt,
+            Expr::ModuleInput(off) => self.inputs[*off],
             Expr::EvalModule(ident, args) => {
                 let _args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
                 let _off = self.offsets[ident];
@@ -965,6 +995,7 @@ fn enumerate_modules(
         if let Variable::Module { inputs, .. } = v {
             let mut inputs: Vec<String> = inputs.iter().map(|input| input.dst.clone()).collect();
             inputs.sort();
+            eprintln!("inputs1: {:?}", inputs);
             if modules.insert((id.to_string(), inputs)) {
                 // first time we're seeing this monomorphization; recurse
                 enumerate_modules(project, id.as_str(), modules)?;
@@ -977,21 +1008,30 @@ fn enumerate_modules(
 
 impl Simulation {
     pub fn new(project: &Project, model: Rc<Model>) -> Result<Self> {
+        let main_model_name: &str = model.name.as_str();
         let mut modules: HashSet<(Ident, Vec<Ident>)> = HashSet::new();
-        modules.insert((model.name.clone(), vec![]));
+        modules.insert((main_model_name.to_string(), vec![]));
         enumerate_modules(project, model.name.as_str(), &mut modules)?;
 
-        let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();
-        module_names.sort();
+        let module_names: Vec<&str> = {
+            let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();
+            module_names.sort();
 
+            let mut sorted_names = vec![main_model_name];
+            sorted_names.extend(module_names.into_iter().filter(|n| *n != main_model_name));
+            sorted_names
+        };
+
+        let mut compiled_modules: Vec<Module> = Vec::new();
         for name in module_names {
-            eprintln!("TODO: monomorphize '{}'", name);
+            for (_, inputs) in modules.iter().filter(|(n, _)| n == name) {
+                eprintln!("inputs2: {:?}", inputs);
+                let model = Rc::clone(&project.models[name]);
+                let is_root = name == main_model_name;
+                let module = Module::new(project, model, inputs, is_root)?;
+                compiled_modules.push(module);
+            }
         }
-
-        // we start with a project and a root module (one with no references).
-        let root = Module::new(project, model, true)?;
-
-        // TODO: come up with monomorphizations based on what inputs are used
 
         // module assign offsets
 
@@ -1000,7 +1040,7 @@ impl Simulation {
         let specs = Specs::from(project.file.sim_specs.as_ref().unwrap());
 
         Ok(Simulation {
-            modules: vec![root],
+            modules: compiled_modules,
             specs,
             root: 0,
         })
@@ -1010,6 +1050,7 @@ impl Simulation {
         &self,
         modules: &HashMap<&str, &Module>,
         module_id: usize,
+        module_inputs: &[f64],
         dt: f64,
         curr: &mut [f64],
         next: &mut [f64],
@@ -1026,6 +1067,7 @@ impl Simulation {
                 tables: &module.tables,
                 offsets: &module.offsets,
                 modules,
+                inputs: module_inputs,
             }
             .eval(&v.ast);
         }
@@ -1035,6 +1077,7 @@ impl Simulation {
         &self,
         modules: &HashMap<&str, &Module>,
         module_id: usize,
+        module_inputs: &[f64],
         dt: f64,
         curr: &mut [f64],
         next: &mut [f64],
@@ -1049,6 +1092,7 @@ impl Simulation {
                 tables: &module.tables,
                 offsets: &module.offsets,
                 modules,
+                inputs: module_inputs,
             }
             .eval(&v.ast);
         }
@@ -1058,6 +1102,7 @@ impl Simulation {
         &self,
         modules: &HashMap<&str, &Module>,
         module_id: usize,
+        module_inputs: &[f64],
         dt: f64,
         curr: &mut [f64],
         next: &mut [f64],
@@ -1072,6 +1117,7 @@ impl Simulation {
                 tables: &module.tables,
                 offsets: &module.offsets,
                 modules,
+                inputs: module_inputs,
             }
             .eval(&v.ast);
         }
@@ -1111,14 +1157,16 @@ impl Simulation {
             // let mut results: Vec<&[f64]> = Vec::with_capacity(n_chunks + 1);
             let module_id = self.root;
 
+            let module_inputs: &[f64] = &[];
+
             let mut curr = slabs.next().unwrap();
             let mut next = slabs.next().unwrap();
-            self.calc_initials(&modules, module_id, dt, curr, next);
+            self.calc_initials(&modules, module_id, module_inputs, dt, curr, next);
 
             let mut step = 0;
             loop {
-                self.calc_flows(&modules, module_id, dt, curr, next);
-                self.calc_stocks(&modules, module_id, dt, curr, next);
+                self.calc_flows(&modules, module_id, module_inputs, dt, curr, next);
+                self.calc_stocks(&modules, module_id, module_inputs, dt, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 step += 1;
                 if step != save_every {
