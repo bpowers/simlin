@@ -86,6 +86,13 @@ impl Variable {
         }
     }
 
+    pub fn is_module(&self) -> bool {
+        match self {
+            Variable::Module { .. } => true,
+            _ => false,
+        }
+    }
+
     pub fn direct_deps(&self) -> &HashSet<Ident> {
         match self {
             Variable::Stock { direct_deps, .. } => direct_deps,

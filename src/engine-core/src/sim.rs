@@ -948,8 +948,46 @@ pub struct Simulation {
     root: usize, // offset into modules
 }
 
+fn enumerate_modules(
+    project: &Project,
+    model_name: &str,
+    modules: &mut HashSet<(Ident, Vec<Ident>)>,
+) -> Result<()> {
+    use crate::common::{Error, ErrorCode};
+    let model = project.models.get(model_name).ok_or_else(|| {
+        Error::SimulationError(
+            ErrorCode::NotSimulatable,
+            format!("model for module '{}' not found", model_name),
+        )
+    })?;
+    let model = Rc::clone(model);
+    for (id, v) in model.variables.iter() {
+        if let Variable::Module { inputs, .. } = v {
+            let mut inputs: Vec<String> = inputs.iter().map(|input| input.dst.clone()).collect();
+            inputs.sort();
+            if modules.insert((id.to_string(), inputs)) {
+                // first time we're seeing this monomorphization; recurse
+                enumerate_modules(project, id.as_str(), modules)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 impl Simulation {
     pub fn new(project: &Project, model: Rc<Model>) -> Result<Self> {
+        let mut modules: HashSet<(Ident, Vec<Ident>)> = HashSet::new();
+        modules.insert((model.name.clone(), vec![]));
+        enumerate_modules(project, model.name.as_str(), &mut modules)?;
+
+        let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();
+        module_names.sort();
+
+        for name in module_names {
+            eprintln!("TODO: monomorphize '{}'", name);
+        }
+
         // we start with a project and a root module (one with no references).
         let root = Module::new(project, model, true)?;
 
