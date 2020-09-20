@@ -72,8 +72,7 @@ fn main() {
     assert!(project.is_ok());
 
     let project = project.unwrap();
-    let model = project.models.get("main").unwrap().clone();
-    let sim = Simulation::new(&project, model).unwrap();
+    let sim = Simulation::new(&project, "main").unwrap();
     let results = sim.run_to_end();
     let results = results.unwrap();
     results.print_tsv();

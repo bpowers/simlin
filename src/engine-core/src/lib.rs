@@ -55,7 +55,7 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn from_xmile_reader(reader: &mut dyn BufRead) -> Result<Self> {
+    pub fn from_xmile_reader(reader: &mut dyn BufRead) -> Result<Rc<Self>> {
         use quick_xml::de;
         let file: xmile::File = match de::from_reader(reader) {
             Ok(file) => file,
@@ -94,18 +94,7 @@ impl Project {
             models,
         };
 
-        Ok(project)
-    }
-
-    pub fn new_sim(&self, model_name: &str) -> Result<Simulation> {
-        if !self.models.contains_key(model_name) {
-            return sim_err!(DoesNotExist, model_name.to_string());
-        }
-
-        // get reference to model, increasing refcount
-        let model = Rc::clone(&self.models[model_name]);
-
-        Simulation::new(self, model)
+        Ok(Rc::new(project))
     }
 }
 

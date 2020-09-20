@@ -11,7 +11,7 @@ use std::iter::FromIterator;
 #[macro_use]
 extern crate float_cmp;
 
-use engine_core::{canonicalize, Project, Results};
+use engine_core::{canonicalize, Project, Results, Simulation};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
@@ -19,7 +19,7 @@ const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", 
 const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
 
 static TEST_MODELS: &[&str] = &[
-    // "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+    "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
     "test/test-models/samples/SIR/SIR.xmile",
     "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
     "test/test-models/samples/teacup/teacup.xmile",
@@ -110,7 +110,7 @@ fn load_expected_results(xmile_path: &str) -> Results {
         return load_csv(&output_path.to_string_lossy(), *delimiter).unwrap();
     }
 
-    panic!("unreachable");
+    unreachable!();
 }
 
 fn simulate_path(xmile_path: &str) {
@@ -125,7 +125,7 @@ fn simulate_path(xmile_path: &str) {
     assert!(project.is_ok());
 
     let project = project.unwrap();
-    let sim = project.new_sim("main").unwrap();
+    let sim = Simulation::new(&project, "main").unwrap();
     let results = sim.run_to_end();
     assert!(results.is_ok());
 
@@ -164,10 +164,6 @@ fn simulate_path(xmile_path: &str) {
     }
 
     assert_eq!(expected.step_count, step);
-
-    // verify simulation results
-
-    assert!(true);
 }
 
 #[test]
@@ -183,5 +179,5 @@ fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
     let mut f = BufReader::new(f);
     let project = Project::from_xmile_reader(&mut f).unwrap();
-    assert!(project.new_sim("blerg").is_err());
+    assert!(Simulation::new(&project, "blerg").is_err());
 }
