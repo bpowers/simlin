@@ -11,7 +11,7 @@ use std::iter::FromIterator;
 #[macro_use]
 extern crate float_cmp;
 
-use engine_core::{canonicalize, Project, Results, Simulation};
+use engine_core::{canonicalize, Method, Project, Results, SimSpecs, Simulation};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
@@ -94,6 +94,13 @@ fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
         data: step_data.into_boxed_slice(),
         step_size,
         step_count,
+        specs: SimSpecs {
+            start: 0.0,
+            stop: 0.0,
+            dt: 0.0,
+            save_step: 0.0,
+            method: Method::Euler,
+        },
     })
 }
 

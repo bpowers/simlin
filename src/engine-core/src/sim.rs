@@ -1099,6 +1099,7 @@ pub struct Results {
     pub data: Box<[f64]>,
     pub step_size: usize,
     pub step_count: usize,
+    pub specs: Specs,
 }
 
 impl Results {
@@ -1124,6 +1125,9 @@ impl Results {
         }
 
         for curr in self.data.chunks(self.step_size) {
+            if curr[TIME_OFF] > self.specs.stop {
+                break;
+            }
             for (i, val) in curr.iter().enumerate() {
                 print!("{}", val);
                 if i == var_names.len() - 1 {
@@ -1353,6 +1357,7 @@ impl Simulation {
             data: boxed_slab,
             step_size: n_slots,
             step_count: n_chunks,
+            specs: spec.clone(),
         })
     }
 }

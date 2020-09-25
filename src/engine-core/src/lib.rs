@@ -44,8 +44,10 @@ use std::rc::Rc;
 use self::common::Result;
 
 pub use self::common::{canonicalize, Ident};
+pub use self::sim::Method;
 pub use self::sim::Results;
 pub use self::sim::Simulation;
+pub use self::sim::Specs as SimSpecs;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
