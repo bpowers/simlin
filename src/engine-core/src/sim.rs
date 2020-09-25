@@ -614,41 +614,39 @@ fn calc_offsets(
     all_offsets
 }
 
-fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident, usize> {
+fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident, (usize, usize)> {
     let is_root = model_name == "main";
 
-    let mut offsets: HashMap<Ident, usize> = HashMap::new();
-    let mut base = 0;
+    let mut offsets: HashMap<Ident, (usize, usize)> = HashMap::new();
+    let mut i = 0;
     if is_root {
-        offsets.insert("time".to_string(), 0);
-        base += 1;
+        offsets.insert("time".to_string(), (0, 1));
+        i += 1;
     }
 
     let model = Rc::clone(&project.models[model_name]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
-        // TODO: if we reorder based on dependencies, we could probably improve performance
-        //   through better cache behavior.
         var_names.sort();
         var_names
     };
 
-    for (i, ident) in var_names.iter().enumerate() {
-        if let Variable::Module { .. } = &model.variables[*ident] {
+    for ident in var_names.iter() {
+        let size = if let Variable::Module { .. } = &model.variables[*ident] {
             let sub_offsets = calc_recursive_offsets(project, *ident);
             let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
             sub_var_names.sort();
-            for (j, sub_ident) in sub_var_names.iter().enumerate() {
-                offsets.insert(format!("{}.{}", *ident, sub_ident), base + i + j);
+            for sub_name in sub_var_names {
+                let (sub_off, sub_size) = sub_offsets[sub_name];
+                offsets.insert(format!("{}.{}", ident, sub_name), (i + sub_off, sub_size));
             }
-            // so we can find the module offset when evaling the submodule
-            offsets.insert(ident.to_string(), base + i);
-            // TODO: -1 because we didn't use the "slot" reserved for the
-            //   module in the parent model
-            base += sub_offsets.len() - 1;
+            let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
+            sub_size
         } else {
-            offsets.insert(ident.to_string(), base + i);
-        }
+            offsets.insert(ident.to_string(), (i, 1));
+            1
+        };
+        i += size;
     }
 
     offsets
@@ -698,10 +696,10 @@ impl Module {
                 StepPart::Initials | StepPart::Flows => topo_sort(&model.variables, deps, runlist),
                 StepPart::Stocks => runlist,
             };
-            // eprintln!("runlist {}", model_name);
-            // for (i, name) in runlist.iter().enumerate() {
-            //     eprintln!("  {}: {}", i, name);
-            // }
+            eprintln!("runlist {}", model_name);
+            for (i, name) in runlist.iter().enumerate() {
+                eprintln!("  {}: {}", i, name);
+            }
             let is_initial = match part {
                 StepPart::Initials => true,
                 _ => false,
@@ -721,9 +719,10 @@ impl Module {
                     )
                 })
                 .collect();
-            // for v in runlist.clone().unwrap().iter() {
-            //     eprintln!("{}", pretty(&v.ast));
-            // }
+            for v in runlist.clone().unwrap().iter() {
+                eprintln!("{}", pretty(&v.ast));
+            }
+            eprintln!("");
 
             runlist
         };
@@ -738,7 +737,8 @@ impl Module {
             !(&model.variables[*id]).is_stock()
         })?;
         let runlist_stocks = build_runlist(dt_deps, StepPart::Stocks, &|id| {
-            (&model.variables[*id]).is_stock()
+            let v = &model.variables[*id];
+            v.is_stock() || v.is_module()
         })?;
 
         let tables: Result<HashMap<String, Table>> = var_names
@@ -793,6 +793,8 @@ impl<'a> ModuleEvaluator<'a> {
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 let off = self.off + module_offsets[ident].0;
                 let module = self.modules[ident.as_str()];
+
+                eprintln!("eval_module<{}, {}>", ident, off);
 
                 self.sim.calc(
                     self.step_part,
@@ -1313,6 +1315,8 @@ impl Simulation {
         }
 
         let offsets = calc_recursive_offsets(&self.project, &module.ident);
+        let offsets: HashMap<Ident, usize> =
+            offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
 
         Ok(Results {
             offsets,
