@@ -130,25 +130,34 @@ pub enum Expr {
 }
 
 struct Context<'a> {
+    model_name: &'a str,
     ident: &'a str,
-    offsets: &'a HashMap<String, usize>,
+    offsets: &'a HashMap<Ident, HashMap<Ident, (usize, usize)>>,
     is_initial: bool,
     inputs: &'a [Ident],
 }
 
 impl<'a> Context<'a> {
     fn get_offset(&self, ident: &str) -> Result<usize> {
-        if self.offsets.contains_key(ident) {
-            Ok(self.offsets[ident])
+        self.get_submodel_offset(self.model_name, ident)
+    }
+
+    fn get_submodel_offset(&self, model: &str, ident: &str) -> Result<usize> {
+        let offsets = &self.offsets[model];
+        if let Some(pos) = ident.find('.') {
+            let submodel_name = &ident[..pos];
+            let submodel_var = &ident[pos + 1..];
+            let submodel_off = offsets[submodel_name].0;
+            Ok(submodel_off + self.get_submodel_offset(submodel_name, submodel_var)?)
         } else {
-            unreachable!();
+            Ok(offsets[ident].0)
         }
     }
 
     fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
         let expr = match expr {
             ast::Expr::Const(_, n) => Expr::Const(*n),
-            ast::Expr::Var(id) => Expr::Var(self.offsets[id.as_str()]),
+            ast::Expr::Var(id) => Expr::Var(self.get_offset(id)?),
             ast::Expr::App(id, orig_args) => {
                 let args: Result<Vec<Expr>> = orig_args.iter().map(|e| self.lower(e)).collect();
                 let mut args = args?;
@@ -284,7 +293,7 @@ impl<'a> Context<'a> {
 
         let mut loads = flows
             .iter()
-            .map(|flow| Expr::Var(self.offsets[flow.as_str()]));
+            .map(|flow| Expr::Var(self.get_offset(flow).unwrap()));
 
         let first = loads.next().unwrap();
         Some(loads.fold(first, |acc, flow| {
@@ -348,12 +357,15 @@ fn test_lower() {
     };
 
     let inputs = &[];
-    let mut offsets: HashMap<String, usize> = HashMap::new();
-    offsets.insert("true_input".to_string(), 7);
-    offsets.insert("false_input".to_string(), 8);
+    let mut offsets: HashMap<String, (usize, usize)> = HashMap::new();
+    offsets.insert("true_input".to_string(), (7, 1));
+    offsets.insert("false_input".to_string(), (8, 1));
+    let mut offsets2 = HashMap::new();
+    offsets2.insert("main".to_string(), offsets);
     let context = Context {
+        model_name: "main",
         ident: "test",
-        offsets: &offsets,
+        offsets: &offsets2,
         is_initial: false,
         inputs,
     };
@@ -386,12 +398,15 @@ fn test_lower() {
     };
 
     let inputs = &[];
-    let mut offsets: HashMap<String, usize> = HashMap::new();
-    offsets.insert("true_input".to_string(), 7);
-    offsets.insert("false_input".to_string(), 8);
+    let mut offsets: HashMap<String, (usize, usize)> = HashMap::new();
+    offsets.insert("true_input".to_string(), (7, 1));
+    offsets.insert("false_input".to_string(), (8, 1));
+    let mut offsets2 = HashMap::new();
+    offsets2.insert("main".to_string(), offsets);
     let context = Context {
+        model_name: "main",
         ident: "test",
-        offsets: &offsets,
+        offsets: &offsets2,
         is_initial: false,
         inputs,
     };
@@ -421,11 +436,18 @@ fn test_fold_flows() {
 
     let inputs = &[];
     let offsets: &[(&str, usize)] = &[("time", 0), ("a", 1), ("b", 2), ("c", 3), ("d", 4)];
-    let offsets: HashMap<String, usize> =
-        HashMap::from_iter(offsets.into_iter().map(|(k, v)| ((*k).to_string(), *v)));
+    let offsets: HashMap<String, (usize, usize)> = HashMap::from_iter(
+        offsets
+            .into_iter()
+            .map(|(k, v)| ((*k).to_string(), (*v, 1))),
+    );
+    let mut offsets2 = HashMap::new();
+    offsets2.insert("main".to_string(), offsets);
+
     let ctx = Context {
+        model_name: "main",
         ident: "test",
-        offsets: &offsets,
+        offsets: &offsets2,
         is_initial: false,
         inputs,
     };
@@ -462,7 +484,7 @@ impl Var {
                     Expr::EvalModule(ident.clone(), inputs)
                 }
                 Variable::Stock { ast, .. } => {
-                    let off = ctx.offsets[var.ident()];
+                    let off = ctx.get_offset(var.ident())?;
                     if ctx.is_initial {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
@@ -475,7 +497,7 @@ impl Var {
                 Variable::Var {
                     ident, table, ast, ..
                 } => {
-                    let off = ctx.offsets[var.ident()];
+                    let off = ctx.get_offset(var.ident())?;
                     if let Some(ast) = ast {
                         let expr = ctx.lower(ast)?;
                         let expr = if table.is_some() {
@@ -508,8 +530,8 @@ pub struct Module {
     runlist_initials: Vec<Var>,
     runlist_flows: Vec<Var>,
     runlist_stocks: Vec<Var>,
-    offsets: HashMap<String, usize>,
-    tables: HashMap<String, Table>,
+    offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
+    tables: HashMap<Ident, Table>,
 }
 
 fn topo_sort<'out>(
@@ -550,7 +572,49 @@ fn topo_sort<'out>(
     result
 }
 
-fn calc_offsets(project: &Project, model_name: &str) -> HashMap<Ident, usize> {
+// TODO: this should memoize
+fn calc_offsets(
+    project: &Project,
+    model_name: &str,
+) -> HashMap<Ident, HashMap<Ident, (usize, usize)>> {
+    let is_root = model_name == "main";
+
+    let mut all_offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>> = HashMap::new();
+
+    let mut offsets: HashMap<Ident, (usize, usize)> = HashMap::new();
+    let mut i = 0;
+    if is_root {
+        offsets.insert("time".to_string(), (0, 1));
+        i += 1;
+    }
+
+    let model = Rc::clone(&project.models[model_name]);
+    let var_names: Vec<&str> = {
+        let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
+        var_names.sort();
+        var_names
+    };
+
+    for ident in var_names.iter() {
+        let size = if let Variable::Module { .. } = &model.variables[*ident] {
+            let all_sub_offsets = calc_offsets(project, *ident);
+            let sub_offsets = &all_sub_offsets[*ident];
+            let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
+            all_offsets.extend(all_sub_offsets);
+            sub_size
+        } else {
+            1
+        };
+        offsets.insert(ident.to_string(), (i, size));
+        i += size;
+    }
+
+    all_offsets.insert(model_name.to_string(), offsets);
+
+    all_offsets
+}
+
+fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident, usize> {
     let is_root = model_name == "main";
 
     let mut offsets: HashMap<Ident, usize> = HashMap::new();
@@ -571,7 +635,7 @@ fn calc_offsets(project: &Project, model_name: &str) -> HashMap<Ident, usize> {
 
     for (i, ident) in var_names.iter().enumerate() {
         if let Variable::Module { .. } = &model.variables[*ident] {
-            let sub_offsets = calc_offsets(project, *ident);
+            let sub_offsets = calc_recursive_offsets(project, *ident);
             let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
             sub_var_names.sort();
             for (j, sub_ident) in sub_var_names.iter().enumerate() {
@@ -634,10 +698,10 @@ impl Module {
                 StepPart::Initials | StepPart::Flows => topo_sort(&model.variables, deps, runlist),
                 StepPart::Stocks => runlist,
             };
-            eprintln!("runlist {}", model_name);
-            for (i, name) in runlist.iter().enumerate() {
-                eprintln!("  {}: {}", i, name);
-            }
+            // eprintln!("runlist {}", model_name);
+            // for (i, name) in runlist.iter().enumerate() {
+            //     eprintln!("  {}: {}", i, name);
+            // }
             let is_initial = match part {
                 StepPart::Initials => true,
                 _ => false,
@@ -647,6 +711,7 @@ impl Module {
                 .map(|ident| {
                     Var::new(
                         &Context {
+                            model_name,
                             ident,
                             offsets: &offsets,
                             is_initial,
@@ -656,9 +721,9 @@ impl Module {
                     )
                 })
                 .collect();
-            for v in runlist.clone().unwrap().iter() {
-                eprintln!("{}", pretty(&v.ast));
-            }
+            // for v in runlist.clone().unwrap().iter() {
+            //     eprintln!("{}", pretty(&v.ast));
+            // }
 
             runlist
         };
@@ -671,10 +736,10 @@ impl Module {
         let dt_deps = model.dt_deps.as_ref().unwrap();
         let runlist_flows = build_runlist(dt_deps, StepPart::Flows, &|id| {
             !(&model.variables[*id]).is_stock()
-        });
+        })?;
         let runlist_stocks = build_runlist(dt_deps, StepPart::Stocks, &|id| {
             (&model.variables[*id]).is_stock()
-        });
+        })?;
 
         let tables: Result<HashMap<String, Table>> = var_names
             .iter()
@@ -692,8 +757,8 @@ impl Module {
             ident: model_name.to_string(),
             n_slots,
             runlist_initials,
-            runlist_flows: runlist_flows?,
-            runlist_stocks: runlist_stocks?,
+            runlist_flows,
+            runlist_stocks,
             offsets,
             tables,
         })
@@ -725,7 +790,8 @@ impl<'a> ModuleEvaluator<'a> {
             Expr::ModuleInput(off) => self.inputs[*off],
             Expr::EvalModule(ident, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
-                let off = self.off + self.module.offsets[ident];
+                let module_offsets = &self.module.offsets[&self.module.ident];
+                let off = self.off + module_offsets[ident].0;
                 let module = self.modules[ident.as_str()];
 
                 self.sim.calc(
@@ -917,7 +983,8 @@ impl<'a> ModuleEvaluator<'a> {
     }
 }
 
-fn pretty(expr: &Expr) -> String {
+#[allow(dead_code)]
+pub fn pretty(expr: &Expr) -> String {
     match expr {
         Expr::Const(n) => format!("{}", n),
         Expr::Var(off) => format!("curr[{}]", off),
@@ -1245,7 +1312,7 @@ impl Simulation {
             assert!(curr[TIME_OFF] > stop);
         }
 
-        let offsets = calc_offsets(&self.project, &module.ident);
+        let offsets = calc_recursive_offsets(&self.project, &module.ident);
 
         Ok(Results {
             offsets,
