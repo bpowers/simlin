@@ -614,9 +614,7 @@ impl Module {
 
         let model_name: &str = &model.name;
         let n_slots_start_off = if is_root { 1 } else { 0 };
-
         let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
-
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
             // TODO: if we reorder based on dependencies, we could probably improve performance
@@ -627,83 +625,56 @@ impl Module {
 
         let offsets = calc_offsets(project, model_name);
 
-        let initial_deps = model.initial_deps.as_ref().unwrap();
-        let is_initial = true;
+        let build_runlist = |deps: &HashMap<Ident, HashSet<Ident>>,
+                             part: StepPart,
+                             predicate: &dyn Fn(&&str) -> bool|
+         -> Result<Vec<Var>> {
+            let runlist: Vec<&str> = var_names.iter().cloned().filter(predicate).collect();
+            let runlist = match part {
+                StepPart::Initials | StepPart::Flows => topo_sort(&model.variables, deps, runlist),
+                StepPart::Stocks => runlist,
+            };
+            eprintln!("runlist {}", model_name);
+            for (i, name) in runlist.iter().enumerate() {
+                eprintln!("  {}: {}", i, name);
+            }
+            let is_initial = match part {
+                StepPart::Initials => true,
+                _ => false,
+            };
+            let runlist: Result<Vec<Var>> = runlist
+                .into_iter()
+                .map(|ident| {
+                    Var::new(
+                        &Context {
+                            ident,
+                            offsets: &offsets,
+                            is_initial,
+                            inputs,
+                        },
+                        &model.variables[ident],
+                    )
+                })
+                .collect();
+            for v in runlist.clone().unwrap().iter() {
+                eprintln!("{}", pretty(&v.ast));
+            }
 
+            runlist
+        };
+
+        let initial_deps = model.initial_deps.as_ref().unwrap();
         // TODO: we can cut this down to just things needed to initialize stocks,
         //   but thats just an optimization
-        let runlist_initials: Vec<&str> = var_names.clone();
-        let runlist_initials = topo_sort(&model.variables, initial_deps, runlist_initials);
-        eprintln!("initial runlist {}", model_name);
-        for (i, name) in runlist_initials.iter().enumerate() {
-            eprintln!("  {}: {}", i, name);
-        }
-        let runlist_initials: Result<Vec<Var>> = runlist_initials
-            .into_iter()
-            .map(|ident| {
-                Var::new(
-                    &Context {
-                        ident,
-                        offsets: &offsets,
-                        is_initial,
-                        inputs,
-                    },
-                    &model.variables[ident],
-                )
-            })
-            .collect();
-        for v in runlist_initials.clone().unwrap().iter() {
-            eprintln!("{}", pretty(&v.ast));
-        }
+        let runlist_initials = build_runlist(initial_deps, StepPart::Initials, &|_| true)?;
 
         let dt_deps = model.dt_deps.as_ref().unwrap();
-        let is_initial = false;
-
-        let runlist_flows: Vec<&str> = var_names
-            .iter()
-            .cloned()
-            .filter(|id| !(&model.variables[*id]).is_stock())
-            .collect();
-        let runlist_flows = topo_sort(&model.variables, dt_deps, runlist_flows);
-        eprintln!("flows runlist {}", model_name);
-        for (i, name) in runlist_flows.iter().enumerate() {
-            eprintln!("  {}: {}", i, name);
-        }
-        let runlist_flows: Result<Vec<Var>> = runlist_flows
-            .into_iter()
-            .map(|ident| {
-                Var::new(
-                    &Context {
-                        ident,
-                        offsets: &offsets,
-                        is_initial,
-                        inputs,
-                    },
-                    &model.variables[ident],
-                )
-            })
-            .collect();
-        for v in runlist_flows.clone().unwrap().iter() {
-            eprintln!("{}", pretty(&v.ast));
-        }
-
-        // no sorting needed for stocks
-        let runlist_stocks: Result<Vec<Var>> = var_names
-            .iter()
-            .map(|id| &model.variables[*id])
-            .filter(|v| v.is_stock())
-            .map(|v| {
-                Var::new(
-                    &Context {
-                        ident: v.ident(),
-                        offsets: &offsets,
-                        is_initial,
-                        inputs,
-                    },
-                    v,
-                )
-            })
-            .collect();
+        let runlist_flows = build_runlist(dt_deps, StepPart::Flows, &|id| {
+            !(&model.variables[*id]).is_stock()
+        });
+        let runlist_stocks = build_runlist(dt_deps, StepPart::Stocks, &|id| {
+            (&model.variables[*id]).is_stock()
+        });
 
         let tables: Result<HashMap<String, Table>> = var_names
             .iter()
@@ -720,7 +691,7 @@ impl Module {
         Ok(Module {
             ident: model_name.to_string(),
             n_slots,
-            runlist_initials: runlist_initials?,
+            runlist_initials,
             runlist_flows: runlist_flows?,
             runlist_stocks: runlist_stocks?,
             offsets,
