@@ -157,7 +157,18 @@ impl<'a> Context<'a> {
     fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
         let expr = match expr {
             ast::Expr::Const(_, n) => Expr::Const(*n),
-            ast::Expr::Var(id) => Expr::Var(self.get_offset(id)?),
+            ast::Expr::Var(id) => {
+                if let Some((off, _)) = self
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, input)| id == *input)
+                {
+                    Expr::ModuleInput(off)
+                } else {
+                    Expr::Var(self.get_offset(id)?)
+                }
+            }
             ast::Expr::App(id, orig_args) => {
                 let args: Result<Vec<Expr>> = orig_args.iter().map(|e| self.lower(e)).collect();
                 let mut args = args?;
@@ -467,13 +478,13 @@ fn test_fold_flows() {
 impl Var {
     fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
-        let ast = if let Some((off, _)) = ctx
+        let ast = if let Some((off, ident)) = ctx
             .inputs
             .iter()
             .enumerate()
             .find(|(_i, n)| *n == var.ident())
         {
-            Expr::AssignCurr(off, Box::new(Expr::ModuleInput(off)))
+            Expr::AssignCurr(ctx.get_offset(ident)?, Box::new(Expr::ModuleInput(off)))
         } else {
             match var {
                 Variable::Module { ident, inputs, .. } => {
@@ -693,13 +704,31 @@ impl Module {
          -> Result<Vec<Var>> {
             let runlist: Vec<&str> = var_names.iter().cloned().filter(predicate).collect();
             let runlist = match part {
-                StepPart::Initials | StepPart::Flows => topo_sort(&model.variables, deps, runlist),
+                StepPart::Initials => {
+                    let needed: HashSet<&str> = runlist
+                        .iter()
+                        .cloned()
+                        .filter(|id| {
+                            let v = &model.variables[*id];
+                            v.is_stock() || v.is_module()
+                        })
+                        .collect();
+                    let mut runlist: HashSet<&str> = needed
+                        .iter()
+                        .flat_map(|id| &deps[*id])
+                        .map(|id| id.as_str())
+                        .collect();
+                    runlist.extend(needed);
+                    let runlist = runlist.into_iter().collect();
+                    topo_sort(&model.variables, deps, runlist)
+                }
+                StepPart::Flows => topo_sort(&model.variables, deps, runlist),
                 StepPart::Stocks => runlist,
             };
-            eprintln!("runlist {}", model_name);
-            for (i, name) in runlist.iter().enumerate() {
-                eprintln!("  {}: {}", i, name);
-            }
+            // eprintln!("runlist {}", model_name);
+            // for (i, name) in runlist.iter().enumerate() {
+            //     eprintln!("  {}: {}", i, name);
+            // }
             let is_initial = match part {
                 StepPart::Initials => true,
                 _ => false,
@@ -719,10 +748,10 @@ impl Module {
                     )
                 })
                 .collect();
-            for v in runlist.clone().unwrap().iter() {
-                eprintln!("{}", pretty(&v.ast));
-            }
-            eprintln!("");
+            // for v in runlist.clone().unwrap().iter() {
+            //     eprintln!("{}", pretty(&v.ast));
+            // }
+            // eprintln!("");
 
             runlist
         };
@@ -732,13 +761,15 @@ impl Module {
         //   but thats just an optimization
         let runlist_initials = build_runlist(initial_deps, StepPart::Initials, &|_| true)?;
 
+        let inputs_set: HashSet<Ident> = inputs.iter().cloned().collect();
+
         let dt_deps = model.dt_deps.as_ref().unwrap();
         let runlist_flows = build_runlist(dt_deps, StepPart::Flows, &|id| {
-            !(&model.variables[*id]).is_stock()
+            inputs_set.contains(*id) || !(&model.variables[*id]).is_stock()
         })?;
         let runlist_stocks = build_runlist(dt_deps, StepPart::Stocks, &|id| {
             let v = &model.variables[*id];
-            v.is_stock() || v.is_module()
+            !inputs_set.contains(*id) && (v.is_stock() || v.is_module())
         })?;
 
         let tables: Result<HashMap<String, Table>> = var_names
@@ -794,8 +825,6 @@ impl<'a> ModuleEvaluator<'a> {
                 let off = self.off + module_offsets[ident].0;
                 let module = self.modules[ident.as_str()];
 
-                eprintln!("eval_module<{}, {}>", ident, off);
-
                 self.sim.calc(
                     self.step_part,
                     self.modules,
@@ -809,13 +838,15 @@ impl<'a> ModuleEvaluator<'a> {
 
                 0.0
             }
-            Expr::Var(off) => self.curr[*off],
+            Expr::Var(off) => self.curr[self.off + *off],
             Expr::AssignCurr(off, r) => {
-                self.curr[self.off + *off] = self.eval(r);
+                let rhs = self.eval(r);
+                self.curr[self.off + *off] = rhs;
                 0.0
             }
             Expr::AssignNext(off, r) => {
-                self.next[self.off + *off] = self.eval(r);
+                let rhs = self.eval(r);
+                self.next[self.off + *off] = rhs;
                 0.0
             }
             Expr::If(cond, t, f) => {
@@ -1272,7 +1303,6 @@ impl Simulation {
                 curr,
                 next,
             );
-
             let mut step = 0;
             loop {
                 self.calc(
