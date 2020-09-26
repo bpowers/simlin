@@ -97,6 +97,15 @@ export class FirestoreTable<T extends Message> implements Table<T> {
       if (value === undefined) {
         doc[key] = null;
       }
+
+      if (key === 'jsonContents') {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        const contents = value as any;
+        // if the JSON is too big, don't expose it (as its only for debugging info anyway)
+        if (contents.length > 100 * 1024) {
+          doc[key] = null;
+        }
+      }
     }
 
     doc['value'] = Buffer.from(serializedPb);
