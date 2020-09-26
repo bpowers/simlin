@@ -75,7 +75,9 @@ export class BuiltinVisitor implements Visitor<Node> {
 
     const model = this.project.model('stdlib·' + fn);
     if (!model) {
-      throw new Error('unknown builtin: ' + fn);
+      console.warn('unknown builtin: ' + fn);
+      // throw new Error('unknown builtin: ' + fn);
+      return new Constant(n.pos, '0.0');
     }
 
     let identArgs = List<string>();
