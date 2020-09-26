@@ -228,7 +228,7 @@ export class File extends Record(FileDefaults) implements XNode {
         case 'model': {
           const [model, err] = Model.FromXML(child);
           if (err || !model) {
-            return [undefined, new Error(`SimSpec: ${err}`)];
+            return [undefined, new Error(`Model: ${err}`)];
           }
           if (!file.models) {
             file.models = List<Model>();
@@ -836,10 +836,12 @@ export class Model extends Record(ModelDefaults) implements XNode {
             }
             const [v, err] = Variable.FromXML(vchild);
             // FIXME: real logging
-            if (err || !v) {
+            if (err) {
               return [undefined, new Error(`${child.nodeName} var: ${err}`)];
             }
-            model.variables = model.variables.push(v);
+            if (v) {
+              model.variables = model.variables.push(v);
+            }
           }
           break;
         case 'views':
@@ -989,7 +991,7 @@ export class Variable extends Record(VariableDefaults) implements XNode {
     };
   }
 
-  static FromXML(el: Element): [Variable, undefined] | [undefined, Error] {
+  static FromXML(el: Element): [Variable, undefined] | [undefined, Error] | [undefined, undefined] {
     const v = Object.assign({}, VariableDefaults);
 
     const typename = el.nodeName.toLowerCase();
@@ -1001,6 +1003,8 @@ export class Variable extends Record(VariableDefaults) implements XNode {
       typename === 'connector'
     ) {
       v.type = typename;
+    } else if (typename === 'group') {
+      return [undefined, undefined];
     } else {
       return [undefined, new Error(`unknown variable type: ${typename}`)];
     }
@@ -1229,7 +1233,8 @@ export class ViewElement extends Record(ViewElementDefaults) implements XNode {
       typename === 'button' ||
       typename === 'isee:loop_indicator' ||
       typename === 'graphics_frame' ||
-      typename === 'slider'
+      typename === 'slider' ||
+      typename === 'group'
     ) {
       // TODO(bpowers)
       return [undefined, undefined];
