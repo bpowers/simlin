@@ -1,0 +1,52 @@
+// Copyright 2020 Bobby Powers. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+fn main() {
+    cc::Build::new()
+        .cpp(true)
+        .include("./third_party/tinyxml2")
+        .flag("-Wno-conversion-null")
+        .flag("-Wno-attributes")
+        .flag("-Wno-unused-variable")
+        .flag("-Wno-reorder")
+        .flag("-Wno-unused-but-set-variable")
+        .flag("-Wno-sign-compare")
+        .flag("-Wno-unused-local-typedefs")
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unused-function")
+        .flag("-Wno-unknown-pragmas")
+        .flag("-Wno-parentheses")
+        .file("./third_party/xmutil/Function/TableFunction.cpp")
+        .file("./third_party/xmutil/Function/Level.cpp")
+        .file("./third_party/xmutil/Function/State.cpp")
+        .file("./third_party/xmutil/Function/Function.cpp")
+        .file("./third_party/xmutil/Xmile/XMILEGenerator.cpp")
+        .file("./third_party/xmutil/Vensim/VensimView.cpp")
+        .file("./third_party/xmutil/Vensim/VensimParseFunctions.cpp")
+        .file("./third_party/xmutil/Vensim/VYacc.tab.cpp")
+        .file("./third_party/xmutil/Vensim/VensimLex.cpp")
+        .file("./third_party/xmutil/Vensim/VensimParse.cpp")
+        .file("./third_party/xmutil/Main.cpp")
+        .file("./third_party/xmutil/ContextInfo.cpp")
+        .file("./third_party/xmutil/XMUtil.cpp")
+        .file("./third_party/xmutil/Symbol/Symbol.cpp")
+        .file("./third_party/xmutil/Symbol/SymbolTableBase.cpp")
+        .file("./third_party/xmutil/Symbol/SymbolList.cpp")
+        .file("./third_party/xmutil/Symbol/Units.cpp")
+        .file("./third_party/xmutil/Symbol/NotUsed_SymAllocList.cpp")
+        .file("./third_party/xmutil/Symbol/SymbolNameSpace.cpp")
+        .file("./third_party/xmutil/Symbol/SymbolListList.cpp")
+        .file("./third_party/xmutil/Symbol/LeftHandSide.cpp")
+        .file("./third_party/xmutil/Symbol/ExpressionList.cpp")
+        .file("./third_party/xmutil/Symbol/Expression.cpp")
+        .file("./third_party/xmutil/Symbol/Equation.cpp")
+        .file("./third_party/xmutil/Symbol/Variable.cpp")
+        .file("./third_party/xmutil/Symbol/UnitExpression.cpp")
+        .compile("xmutil-native");
+
+    cc::Build::new()
+        .cpp(true)
+        .file("./third_party/tinyxml2/tinyxml2.cpp")
+        .compile("tinyxml-native");
+}

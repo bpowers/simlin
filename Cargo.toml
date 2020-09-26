@@ -2,8 +2,11 @@
 name = "xmutil-rs"
 version = "0.1.0"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+build = "build.rs"
 
 [dependencies]
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
