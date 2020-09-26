@@ -6,11 +6,11 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
+import Accordion from '@material-ui/core/Accordion';
+import AccordionDetails from '@material-ui/core/AccordionDetails';
+import AccordionSummary from '@material-ui/core/AccordionSummary';
 import Button from '@material-ui/core/Button';
 import Checkbox from '@material-ui/core/Checkbox';
-import ExpansionPanel from '@material-ui/core/ExpansionPanel';
-import ExpansionPanelDetails from '@material-ui/core/ExpansionPanelDetails';
-import ExpansionPanelSummary from '@material-ui/core/ExpansionPanelSummary';
 import Grid from '@material-ui/core/Grid';
 import InputAdornment from '@material-ui/core/InputAdornment';
 import TextField from '@material-ui/core/TextField';
@@ -237,13 +237,13 @@ export const NewProject = withStyles(styles)(
           <br />
           <br />
 
-          <ExpansionPanel>
-            <ExpansionPanelSummary expandIcon={<ExpandMoreIcon />}>
+          <Accordion>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
               <div>
                 <Typography>Advanced</Typography>
               </div>
-            </ExpansionPanelSummary>
-            <ExpansionPanelDetails>
+            </AccordionSummary>
+            <AccordionDetails>
               <form>
                 <Grid container spacing={10} justify="center" alignItems="center">
                   <Grid item xs={8}>
@@ -274,8 +274,8 @@ export const NewProject = withStyles(styles)(
                   </Grid>
                 </Grid>
               </form>
-            </ExpansionPanelDetails>
-          </ExpansionPanel>
+            </AccordionDetails>
+          </Accordion>
 
           <br />
           <br />
