@@ -142,8 +142,17 @@ class App {
     );
 
     // support both JSON and x-url-encoded POST bodies
-    this.app.use(bodyParser.json());
-    this.app.use(bodyParser.urlencoded({ extended: false }));
+    this.app.use(
+      bodyParser.json({
+        limit: '10mb',
+      }),
+    );
+    this.app.use(
+      bodyParser.urlencoded({
+        limit: '10mb',
+        extended: false,
+      }),
+    );
 
     this.app.use(favicon(path.join(this.app.get('public'), 'favicon.ico')));
 
