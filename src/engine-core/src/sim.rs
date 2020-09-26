@@ -809,7 +809,6 @@ pub struct ModuleEvaluator<'a> {
     next: &'a mut [f64],
     dt: f64,
     module: &'a Module,
-    modules: &'a HashMap<&'a str, &'a Module>,
     sim: &'a Simulation,
 }
 
@@ -823,11 +822,10 @@ impl<'a> ModuleEvaluator<'a> {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 let off = self.off + module_offsets[ident].0;
-                let module = self.modules[ident.as_str()];
+                let module = &self.sim.modules[ident.as_str()];
 
                 self.sim.calc(
                     self.step_part,
-                    self.modules,
                     module,
                     off,
                     &args,
@@ -1146,9 +1144,9 @@ impl Results {
 
 #[derive(Debug)]
 pub struct Simulation {
-    modules: Vec<Module>,
+    modules: HashMap<Ident, Module>,
     specs: Specs,
-    root: usize, // offset into modules
+    root: String,
     project: Rc<Project>,
 }
 
@@ -1201,13 +1199,13 @@ impl Simulation {
             sorted_names
         };
 
-        let mut compiled_modules: Vec<Module> = Vec::new();
+        let mut compiled_modules: HashMap<Ident, Module> = HashMap::new();
         for name in module_names {
             for (_, inputs) in modules.iter().filter(|(n, _)| n == name) {
                 let model = Rc::clone(&project.models[name]);
                 let is_root = name == main_model_name;
                 let module = Module::new(project, model, inputs, is_root)?;
-                compiled_modules.push(module);
+                compiled_modules.insert(name.to_string(), module);
             }
         }
 
@@ -1220,7 +1218,7 @@ impl Simulation {
         Ok(Simulation {
             modules: compiled_modules,
             specs,
-            root: 0,
+            root: main_model_name.to_string(),
             project: Rc::clone(project_rc),
         })
     }
@@ -1228,7 +1226,6 @@ impl Simulation {
     fn calc(
         &self,
         step_part: StepPart,
-        modules: &HashMap<&str, &Module>,
         module: &Module,
         module_off: usize,
         module_inputs: &[f64],
@@ -1249,7 +1246,6 @@ impl Simulation {
             curr,
             next,
             module,
-            modules,
             inputs: module_inputs,
             sim: self,
         };
@@ -1259,8 +1255,8 @@ impl Simulation {
         }
     }
 
-    fn n_slots(&self, module_id: usize) -> usize {
-        self.modules[module_id].n_slots
+    fn n_slots(&self, module_name: &str) -> usize {
+        self.modules[module_name].n_slots
     }
 
     pub fn run_to_end(&self) -> Result<Results> {
@@ -1279,11 +1275,9 @@ impl Simulation {
         let dt = spec.dt;
         let stop = spec.stop;
 
-        let n_slots = self.n_slots(self.root);
+        let n_slots = self.n_slots(&self.root);
 
-        let module = &self.modules[self.root];
-        let modules: HashMap<&str, &Module> =
-            self.modules.iter().map(|m| (m.ident.as_str(), m)).collect();
+        let module = &self.modules[&self.root];
 
         let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
         let mut boxed_slab = slab.into_boxed_slice();
@@ -1297,38 +1291,11 @@ impl Simulation {
             let mut curr = slabs.next().unwrap();
             let mut next = slabs.next().unwrap();
             curr[TIME_OFF] = self.specs.start;
-            self.calc(
-                StepPart::Initials,
-                &modules,
-                module,
-                0,
-                module_inputs,
-                dt,
-                curr,
-                next,
-            );
+            self.calc(StepPart::Initials, module, 0, module_inputs, dt, curr, next);
             let mut step = 0;
             loop {
-                self.calc(
-                    StepPart::Flows,
-                    &modules,
-                    module,
-                    0,
-                    module_inputs,
-                    dt,
-                    curr,
-                    next,
-                );
-                self.calc(
-                    StepPart::Stocks,
-                    &modules,
-                    module,
-                    0,
-                    module_inputs,
-                    dt,
-                    curr,
-                    next,
-                );
+                self.calc(StepPart::Flows, module, 0, module_inputs, dt, curr, next);
+                self.calc(StepPart::Stocks, module, 0, module_inputs, dt, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 step += 1;
                 if step != save_every {
