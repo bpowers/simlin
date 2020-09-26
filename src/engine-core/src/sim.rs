@@ -15,6 +15,7 @@ use crate::Project;
 use std::borrow::BorrowMut;
 
 const TIME_OFF: usize = 0;
+const DT_OFF: usize = 1;
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum Method {
@@ -596,7 +597,8 @@ fn calc_offsets(
     let mut i = 0;
     if is_root {
         offsets.insert("time".to_string(), (0, 1));
-        i += 1;
+        offsets.insert("dt".to_string(), (1, 1));
+        i += 2;
     }
 
     let model = Rc::clone(&project.models[model_name]);
@@ -632,7 +634,8 @@ fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
     let mut i = 0;
     if is_root {
         offsets.insert("time".to_string(), (0, 1));
-        i += 1;
+        offsets.insert("dt".to_string(), (1, 1));
+        i += 2;
     }
 
     let model = Rc::clone(&project.models[model_name]);
@@ -686,12 +689,10 @@ impl Module {
         }
 
         let model_name: &str = &model.name;
-        let n_slots_start_off = if is_root { 1 } else { 0 };
+        let n_slots_start_off = if is_root { 2 } else { 0 };
         let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
-            // TODO: if we reorder based on dependencies, we could probably improve performance
-            //   through better cache behavior.
             var_names.sort();
             var_names
         };
@@ -807,7 +808,6 @@ pub struct ModuleEvaluator<'a> {
     inputs: &'a [f64],
     curr: &'a mut [f64],
     next: &'a mut [f64],
-    dt: f64,
     module: &'a Module,
     sim: &'a Simulation,
 }
@@ -816,7 +816,7 @@ impl<'a> ModuleEvaluator<'a> {
     fn eval(&mut self, expr: &Expr) -> f64 {
         match expr {
             Expr::Const(n) => *n,
-            Expr::Dt => self.dt,
+            Expr::Dt => self.curr[DT_OFF],
             Expr::ModuleInput(off) => self.inputs[*off],
             Expr::EvalModule(ident, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
@@ -824,15 +824,8 @@ impl<'a> ModuleEvaluator<'a> {
                 let off = self.off + module_offsets[ident].0;
                 let module = &self.sim.modules[ident.as_str()];
 
-                self.sim.calc(
-                    self.step_part,
-                    module,
-                    off,
-                    &args,
-                    self.dt,
-                    self.curr,
-                    self.next,
-                );
+                self.sim
+                    .calc(self.step_part, module, off, &args, self.curr, self.next);
 
                 0.0
             }
@@ -995,10 +988,11 @@ impl<'a> ModuleEvaluator<'a> {
                             return 0.0;
                         }
 
+                        let dt = self.curr[DT_OFF];
                         let mut next_pulse = first_pulse;
                         while time >= next_pulse {
-                            if time < next_pulse + self.dt {
-                                return volume / self.dt;
+                            if time < next_pulse + dt {
+                                return volume / dt;
                             } else if interval <= 0.0 {
                                 break;
                             } else {
@@ -1229,7 +1223,6 @@ impl Simulation {
         module: &Module,
         module_off: usize,
         module_inputs: &[f64],
-        dt: f64,
         curr: &mut [f64],
         next: &mut [f64],
     ) {
@@ -1241,7 +1234,6 @@ impl Simulation {
 
         let mut step = ModuleEvaluator {
             step_part,
-            dt,
             off: module_off,
             curr,
             next,
@@ -1291,12 +1283,14 @@ impl Simulation {
             let mut curr = slabs.next().unwrap();
             let mut next = slabs.next().unwrap();
             curr[TIME_OFF] = self.specs.start;
-            self.calc(StepPart::Initials, module, 0, module_inputs, dt, curr, next);
+            curr[DT_OFF] = dt;
+            self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
             let mut step = 0;
             loop {
-                self.calc(StepPart::Flows, module, 0, module_inputs, dt, curr, next);
-                self.calc(StepPart::Stocks, module, 0, module_inputs, dt, curr, next);
+                self.calc(StepPart::Flows, module, 0, module_inputs, curr, next);
+                self.calc(StepPart::Stocks, module, 0, module_inputs, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
+                next[DT_OFF] = dt;
                 step += 1;
                 if step != save_every {
                     let curr = curr.borrow_mut();
