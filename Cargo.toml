@@ -1,6 +1,6 @@
 [package]
 name = "xmutil"
-version = "1.0.0"
+version = "1.0.1"
 description = "convert Vensim MDL files to XMILE"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 homepage = "https://github.com/bpowers/xmutil-rs"
@@ -14,4 +14,4 @@ build = "build.rs"
 libc = "0.2"
 
 [build-dependencies]
-cc = { version = "1", features = ["parallel"] }
+cc = "1"
