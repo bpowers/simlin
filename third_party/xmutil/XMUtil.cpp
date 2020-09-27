@@ -286,13 +286,12 @@ void CheckMemoryTrack(int clear) {
 
 extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
-char *convert_mdl(const char *mdlSource, bool isCompact) {
+char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool isCompact) {
   Model m{};
 
   // parse the input
   {
     VensimParse vp{&m};
-    const size_t mdlSourceLen = strlen(mdlSource);
     if (!vp.ProcessFile("<in memory>", mdlSource, mdlSourceLen)) {
       return nullptr;
     }
