@@ -2,12 +2,12 @@
 #ifndef __XMILE_H
 #define __XMILE_H
 
-class Model;
-
 #include <tinyxml2.h>
 
 #include <string>
 #include <vector>
+
+class Model;
 class VensimView;
 class SymbolNameSpace;
 
@@ -15,6 +15,7 @@ class XMILEGenerator {
 public:
   XMILEGenerator(Model *model);
 
+  std::string Print(bool isCompact, std::vector<std::string> &errs);
   bool Generate(FILE *file, std::vector<std::string> &errs);
 
 protected:

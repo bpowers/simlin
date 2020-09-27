@@ -84,8 +84,8 @@ private:
   SymbolNameSpace *pSymbolNameSpace;
   SymbolNameSpace *pMainSymbolNameSpace;
   Variable *pActiveVar;
-  bool mInMacro;
-  bool bLongName;
+  bool mInMacro = false;
+  bool bLongName = false;
   std::vector<MacroFunction *> mMacroFunctions;
 };
 

@@ -121,8 +121,8 @@ int cliMain(int argc, char *argv[], Model *m) {
   }
 
   std::vector<std::string> errs;
-  m->WriteToXMILE(out, errs);
-
+  auto xmile = m->PrintXMILE(false, errs);
+  fprintf(out, "%s", xmile.c_str());
   fclose(out);
 
   for (const std::string &err : errs) {
@@ -138,9 +138,6 @@ void CheckMemoryTrack(int clear);
 #endif
 
 int main(int argc, char *argv[]) {
-  if (!OpenUCaseMap())
-    return -1;
-
   int ret = 0;
   Model *m = new Model();
 #ifndef WITH_UI
@@ -158,7 +155,6 @@ int main(int argc, char *argv[]) {
   ret = app.exec();
 #endif
   delete m;
-  CloseUCaseMap();
   // CheckMemoryTrack(1) ;
 
   // printf("Size of symbol is %d\n",sizeof(Symbol)) ;

@@ -15,7 +15,7 @@ Function::~Function(void) {
 
 MacroFunction::MacroFunction(SymbolNameSpace *sns, SymbolNameSpace *local, const std::string &name,
                              ExpressionList *margs)
-    : mArgs(margs), pSymbolNameSpace(local), Function(sns, name, margs->Length()) {
+    : Function(sns, name, margs->Length()), pSymbolNameSpace(local), mArgs(margs) {
 }
 
 std::string MacroFunction::ComputableName(void) {

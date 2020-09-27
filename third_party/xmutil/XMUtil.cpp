@@ -8,21 +8,7 @@
 
 #include "Model.h"
 #include "Vensim/VensimParse.h"
-#include "unicode/ucasemap.h"
-#include "unicode/ustring.h"
-#include "unicode/utypes.h"
-
-UCaseMap *GlobalUCaseMap;
-bool OpenUCaseMap() {
-  UErrorCode ec = U_ZERO_ERROR;
-  GlobalUCaseMap = ucasemap_open("en", 0, &ec);
-  if (!GlobalUCaseMap)
-    return false;
-  return true;
-}
-void CloseUCaseMap() {
-  ucasemap_close(GlobalUCaseMap);
-}
+#include "libutf/utf.h"
 
 std::string SpaceToUnderBar(const std::string &s) {
   std::string rval{s};
@@ -31,10 +17,33 @@ std::string SpaceToUnderBar(const std::string &s) {
 }
 
 bool StringMatch(const std::string &f, const std::string &s) {
-	if (f.size() != s.size()) {
-		return false;
-	}
-	return strncasecmp(f.c_str(), s.c_str(), f.size()) == 0;
+  if (f.size() != s.size()) {
+    return false;
+  }
+  return strncasecmp(f.c_str(), s.c_str(), f.size()) == 0;
+}
+
+char *utf8ToLower(const char *src, size_t srcLen) {
+  int n;
+  Rune u;
+
+  size_t dstLen = 0;
+  for (size_t srcOff = 0; srcOff<srcLen && * src> 0 && (n = chartorune(&u, &src[srcOff])); srcOff += n) {
+    const Rune l = tolowerrune(u);
+    dstLen += runelen(l);
+  }
+
+  char *dst = new char[dstLen + 1];
+  memset(dst, 0, dstLen + 1);
+
+  size_t dstOff = 0;
+  for (size_t srcOff = 0; srcOff<srcLen && * src> 0 && (n = chartorune(&u, &src[srcOff])); srcOff += n) {
+    Rune l = tolowerrune(u);
+    const int size = runetochar(&dst[dstOff], &l);
+    dstOff += size;
+  }
+
+  return dst;
 }
 
 double AngleFromPoints(double startx, double starty, double pointx, double pointy, double endx, double endy) {
@@ -274,3 +283,46 @@ void CheckMemoryTrack(int clear) {
   }
 }
 #endif
+
+extern "C" {
+// returns NULL on error or a string containing XMILE that the caller now owns
+char *convert_mdl(const char *mdlSource, bool isCompact) {
+  Model m{};
+
+  // parse the input
+  {
+    VensimParse vp{&m};
+    const size_t mdlSourceLen = strlen(mdlSource);
+    if (!vp.ProcessFile("<in memory>", mdlSource, mdlSourceLen)) {
+      return nullptr;
+    }
+  }
+
+  // if(m->AnalyzeEquations()) {
+  //   m->Simulate() ;
+  //   m->OutputComputable(true);
+  // }
+
+  // mark variable types and potentially convert INTEG equations
+  // involving expressions into flows (a single net flow on the first
+  // pass though this)
+  m.MarkVariableTypes(nullptr);
+
+  for (MacroFunction *mf : m.MacroFunctions()) {
+    m.MarkVariableTypes(mf->NameSpace());
+  }
+
+  // if there is a view then try to make sure everything is defined in
+  // the views put unknowns in a heap in the first view at 20,20 but
+  // for things that have connections try to put them in the right
+  // place
+  m.AttachStragglers();
+
+  // TODO: expose errs
+  std::vector<std::string> errs;
+  std::string xmile = m.PrintXMILE(isCompact, errs);
+  char *result = strdup(xmile.c_str());
+
+  return result;
+}
+}

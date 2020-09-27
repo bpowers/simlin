@@ -108,14 +108,14 @@ eqn :
    | lhs '=' VPTT_with_lookup '(' exp ',' '(' tablevals ')' ')' { $$ = vpyy_add_lookup($1,$5,$8, 0) ; }
    | lhs VPTT_dataequals exp {$$ = vpyy_addeq($1,$3,NULL,VPTT_dataequals) ; }
    | lhs { $$ = vpyy_add_lookup($1,NULL,NULL, 0) ; } // treat as if a lookup on time - don't have numbers
-   | VPTT_symbol ':' subdef maplist {$$ = vpyy_addeq(vpyy_addexceptinterp(vpyy_var_expression($1,NULL),NULL,NULL),(Expression *)vpyy_symlist_expression($3,$4),NULL,':') ; }
+   | VPTT_symbol ':' subdef maplist {$$ = vpyy_addeq(vpyy_addexceptinterp(vpyy_var_expression($1,NULL),NULL,0),(Expression *)vpyy_symlist_expression($3,$4),NULL,':') ; }
    | lhs '=' VPTT_tabbed_array { $$ = vpyy_addeq($1,$3,NULL,'=') ; }
    ;
 
 
 lhs : 
-   var  { $$ = vpyy_addexceptinterp($1,NULL,NULL) ; }
-   | var exceptlist  {$$ = vpyy_addexceptinterp($1,$2,NULL) ;}
+   var  { $$ = vpyy_addexceptinterp($1,NULL,0) ; }
+   | var exceptlist  {$$ = vpyy_addexceptinterp($1,$2,0) ;}
    | var interpmode {$$ = vpyy_addexceptinterp($1,NULL,$2) ;}
    ;
 

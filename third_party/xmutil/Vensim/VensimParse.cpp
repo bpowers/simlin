@@ -335,7 +335,7 @@ char *VensimParse::GetIntChar(char *s, int &val, char c) {
   char *tv;
   for (tv = s; *tv; tv++) {
     if (*tv == c) {
-      *tv++ = NULL;
+      *tv++ = 0;
       break;
     }
   }
@@ -346,7 +346,7 @@ char *VensimParse::GetInt(char *s, int &val) {
   char *tv;
   for (tv = s; *tv; tv++) {
     if (*tv == ',') {
-      *tv++ = NULL;
+      *tv++ = 0;
       break;
     }
   }
@@ -360,7 +360,7 @@ char *VensimParse::GetString(char *s, std::string &name) {
       if (*tv == '\"') {
         tv++;
         assert(*tv == ',');
-        *tv++ = NULL;
+        *tv++ = 0;
         break;
       } else if (*tv == '\\' && tv[1] == '\"')
         tv++;
@@ -368,7 +368,7 @@ char *VensimParse::GetString(char *s, std::string &name) {
   } else {
     for (tv = s; *tv; tv++) {
       if (*tv == ',') {
-        *tv++ = NULL;
+        *tv++ = 0;
         break;
       }
     }

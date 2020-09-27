@@ -57,9 +57,12 @@ inline void __cdecl operator delete[](void *p) {
 #endif
 #endif
 
-// unicode utility functions
-bool OpenUCaseMap();
-void CloseUCaseMap();
+extern "C" {
+// returns NULL on error or a string containing XMILE that the caller now owns
+char *convert_mdl(const char *mdlSource, bool isCompact);
+}
+
+char *utf8ToLower(const char *src, size_t srcLen);
 
 // utility functions
 std::string SpaceToUnderBar(const std::string &s);
