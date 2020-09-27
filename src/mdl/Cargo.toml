@@ -8,3 +8,5 @@ edition = "2018"
 [dependencies]
 engine-core = { version = "0.1", path = "../engine-core" }
 engine-vensim = { version = "0.1", path = "../engine-vensim" }
+xmutil = "1.1"
+stringreader = "0.1"

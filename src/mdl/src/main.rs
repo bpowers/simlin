@@ -2,9 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use xmutil::convert_vensim_mdl;
+
 use engine_core::{self, Simulation};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -43,29 +45,51 @@ fn usage() -> ! {
     );
 }
 
-fn parse_args() -> Option<String> {
+#[derive(Default)]
+struct Args {
+    path: Option<String>,
+    is_vensim: bool,
+}
+
+fn parse_args() -> Args {
+    let mut args: Args = Default::default();
     for arg in std::env::args().skip(1) {
         if arg == "-help" || arg == "--help" {
             usage();
+        } else if arg == "--mdl" {
+            args.is_vensim = true;
         } else if arg.chars().next().unwrap_or(' ') == '-' {
             eprintln!("unknown arg '{}'", arg);
             usage();
         } else {
-            return Some(arg);
+            args.path = Some(arg);
         }
     }
 
-    // no args? reading from stdin then
-    None
+    args
 }
 
 fn main() {
-    let file_path = parse_args().unwrap_or_else(|| "/dev/stdin".to_string());
+    let args = parse_args();
+    let file_path = args.path.unwrap_or_else(|| "/dev/stdin".to_string());
 
     let f = File::open(&file_path).unwrap();
-    let mut f = BufReader::new(f);
+    let project = if args.is_vensim {
+        let contents: String = BufReader::new(f)
+            .lines()
+            .fold("".to_string(), |a, b| a + &b.unwrap());
+        let xmile_src: Option<String> = convert_vensim_mdl(&contents, true);
+        if xmile_src.is_none() {
+            eprintln!("couldn't convert vensim model.\n");
+        }
+        let xmile_src = xmile_src.unwrap();
+        let mut f = BufReader::new(stringreader::StringReader::new(&xmile_src));
+        engine_core::Project::from_xmile_reader(&mut f)
+    } else {
+        let mut f = BufReader::new(f);
+        engine_core::Project::from_xmile_reader(&mut f)
+    };
 
-    let project = engine_core::Project::from_xmile_reader(&mut f);
     if let Err(ref err) = project {
         eprintln!("model '{}' error: {}", &file_path, err);
     }

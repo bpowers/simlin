@@ -239,7 +239,7 @@ pub struct Variables {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Views {
-    pub view: Vec<View>,
+    pub view: Option<Vec<View>>,
 }
 
 impl Model {
