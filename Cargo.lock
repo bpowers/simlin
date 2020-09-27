@@ -297,10 +297,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine-vensim"
-version = "0.1.0"
-
-[[package]]
 name = "fake-simd"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -456,7 +452,6 @@ name = "mdl"
 version = "0.1.0"
 dependencies = [
  "engine-core",
- "engine-vensim",
  "stringreader",
  "xmutil",
 ]

@@ -3,7 +3,6 @@
 members = [
     "src/engine-v2",
     "src/engine-core",
-    "src/engine-vensim",
     "src/mdl",
 ]
 
