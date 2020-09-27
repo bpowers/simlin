@@ -7,8 +7,12 @@ extern crate libc;
 use std::ffi::CStr;
 use std::str;
 
-extern {
-    fn _convert_mdl_to_xmile(mdl_source: *const u8, mdl_source_len: u32, is_compact: bool) -> *const i8;
+extern "C" {
+    fn _convert_mdl_to_xmile(
+        mdl_source: *const u8,
+        mdl_source_len: u32,
+        is_compact: bool,
+    ) -> *const i8;
 }
 
 pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> String {
@@ -22,8 +26,6 @@ pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> String {
         str_slice.to_owned()
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
