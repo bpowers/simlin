@@ -20,7 +20,7 @@ pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> Option<String> 
     unsafe {
         let result_buf = _convert_mdl_to_xmile(str_ptr, str_len, is_compact);
         if result_buf.is_null() {
-            return None
+            return None;
         }
         // TODO: I think we might be leaking this
         let c_str: &CStr = CStr::from_ptr(result_buf);
