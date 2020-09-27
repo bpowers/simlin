@@ -5,6 +5,7 @@ description = "convert Vensim MDL files to XMILE"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 homepage = "https://github.com/bpowers/xmutil-rs"
 repository = "https://github.com/bpowers/xmutil-rs"
+readme = "README.md"
 license = "Apache-2.0"
 edition = "2018"
 build = "build.rs"
