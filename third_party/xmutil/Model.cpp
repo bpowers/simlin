@@ -1,6 +1,5 @@
 #include "Model.h"
 
-#include <iostream>
 #include <vector>
 
 #include "Symbol/Equation.h"
@@ -289,7 +288,7 @@ bool Model::OutputComputable(bool wantshort) {
       e->OutputComputable(&info);
     }
   } catch (...) {
-    std::cerr << "Error of some sort" << std::endl;
+    // std::cerr << "Error of some sort" << std::endl;
     return false;
   }
   return true;

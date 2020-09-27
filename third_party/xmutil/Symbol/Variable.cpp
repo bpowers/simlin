@@ -2,8 +2,6 @@
 
 #include <assert.h>
 
-#include <iostream>
-
 #include "../Symbol/Expression.h"
 #include "../Symbol/LeftHandSide.h"
 #include "../XMUtil.h"
@@ -252,17 +250,17 @@ bool VariableContentVar::CheckComputed(Symbol *parent, ContextInfo *info, bool f
   }
   int intype = info->GetComputeType() << 1;
   if (pState->cComputeFlag & intype) {
-    if (info->GetComputeType() == CF_initial)
-      std::cerr << "Simultaneous initial equations found " << std::endl;
-    else {
+    if (info->GetComputeType() == CF_initial) {
+      // std::cerr << "Simultaneous initial equations found " << std::endl;
+    } else {
       if (pState->HasMemory()) {  // first call was for rates - now for level
         assert(!first);
         info->AddDDF(DDF_level);
         return true;
       }
-      std::cerr << "Simultaneous active equations found " << std::endl;
+      // std::cerr << "Simultaneous active equations found " << std::endl;
     }
-    std::cerr << "     " << parent->GetName() << std::endl;
+    // std::cerr << "     " << parent->GetName() << std::endl;
     pState->cComputeFlag &= ~intype;
     return false;
   } else if (!first && (info->GetComputeType() != CF_initial) && pState->HasMemory()) {
@@ -282,7 +280,7 @@ bool VariableContentVar::CheckComputed(Symbol *parent, ContextInfo *info, bool f
     pState->cComputeFlag |= intype;
     for (Equation *e : vEquations) {
       if (!e->GetExpression()->CheckComputed(info)) {
-        std::cerr << "     " << parent->GetName() << std::endl;
+        // std::cerr << "     " << parent->GetName() << std::endl;
         pState->cComputeFlag &= ~intype;
         pState->cComputeFlag |= info->GetComputeType();  // don't reenter
         return false;

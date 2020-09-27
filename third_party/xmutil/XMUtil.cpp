@@ -261,6 +261,11 @@ char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool i
   // TODO: expose errs
   std::vector<std::string> errs;
   std::string xmile = m.PrintXMILE(isCompact, errs);
+
+  if (errs.size() != 0) {
+    return nullptr;
+  }
+
   char *result = strdup(xmile.c_str());
 
   return result;

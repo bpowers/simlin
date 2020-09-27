@@ -102,7 +102,8 @@ void VensimParse::ReadyFunctions() {
 
     pSymbolNameSpace->ConfirmAllAllocations();
   } catch (...) {
-    std::cerr << "Failed to initialize symbol table" << std::endl;
+    // std::cerr << "Failed to initialize symbol table" << std::endl;
+    assert(false);
   }
 }
 Equation *VensimParse::AddEq(LeftHandSide *lhs, Expression *ex, ExpressionList *exl, int tok) {
@@ -203,6 +204,8 @@ static std::string compress_whitespace(const std::string &s) {
 bool VensimParse::ProcessFile(const std::string &filename, const char *contents, size_t contentsLen) {
   sFilename = filename;
 
+  bool is_ok = true;
+
   mVensimLex.Initialize(contents, contentsLen);
   int endtok = mVensimLex.GetEndToken();
   // now we call the bison built parser which will call back to VensimLex
@@ -228,21 +231,24 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
           group_owner = _model->Groups().back().sOwner;
         { _model->Groups().push_back(ModelGroup(*mVensimLex.CurToken(), group_owner)); }
       } else if (rval != endtok) {
-        std::cerr << "Unknown terminal token " << rval << std::endl;
+        // std::cerr << "Unknown terminal token " << rval << std::endl;
         if (!FindNextEq(false))
           break;
       }
 
     } catch (VensimParseSyntaxError &e) {
-      std::cerr << e.str << std::endl;
-      std::cerr << "Error at line " << mVensimLex.LineNumber() << " position " << mVensimLex.Position() << " in file "
-                << sFilename << std::endl;
-      std::cerr << "(skipping the associated variable and looking for the next usable content)" << std::endl;
+      // std::cerr << e.str << std::endl;
+      // std::cerr << "Error at line " << mVensimLex.LineNumber() << " position " << mVensimLex.Position() << " in file
+      // "
+      //           << sFilename << std::endl;
+      // std::cerr << "(skipping the associated variable and looking for the next usable content)" << std::endl;
+      is_ok = false;
       pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
       if (!FindNextEq(false))
         break;
 
     } catch (...) {
+      is_ok = false;
       pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
       if (!FindNextEq(false))
         break;
@@ -324,7 +330,7 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
       }
     }
   }
-  return true;  // got something - try to put something out
+  return is_ok;  // got something - try to put something out
 }
 
 char *VensimParse::GetIntChar(char *s, int &val, char c) {

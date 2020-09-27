@@ -63,48 +63,27 @@ int cliMain(int argc, char *argv[], Model *m) {
     cliUsage();
   }
 
-  {
-    VensimParse vp(m);
-    FILE *file = nullptr;
-    if (useStdio) {
-      file = stdin;
-    } else {
-      file = fopen(path, "r");
-    }
-    if (file == nullptr) {
-      return false;
-    }
-    int err = 0;
-    auto contents = ReadFile(file, err);
-    if (err) {
-      fprintf(stderr, "ReadFile(): %d (%s)\n", err, strerror(err));
-      return false;
-    }
-    fclose(file);
-
-    ret = !vp.ProcessFile(path, contents.c_str(), contents.size());
+  FILE *file = nullptr;
+  if (useStdio) {
+    file = stdin;
+  } else {
+    file = fopen(path, "r");
   }
-
-  /*
-    if(m->AnalyzeEquations()) {
-      m->Simulate() ;
-      m->OutputComputable(true);
-    }
-   */
-
-  // mark variable types and potentially convert INTEG equations involving expressions
-  // into flows (a single net flow on the first pass though this)
-  m->MarkVariableTypes(nullptr);
-
-  for (MacroFunction *mf : m->MacroFunctions()) {
-    m->MarkVariableTypes(mf->NameSpace());
+  if (file == nullptr) {
+    return false;
   }
+  int err = 0;
+  auto contents = ReadFile(file, err);
+  if (err) {
+    fprintf(stderr, "ReadFile(): %d (%s)\n", err, strerror(err));
+    return false;
+  }
+  fclose(file);
 
-  // if there is a view then try to make sure everything is defined in the views
-  // put unknowns in a heap in the first view at 20,20 but for things that have
-  // connections try to put them in the right place
-  if (wantComplete) {
-    m->AttachStragglers();
+  auto xmile = _convert_mdl_to_xmile(contents.c_str(), contents.size(), false);
+  if (xmile == nullptr) {
+    fprintf(stderr, "error trying to convert the mdl to xmile\n");
+    return 1;
   }
 
   FILE *out = nullptr;
@@ -120,15 +99,8 @@ int cliMain(int argc, char *argv[], Model *m) {
     }
   }
 
-  std::vector<std::string> errs;
-  auto xmile = m->PrintXMILE(false, errs);
-  fprintf(out, "%s", xmile.c_str());
+  fprintf(out, "%s", xmile);
   fclose(out);
-
-  for (const std::string &err : errs) {
-    std::cerr << err << std::endl;
-    ret++;
-  }
 
   return ret;
 }

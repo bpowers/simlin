@@ -1,6 +1,5 @@
 #ifndef _XMUTIL_VENSIM_VENSIMPARSE_H
 #define _XMUTIL_VENSIM_VENSIMPARSE_H
-#include <iostream>
 #include <string>
 
 #include "../Function/Function.h"
