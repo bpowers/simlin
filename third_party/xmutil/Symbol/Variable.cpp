@@ -307,7 +307,7 @@ bool VariableContentVar::CheckComputed(Symbol *parent, ContextInfo *info, bool f
     if (!pState->HasMemory())
       return true;
   }
-  fprintf(stderr, "Outputting equations for  %s\n", parent->GetName().c_str());
+  // fprintf(stderr, "Outputting equations for  %s\n", parent->GetName().c_str());
   for (Equation *e : vEquations) {
     info->PushEquation(e);
   }
@@ -365,7 +365,7 @@ int VariableContentVar::SubscriptCount(std::vector<Variable *> &elmlist) {
   int count;
   if (vEquations.empty())
     return 0;
-  if (count = vEquations[0]->SubscriptCount(elmlist)) {
+  if ((count = vEquations[0]->SubscriptCount(elmlist))) {
     if (vEquations.size() != 1) {
       for (size_t i = 1; i < vEquations.size(); i++) {
         std::vector<Variable *> other;

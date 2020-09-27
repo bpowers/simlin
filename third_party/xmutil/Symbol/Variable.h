@@ -114,7 +114,6 @@ public:
 
 private:
   Variable *pFamily;
-  int iValue; /* 1 based value */
 };
 class VariableContentVar : public VariableContent {
 public:
@@ -214,7 +213,7 @@ public:
     if (pVariableContent)
       pVariableContent->SetupState(info);
   }
-  int SubscriptCount(std::vector<Variable *> &elmlist) {
+  int SubscriptCountVars(std::vector<Variable *> &elmlist) {
     return pVariableContent ? pVariableContent->SubscriptCount(elmlist) : 0;
   }
   // passthrough calls - many of these are virtual in VariableContent or passed through to yet another class

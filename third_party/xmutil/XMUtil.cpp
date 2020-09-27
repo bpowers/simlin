@@ -225,65 +225,6 @@ double AngleFromPoints(double startx, double starty, double pointx, double point
   return 33;
 }
 
-#if defined(_DEBUG) && defined(wantownmemorytesting)
-#include <assert.h>
-
-#include <unordered_map>
-#undef new     // regular new used in this section
-#undef delete  // same for delete
-
-typedef struct {
-  size_t size;
-  int line_no;
-  char file[32];
-} AllocInfo;
-
-typedef std::unordered_map<void *, AllocInfo> MemTrackMap;
-
-MemTrackMap *AllocList = 0;
-
-void AddTrack(void *addr, size_t size, const char *fname, int lnum) {
-  if (!AllocList)
-    AllocList = new MemTrackMap();
-  AllocInfo ai;
-  ai.size = size;
-  ai.line_no = lnum;
-  if (strlen(fname) > 31)
-    strcpy(ai.file, fname + strlen(fname) - 31);
-  else
-    strcpy(ai.file, fname);
-  (*AllocList)[addr] = ai;
-};
-
-static int Uk = 0;
-void RemoveTrack(void *addr) {
-  if (AllocList) {
-    MemTrackMap::iterator node = AllocList->find(addr);
-    if (node != AllocList->end()) {
-      AllocList->erase(node);
-      return;
-    }
-  }
-  // printf("%x %d\n",addr,++Uk) ;
-  // ignore things that may have been allocated elsewhere - boost is not controllable
-}
-
-void CheckMemoryTrack(int clear) {
-  if (!AllocList)
-    return;
-  MemTrackMap::iterator node = AllocList->begin();
-  for (; node != AllocList->end(); node++) {
-    fprintf(stderr, "Uncleared Memory at %u size %d from %s(%d)\n", node->first, node->second.size, node->second.file,
-            node->second.line_no);
-  }
-  if (clear) {
-    MemTrackMap *a = AllocList;
-    AllocList = NULL;
-    delete a;
-  }
-}
-#endif
-
 extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
 char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool isCompact) {

@@ -1,6 +1,5 @@
 #ifndef _XMUTIL_MODEL_H
 #define _XMUTIL_MODEL_H
-#include <cstdio>
 #include <vector>
 
 #include "Symbol/Expression.h"
@@ -23,7 +22,6 @@ public:
     return false;
   }
   bool AnalyzeEquations(void);
-  bool Simulate(void);
   SymbolNameSpace *GetNameSpace(void) {
     return &mSymbolNameSpace;
   }

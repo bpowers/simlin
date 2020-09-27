@@ -203,7 +203,6 @@ static std::string compress_whitespace(const std::string &s) {
 bool VensimParse::ProcessFile(const std::string &filename, const char *contents, size_t contentsLen) {
   sFilename = filename;
 
-  bool noerr = true;
   mVensimLex.Initialize(contents, contentsLen);
   int endtok = mVensimLex.GetEndToken();
   // now we call the bison built parser which will call back to VensimLex
@@ -219,7 +218,7 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
           break;
       } else if (rval == '|') {
       } else if (rval == VPTT_groupstar) {
-        fprintf(stderr, "%s\n", mVensimLex.CurToken()->c_str());
+        // fprintf(stderr, "%s\n", mVensimLex.CurToken()->c_str());
         // only change this if a new number
         std::string group_owner;
         char c = mVensimLex.CurToken()->at(0);
@@ -240,13 +239,11 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
                 << sFilename << std::endl;
       std::cerr << "(skipping the associated variable and looking for the next usable content)" << std::endl;
       pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
-      noerr = false;
       if (!FindNextEq(false))
         break;
 
     } catch (...) {
       pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
-      noerr = false;
       if (!FindNextEq(false))
         break;
     }
@@ -259,12 +256,11 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
       break;
     this->mVensimLex.ReadLine(buf, BUFLEN);  // version line
     if (strncmp(buf, "V300 ", 5)) {
-      fprintf(stderr, "Unrecognized version - can't read sketch info\n");
-      noerr = false;
+      // fprintf(stderr, "Unrecognized version - can't read sketch info\n");
       break;
     }
     VensimView *view = new VensimView;
-    VensimViewElements &elements = view->Elements();  // we populate this directly
+    // VensimViewElements &elements = view->Elements();  // we populate this directly
 
     _model->AddView(view);
     // next the title

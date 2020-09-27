@@ -28,8 +28,6 @@ const std::string &Symbol::GetName(void) {
 }
 
 void Symbol::SetOwner(Symbol *var) {
-  if (var->GetName() == "Age")
-    var = var;
   // static FILE *f; if (!f) f = fopen("c:\\temp\\temp.txt", "w");
   // if(f) fprintf(f, "%s <-- %s", var->GetName().c_str(), this->GetName().c_str());
   if (!pOwner || static_cast<Variable *>(pOwner)->Nelm() < static_cast<Variable *>(var)->Nelm()) {

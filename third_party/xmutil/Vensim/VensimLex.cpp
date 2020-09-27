@@ -103,7 +103,7 @@ int VensimLex::ReadTabbedArray(void) {
   // then just numbers - tab or space separated with new lines
   ExpressionNumberTable *ent = new ExpressionNumberTable(VPObject->GetSymbolNameSpace());
   row = 0;
-  while (toktype = NextToken()) {
+  while ((toktype = NextToken())) {
     if ((toktype == '+' || toktype == '-')) {
       if (NextToken() == VPTT_number) {
         vpyylval.num = -vpyylval.num;
@@ -119,7 +119,7 @@ int VensimLex::ReadTabbedArray(void) {
       throw "Bad numbers";
     ent->AddValue(row, vpyylval.num);
     // test for \n
-    while (c = GetNextChar(false)) {
+    while ((c = GetNextChar(false))) {
       if (c == '\n') {
         row++;
         break;
@@ -294,7 +294,7 @@ int VensimLex::NextToken()  // also sets token type
     int nesting = 1;
     int len = 1;
     MarkPosition();
-    while (c = GetNextChar(false)) {
+    while ((c = GetNextChar(false))) {
       len++;
       if (len > 1028)
         break;  // excessive comments not considered valid
@@ -339,7 +339,7 @@ int VensimLex::NextToken()  // also sets token type
   case '\'':         // vensim literal - just look for matching '
   {
     int len;
-    for (len = 1; c = GetNextChar(true); len++) {
+    for (len = 1; (c = GetNextChar(true)); len++) {
       if (c == '\'') {
         return VPTT_literal;  // the returned token includes both the opening and closing quote
       }
@@ -349,7 +349,7 @@ int VensimLex::NextToken()  // also sets token type
   {
     int len;
     MarkPosition();
-    for (len = 1; c = GetNextChar(true); len++) {
+    for (len = 1; (c = GetNextChar(true)); len++) {
       if (c == '\"') {
         return VPTT_symbol;    // the returned token includes both the opening and closing quote
       } else if (c == '\\') {  // skip what follows in case it is a " or \ --
@@ -372,7 +372,7 @@ int VensimLex::NextToken()  // also sets token type
     break;
   default:                                                                // a variable name or an unrecognizable token
     if (isalpha(c) || c > 127 || ((iInUnitsComment == 1) && c == '$')) {  // a variable
-      while (c = GetNextChar(true)) {
+      while ((c = GetNextChar(true))) {
         if (!isalnum(c) && c != ' ' && c != '_' && c != '$' && c != '\t' && c != '\'' && c < 128) {
           PushBack(c, true);
           break;
@@ -433,7 +433,7 @@ bool VensimLex::KeywordMatch(const char *target) {
       if (c != ' ' && c != '_' && c != '\t')
         break;
       buffer.push_back(c);
-      while (c = GetNextChar(true)) {
+      while ((c = GetNextChar(true))) {
         if (c != ' ' && c != '_' && c != '\t')
           break;
         buffer.push_back(c);
@@ -510,7 +510,7 @@ bool VensimLex::TestTokenMatch(const char *tok, bool storeonsuccess) {
 std::string VensimLex::GetComment(const char *tok) {
   char c;
   std::string rval;
-  while (c = GetNextChar(false)) {
+  while ((c = GetNextChar(false))) {
     if (c == *tok && TestTokenMatch(tok + 1, true)) {
       PushBack(c, false);  // next call to findToken will find this
       // strip trailing white space
@@ -533,7 +533,7 @@ std::string VensimLex::GetComment(const char *tok) {
 
 bool VensimLex::FindToken(const char *tok) {
   char c;
-  while (c = GetNextChar(false)) {
+  while ((c = GetNextChar(false))) {
     if (c == *tok && TestTokenMatch(tok + 1, true))
       return true;
     else if (c == '\\' && TestTokenMatch("\\\\---///", false)) {

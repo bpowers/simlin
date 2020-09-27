@@ -36,7 +36,7 @@ runestrstr(Rune *s1, Rune *s2)
 			c = *pb;
 			if(c == 0)
 				return p;
-			if(c != *++pa)
+			if((unsigned int)c != *++pa)
 				break;
 		}
 	}

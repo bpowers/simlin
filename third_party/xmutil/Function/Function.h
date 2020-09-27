@@ -31,7 +31,7 @@ public:
   virtual double Eval(Expression *ex, ExpressionList *arg, ContextInfo *info) {
     return 0;
   }  // make this pure virtual if finishing engine is required
-  virtual bool CheckComputed(ContextInfo *info, ExpressionList *arg);
+  virtual bool CheckComputedList(ContextInfo *info, ExpressionList *arg);
   virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
   virtual std::string ComputableName(void) {
     return "";
@@ -63,7 +63,7 @@ public:
   bool IsMemoryless(void) {
     return false;
   }
-  bool CheckComputed(ContextInfo *info, ExpressionList *arg);
+  bool CheckComputedList(ContextInfo *info, ExpressionList *arg);
   void OutputComputable(ContextInfo *info, ExpressionList *arg);
 
 private:
@@ -144,10 +144,10 @@ private:
     }                                                                                   \
     ~name(void) {                                                                       \
     }                                                                                   \
-    std::string ComputableName(void) {                                                  \
+    std::string ComputableName(void) override {                                         \
       return cnamea;                                                                    \
     }                                                                                   \
-    std::string ComputableNameInit(void) {                                              \
+    std::string ComputableNameInit(void) override {                                     \
       return cnamei;                                                                    \
     }                                                                                   \
                                                                                         \

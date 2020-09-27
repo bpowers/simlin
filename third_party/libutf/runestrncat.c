@@ -23,7 +23,7 @@ runestrncat(Rune *s1, Rune *s2, long n)
 
 	os1 = s1;
 	s1 = runestrchr(s1, 0);
-	while(*s1++ = *s2++)
+	while((*s1++ = *s2++))
 		if(--n < 0) {
 			s1[-1] = 0;
 			break;

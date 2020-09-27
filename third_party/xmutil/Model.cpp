@@ -40,7 +40,7 @@ void Model::ClearCompEquations(void) {
   vInitialTimeComps.clear();
 
   SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
-  for (const SymbolNameSpace::iterator it : *ht) {
+  for (const SymbolNameSpace::iterator &it : *ht) {
     SNSitToSymbol(it)->SetupState(NULL);
     SNSitToSymbol(it)->CheckPlaceholderVars(NULL);
   }
@@ -72,9 +72,9 @@ bool Model::OrganizeSubscripts(void) {
   SubInfoWCount siwc;
   try {
     SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
-    for (const SymbolNameSpace::iterator it : *ht) {
+    for (const SymbolNameSpace::iterator &it : *ht) {
       siwc.v = static_cast<Variable *> SNSitToSymbol(it);
-      if (siwc.count = siwc.v->SubscriptCount(subelm)) {
+      if ((siwc.count = siwc.v->SubscriptCountVars(subelm))) {
         sublist.push_back(siwc);
       }
     }
@@ -89,7 +89,7 @@ bool Model::OrganizeSubscripts(void) {
 bool Model::ValidatePlaceholderVars(void) {
   try {
     SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
-    for (const SymbolNameSpace::iterator it : *ht) {
+    for (const SymbolNameSpace::iterator &it : *ht) {
       // printf("Checking placeholders out %s\n",SNSitToSymbol(it)->GetName().c_str()) ;
       SNSitToSymbol(it)->CheckPlaceholderVars(this);
     }
@@ -126,7 +126,7 @@ bool Model::SetupVariableStates(int pass /* 0 just assign, 1 determine sizes, 2 
       info.pBaseLevel = info.pCurLevel = NULL;
       info.iComputeType = 0;
     }
-    for (const SymbolNameSpace::iterator it : *ht) {
+    for (const SymbolNameSpace::iterator &it : *ht) {
       SNSitToSymbol(it)->SetupState(&info);
     }
     // placeholder vars also need state set up
@@ -140,7 +140,7 @@ bool Model::SetupVariableStates(int pass /* 0 just assign, 1 determine sizes, 2 
     }
   } catch (...) {
     // set all states to null - they will be deleted
-    for (const SymbolNameSpace::iterator it : *ht) {
+    for (const SymbolNameSpace::iterator &it : *ht) {
       SNSitToSymbol(it)->SetupState(NULL);  // clear if setup
     }
     mSymbolNameSpace.DeleteAllUnconfirmedAllocations();
@@ -181,7 +181,7 @@ bool Model::OrderEquations(ContextInfo *info, bool tonly) {
       if (!v || !v->CheckComputed(info, false))
         haserr = true;
     } else {
-      for (const SymbolNameSpace::iterator it : *ht) {
+      for (const SymbolNameSpace::iterator &it : *ht) {
         // printf("Looping to: %s\n",SNSitToSymbol(it)->GetName().c_str()) ;
         if (!SNSitToSymbol(it)->CheckComputed(info, true))
           haserr = true;  // continue looking for simultaneous even when false
@@ -228,116 +228,32 @@ bool Model::AnalyzeEquations(void) {
   //
 
   // before the passes initialize time, then dt
-  fprintf(stderr, "\nInitial time \n");
+  // fprintf(stderr, "\nInitial time \n");
   info.iComputeType = CF_initial;
   info.pEquations = &vInitialTimeComps;
   if (!OrderEquations(&info, true))
     return false;
 
-  fprintf(stderr, "\nInitial equations \n");
+  // fprintf(stderr, "\nInitial equations \n");
   info.iComputeType = CF_initial;
   info.pEquations = &vInitialComps;
   if (!OrderEquations(&info, false))
     return false;
-  fprintf(stderr, "\n\nActive equations \n");
+  // fprintf(stderr, "\n\nActive equations \n");
   info.iComputeType = CF_active;
   info.pEquations = &vActiveComps;
   if (!OrderEquations(&info, false))
     return false;
-  fprintf(stderr, "\n\nUnchanging equations \n");
+  // fprintf(stderr, "\n\nUnchanging equations \n");
   info.iComputeType = CF_unchanging;
   info.pEquations = &vUnchangingComps;
   if (!OrderEquations(&info, false))
     return false;
-  fprintf(stderr, "\n\nRate equations \n");
+  // fprintf(stderr, "\n\nRate equations \n");
   info.iComputeType = CF_rate;
   info.pEquations = &vRateComps;
   if (!OrderEquations(&info, false))
     return false;
-  return true;
-}
-
-bool Model::Simulate(void) {
-  ContextInfo info;
-  try {
-    double t, s, e, dt;
-    int i, n;
-    Variable *time = static_cast<Variable *>(mSymbolNameSpace.Find("Time"));
-    Variable *start = static_cast<Variable *>(mSymbolNameSpace.Find("INITIAL TIME"));
-    Variable *end = static_cast<Variable *>(mSymbolNameSpace.Find("FINAL TIME"));
-    Variable *step = static_cast<Variable *>(mSymbolNameSpace.Find("TIME STEP"));
-    n = iNLevel;
-
-    info.iComputeType = CF_initial;
-    for (Equation *e : vInitialTimeComps) {
-      e->Execute(&info);
-      // printf("%s = %g\n",e->GetVariable()->GetName().c_str(),e->GetVariable()->Eval(&info)) ;
-    }
-    if (start)
-      s = start->Eval(&info);
-    else
-      s = 0;
-    if (step)
-      dt = step->Eval(&info);
-    else
-      dt = 1;
-    info.dTime = s;
-    info.dDT = dt;
-    for (Equation *e : vInitialComps) {
-      e->Execute(&info);
-      // printf("%s = %g\n",e->GetVariable()->GetName().c_str(),e->GetVariable()->Eval(&info)) ;
-    }
-    // now the active equations
-    info.iComputeType = CF_active;
-    // first the unchanging variables
-    // printf("\n Unchanging\n") ;
-    for (Equation *e : vUnchangingComps) {
-      e->Execute(&info);
-      // printf("%s = %g\n",e->GetVariable()->GetName().c_str(),e->GetVariable()->Eval(&info)) ;
-    }
-
-    // now over time
-    if (end)
-      e = end->Eval(&info);
-    else
-      e = 100;
-    fprintf(stderr, "Time");
-    for (Equation *e : vActiveComps) {
-      fprintf(stderr, "\t%s", e->GetVariable()->GetName().c_str());
-    };
-    for (Equation *e : vRateComps) {
-      fprintf(stderr, "\t%s", e->GetVariable()->GetName().c_str());
-    }
-    fprintf(stderr, "\n");
-
-    for (t = s; t <= e; t += dt) {
-      info.dTime = t;
-      // printf("\n\nAt time %g\n",t) ;
-      if (time)
-        time->SetActiveValue(0, t);
-      fprintf(stderr, "%g", t);
-      for (Equation *e : vActiveComps) {
-        e->Execute(&info);
-        fprintf(stderr, "\t%g", e->GetVariable()->Eval(&info));
-      }
-      for (Equation *e : vRateComps) {
-        e->Execute(&info);
-        fprintf(stderr, "\t%g", e->GetVariable()->Eval(&info));
-      }
-      fprintf(stderr, "\n");
-      if (step)
-        info.dDT = dt = step->Eval(&info);
-      // update states
-      for (i = 0; i < n; i++) {
-        dLevel[i] += dt * this->dRate[i];
-      }
-      if (end)
-        e = end->Eval(&info);
-    }
-  } catch (...) {
-    std::cerr << "Error of some sort" << std::endl;
-    return false;
-  }
   return true;
 }
 
@@ -349,26 +265,26 @@ bool Model::OutputComputable(bool wantshort) {
     else
       GenerateCanonicalNames();
     info.iComputeType = CF_initial;
-    fprintf(stderr, "------------- initial time -----------------\n");
+    // fprintf(stderr, "------------- initial time -----------------\n");
     for (Equation *e : vInitialTimeComps) {
       e->OutputComputable(&info);
     }
-    fprintf(stderr, "------------- initialization -----------------\n");
+    // fprintf(stderr, "------------- initialization -----------------\n");
     for (Equation *e : vInitialComps) {
       e->OutputComputable(&info);
     }
     info.iComputeType = CF_active;
-    fprintf(stderr, "------------- Unchanging -----------------\n");
+    // fprintf(stderr, "------------- Unchanging -----------------\n");
     info.iComputeType = CF_active;
     for (Equation *e : vUnchangingComps) {
       e->OutputComputable(&info);
     }
-    fprintf(stderr, "------------- active -----------------\n");
+    // fprintf(stderr, "------------- active -----------------\n");
     for (Equation *e : vActiveComps) {
       e->OutputComputable(&info);
     }
     info.iComputeType = CF_rate;
-    fprintf(stderr, "------------- rates -----------------\n");
+    // fprintf(stderr, "------------- rates -----------------\n");
     for (Equation *e : vRateComps) {
       e->OutputComputable(&info);
     }
@@ -389,7 +305,7 @@ bool Model::MarkVariableTypes(SymbolNameSpace *ns) {
       ns = &mSymbolNameSpace;
     }
     std::vector<Variable *> vars;
-    for (const SymbolNameSpace::iterator it : *ht) {
+    for (const SymbolNameSpace::iterator &it : *ht) {
       Symbol *sym = SNSitToSymbol(it);
 
       if (sym->isType() == Symtype_Variable)
@@ -410,7 +326,7 @@ bool Model::MarkVariableTypes(SymbolNameSpace *ns) {
   ContextInfo info;
 
   SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
-  for (const SymbolNameSpace::iterator it : *ht) {
+  for (const SymbolNameSpace::iterator &it : *ht) {
     Symbol *sym = SNSitToSymbol(it);
 
     if (sym->isType() == Symtype_Variable) {
@@ -431,7 +347,7 @@ bool Model::MarkVariableTypes(SymbolNameSpace *ns) {
 void Model::AttachStragglers() {
   SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
   std::vector<Variable *> vars;
-  for (const SymbolNameSpace::iterator it : *ht) {
+  for (const SymbolNameSpace::iterator &it : *ht) {
     Symbol *sym = SNSitToSymbol(it);
 
     if (sym->isType() == Symtype_Variable)
@@ -517,7 +433,7 @@ void Model::GenerateCanonicalNames(void) {
 void Model::GenerateShortNames(void) {
   size_t i = 0;
   SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
-  for (const SymbolNameSpace::iterator it : *ht) {
+  for (const SymbolNameSpace::iterator &it : *ht) {
     Variable *v = static_cast<Variable *>(SNSitToSymbol(it));
     if (v->isType() == Symtype_Variable) {
       std::string s = "v" + std::to_string(i);
