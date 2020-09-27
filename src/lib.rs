@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-extern crate libc;
-
 use std::ffi::CStr;
 use std::str;
 
@@ -15,15 +13,23 @@ extern "C" {
     ) -> *const i8;
 }
 
-pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> String {
+pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> Option<String> {
     let str_ptr = mdl_source.as_ptr();
     let str_len = mdl_source.len() as u32;
 
     unsafe {
         let result_buf = _convert_mdl_to_xmile(str_ptr, str_len, is_compact);
+        if result_buf.is_null() {
+            return None
+        }
+        // TODO: I think we might be leaking this
         let c_str: &CStr = CStr::from_ptr(result_buf);
         let str_slice: &str = c_str.to_str().unwrap();
-        str_slice.to_owned()
+        if str_slice.is_empty() {
+            None
+        } else {
+            Some(str_slice.to_owned())
+        }
     }
 }
 
@@ -142,8 +148,13 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,1
 26:10
 ";
 
-        let actual = crate::convert_vensim_mdl(mdl_source, false);
+        let actual = crate::convert_vensim_mdl(mdl_source, false).unwrap();
         assert!(actual.starts_with("<xmile "));
         assert!(actual.ends_with("</xmile>\n"));
+    }
+
+    #[test]
+    fn failure_is_none() {
+        assert!(crate::convert_vensim_mdl(":ohno:", true).is_none())
     }
 }
