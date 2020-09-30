@@ -16,6 +16,9 @@ use std::borrow::BorrowMut;
 
 const TIME_OFF: usize = 0;
 const DT_OFF: usize = 1;
+const INITIAL_TIME_OFF: usize = 2;
+const FINAL_TIME_OFF: usize = 3;
+const IMPLICIT_VAR_COUNT: usize = 4;
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum Method {
@@ -598,7 +601,9 @@ fn calc_offsets(
     if is_root {
         offsets.insert("time".to_string(), (0, 1));
         offsets.insert("dt".to_string(), (1, 1));
-        i += 2;
+        offsets.insert("initial_time".to_string(), (2, 1));
+        offsets.insert("final_time".to_string(), (3, 1));
+        i += IMPLICIT_VAR_COUNT;
     }
 
     let model = Rc::clone(&project.models[model_name]);
@@ -635,7 +640,9 @@ fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
     if is_root {
         offsets.insert("time".to_string(), (0, 1));
         offsets.insert("dt".to_string(), (1, 1));
-        i += 2;
+        offsets.insert("initial_time".to_string(), (2, 1));
+        offsets.insert("final_time".to_string(), (3, 1));
+        i += IMPLICIT_VAR_COUNT;
     }
 
     let model = Rc::clone(&project.models[model_name]);
@@ -689,7 +696,7 @@ impl Module {
         }
 
         let model_name: &str = &model.name;
-        let n_slots_start_off = if is_root { 2 } else { 0 };
+        let n_slots_start_off = if is_root { IMPLICIT_VAR_COUNT } else { 0 };
         let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
@@ -1284,6 +1291,8 @@ impl Simulation {
             let mut next = slabs.next().unwrap();
             curr[TIME_OFF] = self.specs.start;
             curr[DT_OFF] = dt;
+            curr[INITIAL_TIME_OFF] = self.specs.start;
+            curr[FINAL_TIME_OFF] = self.specs.stop;
             self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
             let mut step = 0;
             loop {
@@ -1291,6 +1300,8 @@ impl Simulation {
                 self.calc(StepPart::Stocks, module, 0, module_inputs, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 next[DT_OFF] = dt;
+                curr[INITIAL_TIME_OFF] = self.specs.start;
+                curr[FINAL_TIME_OFF] = self.specs.stop;
                 step += 1;
                 if step != save_every {
                     let curr = curr.borrow_mut();
