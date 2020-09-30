@@ -82,9 +82,9 @@
     "saslprep": "^1.0.3",
     "serve-favicon": "^2.5.0",
     "seshcookie": "^1.0.1",
-    "slate": "^0.58.1",
-    "slate-history": "^0.58.1",
-    "slate-react": "^0.58.1",
+    "slate": "^0.59.0",
+    "slate-history": "^0.59.0",
+    "slate-react": "^0.59.0",
     "uuid": "^8.0.0",
     "winston": "^3.2.1",
     "xmldom": "^0.3.0"
