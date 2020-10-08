@@ -3,7 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 
 use lalrpop_util::ParseError;
 
@@ -31,7 +30,7 @@ pub struct ModuleInput {
 pub enum Variable {
     Stock {
         ident: Ident,
-        ast: Option<Rc<ast::Expr>>,
+        ast: Option<Box<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
         inflows: Vec<Ident>,
@@ -42,7 +41,7 @@ pub enum Variable {
     },
     Var {
         ident: Ident,
-        ast: Option<Rc<ast::Expr>>,
+        ast: Option<Box<ast::Expr>>,
         eqn: Option<String>,
         units: Option<String>,
         table: Option<Table>,
@@ -171,7 +170,7 @@ fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>> {
     }))
 }
 
-fn parse_eqn(eqn: &Option<String>) -> (Option<Rc<ast::Expr>>, Vec<EquationError>) {
+fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<EquationError>) {
     let mut errs = Vec::new();
 
     if eqn.is_none() {
@@ -454,46 +453,46 @@ fn test_parse() {
     use crate::ast::BinaryOp::*;
     use crate::ast::Expr::*;
 
-    let if1 = Rc::new(If(
-        Rc::new(Const("1".to_string(), 1.0)),
-        Rc::new(Const("2".to_string(), 2.0)),
-        Rc::new(Const("3".to_string(), 3.0)),
+    let if1 = Box::new(If(
+        Box::new(Const("1".to_string(), 1.0)),
+        Box::new(Const("2".to_string(), 2.0)),
+        Box::new(Const("3".to_string(), 3.0)),
     ));
 
-    let if2 = Rc::new(If(
-        Rc::new(Op2(
+    let if2 = Box::new(If(
+        Box::new(Op2(
             Eq,
-            Rc::new(Var("blerg".to_string())),
-            Rc::new(Var("foo".to_string())),
+            Box::new(Var("blerg".to_string())),
+            Box::new(Var("foo".to_string())),
         )),
-        Rc::new(Const("2".to_string(), 2.0)),
-        Rc::new(Const("3".to_string(), 3.0)),
+        Box::new(Const("2".to_string(), 2.0)),
+        Box::new(Const("3".to_string(), 3.0)),
     ));
 
-    let if3 = Rc::new(If(
-        Rc::new(Op2(
+    let if3 = Box::new(If(
+        Box::new(Op2(
             Eq,
-            Rc::new(Var("quotient".to_string())),
-            Rc::new(Var("quotient_target".to_string())),
+            Box::new(Var("quotient".to_string())),
+            Box::new(Var("quotient_target".to_string())),
         )),
-        Rc::new(Const("1".to_string(), 1.0)),
-        Rc::new(Const("0".to_string(), 0.0)),
+        Box::new(Const("1".to_string(), 1.0)),
+        Box::new(Const("0".to_string(), 0.0)),
     ));
 
-    let if4 = Rc::new(If(
-        Rc::new(Op2(
+    let if4 = Box::new(If(
+        Box::new(Op2(
             And,
-            Rc::new(Var("true_input".to_string())),
-            Rc::new(Var("false_input".to_string())),
+            Box::new(Var("true_input".to_string())),
+            Box::new(Var("false_input".to_string())),
         )),
-        Rc::new(Const("1".to_string(), 1.0)),
-        Rc::new(Const("0".to_string(), 0.0)),
+        Box::new(Const("1".to_string(), 1.0)),
+        Box::new(Const("0".to_string(), 0.0)),
     ));
 
-    let quoting_eq = Rc::new(Op2(
+    let quoting_eq = Box::new(Op2(
         Eq,
-        Rc::new(Var("oh_dear".to_string())),
-        Rc::new(Var("oh_dear".to_string())),
+        Box::new(Var("oh_dear".to_string())),
+        Box::new(Var("oh_dear".to_string())),
     ));
 
     let cases = [
@@ -560,7 +559,7 @@ fn test_canonicalize_stock_inflows() {
 
     let expected = Variable::Stock {
         ident: "heat_loss_to_room".to_string(),
-        ast: Some(Rc::new(Expr::Var("total_population".to_string()))),
+        ast: Some(Box::new(Expr::Var("total_population".to_string()))),
         eqn: Some("total_population".to_string()),
         units: Some("people".to_string()),
         inflows: vec!["solar_radiation".to_string()],
@@ -598,7 +597,7 @@ fn test_tables() {
 
     let expected = Variable::Var {
         ident: "lookup_function_table".to_string(),
-        ast: Some(Rc::new(Expr::Const("0".to_string(), 0.0))),
+        ast: Some(Box::new(Expr::Const("0".to_string(), 0.0))),
         eqn: Some("0".to_string()),
         units: None,
         table: Some(Table {

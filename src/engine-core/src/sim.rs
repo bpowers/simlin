@@ -360,14 +360,14 @@ fn test_lower() {
     let input = {
         use ast::BinaryOp::*;
         use ast::Expr::*;
-        Rc::new(If(
-            Rc::new(Op2(
+        Box::new(If(
+            Box::new(Op2(
                 And,
-                Rc::new(Var("true_input".to_string())),
-                Rc::new(Var("false_input".to_string())),
+                Box::new(Var("true_input".to_string())),
+                Box::new(Var("false_input".to_string())),
             )),
-            Rc::new(Const("1".to_string(), 1.0)),
-            Rc::new(Const("0".to_string(), 0.0)),
+            Box::new(Const("1".to_string(), 1.0)),
+            Box::new(Const("0".to_string(), 0.0)),
         ))
     };
 
@@ -401,14 +401,14 @@ fn test_lower() {
     let input = {
         use ast::BinaryOp::*;
         use ast::Expr::*;
-        Rc::new(If(
-            Rc::new(Op2(
+        Box::new(If(
+            Box::new(Op2(
                 Or,
-                Rc::new(Var("true_input".to_string())),
-                Rc::new(Var("false_input".to_string())),
+                Box::new(Var("true_input".to_string())),
+                Box::new(Var("false_input".to_string())),
             )),
-            Rc::new(Const("1".to_string(), 1.0)),
-            Rc::new(Const("0".to_string(), 0.0)),
+            Box::new(Const("1".to_string(), 1.0)),
+            Box::new(Const("0".to_string(), 0.0)),
         ))
     };
 
