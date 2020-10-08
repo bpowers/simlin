@@ -181,7 +181,7 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<EquationError
     let eqn = eqn_string.as_str();
     let lexer = crate::token::Lexer::new(eqn);
     match crate::equation::EquationParser::new().parse(eqn, lexer) {
-        Ok(ast) => (Some(ast), errs),
+        Ok(ast) => (Some(Box::new(ast)), errs),
         Err(err) => {
             use crate::common::ErrorCode::*;
             let err = match err {

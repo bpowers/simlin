@@ -7,72 +7,72 @@ use crate::token::Token;
 
 grammar<'input>(input: &'input str);
 
-pub Equation: Box<Expr> = {
+pub Equation: Expr = {
     Expr,
 };
 
-Expr: Box<Expr> = {
-    "if" <c:Expr> "then" <t:Expr> "else" <f:Expr> => Box::new(If(c, t, f)),
+Expr: Expr = {
+    "if" <c:Expr> "then" <t:Expr> "else" <f:Expr> => If(Box::new(c), Box::new(t), Box::new(f)),
     LCmp,
 };
 
-LCmp: Box<Expr> = {
-    <l:LCmp> "&&" <r:ACmp> => Box::new(Op2(And, l, r)),
-    <l:LCmp> "||" <r:ACmp> => Box::new(Op2(Or, l, r)),
+LCmp: Expr = {
+    <l:LCmp> "&&" <r:ACmp> => Op2(And, Box::new(l), Box::new(r)),
+    <l:LCmp> "||" <r:ACmp> => Op2(Or, Box::new(l), Box::new(r)),
     ACmp,
 };
 
-ACmp: Box<Expr> = {
-    <l:ACmp> "=" <r:Eq>  => Box::new(Op2(Eq, l, r)),
-    <l:ACmp> "<>" <r:Eq> => Box::new(Op2(Neq, l, r)),
-    <l:ACmp> "!=" <r:Eq> => Box::new(Op2(Neq, l, r)),
+ACmp: Expr = {
+    <l:ACmp> "=" <r:Eq>  => Op2(Eq, Box::new(l), Box::new(r)),
+    <l:ACmp> "<>" <r:Eq> => Op2(Neq, Box::new(l), Box::new(r)),
+    <l:ACmp> "!=" <r:Eq> => Op2(Neq, Box::new(l), Box::new(r)),
     Eq,
 };
 
-Eq: Box<Expr> = {
-    <l:Eq> "<" <r:Add>  => Box::new(Op2(Lt, l, r)),
-    <l:Eq> "<=" <r:Add> => Box::new(Op2(Lte, l, r)),
-    <l:Eq> ">" <r:Add>  => Box::new(Op2(Gt, l, r)),
-    <l:Eq> ">=" <r:Add> => Box::new(Op2(Gte, l, r)),
+Eq: Expr = {
+    <l:Eq> "<" <r:Add>  => Op2(Lt, Box::new(l), Box::new(r)),
+    <l:Eq> "<=" <r:Add> => Op2(Lte, Box::new(l), Box::new(r)),
+    <l:Eq> ">" <r:Add>  => Op2(Gt, Box::new(l), Box::new(r)),
+    <l:Eq> ">=" <r:Add> => Op2(Gte, Box::new(l), Box::new(r)),
     Add,
 };
 
-Add: Box<Expr> = {
-    <l:Add> "-" <r:Mul> => Box::new(Op2(Sub, l, r)),
-    <l:Add> "+" <r:Mul> => Box::new(Op2(Add, l, r)),
+Add: Expr = {
+    <l:Add> "-" <r:Mul> => Op2(Sub, Box::new(l), Box::new(r)),
+    <l:Add> "+" <r:Mul> => Op2(Add, Box::new(l), Box::new(r)),
     Mul,
 };
 
-Mul: Box<Expr> = {
-    <l:Mul> "*" <r:Unary> => Box::new(Op2(Mul, l, r)),
-    <l:Mul> "/" <r:Unary> => Box::new(Op2(Div, l, r)),
+Mul: Expr = {
+    <l:Mul> "*" <r:Unary> => Op2(Mul, Box::new(l), Box::new(r)),
+    <l:Mul> "/" <r:Unary> => Op2(Div, Box::new(l), Box::new(r)),
     Unary,
 };
 
-Unary: Box<Expr> = {
-    "+" <e:Exp> => Box::new(Op1(Positive, e)),
-    "-" <e:Exp> => Box::new(Op1(Negative, e)),
-    "!" <e:Exp> => Box::new(Op1(Not, e)),
+Unary: Expr = {
+    "+" <e:Exp> => Op1(Positive, Box::new(e)),
+    "-" <e:Exp> => Op1(Negative, Box::new(e)),
+    "!" <e:Exp> => Op1(Not, Box::new(e)),
     Exp,
 };
 
-Exp: Box<Expr> = {
-    <l:Exp> "^" <r:App> => Box::new(Op2(Exp, l, r)),
+Exp: Expr = {
+    <l:Exp> "^" <r:App> => Op2(Exp, Box::new(l), Box::new(r)),
     App,
 };
 
-App: Box<Expr> = {
-    <id:Ident> "(" <args:Exprs> ")" => Box::new(App(id, args)),
+App: Expr = {
+    <id:Ident> "(" <args:Exprs> ")" => App(id, args),
     Atom,
 };
 
-Atom: Box<Expr> = {
-    <id:Ident> => Box::new(Var(id)),
+Atom: Expr = {
+    <id:Ident> => Var(id),
     "(" <Expr> ")",
     "Num" => {
         use std::str::FromStr;
         let s = <>;
-        Box::new(Const(s.to_string(), f64::from_str(s).unwrap()))
+        Const(s.to_string(), f64::from_str(s).unwrap())
     },
 };
 

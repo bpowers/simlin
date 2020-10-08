@@ -230,7 +230,7 @@ impl<'a> Context<'a> {
 
                 let builtin = match id.as_str() {
                     "lookup" => {
-                        if let ast::Expr::Var(ident) = (&orig_args[0]).as_ref() {
+                        if let ast::Expr::Var(ident) = &orig_args[0] {
                             BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()))
                         } else {
                             return sim_err!(BadTable, id.clone());

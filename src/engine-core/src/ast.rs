@@ -11,8 +11,7 @@ use crate::common::Ident;
 pub enum Expr<AppId = Ident> {
     Const(String, f64),
     Var(Ident),
-    #[allow(clippy::vec_box)]
-    App(AppId, Vec<Box<Expr>>),
+    App(AppId, Vec<Expr>),
     Op1(UnaryOp, Box<Expr>),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
