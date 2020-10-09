@@ -609,7 +609,7 @@ fn calc_offsets(
     let model = Rc::clone(&project.models[model_name]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
-        var_names.sort();
+        var_names.sort_unstable();
         var_names
     };
 
@@ -648,7 +648,7 @@ fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
     let model = Rc::clone(&project.models[model_name]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
-        var_names.sort();
+        var_names.sort_unstable();
         var_names
     };
 
@@ -656,7 +656,7 @@ fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
         let size = if let Variable::Module { .. } = &model.variables[*ident] {
             let sub_offsets = calc_recursive_offsets(project, *ident);
             let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
-            sub_var_names.sort();
+            sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
                 let (sub_off, sub_size) = sub_offsets[sub_name];
                 offsets.insert(format!("{}.{}", ident, sub_name), (i + sub_off, sub_size));
@@ -700,7 +700,7 @@ impl Module {
         let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
-            var_names.sort();
+            var_names.sort_unstable();
             var_names
         };
 
@@ -737,10 +737,7 @@ impl Module {
             // for (i, name) in runlist.iter().enumerate() {
             //     eprintln!("  {}: {}", i, name);
             // }
-            let is_initial = match part {
-                StepPart::Initials => true,
-                _ => false,
-            };
+            let is_initial = matches!(part, StepPart::Initials);
             let runlist: Result<Vec<Var>> = runlist
                 .into_iter()
                 .map(|ident| {
@@ -1193,7 +1190,7 @@ impl Simulation {
 
         let module_names: Vec<&str> = {
             let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();
-            module_names.sort();
+            module_names.sort_unstable();
 
             let mut sorted_names = vec![main_model_name];
             sorted_names.extend(module_names.into_iter().filter(|n| *n != main_model_name));

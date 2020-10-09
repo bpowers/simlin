@@ -79,17 +79,11 @@ impl Variable {
     }
 
     pub fn is_stock(&self) -> bool {
-        match self {
-            Variable::Stock { .. } => true,
-            _ => false,
-        }
+        matches!(self, Variable::Stock { .. })
     }
 
     pub fn is_module(&self) -> bool {
-        match self {
-            Variable::Module { .. } => true,
-            _ => false,
-        }
+        matches!(self, Variable::Module { .. })
     }
 
     pub fn direct_deps(&self) -> &HashSet<Ident> {
@@ -330,13 +324,7 @@ pub fn parse_var(
             let inputs: Vec<Result<ModuleInput>> = v
                 .refs
                 .iter()
-                .filter(|r| {
-                    if let xmile::Reference::Connect(_) = r {
-                        true
-                    } else {
-                        false
-                    }
-                })
+                .filter(|r| matches!(r, xmile::Reference::Connect(_)))
                 .map(|r| {
                     if let xmile::Reference::Connect(r) = r {
                         (r.src.as_str(), r.dst.as_str())
