@@ -8,6 +8,7 @@ use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
 use crate::common::{canonicalize, EquationError, Error, Ident, Result};
+use crate::model::resolve_relative;
 use crate::xmile;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -350,8 +351,7 @@ pub fn parse_var(
                         None => src,
                     };
 
-                    if let xmile::Var::Stock(_) =
-                        crate::model::resolve_relative(models, model_name, src).unwrap()
+                    if let xmile::Var::Stock(_) = resolve_relative(models, model_name, src).unwrap()
                     {
                         // if our input is a stock, we don't have any flow dependencies to
                         // order before us this dt
