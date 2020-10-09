@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::ast::Expr;
-use crate::common::Ident;
+use crate::common::{Ident, Result};
 use crate::xmile;
 use std::collections::HashMap;
 
@@ -22,24 +22,29 @@ impl<'a> BuiltinVisitor<'a> {
     #[allow(dead_code)]
     pub fn new(
         variable_name: &'a str,
-        _ast: &Expr,
+        ast: Expr,
         models: &'a HashMap<String, HashMap<Ident, &'a xmile::Var>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let mut builtin_visitor = Self {
             variable_name,
             models,
             modules: Default::default(),
             vars: Default::default(),
             n: 0,
-        }
+        };
+
+        let _ast = builtin_visitor.walk(ast)?;
+
+        Ok(builtin_visitor)
+    }
+
+    fn walk(&mut self, expr: Expr) -> Result<Expr> {
+        Ok(expr)
     }
 }
 
 #[test]
 fn test_builtin_visitor() {
-    let _visitor = BuiltinVisitor::new(
-        "test",
-        &Expr::Const("0.0".to_string(), 0.0),
-        &HashMap::new(),
-    );
+    let _visitor =
+        BuiltinVisitor::new("test", Expr::Const("0.0".to_string(), 0.0), &HashMap::new()).unwrap();
 }
