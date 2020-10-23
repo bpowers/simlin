@@ -9,6 +9,7 @@ use crate::common::{EquationError, Ident};
 use crate::xmile;
 
 pub struct BuiltinVisitor<'a> {
+    #[allow(dead_code)]
     variable_name: &'a str,
     models: &'a HashMap<String, HashMap<Ident, &'a xmile::Var>>,
     vars: HashMap<Ident, xmile::Var>,
