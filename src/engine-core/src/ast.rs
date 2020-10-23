@@ -1,5 +1,5 @@
 // Copyright 2020 The Model Authors. All rights reserved.
-// Use of this souBoxe code is governed by the Apache License,
+// Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::common::Ident;
@@ -15,6 +15,12 @@ pub enum Expr<AppId = Ident> {
     Op1(UnaryOp, Box<Expr>),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+}
+
+impl Default for Expr {
+    fn default() -> Self {
+        Expr::Const("0.0".to_string(), 0.0)
+    }
 }
 
 pub trait Visitor<T> {

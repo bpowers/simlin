@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
+use crate::builtin::instantiate_implicit_modules;
 use crate::common::{canonicalize, EquationError, Error, Ident, Result};
 use crate::model::resolve_relative;
 use crate::xmile;
@@ -31,7 +32,7 @@ pub struct ModuleInput {
 pub enum Variable {
     Stock {
         ident: Ident,
-        ast: Option<Box<ast::Expr>>,
+        ast: Option<ast::Expr>,
         eqn: Option<String>,
         units: Option<String>,
         inflows: Vec<Ident>,
@@ -42,7 +43,7 @@ pub enum Variable {
     },
     Var {
         ident: Ident,
-        ast: Option<Box<ast::Expr>>,
+        ast: Option<ast::Expr>,
         eqn: Option<String>,
         units: Option<String>,
         table: Option<Table>,
@@ -165,7 +166,7 @@ fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>> {
     }))
 }
 
-fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<EquationError>) {
+fn parse_eqn(eqn: &Option<String>) -> (Option<ast::Expr>, Vec<EquationError>) {
     let mut errs = Vec::new();
 
     if eqn.is_none() {
@@ -176,7 +177,7 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<Box<ast::Expr>>, Vec<EquationError
     let eqn = eqn_string.as_str();
     let lexer = crate::token::Lexer::new(eqn);
     match crate::equation::EquationParser::new().parse(eqn, lexer) {
-        Ok(ast) => (Some(Box::new(ast)), errs),
+        Ok(ast) => (Some(ast), errs),
         Err(err) => {
             use crate::common::ErrorCode::*;
             let err = match err {
@@ -224,13 +225,28 @@ pub fn parse_var(
     models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
     model_name: &str,
     v: &xmile::Var,
+    implicit_vars: &mut Vec<xmile::Var>,
 ) -> Variable {
     match v {
         xmile::Var::Stock(v) => {
-            let (ast, errors) = parse_eqn(&v.eqn);
+            let ident = canonicalize(v.name.as_ref());
+            let (ast, mut errors) = parse_eqn(&v.eqn);
             let direct_deps = match &ast {
                 Some(ast) => identifier_set(ast),
                 None => HashSet::new(),
+            };
+            let ast = match ast {
+                Some(ast) => match instantiate_implicit_modules(&ident, ast, models) {
+                    Ok((ast, mut new_vars)) => {
+                        implicit_vars.append(&mut new_vars);
+                        Some(ast)
+                    }
+                    Err(err) => {
+                        errors.push(err);
+                        None
+                    }
+                },
+                None => None,
             };
             let inflows = match &v.inflows {
                 None => Vec::new(),
@@ -240,7 +256,6 @@ pub fn parse_var(
                 None => Vec::new(),
                 Some(outflows) => outflows.iter().map(|id| canonicalize(id)).collect(),
             };
-            let ident = canonicalize(v.name.as_ref());
             let errors = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
@@ -500,7 +515,7 @@ fn test_parse() {
         let (ast, err) = parse_eqn(&Some(eqn.to_string()));
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
-        assert_eq!(case.1, ast.unwrap());
+        assert_eq!(&*case.1, &ast.unwrap());
     }
 }
 
@@ -547,7 +562,7 @@ fn test_canonicalize_stock_inflows() {
 
     let expected = Variable::Stock {
         ident: "heat_loss_to_room".to_string(),
-        ast: Some(Box::new(Expr::Var("total_population".to_string()))),
+        ast: Some(Expr::Var("total_population".to_string())),
         eqn: Some("total_population".to_string()),
         units: Some("people".to_string()),
         inflows: vec!["solar_radiation".to_string()],
@@ -557,7 +572,9 @@ fn test_canonicalize_stock_inflows() {
         direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
     };
 
-    let output = parse_var(&HashMap::new(), "main", &input);
+    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+
+    let output = parse_var(&HashMap::new(), "main", &input, &mut implicit_vars);
 
     assert_eq!(expected, output);
 }
@@ -585,7 +602,7 @@ fn test_tables() {
 
     let expected = Variable::Var {
         ident: "lookup_function_table".to_string(),
-        ast: Some(Box::new(Expr::Const("0".to_string(), 0.0))),
+        ast: Some(Expr::Const("0".to_string(), 0.0)),
         eqn: Some("0".to_string()),
         units: None,
         table: Some(Table {
@@ -610,7 +627,9 @@ fn test_tables() {
         assert!(false);
     }
 
-    let output = parse_var(&HashMap::new(), "main", &input);
+    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+
+    let output = parse_var(&HashMap::new(), "main", &input, &mut implicit_vars);
 
     assert_eq!(expected, output);
 }

@@ -180,13 +180,15 @@ impl Model {
             variables: Vec::new(),
         };
 
+        let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+
         let variable_list: Vec<Variable> = x_model
             .variables
             .as_ref()
             .unwrap_or(&empty_vars)
             .variables
             .iter()
-            .map(|v| parse_var(models, x_model.get_name(), v))
+            .map(|v| parse_var(models, x_model.get_name(), v, &mut implicit_vars))
             .collect();
 
         let mut errors: Vec<Error> = Vec::new();
@@ -272,8 +274,10 @@ fn x_flow(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
-    let var = parse_var(&HashMap::new(), "main", &var);
+    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
     assert!(var.errors().is_none());
+    assert!(implicit_vars.is_empty());
     var
 }
 
@@ -293,8 +297,10 @@ fn x_aux(ident: &str, eqn: &str) -> xmile::Var {
 #[cfg(test)]
 fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
-    let var = parse_var(&HashMap::new(), "main", &var);
+    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
     assert!(var.errors().is_none());
+    assert!(implicit_vars.is_empty());
     var
 }
 
@@ -316,8 +322,10 @@ fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> xmile
 #[cfg(test)]
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows);
-    let var = parse_var(&HashMap::new(), "main", &var);
+    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
     assert!(var.errors().is_none());
+    assert!(implicit_vars.is_empty());
     var
 }
 
@@ -431,8 +439,10 @@ fn test_module_parse() {
     .map(|(name, m)| build_xvars_map(name, m))
     .collect();
 
-    let actual = parse_var(&models, "main", models["main"]["hares"]);
+    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let actual = parse_var(&models, "main", models["main"]["hares"], &mut implicit_vars);
     assert!(actual.errors().is_none());
+    assert!(implicit_vars.is_empty());
     assert_eq!(expected, actual);
 }
 
@@ -518,7 +528,9 @@ fn test_all_deps() {
             .map(|(name, m)| build_xvars_map(name, m))
             .collect();
 
-    let mod_1 = parse_var(&models, "main", models["main"]["mod_1"]);
+    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let mod_1 = parse_var(&models, "main", models["main"]["mod_1"], &mut implicit_vars);
+    assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
     let inflow = flow("inflow", "mod_1.output");
     let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
