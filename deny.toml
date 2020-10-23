@@ -5,6 +5,7 @@ yanked = "deny"
 notice = "deny"
 ignore = [
     "RUSTSEC-2018-0015",
+    "RUSTSEC-2020-0053",
 ]
 
 [licenses]
