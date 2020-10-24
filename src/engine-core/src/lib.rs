@@ -25,7 +25,8 @@ mod equation {
     #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/equation.rs"));
 }
-mod builtin;
+mod builtins;
+mod builtins_visitor;
 mod model;
 mod sim;
 mod token;

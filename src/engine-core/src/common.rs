@@ -89,6 +89,13 @@ macro_rules! import_err(
     }}
 );
 
+macro_rules! eqn_err(
+    ($code:tt, $off:expr) => {{
+        use crate::common::ErrorCode;
+        Err(EquationError{ location: $off, code: ErrorCode::$code})
+    }}
+);
+
 macro_rules! model_err(
     ($code:tt, $str:expr) => {{
         use crate::common::{Error, ErrorCode};

@@ -95,28 +95,7 @@ impl Specs {
     }
 }
 
-#[derive(PartialEq, Clone, Debug)]
-pub enum BuiltinFn {
-    Lookup(String, Box<Expr>),
-    Abs(Box<Expr>),
-    Arccos(Box<Expr>),
-    Arcsin(Box<Expr>),
-    Arctan(Box<Expr>),
-    Cos(Box<Expr>),
-    Exp(Box<Expr>),
-    Inf,
-    Int(Box<Expr>),
-    Ln(Box<Expr>),
-    Log10(Box<Expr>),
-    Max(Box<Expr>, Box<Expr>),
-    Min(Box<Expr>, Box<Expr>),
-    Pi,
-    Pulse(Box<Expr>, Box<Expr>, Box<Expr>),
-    SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
-    Sin(Box<Expr>),
-    Sqrt(Box<Expr>),
-    Tan(Box<Expr>),
-}
+type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
-use crate::builtin::instantiate_implicit_modules;
+use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{canonicalize, EquationError, Error, Ident, Result};
 use crate::model::resolve_relative;
 use crate::xmile;
@@ -227,16 +227,11 @@ pub fn parse_var(
     v: &xmile::Var,
     implicit_vars: &mut Vec<xmile::Var>,
 ) -> Variable {
-    match v {
-        xmile::Var::Stock(v) => {
-            let ident = canonicalize(v.name.as_ref());
-            let (ast, mut errors) = parse_eqn(&v.eqn);
-            let direct_deps = match &ast {
-                Some(ast) => identifier_set(ast),
-                None => HashSet::new(),
-            };
+    let mut parse_and_lower_eqn =
+        |ident: &str, eqn: &Option<String>| -> (Option<Expr>, HashSet<Ident>, Vec<EquationError>) {
+            let (ast, mut errors) = parse_eqn(eqn);
             let ast = match ast {
-                Some(ast) => match instantiate_implicit_modules(&ident, ast, models) {
+                Some(ast) => match instantiate_implicit_modules(ident, ast, models) {
                     Ok((ast, mut new_vars)) => {
                         implicit_vars.append(&mut new_vars);
                         Some(ast)
@@ -248,6 +243,17 @@ pub fn parse_var(
                 },
                 None => None,
             };
+            let direct_deps = match &ast {
+                Some(ast) => identifier_set(ast),
+                None => HashSet::new(),
+            };
+
+            (ast, direct_deps, errors)
+        };
+    match v {
+        xmile::Var::Stock(v) => {
+            let ident = canonicalize(v.name.as_ref());
+            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.eqn);
             let inflows = match &v.inflows {
                 None => Vec::new(),
                 Some(inflows) => inflows.iter().map(|id| canonicalize(id)).collect(),
@@ -273,12 +279,8 @@ pub fn parse_var(
             }
         }
         xmile::Var::Flow(v) => {
-            let (ast, errors) = parse_eqn(&v.eqn);
-            let direct_deps = match &ast {
-                Some(ast) => identifier_set(ast),
-                None => HashSet::new(),
-            };
             let ident = canonicalize(v.name.as_ref());
+            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.eqn);
             let mut errors: Vec<Error> = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
@@ -304,12 +306,8 @@ pub fn parse_var(
             }
         }
         xmile::Var::Aux(v) => {
-            let (ast, errors) = parse_eqn(&v.eqn);
-            let direct_deps = match &ast {
-                Some(ast) => identifier_set(ast),
-                None => HashSet::new(),
-            };
             let ident = canonicalize(v.name.as_ref());
+            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.eqn);
             let mut errors: Vec<Error> = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
