@@ -496,16 +496,40 @@ fn test_parse() {
         Box::new(Var("oh_dear".to_string())),
     ));
 
+    use crate::ast::print_eqn;
+
     let cases = [
-        ("if 1 then 2 else 3", if1),
-        ("if blerg = foo then 2 else 3", if2),
-        ("IF quotient = quotient_target THEN 1 ELSE 0", if3.clone()),
-        ("(IF quotient = quotient_target THEN 1 ELSE 0)", if3.clone()),
+        ("if 1 then 2 else 3", if1, "if (1) then (2) else (3)"),
+        (
+            "if blerg = foo then 2 else 3",
+            if2,
+            "if ((blerg = foo)) then (2) else (3)",
+        ),
+        (
+            "IF quotient = quotient_target THEN 1 ELSE 0",
+            if3.clone(),
+            "if ((quotient = quotient_target)) then (1) else (0)",
+        ),
+        (
+            "(IF quotient = quotient_target THEN 1 ELSE 0)",
+            if3.clone(),
+            "if ((quotient = quotient_target)) then (1) else (0)",
+        ),
         (
             "( IF true_input and false_input THEN 1 ELSE 0 )",
             if4.clone(),
+            "if ((true_input && false_input)) then (1) else (0)",
         ),
-        ("\"oh dear\" = oh_dear", quoting_eq.clone()),
+        (
+            "( IF true_input && false_input THEN 1 ELSE 0 )",
+            if4.clone(),
+            "if ((true_input && false_input)) then (1) else (0)",
+        ),
+        (
+            "\"oh dear\" = oh_dear",
+            quoting_eq.clone(),
+            "(oh_dear = oh_dear)",
+        ),
     ];
 
     for case in cases.iter() {
@@ -513,7 +537,10 @@ fn test_parse() {
         let (ast, err) = parse_eqn(&Some(eqn.to_string()));
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
-        assert_eq!(&*case.1, &ast.unwrap());
+        let ast = ast.unwrap();
+        assert_eq!(&*case.1, &ast);
+        let printed = print_eqn(&ast);
+        assert_eq!(case.2, &printed);
     }
 }
 

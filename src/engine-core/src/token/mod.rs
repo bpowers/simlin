@@ -221,6 +221,20 @@ impl<'input> Iterator for Lexer<'input> {
                         _ => Some(Ok((i, Gt, i + 1))),
                     }
                 }
+                Some((i, '&')) => {
+                    match self.bump() {
+                        Some((_, '&')) => self.consume(i, And, 2),
+                        // we've already bumped, don't consume
+                        _ => Some(error(UnrecognizedToken, i)),
+                    }
+                }
+                Some((i, '|')) => {
+                    match self.bump() {
+                        Some((_, '|')) => self.consume(i, Or, 2),
+                        // we've already bumped, don't consume
+                        _ => Some(error(UnrecognizedToken, i)),
+                    }
+                }
                 Some((i, '-')) => self.consume(i, Minus, 1),
                 Some((i, '+')) => self.consume(i, Plus, 1),
                 Some((i, '*')) => self.consume(i, Mul, 1),

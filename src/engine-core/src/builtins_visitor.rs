@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::Expr;
+use crate::ast::{print_eqn, Expr};
 use crate::builtins::is_builtin_fn;
 use crate::common::{EquationError, Ident};
 use crate::xmile;
@@ -74,8 +74,7 @@ impl<'a> BuiltinVisitor<'a> {
                             let id = format!("$·{}·{}·arg{}", self.variable_name, self.n, i);
                             let x_var = xmile::Var::Aux(xmile::Aux {
                                 name: id.clone(),
-                                // TODO: PrintVisitor
-                                eqn: Some("".to_string()),
+                                eqn: Some(print_eqn(&arg)),
                                 doc: None,
                                 units: None,
                                 gf: None,

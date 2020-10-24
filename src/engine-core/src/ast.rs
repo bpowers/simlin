@@ -51,3 +51,103 @@ pub enum UnaryOp {
     Negative,
     Not,
 }
+
+struct PrintVisitor {}
+
+impl Visitor<String> for PrintVisitor {
+    fn walk(&mut self, expr: &Expr) -> String {
+        match expr {
+            Expr::Const(s, _) => s.clone(),
+            Expr::Var(id) => id.clone(),
+            Expr::App(func, args) => {
+                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+                format!("{}({})", func, args.join(", "))
+            }
+            Expr::Op1(op, l) => {
+                let l = self.walk(l);
+                let op: &str = match op {
+                    UnaryOp::Positive => "+",
+                    UnaryOp::Negative => "-",
+                    UnaryOp::Not => "!",
+                };
+                format!("{}{}", op, l)
+            }
+            Expr::Op2(op, l, r) => {
+                let l = self.walk(l);
+                let r = self.walk(r);
+                let op: &str = match op {
+                    BinaryOp::Add => "+",
+                    BinaryOp::Sub => "-",
+                    BinaryOp::Exp => "^",
+                    BinaryOp::Mul => "*",
+                    BinaryOp::Div => "/",
+                    BinaryOp::Mod => "%",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::Gte => ">=",
+                    BinaryOp::Lte => "<=",
+                    BinaryOp::Eq => "=",
+                    BinaryOp::Neq => "!=",
+                    BinaryOp::And => "&&",
+                    BinaryOp::Or => "||",
+                };
+                format!("({} {} {})", l, op, r)
+            }
+            Expr::If(cond, t, f) => {
+                let cond = self.walk(cond);
+                let t = self.walk(t);
+                let f = self.walk(f);
+                format!("if ({}) then ({}) else ({})", cond, t, f)
+            }
+        }
+    }
+}
+
+pub fn print_eqn(expr: &Expr) -> String {
+    let mut visitor = PrintVisitor {};
+    visitor.walk(expr)
+}
+
+#[test]
+fn test_print_eqn() {
+    assert_eq!(
+        "(a + b)",
+        print_eqn(&Expr::Op2(
+            BinaryOp::Add,
+            Box::new(Expr::Var("a".to_string())),
+            Box::new(Expr::Var("b".to_string()))
+        ))
+    );
+    assert_eq!(
+        "-a",
+        print_eqn(&Expr::Op1(
+            UnaryOp::Negative,
+            Box::new(Expr::Var("a".to_string()))
+        ))
+    );
+    assert_eq!(
+        "!a",
+        print_eqn(&Expr::Op1(
+            UnaryOp::Not,
+            Box::new(Expr::Var("a".to_string()))
+        ))
+    );
+    assert_eq!(
+        "+a",
+        print_eqn(&Expr::Op1(
+            UnaryOp::Positive,
+            Box::new(Expr::Var("a".to_string()))
+        ))
+    );
+    assert_eq!("4.7", print_eqn(&Expr::Const("4.7".to_string(), 4.7)));
+    assert_eq!(
+        "lookup(a, 1.0)",
+        print_eqn(&Expr::App(
+            "lookup".to_string(),
+            vec![
+                Expr::Var("a".to_string()),
+                Expr::Const("1.0".to_string(), 1.0)
+            ]
+        ))
+    );
+}
