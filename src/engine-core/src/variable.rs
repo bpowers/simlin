@@ -231,7 +231,7 @@ pub fn parse_var(
         |ident: &str, eqn: &Option<String>| -> (Option<Expr>, HashSet<Ident>, Vec<EquationError>) {
             let (ast, mut errors) = parse_eqn(eqn);
             let ast = match ast {
-                Some(ast) => match instantiate_implicit_modules(ident, ast, models) {
+                Some(ast) => match instantiate_implicit_modules(ident, ast) {
                     Ok((ast, mut new_vars)) => {
                         implicit_vars.append(&mut new_vars);
                         Some(ast)

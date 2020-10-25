@@ -182,7 +182,7 @@ impl Model {
 
         let mut implicit_vars: Vec<xmile::Var> = Vec::new();
 
-        let variable_list: Vec<Variable> = x_model
+        let mut variable_list: Vec<Variable> = x_model
             .variables
             .as_ref()
             .unwrap_or(&empty_vars)
@@ -190,6 +190,15 @@ impl Model {
             .iter()
             .map(|v| parse_var(models, x_model.get_name(), v, &mut implicit_vars))
             .collect();
+
+        {
+            // FIXME: this is an unfortunate API choice
+            let mut dummy_implicit_vars: Vec<xmile::Var> = Vec::new();
+            variable_list.extend(implicit_vars.into_iter().map(|x_var| {
+                parse_var(models, x_model.get_name(), &x_var, &mut dummy_implicit_vars)
+            }));
+            assert_eq!(0, dummy_implicit_vars.len());
+        }
 
         let mut errors: Vec<Error> = Vec::new();
 

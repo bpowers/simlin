@@ -24,7 +24,6 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
 pub struct BuiltinVisitor<'a> {
     #[allow(dead_code)]
     variable_name: &'a str,
-    models: &'a HashMap<String, HashMap<Ident, &'a xmile::Var>>,
     vars: HashMap<Ident, xmile::Var>,
     n: usize,
 }
@@ -32,13 +31,9 @@ pub struct BuiltinVisitor<'a> {
 impl<'a> BuiltinVisitor<'a> {
     // FIXME: remove when done here
     #[allow(dead_code)]
-    pub fn new(
-        variable_name: &'a str,
-        models: &'a HashMap<String, HashMap<Ident, &'a xmile::Var>>,
-    ) -> Self {
+    pub fn new(variable_name: &'a str) -> Self {
         Self {
             variable_name,
-            models,
             vars: Default::default(),
             n: 0,
         }
@@ -58,7 +53,8 @@ impl<'a> BuiltinVisitor<'a> {
                     return Ok(App(func, args));
                 }
 
-                if !self.models.contains_key(&func) {
+                // TODO: make this a function call/hash lookup
+                if !crate::stdlib::MODEL_NAMES.contains(&func.as_str()) {
                     return eqn_err!(UnknownBuiltin, 0);
                 }
 
@@ -134,12 +130,11 @@ impl<'a> BuiltinVisitor<'a> {
 #[test]
 fn test_builtin_visitor() {}
 
-pub fn instantiate_implicit_modules<'a>(
-    variable_name: &'a str,
+pub fn instantiate_implicit_modules(
+    variable_name: &str,
     ast: Expr,
-    models: &'a HashMap<String, HashMap<Ident, &'a xmile::Var>>,
 ) -> std::result::Result<(Expr, Vec<xmile::Var>), EquationError> {
-    let mut builtin_visitor = BuiltinVisitor::new(variable_name, models);
+    let mut builtin_visitor = BuiltinVisitor::new(variable_name);
     let ast = builtin_visitor.walk(ast)?;
     let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
     Ok((ast, vars))
