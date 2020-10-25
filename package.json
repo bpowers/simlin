@@ -178,9 +178,9 @@
     "tsconfig-paths": "^3.9.0",
     "typescript": "^4.0.2",
     "url-loader": "^4.0.0",
-    "webpack": "^4.44.2",
+    "webpack": "^5.2.0",
     "webpack-dev-server": "^3.11.0",
-    "webpack-manifest-plugin": "^2.2.0",
+    "webpack-manifest-plugin": "^3.0.0-rc.0",
     "worker-loader": "^3.0.5"
   },
   "browserslist": [
