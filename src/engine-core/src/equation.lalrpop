@@ -78,6 +78,7 @@ Atom: Expr = {
         let s = <>;
         Const(s.to_string(), f64::from_str(s).unwrap())
     },
+    "Nan" => Const("NaN".to_string(), f64::NAN),
 };
 
 Comma<T>: Vec<T> = {
@@ -124,6 +125,7 @@ extern {
         "^" => Token::Exp,
         "&&" => Token::And,
         "||" => Token::Or,
+        "Nan" => Token::Nan,
 
         "Iden" => Token::Ident(<&'input str>),
         "Num" => Token::Num(<&'input str>),

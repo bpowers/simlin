@@ -198,6 +198,7 @@ fn test_module_parsing() {
 
     let expected = xmile::Module {
         name: "hares".to_string(),
+        model_name: None,
         doc: None,
         units: None,
         refs: vec![

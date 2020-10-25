@@ -103,7 +103,7 @@ pub enum Expr {
     Var(usize), // offset
     Dt,
     App(BuiltinFn),
-    EvalModule(Ident, Vec<Expr>),
+    EvalModule(Ident, Ident, Vec<Expr>),
     ModuleInput(usize),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     Op1(UnaryOp, Box<Expr>),
@@ -116,6 +116,7 @@ struct Context<'a> {
     model_name: &'a str,
     ident: &'a str,
     offsets: &'a HashMap<Ident, HashMap<Ident, (usize, usize)>>,
+    module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
     is_initial: bool,
     inputs: &'a [Ident],
 }
@@ -128,9 +129,10 @@ impl<'a> Context<'a> {
     fn get_submodel_offset(&self, model: &str, ident: &str) -> Result<usize> {
         let offsets = &self.offsets[model];
         if let Some(pos) = ident.find('.') {
-            let submodel_name = &ident[..pos];
+            let submodel_module_name = &ident[..pos];
+            let submodel_name = &self.module_models[model][submodel_module_name];
             let submodel_var = &ident[pos + 1..];
-            let submodel_off = offsets[submodel_name].0;
+            let submodel_off = offsets[submodel_module_name].0;
             Ok(submodel_off + self.get_submodel_offset(submodel_name, submodel_var)?)
         } else {
             Ok(offsets[ident].0)
@@ -351,6 +353,7 @@ fn test_lower() {
     };
 
     let inputs = &[];
+    let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
     let mut offsets: HashMap<String, (usize, usize)> = HashMap::new();
     offsets.insert("true_input".to_string(), (7, 1));
     offsets.insert("false_input".to_string(), (8, 1));
@@ -360,6 +363,7 @@ fn test_lower() {
         model_name: "main",
         ident: "test",
         offsets: &offsets2,
+        module_models: &module_models,
         is_initial: false,
         inputs,
     };
@@ -392,6 +396,7 @@ fn test_lower() {
     };
 
     let inputs = &[];
+    let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
     let mut offsets: HashMap<String, (usize, usize)> = HashMap::new();
     offsets.insert("true_input".to_string(), (7, 1));
     offsets.insert("false_input".to_string(), (8, 1));
@@ -401,6 +406,7 @@ fn test_lower() {
         model_name: "main",
         ident: "test",
         offsets: &offsets2,
+        module_models: &module_models,
         is_initial: false,
         inputs,
     };
@@ -429,6 +435,7 @@ fn test_fold_flows() {
     use std::iter::FromIterator;
 
     let inputs = &[];
+    let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
     let offsets: &[(&str, usize)] = &[("time", 0), ("a", 1), ("b", 2), ("c", 3), ("d", 4)];
     let offsets: HashMap<String, (usize, usize)> = HashMap::from_iter(
         offsets
@@ -442,6 +449,7 @@ fn test_fold_flows() {
         model_name: "main",
         ident: "test",
         offsets: &offsets2,
+        module_models: &module_models,
         is_initial: false,
         inputs,
     };
@@ -470,12 +478,19 @@ impl Var {
             Expr::AssignCurr(ctx.get_offset(ident)?, Box::new(Expr::ModuleInput(off)))
         } else {
             match var {
-                Variable::Module { ident, inputs, .. } => {
+                Variable::Module {
+                    ident,
+                    model_name,
+                    inputs,
+                    ..
+                } => {
+                    let mut inputs = inputs.clone();
+                    inputs.sort_unstable_by(|a, b| a.dst.partial_cmp(&b.dst).unwrap());
                     let inputs: Vec<Expr> = inputs
-                        .iter()
+                        .into_iter()
                         .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap()))
                         .collect();
-                    Expr::EvalModule(ident.clone(), inputs)
+                    Expr::EvalModule(ident.clone(), model_name.clone(), inputs)
                 }
                 Variable::Stock { ast, .. } => {
                     let off = ctx.get_offset(var.ident())?;
@@ -566,6 +581,35 @@ fn topo_sort<'out>(
     result
 }
 
+// calculate a mapping of module variable name -> module model name
+fn calc_module_model_map(
+    project: &Project,
+    model_name: &str,
+) -> HashMap<Ident, HashMap<Ident, Ident>> {
+    let mut all_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
+
+    let model = Rc::clone(&project.models[model_name]);
+    let var_names: Vec<&str> = {
+        let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
+        var_names.sort_unstable();
+        var_names
+    };
+
+    let mut current_mapping: HashMap<Ident, Ident> = HashMap::new();
+
+    for ident in var_names.iter() {
+        if let Variable::Module { model_name, .. } = &model.variables[*ident] {
+            current_mapping.insert(ident.to_string(), model_name.clone());
+            let all_sub_models = calc_module_model_map(project, model_name);
+            all_models.extend(all_sub_models);
+        };
+    }
+
+    all_models.insert(model_name.to_string(), current_mapping);
+
+    all_models
+}
+
 // TODO: this should memoize
 fn calc_offsets(
     project: &Project,
@@ -593,9 +637,9 @@ fn calc_offsets(
     };
 
     for ident in var_names.iter() {
-        let size = if let Variable::Module { .. } = &model.variables[*ident] {
-            let all_sub_offsets = calc_offsets(project, *ident);
-            let sub_offsets = &all_sub_offsets[*ident];
+        let size = if let Variable::Module { model_name, .. } = &model.variables[*ident] {
+            let all_sub_offsets = calc_offsets(project, model_name);
+            let sub_offsets = &all_sub_offsets[model_name];
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             all_offsets.extend(all_sub_offsets);
             sub_size
@@ -632,8 +676,8 @@ fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
     };
 
     for ident in var_names.iter() {
-        let size = if let Variable::Module { .. } = &model.variables[*ident] {
-            let sub_offsets = calc_recursive_offsets(project, *ident);
+        let size = if let Variable::Module { model_name, .. } = &model.variables[*ident] {
+            let sub_offsets = calc_recursive_offsets(project, model_name);
             let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
             sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
@@ -659,8 +703,8 @@ fn calc_n_slots(project: &Project, model_name: &str) -> usize {
         .variables
         .iter()
         .map(|(_name, var)| {
-            if let Variable::Module { ident, .. } = var {
-                calc_n_slots(project, ident)
+            if let Variable::Module { model_name, .. } = var {
+                calc_n_slots(project, model_name)
             } else {
                 1
             }
@@ -684,6 +728,7 @@ impl Module {
         };
 
         let offsets = calc_offsets(project, model_name);
+        let module_models = calc_module_model_map(project, model_name);
 
         let build_runlist = |deps: &HashMap<Ident, HashSet<Ident>>,
                              part: StepPart,
@@ -725,6 +770,7 @@ impl Module {
                             model_name,
                             ident,
                             offsets: &offsets,
+                            module_models: &module_models,
                             is_initial,
                             inputs,
                         },
@@ -801,11 +847,11 @@ impl<'a> ModuleEvaluator<'a> {
             Expr::Const(n) => *n,
             Expr::Dt => self.curr[DT_OFF],
             Expr::ModuleInput(off) => self.inputs[*off],
-            Expr::EvalModule(ident, args) => {
+            Expr::EvalModule(ident, model_name, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 let off = self.off + module_offsets[ident].0;
-                let module = &self.sim.modules[ident.as_str()];
+                let module = &self.sim.modules[model_name.as_str()];
 
                 self.sim
                     .calc(self.step_part, module, off, &args, self.curr, self.next);
@@ -1027,10 +1073,10 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Sqrt(l) => format!("sqrt({})", pretty(l)),
             BuiltinFn::Tan(l) => format!("tan({})", pretty(l)),
         },
-        Expr::EvalModule(module, args) => {
+        Expr::EvalModule(module, model_name, args) => {
             let args: Vec<_> = args.iter().map(|arg| pretty(arg)).collect();
             let string_args = args.join(", ");
-            format!("eval<{}>({})", module, string_args)
+            format!("eval<{}::{}>({})", module, model_name, string_args)
         }
         Expr::ModuleInput(a) => format!("mi<{}>", a),
         Expr::Op2(op, l, r) => {
@@ -1084,7 +1130,12 @@ impl Results {
                 self.offsets.iter().map(|(k, v)| (*v, k.as_str())).collect();
             let mut var_names: Vec<&str> = Vec::with_capacity(self.step_size);
             for i in 0..(self.step_size) {
-                var_names.push(offset_name_map[&i]);
+                let name = if offset_name_map.contains_key(&i) {
+                    offset_name_map[&i]
+                } else {
+                    "UNKNOWN"
+                };
+                var_names.push(name);
             }
             var_names
         };
@@ -1140,13 +1191,16 @@ fn enumerate_modules(
         )
     })?;
     let model = Rc::clone(model);
-    for (id, v) in model.variables.iter() {
-        if let Variable::Module { inputs, .. } = v {
+    for (_id, v) in model.variables.iter() {
+        if let Variable::Module {
+            model_name, inputs, ..
+        } = v
+        {
             let mut inputs: Vec<String> = inputs.iter().map(|input| input.dst.clone()).collect();
-            inputs.sort();
-            if modules.insert((id.to_string(), inputs)) {
+            inputs.sort_unstable();
+            if modules.insert((model_name.clone(), inputs)) {
                 // first time we're seeing this monomorphization; recurse
-                enumerate_modules(project, id.as_str(), modules)?;
+                enumerate_modules(project, model_name, modules)?;
             }
         }
     }

@@ -165,6 +165,12 @@ pub fn resolve_module_input<'a>(
     }
     let dst = dst.unwrap().to_string();
 
+    // TODO: reevaluate if this is really the best option here
+    // if the source is a temporary created by the engine, assume it is OK
+    if (&src).starts_with("$·") {
+        return Ok(ModuleInput { src, dst });
+    }
+
     match resolve_relative(models, model_name, &src) {
         Some(_) => Ok(ModuleInput { src, dst }),
         None => var_err!(BadModuleInputSrc, orig_src.to_string()),
@@ -260,6 +266,7 @@ fn x_module(ident: &str, refs: &[(&str, &str)]) -> xmile::Var {
 
     Var::Module(Module {
         name: ident.to_string(),
+        model_name: None,
         doc: None,
         units: None,
         refs,
@@ -401,6 +408,7 @@ fn test_module_parse() {
     ];
     let direct_deps = vec!["area".to_string()].into_iter().collect();
     let expected = Variable::Module {
+        model_name: "hares".to_string(),
         ident: "hares".to_string(),
         units: None,
         inputs,

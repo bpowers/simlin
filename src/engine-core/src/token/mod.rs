@@ -40,6 +40,7 @@ pub enum Token<'input> {
     LBracket,
     RBracket,
     Comma,
+    Nan,
     Ident(&'input str),
     Num(&'input str),
 }
@@ -67,6 +68,7 @@ const KEYWORDS: &[(&str, Token<'static>)] = &[
     ("mod", Mod),
     ("and", And),
     ("or", Or),
+    ("nan", Nan),
 ];
 
 impl<'input> Lexer<'input> {

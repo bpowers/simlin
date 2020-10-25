@@ -56,6 +56,7 @@ pub enum Variable {
     Module {
         // the current spec has ident == model name
         ident: Ident,
+        model_name: Ident,
         units: Option<String>,
         inputs: Vec<ModuleInput>,
         errors: Vec<Error>,
@@ -364,11 +365,16 @@ pub fn parse_var(
                         None => src,
                     };
 
-                    if let xmile::Var::Stock(_) = resolve_relative(models, model_name, src).unwrap()
-                    {
-                        // if our input is a stock, we don't have any flow dependencies to
-                        // order before us this dt
-                        None
+                    let src = resolve_relative(models, model_name, src);
+                    // will be none if this is a temporary we created
+                    if let Some(src) = src {
+                        if let xmile::Var::Stock(_) = src {
+                            // if our input is a stock, we don't have any flow dependencies to
+                            // order before us this dt
+                            None
+                        } else {
+                            Some(direct_dep.to_string())
+                        }
                     } else {
                         Some(direct_dep.to_string())
                     }
@@ -377,6 +383,7 @@ pub fn parse_var(
                 .map(|d| d.unwrap())
                 .collect();
             Variable::Module {
+                model_name: v.model_name.as_ref().unwrap_or(&ident).clone(),
                 ident,
                 units: v.units.clone(),
                 inputs,
@@ -542,6 +549,18 @@ fn test_parse() {
         let printed = print_eqn(&ast);
         assert_eq!(case.2, &printed);
     }
+
+    let (ast, err) = parse_eqn(&Some("NAN".to_string()));
+    assert_eq!(err.len(), 0);
+    assert!(ast.is_some());
+    let ast = ast.unwrap();
+    assert!(matches!(&ast, Expr::Const(_, _)));
+    if let Expr::Const(id, n) = &ast {
+        assert_eq!("NaN", id);
+        assert!(n.is_nan());
+    }
+    let printed = print_eqn(&ast);
+    assert_eq!("NaN", &printed);
 }
 
 #[test]

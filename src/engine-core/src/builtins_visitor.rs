@@ -68,9 +68,10 @@ impl<'a> BuiltinVisitor<'a> {
                             id
                         } else {
                             let id = format!("$·{}·{}·arg{}", self.variable_name, self.n, i);
+                            let eqn = print_eqn(&arg);
                             let x_var = xmile::Var::Aux(xmile::Aux {
                                 name: id.clone(),
-                                eqn: Some(print_eqn(&arg)),
+                                eqn: Some(eqn),
                                 doc: None,
                                 units: None,
                                 gf: None,
@@ -82,23 +83,23 @@ impl<'a> BuiltinVisitor<'a> {
                     })
                     .collect();
 
-                let references: Vec<_> = ident_args
+                let module_name = format!("$·{}·{}·{}", self.variable_name, self.n, func);
+                let refs: Vec<_> = ident_args
                     .into_iter()
                     .enumerate()
-                    .map(|(i, arg)| {
+                    .map(|(i, src)| {
                         xmile::Reference::Connect(xmile::Connect {
-                            src: arg,
-                            dst: stdlib_model_inputs[i].to_string(),
+                            src,
+                            dst: format!("{}.{}", module_name, stdlib_model_inputs[i]),
                         })
                     })
                     .collect();
-
-                let module_name = format!("$·{}·{}·{}", self.variable_name, self.n, func);
                 let x_module = xmile::Var::Module(xmile::Module {
                     name: module_name.clone(),
+                    model_name: Some(format!("stdlib·{}", func)),
                     doc: None,
                     units: None,
-                    refs: references,
+                    refs,
                 });
                 let module_output_name = format!("{}.output", module_name);
                 self.vars.insert(module_name, x_module);

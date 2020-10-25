@@ -358,6 +358,7 @@ pub struct ArrayElement {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Module {
     pub name: String,
+    pub model_name: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
     #[serde(rename = "$value", default)]
