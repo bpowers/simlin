@@ -2,17 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import * as fs from 'fs';
+import { readFileSync } from 'fs';
 
 import { expect } from 'chai';
 import { is, List } from 'immutable';
 import { defined } from '../lib/engine/common';
 import { stdProject } from '../lib/engine/project';
 import { FileFromJSON } from '../lib/engine/xmile';
-import { promisify } from 'util';
 import { DOMParser } from 'xmldom';
-
-const readFile = promisify(fs.readFile);
 
 const MODEL_PATHS = List([
   'test/test-models/tests/xidz_zidz/xidz_zidz.xmile',
@@ -47,10 +44,10 @@ const MODEL_PATHS = List([
   'test/test-models/samples/SIR/SIR_reciprocal-dt.xmile',
 ]);
 
-describe('roundtrip', async () => {
+describe('roundtrip', () => {
   for (const path of MODEL_PATHS) {
     it(`should roundtrip ${path}`, async () => {
-      const data = await readFile(path);
+      const data = readFileSync(path);
       const xml = new DOMParser().parseFromString(data.toString(), 'application/xml');
       const [project, err] = stdProject.addXmileFile(xml);
       expect(err).to.be.undefined;
