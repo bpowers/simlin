@@ -4,10 +4,10 @@
 
 import { List } from 'immutable';
 
-import { expect } from 'chai';
-import * as parse from '../lib/engine/parse';
-import { SourceLoc } from '../lib/engine/token';
-import { Node, BinaryExpr, ParenExpr, IfExpr, CallExpr, Ident, Constant } from '../lib/engine/ast';
+import { expect } from '@jest/globals';
+import * as parse from '../src/engine/parse';
+import { SourceLoc } from '../src/engine/token';
+import { Node, BinaryExpr, ParenExpr, IfExpr, CallExpr, Ident, Constant } from '../src/engine/ast';
 
 interface ParseTestData {
   in: string;
@@ -158,9 +158,9 @@ describe('parse', function (): void {
       if (err) {
         for (let i = 0; i < err.length; i++) console.log(err[i]);
       }
-      expect(node).not.to.be.null;
-      expect(err).to.be.null;
-      expect(t.out.equals(node)).to.be.true;
+      expect(node).not.toBeNull();
+      expect(err).toBeNull();
+      expect(t.out.equals(node)).toBeTruthy();
       done();
     });
   });
@@ -170,8 +170,8 @@ describe('parse-failures', function (): void {
   PARSE_TEST_FAILURES.forEach(function (eqn: string): void {
     it("shouldn't parse " + eqn, function (done): void {
       let [node, err] = parse.eqn(eqn);
-      expect(node).to.be.null;
-      expect(err).not.to.be.null;
+      expect(node).toBeNull();
+      expect(err).not.toBeNull();
       done();
     });
   });

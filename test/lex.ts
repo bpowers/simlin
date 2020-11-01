@@ -2,11 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import * as chai from 'chai';
-import { SourceLoc, Token, TokenType } from '../lib/engine/token';
-import { Lexer } from '../lib/engine/lex';
-
-const expect = chai.expect;
+import { expect } from '@jest/globals';
+import { SourceLoc, Token, TokenType } from '../src/engine/token';
+import { Lexer } from '../src/engine/lex';
 
 interface LexTestData {
   in: string;
@@ -268,14 +266,14 @@ describe('lex', function (): void {
       let count = 0;
       for (let tok = lexer.nextTok(); tok !== null; tok = lexer.nextTok()) {
         let expected = t.out[count];
-        expect(tok.type).to.equal(expected.type);
+        expect(tok.type).toEqual(expected.type);
         if (tok.type !== expected.type) {
           console.log(`errrr: ${tok} -- ${expected}`);
         }
-        expect(tok.tok).to.equal(expected.tok);
+        expect(tok.tok).toEqual(expected.tok);
         count++;
       }
-      expect(count).to.equal(t.out.length);
+      expect(count).toEqual(t.out.length);
       done();
     });
   });
