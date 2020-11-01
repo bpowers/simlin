@@ -17,7 +17,7 @@ require('../config/env');
 
 const path = require('path');
 const chalk = require('react-dev-utils/chalk');
-const fs = require('fs-extra');
+const fs = require('fs');
 const bfj = require('bfj');
 const webpack = require('webpack');
 const configFactory = require('../config/webpack.component.config');
@@ -27,6 +27,36 @@ const formatWebpackMessages = require('react-dev-utils/formatWebpackMessages');
 const printHostingInstructions = require('react-dev-utils/printHostingInstructions');
 const FileSizeReporter = require('react-dev-utils/FileSizeReporter');
 const printBuildError = require('react-dev-utils/printBuildError');
+
+const emptyDirSync = (dir) => {
+  let items;
+  try {
+    items = fs.readdirSync(dir);
+  } catch {
+    return fs.mkdirSync(dir, {recursive: true});
+  }
+
+  items.forEach((item) => {
+    item = path.join(dir, item);
+    fs.rmSync(item, {recursive: true});
+  });
+};
+
+const copyDirSync = (src, dst) => {
+  if (fs.lstatSync(src).isDirectory()) {
+    if (!fs.existsSync(dst)) {
+      fs.mkdirSync(dst, {recursive: true});
+    }
+    const contents = fs.readdirSync(src);
+    for (const entry of contents) {
+      const entrySrc = path.join(src, entry);
+      const entryDst = path.join(dst, entry);
+      copyDirSync(entrySrc, entryDst);
+    }
+  } else {
+    fs.copyFileSync(src, dst);
+  }
+};
 
 const measureFileSizesBeforeBuild =
   FileSizeReporter.measureFileSizesBeforeBuild;
@@ -62,7 +92,7 @@ checkBrowsers(paths.appPath, isInteractive)
   .then(previousFileSizes => {
     // Remove all content but keep the directory so that
     // if you're in it, you don't end up in Trash
-    fs.emptyDirSync(paths.componentBuild);
+    emptyDirSync(paths.componentBuild);
     // Merge with the public folder
     copyPublicFolder();
     // Start the webpack build
@@ -205,7 +235,7 @@ function build(previousFileSizes) {
 }
 
 function copyPublicFolder() {
-  fs.copySync(paths.appPublic, paths.componentBuild, {
+  copyDirSync(paths.appPublic, paths.componentBuild, {
     dereference: true,
     filter: file => file !== paths.appHtml,
   });

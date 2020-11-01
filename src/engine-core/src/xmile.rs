@@ -333,8 +333,8 @@ pub enum ViewObject {
         y: f64,
     },
     Style(Style),
-    StackedContainer,
-    SimulationDelay,
+    #[serde(other)]
+    Unhandled,
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
