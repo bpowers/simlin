@@ -332,7 +332,7 @@ pub enum ViewObject {
         x: f64,
         y: f64,
     },
-    Style(Style),
+    // Style(Style),
     #[serde(other)]
     Unhandled,
 }

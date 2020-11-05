@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package project_io;
+
+message Variable {
+  message Stock {
+    string name = 1;
+    string eqn = 2;
+    string doc = 3;
+    string units = 4;
+    repeated string inflows = 5;
+    repeated string outflows = 6;
+    bool non_negative = 7;
+    // dimensions
+  };
+
+  message Flow {
+    string name = 1;
+    string eqn = 2;
+    string doc = 3;
+    string units = 4;
+    // GF gf = 5;
+    bool non_negative = 7;
+    // dimensions
+  };
+
+  message Aux {
+    string name = 1;
+    string eqn = 2;
+    string doc = 3;
+    string units = 4;
+    // GF gf = 5;
+    // dimensions
+  };
+
+  message Module {
+    message Reference {
+      string src = 1;
+      string dst = 2;
+    };
+
+    string name = 1;
+    string model_name = 2;
+    string doc = 3;
+    string units = 4;
+    repeated Reference references = 5;
+  };
+
+  oneof v {
+    Stock stock = 1;
+    Flow flow = 2;
+    Aux aux = 3;
+    Module module = 4;
+  }
+};
+
+enum ViewType {
+  STOCK_FLOW = 0;
+  INTERFACE = 1;
+  POPUP = 2;
+  VENDOR_SPECIFIC = 3;
+};
+
+enum LabelSide {
+  TOP = 0;
+  LEFT = 1;
+  CENTER = 2;
+  BOTTOM = 3;
+  RIGHT = 4;
+};
+
+message ViewObject {
+  message Stock {
+    string name = 1;
+    int32 uid = 2;
+    double x = 3;
+    double y = 4;
+    double width = 5;
+    double height = 6;
+    LabelSide label_side = 7;
+  };
+  message Flow {};
+  message Aux {};
+  message Link {};
+  message Module {};
+  message Cloud {};
+
+  oneof vo {
+    Stock stock = 1;
+    Flow flow = 2;
+    Aux aux = 3;
+    Link link = 4;
+    Module module = 5;
+    Cloud cloud = 6;
+  }
+}
+
+message View {
+  ViewType type = 1;
+  // background
+  repeated ViewObject objects = 3;
+};
+
+message Model {
+  string name = 1;
+  // namespaces
+  // no 'resource' or sim_specs in our normalized form
+  repeated Variable variables = 3;
+  repeated View views = 4;
+}

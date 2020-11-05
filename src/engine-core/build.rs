@@ -15,6 +15,8 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 
+const PROTOS: &[&str] = &["src/ast_io.proto", "src/project_io.proto"];
+
 const XMILE_SUFFIX: &str = ".stmx";
 
 fn build_stdlib() -> io::Result<()> {
@@ -139,7 +141,7 @@ pub fn get(name: &str) -> Option<xmile::Model> {{
 }
 
 fn main() {
-    prost_build::compile_protos(&["src/ast_io.proto"], &["src/"]).unwrap();
+    prost_build::compile_protos(PROTOS, &["src/"]).unwrap();
     lalrpop::process_root().unwrap();
 
     build_stdlib().unwrap();

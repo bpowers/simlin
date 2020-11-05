@@ -18,6 +18,9 @@ extern crate float_cmp;
 #[macro_use]
 mod common;
 mod ast;
+mod project_io {
+    include!(concat!(env!("OUT_DIR"), "/project_io.rs"));
+}
 mod ast_io {
     include!(concat!(env!("OUT_DIR"), "/ast_io.rs"));
 }
