@@ -20,6 +20,7 @@ const ModuleNotFoundPlugin = require('react-dev-utils/ModuleNotFoundPlugin');
 const ForkTsCheckerWebpackPlugin = require('react-dev-utils/ForkTsCheckerWebpackPlugin');
 const typescriptFormatter = require('react-dev-utils/typescriptFormatter');
 const ReactRefreshWebpackPlugin = require('@pmmmwh/react-refresh-webpack-plugin');
+const CspHtmlWebpackPlugin = require('csp-html-webpack-plugin');
 
 const appPackageJson = require(paths.appPackageJson);
 
@@ -387,6 +388,28 @@ module.exports = function (webpackEnv) {
             : undefined
         )
       ),
+      new CspHtmlWebpackPlugin({
+        'default-src': "'self'",
+        'base-uri': "'self'",
+        "block-all-mixed-content": [],
+        'font-src': ["'self'", "https://fonts.gstatic.com", "data:"],
+        "frame-ancestors": ["'self'"],
+        'img-src': ["'self'", "data:"],
+        'object-src': "'none'",
+        'script-src': ["'self'"],
+        'style-src': ["'self'", "https://fonts.googleapis.com", "'unsafe-inline'"],
+      }, {
+        enabled: true,
+        hashingMethod: 'sha256',
+        hashEnabled: {
+          'script-src': true,
+          'style-src': true,
+        },
+        nonceEnabled: {
+          'script-src': false,
+          'style-src': false,
+        },
+      }),
       // Inlines the webpack runtime script. This script is too small to warrant
       // a network request.
       // https://github.com/facebook/create-react-app/issues/5358
