@@ -388,12 +388,11 @@ module.exports = function (webpackEnv) {
             : undefined
         )
       ),
-      new CspHtmlWebpackPlugin({
+      isEnvProduction && new CspHtmlWebpackPlugin({
         'default-src': "'self'",
         'base-uri': "'self'",
         "block-all-mixed-content": [],
         'font-src': ["'self'", "https://fonts.gstatic.com", "data:"],
-        "frame-ancestors": ["'self'"],
         'img-src': ["'self'", "data:"],
         'object-src': "'none'",
         'script-src': ["'self'"],
@@ -403,7 +402,7 @@ module.exports = function (webpackEnv) {
         hashingMethod: 'sha256',
         hashEnabled: {
           'script-src': true,
-          'style-src': true,
+          'style-src': false,
         },
         nonceEnabled: {
           'script-src': false,

@@ -4,6 +4,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { IncomingMessage, ServerResponse } from 'http';
 
 import * as bodyParser from 'body-parser';
 import cookieParser from 'cookie-parser';
@@ -24,6 +25,19 @@ import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
 import { User as UserPb } from './schemas/user_pb';
+
+// redefinition from Helmet, as they don't export it
+interface ContentSecurityPolicyDirectiveValueFunction {
+  (req: IncomingMessage, res: ServerResponse): string;
+}
+
+// redefinition from Helmet, as they don't export it
+type ContentSecurityPolicyDirectiveValue = string | ContentSecurityPolicyDirectiveValueFunction;
+
+// redefinition from Helmet, as they don't export it
+interface ContentSecurityPolicyDirectives {
+  [directiveName: string]: Iterable<ContentSecurityPolicyDirectiveValue>;
+}
 
 export async function createApp(): Promise<App> {
   const app = new App();
@@ -125,8 +139,40 @@ class App {
     this.app.use(requestLogger);
     this.app.use(cookieParser());
     this.app.use(seshcookie(this.app.get('authentication').seshcookie));
+
+    const indexHtml = fs.readFileSync('public/index.html').toString('utf-8');
+    const metaTagContentsMatch = indexHtml.match(/http-equiv="Content-Security-Policy"[^>]+/g);
+    const additionalScriptSrcs: string[] = [];
+    if (metaTagContentsMatch && metaTagContentsMatch.length > 0) {
+      const metaTagContents: string = metaTagContentsMatch[0];
+      const shasMatch = metaTagContents.match(/sha[^']+/g);
+      if (shasMatch) {
+        for (const sha of shasMatch) {
+          additionalScriptSrcs.push(`'${sha}'`);
+        }
+      }
+    }
+
+    // copy of the default from helmet, with font + style changed from 'https:' to specific google font hosts
+    const directives: ContentSecurityPolicyDirectives = {
+      'default-src': ["'self'"],
+      'base-uri': ["'self'"],
+      'block-all-mixed-content': [],
+      'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      'frame-ancestors': ["'self'"],
+      'img-src': ["'self'", 'data:'],
+      'object-src': ["'none'"],
+      'script-src': ["'self'"].concat(additionalScriptSrcs),
+      'script-src-attr': ["'none'"],
+      'style-src': ["'self'", 'https://fonts.googleapis.com', "'unsafe-inline'"],
+      'upgrade-insecure-requests': [],
+    };
+
     this.app.use(
       helmet({
+        contentSecurityPolicy: {
+          directives,
+        },
         hsts: {
           maxAge: oneYearInSeconds,
           includeSubDomains: true,
