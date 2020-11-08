@@ -209,6 +209,12 @@ class App {
     // all others should serve index.js if user is authorized
     this.app.use('/api', authz, apiRouter(this.app));
 
+    const staticHandler = express.static('public', {
+      // this doesn't seem to work on Google App Engine - always says
+      // Tue, 01 Jan 1980 00:00:01 GMT, so disable it
+      lastModified: false,
+    });
+
     this.app.get(
       '/:username/:projectName',
       authz,
@@ -242,12 +248,12 @@ class App {
           return;
         }
 
-        req.url = '/';
+        req.url = '/index.html';
 
         // eslint-disable-next-line @typescript-eslint/await-thenable
         await next();
       },
-      express.static('public'),
+      staticHandler,
     );
 
     // Configure a middleware for 404s and the error handler
@@ -257,7 +263,7 @@ class App {
     // unauthenticated:
     // /static for CSS, JS, etc
     // /, /login serve index.js
-    this.app.use(express.static('public'));
+    this.app.use(staticHandler);
 
     if (!this.app.db) {
       throw new Error('expected DB to be initialized');
