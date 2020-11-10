@@ -9,8 +9,8 @@ import { Link } from 'react-router-dom';
 import AppBar from '@material-ui/core/AppBar';
 import Button from '@material-ui/core/Button';
 import Grid from '@material-ui/core/Grid';
-import GridList from '@material-ui/core/GridList';
-import GridListTile from '@material-ui/core/GridListTile';
+import ImageList from '@material-ui/core/ImageList';
+import ImageListItem from '@material-ui/core/ImageListItem';
 import IconButton from '@material-ui/core/IconButton';
 import Menu from '@material-ui/core/Menu';
 import MenuItem from '@material-ui/core/MenuItem';
@@ -171,7 +171,7 @@ const Home = withWidth()(
         const { classes } = this.props;
         return (
           <div className={classes.newForm}>
-            <Grid container direction="row" justify="center" alignItems="center">
+            <Grid container direction="row" justifyContent="center" alignItems="center">
               <Grid item>
                 <NewProject user={this.props.user} onProjectCreated={this.handleProjectCreated} />
               </Grid>
@@ -185,9 +185,9 @@ const Home = withWidth()(
         const { projects } = this.state;
         return (
           <div className={classes.projectGrid}>
-            <GridList cols={this.getGridListCols()} spacing={0}>
+            <ImageList cols={this.getGridListCols()} gap={0}>
               {projects.map((project) => (
-                <GridListTile key={project.id} style={{ height: 'auto' }}>
+                <ImageListItem key={project.id} style={{ height: 'auto' }}>
                   <Link to={`/${project.id}`} className={classes.modelLink}>
                     <Paper className={classes.paper} elevation={4}>
                       <div className={classes.preview}>
@@ -199,9 +199,9 @@ const Home = withWidth()(
                       <Typography component="p">{project.description}&nbsp;</Typography>
                     </Paper>
                   </Link>
-                </GridListTile>
+                </ImageListItem>
               ))}
-            </GridList>
+            </ImageList>
           </div>
         );
       }

@@ -33,9 +33,9 @@ import EditIcon from '@material-ui/icons/Edit';
 import MenuIcon from '@material-ui/icons/Menu';
 import SearchIcon from '@material-ui/icons/Search';
 
-import SpeedDial, { CloseReason } from '@material-ui/lab/SpeedDial';
-import SpeedDialAction from '@material-ui/lab/SpeedDialAction';
-import SpeedDialIcon from '@material-ui/lab/SpeedDialIcon';
+import SpeedDial, { CloseReason } from '@material-ui/core/SpeedDial';
+import SpeedDialAction from '@material-ui/core/SpeedDialAction';
+import SpeedDialIcon from '@material-ui/core/SpeedDialIcon';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
@@ -1334,25 +1334,25 @@ export const Editor = withStyles(styles)(
         >
           <SpeedDialAction
             icon={<StockIcon />}
-            tooltipTitle="Stock"
+            title="Stock"
             onClick={this.handleSelectStock}
             className={selectedTool === 'stock' ? classes.selectedTool : undefined}
           />
           <SpeedDialAction
             icon={<FlowIcon />}
-            tooltipTitle="Flow"
+            title="Flow"
             onClick={this.handleSelectFlow}
             className={selectedTool === 'flow' ? classes.selectedTool : undefined}
           />
           <SpeedDialAction
             icon={<AuxIcon />}
-            tooltipTitle="Variable"
+            title="Variable"
             onClick={this.handleSelectAux}
             className={selectedTool === 'aux' ? classes.selectedTool : undefined}
           />
           <SpeedDialAction
             icon={<LinkIcon />}
-            tooltipTitle="Link"
+            title="Link"
             onClick={this.handleSelectLink}
             className={selectedTool === 'link' ? classes.selectedTool : undefined}
           />

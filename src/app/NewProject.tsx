@@ -245,7 +245,7 @@ export const NewProject = withStyles(styles)(
             </AccordionSummary>
             <AccordionDetails>
               <form>
-                <Grid container spacing={10} justify="center" alignItems="center">
+                <Grid container spacing={10} justifyContent="center" alignItems="center">
                   <Grid item xs={8}>
                     <Typography>Use existing model</Typography>
                   </Grid>
