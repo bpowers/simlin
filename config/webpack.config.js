@@ -393,7 +393,7 @@ module.exports = function (webpackEnv) {
         'base-uri': "'self'",
         "block-all-mixed-content": [],
         'font-src': ["'self'", "https://fonts.gstatic.com", "data:"],
-        'img-src': ["'self'", "data:"],
+        'img-src': ["'self'", "data:", "https://*.googleusercontent.com"],
         'object-src': "'none'",
         'script-src': ["'self'"],
         'style-src': ["'self'", "https://fonts.googleapis.com", "'unsafe-inline'"],

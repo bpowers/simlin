@@ -160,7 +160,7 @@ class App {
       'block-all-mixed-content': [],
       'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'],
       'frame-ancestors': ["'self'"],
-      'img-src': ["'self'", 'data:'],
+      'img-src': ["'self'", 'data:', 'https://*.googleusercontent.com'],
       'object-src': ["'none'"],
       'script-src': ["'self'"].concat(additionalScriptSrcs),
       'script-src-attr': ["'none'"],
