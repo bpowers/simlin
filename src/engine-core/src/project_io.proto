@@ -69,36 +69,83 @@ enum LabelSide {
   RIGHT = 4;
 };
 
-message ViewObject {
+message ViewElement {
   message Stock {
     string name = 1;
     int32 uid = 2;
     double x = 3;
     double y = 4;
-    double width = 5;
-    double height = 6;
-    LabelSide label_side = 7;
+    LabelSide label_side = 5;
   };
-  message Flow {};
-  message Aux {};
-  message Link {};
-  message Module {};
-  message Cloud {};
 
-  oneof vo {
-    Stock stock = 1;
-    Flow flow = 2;
-    Aux aux = 3;
+  message Flow {
+    message FlowPoint {
+      double x = 1;
+      double y = 2;
+      int32 attachedToUid = 3;
+    }
+    string name = 1;
+    int32 uid = 2;
+    int32 segmentWithAux = 3;
+    double auxPercentageIntoSegment = 4;
+    repeated FlowPoint flowPoints = 5;
+  };
+
+  message Aux {
+    string name = 1;
+    int32 uid = 2;
+    double x = 3;
+    double y = 4;
+    LabelSide label_side = 5;
+  };
+
+  message Link {
+    int32 fromUid = 1;
+    int32 toUid = 2;
+    oneof l {
+      double angle = 3; // [0, 360)
+      bool isStraight = 4;
+    }
+  };
+
+  message Module {
+    int32 name = 1;
+    int32 uid = 2;
+    double x = 3;
+    double y = 4;
+    LabelSide label_side = 5;
+  };
+
+  message Cloud {
+    int32 uid = 1;
+    int32 flowUid = 2;
+    double x = 3;
+    double y = 4;
+  };
+
+  message Alias {
+    int32 uid = 1;
+    int32 aliasOfUid = 2;
+    double x = 3;
+    double y = 4;
+    LabelSide label_side = 5;
+  };
+
+  oneof ve {
+    Aux aux = 1;
+    Stock stock = 2;
+    Flow flow = 3;
     Link link = 4;
     Module module = 5;
-    Cloud cloud = 6;
+    Alias alias = 6;
+    Cloud cloud = 7;
   }
 }
 
 message View {
   ViewType type = 1;
   // background
-  repeated ViewObject objects = 3;
+  repeated ViewElement objects = 3;
 };
 
 message Model {

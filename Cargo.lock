@@ -148,9 +148,9 @@ checksum = "08c48aae112d48ed9f069b33538ea9e3e90aa263cfa3d1c24309612b1f7472de"
 
 [[package]]
 name = "bytes"
-version = "0.5.6"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e4cec68f03f32e44924783795810fa50a7035d8c8ebe78580ad7e6c703fba38"
+checksum = "e0dcbc35f504eb6fc275a6d20e4ebcda18cf50d40ba6fabff8c711fa16cb3b16"
 
 [[package]]
 name = "cc"
@@ -532,7 +532,7 @@ dependencies = [
 [[package]]
 name = "prost"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=4ded4a98ef339da0b7babd4efee3fbe8adaf746b#4ded4a98ef339da0b7babd4efee3fbe8adaf746b"
+source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -541,7 +541,7 @@ dependencies = [
 [[package]]
 name = "prost-build"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=4ded4a98ef339da0b7babd4efee3fbe8adaf746b#4ded4a98ef339da0b7babd4efee3fbe8adaf746b"
+source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
 dependencies = [
  "bytes",
  "heck",
@@ -558,7 +558,7 @@ dependencies = [
 [[package]]
 name = "prost-derive"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=4ded4a98ef339da0b7babd4efee3fbe8adaf746b#4ded4a98ef339da0b7babd4efee3fbe8adaf746b"
+source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
 dependencies = [
  "anyhow",
  "itertools",
@@ -570,7 +570,7 @@ dependencies = [
 [[package]]
 name = "prost-types"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=4ded4a98ef339da0b7babd4efee3fbe8adaf746b#4ded4a98ef339da0b7babd4efee3fbe8adaf746b"
+source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
 dependencies = [
  "bytes",
  "prost",
