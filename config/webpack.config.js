@@ -395,7 +395,7 @@ module.exports = function (webpackEnv) {
         'font-src': ["'self'", "https://fonts.gstatic.com", "data:"],
         'img-src': ["'self'", "data:", "https://*.googleusercontent.com"],
         'object-src': "'none'",
-        'script-src': ["'self'"],
+        'script-src': ["'self'", 'blob:'],
         'style-src': ["'self'", "https://fonts.googleapis.com", "'unsafe-inline'"],
       }, {
         enabled: true,

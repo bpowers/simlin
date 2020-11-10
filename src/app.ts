@@ -162,7 +162,7 @@ class App {
       'frame-ancestors': ["'self'"],
       'img-src': ["'self'", 'data:', 'https://*.googleusercontent.com'],
       'object-src': ["'none'"],
-      'script-src': ["'self'"].concat(additionalScriptSrcs),
+      'script-src': ["'self'", 'blob:'].concat(additionalScriptSrcs),
       'script-src-attr': ["'none'"],
       'style-src': ["'self'", 'https://fonts.googleapis.com', "'unsafe-inline'"],
       'upgrade-insecure-requests': [],
