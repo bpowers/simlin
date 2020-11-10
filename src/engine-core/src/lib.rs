@@ -21,9 +21,7 @@ mod ast;
 mod project_io {
     include!(concat!(env!("OUT_DIR"), "/project_io.rs"));
 }
-mod ast_io {
-    include!(concat!(env!("OUT_DIR"), "/ast_io.rs"));
-}
+mod project;
 mod equation {
     #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/equation.rs"));

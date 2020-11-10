@@ -15,7 +15,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 
-const PROTOS: &[&str] = &["src/ast_io.proto", "src/project_io.proto"];
+const PROTOS: &[&str] = &["src/project_io.proto"];
 
 const XMILE_SUFFIX: &str = ".stmx";
 

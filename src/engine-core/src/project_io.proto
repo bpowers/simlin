@@ -2,11 +2,25 @@ syntax = "proto3";
 
 package project_io;
 
+message GraphicalFunction {
+  enum Kind {
+    Continuous = 0;
+  };
+  message Scale {
+    double min = 1;
+    double max = 2;
+  }
+  Kind kind = 1;
+  repeated double yPoints = 2;
+  Scale xScale = 3;
+  Scale yScale = 4;
+}
+
 message Variable {
   message Stock {
-    string name = 1;
-    string eqn = 2;
-    string doc = 3;
+    string ident = 1;
+    string equation = 2;
+    string documentation = 3;
     string units = 4;
     repeated string inflows = 5;
     repeated string outflows = 6;
@@ -15,21 +29,21 @@ message Variable {
   };
 
   message Flow {
-    string name = 1;
-    string eqn = 2;
-    string doc = 3;
+    string ident = 1;
+    string equation = 2;
+    string documentation = 3;
     string units = 4;
-    // GF gf = 5;
+    GraphicalFunction gf = 5;
     bool non_negative = 7;
     // dimensions
   };
 
   message Aux {
-    string name = 1;
-    string eqn = 2;
-    string doc = 3;
+    string ident = 1;
+    string equation = 2;
+    string documentation = 3;
     string units = 4;
-    // GF gf = 5;
+    GraphicalFunction gf = 5;
     // dimensions
   };
 
@@ -39,9 +53,9 @@ message Variable {
       string dst = 2;
     };
 
-    string name = 1;
+    string ident = 1;
     string model_name = 2;
-    string doc = 3;
+    string documentation = 3;
     string units = 4;
     repeated Reference references = 5;
   };
@@ -56,9 +70,9 @@ message Variable {
 
 enum ViewType {
   STOCK_FLOW = 0;
-  INTERFACE = 1;
-  POPUP = 2;
-  VENDOR_SPECIFIC = 3;
+  // INTERFACE = 1;
+  // POPUP = 2;
+  // VENDOR_SPECIFIC = 3;
 };
 
 enum LabelSide {
@@ -70,6 +84,14 @@ enum LabelSide {
 };
 
 message ViewElement {
+  message Aux {
+    string name = 1;
+    int32 uid = 2;
+    double x = 3;
+    double y = 4;
+    LabelSide label_side = 5;
+  };
+
   message Stock {
     string name = 1;
     int32 uid = 2;
@@ -88,15 +110,7 @@ message ViewElement {
     int32 uid = 2;
     int32 segmentWithAux = 3;
     double auxPercentageIntoSegment = 4;
-    repeated FlowPoint flowPoints = 5;
-  };
-
-  message Aux {
-    string name = 1;
-    int32 uid = 2;
-    double x = 3;
-    double y = 4;
-    LabelSide label_side = 5;
+    repeated FlowPoint points = 5;
   };
 
   message Link {
@@ -116,19 +130,19 @@ message ViewElement {
     LabelSide label_side = 5;
   };
 
-  message Cloud {
-    int32 uid = 1;
-    int32 flowUid = 2;
-    double x = 3;
-    double y = 4;
-  };
-
   message Alias {
     int32 uid = 1;
     int32 aliasOfUid = 2;
     double x = 3;
     double y = 4;
     LabelSide label_side = 5;
+  };
+
+  message Cloud {
+    int32 uid = 1;
+    int32 flowUid = 2;
+    double x = 3;
+    double y = 4;
   };
 
   oneof ve {
@@ -145,7 +159,7 @@ message ViewElement {
 message View {
   ViewType type = 1;
   // background
-  repeated ViewElement objects = 3;
+  repeated ViewElement elements = 3;
 };
 
 message Model {
@@ -155,3 +169,22 @@ message Model {
   repeated Variable variables = 3;
   repeated View views = 4;
 }
+
+enum SimMethod {
+  EULER = 0;
+}
+
+message SimSpecs {
+  double start = 1;
+  double stop = 2;
+  double dt = 3;
+  double saveStep = 4;
+  SimMethod simMethod = 5;
+  string timeUnits = 6;
+};
+
+message Project {
+  string name = 1;
+  SimSpecs simSpecs = 2;
+  repeated Model models = 3;
+};
