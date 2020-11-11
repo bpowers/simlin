@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::common::canonicalize;
 use super::datamodel;
 
 // const VERSION: &str = "1.0";
@@ -405,6 +406,29 @@ pub struct Model {
     pub views: Option<Views>,
 }
 
+impl From<Model> for datamodel::Model {
+    fn from(model: Model) -> Self {
+        datamodel::Model {
+            name: model.name.unwrap_or_else(|| "main".to_string()),
+            variables: vec![],
+            views: vec![],
+        }
+    }
+}
+
+impl From<datamodel::Model> for Model {
+    fn from(model: datamodel::Model) -> Self {
+        Model {
+            name: Some(model.name),
+            namespaces: None,
+            resource: None,
+            sim_specs: None,
+            variables: None,
+            views: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
     #[serde(rename = "$value")]
@@ -538,6 +562,40 @@ pub struct Module {
     #[serde(rename = "$value", default)]
     pub refs: Vec<Reference>,
 }
+
+impl From<Module> for datamodel::Module {
+    fn from(module: Module) -> Self {
+        datamodel::Module {
+            ident: canonicalize(&module.name),
+            model_name: match module.model_name {
+                Some(model_name) => canonicalize(&model_name),
+                None => canonicalize(&module.name),
+            },
+            documentation: module.doc.unwrap_or_default(),
+            units: module.units,
+            // FIXME
+            references: vec![],
+        }
+    }
+}
+
+impl From<datamodel::Module> for Module {
+    fn from(module: datamodel::Module) -> Self {
+        Module {
+            name: module.ident,
+            model_name: Some(module.model_name),
+            doc: if module.documentation.is_empty() {
+                None
+            } else {
+                Some(module.documentation)
+            },
+            units: module.units,
+            // FIXME
+            refs: vec![],
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reference {
@@ -571,6 +629,55 @@ pub struct Stock {
     pub dimensions: Option<VarDimensions>,
 }
 
+impl From<Stock> for datamodel::Stock {
+    fn from(stock: Stock) -> Self {
+        datamodel::Stock {
+            ident: canonicalize(&stock.name),
+            equation: stock.eqn.unwrap_or_default(),
+            documentation: stock.doc.unwrap_or_default(),
+            units: stock.units,
+            inflows: stock.inflows.unwrap_or_default(),
+            outflows: stock.outflows.unwrap_or_default(),
+            non_negative: stock.non_negative.is_some(),
+        }
+    }
+}
+
+impl From<datamodel::Stock> for Stock {
+    fn from(stock: datamodel::Stock) -> Self {
+        Stock {
+            name: stock.ident,
+            eqn: if stock.equation.is_empty() {
+                None
+            } else {
+                Some(stock.equation)
+            },
+            doc: if stock.documentation.is_empty() {
+                None
+            } else {
+                Some(stock.documentation)
+            },
+            units: stock.units,
+            inflows: if stock.inflows.is_empty() {
+                None
+            } else {
+                Some(stock.inflows)
+            },
+            outflows: if stock.outflows.is_empty() {
+                None
+            } else {
+                Some(stock.outflows)
+            },
+            non_negative: if stock.non_negative {
+                Some(NonNegative {})
+            } else {
+                None
+            },
+            dimensions: None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Flow {
     pub name: String,
@@ -582,6 +689,51 @@ pub struct Flow {
     pub dimensions: Option<VarDimensions>,
 }
 
+impl From<Flow> for datamodel::Flow {
+    fn from(flow: Flow) -> Self {
+        datamodel::Flow {
+            ident: canonicalize(&flow.name),
+            equation: flow.eqn.unwrap_or_default(),
+            documentation: flow.doc.unwrap_or_default(),
+            units: flow.units,
+            gf: match flow.gf {
+                Some(gf) => Some(datamodel::GraphicalFunction::from(gf)),
+                None => None,
+            },
+            non_negative: flow.non_negative.is_some(),
+        }
+    }
+}
+
+impl From<datamodel::Flow> for Flow {
+    fn from(flow: datamodel::Flow) -> Self {
+        Flow {
+            name: flow.ident,
+            eqn: if flow.equation.is_empty() {
+                None
+            } else {
+                Some(flow.equation)
+            },
+            doc: if flow.documentation.is_empty() {
+                None
+            } else {
+                Some(flow.documentation)
+            },
+            units: flow.units,
+            gf: match flow.gf {
+                Some(gf) => Some(GF::from(gf)),
+                None => None,
+            },
+            non_negative: if flow.non_negative {
+                Some(NonNegative {})
+            } else {
+                None
+            },
+            dimensions: None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Aux {
     pub name: String,
@@ -590,6 +742,45 @@ pub struct Aux {
     pub units: Option<String>,
     pub gf: Option<GF>,
     pub dimensions: Option<VarDimensions>,
+}
+
+impl From<Aux> for datamodel::Aux {
+    fn from(aux: Aux) -> Self {
+        datamodel::Aux {
+            ident: canonicalize(&aux.name),
+            equation: aux.eqn.unwrap_or_default(),
+            documentation: aux.doc.unwrap_or_default(),
+            units: aux.units,
+            gf: match aux.gf {
+                Some(gf) => Some(datamodel::GraphicalFunction::from(gf)),
+                None => None,
+            },
+        }
+    }
+}
+
+impl From<datamodel::Aux> for Aux {
+    fn from(aux: datamodel::Aux) -> Self {
+        Aux {
+            name: aux.ident,
+            eqn: if aux.equation.is_empty() {
+                None
+            } else {
+                Some(aux.equation)
+            },
+            doc: if aux.documentation.is_empty() {
+                None
+            } else {
+                Some(aux.documentation)
+            },
+            units: aux.units,
+            gf: match aux.gf {
+                Some(gf) => Some(GF::from(gf)),
+                None => None,
+            },
+            dimensions: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -609,6 +800,28 @@ impl Var {
             Var::Flow(flow) => flow.name.as_str(),
             Var::Aux(aux) => aux.name.as_str(),
             Var::Module(module) => module.name.as_str(),
+        }
+    }
+}
+
+impl From<Var> for datamodel::Variable {
+    fn from(var: Var) -> Self {
+        match var {
+            Var::Stock(stock) => datamodel::Variable::Stock(datamodel::Stock::from(stock)),
+            Var::Flow(flow) => datamodel::Variable::Flow(datamodel::Flow::from(flow)),
+            Var::Aux(aux) => datamodel::Variable::Aux(datamodel::Aux::from(aux)),
+            Var::Module(module) => datamodel::Variable::Module(datamodel::Module::from(module)),
+        }
+    }
+}
+
+impl From<datamodel::Variable> for Var {
+    fn from(var: datamodel::Variable) -> Self {
+        match var {
+            datamodel::Variable::Stock(stock) => Var::Stock(Stock::from(stock)),
+            datamodel::Variable::Flow(flow) => Var::Flow(Flow::from(flow)),
+            datamodel::Variable::Aux(aux) => Var::Aux(Aux::from(aux)),
+            datamodel::Variable::Module(module) => Var::Module(Module::from(module)),
         }
     }
 }

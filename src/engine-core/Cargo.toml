@@ -27,6 +27,8 @@ rand = "0.7"
 csv = "1"
 
 [build-dependencies]
+lazy_static = "1"
+regex = "1"
 bincode = "1"
 lalrpop = "0.19"
 prost-build = { version = "0.6", git = "https://github.com/danburkert/prost", rev = "ca6de9fab99fb192fd8e1e684fc3aff980e0e911"}

@@ -2,19 +2,28 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-mod datamodel {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/datamodel.rs"));
-}
-
-mod xmile {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/xmile.rs"));
-}
+// because of our creative use of modules below, rustc wants to
+// warn about unused code in common.  Ignore those warnings here.
+#![allow(dead_code, unused_macros)]
 
 use std::env;
 use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::Path;
+
+#[macro_use]
+extern crate lazy_static;
+
+mod common {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/common.rs"));
+}
+mod datamodel {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/datamodel.rs"));
+}
+mod xmile {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/xmile.rs"));
+}
 
 const PROTOS: &[&str] = &["src/project_io.proto"];
 
