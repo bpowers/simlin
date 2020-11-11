@@ -2,8 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-extern crate bincode;
-extern crate lalrpop;
+use bincode;
+use lalrpop;
+
+mod datamodel {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/datamodel.rs"));
+}
 
 mod xmile {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/xmile.rs"));

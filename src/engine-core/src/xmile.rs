@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::project;
+use super::datamodel;
 
 // const VERSION: &str = "1.0";
 // const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
@@ -176,12 +176,12 @@ pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
-impl From<GraphicalFunctionKind> for project::GraphicalFunctionKind {
+impl From<GraphicalFunctionKind> for datamodel::GraphicalFunctionKind {
     fn from(kind: GraphicalFunctionKind) -> Self {
         match kind {
-            GraphicalFunctionKind::Continuous => project::GraphicalFunctionKind::Continuous,
-            GraphicalFunctionKind::Extrapolate => project::GraphicalFunctionKind::Extrapolate,
-            GraphicalFunctionKind::Discrete => project::GraphicalFunctionKind::Discrete,
+            GraphicalFunctionKind::Continuous => datamodel::GraphicalFunctionKind::Continuous,
+            GraphicalFunctionKind::Extrapolate => datamodel::GraphicalFunctionKind::Extrapolate,
+            GraphicalFunctionKind::Discrete => datamodel::GraphicalFunctionKind::Discrete,
         }
     }
 }
@@ -194,9 +194,9 @@ pub enum GraphicalFunctionKind {
     Discrete,
 }
 
-impl From<GraphicalFunctionScale> for project::GraphicalFunctionScale {
+impl From<GraphicalFunctionScale> for datamodel::GraphicalFunctionScale {
     fn from(scale: GraphicalFunctionScale) -> Self {
-        project::GraphicalFunctionScale {
+        datamodel::GraphicalFunctionScale {
             min: scale.min,
             max: scale.max,
         }
@@ -218,11 +218,11 @@ pub struct GF {
     pub y_pts: Option<String>, // comma separated list of points
 }
 
-impl From<GF> for project::GraphicalFunction {
+impl From<GF> for datamodel::GraphicalFunction {
     fn from(gf: GF) -> Self {
         use std::str::FromStr;
 
-        let kind = project::GraphicalFunctionKind::from(
+        let kind = datamodel::GraphicalFunctionKind::from(
             gf.kind.unwrap_or(GraphicalFunctionKind::Continuous),
         );
 
@@ -236,12 +236,12 @@ impl From<GF> for project::GraphicalFunction {
         };
 
         let x_scale = match gf.x_scale {
-            Some(x_scale) => project::GraphicalFunctionScale::from(x_scale),
-            None => project::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+            Some(x_scale) => datamodel::GraphicalFunctionScale::from(x_scale),
+            None => datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
         };
 
         let y_scale = match gf.y_scale {
-            Some(y_scale) => project::GraphicalFunctionScale::from(y_scale),
+            Some(y_scale) => datamodel::GraphicalFunctionScale::from(y_scale),
             None => {
                 let min = if y_points.is_empty() {
                     0.0
@@ -253,11 +253,11 @@ impl From<GF> for project::GraphicalFunction {
                 } else {
                     y_points.iter().fold(-f64::INFINITY, |a, &b| a.max(b))
                 };
-                project::GraphicalFunctionScale { min, max }
+                datamodel::GraphicalFunctionScale { min, max }
             }
         };
 
-        project::GraphicalFunction {
+        datamodel::GraphicalFunction {
             kind,
             y_points,
             x_scale,

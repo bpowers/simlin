@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// #![allow(dead_code)]
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum GraphicalFunctionKind {
     Continuous,
@@ -11,12 +9,13 @@ pub enum GraphicalFunctionKind {
     Discrete,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct GraphicalFunction {
     pub kind: GraphicalFunctionKind,
     pub y_points: Vec<f64>,
@@ -24,6 +23,7 @@ pub struct GraphicalFunction {
     pub y_scale: GraphicalFunctionScale,
 }
 
+#[allow(dead_code)]
 pub struct Stock {
     pub ident: String,
     pub equation: String,
@@ -34,6 +34,7 @@ pub struct Stock {
     pub non_negative: bool,
 }
 
+#[allow(dead_code)]
 pub struct Flow {
     pub ident: String,
     pub equation: String,
@@ -43,6 +44,7 @@ pub struct Flow {
     pub non_negative: bool,
 }
 
+#[allow(dead_code)]
 pub struct Aux {
     pub ident: String,
     pub equation: String,
@@ -51,11 +53,13 @@ pub struct Aux {
     pub units: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct ModuleReference {
     pub src: String,
     pub dst: String,
 }
 
+#[allow(dead_code)]
 pub struct Module {
     pub ident: String,
     pub model_name: String,
@@ -64,6 +68,7 @@ pub struct Module {
     pub references: Vec<ModuleReference>,
 }
 
+#[allow(dead_code)]
 pub enum Variable {
     Stock(Stock),
     Flow(Flow),
@@ -72,6 +77,7 @@ pub enum Variable {
 }
 
 pub mod view_element {
+    #[allow(dead_code)]
     pub enum LabelSide {
         Top,
         Left,
@@ -80,6 +86,7 @@ pub mod view_element {
         Right,
     }
 
+    #[allow(dead_code)]
     pub struct Aux {
         pub name: String,
         pub uid: i32,
@@ -88,6 +95,7 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
+    #[allow(dead_code)]
     pub struct Stock {
         pub name: String,
         pub uid: i32,
@@ -96,12 +104,14 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
+    #[allow(dead_code)]
     pub struct FlowPoint {
         pub x: f64,
         pub y: f64,
         pub attached_to_uid: Option<i32>,
     }
 
+    #[allow(dead_code)]
     pub struct Flow {
         pub name: String,
         pub uid: i32,
@@ -110,17 +120,20 @@ pub mod view_element {
         pub points: Vec<FlowPoint>,
     }
 
+    #[allow(dead_code)]
     pub enum LinkShape {
         Straight,
         Curved(f64), // angle in [0, 360)
     }
 
+    #[allow(dead_code)]
     pub struct Link {
         pub from_uid: i32,
         pub to_uid: i32,
         pub shape: LinkShape,
     }
 
+    #[allow(dead_code)]
     pub struct Module {
         pub name: String,
         pub uid: i32,
@@ -129,6 +142,7 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
+    #[allow(dead_code)]
     pub struct Alias {
         pub uid: i32,
         pub alias_of_uid: i32,
@@ -137,6 +151,7 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
+    #[allow(dead_code)]
     pub struct Cloud {
         pub uid: i32,
         pub flow_uid: i32,
@@ -145,6 +160,7 @@ pub mod view_element {
     }
 }
 
+#[allow(dead_code)]
 pub enum ViewElement {
     Aux(view_element::Aux),
     Stock(view_element::Stock),
@@ -155,24 +171,29 @@ pub enum ViewElement {
     Cloud(view_element::Cloud),
 }
 
+#[allow(dead_code)]
 pub struct StockFlow {
     pub elements: Vec<ViewElement>,
 }
 
+#[allow(dead_code)]
 pub enum View {
     StockFlow(StockFlow),
 }
 
+#[allow(dead_code)]
 pub struct Model {
     pub name: String,
     pub variables: Vec<Variable>,
     pub views: Vec<View>,
 }
 
+#[allow(dead_code)]
 pub enum SimMethod {
     Euler,
 }
 
+#[allow(dead_code)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -182,6 +203,7 @@ pub struct SimSpecs {
     pub time_units: Option<String>,
 }
 
+#[allow(dead_code)]
 pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,

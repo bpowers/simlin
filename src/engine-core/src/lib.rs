@@ -4,16 +4,10 @@
 
 #![forbid(unsafe_code)]
 
-use core;
 #[macro_use]
-use lazy_static;
-use prost;
-use quick_xml;
-use regex;
-use serde;
-use unicode_xid;
+extern crate lazy_static;
 #[macro_use]
-use float_cmp;
+extern crate float_cmp;
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -22,7 +16,7 @@ use std::rc::Rc;
 #[macro_use]
 mod common;
 mod ast;
-mod project;
+mod datamodel;
 pub mod project_io {
     include!(concat!(env!("OUT_DIR"), "/project_io.rs"));
 }
@@ -166,7 +160,7 @@ fn test_xml_gf_parsing() {
             name: None,
             kind: None,
             x_scale: None,
-            y_scale: Some(xmile::Scale {
+            y_scale: Some(xmile::GraphicalFunctionScale {
                 min: -1.0,
                 max: 1.0,
             }),

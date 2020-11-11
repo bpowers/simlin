@@ -634,7 +634,7 @@ fn test_tables() {
             name: None,
             kind: None,
             x_scale: None,
-            y_scale: Some(xmile::Scale {
+            y_scale: Some(xmile::GraphicalFunctionScale {
                 min: -1.0,
                 max: 1.0,
             }),
