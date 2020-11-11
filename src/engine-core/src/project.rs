@@ -2,12 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-#![allow(dead_code)]
+// #![allow(dead_code)]
 
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum GraphicalFunctionKind {
     Continuous,
+    Extrapolate,
+    Discrete,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,

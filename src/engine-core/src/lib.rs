@@ -4,24 +4,28 @@
 
 #![forbid(unsafe_code)]
 
-extern crate core;
+use core;
 #[macro_use]
-extern crate lazy_static;
-extern crate prost;
-extern crate quick_xml;
-extern crate regex;
-extern crate serde;
-extern crate unicode_xid;
+use lazy_static;
+use prost;
+use quick_xml;
+use regex;
+use serde;
+use unicode_xid;
 #[macro_use]
-extern crate float_cmp;
+use float_cmp;
+
+use std::collections::HashMap;
+use std::io::BufRead;
+use std::rc::Rc;
 
 #[macro_use]
 mod common;
 mod ast;
-mod project_io {
+mod project;
+pub mod project_io {
     include!(concat!(env!("OUT_DIR"), "/project_io.rs"));
 }
-mod project;
 mod equation {
     #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/equation.rs"));
@@ -39,11 +43,7 @@ mod stdlib {
 
 mod interpreter;
 
-use std::collections::HashMap;
-use std::io::BufRead;
-use std::rc::Rc;
-
-use self::common::Result;
+pub use self::common::Result;
 
 pub use self::common::{canonicalize, Ident};
 pub use self::sim::Method;

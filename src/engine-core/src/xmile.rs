@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::project;
+
 // const VERSION: &str = "1.0";
 // const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
 // const NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
@@ -169,33 +171,99 @@ pub struct Index {
     pub name: String,
 }
 
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+pub struct GraphicalFunctionScale {
+    pub min: f64,
+    pub max: f64,
+}
+impl From<GraphicalFunctionKind> for project::GraphicalFunctionKind {
+    fn from(kind: GraphicalFunctionKind) -> Self {
+        match kind {
+            GraphicalFunctionKind::Continuous => project::GraphicalFunctionKind::Continuous,
+            GraphicalFunctionKind::Extrapolate => project::GraphicalFunctionKind::Extrapolate,
+            GraphicalFunctionKind::Discrete => project::GraphicalFunctionKind::Discrete,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TableType {
+pub enum GraphicalFunctionKind {
     Continuous,
     Extrapolate,
     Discrete,
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-pub struct Scale {
-    pub min: f64,
-    pub max: f64,
+impl From<GraphicalFunctionScale> for project::GraphicalFunctionScale {
+    fn from(scale: GraphicalFunctionScale) -> Self {
+        project::GraphicalFunctionScale {
+            min: scale.min,
+            max: scale.max,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct GF {
     pub name: Option<String>,
     #[serde(rename = "type")]
-    pub kind: Option<TableType>,
+    pub kind: Option<GraphicalFunctionKind>,
     #[serde(rename = "xscale")]
-    pub x_scale: Option<Scale>,
+    pub x_scale: Option<GraphicalFunctionScale>,
     #[serde(rename = "yscale")]
-    pub y_scale: Option<Scale>,
+    pub y_scale: Option<GraphicalFunctionScale>,
     #[serde(rename = "xpts")]
     pub x_pts: Option<String>, // comma separated list of points
     #[serde(rename = "ypts")]
     pub y_pts: Option<String>, // comma separated list of points
+}
+
+impl From<GF> for project::GraphicalFunction {
+    fn from(gf: GF) -> Self {
+        use std::str::FromStr;
+
+        let kind = project::GraphicalFunctionKind::from(
+            gf.kind.unwrap_or(GraphicalFunctionKind::Continuous),
+        );
+
+        let y_points: std::result::Result<Vec<f64>, _> = match &gf.y_pts {
+            None => Ok(vec![]),
+            Some(y_pts) => y_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
+        };
+        let y_points: Vec<f64> = match y_points {
+            Ok(pts) => pts,
+            Err(_) => vec![],
+        };
+
+        let x_scale = match gf.x_scale {
+            Some(x_scale) => project::GraphicalFunctionScale::from(x_scale),
+            None => project::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+        };
+
+        let y_scale = match gf.y_scale {
+            Some(y_scale) => project::GraphicalFunctionScale::from(y_scale),
+            None => {
+                let min = if y_points.is_empty() {
+                    0.0
+                } else {
+                    y_points.iter().fold(f64::INFINITY, |a, &b| a.min(b))
+                };
+                let max = if y_points.is_empty() {
+                    1.0
+                } else {
+                    y_points.iter().fold(-f64::INFINITY, |a, &b| a.max(b))
+                };
+                project::GraphicalFunctionScale { min, max }
+            }
+        };
+
+        project::GraphicalFunction {
+            kind,
+            y_points,
+            x_scale,
+            y_scale,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
