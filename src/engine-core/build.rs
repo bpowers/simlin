@@ -2,9 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use bincode;
-use lalrpop;
-
 mod datamodel {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/datamodel.rs"));
 }

@@ -151,11 +151,78 @@ pub struct SimSpecs {
     pub time_units: Option<String>,
 }
 
+impl From<SimSpecs> for datamodel::SimSpecs {
+    fn from(sim_specs: SimSpecs) -> Self {
+        let sim_method = sim_specs
+            .method
+            .unwrap_or_else(|| "euler".to_string())
+            .to_lowercase();
+        datamodel::SimSpecs {
+            start: sim_specs.start,
+            stop: sim_specs.stop,
+            dt: match sim_specs.dt {
+                Some(dt) => datamodel::Dt::from(dt),
+                None => Default::default(),
+            },
+            save_step: sim_specs.save_step,
+            // FIXME: the spec says method is technically a
+            //   comma separated list of fallbacks
+            sim_method: match sim_method.as_str() {
+                "euler" => datamodel::SimMethod::Euler,
+                "rk4" => datamodel::SimMethod::RungeKutta4,
+                _ => datamodel::SimMethod::Euler,
+            },
+            time_units: sim_specs.time_units,
+        }
+    }
+}
+
+impl From<datamodel::SimSpecs> for SimSpecs {
+    fn from(sim_specs: datamodel::SimSpecs) -> Self {
+        SimSpecs {
+            start: sim_specs.start,
+            stop: sim_specs.stop,
+            dt: Some(Dt::from(sim_specs.dt)),
+            save_step: sim_specs.save_step,
+            method: Some(match sim_specs.sim_method {
+                datamodel::SimMethod::Euler => "euler".to_string(),
+                datamodel::SimMethod::RungeKutta4 => "rk4".to_string(),
+            }),
+            time_units: sim_specs.time_units,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Dt {
     #[serde(rename = "$value")]
     pub value: f64,
     pub reciprocal: Option<bool>,
+}
+
+impl From<Dt> for datamodel::Dt {
+    fn from(dt: Dt) -> Self {
+        if dt.reciprocal.unwrap_or(false) {
+            datamodel::Dt::Reciprocal(dt.value)
+        } else {
+            datamodel::Dt::Dt(dt.value)
+        }
+    }
+}
+
+impl From<datamodel::Dt> for Dt {
+    fn from(dt: datamodel::Dt) -> Self {
+        match dt {
+            datamodel::Dt::Dt(value) => Dt {
+                value,
+                reciprocal: None,
+            },
+            datamodel::Dt::Reciprocal(value) => Dt {
+                value,
+                reciprocal: Some(true),
+            },
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -176,12 +243,21 @@ pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
 }
-impl From<GraphicalFunctionKind> for datamodel::GraphicalFunctionKind {
-    fn from(kind: GraphicalFunctionKind) -> Self {
-        match kind {
-            GraphicalFunctionKind::Continuous => datamodel::GraphicalFunctionKind::Continuous,
-            GraphicalFunctionKind::Extrapolate => datamodel::GraphicalFunctionKind::Extrapolate,
-            GraphicalFunctionKind::Discrete => datamodel::GraphicalFunctionKind::Discrete,
+
+impl From<GraphicalFunctionScale> for datamodel::GraphicalFunctionScale {
+    fn from(scale: GraphicalFunctionScale) -> Self {
+        datamodel::GraphicalFunctionScale {
+            min: scale.min,
+            max: scale.max,
+        }
+    }
+}
+
+impl From<datamodel::GraphicalFunctionScale> for GraphicalFunctionScale {
+    fn from(scale: datamodel::GraphicalFunctionScale) -> Self {
+        GraphicalFunctionScale {
+            min: scale.min,
+            max: scale.max,
         }
     }
 }
@@ -194,11 +270,22 @@ pub enum GraphicalFunctionKind {
     Discrete,
 }
 
-impl From<GraphicalFunctionScale> for datamodel::GraphicalFunctionScale {
-    fn from(scale: GraphicalFunctionScale) -> Self {
-        datamodel::GraphicalFunctionScale {
-            min: scale.min,
-            max: scale.max,
+impl From<GraphicalFunctionKind> for datamodel::GraphicalFunctionKind {
+    fn from(kind: GraphicalFunctionKind) -> Self {
+        match kind {
+            GraphicalFunctionKind::Continuous => datamodel::GraphicalFunctionKind::Continuous,
+            GraphicalFunctionKind::Extrapolate => datamodel::GraphicalFunctionKind::Extrapolate,
+            GraphicalFunctionKind::Discrete => datamodel::GraphicalFunctionKind::Discrete,
+        }
+    }
+}
+
+impl From<datamodel::GraphicalFunctionKind> for GraphicalFunctionKind {
+    fn from(kind: datamodel::GraphicalFunctionKind) -> Self {
+        match kind {
+            datamodel::GraphicalFunctionKind::Continuous => GraphicalFunctionKind::Continuous,
+            datamodel::GraphicalFunctionKind::Extrapolate => GraphicalFunctionKind::Extrapolate,
+            datamodel::GraphicalFunctionKind::Discrete => GraphicalFunctionKind::Discrete,
         }
     }
 }
@@ -262,6 +349,25 @@ impl From<GF> for datamodel::GraphicalFunction {
             y_points,
             x_scale,
             y_scale,
+        }
+    }
+}
+
+impl From<datamodel::GraphicalFunction> for GF {
+    fn from(gf: datamodel::GraphicalFunction) -> Self {
+        let y_pts = gf
+            .y_points
+            .into_iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<String>>()
+            .join(",");
+        GF {
+            name: None,
+            kind: Some(GraphicalFunctionKind::from(gf.kind)),
+            x_scale: Some(GraphicalFunctionScale::from(gf.x_scale)),
+            y_scale: Some(GraphicalFunctionScale::from(gf.y_scale)),
+            x_pts: None, // we don't use these
+            y_pts: Some(y_pts),
         }
     }
 }

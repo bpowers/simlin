@@ -188,16 +188,30 @@ pub struct Model {
     pub views: Vec<View>,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SimMethod {
     Euler,
+    RungeKutta4,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Debug)]
+pub enum Dt {
+    Dt(f64),
+    Reciprocal(f64),
+}
+
+/// The default dt is 1, just like XMILE
+impl Default for Dt {
+    fn default() -> Self {
+        Dt::Dt(1.0)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
-    pub dt: f64,
+    pub dt: Dt,
     pub save_step: Option<f64>,
     pub sim_method: SimMethod,
     pub time_units: Option<String>,
