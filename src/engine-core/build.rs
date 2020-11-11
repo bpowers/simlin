@@ -2,23 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use bincode;
-use lalrpop;
-
-mod datamodel {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/datamodel.rs"));
-}
+extern crate bincode;
+extern crate lalrpop;
 
 mod xmile {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/xmile/datamodel.rs"
-    ));
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/xmile.rs"));
 }
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 use std::path::Path;
 
 const PROTOS: &[&str] = &["src/project_io.proto"];

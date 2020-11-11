@@ -176,7 +176,7 @@ pub fn canonicalize(name: &str) -> String {
 
 #[test]
 fn test_canonicalize() {
-    assert_eq!(canonicalize("\"quoted\""), "quoted");
-    assert_eq!(canonicalize("   a b"), "a_b");
-    assert_eq!(canonicalize("Å\nb"), "å_b");
+    assert!(canonicalize("\"quoted\"") == "quoted");
+    assert!(canonicalize("   a b") == "a_b");
+    assert!(canonicalize("Å\nb") == "å_b");
 }
