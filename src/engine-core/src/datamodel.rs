@@ -23,7 +23,7 @@ pub struct GraphicalFunction {
     pub y_scale: GraphicalFunctionScale,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Stock {
     pub ident: String,
     pub equation: String,
@@ -34,7 +34,7 @@ pub struct Stock {
     pub non_negative: bool,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Flow {
     pub ident: String,
     pub equation: String,
@@ -44,7 +44,7 @@ pub struct Flow {
     pub non_negative: bool,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Aux {
     pub ident: String,
     pub equation: String,
@@ -53,13 +53,13 @@ pub struct Aux {
     pub units: Option<String>,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModuleReference {
     pub src: String,
     pub dst: String,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Module {
     pub ident: String,
     pub model_name: String,
@@ -68,7 +68,7 @@ pub struct Module {
     pub references: Vec<ModuleReference>,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Variable {
     Stock(Stock),
     Flow(Flow),
