@@ -64,7 +64,7 @@ impl Project {
 
         use model::Model;
 
-        let models: HashMap<String, HashMap<Ident, &xmile::Var>> = HashMap::new();
+        let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = HashMap::new();
 
         // first, pull in the models we need from the stdlib
         let mut models_list: Vec<Model> = self::stdlib::MODEL_NAMES
@@ -73,13 +73,15 @@ impl Project {
             .map(|x_model| Model::new(&models, &x_model))
             .collect();
 
-        let models: HashMap<String, HashMap<Ident, &xmile::Var>> = file
-            .models
+        let file_models: Vec<datamodel::Model> =
+            file.models.iter().map(xmile::convert_model).collect();
+
+        let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = file_models
             .iter()
-            .map(|m| model::build_xvars_map(m.get_name().to_string(), m))
+            .map(|m| model::build_xvars_map(m.name.clone(), &m))
             .collect();
 
-        models_list.extend(file.models.iter().map(|m| Model::new(&models, m)));
+        models_list.extend(file_models.iter().map(|m| Model::new(&models, m)));
 
         let models = models_list
             .into_iter()

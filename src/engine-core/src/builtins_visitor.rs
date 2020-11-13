@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::ast::{print_eqn, Expr};
 use crate::builtins::is_builtin_fn;
 use crate::common::{EquationError, Ident};
-use crate::xmile;
+use crate::datamodel;
 
 fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
     let args = match name {
@@ -24,7 +24,7 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
 pub struct BuiltinVisitor<'a> {
     #[allow(dead_code)]
     variable_name: &'a str,
-    vars: HashMap<Ident, xmile::Var>,
+    vars: HashMap<Ident, datamodel::Variable>,
     n: usize,
 }
 
@@ -69,13 +69,12 @@ impl<'a> BuiltinVisitor<'a> {
                         } else {
                             let id = format!("$·{}·{}·arg{}", self.variable_name, self.n, i);
                             let eqn = print_eqn(&arg);
-                            let x_var = xmile::Var::Aux(xmile::Aux {
-                                name: id.clone(),
-                                eqn: Some(eqn),
-                                doc: None,
+                            let x_var = datamodel::Variable::Aux(datamodel::Aux {
+                                ident: id.clone(),
+                                equation: eqn,
+                                documentation: "".to_string(),
                                 units: None,
                                 gf: None,
-                                dimensions: None,
                             });
                             self.vars.insert(id.clone(), x_var);
                             id
@@ -84,22 +83,20 @@ impl<'a> BuiltinVisitor<'a> {
                     .collect();
 
                 let module_name = format!("$·{}·{}·{}", self.variable_name, self.n, func);
-                let refs: Vec<_> = ident_args
+                let references: Vec<_> = ident_args
                     .into_iter()
                     .enumerate()
-                    .map(|(i, src)| {
-                        xmile::Reference::Connect(xmile::Connect {
-                            src,
-                            dst: format!("{}.{}", module_name, stdlib_model_inputs[i]),
-                        })
+                    .map(|(i, src)| datamodel::ModuleReference {
+                        src,
+                        dst: format!("{}.{}", module_name, stdlib_model_inputs[i]),
                     })
                     .collect();
-                let x_module = xmile::Var::Module(xmile::Module {
-                    name: module_name.clone(),
-                    model_name: Some(format!("stdlib·{}", func)),
-                    doc: None,
+                let x_module = datamodel::Variable::Module(datamodel::Module {
+                    ident: module_name.clone(),
+                    model_name: format!("stdlib·{}", func),
+                    documentation: "".to_string(),
                     units: None,
-                    refs,
+                    references,
                 });
                 let module_output_name = format!("{}.output", module_name);
                 self.vars.insert(module_name, x_module);
@@ -134,7 +131,7 @@ fn test_builtin_visitor() {}
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Expr,
-) -> std::result::Result<(Expr, Vec<xmile::Var>), EquationError> {
+) -> std::result::Result<(Expr, Vec<datamodel::Variable>), EquationError> {
     let mut builtin_visitor = BuiltinVisitor::new(variable_name);
     let ast = builtin_visitor.walk(ast)?;
     let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();

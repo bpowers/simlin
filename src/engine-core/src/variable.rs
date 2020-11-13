@@ -8,16 +8,16 @@ use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
 use crate::builtins_visitor::instantiate_implicit_modules;
-use crate::common::{canonicalize, EquationError, Error, Ident, Result};
+use crate::common::{EquationError, Error, Ident, Result};
+use crate::datamodel;
 use crate::model::resolve_relative;
-use crate::xmile;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
-    x_range: Option<(f64, f64)>,
-    y_range: Option<(f64, f64)>,
+    x_range: datamodel::GraphicalFunctionScale,
+    y_range: datamodel::GraphicalFunctionScale,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -120,62 +120,37 @@ impl Variable {
     }
 }
 
-fn parse_table(ident: &str, gf: &Option<xmile::GF>) -> Result<Option<Table>> {
-    use std::str::FromStr;
-
+fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> Result<Option<Table>> {
     if gf.is_none() {
         return Ok(None);
     }
     let gf = gf.as_ref().unwrap();
 
-    let x_range: Option<(f64, f64)> = gf.x_scale.as_ref().map(|scale| (scale.min, scale.max));
-    let y_range: Option<(f64, f64)> = gf.y_scale.as_ref().map(|scale| (scale.min, scale.max));
-
-    let y: std::result::Result<Vec<f64>, _> = match &gf.y_pts {
-        None => Ok(vec![]),
-        Some(y_pts) => y_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
-    };
-    if y.is_err() {
-        return var_err!(BadTable, ident.to_string());
-    }
-    let y = y.unwrap();
-
-    let x: std::result::Result<Vec<f64>, _> = match &gf.x_pts {
+    let x: Vec<f64> = match &gf.x_points {
+        Some(x_points) => x_points.clone(),
         None => {
-            if let Some((x_min, x_max)) = x_range {
-                let size = y.len() as f64;
-                Ok(y.iter()
-                    .enumerate()
-                    .map(|(i, _)| ((i as f64) / (size - 1.0)) * (x_max - x_min) + x_min)
-                    .collect())
-            } else {
-                Ok(vec![])
-            }
+            let x_min = gf.x_scale.min;
+            let x_max = gf.x_scale.max;
+            let size = gf.y_points.len() as f64;
+            gf.y_points
+                .iter()
+                .enumerate()
+                .map(|(i, _)| ((i as f64) / (size - 1.0)) * (x_max - x_min) + x_min)
+                .collect()
         }
-        Some(x_pts) => x_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
     };
-    if x.is_err() {
-        return var_err!(BadTable, ident.to_string());
-    }
-    let x = x.unwrap();
 
     Ok(Some(Table {
         x,
-        y,
-        x_range,
-        y_range,
+        y: gf.y_points.clone(),
+        x_range: gf.x_scale.clone(),
+        y_range: gf.y_scale.clone(),
     }))
 }
 
-fn parse_eqn(eqn: &Option<String>) -> (Option<ast::Expr>, Vec<EquationError>) {
+fn parse_eqn(eqn: &str) -> (Option<ast::Expr>, Vec<EquationError>) {
     let mut errs = Vec::new();
 
-    if eqn.is_none() {
-        return (None, errs);
-    }
-
-    let eqn_string = eqn.as_ref().unwrap();
-    let eqn = eqn_string.as_str();
     let lexer = crate::token::Lexer::new(eqn);
     match crate::equation::EquationParser::new().parse(eqn, lexer) {
         Ok(ast) => (Some(ast), errs),
@@ -223,13 +198,13 @@ fn parse_eqn(eqn: &Option<String>) -> (Option<ast::Expr>, Vec<EquationError>) {
 }
 
 pub fn parse_var(
-    models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
+    models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
     model_name: &str,
-    v: &xmile::Var,
-    implicit_vars: &mut Vec<xmile::Var>,
+    v: &datamodel::Variable,
+    implicit_vars: &mut Vec<datamodel::Variable>,
 ) -> Variable {
     let mut parse_and_lower_eqn =
-        |ident: &str, eqn: &Option<String>| -> (Option<Expr>, HashSet<Ident>, Vec<EquationError>) {
+        |ident: &str, eqn: &str| -> (Option<Expr>, HashSet<Ident>, Vec<EquationError>) {
             let (ast, mut errors) = parse_eqn(eqn);
             let ast = match ast {
                 Some(ast) => match instantiate_implicit_modules(ident, ast) {
@@ -252,17 +227,9 @@ pub fn parse_var(
             (ast, direct_deps, errors)
         };
     match v {
-        xmile::Var::Stock(v) => {
-            let ident = canonicalize(v.name.as_ref());
-            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.eqn);
-            let inflows = match &v.inflows {
-                None => Vec::new(),
-                Some(inflows) => inflows.iter().map(|id| canonicalize(id)).collect(),
-            };
-            let outflows = match &v.outflows {
-                None => Vec::new(),
-                Some(outflows) => outflows.iter().map(|id| canonicalize(id)).collect(),
-            };
+        datamodel::Variable::Stock(v) => {
+            let ident = v.ident.clone();
+            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
             let errors = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
@@ -270,23 +237,23 @@ pub fn parse_var(
             Variable::Stock {
                 ident,
                 ast,
-                eqn: v.eqn.clone(),
+                eqn: Some(v.equation.clone()),
                 units: v.units.clone(),
-                inflows,
-                outflows,
-                non_negative: v.non_negative.is_some(),
+                inflows: v.inflows.clone(),
+                outflows: v.outflows.clone(),
+                non_negative: v.non_negative,
                 errors,
                 direct_deps,
             }
         }
-        xmile::Var::Flow(v) => {
-            let ident = canonicalize(v.name.as_ref());
-            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.eqn);
+        datamodel::Variable::Flow(v) => {
+            let ident = v.ident.clone();
+            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
             let mut errors: Vec<Error> = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
                 .collect();
-            let table = match parse_table(ident.as_str(), &v.gf) {
+            let table = match parse_table(&v.gf) {
                 Ok(table) => table,
                 Err(err) => {
                     errors.push(err);
@@ -296,24 +263,24 @@ pub fn parse_var(
             Variable::Var {
                 ident,
                 ast,
-                eqn: v.eqn.clone(),
+                eqn: Some(v.equation.clone()),
                 units: v.units.clone(),
                 table,
                 is_flow: true,
                 is_table_only: false,
-                non_negative: v.non_negative.is_some(),
+                non_negative: v.non_negative,
                 errors,
                 direct_deps,
             }
         }
-        xmile::Var::Aux(v) => {
-            let ident = canonicalize(v.name.as_ref());
-            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.eqn);
+        datamodel::Variable::Aux(v) => {
+            let ident = v.ident.clone();
+            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
             let mut errors: Vec<Error> = errors
                 .into_iter()
                 .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
                 .collect();
-            let table = match parse_table(ident.as_str(), &v.gf) {
+            let table = match parse_table(&v.gf) {
                 Ok(table) => table,
                 Err(err) => {
                     errors.push(err);
@@ -323,7 +290,7 @@ pub fn parse_var(
             Variable::Var {
                 ident,
                 ast,
-                eqn: v.eqn.clone(),
+                eqn: Some(v.equation.clone()),
                 units: v.units.clone(),
                 table,
                 is_flow: false,
@@ -333,23 +300,13 @@ pub fn parse_var(
                 direct_deps,
             }
         }
-        xmile::Var::Module(v) => {
-            let ident = canonicalize(v.name.as_ref());
-            let input_prefix = format!("{}.", ident);
+        datamodel::Variable::Module(v) => {
+            let ident = v.ident.clone();
             let inputs: Vec<Result<ModuleInput>> = v
-                .refs
+                .references
                 .iter()
-                .filter(|r| matches!(r, xmile::Reference::Connect(_)))
-                .map(|r| {
-                    if let xmile::Reference::Connect(r) = r {
-                        (r.src.as_str(), r.dst.as_str())
-                    } else {
-                        unreachable!();
-                    }
-                })
-                .filter(|(_src, dst)| (*dst).starts_with(&input_prefix))
-                .map(|(src, dst)| {
-                    crate::model::resolve_module_input(models, model_name, &ident, src, dst)
+                .map(|mi| {
+                    crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
                 })
                 .collect();
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.into_iter().partition(Result::is_ok);
@@ -368,7 +325,7 @@ pub fn parse_var(
                     let src = resolve_relative(models, model_name, src);
                     // will be none if this is a temporary we created
                     if let Some(src) = src {
-                        if let xmile::Var::Stock(_) = src {
+                        if let datamodel::Variable::Stock(_) = src {
                             // if our input is a stock, we don't have any flow dependencies to
                             // order before us this dt
                             None
@@ -383,7 +340,7 @@ pub fn parse_var(
                 .map(|d| d.unwrap())
                 .collect();
             Variable::Module {
-                model_name: v.model_name.as_ref().unwrap_or(&ident).clone(),
+                model_name: v.model_name.clone(),
                 ident,
                 units: v.units.clone(),
                 inputs,
@@ -446,7 +403,7 @@ fn test_identifier_sets() {
     ];
 
     for (eqn, id_list) in cases.iter() {
-        let (ast, err) = parse_eqn(&Some(eqn.to_string()));
+        let (ast, err) = parse_eqn(eqn);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let ast = ast.unwrap();
@@ -541,7 +498,7 @@ fn test_parse() {
 
     for case in cases.iter() {
         let eqn = case.0;
-        let (ast, err) = parse_eqn(&Some(eqn.to_string()));
+        let (ast, err) = parse_eqn(eqn);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let ast = ast.unwrap();
@@ -550,7 +507,7 @@ fn test_parse() {
         assert_eq!(case.2, &printed);
     }
 
-    let (ast, err) = parse_eqn(&Some("NAN".to_string()));
+    let (ast, err) = parse_eqn("NAN");
     assert_eq!(err.len(), 0);
     assert!(ast.is_some());
     let ast = ast.unwrap();
@@ -580,68 +537,33 @@ fn test_parse_failures() {
     ];
 
     for case in failures {
-        let (ast, err) = parse_eqn(&Some(case.to_string()));
+        let (ast, err) = parse_eqn(case);
         assert!(ast.is_none());
         assert!(err.len() > 0);
     }
 }
 
 #[test]
-fn test_canonicalize_stock_inflows() {
-    use std::iter::FromIterator;
-
-    let input = xmile::Var::Stock(xmile::Stock {
-        name: "Heat Loss To Room".to_string(),
-        eqn: Some("total_population".to_string()),
-        doc: Some("People who can contract the disease.".to_string()),
-        units: Some("people".to_string()),
-        inflows: Some(vec!["\"Solar Radiation\"".to_string()]),
-        outflows: Some(vec![
-            "\"succumbing\"".to_string(),
-            "\"succumbing 2\"".to_string(),
-        ]),
-        non_negative: None,
-        dimensions: None,
-    });
-
-    let expected = Variable::Stock {
-        ident: "heat_loss_to_room".to_string(),
-        ast: Some(Expr::Var("total_population".to_string())),
-        eqn: Some("total_population".to_string()),
-        units: Some("people".to_string()),
-        inflows: vec!["solar_radiation".to_string()],
-        outflows: vec!["succumbing".to_string(), "succumbing_2".to_string()],
-        non_negative: false,
-        errors: vec![],
-        direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
-    };
-
-    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
-
-    let output = parse_var(&HashMap::new(), "main", &input, &mut implicit_vars);
-
-    assert_eq!(expected, output);
-}
-
-#[test]
 fn test_tables() {
-    let input = xmile::Var::Aux(xmile::Aux {
-        name: "lookup function table".to_string(),
-        eqn: Some("0".to_string()),
-        doc: None,
+    use crate::common::canonicalize;
+    let input = datamodel::Variable::Aux(datamodel::Aux {
+        ident: canonicalize("lookup function table"),
+        equation: "0".to_string(),
+        documentation: "".to_string(),
         units: None,
-        gf: Some(xmile::GF {
-            name: None,
-            kind: None,
-            x_scale: None,
-            y_scale: Some(xmile::GraphicalFunctionScale {
+        gf: Some(datamodel::GraphicalFunction {
+            kind: datamodel::GraphicalFunctionKind::Continuous,
+            x_scale: datamodel::GraphicalFunctionScale {
+                min: 0.0,
+                max: 45.0,
+            },
+            y_scale: datamodel::GraphicalFunctionScale {
                 min: -1.0,
                 max: 1.0,
-            }),
-            x_pts: Some("0,5,10,15,20,25,30,35,40,45".to_string()),
-            y_pts: Some("0,0,1,1,0,0,-1,-1,0,0".to_string()),
+            },
+            x_points: None,
+            y_points: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
         }),
-        dimensions: None,
     });
 
     let expected = Variable::Var {
@@ -652,8 +574,14 @@ fn test_tables() {
         table: Some(Table {
             x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],
             y: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
-            x_range: None,
-            y_range: Some((-1.0, 1.0)),
+            x_range: datamodel::GraphicalFunctionScale {
+                min: 0.0,
+                max: 45.0,
+            },
+            y_range: datamodel::GraphicalFunctionScale {
+                min: -1.0,
+                max: 1.0,
+            },
         }),
         non_negative: false,
         is_flow: false,
@@ -671,8 +599,7 @@ fn test_tables() {
         assert!(false);
     }
 
-    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
-
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let output = parse_var(&HashMap::new(), "main", &input, &mut implicit_vars);
 
     assert_eq!(expected, output);

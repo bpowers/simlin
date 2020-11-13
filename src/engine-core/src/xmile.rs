@@ -314,6 +314,15 @@ impl From<GF> for datamodel::GraphicalFunction {
             gf.kind.unwrap_or(GraphicalFunctionKind::Continuous),
         );
 
+        let x_points: std::result::Result<Vec<f64>, _> = match &gf.x_pts {
+            None => Ok(vec![]),
+            Some(x_pts) => x_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
+        };
+        let x_points: Vec<f64> = match x_points {
+            Ok(pts) => pts,
+            Err(_) => vec![],
+        };
+
         let y_points: std::result::Result<Vec<f64>, _> = match &gf.y_pts {
             None => Ok(vec![]),
             Some(y_pts) => y_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
@@ -325,7 +334,19 @@ impl From<GF> for datamodel::GraphicalFunction {
 
         let x_scale = match gf.x_scale {
             Some(x_scale) => datamodel::GraphicalFunctionScale::from(x_scale),
-            None => datamodel::GraphicalFunctionScale { min: 0.0, max: 1.0 },
+            None => {
+                let min = if x_points.is_empty() {
+                    0.0
+                } else {
+                    x_points.iter().fold(f64::INFINITY, |a, &b| a.min(b))
+                };
+                let max = if x_points.is_empty() {
+                    1.0
+                } else {
+                    x_points.iter().fold(-f64::INFINITY, |a, &b| a.max(b))
+                };
+                datamodel::GraphicalFunctionScale { min, max }
+            }
         };
 
         let y_scale = match gf.y_scale {
@@ -347,6 +368,11 @@ impl From<GF> for datamodel::GraphicalFunction {
 
         datamodel::GraphicalFunction {
             kind,
+            x_points: if x_points.is_empty() {
+                None
+            } else {
+                Some(x_points)
+            },
             y_points,
             x_scale,
             y_scale,
@@ -356,6 +382,16 @@ impl From<GF> for datamodel::GraphicalFunction {
 
 impl From<datamodel::GraphicalFunction> for GF {
     fn from(gf: datamodel::GraphicalFunction) -> Self {
+        let x_pts: Option<String> = match gf.x_points {
+            Some(x_points) => Some(
+                x_points
+                    .into_iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<String>>()
+                    .join(","),
+            ),
+            None => None,
+        };
         let y_pts = gf
             .y_points
             .into_iter()
@@ -367,7 +403,7 @@ impl From<datamodel::GraphicalFunction> for GF {
             kind: Some(GraphicalFunctionKind::from(gf.kind)),
             x_scale: Some(GraphicalFunctionScale::from(gf.x_scale)),
             y_scale: Some(GraphicalFunctionScale::from(gf.y_scale)),
-            x_pts: None, // we don't use these
+            x_pts,
             y_pts: Some(y_pts),
         }
     }
@@ -577,22 +613,49 @@ pub struct Module {
 
 impl From<Module> for datamodel::Module {
     fn from(module: Module) -> Self {
+        let ident = canonicalize(&module.name);
+        let input_prefix = format!("{}.", ident);
+        let references: Vec<datamodel::ModuleReference> = module
+            .refs
+            .into_iter()
+            .filter(|r| matches!(r, Reference::Connect(_)))
+            .map(|r| {
+                if let Reference::Connect(r) = r {
+                    datamodel::ModuleReference {
+                        src: canonicalize(&r.src),
+                        dst: canonicalize(&r.dst),
+                    }
+                } else {
+                    unreachable!();
+                }
+            })
+            .filter(|mr| (*mr.dst).starts_with(&input_prefix))
+            .collect();
         datamodel::Module {
-            ident: canonicalize(&module.name),
+            ident,
             model_name: match module.model_name {
                 Some(model_name) => canonicalize(&model_name),
                 None => canonicalize(&module.name),
             },
             documentation: module.doc.unwrap_or_default(),
             units: module.units,
-            // FIXME
-            references: vec![],
+            references,
         }
     }
 }
 
 impl From<datamodel::Module> for Module {
     fn from(module: datamodel::Module) -> Self {
+        let refs: Vec<Reference> = module
+            .references
+            .into_iter()
+            .map(|mi| {
+                Reference::Connect(Connect {
+                    src: mi.src,
+                    dst: mi.dst,
+                })
+            })
+            .collect();
         Module {
             name: module.ident,
             model_name: Some(module.model_name),
@@ -602,8 +665,7 @@ impl From<datamodel::Module> for Module {
                 Some(module.documentation)
             },
             units: module.units,
-            // FIXME
-            refs: vec![],
+            refs,
         }
     }
 }
@@ -643,13 +705,25 @@ pub struct Stock {
 
 impl From<Stock> for datamodel::Stock {
     fn from(stock: Stock) -> Self {
+        let inflows = stock
+            .inflows
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| canonicalize(&id))
+            .collect();
+        let outflows = stock
+            .outflows
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| canonicalize(&id))
+            .collect();
         datamodel::Stock {
             ident: canonicalize(&stock.name),
             equation: stock.eqn.unwrap_or_default(),
             documentation: stock.doc.unwrap_or_default(),
             units: stock.units,
-            inflows: stock.inflows.unwrap_or_default(),
-            outflows: stock.outflows.unwrap_or_default(),
+            inflows,
+            outflows,
             non_negative: stock.non_negative.is_some(),
         }
     }
@@ -836,4 +910,47 @@ impl From<datamodel::Variable> for Var {
             datamodel::Variable::Module(module) => Var::Module(Module::from(module)),
         }
     }
+}
+
+#[test]
+fn test_canonicalize_stock_inflows() {
+    /*
+    use crate::common::canonicalize;
+    use std::iter::FromIterator;
+
+    let input = datamodel::Variable::Stock(datamodel::Stock {
+        ident: canonicalize("Heat Loss To Room"),
+        equation: "total_population".to_string(),
+        documentation: "People who can contract the disease.".to_string(),
+        units: Some("people".to_string()),
+        inflows: vec!["\"Solar Radiation\"".to_string()],
+        outflows: vec![
+            "\"succumbing\"".to_string(),
+            "\"succumbing 2\"".to_string(),
+        ],
+        non_negative: false,
+    });
+
+    let expected = Variable::Stock {
+        ident: "heat_loss_to_room".to_string(),
+        ast: Some(Expr::Var("total_population".to_string())),
+        eqn: Some("total_population".to_string()),
+        units: Some("people".to_string()),
+        inflows: vec!["solar_radiation".to_string()],
+        outflows: vec!["succumbing".to_string(), "succumbing_2".to_string()],
+        non_negative: false,
+        errors: vec![],
+        direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
+    };
+
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+
+    let output = parse_var(&HashMap::new(), "main", &input, &mut implicit_vars);
+
+    assert_eq!(expected, output);
+    */
+}
+
+pub fn convert_model(model: &Model) -> datamodel::Model {
+    datamodel::Model::from(model.clone())
 }

@@ -8,8 +8,7 @@
 
 use std::env;
 use std::fs;
-use std::io;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 
 #[macro_use]
@@ -67,13 +66,13 @@ fn build_stdlib() -> io::Result<()> {
     }
 
     // we don't want to serialize the whole xmile::File, just the models
-    let models: Vec<(String, xmile::Model)> = files
+    let models: Vec<(String, datamodel::Model)> = files
         .iter()
-        .map(|(name, f)| (name.clone(), f.models[0].clone()))
+        .map(|(name, f)| (name.clone(), datamodel::Model::from(f.models[0].clone())))
         .map(|(name, mut m)| {
             // this was the 1 hand-edit we did to stmx files, so lets just
             // automate adding it here when embedding them in the library
-            m.name = Some(format!("stdlib·{}", name));
+            m.name = format!("stdlib·{}", name);
             (name, m)
         })
         .collect();
@@ -87,7 +86,7 @@ fn build_stdlib() -> io::Result<()> {
         bincode::serialize_into(writer, model).unwrap();
 
         let serialized = bincode::serialize(model).unwrap();
-        let model2: xmile::Model = bincode::deserialize(serialized.as_slice()).unwrap();
+        let model2: datamodel::Model = bincode::deserialize(serialized.as_slice()).unwrap();
 
         // check that roundtripping through bincode is lossless
         assert!(*model == model2);
@@ -98,7 +97,7 @@ fn build_stdlib() -> io::Result<()> {
     write_stdlib_module(models)
 }
 
-fn write_stdlib_module(models: Vec<(String, xmile::Model)>) -> io::Result<()> {
+fn write_stdlib_module(models: Vec<(String, datamodel::Model)>) -> io::Result<()> {
     let out_dir = env::var_os("OUT_DIR").unwrap();
 
     let dest_path = Path::new(&out_dir).join("stdlib.rs");
@@ -106,7 +105,7 @@ fn write_stdlib_module(models: Vec<(String, xmile::Model)>) -> io::Result<()> {
 
     writeln!(
         writer,
-        "use crate::xmile;
+        "use crate::datamodel;
 
 pub const MODEL_NAMES: [&str; {}] = [",
         models.len()
@@ -121,11 +120,11 @@ pub const MODEL_NAMES: [&str; {}] = [",
         writer,
         "];
 
-fn hydrate(bytes: &[u8]) -> Option<xmile::Model> {{
+fn hydrate(bytes: &[u8]) -> Option<datamodel::Model> {{
     Some(bincode::deserialize(bytes).unwrap())
 }}
 
-pub fn get(name: &str) -> Option<xmile::Model> {{
+pub fn get(name: &str) -> Option<datamodel::Model> {{
     match name {{"
     )
     .unwrap();

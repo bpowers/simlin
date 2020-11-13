@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Error, Ident, Result};
+use crate::datamodel;
 use crate::variable::{parse_var, ModuleInput, Variable};
-use crate::xmile;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
@@ -114,10 +114,10 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
 }
 
 pub fn resolve_relative<'a>(
-    models: &HashMap<String, HashMap<Ident, &'a xmile::Var>>,
+    models: &HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
     model_name: &str,
     ident: &str,
-) -> Option<&'a xmile::Var> {
+) -> Option<&'a datamodel::Variable> {
     let ident = if model_name == "main" && ident.starts_with('.') {
         &ident[1..]
     } else {
@@ -141,7 +141,7 @@ pub fn resolve_relative<'a>(
 }
 
 pub fn resolve_module_input<'a>(
-    models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
+    models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
     model_name: &str,
     ident: &str,
     orig_src: &'a str,
@@ -179,30 +179,25 @@ pub fn resolve_module_input<'a>(
 
 impl Model {
     pub fn new(
-        models: &HashMap<String, HashMap<Ident, &xmile::Var>>,
-        x_model: &xmile::Model,
+        models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
+        x_model: &datamodel::Model,
     ) -> Self {
-        let empty_vars: xmile::Variables = xmile::Variables {
-            variables: Vec::new(),
-        };
-
-        let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+        let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
 
         let mut variable_list: Vec<Variable> = x_model
             .variables
-            .as_ref()
-            .unwrap_or(&empty_vars)
-            .variables
             .iter()
-            .map(|v| parse_var(models, x_model.get_name(), v, &mut implicit_vars))
+            .map(|v| parse_var(models, &x_model.name, v, &mut implicit_vars))
             .collect();
 
         {
             // FIXME: this is an unfortunate API choice
-            let mut dummy_implicit_vars: Vec<xmile::Var> = Vec::new();
-            variable_list.extend(implicit_vars.into_iter().map(|x_var| {
-                parse_var(models, x_model.get_name(), &x_var, &mut dummy_implicit_vars)
-            }));
+            let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
+            variable_list.extend(
+                implicit_vars.into_iter().map(|x_var| {
+                    parse_var(models, &x_model.name, &x_var, &mut dummy_implicit_vars)
+                }),
+            );
             assert_eq!(0, dummy_implicit_vars.len());
         }
 
@@ -230,7 +225,7 @@ impl Model {
         };
 
         Model {
-            name: x_model.name.as_ref().unwrap_or(&"main".to_string()).clone(),
+            name: x_model.name.clone(),
             variables: variable_list
                 .into_iter()
                 .map(|v| (v.ident().to_string(), v))
@@ -243,54 +238,47 @@ impl Model {
 }
 
 #[cfg(test)]
-fn optional_vec(slice: &[&str]) -> Option<Vec<String>> {
-    if slice.is_empty() {
-        None
-    } else {
-        Some(slice.iter().map(|id| id.to_string()).collect())
-    }
+fn optional_vec(slice: &[&str]) -> Vec<String> {
+    slice.iter().map(|id| id.to_string()).collect()
 }
 
 #[cfg(test)]
-fn x_module(ident: &str, refs: &[(&str, &str)]) -> xmile::Var {
-    use xmile::{Connect, Module, Reference, Var};
-    let refs: Vec<Reference> = refs
+fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
+    use datamodel::{Module, ModuleReference, Variable};
+    let references: Vec<ModuleReference> = refs
         .iter()
-        .map(|(src, dst)| {
-            Reference::Connect(Connect {
-                src: src.to_string(),
-                dst: dst.to_string(),
-            })
+        .map(|(src, dst)| ModuleReference {
+            src: src.to_string(),
+            dst: dst.to_string(),
         })
         .collect();
 
-    Var::Module(Module {
-        name: ident.to_string(),
-        model_name: None,
-        doc: None,
+    Variable::Module(Module {
+        ident: ident.to_string(),
+        model_name: ident.to_string(),
+        documentation: "".to_string(),
         units: None,
-        refs,
+        references,
     })
 }
 
 #[cfg(test)]
-fn x_flow(ident: &str, eqn: &str) -> xmile::Var {
-    use xmile::{Flow, Var};
-    Var::Flow(Flow {
-        name: ident.to_string(),
-        eqn: Some(eqn.to_string()),
-        doc: None,
+fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
+    use datamodel::{Flow, Variable};
+    Variable::Flow(Flow {
+        ident: ident.to_string(),
+        equation: eqn.to_string(),
+        documentation: "".to_string(),
         units: None,
         gf: None,
-        non_negative: None,
-        dimensions: None,
+        non_negative: false,
     })
 }
 
 #[cfg(test)]
 fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
-    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
     assert!(var.errors().is_none());
     assert!(implicit_vars.is_empty());
@@ -298,22 +286,21 @@ fn flow(ident: &str, eqn: &str) -> Variable {
 }
 
 #[cfg(test)]
-fn x_aux(ident: &str, eqn: &str) -> xmile::Var {
-    use xmile::{Aux, Var};
-    Var::Aux(Aux {
-        name: ident.to_string(),
-        eqn: Some(eqn.to_string()),
-        doc: None,
+fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
+    use datamodel::{Aux, Variable};
+    Variable::Aux(Aux {
+        ident: ident.to_string(),
+        equation: eqn.to_string(),
+        documentation: "".to_string(),
         units: None,
         gf: None,
-        dimensions: None,
     })
 }
 
 #[cfg(test)]
 fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
-    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
     assert!(var.errors().is_none());
     assert!(implicit_vars.is_empty());
@@ -321,24 +308,23 @@ fn aux(ident: &str, eqn: &str) -> Variable {
 }
 
 #[cfg(test)]
-fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> xmile::Var {
-    use xmile::{Stock, Var};
-    Var::Stock(Stock {
-        name: ident.to_string(),
-        eqn: Some(eqn.to_string()),
-        doc: None,
+fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> datamodel::Variable {
+    use datamodel::{Stock, Variable};
+    Variable::Stock(Stock {
+        ident: ident.to_string(),
+        equation: eqn.to_string(),
+        documentation: "".to_string(),
         units: None,
         inflows: optional_vec(inflows),
         outflows: optional_vec(outflows),
-        non_negative: None,
-        dimensions: None,
+        non_negative: false,
     })
 }
 
 #[cfg(test)]
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows);
-    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
     assert!(var.errors().is_none());
     assert!(implicit_vars.is_empty());
@@ -346,14 +332,11 @@ fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variabl
 }
 
 #[cfg(test)]
-fn x_model(ident: &str, variables: Vec<xmile::Var>) -> xmile::Model {
-    xmile::Model {
-        name: Some(ident.to_string()),
-        namespaces: None,
-        resource: None,
-        sim_specs: None,
-        variables: Some(xmile::Variables { variables }),
-        views: None,
+fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datamodel::Model {
+    datamodel::Model {
+        name: ident.to_string(),
+        variables,
+        views: vec![],
     }
 }
 
@@ -384,7 +367,7 @@ fn test_module_dependency() {
         ],
     );
 
-    let _models: HashMap<String, &xmile::Model> = vec![
+    let _models: HashMap<String, &datamodel::Model> = vec![
         ("main".to_string(), &main_model),
         ("lynxes".to_string(), &lynxes_model),
         ("hares".to_string(), &hares_model),
@@ -447,7 +430,7 @@ fn test_module_parse() {
         ],
     );
 
-    let models: HashMap<String, HashMap<Ident, &xmile::Var>> = vec![
+    let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = vec![
         ("main".to_string(), &main_model),
         ("lynxes".to_string(), &lynxes_model),
         ("hares".to_string(), &hares_model),
@@ -456,7 +439,7 @@ fn test_module_parse() {
     .map(|(name, m)| build_xvars_map(name, m))
     .collect();
 
-    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let actual = parse_var(&models, "main", models["main"]["hares"], &mut implicit_vars);
     assert!(actual.errors().is_none());
     assert!(implicit_vars.is_empty());
@@ -466,20 +449,14 @@ fn test_module_parse() {
 #[allow(dead_code)] // false positive
 pub fn build_xvars_map<'a>(
     name: Ident,
-    m: &'a xmile::Model,
-) -> (Ident, HashMap<Ident, &'a xmile::Var>) {
-    use crate::common::canonicalize;
-
+    m: &'a datamodel::Model,
+) -> (Ident, HashMap<Ident, &'a datamodel::Variable>) {
     (
         name,
-        match m.variables.as_ref() {
-            Some(vars) => vars
-                .variables
-                .iter()
-                .map(|v| (canonicalize(v.get_noncanonical_name()), v))
-                .collect(),
-            None => HashMap::new(),
-        },
+        m.variables
+            .iter()
+            .map(|v| (v.get_ident().to_string(), v))
+            .collect(),
     )
 }
 
@@ -539,13 +516,13 @@ fn test_all_deps() {
             x_flow("inflow", "mod_1.output"),
         ],
     );
-    let models: HashMap<String, HashMap<Ident, &xmile::Var>> =
+    let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> =
         vec![("main".to_string(), &main_model)]
             .into_iter()
             .map(|(name, m)| build_xvars_map(name, m))
             .collect();
 
-    let mut implicit_vars: Vec<xmile::Var> = Vec::new();
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let mod_1 = parse_var(&models, "main", models["main"]["mod_1"], &mut implicit_vars);
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
