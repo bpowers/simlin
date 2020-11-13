@@ -410,7 +410,14 @@ impl From<Model> for datamodel::Model {
     fn from(model: Model) -> Self {
         datamodel::Model {
             name: model.name.unwrap_or_else(|| "main".to_string()),
-            variables: vec![],
+            variables: match model.variables {
+                Some(vars) => vars
+                    .variables
+                    .into_iter()
+                    .map(datamodel::Variable::from)
+                    .collect(),
+                None => vec![],
+            },
             views: vec![],
         }
     }
@@ -423,7 +430,12 @@ impl From<datamodel::Model> for Model {
             namespaces: None,
             resource: None,
             sim_specs: None,
-            variables: None,
+            variables: if model.variables.is_empty() {
+                None
+            } else {
+                let variables = model.variables.into_iter().map(Var::from).collect();
+                Some(Variables { variables })
+            },
             views: None,
         }
     }
