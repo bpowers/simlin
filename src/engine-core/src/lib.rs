@@ -48,7 +48,7 @@ pub use self::sim::Specs as SimSpecs;
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub name: String,
-    file: xmile::File,
+    datamodel: datamodel::Project,
     pub models: HashMap<String, Rc<model::Model>>,
 }
 
@@ -73,15 +73,20 @@ impl Project {
             .map(|x_model| Model::new(&models, &x_model))
             .collect();
 
-        let file_models: Vec<datamodel::Model> =
-            file.models.iter().map(xmile::convert_model).collect();
+        let project_datamodel = xmile::convert_file_to_project(&file);
 
-        let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = file_models
+        let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = project_datamodel
+            .models
             .iter()
             .map(|m| model::build_xvars_map(m.name.clone(), &m))
             .collect();
 
-        models_list.extend(file_models.iter().map(|m| Model::new(&models, m)));
+        models_list.extend(
+            project_datamodel
+                .models
+                .iter()
+                .map(|m| Model::new(&models, m)),
+        );
 
         let models = models_list
             .into_iter()
@@ -90,7 +95,7 @@ impl Project {
 
         let project = Project {
             name: "test".to_string(),
-            file,
+            datamodel: project_datamodel,
             models,
         };
 

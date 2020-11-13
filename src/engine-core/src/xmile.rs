@@ -32,6 +32,30 @@ pub struct File {
     pub macros: Vec<Macro>,
 }
 
+impl From<File> for datamodel::Project {
+    fn from(file: File) -> Self {
+        datamodel::Project {
+            name: "".to_string(),
+            sim_specs: datamodel::SimSpecs::from(file.sim_specs.unwrap_or(SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: Some(Dt {
+                    value: 1.0,
+                    reciprocal: None,
+                }),
+                save_step: None,
+                method: None,
+                time_units: None,
+            })),
+            models: file
+                .models
+                .into_iter()
+                .map(datamodel::Model::from)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Data {
     // TODO
@@ -945,6 +969,6 @@ fn test_canonicalize_stock_inflows() {
     assert_eq!(expected, output);
 }
 
-pub fn convert_model(model: &Model) -> datamodel::Model {
-    datamodel::Model::from(model.clone())
+pub fn convert_file_to_project(file: &File) -> datamodel::Project {
+    datamodel::Project::from(file.clone())
 }

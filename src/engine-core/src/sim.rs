@@ -7,10 +7,11 @@ use std::rc::Rc;
 
 use crate::ast;
 use crate::common::{Ident, Result};
+use crate::datamodel;
+use crate::datamodel::{Dt, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
-use crate::xmile;
 use crate::Project;
 use std::borrow::BorrowMut;
 
@@ -34,11 +35,6 @@ pub struct Specs {
     pub method: Method,
 }
 
-const DEFAULT_DT: xmile::Dt = xmile::Dt {
-    value: 1.0,
-    reciprocal: None,
-};
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
     pub data: Vec<(f64, f64)>,
@@ -57,31 +53,19 @@ impl Table {
 }
 
 impl Specs {
-    pub fn from(specs: &xmile::SimSpecs) -> Self {
-        let dt: f64 = {
-            let spec_dt = specs.dt.as_ref().unwrap_or(&DEFAULT_DT);
-            if spec_dt.reciprocal.unwrap_or(false) {
-                1.0 / spec_dt.value
-            } else {
-                spec_dt.value
-            }
+    pub fn from(specs: &datamodel::SimSpecs) -> Self {
+        let dt: f64 = match &specs.dt {
+            Dt::Dt(value) => *value,
+            Dt::Reciprocal(value) => 1.0 / *value,
         };
 
         let save_step: f64 = specs.save_step.unwrap_or(dt);
 
-        let method = if specs.method.is_none() {
-            Method::Euler
-        } else {
-            let method_str = specs.method.as_ref().unwrap();
-            match method_str.to_lowercase().as_str() {
-                "euler" => Method::Euler,
-                _ => {
-                    eprintln!(
-                        "warning, simulation requested '{}' method, but only support Euler",
-                        method_str
-                    );
-                    Method::Euler
-                }
+        let method = match specs.sim_method {
+            SimMethod::Euler => Method::Euler,
+            SimMethod::RungeKutta4 => {
+                eprintln!("warning, simulation requested 'rk4', but only support Euler");
+                Method::Euler
             }
         };
 
@@ -1244,7 +1228,7 @@ impl Simulation {
 
         // reset
 
-        let specs = Specs::from(project.file.sim_specs.as_ref().unwrap());
+        let specs = Specs::from(&project.datamodel.sim_specs);
 
         Ok(Simulation {
             modules: compiled_modules,
