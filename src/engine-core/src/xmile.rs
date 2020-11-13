@@ -914,41 +914,35 @@ impl From<datamodel::Variable> for Var {
 
 #[test]
 fn test_canonicalize_stock_inflows() {
-    /*
     use crate::common::canonicalize;
-    use std::iter::FromIterator;
 
-    let input = datamodel::Variable::Stock(datamodel::Stock {
-        ident: canonicalize("Heat Loss To Room"),
-        equation: "total_population".to_string(),
-        documentation: "People who can contract the disease.".to_string(),
+    let input = Var::Stock(Stock {
+        name: canonicalize("Heat Loss To Room"),
+        eqn: Some("total_population".to_string()),
+        doc: Some("People who can contract the disease.".to_string()),
         units: Some("people".to_string()),
-        inflows: vec!["\"Solar Radiation\"".to_string()],
-        outflows: vec![
+        inflows: Some(vec!["\"Solar Radiation\"".to_string()]),
+        outflows: Some(vec![
             "\"succumbing\"".to_string(),
             "\"succumbing 2\"".to_string(),
-        ],
-        non_negative: false,
+        ]),
+        non_negative: None,
+        dimensions: None,
     });
 
-    let expected = Variable::Stock {
+    let expected = datamodel::Variable::Stock(datamodel::Stock {
         ident: "heat_loss_to_room".to_string(),
-        ast: Some(Expr::Var("total_population".to_string())),
-        eqn: Some("total_population".to_string()),
+        equation: "total_population".to_string(),
+        documentation: "People who can contract the disease.".to_string(),
         units: Some("people".to_string()),
         inflows: vec!["solar_radiation".to_string()],
         outflows: vec!["succumbing".to_string(), "succumbing_2".to_string()],
         non_negative: false,
-        errors: vec![],
-        direct_deps: HashSet::from_iter(["total_population".to_string()].iter().cloned()),
-    };
+    });
 
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-
-    let output = parse_var(&HashMap::new(), "main", &input, &mut implicit_vars);
+    let output = datamodel::Variable::from(input);
 
     assert_eq!(expected, output);
-    */
 }
 
 pub fn convert_model(model: &Model) -> datamodel::Model {
