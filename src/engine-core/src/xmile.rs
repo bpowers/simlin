@@ -638,7 +638,8 @@ pub struct Module {
 impl From<Module> for datamodel::Module {
     fn from(module: Module) -> Self {
         let ident = canonicalize(&module.name);
-        let input_prefix = format!("{}.", ident);
+        // TODO: we should filter these to only module inputs, and rewrite
+        //       the equations of variables that use module outputs
         let references: Vec<datamodel::ModuleReference> = module
             .refs
             .into_iter()
@@ -653,7 +654,6 @@ impl From<Module> for datamodel::Module {
                     unreachable!();
                 }
             })
-            .filter(|mr| (*mr.dst).starts_with(&input_prefix))
             .collect();
         datamodel::Module {
             ident,
@@ -971,4 +971,190 @@ fn test_canonicalize_stock_inflows() {
 
 pub fn convert_file_to_project(file: &File) -> datamodel::Project {
     datamodel::Project::from(file.clone())
+}
+
+#[test]
+fn test_bad_xml() {
+    let input = "<stock name=\"susceptible\">
+        <eqn>total_population</eqn>
+        <outflow>succumbing</outflow>
+        <outflow>succumbing_2";
+
+    use quick_xml::de;
+    let stock: std::result::Result<Var, _> = de::from_reader(input.as_bytes());
+
+    assert!(stock.is_err());
+}
+
+#[test]
+fn test_xml_stock_parsing() {
+    let input = "<stock name=\"susceptible\">
+        <eqn>total_population</eqn>
+        <outflow>succumbing</outflow>
+        <outflow>succumbing_2</outflow>
+        <doc>People who can contract the disease.</doc>
+        <units>people</units>
+    </stock>";
+
+    let expected = Stock {
+        name: "susceptible".to_string(),
+        eqn: Some("total_population".to_string()),
+        doc: Some("People who can contract the disease.".to_string()),
+        units: Some("people".to_string()),
+        inflows: None,
+        outflows: Some(vec!["succumbing".to_string(), "succumbing_2".to_string()]),
+        non_negative: None,
+        dimensions: None,
+    };
+
+    use quick_xml::de;
+    let stock: Var = de::from_reader(input.as_bytes()).unwrap();
+
+    if let Var::Stock(stock) = stock {
+        assert_eq!(expected, stock);
+    } else {
+        assert!(false);
+    }
+}
+
+#[test]
+fn test_xml_gf_parsing() {
+    let input = "            <aux name=\"lookup function table\">
+                <eqn>0</eqn>
+                <gf>
+                    <yscale min=\"-1\" max=\"1\"/>
+                    <xpts>0,5,10,15,20,25,30,35,40,45</xpts>
+                    <ypts>0,0,1,1,0,0,-1,-1,0,0</ypts>
+                </gf>
+            </aux>";
+
+    let expected = Aux {
+        name: "lookup function table".to_string(),
+        eqn: Some("0".to_string()),
+        doc: None,
+        units: None,
+        gf: Some(GF {
+            name: None,
+            kind: None,
+            x_scale: None,
+            y_scale: Some(GraphicalFunctionScale {
+                min: -1.0,
+                max: 1.0,
+            }),
+            x_pts: Some("0,5,10,15,20,25,30,35,40,45".to_string()),
+            y_pts: Some("0,0,1,1,0,0,-1,-1,0,0".to_string()),
+        }),
+        dimensions: None,
+    };
+
+    use quick_xml::de;
+    let aux: Var = de::from_reader(input.as_bytes()).unwrap();
+
+    if let Var::Aux(aux) = aux {
+        assert_eq!(expected, aux);
+    } else {
+        assert!(false);
+    }
+}
+
+#[test]
+fn test_module_parsing() {
+    let input = "<module name=\"hares\" isee:label=\"\">
+				<connect to=\"hares.area\" from=\".area\"/>
+				<connect2 to=\"hares.area\" from=\"area\"/>
+				<connect to=\"lynxes.hare_density\" from=\"hares.hare_density\"/>
+				<connect2 to=\"lynxes.hare_density\" from=\"hares.hare_density\"/>
+				<connect to=\"hares.lynxes\" from=\"lynxes.lynxes\"/>
+				<connect2 to=\"hares.lynxes\" from=\"lynxes.lynxes\"/>
+			</module>";
+
+    let expected = Module {
+        name: "hares".to_string(),
+        model_name: None,
+        doc: None,
+        units: None,
+        refs: vec![
+            Reference::Connect(Connect {
+                src: ".area".to_string(),
+                dst: "hares.area".to_string(),
+            }),
+            Reference::Connect2(Connect {
+                src: "area".to_string(),
+                dst: "hares.area".to_string(),
+            }),
+            Reference::Connect(Connect {
+                src: "hares.hare_density".to_string(),
+                dst: "lynxes.hare_density".to_string(),
+            }),
+            Reference::Connect2(Connect {
+                src: "hares.hare_density".to_string(),
+                dst: "lynxes.hare_density".to_string(),
+            }),
+            Reference::Connect(Connect {
+                src: "lynxes.lynxes".to_string(),
+                dst: "hares.lynxes".to_string(),
+            }),
+            Reference::Connect2(Connect {
+                src: "lynxes.lynxes".to_string(),
+                dst: "hares.lynxes".to_string(),
+            }),
+        ],
+    };
+
+    use quick_xml::de;
+    let actual: Module = de::from_reader(input.as_bytes()).unwrap();
+    assert_eq!(expected, actual);
+
+    let expected_roundtripped = Module {
+        name: "hares".to_string(),
+        model_name: Some("hares".to_string()),
+        doc: None,
+        units: None,
+        refs: vec![
+            Reference::Connect(Connect {
+                src: ".area".to_string(),
+                dst: "hares.area".to_string(),
+            }),
+            Reference::Connect(Connect {
+                src: "hares.hare_density".to_string(),
+                dst: "lynxes.hare_density".to_string(),
+            }),
+            Reference::Connect(Connect {
+                src: "lynxes.lynxes".to_string(),
+                dst: "hares.lynxes".to_string(),
+            }),
+        ],
+    };
+
+    let roundtripped = Module::from(datamodel::Module::from(actual.clone()));
+    assert_eq!(expected_roundtripped, roundtripped);
+}
+
+#[test]
+fn test_sim_specs_parsing() {
+    let input = "<sim_specs method=\"euler\" time_units=\"Time\">
+		<start>0</start>
+		<stop>100</stop>
+		<savestep>1</savestep>
+		<dt>0.03125</dt>
+	</sim_specs>";
+
+    let expected = SimSpecs {
+        start: 0.0,
+        stop: 100.0,
+        dt: Some(Dt {
+            value: 0.03125,
+            reciprocal: None,
+        }),
+        save_step: Some(1.0),
+        method: Some("euler".to_string()),
+        time_units: Some("Time".to_string()),
+    };
+
+    use quick_xml::de;
+    let actual: SimSpecs = de::from_reader(input.as_bytes()).unwrap();
+    assert_eq!(expected, actual);
+
+    let roundtripped = SimSpecs::from(datamodel::SimSpecs::from(actual.clone()));
+    assert_eq!(roundtripped, actual);
 }
