@@ -2,9 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::io::BufRead;
+
 use serde::{Deserialize, Serialize};
 
-use super::common::canonicalize;
+use super::common::{canonicalize, Result};
 use super::datamodel;
 
 // const VERSION: &str = "1.0";
@@ -967,6 +969,18 @@ fn test_canonicalize_stock_inflows() {
     let output = datamodel::Variable::from(input);
 
     assert_eq!(expected, output);
+}
+
+pub fn project_from_xmile_reader(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
+    use quick_xml::de;
+    let file: File = match de::from_reader(reader) {
+        Ok(file) => file,
+        Err(err) => {
+            return import_err!(XmlDeserialization, err.to_string());
+        }
+    };
+
+    Ok(convert_file_to_project(&file))
 }
 
 pub fn convert_file_to_project(file: &File) -> datamodel::Project {

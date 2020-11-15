@@ -54,15 +54,9 @@ pub struct Project {
 
 impl Project {
     pub fn from_xmile_reader(reader: &mut dyn BufRead) -> Result<Rc<Self>> {
-        use quick_xml::de;
-        let file: xmile::File = match de::from_reader(reader) {
-            Ok(file) => file,
-            Err(err) => {
-                return import_err!(XmlDeserialization, err.to_string());
-            }
-        };
-
         use model::Model;
+
+        let project_datamodel = xmile::project_from_xmile_reader(reader)?;
 
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = HashMap::new();
 
@@ -72,8 +66,6 @@ impl Project {
             .map(|name| self::stdlib::get(name).unwrap())
             .map(|x_model| Model::new(&models, &x_model))
             .collect();
-
-        let project_datamodel = xmile::convert_file_to_project(&file);
 
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = project_datamodel
             .models

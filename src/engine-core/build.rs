@@ -14,6 +14,7 @@ use std::path::Path;
 #[macro_use]
 extern crate lazy_static;
 
+#[macro_use]
 mod common {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/common.rs"));
 }
