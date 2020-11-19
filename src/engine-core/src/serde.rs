@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::datamodel::{
-    Dt, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, SimMethod, SimSpecs,
-    Stock,
+    Aux, Dt, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, Model, Module,
+    ModuleReference, Project, SimMethod, SimSpecs, Stock, Variable,
 };
 use crate::project_io;
 
@@ -346,4 +346,359 @@ fn test_stock_roundtrip() {
         let actual = Stock::from(project_io::variable::Stock::from(expected.clone()));
         assert_eq!(expected, actual);
     }
+}
+
+impl From<Flow> for project_io::variable::Flow {
+    fn from(flow: Flow) -> Self {
+        project_io::variable::Flow {
+            ident: flow.ident,
+            equation: flow.equation,
+            documentation: flow.documentation,
+            units: flow.units.unwrap_or_default(),
+            gf: match flow.gf {
+                Some(gf) => Some(project_io::GraphicalFunction::from(gf)),
+                None => None,
+            },
+            non_negative: flow.non_negative,
+        }
+    }
+}
+
+impl From<project_io::variable::Flow> for Flow {
+    fn from(flow: project_io::variable::Flow) -> Self {
+        Flow {
+            ident: flow.ident,
+            equation: flow.equation,
+            documentation: flow.documentation,
+            units: if flow.units.is_empty() {
+                None
+            } else {
+                Some(flow.units)
+            },
+            gf: match flow.gf {
+                Some(gf) => Some(GraphicalFunction::from(gf)),
+                None => None,
+            },
+            non_negative: flow.non_negative,
+        }
+    }
+}
+
+#[test]
+fn test_flow_roundtrip() {
+    let cases: &[Flow] = &[
+        Flow {
+            ident: "blerg".to_string(),
+            equation: "1+3".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: None,
+            gf: None,
+            non_negative: false,
+        },
+        Flow {
+            ident: "blerg2".to_string(),
+            equation: "1+3".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: Some("flarbles".to_string()),
+            gf: Some(GraphicalFunction {
+                kind: GraphicalFunctionKind::Extrapolate,
+                x_points: Some(vec![9.3, 9.1, 9.2]),
+                y_points: vec![1.0, 2.0, 6.0],
+                x_scale: GraphicalFunctionScale {
+                    min: 1.0,
+                    max: 7.01,
+                },
+                y_scale: GraphicalFunctionScale {
+                    min: 2.0,
+                    max: 8.01,
+                },
+            }),
+            non_negative: false,
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Flow::from(project_io::variable::Flow::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<Aux> for project_io::variable::Aux {
+    fn from(aux: Aux) -> Self {
+        project_io::variable::Aux {
+            ident: aux.ident,
+            equation: aux.equation,
+            documentation: aux.documentation,
+            units: aux.units.unwrap_or_default(),
+            gf: match aux.gf {
+                Some(gf) => Some(project_io::GraphicalFunction::from(gf)),
+                None => None,
+            },
+        }
+    }
+}
+
+impl From<project_io::variable::Aux> for Aux {
+    fn from(aux: project_io::variable::Aux) -> Self {
+        Aux {
+            ident: aux.ident,
+            equation: aux.equation,
+            documentation: aux.documentation,
+            units: if aux.units.is_empty() {
+                None
+            } else {
+                Some(aux.units)
+            },
+            gf: match aux.gf {
+                Some(gf) => Some(GraphicalFunction::from(gf)),
+                None => None,
+            },
+        }
+    }
+}
+
+#[test]
+fn test_aux_roundtrip() {
+    let cases: &[Aux] = &[
+        Aux {
+            ident: "blerg".to_string(),
+            equation: "1+3".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: None,
+            gf: None,
+        },
+        Aux {
+            ident: "blerg2".to_string(),
+            equation: "1+3".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: Some("flarbles".to_string()),
+            gf: Some(GraphicalFunction {
+                kind: GraphicalFunctionKind::Extrapolate,
+                x_points: Some(vec![9.3, 9.1, 9.2]),
+                y_points: vec![1.0, 2.0, 6.0],
+                x_scale: GraphicalFunctionScale {
+                    min: 1.0,
+                    max: 7.01,
+                },
+                y_scale: GraphicalFunctionScale {
+                    min: 2.0,
+                    max: 8.01,
+                },
+            }),
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Aux::from(project_io::variable::Aux::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<ModuleReference> for project_io::variable::module::Reference {
+    fn from(mod_ref: ModuleReference) -> Self {
+        project_io::variable::module::Reference {
+            src: mod_ref.src,
+            dst: mod_ref.dst,
+        }
+    }
+}
+
+impl From<project_io::variable::module::Reference> for ModuleReference {
+    fn from(mod_ref: project_io::variable::module::Reference) -> Self {
+        ModuleReference {
+            src: mod_ref.src,
+            dst: mod_ref.dst,
+        }
+    }
+}
+
+#[test]
+fn test_module_reference_roundtrip() {
+    let cases: &[ModuleReference] = &[ModuleReference {
+        src: "foo".to_string(),
+        dst: "self.bar".to_string(),
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = ModuleReference::from(project_io::variable::module::Reference::from(
+            expected.clone(),
+        ));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<Module> for project_io::variable::Module {
+    fn from(module: Module) -> Self {
+        project_io::variable::Module {
+            ident: module.ident,
+            model_name: module.model_name,
+            documentation: module.documentation,
+            units: module.units.unwrap_or_default(),
+            references: module
+                .references
+                .into_iter()
+                .map(project_io::variable::module::Reference::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<project_io::variable::Module> for Module {
+    fn from(module: project_io::variable::Module) -> Self {
+        Module {
+            ident: module.ident,
+            model_name: module.model_name,
+            documentation: module.documentation,
+            units: if module.units.is_empty() {
+                None
+            } else {
+                Some(module.units)
+            },
+            references: module
+                .references
+                .into_iter()
+                .map(ModuleReference::from)
+                .collect(),
+        }
+    }
+}
+
+#[test]
+fn test_module_roundtrip() {
+    let cases: &[Module] = &[
+        Module {
+            ident: "blerg".to_string(),
+            model_name: "blergers".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: None,
+            references: vec![ModuleReference {
+                src: "foo".to_string(),
+                dst: "self.bar".to_string(),
+            }],
+        },
+        Module {
+            ident: "blerg2".to_string(),
+            model_name: "blergers2".to_string(),
+            documentation: "this is deeper stuff".to_string(),
+            units: Some("flarbles".to_string()),
+            references: vec![],
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Module::from(project_io::variable::Module::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<Variable> for project_io::Variable {
+    fn from(var: Variable) -> Self {
+        let v = match var {
+            Variable::Stock(stock) => {
+                project_io::variable::V::Stock(project_io::variable::Stock::from(stock))
+            }
+            Variable::Flow(flow) => {
+                project_io::variable::V::Flow(project_io::variable::Flow::from(flow))
+            }
+            Variable::Aux(aux) => {
+                project_io::variable::V::Aux(project_io::variable::Aux::from(aux))
+            }
+            Variable::Module(module) => {
+                project_io::variable::V::Module(project_io::variable::Module::from(module))
+            }
+        };
+        project_io::Variable { v: Some(v) }
+    }
+}
+
+impl From<project_io::Variable> for Variable {
+    fn from(var: project_io::Variable) -> Self {
+        match var.v.unwrap() {
+            project_io::variable::V::Stock(stock) => Variable::Stock(Stock::from(stock)),
+            project_io::variable::V::Flow(flow) => Variable::Flow(Flow::from(flow)),
+            project_io::variable::V::Aux(aux) => Variable::Aux(Aux::from(aux)),
+            project_io::variable::V::Module(module) => Variable::Module(Module::from(module)),
+        }
+    }
+}
+
+#[test]
+fn test_variable_roundtrip() {
+    let cases: &[Variable] = &[
+        Variable::Aux(Aux {
+            ident: "blerg".to_string(),
+            equation: "1+3".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: None,
+            gf: None,
+        }),
+        Variable::Module(Module {
+            ident: "blerg2".to_string(),
+            model_name: "blergers2".to_string(),
+            documentation: "this is deeper stuff".to_string(),
+            units: Some("flarbles".to_string()),
+            references: vec![],
+        }),
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Variable::from(project_io::Variable::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<Model> for project_io::Model {
+    fn from(model: Model) -> Self {
+        project_io::Model {
+            name: model.name,
+            variables: model
+                .variables
+                .into_iter()
+                .map(project_io::Variable::from)
+                .collect(),
+            views: vec![],
+        }
+    }
+}
+
+impl From<project_io::Model> for Model {
+    fn from(model: project_io::Model) -> Self {
+        Model {
+            name: model.name,
+            variables: model.variables.into_iter().map(Variable::from).collect(),
+            views: vec![],
+        }
+    }
+}
+
+impl From<Project> for project_io::Project {
+    fn from(project: Project) -> Self {
+        project_io::Project {
+            name: project.name,
+            sim_specs: Some(project_io::SimSpecs::from(project.sim_specs)),
+            models: project
+                .models
+                .into_iter()
+                .map(project_io::Model::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<project_io::Project> for Project {
+    fn from(project: project_io::Project) -> Self {
+        Project {
+            name: project.name,
+            sim_specs: SimSpecs::from(project.sim_specs.unwrap()),
+            models: project.models.into_iter().map(Model::from).collect(),
+        }
+    }
+}
+
+pub fn serialize(project: &Project) -> project_io::Project {
+    project_io::Project::from(project.clone())
+}
+
+pub fn deserialize(project: &project_io::Project) -> Project {
+    Project::from(project.clone())
 }
