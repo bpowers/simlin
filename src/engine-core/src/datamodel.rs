@@ -211,6 +211,8 @@ pub enum SimMethod {
     RungeKutta4,
 }
 
+/// Dt is a UI thing: it can be nice to specify exact
+/// fractions that don't display neatly in the UI, like 1/3
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub enum Dt {
     Dt(f64),
@@ -229,7 +231,7 @@ pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
     pub dt: Dt,
-    pub save_step: Option<f64>,
+    pub save_step: Option<Dt>,
     pub sim_method: SimMethod,
     pub time_units: Option<String>,
 }

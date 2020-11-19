@@ -59,7 +59,13 @@ impl Specs {
             Dt::Reciprocal(value) => 1.0 / *value,
         };
 
-        let save_step: f64 = specs.save_step.unwrap_or(dt);
+        let save_step: f64 = match &specs.save_step {
+            None => dt,
+            Some(save_step) => match save_step {
+                Dt::Dt(value) => *value,
+                Dt::Reciprocal(value) => 1.0 / *value,
+            },
+        };
 
         let method = match specs.sim_method {
             SimMethod::Euler => Method::Euler,

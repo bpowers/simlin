@@ -157,7 +157,7 @@ message ViewElement {
 }
 
 message View {
-  ViewType type = 1;
+  ViewType kind = 1;
   // background
   repeated ViewElement elements = 3;
 };
@@ -172,15 +172,21 @@ message Model {
 
 enum SimMethod {
   EULER = 0;
+  RUNGE_KUTTA_4 = 1;
+}
+
+message Dt {
+  double value = 1;
+  bool isReciprocal = 2;
 }
 
 message SimSpecs {
   double start = 1;
   double stop = 2;
-  double dt = 3;
-  double saveStep = 4;
+  Dt dt = 3;
+  optional Dt saveStep = 4;
   SimMethod simMethod = 5;
-  string timeUnits = 6;
+  optional string timeUnits = 6;
 };
 
 message Project {

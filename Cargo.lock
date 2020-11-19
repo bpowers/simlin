@@ -532,7 +532,7 @@ dependencies = [
 [[package]]
 name = "prost"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
+source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -541,7 +541,7 @@ dependencies = [
 [[package]]
 name = "prost-build"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
+source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
 dependencies = [
  "bytes",
  "heck",
@@ -558,7 +558,7 @@ dependencies = [
 [[package]]
 name = "prost-derive"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
+source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
 dependencies = [
  "anyhow",
  "itertools",
@@ -570,7 +570,7 @@ dependencies = [
 [[package]]
 name = "prost-types"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=ca6de9fab99fb192fd8e1e684fc3aff980e0e911#ca6de9fab99fb192fd8e1e684fc3aff980e0e911"
+source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
 dependencies = [
  "bytes",
  "prost",

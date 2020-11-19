@@ -191,7 +191,10 @@ impl From<SimSpecs> for datamodel::SimSpecs {
                 Some(dt) => datamodel::Dt::from(dt),
                 None => Default::default(),
             },
-            save_step: sim_specs.save_step,
+            save_step: match sim_specs.save_step {
+                Some(save_step) => Some(datamodel::Dt::Dt(save_step)),
+                None => None,
+            },
             // FIXME: the spec says method is technically a
             //   comma separated list of fallbacks
             sim_method: match sim_method.as_str() {
@@ -210,7 +213,13 @@ impl From<datamodel::SimSpecs> for SimSpecs {
             start: sim_specs.start,
             stop: sim_specs.stop,
             dt: Some(Dt::from(sim_specs.dt)),
-            save_step: sim_specs.save_step,
+            save_step: match sim_specs.save_step {
+                None => None,
+                Some(dt) => match dt {
+                    datamodel::Dt::Dt(value) => Some(value),
+                    datamodel::Dt::Reciprocal(value) => Some(1.0 / value),
+                },
+            },
             method: Some(match sim_specs.sim_method {
                 datamodel::SimMethod::Euler => "euler".to_string(),
                 datamodel::SimMethod::RungeKutta4 => "rk4".to_string(),
