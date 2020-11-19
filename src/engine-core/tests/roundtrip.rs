@@ -55,13 +55,8 @@ fn roundtrips_model() {
         let f = File::open(file_path).unwrap();
         let mut f = BufReader::new(f);
 
-        let project = engine_core::Project::from_xmile_reader(&mut f);
-        if let Err(ref err) = project {
-            writeln!(::std::io::stderr(), "model '{}' error: {}", path, err).unwrap();
-        }
-        assert!(project.is_ok());
-
-        let project = project.unwrap();
+        let datamodel_project = engine_core::xmile::project_from_reader(&mut f).unwrap();
+        let project = engine_core::Project::from(datamodel_project);
 
         for (model_name, model) in project.models.iter() {
             for (var_name, var) in model.variables.iter() {

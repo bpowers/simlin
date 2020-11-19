@@ -971,7 +971,7 @@ fn test_canonicalize_stock_inflows() {
     assert_eq!(expected, output);
 }
 
-pub fn project_from_xmile_reader(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
+pub fn project_from_reader(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
     use quick_xml::de;
     let file: File = match de::from_reader(reader) {
         Ok(file) => file,

@@ -7,10 +7,12 @@ use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::iter::FromIterator;
+use std::rc::Rc;
 
 #[macro_use]
 extern crate float_cmp;
 
+use engine_core::xmile;
 use engine_core::{canonicalize, Method, Project, Results, SimSpecs, Simulation};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
@@ -127,13 +129,13 @@ fn simulate_path(xmile_path: &str) {
     let f = File::open(xmile_path).unwrap();
     let mut f = BufReader::new(f);
 
-    let project = Project::from_xmile_reader(&mut f);
-    if let Err(ref err) = project {
+    let datamodel_project = xmile::project_from_reader(&mut f);
+    if let Err(ref err) = datamodel_project {
         eprintln!("model '{}' error: {}", xmile_path, err);
     }
-    assert!(project.is_ok());
+    let project = Project::from(datamodel_project.unwrap());
 
-    let project = project.unwrap();
+    let project = Rc::new(project);
     let sim = Simulation::new(&project, "main").unwrap();
     let results = sim.run_to_end();
     assert!(results.is_ok());
@@ -187,6 +189,8 @@ fn simulates_models_correctly() {
 fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
     let mut f = BufReader::new(f);
-    let project = Project::from_xmile_reader(&mut f).unwrap();
+    let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
+    let project = Project::from(datamodel_project);
+    let project = Rc::new(project);
     assert!(Simulation::new(&project, "blerg").is_err());
 }

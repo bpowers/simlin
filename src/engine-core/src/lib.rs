@@ -10,7 +10,6 @@ extern crate lazy_static;
 extern crate float_cmp;
 
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::rc::Rc;
 
 #[macro_use]
@@ -37,9 +36,7 @@ mod stdlib {
 
 mod interpreter;
 
-pub use self::common::Result;
-
-pub use self::common::{canonicalize, Ident};
+pub use self::common::{canonicalize, Error, Ident, Result};
 pub use self::sim::Method;
 pub use self::sim::Results;
 pub use self::sim::Simulation;
@@ -52,11 +49,9 @@ pub struct Project {
     pub models: HashMap<String, Rc<model::Model>>,
 }
 
-impl Project {
-    pub fn from_xmile_reader(reader: &mut dyn BufRead) -> Result<Rc<Self>> {
+impl From<datamodel::Project> for Project {
+    fn from(project_datamodel: datamodel::Project) -> Self {
         use model::Model;
-
-        let project_datamodel = xmile::project_from_xmile_reader(reader)?;
 
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = HashMap::new();
 
@@ -85,12 +80,10 @@ impl Project {
             .map(|m| (m.name.to_string(), Rc::new(m)))
             .collect();
 
-        let project = Project {
+        Project {
             name: "test".to_string(),
             datamodel: project_datamodel,
             models,
-        };
-
-        Ok(Rc::new(project))
+        }
     }
 }

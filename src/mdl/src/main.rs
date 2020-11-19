@@ -2,11 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use xmutil::convert_vensim_mdl;
-
-use engine_core::{self, Simulation};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::rc::Rc;
+
+use engine_core::{self, xmile, Project, Simulation};
+use xmutil::convert_vensim_mdl;
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -84,18 +85,25 @@ fn main() {
         }
         let xmile_src = xmile_src.unwrap();
         let mut f = BufReader::new(stringreader::StringReader::new(&xmile_src));
-        engine_core::Project::from_xmile_reader(&mut f)
+        match xmile::project_from_reader(&mut f) {
+            Ok(project) => Project::from(project),
+            Err(err) => {
+                eprintln!("model '{}' error: {}", &file_path, err);
+                return;
+            }
+        }
     } else {
         let mut f = BufReader::new(f);
-        engine_core::Project::from_xmile_reader(&mut f)
+        match xmile::project_from_reader(&mut f) {
+            Ok(project) => Project::from(project),
+            Err(err) => {
+                eprintln!("model '{}' error: {}", &file_path, err);
+                return;
+            }
+        }
     };
 
-    if let Err(ref err) = project {
-        eprintln!("model '{}' error: {}", &file_path, err);
-    }
-    assert!(project.is_ok());
-
-    let project = project.unwrap();
+    let project = Rc::new(project);
     let sim = Simulation::new(&project, "main").unwrap();
     let results = sim.run_to_end();
     let results = results.unwrap();
