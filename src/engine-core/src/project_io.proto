@@ -4,16 +4,19 @@ package project_io;
 
 message GraphicalFunction {
   enum Kind {
-    Continuous = 0;
+    CONTINUOUS = 0;
+    DISCRETE = 1;
+    EXTRAPOLATE = 2;
   };
   message Scale {
     double min = 1;
     double max = 2;
   }
   Kind kind = 1;
-  repeated double yPoints = 2;
-  Scale xScale = 3;
-  Scale yScale = 4;
+  repeated double xPoints = 2;
+  repeated double yPoints = 3;
+  Scale xScale = 4;
+  Scale yScale = 5;
 }
 
 message Variable {
@@ -68,22 +71,15 @@ message Variable {
   }
 };
 
-enum ViewType {
-  STOCK_FLOW = 0;
-  // INTERFACE = 1;
-  // POPUP = 2;
-  // VENDOR_SPECIFIC = 3;
-};
-
-enum LabelSide {
-  TOP = 0;
-  LEFT = 1;
-  CENTER = 2;
-  BOTTOM = 3;
-  RIGHT = 4;
-};
-
 message ViewElement {
+  enum LabelSide {
+    TOP = 0;
+    LEFT = 1;
+    CENTER = 2;
+    BOTTOM = 3;
+    RIGHT = 4;
+  };
+
   message Aux {
     string name = 1;
     int32 uid = 2;
@@ -157,6 +153,13 @@ message ViewElement {
 }
 
 message View {
+  enum ViewType {
+    STOCK_FLOW = 0;
+    // INTERFACE = 1;
+    // POPUP = 2;
+    // VENDOR_SPECIFIC = 3;
+  };
+
   ViewType kind = 1;
   // background
   repeated ViewElement elements = 3;

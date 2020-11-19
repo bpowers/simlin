@@ -2,7 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::datamodel::{Dt, SimMethod, SimSpecs};
+use crate::datamodel::{
+    Dt, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, SimMethod, SimSpecs,
+    Stock,
+};
 use crate::project_io;
 
 impl From<Dt> for project_io::Dt {
@@ -142,6 +145,205 @@ fn test_sim_specs_roundtrip() {
     for expected in cases {
         let expected = expected.clone();
         let actual = SimSpecs::from(project_io::SimSpecs::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<GraphicalFunctionKind> for project_io::graphical_function::Kind {
+    fn from(kind: GraphicalFunctionKind) -> Self {
+        match kind {
+            GraphicalFunctionKind::Continuous => project_io::graphical_function::Kind::Continuous,
+            GraphicalFunctionKind::Discrete => project_io::graphical_function::Kind::Discrete,
+            GraphicalFunctionKind::Extrapolate => project_io::graphical_function::Kind::Extrapolate,
+        }
+    }
+}
+
+impl From<project_io::graphical_function::Kind> for GraphicalFunctionKind {
+    fn from(kind: project_io::graphical_function::Kind) -> Self {
+        match kind {
+            project_io::graphical_function::Kind::Continuous => GraphicalFunctionKind::Continuous,
+            project_io::graphical_function::Kind::Discrete => GraphicalFunctionKind::Discrete,
+            project_io::graphical_function::Kind::Extrapolate => GraphicalFunctionKind::Extrapolate,
+        }
+    }
+}
+
+impl From<i32> for project_io::graphical_function::Kind {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => project_io::graphical_function::Kind::Continuous,
+            1 => project_io::graphical_function::Kind::Discrete,
+            2 => project_io::graphical_function::Kind::Extrapolate,
+            _ => project_io::graphical_function::Kind::Continuous,
+        }
+    }
+}
+
+#[test]
+fn test_graphical_function_kind_roundtrip() {
+    let cases: &[GraphicalFunctionKind] = &[
+        GraphicalFunctionKind::Discrete,
+        GraphicalFunctionKind::Continuous,
+        GraphicalFunctionKind::Extrapolate,
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = GraphicalFunctionKind::from(project_io::graphical_function::Kind::from(
+            expected.clone(),
+        ));
+        assert_eq!(expected, actual);
+    }
+
+    assert_eq!(
+        project_io::graphical_function::Kind::Continuous,
+        project_io::graphical_function::Kind::from(666)
+    );
+}
+
+impl From<GraphicalFunctionScale> for project_io::graphical_function::Scale {
+    fn from(scale: GraphicalFunctionScale) -> Self {
+        project_io::graphical_function::Scale {
+            min: scale.min,
+            max: scale.max,
+        }
+    }
+}
+
+impl From<project_io::graphical_function::Scale> for GraphicalFunctionScale {
+    fn from(scale: project_io::graphical_function::Scale) -> Self {
+        GraphicalFunctionScale {
+            min: scale.min,
+            max: scale.max,
+        }
+    }
+}
+
+#[test]
+fn test_graphical_function_scale_roundtrip() {
+    let cases: &[GraphicalFunctionScale] = &[GraphicalFunctionScale {
+        min: 1.0,
+        max: 129.0,
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = GraphicalFunctionScale::from(project_io::graphical_function::Scale::from(
+            expected.clone(),
+        ));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<GraphicalFunction> for project_io::GraphicalFunction {
+    fn from(gf: GraphicalFunction) -> Self {
+        project_io::GraphicalFunction {
+            kind: project_io::graphical_function::Kind::from(gf.kind) as i32,
+            x_points: gf.x_points.unwrap_or_default(),
+            y_points: gf.y_points,
+            x_scale: Some(project_io::graphical_function::Scale::from(gf.x_scale)),
+            y_scale: Some(project_io::graphical_function::Scale::from(gf.y_scale)),
+        }
+    }
+}
+
+impl From<project_io::GraphicalFunction> for GraphicalFunction {
+    fn from(gf: project_io::GraphicalFunction) -> Self {
+        GraphicalFunction {
+            kind: GraphicalFunctionKind::from(project_io::graphical_function::Kind::from(gf.kind)),
+            x_points: if gf.x_points.is_empty() {
+                None
+            } else {
+                Some(gf.x_points)
+            },
+            y_points: gf.y_points,
+            x_scale: GraphicalFunctionScale::from(gf.x_scale.unwrap()),
+            y_scale: GraphicalFunctionScale::from(gf.y_scale.unwrap()),
+        }
+    }
+}
+
+#[test]
+fn test_graphical_function_roundtrip() {
+    let cases: &[GraphicalFunction] = &[
+        GraphicalFunction {
+            kind: GraphicalFunctionKind::Continuous,
+            x_points: None,
+            y_points: vec![1.0, 2.0, 3.0],
+            x_scale: GraphicalFunctionScale { min: 1.0, max: 7.0 },
+            y_scale: GraphicalFunctionScale { min: 2.0, max: 8.0 },
+        },
+        GraphicalFunction {
+            kind: GraphicalFunctionKind::Continuous,
+            x_points: Some(vec![9.0, 9.1, 9.2]),
+            y_points: vec![1.0, 2.0, 3.0],
+            x_scale: GraphicalFunctionScale { min: 1.0, max: 7.0 },
+            y_scale: GraphicalFunctionScale { min: 2.0, max: 8.0 },
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = GraphicalFunction::from(project_io::GraphicalFunction::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<Stock> for project_io::variable::Stock {
+    fn from(stock: Stock) -> Self {
+        project_io::variable::Stock {
+            ident: stock.ident,
+            equation: stock.equation,
+            documentation: stock.documentation,
+            units: stock.units.unwrap_or_default(),
+            inflows: stock.inflows,
+            outflows: stock.outflows,
+            non_negative: stock.non_negative,
+        }
+    }
+}
+
+impl From<project_io::variable::Stock> for Stock {
+    fn from(stock: project_io::variable::Stock) -> Self {
+        Stock {
+            ident: stock.ident,
+            equation: stock.equation,
+            documentation: stock.documentation,
+            units: if stock.units.is_empty() {
+                None
+            } else {
+                Some(stock.units)
+            },
+            inflows: stock.inflows,
+            outflows: stock.outflows,
+            non_negative: stock.non_negative,
+        }
+    }
+}
+
+#[test]
+fn test_stock_roundtrip() {
+    let cases: &[Stock] = &[
+        Stock {
+            ident: "blerg".to_string(),
+            equation: "1+3".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: None,
+            inflows: vec!["inflow".to_string()],
+            outflows: vec![],
+            non_negative: false,
+        },
+        Stock {
+            ident: "blerg2".to_string(),
+            equation: "1+3".to_string(),
+            documentation: "this is deep stuff".to_string(),
+            units: Some("flarbles".to_string()),
+            inflows: vec!["inflow".to_string()],
+            outflows: vec![],
+            non_negative: false,
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Stock::from(project_io::variable::Stock::from(expected.clone()));
         assert_eq!(expected, actual);
     }
 }
