@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "src/system-dynamics-compat",
     "src/engine-v2",
     "src/engine-core",
     "src/mdl",

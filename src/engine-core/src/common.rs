@@ -74,6 +74,7 @@ impl fmt::Display for EquationError {
 }
 
 // from https://stackoverflow.com/questions/27588416/how-to-send-output-to-stderr
+#[macro_export]
 macro_rules! eprintln(
     ($($arg:tt)*) => {{
         use std::io::Write;
@@ -96,6 +97,7 @@ macro_rules! eqn_err(
     }}
 );
 
+#[macro_export]
 macro_rules! model_err(
     ($code:tt, $str:expr) => {{
         use crate::common::{Error, ErrorCode};

@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 #[macro_use]
-mod common;
+pub mod common;
 mod ast;
-mod datamodel;
+pub mod datamodel;
 pub mod project_io {
     include!(concat!(env!("OUT_DIR"), "/project_io.rs"));
 }
