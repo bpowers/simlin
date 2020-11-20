@@ -1,5 +1,5 @@
 [package]
-name = "engine-core"
+name = "system-dynamics-engine"
 version = "0.1.0"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
@@ -24,7 +24,6 @@ float-cmp = "0.8"
 
 [dev-dependencies]
 rand = "0.7"
-csv = "1"
 
 [build-dependencies]
 lazy_static = "1"

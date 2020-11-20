@@ -9,11 +9,10 @@ use std::io::BufReader;
 use std::iter::FromIterator;
 use std::rc::Rc;
 
-#[macro_use]
-extern crate float_cmp;
+use csv;
+use float_cmp::approx_eq;
 
-use engine_core::xmile;
-use engine_core::{canonicalize, Method, Project, Results, SimSpecs, Simulation};
+use system_dynamics_engine::{canonicalize, xmile, Method, Project, Results, SimSpecs, Simulation};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 

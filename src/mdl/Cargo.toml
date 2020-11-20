@@ -6,6 +6,6 @@ license = "Apache-2.0"
 edition = "2018"
 
 [dependencies]
-engine-core = { version = "0.1", path = "../engine-core" }
-xmutil = "1.1"
 stringreader = "0.1"
+system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine" }
+xmutil = "1.1"

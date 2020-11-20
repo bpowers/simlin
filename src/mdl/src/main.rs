@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::rc::Rc;
 
-use engine_core::{self, xmile, Project, Simulation};
+use system_dynamics_engine::{xmile, Project, Simulation};
 use xmutil::convert_vensim_mdl;
 
 const VERSION: &str = "1.0";

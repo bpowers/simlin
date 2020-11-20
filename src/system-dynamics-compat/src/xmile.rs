@@ -6,12 +6,12 @@ use std::io::BufRead;
 
 use serde::{Deserialize, Serialize};
 
-use engine_core::common::{canonicalize, Result};
-use engine_core::datamodel;
+use system_dynamics_engine::common::{canonicalize, Result};
+use system_dynamics_engine::datamodel;
 
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
-        use engine_core::common::{Error, ErrorCode};
+        use system_dynamics_engine::common::{Error, ErrorCode};
         Err(Error::ImportError(ErrorCode::$code, $str))
     }}
 );
@@ -956,7 +956,7 @@ impl From<datamodel::Variable> for Var {
 
 #[test]
 fn test_canonicalize_stock_inflows() {
-    use crate::common::canonicalize;
+    use system_dynamics_engine::common::canonicalize;
 
     let input = Var::Stock(Stock {
         name: canonicalize("Heat Loss To Room"),

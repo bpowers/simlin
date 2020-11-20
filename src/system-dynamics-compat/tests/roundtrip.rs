@@ -1,11 +1,11 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2020 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::fs::File;
 use std::io::BufReader;
 
-use engine_core;
+use system_dynamics_engine::{xmile, Project};
 
 static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
@@ -55,8 +55,8 @@ fn roundtrips_model() {
         let f = File::open(file_path).unwrap();
         let mut f = BufReader::new(f);
 
-        let datamodel_project = engine_core::xmile::project_from_reader(&mut f).unwrap();
-        let project = engine_core::Project::from(datamodel_project);
+        let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
+        let project = Project::from(datamodel_project);
 
         for (model_name, model) in project.models.iter() {
             for (var_name, var) in model.variables.iter() {

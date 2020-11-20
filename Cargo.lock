@@ -267,31 +267,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine-core"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "csv",
- "float-cmp",
- "lalrpop",
- "lalrpop-util",
- "lazy_static",
- "libc",
- "prost",
- "prost-build",
- "prost-types",
- "quick-xml",
- "rand",
- "regex",
- "serde",
- "unicode-xid",
-]
-
-[[package]]
 name = "engine-v2"
 version = "0.1.0"
 dependencies = [
- "engine-core",
+ "system-dynamics-engine",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -451,8 +430,8 @@ dependencies = [
 name = "mdl"
 version = "0.1.0"
 dependencies = [
- "engine-core",
  "stringreader",
+ "system-dynamics-engine",
  "xmutil",
 ]
 
@@ -791,11 +770,33 @@ dependencies = [
 name = "system-dynamics-compat"
 version = "0.1.0"
 dependencies = [
- "engine-core",
+ "csv",
+ "float-cmp",
  "prost",
  "quick-xml",
  "serde",
+ "system-dynamics-engine",
  "xmutil",
+]
+
+[[package]]
+name = "system-dynamics-engine"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "float-cmp",
+ "lalrpop",
+ "lalrpop-util",
+ "lazy_static",
+ "libc",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "quick-xml",
+ "rand",
+ "regex",
+ "serde",
+ "unicode-xid",
 ]
 
 [[package]]
