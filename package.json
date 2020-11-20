@@ -100,6 +100,7 @@
     "@babel/preset-typescript": "^7.6.0",
     "@emotion/core": "^11.0.0",
     "@emotion/styled": "^11.0.0",
+    "@emotion/react": "^11.0.0",
     "@pmmmwh/react-refresh-webpack-plugin": "^0.4.2",
     "@stripe/react-stripe-js": "^1.1.2",
     "@stripe/stripe-js": "^1.7.0",
