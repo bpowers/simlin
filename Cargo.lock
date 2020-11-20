@@ -291,7 +291,6 @@ name = "engine-v2"
 version = "0.1.0"
 dependencies = [
  "system-dynamics-compat",
- "system-dynamics-engine",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

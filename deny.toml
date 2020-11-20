@@ -27,6 +27,10 @@ multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 
+[[bans.skip]]
+name = "strsim"
+version = "=0.8.0"
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
