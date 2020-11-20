@@ -142,7 +142,7 @@ impl<'input> Lexer<'input> {
             .filter(|&&(w, _)| w == lower_word)
             .map(|&(_, ref t)| *t)
             .next()
-            .unwrap_or_else(|| Ident(word));
+            .unwrap_or(Ident(word));
 
         Ok((start, tok, end))
     }
