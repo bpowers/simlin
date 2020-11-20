@@ -10,8 +10,8 @@ crate-type = ["rlib"]
 
 [dependencies]
 quick-xml = { version = "0.20", features = [ "serialize" ] }
-prost = { version = "0.6", git = "https://github.com/danburkert/prost", rev = "b664fef20ebb0dd9edbdfb69462c05f1a2005a55"}
 serde = { version = "1", features = [ "derive" ] }
+stringreader = "0.1"
 system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine" }
 xmutil = "1.1"
 

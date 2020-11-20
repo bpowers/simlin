@@ -8,5 +8,5 @@ edition = "2018"
 [dependencies]
 clap = "2"
 stringreader = "0.1"
-system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine" }
+system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat" }
 xmutil = "1.1"

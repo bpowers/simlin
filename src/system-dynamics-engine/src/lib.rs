@@ -7,9 +7,10 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-#[macro_use]
-pub mod common;
+pub use prost;
+
 mod ast;
+pub mod common;
 pub mod datamodel;
 pub mod project_io {
     include!(concat!(env!("OUT_DIR"), "/project_io.rs"));

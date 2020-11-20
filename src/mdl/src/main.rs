@@ -3,15 +3,17 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Write};
 use std::rc::Rc;
 
 use clap::{App, Arg, SubCommand};
 
-use system_dynamics_engine::{datamodel, eprintln, xmile, Project, Result, Simulation};
-use xmutil::convert_vensim_mdl;
+use system_dynamics_compat::engine::{eprintln, serde, Project, Simulation};
+use system_dynamics_compat::prost::Message;
+use system_dynamics_compat::{open_vensim, open_xmile};
 
 const VERSION: &str = "1.0";
+const EXIT_FAILURE: i32 = 1;
 
 #[macro_export]
 macro_rules! die(
@@ -28,6 +30,7 @@ struct Args {
     output: Option<String>,
     is_vensim: bool,
     is_convert: bool,
+    is_model_only: bool,
 }
 
 fn parse_args() -> Args {
@@ -47,58 +50,50 @@ fn parse_args() -> Args {
                 .help("Sets a custom config file"),
         )
         .subcommand(
-            SubCommand::with_name("convert").about("Convert ").arg(
-                Arg::with_name("output")
-                    .short("o")
-                    .long("output")
-                    .value_name("OUTPUT")
-                    .help("Output protobuf-encoded model path")
-                    .takes_value(true),
-            ),
+            SubCommand::with_name("convert")
+                .about("Convert ")
+                .arg(
+                    Arg::with_name("output")
+                        .short("o")
+                        .long("output")
+                        .value_name("OUTPUT")
+                        .help("Output protobuf-encoded model path")
+                        .takes_value(true)
+                        .required(true),
+                )
+                .arg(
+                    Arg::with_name("model-only")
+                        .long("model-only")
+                        .help("Only output the model, not the project"),
+                ),
         )
         .get_matches();
 
     let mut args: Args = Default::default();
     args.path = matches.value_of("INPUT").map(|p| p.to_string());
-    args.is_vensim = matches.value_of("vensim").is_some();
+    args.is_vensim = matches.is_present("vensim");
     if matches.subcommand_name() == Some("convert") {
         args.is_convert = true;
         let matches = matches.subcommand_matches("convert").unwrap();
-        args.output = matches.value_of("output").map(|p| p.to_string())
+        args.output = matches.value_of("output").map(|p| p.to_string());
+        args.is_model_only = matches.is_present("model-only");
     }
+
+    eprintln!("args: {:?}", args);
 
     args
 }
 
-fn open_vensim(file: &File) -> Result<datamodel::Project> {
-    let contents: String = BufReader::new(file)
-        .lines()
-        .fold("".to_string(), |a, b| a + &b.unwrap());
-    let xmile_src: Option<String> = convert_vensim_mdl(&contents, true);
-    if xmile_src.is_none() {
-        eprintln!("couldn't convert vensim model.\n");
-    }
-    let xmile_src = xmile_src.unwrap();
-    let mut f = BufReader::new(stringreader::StringReader::new(&xmile_src));
-    xmile::project_from_reader(&mut f)
-}
-
-fn open_xmile(file: &File) -> Result<datamodel::Project> {
-    let mut f = BufReader::new(file);
-    xmile::project_from_reader(&mut f)
-}
-
 fn main() {
     let args = parse_args();
-    eprintln!("args: {:?}", args);
-
     let file_path = args.path.unwrap_or_else(|| "/dev/stdin".to_string());
     let file = File::open(&file_path).unwrap();
+    let mut reader = BufReader::new(file);
 
     let project = if args.is_vensim {
-        open_vensim(&file)
+        open_vensim(&mut reader)
     } else {
-        open_xmile(&file)
+        open_xmile(&mut reader)
     };
 
     if project.is_err() {
@@ -106,15 +101,34 @@ fn main() {
         return;
     };
 
+    let project = project.unwrap();
+
     if args.is_convert {
-        eprintln!("TODO: convert");
+        let pb_project = serde::serialize(&project);
 
-        return;
+        let buf: Vec<u8> = if args.is_model_only {
+            eprintln!("model only");
+            if pb_project.models.len() != 1 {
+                die!("--model-only specified, but more than 1 model in this project");
+            }
+            let mut buf = Vec::with_capacity(pb_project.models[0].encoded_len() + 8);
+            pb_project.models[0]
+                .encode_length_delimited(&mut buf)
+                .unwrap();
+            buf
+        } else {
+            let mut buf = Vec::with_capacity(pb_project.encoded_len() + 8);
+            pb_project.encode_length_delimited(&mut buf).unwrap();
+            buf
+        };
+
+        let mut output_file = File::create(&args.output.unwrap()).unwrap();
+        output_file.write_all(&buf).unwrap();
+    } else {
+        let project = Rc::new(Project::from(project));
+        let sim = Simulation::new(&project, "main").unwrap();
+        let results = sim.run_to_end();
+        let results = results.unwrap();
+        results.print_tsv();
     }
-
-    let project = Rc::new(Project::from(project.unwrap()));
-    let sim = Simulation::new(&project, "main").unwrap();
-    let results = sim.run_to_end();
-    let results = results.unwrap();
-    results.print_tsv();
 }

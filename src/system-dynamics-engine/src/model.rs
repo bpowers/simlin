@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Error, Ident, Result};
-use crate::datamodel;
 use crate::variable::{parse_var, ModuleInput, Variable};
+use crate::{datamodel, model_err, var_err};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {

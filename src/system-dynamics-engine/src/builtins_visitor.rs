@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::ast::{print_eqn, Expr};
 use crate::builtins::is_builtin_fn;
 use crate::common::{EquationError, Ident};
-use crate::datamodel;
+use crate::{datamodel, eqn_err};
 
 fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
     let args = match name {

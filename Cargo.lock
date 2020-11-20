@@ -462,7 +462,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "stringreader",
- "system-dynamics-engine",
+ "system-dynamics-compat",
  "xmutil",
 ]
 
@@ -809,9 +809,9 @@ version = "0.1.0"
 dependencies = [
  "csv",
  "float-cmp",
- "prost",
  "quick-xml",
  "serde",
+ "stringreader",
  "system-dynamics-engine",
  "xmutil",
 ]

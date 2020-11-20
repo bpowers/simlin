@@ -1,4 +1,4 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2020 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{canonicalize, Result};
 use super::datamodel;
+
+macro_rules! import_err(
+    ($code:tt, $str:expr) => {{
+        use super::common::{Error, ErrorCode};
+        Err(Error::ImportError(ErrorCode::$code, $str))
+    }}
+);
 
 // const VERSION: &str = "1.0";
 // const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";

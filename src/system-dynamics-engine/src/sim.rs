@@ -9,12 +9,11 @@ use float_cmp::approx_eq;
 
 use crate::ast;
 use crate::common::{Ident, Result};
-use crate::datamodel;
-use crate::datamodel::{Dt, SimMethod};
+use crate::datamodel::{self, Dt, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
-use crate::Project;
+use crate::{sim_err, Project};
 use std::borrow::BorrowMut;
 
 const TIME_OFF: usize = 0;

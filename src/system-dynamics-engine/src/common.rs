@@ -84,13 +84,7 @@ macro_rules! eprintln(
     }}
 );
 
-macro_rules! import_err(
-    ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode};
-        Err(Error::ImportError(ErrorCode::$code, $str))
-    }}
-);
-
+#[macro_export]
 macro_rules! eqn_err(
     ($code:tt, $off:expr) => {{
         use crate::common::ErrorCode;
@@ -106,6 +100,7 @@ macro_rules! model_err(
     }}
 );
 
+#[macro_export]
 macro_rules! var_err(
     ($code:tt, $str:expr) => {{
         use crate::common::{Error, ErrorCode};
@@ -117,6 +112,7 @@ macro_rules! var_err(
     }};
 );
 
+#[macro_export]
 macro_rules! sim_err(
     ($code:tt, $str:expr) => {{
         use crate::common::{Error, ErrorCode};
