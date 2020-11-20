@@ -12,7 +12,8 @@ use std::rc::Rc;
 use csv;
 use float_cmp::approx_eq;
 
-use system_dynamics_engine::{canonicalize, xmile, Method, Project, Results, SimSpecs, Simulation};
+use system_dynamics_compat::xmile;
+use system_dynamics_engine::{canonicalize, Method, Project, Results, SimSpecs, Simulation};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 

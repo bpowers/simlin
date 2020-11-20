@@ -79,8 +79,6 @@ fn parse_args() -> Args {
         args.is_model_only = matches.is_present("model-only");
     }
 
-    eprintln!("args: {:?}", args);
-
     args
 }
 
@@ -107,7 +105,6 @@ fn main() {
         let pb_project = serde::serialize(&project);
 
         let buf: Vec<u8> = if args.is_model_only {
-            eprintln!("model only");
             if pb_project.models.len() != 1 {
                 die!("--model-only specified, but more than 1 model in this project");
             }

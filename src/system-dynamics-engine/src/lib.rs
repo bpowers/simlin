@@ -26,7 +26,6 @@ mod model;
 mod sim;
 mod token;
 mod variable;
-pub mod xmile;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
