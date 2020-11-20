@@ -5,6 +5,7 @@
 use std::fmt;
 use std::{error, result};
 
+use lazy_static::lazy_static;
 use regex::Regex;
 
 pub type Ident = String;

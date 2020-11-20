@@ -6,6 +6,8 @@
 // internal tokenizer
 
 use std::str::CharIndices;
+
+use lazy_static::lazy_static;
 use unicode_xid::UnicodeXID;
 
 use self::Token::*;

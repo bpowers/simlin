@@ -4,11 +4,6 @@
 
 #![forbid(unsafe_code)]
 
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate float_cmp;
-
 use std::collections::HashMap;
 use std::rc::Rc;
 

@@ -5,6 +5,8 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use float_cmp::approx_eq;
+
 use crate::ast;
 use crate::common::{Ident, Result};
 use crate::datamodel;
