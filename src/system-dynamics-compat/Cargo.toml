@@ -13,7 +13,7 @@ quick-xml = { version = "0.20", features = [ "serialize" ] }
 serde = { version = "1", features = [ "derive" ] }
 stringreader = "0.1"
 system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine" }
-xmutil = "1.1"
+xmutil = { version = "1", path = "../xmutil" }
 
 [dev-dependencies]
 float-cmp = "0.8"

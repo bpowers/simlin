@@ -453,7 +453,6 @@ dependencies = [
  "clap",
  "stringreader",
  "system-dynamics-compat",
- "xmutil",
 ]
 
 [[package]]
@@ -1055,8 +1054,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "xmutil"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9cb32f7223c8c040a602b86f491542e9f6e1434073e9d14ed044b142141bc05"
 dependencies = [
  "cc",
+ "lazy_static",
 ]

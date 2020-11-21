@@ -5,6 +5,7 @@ members = [
     "src/mdl",
     "src/system-dynamics-compat",
     "src/system-dynamics-engine",
+    "src/xmutil",
 ]
 
 [profile.release]

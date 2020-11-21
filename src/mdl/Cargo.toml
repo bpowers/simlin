@@ -9,4 +9,3 @@ edition = "2018"
 clap = "2"
 stringreader = "0.1"
 system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat" }
-xmutil = "1.1"

@@ -11,6 +11,7 @@ edition = "2018"
 build = "build.rs"
 
 [dependencies]
+lazy_static = "1"
 
 [build-dependencies]
 cc = "1"

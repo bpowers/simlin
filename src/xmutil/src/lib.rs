@@ -4,6 +4,9 @@
 
 use std::ffi::CStr;
 use std::str;
+use std::sync::Mutex;
+
+use lazy_static::lazy_static;
 
 extern "C" {
     fn _convert_mdl_to_xmile(
@@ -13,7 +16,15 @@ extern "C" {
     ) -> *const i8;
 }
 
+// xmutil isn't thread-safe, so we need to synchronize calls into it.
+lazy_static! {
+    static ref LOCK: Mutex<()> = Mutex::new(());
+}
+
 pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> Option<String> {
+    // always grab the lock guard before calling in to _convert_mdl_to_xmile
+    let _guard = LOCK.lock().unwrap();
+
     let str_ptr = mdl_source.as_ptr();
     let str_len = mdl_source.len() as u32;
 
