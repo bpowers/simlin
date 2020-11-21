@@ -546,33 +546,63 @@ pub enum ViewType {
     VendorSpecific,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LabelSide {
-    Top,
-    Left,
-    Center,
-    Bottom,
-    Right,
-}
+pub mod view_element {
+    use super::datamodel;
+    use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-pub struct Point {
-    x: f64,
-    y: f64,
-    uid: Option<i32>,
-}
+    #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum LabelSide {
+        Top,
+        Left,
+        Center,
+        Bottom,
+        Right,
+    }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-pub struct Points {
-    #[serde(rename = "pt")]
-    points: Vec<Point>,
-}
+    impl From<LabelSide> for datamodel::view_element::LabelSide {
+        fn from(label_side: LabelSide) -> Self {
+            match label_side {
+                LabelSide::Top => datamodel::view_element::LabelSide::Top,
+                LabelSide::Left => datamodel::view_element::LabelSide::Left,
+                LabelSide::Center => datamodel::view_element::LabelSide::Center,
+                LabelSide::Bottom => datamodel::view_element::LabelSide::Bottom,
+                LabelSide::Right => datamodel::view_element::LabelSide::Right,
+            }
+        }
+    }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ViewObject {
-    Stock {
+    impl From<datamodel::view_element::LabelSide> for LabelSide {
+        fn from(label_side: datamodel::view_element::LabelSide) -> Self {
+            match label_side {
+                datamodel::view_element::LabelSide::Top => LabelSide::Top,
+                datamodel::view_element::LabelSide::Left => LabelSide::Left,
+                datamodel::view_element::LabelSide::Center => LabelSide::Center,
+                datamodel::view_element::LabelSide::Bottom => LabelSide::Bottom,
+                datamodel::view_element::LabelSide::Right => LabelSide::Right,
+            }
+        }
+    }
+
+    #[test]
+    fn test_label_side_roundtrip() {
+        let cases: &[_] = &[
+            datamodel::view_element::LabelSide::Top,
+            datamodel::view_element::LabelSide::Left,
+            datamodel::view_element::LabelSide::Center,
+            datamodel::view_element::LabelSide::Bottom,
+            datamodel::view_element::LabelSide::Right,
+        ];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual =
+                datamodel::view_element::LabelSide::from(LabelSide::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Aux {
         name: String,
         uid: Option<i32>,
         x: f64,
@@ -581,8 +611,76 @@ pub enum ViewObject {
         height: Option<f64>,
         label_side: Option<LabelSide>,
         label_angle: Option<f64>,
-    },
-    Flow {
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Stock {
+        name: String,
+        uid: Option<i32>,
+        x: f64,
+        y: f64,
+        width: Option<f64>,
+        height: Option<f64>,
+        label_side: Option<LabelSide>,
+        label_angle: Option<f64>,
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Point {
+        x: f64,
+        y: f64,
+        uid: Option<i32>,
+    }
+
+    impl From<Point> for datamodel::view_element::FlowPoint {
+        fn from(point: Point) -> Self {
+            datamodel::view_element::FlowPoint {
+                x: point.x,
+                y: point.y,
+                attached_to_uid: point.uid,
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::FlowPoint> for Point {
+        fn from(point: datamodel::view_element::FlowPoint) -> Self {
+            Point {
+                x: point.x,
+                y: point.y,
+                uid: point.attached_to_uid,
+            }
+        }
+    }
+
+    #[test]
+    fn test_point_roundtrip() {
+        let cases: &[_] = &[
+            datamodel::view_element::FlowPoint {
+                x: 1.1,
+                y: 2.2,
+                attached_to_uid: None,
+            },
+            datamodel::view_element::FlowPoint {
+                x: 1.1,
+                y: 2.2,
+                attached_to_uid: Some(666),
+            },
+        ];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::FlowPoint::from(Point::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Points {
+        #[serde(rename = "pt")]
+        points: Vec<Point>,
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Flow {
         name: String,
         uid: Option<i32>,
         x: f64,
@@ -593,18 +691,10 @@ pub enum ViewObject {
         label_angle: Option<f64>,
         #[serde(rename = "pts")]
         points: Option<Points>,
-    },
-    Aux {
-        name: String,
-        uid: Option<i32>,
-        x: f64,
-        y: f64,
-        width: Option<f64>,
-        height: Option<f64>,
-        label_side: Option<LabelSide>,
-        label_angle: Option<f64>,
-    },
-    Connector {
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Link {
         uid: Option<i32>,
         label_side: Option<LabelSide>,
         label_angle: Option<f64>,
@@ -613,13 +703,26 @@ pub enum ViewObject {
         angle: Option<f64>,
         #[serde(rename = "pts")]
         points: Option<Points>, // for multi-point connectors
-    },
-    Module {
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Module {
         name: String,
         uid: Option<i32>,
         x: f64,
         y: f64,
-    },
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewObject {
+    Aux(view_element::Aux),
+    Stock(view_element::Stock),
+    Flow(view_element::Flow),
+    #[serde(rename = "connector")]
+    Link(view_element::Link),
+    Module(view_element::Module),
     // Style(Style),
     #[serde(other)]
     Unhandled,
