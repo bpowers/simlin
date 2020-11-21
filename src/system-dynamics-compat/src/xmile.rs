@@ -613,6 +613,51 @@ pub mod view_element {
         label_angle: Option<f64>,
     }
 
+    impl From<Aux> for datamodel::view_element::Aux {
+        fn from(v: Aux) -> Self {
+            datamodel::view_element::Aux {
+                name: v.name,
+                uid: v.uid.unwrap_or(-1),
+                x: v.x,
+                y: v.y,
+                label_side: datamodel::view_element::LabelSide::from(
+                    v.label_side.unwrap_or(LabelSide::Bottom),
+                ),
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Aux> for Aux {
+        fn from(v: datamodel::view_element::Aux) -> Self {
+            Aux {
+                name: v.name,
+                uid: Some(v.uid),
+                x: v.x,
+                y: v.y,
+                width: None,
+                height: None,
+                label_side: Some(LabelSide::from(v.label_side)),
+                label_angle: None,
+            }
+        }
+    }
+
+    #[test]
+    fn test_aux_roundtrip() {
+        let cases: &[_] = &[datamodel::view_element::Aux {
+            name: "test1".to_string(),
+            uid: 32,
+            x: 72.0,
+            y: 28.0,
+            label_side: datamodel::view_element::LabelSide::Top,
+        }];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Aux::from(Aux::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
+    }
+
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Stock {
         name: String,
@@ -623,6 +668,51 @@ pub mod view_element {
         height: Option<f64>,
         label_side: Option<LabelSide>,
         label_angle: Option<f64>,
+    }
+
+    impl From<Stock> for datamodel::view_element::Stock {
+        fn from(v: Stock) -> Self {
+            datamodel::view_element::Stock {
+                name: v.name,
+                uid: v.uid.unwrap_or(-1),
+                x: v.x,
+                y: v.y,
+                label_side: datamodel::view_element::LabelSide::from(
+                    v.label_side.unwrap_or(LabelSide::Bottom),
+                ),
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Stock> for Stock {
+        fn from(v: datamodel::view_element::Stock) -> Self {
+            Stock {
+                name: v.name,
+                uid: Some(v.uid),
+                x: v.x,
+                y: v.y,
+                width: None,
+                height: None,
+                label_side: Some(LabelSide::from(v.label_side)),
+                label_angle: None,
+            }
+        }
+    }
+
+    #[test]
+    fn test_stock_roundtrip() {
+        let cases: &[_] = &[datamodel::view_element::Stock {
+            name: "stock1".to_string(),
+            uid: 33,
+            x: 73.0,
+            y: 29.0,
+            label_side: datamodel::view_element::LabelSide::Center,
+        }];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Stock::from(Stock::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
     }
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -673,7 +763,7 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
     pub struct Points {
         #[serde(rename = "pt")]
         points: Vec<Point>,
@@ -691,6 +781,73 @@ pub mod view_element {
         label_angle: Option<f64>,
         #[serde(rename = "pts")]
         points: Option<Points>,
+    }
+
+    impl From<Flow> for datamodel::view_element::Flow {
+        fn from(v: Flow) -> Self {
+            datamodel::view_element::Flow {
+                name: v.name,
+                uid: v.uid.unwrap_or(-1),
+                x: v.x,
+                y: v.y,
+                label_side: datamodel::view_element::LabelSide::from(
+                    v.label_side.unwrap_or(LabelSide::Bottom),
+                ),
+                points: v
+                    .points
+                    .unwrap_or_default()
+                    .points
+                    .into_iter()
+                    .map(datamodel::view_element::FlowPoint::from)
+                    .collect(),
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Flow> for Flow {
+        fn from(v: datamodel::view_element::Flow) -> Self {
+            Flow {
+                name: v.name,
+                uid: Some(v.uid),
+                x: v.x,
+                y: v.y,
+                width: None,
+                height: None,
+                label_side: Some(LabelSide::from(v.label_side)),
+                label_angle: None,
+                points: Some(Points {
+                    points: v.points.into_iter().map(Point::from).collect(),
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn test_flow_roundtrip() {
+        let cases: &[_] = &[datamodel::view_element::Flow {
+            name: "inflow".to_string(),
+            uid: 76,
+            x: 1.1,
+            y: 23.2,
+            label_side: datamodel::view_element::LabelSide::Bottom,
+            points: vec![
+                datamodel::view_element::FlowPoint {
+                    x: 1.1,
+                    y: 2.2,
+                    attached_to_uid: None,
+                },
+                datamodel::view_element::FlowPoint {
+                    x: 1.1,
+                    y: 2.2,
+                    attached_to_uid: Some(666),
+                },
+            ],
+        }];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Flow::from(Flow::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
     }
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -711,6 +868,49 @@ pub mod view_element {
         uid: Option<i32>,
         x: f64,
         y: f64,
+        label_side: Option<LabelSide>,
+    }
+
+    impl From<Module> for datamodel::view_element::Module {
+        fn from(v: Module) -> Self {
+            datamodel::view_element::Module {
+                name: v.name,
+                uid: v.uid.unwrap_or(-1),
+                x: v.x,
+                y: v.y,
+                label_side: datamodel::view_element::LabelSide::from(
+                    v.label_side.unwrap_or(LabelSide::Bottom),
+                ),
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Module> for Module {
+        fn from(v: datamodel::view_element::Module) -> Self {
+            Module {
+                name: v.name,
+                uid: Some(v.uid),
+                x: v.x,
+                y: v.y,
+                label_side: Some(LabelSide::from(v.label_side)),
+            }
+        }
+    }
+
+    #[test]
+    fn test_module_roundtrip() {
+        let cases: &[_] = &[datamodel::view_element::Module {
+            name: "stock1".to_string(),
+            uid: 33,
+            x: 73.0,
+            y: 29.0,
+            label_side: datamodel::view_element::LabelSide::Center,
+        }];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Module::from(Module::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
     }
 }
 

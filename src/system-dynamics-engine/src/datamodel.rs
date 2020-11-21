@@ -128,8 +128,11 @@ pub mod view_element {
     pub struct Flow {
         pub name: String,
         pub uid: i32,
-        pub segment_with_aux: i32,
-        pub aux_percentage_into_segment: f64,
+        pub x: f64,
+        pub y: f64,
+        pub label_side: LabelSide,
+        // pub segment_with_aux: i32,
+        // pub aux_percentage_into_segment: f64,
         pub points: Vec<FlowPoint>,
     }
 
