@@ -2,6 +2,7 @@
 
 members = [
     "src/engine-v2",
+    "src/importer",
     "src/mdl",
     "src/system-dynamics-compat",
     "src/system-dynamics-engine",

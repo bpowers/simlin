@@ -8,4 +8,4 @@ edition = "2018"
 [dependencies]
 clap = "2"
 stringreader = "0.1"
-system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat" }
+system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat", features=["vensim"] }

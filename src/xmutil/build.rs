@@ -3,7 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 fn main() {
-    cc::Build::new()
+    let mut xmutil_build = cc::Build::new();
+    xmutil_build
         .cpp(true)
         .include("./third_party/tinyxml2")
         .include("./third_party")
@@ -43,13 +44,28 @@ fn main() {
         .file("./third_party/xmutil/Symbol/Expression.cpp")
         .file("./third_party/xmutil/Symbol/Equation.cpp")
         .file("./third_party/xmutil/Symbol/Variable.cpp")
-        .file("./third_party/xmutil/Symbol/UnitExpression.cpp")
-        .compile("xmutil-native");
+        .file("./third_party/xmutil/Symbol/UnitExpression.cpp");
 
-    cc::Build::new()
+    let mut tinyxml_build = cc::Build::new();
+    tinyxml_build
         .cpp(true)
-        .file("./third_party/tinyxml2/tinyxml2.cpp")
-        .compile("tinyxml-native");
+        .file("./third_party/tinyxml2/tinyxml2.cpp");
+
+    let target = std::env::var("TARGET").unwrap();
+    if target.starts_with("wasm") {
+        // xmutil_build.cpp_set_stdlib("c++");
+        xmutil_build.cpp_link_stdlib("c++-noexcept");
+        // tinyxml_build.cpp_set_stdlib("c++");
+        tinyxml_build.cpp_link_stdlib("c++-noexcept");
+        println!(
+            "cargo:rustc-link-search={}/src/emscripten/cache/wasm/",
+            std::env::var("HOME").unwrap()
+        );
+        println!("cargo:rustc-link-lib=c");
+    }
+
+    xmutil_build.compile("xmutil-native");
+    tinyxml_build.compile("tinyxml-native");
 
     cc::Build::new()
         .flag_if_supported("-Wno-parentheses")

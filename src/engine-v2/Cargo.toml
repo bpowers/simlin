@@ -14,3 +14,9 @@ system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.development.release]
+wasm-opt = false

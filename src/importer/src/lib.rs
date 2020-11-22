@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use std::io::BufReader;
 
-use system_dynamics_compat::{open_xmile, prost, engine};
+use system_dynamics_compat::{engine, open_xmile, prost};
 
 #[wasm_bindgen]
 pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
@@ -15,7 +15,7 @@ pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
 
     let mut buf: Vec<u8> = Vec::with_capacity(project_pb.encoded_len() + 8);
     match project_pb.encode_length_delimited(&mut buf) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(err) => panic!("encode_length_delimited failed: {}", err),
     };
 

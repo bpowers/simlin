@@ -361,6 +361,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "importer"
+version = "0.1.0"
+dependencies = [
+ "system-dynamics-compat",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -800,7 +809,6 @@ dependencies = [
  "float-cmp",
  "quick-xml",
  "serde",
- "stringreader",
  "system-dynamics-engine",
  "xmutil",
 ]
