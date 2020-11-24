@@ -549,6 +549,7 @@ pub enum ViewType {
 pub mod view_element {
     use super::datamodel;
     use serde::{Deserialize, Serialize};
+    use system_dynamics_engine::datamodel::view_element::LinkShape;
 
     #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
@@ -603,14 +604,14 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Aux {
-        name: String,
-        uid: Option<i32>,
-        x: f64,
-        y: f64,
-        width: Option<f64>,
-        height: Option<f64>,
-        label_side: Option<LabelSide>,
-        label_angle: Option<f64>,
+        pub name: String,
+        pub uid: Option<i32>,
+        pub x: f64,
+        pub y: f64,
+        pub width: Option<f64>,
+        pub height: Option<f64>,
+        pub label_side: Option<LabelSide>,
+        pub label_angle: Option<f64>,
     }
 
     impl From<Aux> for datamodel::view_element::Aux {
@@ -660,14 +661,14 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Stock {
-        name: String,
-        uid: Option<i32>,
-        x: f64,
-        y: f64,
-        width: Option<f64>,
-        height: Option<f64>,
-        label_side: Option<LabelSide>,
-        label_angle: Option<f64>,
+        pub name: String,
+        pub uid: Option<i32>,
+        pub x: f64,
+        pub y: f64,
+        pub width: Option<f64>,
+        pub height: Option<f64>,
+        pub label_side: Option<LabelSide>,
+        pub label_angle: Option<f64>,
     }
 
     impl From<Stock> for datamodel::view_element::Stock {
@@ -766,21 +767,21 @@ pub mod view_element {
     #[derive(Clone, PartialEq, Debug, Default, Deserialize, Serialize)]
     pub struct Points {
         #[serde(rename = "pt")]
-        points: Vec<Point>,
+        pub points: Vec<Point>,
     }
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Flow {
-        name: String,
-        uid: Option<i32>,
-        x: f64,
-        y: f64,
-        width: Option<f64>,
-        height: Option<f64>,
-        label_side: Option<LabelSide>,
-        label_angle: Option<f64>,
+        pub name: String,
+        pub uid: Option<i32>,
+        pub x: f64,
+        pub y: f64,
+        pub width: Option<f64>,
+        pub height: Option<f64>,
+        pub label_side: Option<LabelSide>,
+        pub label_angle: Option<f64>,
         #[serde(rename = "pts")]
-        points: Option<Points>,
+        pub points: Option<Points>,
     }
 
     impl From<Flow> for datamodel::view_element::Flow {
@@ -852,23 +853,108 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Link {
-        uid: Option<i32>,
-        label_side: Option<LabelSide>,
-        label_angle: Option<f64>,
-        from: String,
-        to: String,
-        angle: Option<f64>,
+        pub uid: Option<i32>,
+        pub from: String,
+        pub from_uid: Option<i32>,
+        pub to: String,
+        pub to_uid: Option<i32>,
+        pub angle: Option<f64>,
+        pub is_straight: Option<bool>,
         #[serde(rename = "pts")]
-        points: Option<Points>, // for multi-point connectors
+        pub points: Option<Points>, // for multi-point connectors
+    }
+
+    impl From<Link> for datamodel::view_element::Link {
+        fn from(v: Link) -> Self {
+            let shape = if v.is_straight.unwrap_or(false) {
+                datamodel::view_element::LinkShape::Straight
+            } else if v.points.is_some() {
+                datamodel::view_element::LinkShape::MultiPoint(
+                    v.points
+                        .unwrap()
+                        .points
+                        .into_iter()
+                        .map(datamodel::view_element::FlowPoint::from)
+                        .collect(),
+                )
+            } else {
+                datamodel::view_element::LinkShape::Arc(v.angle.unwrap_or(0.0))
+            };
+            datamodel::view_element::Link {
+                uid: v.uid.unwrap_or(-1),
+                from_uid: v.from_uid.unwrap_or(-1),
+                to_uid: v.to_uid.unwrap_or(-1),
+                shape,
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Link> for Link {
+        fn from(v: datamodel::view_element::Link) -> Self {
+            let (is_straight, angle, points) = match v.shape {
+                LinkShape::Straight => (Some(true), None, None),
+                LinkShape::Arc(angle) => (None, Some(angle), None),
+                LinkShape::MultiPoint(points) => (
+                    None,
+                    None,
+                    Some(Points {
+                        points: points.into_iter().map(Point::from).collect(),
+                    }),
+                ),
+            };
+            Link {
+                uid: Some(v.uid),
+                from: "".to_string(),
+                from_uid: Some(v.from_uid),
+                to: "".to_string(),
+                to_uid: Some(v.to_uid),
+                angle,
+                is_straight,
+                points,
+            }
+        }
+    }
+
+    #[test]
+    fn test_link_roundtrip() {
+        let cases: &[_] = &[
+            datamodel::view_element::Link {
+                uid: 33,
+                from_uid: 45,
+                to_uid: 67,
+                shape: LinkShape::Straight,
+            },
+            datamodel::view_element::Link {
+                uid: 33,
+                from_uid: 45,
+                to_uid: 67,
+                shape: LinkShape::Arc(351.3),
+            },
+            datamodel::view_element::Link {
+                uid: 33,
+                from_uid: 45,
+                to_uid: 67,
+                shape: LinkShape::MultiPoint(vec![datamodel::view_element::FlowPoint {
+                    x: 1.1,
+                    y: 2.2,
+                    attached_to_uid: None,
+                }]),
+            },
+        ];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Link::from(Link::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
     }
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Module {
-        name: String,
-        uid: Option<i32>,
-        x: f64,
-        y: f64,
-        label_side: Option<LabelSide>,
+        pub name: String,
+        pub uid: Option<i32>,
+        pub x: f64,
+        pub y: f64,
+        pub label_side: Option<LabelSide>,
     }
 
     impl From<Module> for datamodel::view_element::Module {
@@ -926,6 +1012,19 @@ pub enum ViewObject {
     // Style(Style),
     #[serde(other)]
     Unhandled,
+}
+
+impl ViewObject {
+    pub fn set_uid(view_element: &mut ViewObject, uid: i32) {
+        match view_element {
+            ViewObject::Aux(aux) => aux.uid = Some(uid),
+            ViewObject::Stock(stock) => stock.uid = Some(uid),
+            ViewObject::Flow(flow) => flow.uid = Some(uid),
+            ViewObject::Link(link) => link.uid = Some(uid),
+            ViewObject::Module(module) => module.uid = Some(uid),
+            ViewObject::Unhandled => {}
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]

@@ -139,11 +139,13 @@ pub mod view_element {
     #[derive(Clone, PartialEq, Debug)]
     pub enum LinkShape {
         Straight,
-        Curved(f64), // angle in [0, 360)
+        Arc(f64), // angle in [0, 360)
+        MultiPoint(Vec<FlowPoint>),
     }
 
     #[derive(Clone, PartialEq, Debug)]
     pub struct Link {
+        pub uid: i32,
         pub from_uid: i32,
         pub to_uid: i32,
         pub shape: LinkShape,
