@@ -1,25 +1,25 @@
 use wasm_bindgen::prelude::*;
 
-use std::io::BufReader;
-
-use system_dynamics_compat::{engine, open_xmile, prost};
+use system_dynamics_engine as engine;
+use system_dynamics_engine::{project_io, prost, serde};
 
 #[wasm_bindgen]
-pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
-    use prost::Message;
-    let project = match open_xmile(&mut BufReader::new(xmile_xml.as_bytes())) {
-        Ok(project) => project,
-        Err(err) => panic!("open_xmile failed: {}", err),
-    };
-    let project_pb = engine::serde::serialize(&project);
+pub struct Project {
+    #[allow(dead_code)]
+    project: engine::Project,
+}
 
-    let mut buf: Vec<u8> = Vec::with_capacity(project_pb.encoded_len() + 8);
-    match project_pb.encode_length_delimited(&mut buf) {
-        Ok(_) => {}
+#[wasm_bindgen]
+pub fn open(project_pb: &[u8]) -> Project {
+    use prost::Message;
+    let project = match project_io::Project::decode_length_delimited(project_pb) {
+        Ok(project) => serde::deserialize(project),
         Err(err) => panic!("encode_length_delimited failed: {}", err),
     };
 
-    buf.into_boxed_slice()
+    Project {
+        project: engine::Project::from(project),
+    }
 }
 
 // #[wasm_bindgen]

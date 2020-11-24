@@ -699,6 +699,6 @@ pub fn serialize(project: &Project) -> project_io::Project {
     project_io::Project::from(project.clone())
 }
 
-pub fn deserialize(project: &project_io::Project) -> Project {
-    Project::from(project.clone())
+pub fn deserialize(project: project_io::Project) -> Project {
+    Project::from(project)
 }
