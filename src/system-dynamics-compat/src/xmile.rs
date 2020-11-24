@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use system_dynamics_engine::common::{canonicalize, Result};
 use system_dynamics_engine::datamodel;
+use system_dynamics_engine::datamodel::ViewElement;
 
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
@@ -1023,6 +1024,44 @@ impl ViewObject {
             ViewObject::Link(link) => link.uid = Some(uid),
             ViewObject::Module(module) => module.uid = Some(uid),
             ViewObject::Unhandled => {}
+        }
+    }
+}
+
+impl From<ViewObject> for datamodel::ViewElement {
+    fn from(v: ViewObject) -> Self {
+        match v {
+            ViewObject::Aux(v) => {
+                datamodel::ViewElement::Aux(datamodel::view_element::Aux::from(v))
+            }
+            ViewObject::Stock(v) => {
+                datamodel::ViewElement::Stock(datamodel::view_element::Stock::from(v))
+            }
+            ViewObject::Flow(v) => {
+                datamodel::ViewElement::Flow(datamodel::view_element::Flow::from(v))
+            }
+            ViewObject::Link(v) => {
+                datamodel::ViewElement::Link(datamodel::view_element::Link::from(v))
+            }
+            ViewObject::Module(v) => {
+                datamodel::ViewElement::Module(datamodel::view_element::Module::from(v))
+            }
+            ViewObject::Unhandled => unreachable!("must filter out unhandled"),
+        }
+    }
+}
+
+impl From<datamodel::ViewElement> for ViewObject {
+    fn from(v: datamodel::ViewElement) -> Self {
+        match v {
+            // TODO: rename ViewObject to ViewElement for consistency
+            ViewElement::Aux(v) => ViewObject::Aux(view_element::Aux::from(v)),
+            ViewElement::Stock(v) => ViewObject::Stock(view_element::Stock::from(v)),
+            ViewElement::Flow(v) => ViewObject::Flow(view_element::Flow::from(v)),
+            ViewElement::Link(v) => ViewObject::Link(view_element::Link::from(v)),
+            ViewElement::Module(v) => ViewObject::Module(view_element::Module::from(v)),
+            ViewElement::Alias(_v) => ViewObject::Unhandled, // TODO
+            ViewElement::Cloud(_v) => ViewObject::Unhandled,
         }
     }
 }
