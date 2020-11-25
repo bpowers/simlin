@@ -497,7 +497,15 @@ impl From<Model> for datamodel::Model {
                     .collect(),
                 None => vec![],
             },
-            views: vec![],
+            views: model
+                .views
+                .unwrap_or(Views { view: None })
+                .view
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|v| v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow)
+                .map(datamodel::View::from)
+                .collect(),
         }
     }
 }
@@ -515,7 +523,13 @@ impl From<datamodel::Model> for Model {
                 let variables = model.variables.into_iter().map(Var::from).collect();
                 Some(Variables { variables })
             },
-            views: None,
+            views: if model.views.is_empty() {
+                None
+            } else {
+                Some(Views {
+                    view: Some(model.views.into_iter().map(View::from).collect()),
+                })
+            },
         }
     }
 }
@@ -538,7 +552,7 @@ impl Model {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Copy, Clone, PartialEq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewType {
     StockFlow,
@@ -552,7 +566,7 @@ pub mod view_element {
     use serde::{Deserialize, Serialize};
     use system_dynamics_engine::datamodel::view_element::LinkShape;
 
-    #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
     pub enum LabelSide {
         Top,
@@ -1076,6 +1090,58 @@ pub struct View {
     pub show_pages: Option<bool>,
     #[serde(rename = "$value", default)]
     pub objects: Vec<ViewObject>,
+}
+
+impl From<View> for datamodel::View {
+    fn from(v: View) -> Self {
+        if v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow {
+            datamodel::View::StockFlow(datamodel::StockFlow {
+                elements: v
+                    .objects
+                    .into_iter()
+                    .filter(|v| !matches!(v, ViewObject::Unhandled))
+                    .map(datamodel::ViewElement::from)
+                    .collect(),
+            })
+        } else {
+            unreachable!("only stock_flow supported for now -- should be filtered out before here")
+        }
+    }
+}
+
+impl From<datamodel::View> for View {
+    fn from(v: datamodel::View) -> Self {
+        match v {
+            datamodel::View::StockFlow(v) => View {
+                kind: Some(ViewType::StockFlow),
+                background: None,
+                page_width: None,
+                page_height: None,
+                show_pages: None,
+                objects: v.elements.into_iter().map(ViewObject::from).collect(),
+            },
+        }
+    }
+}
+
+#[test]
+fn test_view_roundtrip() {
+    let cases: &[_] = &[datamodel::View::StockFlow(datamodel::StockFlow {
+        elements: vec![datamodel::ViewElement::Stock(
+            datamodel::view_element::Stock {
+                name: "stock1".to_string(),
+                uid: 33,
+                x: 73.0,
+                y: 29.0,
+                label_side: datamodel::view_element::LabelSide::Center,
+            },
+        )],
+    })];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = datamodel::View::from(View::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
