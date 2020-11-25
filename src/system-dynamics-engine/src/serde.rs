@@ -3,8 +3,9 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::datamodel::{
-    Aux, Dt, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, Model, Module,
-    ModuleReference, Project, SimMethod, SimSpecs, Stock, Variable,
+    view_element, Aux, Dt, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
+    Model, Module, ModuleReference, Project, SimMethod, SimSpecs, Stock, StockFlow, Variable, View,
+    ViewElement,
 };
 use crate::project_io;
 
@@ -647,6 +648,578 @@ fn test_variable_roundtrip() {
     }
 }
 
+impl From<project_io::view_element::LabelSide> for view_element::LabelSide {
+    fn from(label_side: project_io::view_element::LabelSide) -> Self {
+        match label_side {
+            project_io::view_element::LabelSide::Top => view_element::LabelSide::Top,
+            project_io::view_element::LabelSide::Left => view_element::LabelSide::Left,
+            project_io::view_element::LabelSide::Center => view_element::LabelSide::Center,
+            project_io::view_element::LabelSide::Bottom => view_element::LabelSide::Bottom,
+            project_io::view_element::LabelSide::Right => view_element::LabelSide::Right,
+        }
+    }
+}
+
+impl From<i32> for project_io::view_element::LabelSide {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => project_io::view_element::LabelSide::Top,
+            1 => project_io::view_element::LabelSide::Left,
+            2 => project_io::view_element::LabelSide::Center,
+            3 => project_io::view_element::LabelSide::Bottom,
+            4 => project_io::view_element::LabelSide::Right,
+            _ => project_io::view_element::LabelSide::Top,
+        }
+    }
+}
+
+impl From<view_element::LabelSide> for project_io::view_element::LabelSide {
+    fn from(label_side: view_element::LabelSide) -> Self {
+        match label_side {
+            view_element::LabelSide::Top => project_io::view_element::LabelSide::Top,
+            view_element::LabelSide::Left => project_io::view_element::LabelSide::Left,
+            view_element::LabelSide::Center => project_io::view_element::LabelSide::Center,
+            view_element::LabelSide::Bottom => project_io::view_element::LabelSide::Bottom,
+            view_element::LabelSide::Right => project_io::view_element::LabelSide::Right,
+        }
+    }
+}
+
+#[test]
+fn test_label_side_roundtrip() {
+    let cases: &[_] = &[
+        view_element::LabelSide::Top,
+        view_element::LabelSide::Left,
+        view_element::LabelSide::Center,
+        view_element::LabelSide::Bottom,
+        view_element::LabelSide::Right,
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = view_element::LabelSide::from(project_io::view_element::LabelSide::from(
+            expected.clone(),
+        ));
+        assert_eq!(expected, actual);
+    }
+
+    assert_eq!(
+        project_io::view_element::LabelSide::Top,
+        project_io::view_element::LabelSide::from(666)
+    );
+}
+
+impl From<project_io::view_element::Aux> for view_element::Aux {
+    fn from(v: project_io::view_element::Aux) -> Self {
+        view_element::Aux {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
+                v.label_side,
+            )),
+        }
+    }
+}
+
+impl From<view_element::Aux> for project_io::view_element::Aux {
+    fn from(v: view_element::Aux) -> Self {
+        project_io::view_element::Aux {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+        }
+    }
+}
+
+#[test]
+fn test_view_element_aux_roundtrip() {
+    let cases: &[_] = &[view_element::Aux {
+        name: "var1".to_string(),
+        uid: 123,
+        x: 2.0,
+        y: 3.0,
+        label_side: view_element::LabelSide::Top,
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = view_element::Aux::from(project_io::view_element::Aux::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::view_element::Stock> for view_element::Stock {
+    fn from(v: project_io::view_element::Stock) -> Self {
+        view_element::Stock {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
+                v.label_side,
+            )),
+        }
+    }
+}
+
+impl From<view_element::Stock> for project_io::view_element::Stock {
+    fn from(v: view_element::Stock) -> Self {
+        project_io::view_element::Stock {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+        }
+    }
+}
+
+#[test]
+fn test_view_element_stock_roundtrip() {
+    let cases: &[_] = &[view_element::Stock {
+        name: "var2".to_string(),
+        uid: 123,
+        x: 2.0,
+        y: 3.0,
+        label_side: view_element::LabelSide::Top,
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual =
+            view_element::Stock::from(project_io::view_element::Stock::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::view_element::FlowPoint> for view_element::FlowPoint {
+    fn from(v: project_io::view_element::FlowPoint) -> Self {
+        view_element::FlowPoint {
+            x: v.x,
+            y: v.y,
+            attached_to_uid: v.attached_to_uid,
+        }
+    }
+}
+
+impl From<view_element::FlowPoint> for project_io::view_element::FlowPoint {
+    fn from(v: view_element::FlowPoint) -> Self {
+        project_io::view_element::FlowPoint {
+            x: v.x,
+            y: v.y,
+            attached_to_uid: v.attached_to_uid,
+        }
+    }
+}
+
+#[test]
+fn test_view_element_flow_point_roundtrip() {
+    let cases: &[_] = &[
+        view_element::FlowPoint {
+            x: 2.0,
+            y: 3.0,
+            attached_to_uid: Some(31),
+        },
+        view_element::FlowPoint {
+            x: 4.0,
+            y: 5.0,
+            attached_to_uid: None,
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = view_element::FlowPoint::from(project_io::view_element::FlowPoint::from(
+            expected.clone(),
+        ));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::view_element::Flow> for view_element::Flow {
+    fn from(v: project_io::view_element::Flow) -> Self {
+        view_element::Flow {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
+                v.label_side,
+            )),
+            points: v
+                .points
+                .into_iter()
+                .map(view_element::FlowPoint::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<view_element::Flow> for project_io::view_element::Flow {
+    fn from(v: view_element::Flow) -> Self {
+        project_io::view_element::Flow {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            points: v
+                .points
+                .into_iter()
+                .map(project_io::view_element::FlowPoint::from)
+                .collect(),
+        }
+    }
+}
+
+#[test]
+fn test_view_element_flow_roundtrip() {
+    let cases: &[_] = &[view_element::Flow {
+        name: "var2".to_string(),
+        uid: 123,
+        x: 2.0,
+        y: 3.0,
+        label_side: view_element::LabelSide::Top,
+        points: vec![
+            view_element::FlowPoint {
+                x: 6.0,
+                y: 7.0,
+                attached_to_uid: Some(34),
+            },
+            view_element::FlowPoint {
+                x: 8.0,
+                y: 9.0,
+                attached_to_uid: None,
+            },
+        ],
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual =
+            view_element::Flow::from(project_io::view_element::Flow::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::view_element::Link> for view_element::Link {
+    fn from(v: project_io::view_element::Link) -> Self {
+        view_element::Link {
+            uid: v.uid,
+            from_uid: v.from_uid,
+            to_uid: v.to_uid,
+            shape: match v
+                .shape
+                .unwrap_or(project_io::view_element::link::Shape::IsStraight(true))
+            {
+                project_io::view_element::link::Shape::Arc(angle) => {
+                    view_element::LinkShape::Arc(angle)
+                }
+                project_io::view_element::link::Shape::IsStraight(_) => {
+                    view_element::LinkShape::Straight
+                }
+                project_io::view_element::link::Shape::MultiPoint(points) => {
+                    view_element::LinkShape::MultiPoint(
+                        points
+                            .points
+                            .into_iter()
+                            .map(view_element::FlowPoint::from)
+                            .collect(),
+                    )
+                }
+            },
+        }
+    }
+}
+
+impl From<view_element::Link> for project_io::view_element::Link {
+    fn from(v: view_element::Link) -> Self {
+        project_io::view_element::Link {
+            uid: v.uid,
+            from_uid: v.from_uid,
+            to_uid: v.to_uid,
+            shape: match v.shape {
+                view_element::LinkShape::Arc(angle) => {
+                    Some(project_io::view_element::link::Shape::Arc(angle))
+                }
+                view_element::LinkShape::Straight => {
+                    Some(project_io::view_element::link::Shape::IsStraight(true))
+                }
+                view_element::LinkShape::MultiPoint(points) => {
+                    Some(project_io::view_element::link::Shape::MultiPoint(
+                        project_io::view_element::link::LinkPoints {
+                            points: points
+                                .into_iter()
+                                .map(project_io::view_element::FlowPoint::from)
+                                .collect(),
+                        },
+                    ))
+                }
+            },
+        }
+    }
+}
+
+#[test]
+fn test_view_element_link_roundtrip() {
+    let cases: &[_] = &[
+        view_element::Link {
+            uid: 123,
+            from_uid: 21,
+            to_uid: 22,
+            shape: view_element::LinkShape::Straight,
+        },
+        view_element::Link {
+            uid: 123,
+            from_uid: 21,
+            to_uid: 22,
+            shape: view_element::LinkShape::Arc(351.0),
+        },
+        view_element::Link {
+            uid: 123,
+            from_uid: 21,
+            to_uid: 22,
+            shape: view_element::LinkShape::MultiPoint(vec![
+                view_element::FlowPoint {
+                    x: 6.0,
+                    y: 7.0,
+                    attached_to_uid: Some(34),
+                },
+                view_element::FlowPoint {
+                    x: 8.0,
+                    y: 9.0,
+                    attached_to_uid: None,
+                },
+            ]),
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual =
+            view_element::Link::from(project_io::view_element::Link::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::view_element::Module> for view_element::Module {
+    fn from(v: project_io::view_element::Module) -> Self {
+        view_element::Module {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
+                v.label_side,
+            )),
+        }
+    }
+}
+
+impl From<view_element::Module> for project_io::view_element::Module {
+    fn from(v: view_element::Module) -> Self {
+        project_io::view_element::Module {
+            name: v.name,
+            uid: v.uid,
+            x: v.x,
+            y: v.y,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+        }
+    }
+}
+
+#[test]
+fn test_view_element_module_roundtrip() {
+    let cases: &[_] = &[view_element::Module {
+        name: "var3".to_string(),
+        uid: 123,
+        x: 2.0,
+        y: 3.0,
+        label_side: view_element::LabelSide::Top,
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual =
+            view_element::Module::from(project_io::view_element::Module::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::view_element::Alias> for view_element::Alias {
+    fn from(v: project_io::view_element::Alias) -> Self {
+        view_element::Alias {
+            uid: v.uid,
+            alias_of_uid: v.alias_of_uid,
+            x: v.x,
+            y: v.y,
+            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
+                v.label_side,
+            )),
+        }
+    }
+}
+
+impl From<view_element::Alias> for project_io::view_element::Alias {
+    fn from(v: view_element::Alias) -> Self {
+        project_io::view_element::Alias {
+            uid: v.uid,
+            alias_of_uid: v.alias_of_uid,
+            x: v.x,
+            y: v.y,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+        }
+    }
+}
+
+#[test]
+fn test_view_element_alias_roundtrip() {
+    let cases: &[_] = &[view_element::Alias {
+        uid: 123,
+        alias_of_uid: 124,
+        x: 2.0,
+        y: 3.0,
+        label_side: view_element::LabelSide::Top,
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual =
+            view_element::Alias::from(project_io::view_element::Alias::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::view_element::Cloud> for view_element::Cloud {
+    fn from(v: project_io::view_element::Cloud) -> Self {
+        view_element::Cloud {
+            uid: v.uid,
+            flow_uid: v.flow_uid,
+            x: v.x,
+            y: v.y,
+        }
+    }
+}
+
+impl From<view_element::Cloud> for project_io::view_element::Cloud {
+    fn from(v: view_element::Cloud) -> Self {
+        project_io::view_element::Cloud {
+            uid: v.uid,
+            flow_uid: v.flow_uid,
+            x: v.x,
+            y: v.y,
+        }
+    }
+}
+
+#[test]
+fn test_view_element_cloud_roundtrip() {
+    let cases: &[_] = &[view_element::Cloud {
+        uid: 123,
+        flow_uid: 124,
+        x: 2.0,
+        y: 3.0,
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual =
+            view_element::Cloud::from(project_io::view_element::Cloud::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<project_io::ViewElement> for ViewElement {
+    fn from(v: project_io::ViewElement) -> Self {
+        match v.element.unwrap() {
+            project_io::view_element::Element::Aux(v) => {
+                ViewElement::Aux(view_element::Aux::from(v))
+            }
+            project_io::view_element::Element::Stock(v) => {
+                ViewElement::Stock(view_element::Stock::from(v))
+            }
+            project_io::view_element::Element::Flow(v) => {
+                ViewElement::Flow(view_element::Flow::from(v))
+            }
+            project_io::view_element::Element::Link(v) => {
+                ViewElement::Link(view_element::Link::from(v))
+            }
+            project_io::view_element::Element::Module(v) => {
+                ViewElement::Module(view_element::Module::from(v))
+            }
+            project_io::view_element::Element::Alias(v) => {
+                ViewElement::Alias(view_element::Alias::from(v))
+            }
+            project_io::view_element::Element::Cloud(v) => {
+                ViewElement::Cloud(view_element::Cloud::from(v))
+            }
+        }
+    }
+}
+
+impl From<ViewElement> for project_io::ViewElement {
+    fn from(v: ViewElement) -> Self {
+        project_io::ViewElement {
+            element: Some(match v {
+                ViewElement::Aux(v) => {
+                    project_io::view_element::Element::Aux(project_io::view_element::Aux::from(v))
+                }
+                ViewElement::Stock(v) => project_io::view_element::Element::Stock(
+                    project_io::view_element::Stock::from(v),
+                ),
+                ViewElement::Flow(v) => {
+                    project_io::view_element::Element::Flow(project_io::view_element::Flow::from(v))
+                }
+                ViewElement::Link(v) => {
+                    project_io::view_element::Element::Link(project_io::view_element::Link::from(v))
+                }
+                ViewElement::Module(v) => project_io::view_element::Element::Module(
+                    project_io::view_element::Module::from(v),
+                ),
+                ViewElement::Alias(v) => project_io::view_element::Element::Alias(
+                    project_io::view_element::Alias::from(v),
+                ),
+                ViewElement::Cloud(v) => project_io::view_element::Element::Cloud(
+                    project_io::view_element::Cloud::from(v),
+                ),
+            }),
+        }
+    }
+}
+
+#[test]
+fn test_view_element_roundtrip() {
+    let cases: &[_] = &[ViewElement::Cloud(view_element::Cloud {
+        uid: 123,
+        flow_uid: 124,
+        x: 2.0,
+        y: 3.0,
+    })];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = ViewElement::from(project_io::ViewElement::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
+impl From<View> for project_io::View {
+    fn from(view: View) -> Self {
+        match view {
+            View::StockFlow(view) => project_io::View {
+                kind: project_io::view::ViewType::StockFlow as i32,
+                elements: view
+                    .elements
+                    .into_iter()
+                    .map(project_io::ViewElement::from)
+                    .collect(),
+            },
+        }
+    }
+}
+
+impl From<project_io::View> for View {
+    fn from(view: project_io::View) -> Self {
+        View::StockFlow(StockFlow {
+            elements: view.elements.into_iter().map(ViewElement::from).collect(),
+        })
+    }
+}
+
 impl From<Model> for project_io::Model {
     fn from(model: Model) -> Self {
         project_io::Model {
@@ -656,7 +1229,11 @@ impl From<Model> for project_io::Model {
                 .into_iter()
                 .map(project_io::Variable::from)
                 .collect(),
-            views: vec![],
+            views: model
+                .views
+                .into_iter()
+                .map(project_io::View::from)
+                .collect(),
         }
     }
 }
@@ -666,7 +1243,7 @@ impl From<project_io::Model> for Model {
         Model {
             name: model.name,
             variables: model.variables.into_iter().map(Variable::from).collect(),
-            views: vec![],
+            views: model.views.into_iter().map(View::from).collect(),
         }
     }
 }

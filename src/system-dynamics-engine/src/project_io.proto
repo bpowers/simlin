@@ -100,30 +100,39 @@ message ViewElement {
     LabelSide label_side = 5;
   };
 
+  message FlowPoint {
+    double x = 1;
+    double y = 2;
+    optional int32 attachedToUid = 3;
+  }
+
   message Flow {
-    message FlowPoint {
-      double x = 1;
-      double y = 2;
-      int32 attachedToUid = 3;
-    }
     string name = 1;
     int32 uid = 2;
-    int32 segmentWithAux = 3;
-    double auxPercentageIntoSegment = 4;
-    repeated FlowPoint points = 5;
+    double x = 3;
+    double y = 4;
+    LabelSide labelSide = 5;
+    // int32 segmentWithAux = 3;
+    // double auxPercentageIntoSegment = 4;
+    repeated FlowPoint points = 6;
   };
 
   message Link {
-    int32 fromUid = 1;
-    int32 toUid = 2;
-    oneof l {
-      double angle = 3; // [0, 360)
-      bool isStraight = 4;
+    message LinkPoints {
+      repeated FlowPoint points = 1;
+    }
+    int32 uid = 1;
+    int32 fromUid = 2;
+    int32 toUid = 3;
+    oneof shape {
+      double arc = 4; // [0, 360)
+      bool isStraight = 5;
+      LinkPoints multiPoint = 6;
     }
   };
 
   message Module {
-    int32 name = 1;
+    string name = 1;
     int32 uid = 2;
     double x = 3;
     double y = 4;
@@ -145,7 +154,7 @@ message ViewElement {
     double y = 4;
   };
 
-  oneof ve {
+  oneof element {
     Aux aux = 1;
     Stock stock = 2;
     Flow flow = 3;
