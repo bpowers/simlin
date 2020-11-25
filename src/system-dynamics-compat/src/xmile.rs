@@ -6,6 +6,7 @@ use std::io::BufRead;
 
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
 use system_dynamics_engine::common::{canonicalize, Result};
 use system_dynamics_engine::datamodel;
 use system_dynamics_engine::datamodel::ViewElement;
@@ -1030,14 +1031,25 @@ pub enum ViewObject {
 }
 
 impl ViewObject {
-    pub fn set_uid(view_element: &mut ViewObject, uid: i32) {
-        match view_element {
+    pub fn set_uid(&mut self, uid: i32) {
+        match self {
             ViewObject::Aux(aux) => aux.uid = Some(uid),
             ViewObject::Stock(stock) => stock.uid = Some(uid),
             ViewObject::Flow(flow) => flow.uid = Some(uid),
             ViewObject::Link(link) => link.uid = Some(uid),
             ViewObject::Module(module) => module.uid = Some(uid),
             ViewObject::Unhandled => {}
+        }
+    }
+
+    pub fn ident(&self) -> Option<String> {
+        match self {
+            ViewObject::Aux(aux) => Some(canonicalize(&aux.name)),
+            ViewObject::Stock(stock) => Some(canonicalize(&stock.name)),
+            ViewObject::Flow(flow) => Some(canonicalize(&flow.name)),
+            ViewObject::Link(_link) => None,
+            ViewObject::Module(module) => Some(canonicalize(&module.name)),
+            ViewObject::Unhandled => None,
         }
     }
 }
@@ -1082,6 +1094,7 @@ impl From<datamodel::ViewElement> for ViewObject {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct View {
+    pub next_uid: Option<i32>, // used internally
     #[serde(rename = "type")]
     pub kind: Option<ViewType>,
     pub background: Option<String>,
@@ -1092,9 +1105,46 @@ pub struct View {
     pub objects: Vec<ViewObject>,
 }
 
+impl View {
+    fn assign_uids(&mut self) -> HashMap<String, i32> {
+        let mut uid_map: HashMap<String, i32> = HashMap::new();
+        let mut next_uid = 1;
+        for o in self.objects.iter_mut() {
+            o.set_uid(next_uid);
+            if let Some(ident) = o.ident() {
+                uid_map.insert(ident, next_uid);
+            }
+            next_uid += 1;
+        }
+        for o in self.objects.iter_mut() {
+            if let ViewObject::Link(link) = o {
+                link.from_uid = uid_map.get(&canonicalize(&link.from)).cloned();
+                if link.from_uid == None {
+                    panic!("unable to look up Link 'from' {}", link.from);
+                }
+                link.to_uid = uid_map.get(&canonicalize(&link.to)).cloned();
+                if link.to_uid == None {
+                    panic!("unable to look up Link 'to' {}", link.to);
+                }
+            }
+        }
+
+        self.next_uid = Some(next_uid);
+        uid_map
+    }
+    fn fixup_clouds(&mut self, _uid_map: &HashMap<String, i32>) {}
+    fn normalize(&mut self) {
+        let uid_map = self.assign_uids();
+        self.fixup_clouds(&uid_map);
+    }
+}
+
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
         if v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow {
+            let mut v = v;
+            v.normalize();
+
             datamodel::View::StockFlow(datamodel::StockFlow {
                 elements: v
                     .objects
@@ -1113,6 +1163,7 @@ impl From<datamodel::View> for View {
     fn from(v: datamodel::View) -> Self {
         match v {
             datamodel::View::StockFlow(v) => View {
+                next_uid: None,
                 kind: Some(ViewType::StockFlow),
                 background: None,
                 page_width: None,
@@ -1130,7 +1181,7 @@ fn test_view_roundtrip() {
         elements: vec![datamodel::ViewElement::Stock(
             datamodel::view_element::Stock {
                 name: "stock1".to_string(),
-                uid: 33,
+                uid: 1,
                 x: 73.0,
                 y: 29.0,
                 label_side: datamodel::view_element::LabelSide::Center,
