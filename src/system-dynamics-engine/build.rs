@@ -72,7 +72,7 @@ pub const MODEL_NAMES: [&str; {}] = [",
         "];
 
 fn hydrate(bytes: &[u8]) -> datamodel::Model {{
-    let model = project_io::Model::decode_length_delimited(bytes).unwrap();
+    let model = project_io::Model::decode(bytes).unwrap();
     datamodel::Model::from(model)
 }}
 

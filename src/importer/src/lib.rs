@@ -14,9 +14,9 @@ pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
     let project_pb = engine::serde::serialize(&project);
 
     let mut buf: Vec<u8> = Vec::with_capacity(project_pb.encoded_len() + 8);
-    match project_pb.encode_length_delimited(&mut buf) {
+    match project_pb.encode(&mut buf) {
         Ok(_) => {}
-        Err(err) => panic!("encode_length_delimited failed: {}", err),
+        Err(err) => panic!("encode failed: {}", err),
     };
 
     buf.into_boxed_slice()
@@ -31,7 +31,7 @@ pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
 //
 //     let mut buf: Vec<u8> = Vec::with_capacity(project_pb.encoded_len() + 8);
 //     project_pb
-//         .encode_length_delimited(&mut buf)
+//         .encode(&mut buf)
 //         .unwrap();
 //
 //     buf.into_boxed_slice()

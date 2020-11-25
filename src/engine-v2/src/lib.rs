@@ -12,9 +12,9 @@ pub struct Project {
 #[wasm_bindgen]
 pub fn open(project_pb: &[u8]) -> Project {
     use prost::Message;
-    let project = match project_io::Project::decode_length_delimited(project_pb) {
+    let project = match project_io::Project::decode(project_pb) {
         Ok(project) => serde::deserialize(project),
-        Err(err) => panic!("encode_length_delimited failed: {}", err),
+        Err(err) => panic!("decode failed: {}", err),
     };
 
     Project {
@@ -31,7 +31,7 @@ pub fn open(project_pb: &[u8]) -> Project {
 //
 //     let mut buf: Vec<u8> = Vec::with_capacity(project_pb.encoded_len() + 8);
 //     project_pb
-//         .encode_length_delimited(&mut buf)
+//         .encode(&mut buf)
 //         .unwrap();
 //
 //     buf.into_boxed_slice()

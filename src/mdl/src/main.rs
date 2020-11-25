@@ -108,14 +108,12 @@ fn main() {
             if pb_project.models.len() != 1 {
                 die!("--model-only specified, but more than 1 model in this project");
             }
-            let mut buf = Vec::with_capacity(pb_project.models[0].encoded_len() + 8);
-            pb_project.models[0]
-                .encode_length_delimited(&mut buf)
-                .unwrap();
+            let mut buf = Vec::with_capacity(pb_project.models[0].encoded_len());
+            pb_project.models[0].encode(&mut buf).unwrap();
             buf
         } else {
-            let mut buf = Vec::with_capacity(pb_project.encoded_len() + 8);
-            pb_project.encode_length_delimited(&mut buf).unwrap();
+            let mut buf = Vec::with_capacity(pb_project.encoded_len());
+            pb_project.encode(&mut buf).unwrap();
             buf
         };
 
