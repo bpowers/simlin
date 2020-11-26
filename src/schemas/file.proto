@@ -13,4 +13,5 @@ message File {
   string user_id = 4; // user who created this content
   google.protobuf.Timestamp created = 5;
   string json_contents = 6;
+  bytes project_contents = 7;
 }

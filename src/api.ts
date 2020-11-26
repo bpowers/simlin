@@ -17,6 +17,8 @@ import { Project as ProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 import { UsernameDenylist } from './usernames';
 
+import { Project as ProjectIOPb } from './system-dynamics-engine/src/project_io_pb';
+
 export async function updatePreview(db: Database, project: ProjectPb): Promise<PreviewPb> {
   const fileDoc = await db.file.findOne(project.getFileId());
   if (!fileDoc) {
@@ -89,6 +91,12 @@ export const apiRouter = (app: Application): Router => {
         }
 
         const filePb = createFile(project.getId(), user.getId(), undefined, sdJSON);
+
+        if (req.body.projectPB) {
+          const buf = Buffer.from(req.body.projectPB, 'base64');
+          filePb.setProjectContents(buf);
+        }
+
         await app.db.file.create(filePb.getId(), filePb);
 
         project.setFileId(filePb.getId());

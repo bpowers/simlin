@@ -35,6 +35,7 @@ module.exports = {
     }
   },
   "ignorePatterns": [
+    "src/importer/",
     "src/engine-v2/",
     "src/schemas/",
   ],

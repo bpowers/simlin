@@ -39,6 +39,7 @@
   },
   "linterOptions": {
     "exclude": [
+      "src/importer/pkg/**/*.js",
       "src/engine-v2/pkg/**/*.js",
       "src/schemas/*.js",
       "app/config",

@@ -27,6 +27,11 @@ export class File extends jspb.Message {
   getJsonContents(): string;
   setJsonContents(value: string): void;
 
+  getProjectContents(): Uint8Array | string;
+  getProjectContents_asU8(): Uint8Array;
+  getProjectContents_asB64(): string;
+  setProjectContents(value: Uint8Array | string): void;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): File.AsObject;
   static toObject(includeInstance: boolean, msg: File): File.AsObject;
@@ -45,5 +50,6 @@ export namespace File {
     userId: string;
     created?: google_protobuf_timestamp_pb.Timestamp.AsObject;
     jsonContents: string;
+    projectContents: Uint8Array | string;
   };
 }

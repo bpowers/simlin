@@ -90,13 +90,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     const warningText = this.state.errorMsg || '';
     return (
       <div>
-        <Dialog
-          open={true}
-          disableBackdropClick={true}
-          disableEscapeKeyDown={true}
-          onClose={this.handleClose}
-          aria-labelledby="form-dialog-title"
-        >
+        <Dialog open={true} disableEscapeKeyDown={true} onClose={this.handleClose} aria-labelledby="form-dialog-title">
           <DialogTitle id="form-dialog-title">Welcome!</DialogTitle>
           <DialogContent>
             <DialogContentText>Please choose a username (think of this like a GitHub username).</DialogContentText>

@@ -4,6 +4,8 @@
 
 import * as React from 'react';
 
+import { fromUint8Array } from 'js-base64';
+
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import Accordion from '@material-ui/core/Accordion';
@@ -39,6 +41,7 @@ interface NewProjectState {
   errorMsg?: string;
   expanded: boolean;
   projectJSON?: any;
+  projectPB?: Uint8Array;
   isPublic?: boolean;
 }
 
@@ -91,6 +94,10 @@ export const NewProject = withStyles(styles)(
       if (this.state.projectJSON) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         bodyContents.projectJSON = this.state.projectJSON;
+      }
+      if (this.state.projectPB) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        bodyContents.projectPB = fromUint8Array(this.state.projectPB);
       }
       if (this.state.isPublic) {
         bodyContents.isPublic = true;
@@ -164,17 +171,16 @@ export const NewProject = withStyles(styles)(
         return;
       }
 
-      // try {
-      //   const { from } = await import('../engine-v2/pkg');
-      //   debugger;
-      //   const result = from(contents);
-      //   console.log(result);
-      // } catch (e) {
-      //   this.setState({
-      //     errorMsg: `engine-v2: ${e}`,
-      //   });
-      //   return;
-      // }
+      try {
+        const { from_xmile } = await import('../importer/pkg');
+        const projectPB: Uint8Array = from_xmile(contents);
+        this.setState({ projectPB });
+      } catch (e) {
+        this.setState({
+          errorMsg: `importer: ${e}`,
+        });
+        return;
+      }
 
       const [project, err] = stdProject.addXmileFile(doc, true);
       if (err) {

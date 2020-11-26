@@ -37,6 +37,8 @@
     "model-service",
     "webpack",
     "jest",
+    "src/importer",
+    "src/engine-v2",
     "src/setupTests.ts"
   ],
   "include": [
