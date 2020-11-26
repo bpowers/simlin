@@ -1270,17 +1270,6 @@ impl View {
         for element in display_stocks {
             let ident = element.ident().unwrap();
             if let Var::Stock(stock) = model.get_var(&ident).unwrap() {
-                if stock.inflows.is_some() {
-                    for inflow in stock.inflows.as_ref().unwrap() {
-                        let inflow_ident = canonicalize(inflow);
-                        if !uid_map.contains_key(&inflow_ident) {
-                            continue;
-                        }
-                        let inflow_uid = uid_map[&inflow_ident];
-                        let end = result.get_mut(&inflow_uid).unwrap();
-                        end.0 = Some(uid_map[&ident]);
-                    }
-                }
                 if stock.outflows.is_some() {
                     for outflow in stock.outflows.as_ref().unwrap() {
                         let outflow_ident = canonicalize(outflow);
@@ -1289,6 +1278,17 @@ impl View {
                         }
                         let outflow_uid = uid_map[&outflow_ident];
                         let end = result.get_mut(&outflow_uid).unwrap();
+                        end.0 = Some(uid_map[&ident]);
+                    }
+                }
+                if stock.inflows.is_some() {
+                    for inflow in stock.inflows.as_ref().unwrap() {
+                        let inflow_ident = canonicalize(inflow);
+                        if !uid_map.contains_key(&inflow_ident) {
+                            continue;
+                        }
+                        let inflow_uid = uid_map[&inflow_ident];
+                        let end = result.get_mut(&inflow_uid).unwrap();
                         end.1 = Some(uid_map[&ident]);
                     }
                 }
@@ -1347,6 +1347,8 @@ impl View {
                 unreachable!()
             }
         }
+
+        self.objects.append(&mut clouds);
     }
 
     fn normalize(&mut self, model: &Model) {
