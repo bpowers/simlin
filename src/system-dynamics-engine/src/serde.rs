@@ -99,7 +99,7 @@ impl From<SimSpecs> for project_io::SimSpecs {
                 Some(dt) => Some(project_io::Dt::from(dt)),
             },
             sim_method: project_io::SimMethod::from(sim_specs.sim_method) as i32,
-            time_units: sim_specs.time_units,
+            time_units: sim_specs.time_units.unwrap_or_default(),
         }
     }
 }
@@ -118,7 +118,11 @@ impl From<project_io::SimSpecs> for SimSpecs {
                 None => None,
             },
             sim_method: SimMethod::from(project_io::SimMethod::from(sim_specs.sim_method)),
-            time_units: sim_specs.time_units,
+            time_units: if sim_specs.time_units.is_empty() {
+                None
+            } else {
+                Some(sim_specs.time_units)
+            },
         }
     }
 }
@@ -798,7 +802,11 @@ impl From<project_io::view_element::FlowPoint> for view_element::FlowPoint {
         view_element::FlowPoint {
             x: v.x,
             y: v.y,
-            attached_to_uid: v.attached_to_uid,
+            attached_to_uid: if v.attached_to_uid > 0 {
+                Some(v.attached_to_uid)
+            } else {
+                None
+            },
         }
     }
 }
@@ -808,7 +816,7 @@ impl From<view_element::FlowPoint> for project_io::view_element::FlowPoint {
         project_io::view_element::FlowPoint {
             x: v.x,
             y: v.y,
-            attached_to_uid: v.attached_to_uid,
+            attached_to_uid: v.attached_to_uid.unwrap_or_default(),
         }
     }
 }

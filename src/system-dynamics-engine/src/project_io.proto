@@ -103,7 +103,7 @@ message ViewElement {
   message FlowPoint {
     double x = 1;
     double y = 2;
-    optional int32 attachedToUid = 3;
+    int32 attachedToUid = 3;
   }
 
   message Flow {
@@ -200,9 +200,9 @@ message SimSpecs {
   double start = 1;
   double stop = 2;
   Dt dt = 3;
-  optional Dt saveStep = 4;
+  Dt saveStep = 4;
   SimMethod simMethod = 5;
-  optional string timeUnits = 6;
+  string timeUnits = 6;
 };
 
 message Project {
