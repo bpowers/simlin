@@ -488,6 +488,20 @@ pub struct Model {
 
 impl From<Model> for datamodel::Model {
     fn from(model: Model) -> Self {
+        let views = model
+            .views
+            .clone()
+            .unwrap_or(Views { view: None })
+            .view
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow)
+            .map(|v| {
+                let mut v = v;
+                v.normalize(&model);
+                datamodel::View::from(v)
+            })
+            .collect();
         datamodel::Model {
             name: model.name.unwrap_or_else(|| "main".to_string()),
             variables: match model.variables {
@@ -498,15 +512,7 @@ impl From<Model> for datamodel::Model {
                     .collect(),
                 None => vec![],
             },
-            views: model
-                .views
-                .unwrap_or(Views { view: None })
-                .view
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|v| v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow)
-                .map(datamodel::View::from)
-                .collect(),
+            views,
         }
     }
 }
@@ -550,6 +556,21 @@ impl Model {
     #[allow(dead_code)] // TODO: false positive
     pub fn get_name(&self) -> &str {
         &self.name.as_deref().unwrap_or("main")
+    }
+
+    // TODO: if this is a bottleneck, we should have a normalize pass over
+    //   the model to canonicalize things once (and build a map)
+    pub fn get_var(&self, ident: &str) -> Option<&Var> {
+        self.variables.as_ref()?;
+
+        for var in self.variables.as_ref().unwrap().variables.iter() {
+            let name = var.get_noncanonical_name();
+            if ident == name || ident == canonicalize(name) {
+                return Some(var);
+            }
+        }
+
+        None
     }
 }
 
@@ -734,9 +755,9 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Point {
-        x: f64,
-        y: f64,
-        uid: Option<i32>,
+        pub x: f64,
+        pub y: f64,
+        pub uid: Option<i32>,
     }
 
     impl From<Point> for datamodel::view_element::FlowPoint {
@@ -1014,6 +1035,51 @@ pub mod view_element {
             assert_eq!(expected, actual);
         }
     }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Cloud {
+        pub uid: i32,
+        pub flow_uid: i32,
+        pub x: f64,
+        pub y: f64,
+    }
+
+    impl From<Cloud> for datamodel::view_element::Cloud {
+        fn from(v: Cloud) -> Self {
+            datamodel::view_element::Cloud {
+                uid: v.uid,
+                flow_uid: v.flow_uid,
+                x: v.x,
+                y: v.y,
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Cloud> for Cloud {
+        fn from(v: datamodel::view_element::Cloud) -> Self {
+            Cloud {
+                uid: v.uid,
+                flow_uid: v.flow_uid,
+                x: v.x,
+                y: v.y,
+            }
+        }
+    }
+
+    #[test]
+    fn test_cloud_roundtrip() {
+        let cases: &[_] = &[datamodel::view_element::Cloud {
+            uid: 33,
+            flow_uid: 31,
+            x: 73.0,
+            y: 29.0,
+        }];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Cloud::from(Cloud::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -1025,6 +1091,7 @@ pub enum ViewObject {
     #[serde(rename = "connector")]
     Link(view_element::Link),
     Module(view_element::Module),
+    Cloud(view_element::Cloud),
     // Style(Style),
     #[serde(other)]
     Unhandled,
@@ -1038,7 +1105,20 @@ impl ViewObject {
             ViewObject::Flow(flow) => flow.uid = Some(uid),
             ViewObject::Link(link) => link.uid = Some(uid),
             ViewObject::Module(module) => module.uid = Some(uid),
+            ViewObject::Cloud(cloud) => cloud.uid = uid,
             ViewObject::Unhandled => {}
+        }
+    }
+
+    pub fn uid(&self) -> Option<i32> {
+        match self {
+            ViewObject::Aux(aux) => aux.uid,
+            ViewObject::Stock(stock) => stock.uid,
+            ViewObject::Flow(flow) => flow.uid,
+            ViewObject::Link(link) => link.uid,
+            ViewObject::Module(module) => module.uid,
+            ViewObject::Cloud(cloud) => Some(cloud.uid),
+            ViewObject::Unhandled => None,
         }
     }
 
@@ -1049,6 +1129,7 @@ impl ViewObject {
             ViewObject::Flow(flow) => Some(canonicalize(&flow.name)),
             ViewObject::Link(_link) => None,
             ViewObject::Module(module) => Some(canonicalize(&module.name)),
+            ViewObject::Cloud(_cloud) => None,
             ViewObject::Unhandled => None,
         }
     }
@@ -1071,6 +1152,9 @@ impl From<ViewObject> for datamodel::ViewElement {
             }
             ViewObject::Module(v) => {
                 datamodel::ViewElement::Module(datamodel::view_element::Module::from(v))
+            }
+            ViewObject::Cloud(v) => {
+                datamodel::ViewElement::Cloud(datamodel::view_element::Cloud::from(v))
             }
             ViewObject::Unhandled => unreachable!("must filter out unhandled"),
         }
@@ -1105,6 +1189,36 @@ pub struct View {
     pub objects: Vec<ViewObject>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloudPosition {
+    Source,
+    Sink,
+}
+
+fn cloud_for(flow: &ViewObject, pos: CloudPosition, uid: i32) -> ViewObject {
+    if let ViewObject::Flow(flow) = flow {
+        let (x, y) = match pos {
+            CloudPosition::Source => {
+                let point = flow.points.as_ref().unwrap().points.first().unwrap();
+                (point.x, point.y)
+            }
+            CloudPosition::Sink => {
+                let point = flow.points.as_ref().unwrap().points.last().unwrap();
+                (point.x, point.y)
+            }
+        };
+
+        ViewObject::Cloud(view_element::Cloud {
+            uid,
+            flow_uid: flow.uid.unwrap(),
+            x,
+            y,
+        })
+    } else {
+        unreachable!()
+    }
+}
+
 impl View {
     fn assign_uids(&mut self) -> HashMap<String, i32> {
         let mut uid_map: HashMap<String, i32> = HashMap::new();
@@ -1132,19 +1246,121 @@ impl View {
         self.next_uid = Some(next_uid);
         uid_map
     }
-    fn fixup_clouds(&mut self, _uid_map: &HashMap<String, i32>) {}
-    fn normalize(&mut self) {
+
+    fn get_flow_ends(
+        &self,
+        uid_map: &HashMap<String, i32>,
+        model: &Model,
+    ) -> HashMap<i32, (Option<i32>, Option<i32>)> {
+        let display_stocks: Vec<&ViewObject> = self
+            .objects
+            .iter()
+            .filter(|v| matches!(v, ViewObject::Stock(_)))
+            .collect();
+        let display_flows: Vec<&ViewObject> = self
+            .objects
+            .iter()
+            .filter(|v| matches!(v, ViewObject::Flow(_)))
+            .collect();
+        let mut result: HashMap<i32, (Option<i32>, Option<i32>)> = display_flows
+            .iter()
+            .map(|v| (v.uid().unwrap(), (None, None)))
+            .collect();
+
+        for element in display_stocks {
+            let ident = element.ident().unwrap();
+            if let Var::Stock(stock) = model.get_var(&ident).unwrap() {
+                if stock.inflows.is_some() {
+                    for inflow in stock.inflows.as_ref().unwrap() {
+                        let inflow_ident = canonicalize(inflow);
+                        if !uid_map.contains_key(&inflow_ident) {
+                            continue;
+                        }
+                        let inflow_uid = uid_map[&inflow_ident];
+                        let end = result.get_mut(&inflow_uid).unwrap();
+                        end.0 = Some(uid_map[&ident]);
+                    }
+                }
+                if stock.outflows.is_some() {
+                    for outflow in stock.outflows.as_ref().unwrap() {
+                        let outflow_ident = canonicalize(outflow);
+                        if !uid_map.contains_key(&outflow_ident) {
+                            continue;
+                        }
+                        let outflow_uid = uid_map[&outflow_ident];
+                        let end = result.get_mut(&outflow_uid).unwrap();
+                        end.1 = Some(uid_map[&ident]);
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    fn fixup_clouds(&mut self, model: &Model, uid_map: &HashMap<String, i32>) {
+        if model.variables.is_none() {
+            // nothing to do if there are no variables
+            return;
+        }
+        let flow_ends = self.get_flow_ends(uid_map, model);
+        let mut clouds: Vec<ViewObject> = Vec::new();
+
+        let display_flows: Vec<&mut ViewObject> = self
+            .objects
+            .iter_mut()
+            .filter(|v| matches!(v, ViewObject::Flow(_)))
+            .collect();
+
+        for flow in display_flows {
+            let ends = &flow_ends[&flow.uid().unwrap()];
+            let source_uid = match ends.0 {
+                None => {
+                    let uid = self.next_uid.unwrap();
+                    self.next_uid = Some(uid + 1);
+                    let cloud = cloud_for(flow, CloudPosition::Source, uid);
+                    clouds.push(cloud);
+                    uid
+                }
+                Some(uid) => uid,
+            };
+            let sink_uid = match ends.1 {
+                None => {
+                    let uid = self.next_uid.unwrap();
+                    self.next_uid = Some(uid + 1);
+                    let cloud = cloud_for(flow, CloudPosition::Sink, uid);
+                    clouds.push(cloud);
+                    uid
+                }
+                Some(uid) => uid,
+            };
+
+            if let ViewObject::Flow(flow) = flow {
+                if flow.points.is_some() && !flow.points.as_ref().unwrap().points.is_empty() {
+                    let points = flow.points.as_mut().unwrap();
+                    let source_point = points.points.first_mut().unwrap();
+                    source_point.uid = Some(source_uid);
+                    let sink_point = points.points.last_mut().unwrap();
+                    sink_point.uid = Some(sink_uid);
+                }
+            } else {
+                unreachable!()
+            }
+        }
+    }
+
+    fn normalize(&mut self, model: &Model) {
+        if self.kind.unwrap_or(ViewType::VendorSpecific) != ViewType::StockFlow {
+            return;
+        }
         let uid_map = self.assign_uids();
-        self.fixup_clouds(&uid_map);
+        self.fixup_clouds(model, &uid_map);
     }
 }
 
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
         if v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow {
-            let mut v = v;
-            v.normalize();
-
             datamodel::View::StockFlow(datamodel::StockFlow {
                 elements: v
                     .objects
