@@ -89,13 +89,12 @@ export const apiRouter = (app: Application): Router => {
         } else {
           sdJSON = JSON.stringify(emptyProject(projectName, user.getDisplayName()));
         }
-
-        const filePb = createFile(project.getId(), user.getId(), undefined, sdJSON);
-
+        let sdPB: Buffer | undefined;
         if (req.body.projectPB) {
-          const buf = Buffer.from(req.body.projectPB, 'base64');
-          filePb.setProjectContents(buf);
+          sdPB = Buffer.from(req.body.projectPB, 'base64');
         }
+
+        const filePb = createFile(project.getId(), user.getId(), undefined, sdJSON, sdPB);
 
         await app.db.file.create(filePb.getId(), filePb);
 
@@ -258,7 +257,12 @@ export const apiRouter = (app: Application): Router => {
 
       const jsonContents = JSON.stringify(fileContents);
 
-      const file = createFile(projectModel.getId(), user.getId(), undefined, jsonContents);
+      let pbContents: Buffer | undefined;
+      if (req.body.projectPB) {
+        pbContents = Buffer.from(req.body.projectPB, 'base64');
+      }
+
+      const file = createFile(projectModel.getId(), user.getId(), undefined, jsonContents, pbContents);
       await app.db.file.create(file.getId(), file);
 
       // only update if the version matches

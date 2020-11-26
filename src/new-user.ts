@@ -13,6 +13,7 @@ import { Table } from './models/table';
 import { createFile, createProject } from './project-creation';
 import { File } from './schemas/file_pb';
 import { User } from './schemas/user_pb';
+import { from_xmile } from './importer/pkg';
 
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
   const xml = new DOMParser().parseFromString(xmile, 'application/xml');
@@ -26,8 +27,9 @@ async function fileFromXmile(files: Table<File>, projectId: string, userId: stri
 
   const sdFile = project.toFile();
   const sdJson = JSON.stringify(sdFile);
+  const sdPB: Uint8Array = from_xmile(xmile);
 
-  const file = createFile(projectId, userId, undefined, sdJson);
+  const file = createFile(projectId, userId, undefined, sdJson, sdPB);
   await files.create(file.getId(), file);
 
   return file;

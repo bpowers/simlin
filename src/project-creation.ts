@@ -71,6 +71,7 @@ export function createFile(
   userId: string,
   prevId: string | undefined,
   jsonContents: string,
+  pbContents: Uint8Array | undefined,
 ): FilePb {
   const created = new Timestamp();
   created.fromDate(new Date());
@@ -80,6 +81,9 @@ export function createFile(
   filePb.setUserId(userId);
   filePb.setCreated(created);
   filePb.setJsonContents(jsonContents);
+  if (pbContents) {
+    filePb.setProjectContents(pbContents);
+  }
 
   const hash = createHash('sha256');
   hash.update(filePb.serializeBinary());
