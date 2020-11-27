@@ -64,6 +64,7 @@ export const apiRouter = (app: Application): Router => {
   // create a new project
   api.post(
     '/projects',
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
       const user = getUser(req, res);
 
@@ -114,6 +115,7 @@ export const apiRouter = (app: Application): Router => {
 
   api.get(
     '/projects',
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
       const user = getUser(req, res);
       const projectModels = await app.db.project.find(user.getId() + '/');
@@ -124,6 +126,7 @@ export const apiRouter = (app: Application): Router => {
 
   api.get(
     '/projects/:username/:projectName',
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
       let authorUser: UserPb | undefined = getUser(req, res);
       if (authorUser.getId() !== req.params.username) {
@@ -174,6 +177,7 @@ export const apiRouter = (app: Application): Router => {
 
   api.get(
     '/preview/:username/:projectName',
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
       let authorUser: UserPb | undefined = getUser(req, res);
       if (authorUser.getId() !== req.params.username) {
@@ -226,6 +230,7 @@ export const apiRouter = (app: Application): Router => {
 
   api.post(
     '/projects/:username/:projectName',
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
       const user = getUser(req, res);
       // TODO
@@ -302,6 +307,7 @@ export const apiRouter = (app: Application): Router => {
 
   api.patch(
     '/user',
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
       const userModel = getUser(req, res);
 
