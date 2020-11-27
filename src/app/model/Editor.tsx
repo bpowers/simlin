@@ -4,11 +4,15 @@
 
 import * as React from 'react';
 
+import { toUint8Array } from 'js-base64';
+
 import { List, Map, Set, Stack } from 'immutable';
 
 import { History } from 'history';
 
 import { Canvg } from 'canvg';
+
+import { Project as ProjectPB } from './../../system-dynamics-engine/src/project_io_pb';
 
 import { Model } from '../../engine/model';
 import { Project, stdProject } from '../../engine/project';
@@ -351,6 +355,17 @@ export const Editor = withStyles(styles)(
         this.appendModelError(`FileFromJSON: ${err.message}`);
         return;
       }
+
+      let projectPB: ProjectPB;
+      try {
+        const binary = toUint8Array(projectResponse.pb);
+        projectPB = ProjectPB.deserializeBinary(binary);
+      } catch (err) {
+        this.appendModelError(`project protobuf: ${err.message}`);
+        return;
+      }
+
+      console.log(projectPB);
 
       const [project, err2] = stdProject.addFile(defined(file));
       if (err2 || !project) {
