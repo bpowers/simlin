@@ -17,10 +17,10 @@ message GraphicalFunction {
     double max = 2;
   }
   Kind kind = 1;
-  repeated double xPoints = 2;
-  repeated double yPoints = 3;
-  Scale xScale = 4;
-  Scale yScale = 5;
+  repeated double x_points = 2;
+  repeated double y_points = 3;
+  Scale x_scale = 4;
+  Scale y_scale = 5;
 }
 
 message Variable {
@@ -103,7 +103,7 @@ message ViewElement {
   message FlowPoint {
     double x = 1;
     double y = 2;
-    int32 attachedToUid = 3;
+    int32 attached_to_uid = 3;
   }
 
   message Flow {
@@ -111,7 +111,7 @@ message ViewElement {
     int32 uid = 2;
     double x = 3;
     double y = 4;
-    LabelSide labelSide = 5;
+    LabelSide label_side = 5;
     // int32 segmentWithAux = 3;
     // double auxPercentageIntoSegment = 4;
     repeated FlowPoint points = 6;
@@ -122,12 +122,12 @@ message ViewElement {
       repeated FlowPoint points = 1;
     }
     int32 uid = 1;
-    int32 fromUid = 2;
-    int32 toUid = 3;
+    int32 from_uid = 2;
+    int32 to_uid = 3;
     oneof shape {
       double arc = 4; // [0, 360)
-      bool isStraight = 5;
-      LinkPoints multiPoint = 6;
+      bool is_straight = 5;
+      LinkPoints multi_point = 6;
     }
   };
 
@@ -141,7 +141,7 @@ message ViewElement {
 
   message Alias {
     int32 uid = 1;
-    int32 aliasOfUid = 2;
+    int32 alias_of_uid = 2;
     double x = 3;
     double y = 4;
     LabelSide label_side = 5;
@@ -149,7 +149,7 @@ message ViewElement {
 
   message Cloud {
     int32 uid = 1;
-    int32 flowUid = 2;
+    int32 flow_uid = 2;
     double x = 3;
     double y = 4;
   };
@@ -193,20 +193,20 @@ enum SimMethod {
 
 message Dt {
   double value = 1;
-  bool isReciprocal = 2;
+  bool is_reciprocal = 2;
 }
 
 message SimSpecs {
   double start = 1;
   double stop = 2;
   Dt dt = 3;
-  Dt saveStep = 4;
-  SimMethod simMethod = 5;
-  string timeUnits = 6;
+  Dt save_step = 4;
+  SimMethod sim_method = 5;
+  string time_units = 6;
 };
 
 message Project {
   string name = 1;
-  SimSpecs simSpecs = 2;
+  SimSpecs sim_specs = 2;
   repeated Model models = 3;
 };

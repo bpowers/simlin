@@ -7,25 +7,25 @@ export class GraphicalFunction extends jspb.Message {
   getKind(): GraphicalFunction.KindMap[keyof GraphicalFunction.KindMap];
   setKind(value: GraphicalFunction.KindMap[keyof GraphicalFunction.KindMap]): void;
 
-  clearXpointsList(): void;
-  getXpointsList(): Array<number>;
-  setXpointsList(value: Array<number>): void;
-  addXpoints(value: number, index?: number): number;
+  clearXPointsList(): void;
+  getXPointsList(): Array<number>;
+  setXPointsList(value: Array<number>): void;
+  addXPoints(value: number, index?: number): number;
 
-  clearYpointsList(): void;
-  getYpointsList(): Array<number>;
-  setYpointsList(value: Array<number>): void;
-  addYpoints(value: number, index?: number): number;
+  clearYPointsList(): void;
+  getYPointsList(): Array<number>;
+  setYPointsList(value: Array<number>): void;
+  addYPoints(value: number, index?: number): number;
 
-  hasXscale(): boolean;
-  clearXscale(): void;
-  getXscale(): GraphicalFunction.Scale | undefined;
-  setXscale(value?: GraphicalFunction.Scale): void;
+  hasXScale(): boolean;
+  clearXScale(): void;
+  getXScale(): GraphicalFunction.Scale | undefined;
+  setXScale(value?: GraphicalFunction.Scale): void;
 
-  hasYscale(): boolean;
-  clearYscale(): void;
-  getYscale(): GraphicalFunction.Scale | undefined;
-  setYscale(value?: GraphicalFunction.Scale): void;
+  hasYScale(): boolean;
+  clearYScale(): void;
+  getYScale(): GraphicalFunction.Scale | undefined;
+  setYScale(value?: GraphicalFunction.Scale): void;
 
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): GraphicalFunction.AsObject;
@@ -40,10 +40,10 @@ export class GraphicalFunction extends jspb.Message {
 export namespace GraphicalFunction {
   export type AsObject = {
     kind: GraphicalFunction.KindMap[keyof GraphicalFunction.KindMap];
-    xpointsList: Array<number>;
-    ypointsList: Array<number>;
-    xscale?: GraphicalFunction.Scale.AsObject;
-    yscale?: GraphicalFunction.Scale.AsObject;
+    xPointsList: Array<number>;
+    yPointsList: Array<number>;
+    xScale?: GraphicalFunction.Scale.AsObject;
+    yScale?: GraphicalFunction.Scale.AsObject;
   };
 
   export class Scale extends jspb.Message {
@@ -455,8 +455,8 @@ export namespace ViewElement {
     getY(): number;
     setY(value: number): void;
 
-    getAttachedtouid(): number;
-    setAttachedtouid(value: number): void;
+    getAttachedToUid(): number;
+    setAttachedToUid(value: number): void;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): FlowPoint.AsObject;
@@ -472,7 +472,7 @@ export namespace ViewElement {
     export type AsObject = {
       x: number;
       y: number;
-      attachedtouid: number;
+      attachedToUid: number;
     };
   }
 
@@ -489,8 +489,8 @@ export namespace ViewElement {
     getY(): number;
     setY(value: number): void;
 
-    getLabelside(): ViewElement.LabelSideMap[keyof ViewElement.LabelSideMap];
-    setLabelside(value: ViewElement.LabelSideMap[keyof ViewElement.LabelSideMap]): void;
+    getLabelSide(): ViewElement.LabelSideMap[keyof ViewElement.LabelSideMap];
+    setLabelSide(value: ViewElement.LabelSideMap[keyof ViewElement.LabelSideMap]): void;
 
     clearPointsList(): void;
     getPointsList(): Array<ViewElement.FlowPoint>;
@@ -513,7 +513,7 @@ export namespace ViewElement {
       uid: number;
       x: number;
       y: number;
-      labelside: ViewElement.LabelSideMap[keyof ViewElement.LabelSideMap];
+      labelSide: ViewElement.LabelSideMap[keyof ViewElement.LabelSideMap];
       pointsList: Array<ViewElement.FlowPoint.AsObject>;
     };
   }
@@ -522,26 +522,26 @@ export namespace ViewElement {
     getUid(): number;
     setUid(value: number): void;
 
-    getFromuid(): number;
-    setFromuid(value: number): void;
+    getFromUid(): number;
+    setFromUid(value: number): void;
 
-    getTouid(): number;
-    setTouid(value: number): void;
+    getToUid(): number;
+    setToUid(value: number): void;
 
     hasArc(): boolean;
     clearArc(): void;
     getArc(): number;
     setArc(value: number): void;
 
-    hasIsstraight(): boolean;
-    clearIsstraight(): void;
-    getIsstraight(): boolean;
-    setIsstraight(value: boolean): void;
+    hasIsStraight(): boolean;
+    clearIsStraight(): void;
+    getIsStraight(): boolean;
+    setIsStraight(value: boolean): void;
 
-    hasMultipoint(): boolean;
-    clearMultipoint(): void;
-    getMultipoint(): ViewElement.Link.LinkPoints | undefined;
-    setMultipoint(value?: ViewElement.Link.LinkPoints): void;
+    hasMultiPoint(): boolean;
+    clearMultiPoint(): void;
+    getMultiPoint(): ViewElement.Link.LinkPoints | undefined;
+    setMultiPoint(value?: ViewElement.Link.LinkPoints): void;
 
     getShapeCase(): Link.ShapeCase;
     serializeBinary(): Uint8Array;
@@ -557,11 +557,11 @@ export namespace ViewElement {
   export namespace Link {
     export type AsObject = {
       uid: number;
-      fromuid: number;
-      touid: number;
+      fromUid: number;
+      toUid: number;
       arc: number;
-      isstraight: boolean;
-      multipoint?: ViewElement.Link.LinkPoints.AsObject;
+      isStraight: boolean;
+      multiPoint?: ViewElement.Link.LinkPoints.AsObject;
     };
 
     export class LinkPoints extends jspb.Message {
@@ -589,8 +589,8 @@ export namespace ViewElement {
     export enum ShapeCase {
       SHAPE_NOT_SET = 0,
       ARC = 4,
-      ISSTRAIGHT = 5,
-      MULTIPOINT = 6,
+      IS_STRAIGHT = 5,
+      MULTI_POINT = 6,
     }
   }
 
@@ -634,8 +634,8 @@ export namespace ViewElement {
     getUid(): number;
     setUid(value: number): void;
 
-    getAliasofuid(): number;
-    setAliasofuid(value: number): void;
+    getAliasOfUid(): number;
+    setAliasOfUid(value: number): void;
 
     getX(): number;
     setX(value: number): void;
@@ -659,7 +659,7 @@ export namespace ViewElement {
   export namespace Alias {
     export type AsObject = {
       uid: number;
-      aliasofuid: number;
+      aliasOfUid: number;
       x: number;
       y: number;
       labelSide: ViewElement.LabelSideMap[keyof ViewElement.LabelSideMap];
@@ -670,8 +670,8 @@ export namespace ViewElement {
     getUid(): number;
     setUid(value: number): void;
 
-    getFlowuid(): number;
-    setFlowuid(value: number): void;
+    getFlowUid(): number;
+    setFlowUid(value: number): void;
 
     getX(): number;
     setX(value: number): void;
@@ -692,7 +692,7 @@ export namespace ViewElement {
   export namespace Cloud {
     export type AsObject = {
       uid: number;
-      flowuid: number;
+      flowUid: number;
       x: number;
       y: number;
     };
@@ -788,8 +788,8 @@ export class Dt extends jspb.Message {
   getValue(): number;
   setValue(value: number): void;
 
-  getIsreciprocal(): boolean;
-  setIsreciprocal(value: boolean): void;
+  getIsReciprocal(): boolean;
+  setIsReciprocal(value: boolean): void;
 
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Dt.AsObject;
@@ -804,7 +804,7 @@ export class Dt extends jspb.Message {
 export namespace Dt {
   export type AsObject = {
     value: number;
-    isreciprocal: boolean;
+    isReciprocal: boolean;
   };
 }
 
@@ -820,16 +820,16 @@ export class SimSpecs extends jspb.Message {
   getDt(): Dt | undefined;
   setDt(value?: Dt): void;
 
-  hasSavestep(): boolean;
-  clearSavestep(): void;
-  getSavestep(): Dt | undefined;
-  setSavestep(value?: Dt): void;
+  hasSaveStep(): boolean;
+  clearSaveStep(): void;
+  getSaveStep(): Dt | undefined;
+  setSaveStep(value?: Dt): void;
 
-  getSimmethod(): SimMethodMap[keyof SimMethodMap];
-  setSimmethod(value: SimMethodMap[keyof SimMethodMap]): void;
+  getSimMethod(): SimMethodMap[keyof SimMethodMap];
+  setSimMethod(value: SimMethodMap[keyof SimMethodMap]): void;
 
-  getTimeunits(): string;
-  setTimeunits(value: string): void;
+  getTimeUnits(): string;
+  setTimeUnits(value: string): void;
 
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): SimSpecs.AsObject;
@@ -846,9 +846,9 @@ export namespace SimSpecs {
     start: number;
     stop: number;
     dt?: Dt.AsObject;
-    savestep?: Dt.AsObject;
-    simmethod: SimMethodMap[keyof SimMethodMap];
-    timeunits: string;
+    saveStep?: Dt.AsObject;
+    simMethod: SimMethodMap[keyof SimMethodMap];
+    timeUnits: string;
   };
 }
 
@@ -856,10 +856,10 @@ export class Project extends jspb.Message {
   getName(): string;
   setName(value: string): void;
 
-  hasSimspecs(): boolean;
-  clearSimspecs(): void;
-  getSimspecs(): SimSpecs | undefined;
-  setSimspecs(value?: SimSpecs): void;
+  hasSimSpecs(): boolean;
+  clearSimSpecs(): void;
+  getSimSpecs(): SimSpecs | undefined;
+  setSimSpecs(value?: SimSpecs): void;
 
   clearModelsList(): void;
   getModelsList(): Array<Model>;
@@ -879,7 +879,7 @@ export class Project extends jspb.Message {
 export namespace Project {
   export type AsObject = {
     name: string;
-    simspecs?: SimSpecs.AsObject;
+    simSpecs?: SimSpecs.AsObject;
     modelsList: Array<Model.AsObject>;
   };
 }

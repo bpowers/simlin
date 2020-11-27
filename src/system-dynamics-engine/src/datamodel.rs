@@ -18,8 +18,8 @@ pub struct GraphicalFunctionScale {
 #[derive(Clone, PartialEq, Debug)]
 pub struct GraphicalFunction {
     pub kind: GraphicalFunctionKind,
-    pub y_points: Vec<f64>,
     pub x_points: Option<Vec<f64>>,
+    pub y_points: Vec<f64>,
     pub x_scale: GraphicalFunctionScale,
     pub y_scale: GraphicalFunctionScale,
 }
@@ -50,8 +50,8 @@ pub struct Aux {
     pub ident: String,
     pub equation: String,
     pub documentation: String,
-    pub gf: Option<GraphicalFunction>,
     pub units: Option<String>,
+    pub gf: Option<GraphicalFunction>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

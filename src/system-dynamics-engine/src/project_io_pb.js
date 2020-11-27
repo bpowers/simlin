@@ -565,10 +565,10 @@ proto.project_io.GraphicalFunction.prototype.toObject = function(opt_includeInst
 proto.project_io.GraphicalFunction.toObject = function(includeInstance, msg) {
   var f, obj = {
     kind: jspb.Message.getFieldWithDefault(msg, 1, 0),
-    xpointsList: (f = jspb.Message.getRepeatedFloatingPointField(msg, 2)) == null ? undefined : f,
-    ypointsList: (f = jspb.Message.getRepeatedFloatingPointField(msg, 3)) == null ? undefined : f,
-    xscale: (f = msg.getXscale()) && proto.project_io.GraphicalFunction.Scale.toObject(includeInstance, f),
-    yscale: (f = msg.getYscale()) && proto.project_io.GraphicalFunction.Scale.toObject(includeInstance, f)
+    xPointsList: (f = jspb.Message.getRepeatedFloatingPointField(msg, 2)) == null ? undefined : f,
+    yPointsList: (f = jspb.Message.getRepeatedFloatingPointField(msg, 3)) == null ? undefined : f,
+    xScale: (f = msg.getXScale()) && proto.project_io.GraphicalFunction.Scale.toObject(includeInstance, f),
+    yScale: (f = msg.getYScale()) && proto.project_io.GraphicalFunction.Scale.toObject(includeInstance, f)
   };
 
   if (includeInstance) {
@@ -611,21 +611,21 @@ proto.project_io.GraphicalFunction.deserializeBinaryFromReader = function(msg, r
       break;
     case 2:
       var value = /** @type {!Array<number>} */ (reader.readPackedDouble());
-      msg.setXpointsList(value);
+      msg.setXPointsList(value);
       break;
     case 3:
       var value = /** @type {!Array<number>} */ (reader.readPackedDouble());
-      msg.setYpointsList(value);
+      msg.setYPointsList(value);
       break;
     case 4:
       var value = new proto.project_io.GraphicalFunction.Scale;
       reader.readMessage(value,proto.project_io.GraphicalFunction.Scale.deserializeBinaryFromReader);
-      msg.setXscale(value);
+      msg.setXScale(value);
       break;
     case 5:
       var value = new proto.project_io.GraphicalFunction.Scale;
       reader.readMessage(value,proto.project_io.GraphicalFunction.Scale.deserializeBinaryFromReader);
-      msg.setYscale(value);
+      msg.setYScale(value);
       break;
     default:
       reader.skipField();
@@ -663,21 +663,21 @@ proto.project_io.GraphicalFunction.serializeBinaryToWriter = function(message, w
       f
     );
   }
-  f = message.getXpointsList();
+  f = message.getXPointsList();
   if (f.length > 0) {
     writer.writePackedDouble(
       2,
       f
     );
   }
-  f = message.getYpointsList();
+  f = message.getYPointsList();
   if (f.length > 0) {
     writer.writePackedDouble(
       3,
       f
     );
   }
-  f = message.getXscale();
+  f = message.getXScale();
   if (f != null) {
     writer.writeMessage(
       4,
@@ -685,7 +685,7 @@ proto.project_io.GraphicalFunction.serializeBinaryToWriter = function(message, w
       proto.project_io.GraphicalFunction.Scale.serializeBinaryToWriter
     );
   }
-  f = message.getYscale();
+  f = message.getYScale();
   if (f != null) {
     writer.writeMessage(
       5,
@@ -884,10 +884,10 @@ proto.project_io.GraphicalFunction.prototype.setKind = function(value) {
 
 
 /**
- * repeated double xPoints = 2;
+ * repeated double x_points = 2;
  * @return {!Array<number>}
  */
-proto.project_io.GraphicalFunction.prototype.getXpointsList = function() {
+proto.project_io.GraphicalFunction.prototype.getXPointsList = function() {
   return /** @type {!Array<number>} */ (jspb.Message.getRepeatedFloatingPointField(this, 2));
 };
 
@@ -896,7 +896,7 @@ proto.project_io.GraphicalFunction.prototype.getXpointsList = function() {
  * @param {!Array<number>} value
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.setXpointsList = function(value) {
+proto.project_io.GraphicalFunction.prototype.setXPointsList = function(value) {
   return jspb.Message.setField(this, 2, value || []);
 };
 
@@ -906,7 +906,7 @@ proto.project_io.GraphicalFunction.prototype.setXpointsList = function(value) {
  * @param {number=} opt_index
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.addXpoints = function(value, opt_index) {
+proto.project_io.GraphicalFunction.prototype.addXPoints = function(value, opt_index) {
   return jspb.Message.addToRepeatedField(this, 2, value, opt_index);
 };
 
@@ -915,16 +915,16 @@ proto.project_io.GraphicalFunction.prototype.addXpoints = function(value, opt_in
  * Clears the list making it empty but non-null.
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.clearXpointsList = function() {
-  return this.setXpointsList([]);
+proto.project_io.GraphicalFunction.prototype.clearXPointsList = function() {
+  return this.setXPointsList([]);
 };
 
 
 /**
- * repeated double yPoints = 3;
+ * repeated double y_points = 3;
  * @return {!Array<number>}
  */
-proto.project_io.GraphicalFunction.prototype.getYpointsList = function() {
+proto.project_io.GraphicalFunction.prototype.getYPointsList = function() {
   return /** @type {!Array<number>} */ (jspb.Message.getRepeatedFloatingPointField(this, 3));
 };
 
@@ -933,7 +933,7 @@ proto.project_io.GraphicalFunction.prototype.getYpointsList = function() {
  * @param {!Array<number>} value
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.setYpointsList = function(value) {
+proto.project_io.GraphicalFunction.prototype.setYPointsList = function(value) {
   return jspb.Message.setField(this, 3, value || []);
 };
 
@@ -943,7 +943,7 @@ proto.project_io.GraphicalFunction.prototype.setYpointsList = function(value) {
  * @param {number=} opt_index
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.addYpoints = function(value, opt_index) {
+proto.project_io.GraphicalFunction.prototype.addYPoints = function(value, opt_index) {
   return jspb.Message.addToRepeatedField(this, 3, value, opt_index);
 };
 
@@ -952,16 +952,16 @@ proto.project_io.GraphicalFunction.prototype.addYpoints = function(value, opt_in
  * Clears the list making it empty but non-null.
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.clearYpointsList = function() {
-  return this.setYpointsList([]);
+proto.project_io.GraphicalFunction.prototype.clearYPointsList = function() {
+  return this.setYPointsList([]);
 };
 
 
 /**
- * optional Scale xScale = 4;
+ * optional Scale x_scale = 4;
  * @return {?proto.project_io.GraphicalFunction.Scale}
  */
-proto.project_io.GraphicalFunction.prototype.getXscale = function() {
+proto.project_io.GraphicalFunction.prototype.getXScale = function() {
   return /** @type{?proto.project_io.GraphicalFunction.Scale} */ (
     jspb.Message.getWrapperField(this, proto.project_io.GraphicalFunction.Scale, 4));
 };
@@ -971,7 +971,7 @@ proto.project_io.GraphicalFunction.prototype.getXscale = function() {
  * @param {?proto.project_io.GraphicalFunction.Scale|undefined} value
  * @return {!proto.project_io.GraphicalFunction} returns this
 */
-proto.project_io.GraphicalFunction.prototype.setXscale = function(value) {
+proto.project_io.GraphicalFunction.prototype.setXScale = function(value) {
   return jspb.Message.setWrapperField(this, 4, value);
 };
 
@@ -980,8 +980,8 @@ proto.project_io.GraphicalFunction.prototype.setXscale = function(value) {
  * Clears the message field making it undefined.
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.clearXscale = function() {
-  return this.setXscale(undefined);
+proto.project_io.GraphicalFunction.prototype.clearXScale = function() {
+  return this.setXScale(undefined);
 };
 
 
@@ -989,16 +989,16 @@ proto.project_io.GraphicalFunction.prototype.clearXscale = function() {
  * Returns whether this field is set.
  * @return {boolean}
  */
-proto.project_io.GraphicalFunction.prototype.hasXscale = function() {
+proto.project_io.GraphicalFunction.prototype.hasXScale = function() {
   return jspb.Message.getField(this, 4) != null;
 };
 
 
 /**
- * optional Scale yScale = 5;
+ * optional Scale y_scale = 5;
  * @return {?proto.project_io.GraphicalFunction.Scale}
  */
-proto.project_io.GraphicalFunction.prototype.getYscale = function() {
+proto.project_io.GraphicalFunction.prototype.getYScale = function() {
   return /** @type{?proto.project_io.GraphicalFunction.Scale} */ (
     jspb.Message.getWrapperField(this, proto.project_io.GraphicalFunction.Scale, 5));
 };
@@ -1008,7 +1008,7 @@ proto.project_io.GraphicalFunction.prototype.getYscale = function() {
  * @param {?proto.project_io.GraphicalFunction.Scale|undefined} value
  * @return {!proto.project_io.GraphicalFunction} returns this
 */
-proto.project_io.GraphicalFunction.prototype.setYscale = function(value) {
+proto.project_io.GraphicalFunction.prototype.setYScale = function(value) {
   return jspb.Message.setWrapperField(this, 5, value);
 };
 
@@ -1017,8 +1017,8 @@ proto.project_io.GraphicalFunction.prototype.setYscale = function(value) {
  * Clears the message field making it undefined.
  * @return {!proto.project_io.GraphicalFunction} returns this
  */
-proto.project_io.GraphicalFunction.prototype.clearYscale = function() {
-  return this.setYscale(undefined);
+proto.project_io.GraphicalFunction.prototype.clearYScale = function() {
+  return this.setYScale(undefined);
 };
 
 
@@ -1026,7 +1026,7 @@ proto.project_io.GraphicalFunction.prototype.clearYscale = function() {
  * Returns whether this field is set.
  * @return {boolean}
  */
-proto.project_io.GraphicalFunction.prototype.hasYscale = function() {
+proto.project_io.GraphicalFunction.prototype.hasYScale = function() {
   return jspb.Message.getField(this, 5) != null;
 };
 
@@ -3504,7 +3504,7 @@ proto.project_io.ViewElement.FlowPoint.toObject = function(includeInstance, msg)
   var f, obj = {
     x: jspb.Message.getFloatingPointFieldWithDefault(msg, 1, 0.0),
     y: jspb.Message.getFloatingPointFieldWithDefault(msg, 2, 0.0),
-    attachedtouid: jspb.Message.getFieldWithDefault(msg, 3, 0)
+    attachedToUid: jspb.Message.getFieldWithDefault(msg, 3, 0)
   };
 
   if (includeInstance) {
@@ -3551,7 +3551,7 @@ proto.project_io.ViewElement.FlowPoint.deserializeBinaryFromReader = function(ms
       break;
     case 3:
       var value = /** @type {number} */ (reader.readInt32());
-      msg.setAttachedtouid(value);
+      msg.setAttachedToUid(value);
       break;
     default:
       reader.skipField();
@@ -3596,7 +3596,7 @@ proto.project_io.ViewElement.FlowPoint.serializeBinaryToWriter = function(messag
       f
     );
   }
-  f = message.getAttachedtouid();
+  f = message.getAttachedToUid();
   if (f !== 0) {
     writer.writeInt32(
       3,
@@ -3643,10 +3643,10 @@ proto.project_io.ViewElement.FlowPoint.prototype.setY = function(value) {
 
 
 /**
- * optional int32 attachedToUid = 3;
+ * optional int32 attached_to_uid = 3;
  * @return {number}
  */
-proto.project_io.ViewElement.FlowPoint.prototype.getAttachedtouid = function() {
+proto.project_io.ViewElement.FlowPoint.prototype.getAttachedToUid = function() {
   return /** @type {number} */ (jspb.Message.getFieldWithDefault(this, 3, 0));
 };
 
@@ -3655,7 +3655,7 @@ proto.project_io.ViewElement.FlowPoint.prototype.getAttachedtouid = function() {
  * @param {number} value
  * @return {!proto.project_io.ViewElement.FlowPoint} returns this
  */
-proto.project_io.ViewElement.FlowPoint.prototype.setAttachedtouid = function(value) {
+proto.project_io.ViewElement.FlowPoint.prototype.setAttachedToUid = function(value) {
   return jspb.Message.setProto3IntField(this, 3, value);
 };
 
@@ -3703,7 +3703,7 @@ proto.project_io.ViewElement.Flow.toObject = function(includeInstance, msg) {
     uid: jspb.Message.getFieldWithDefault(msg, 2, 0),
     x: jspb.Message.getFloatingPointFieldWithDefault(msg, 3, 0.0),
     y: jspb.Message.getFloatingPointFieldWithDefault(msg, 4, 0.0),
-    labelside: jspb.Message.getFieldWithDefault(msg, 5, 0),
+    labelSide: jspb.Message.getFieldWithDefault(msg, 5, 0),
     pointsList: jspb.Message.toObjectList(msg.getPointsList(),
     proto.project_io.ViewElement.FlowPoint.toObject, includeInstance)
   };
@@ -3760,7 +3760,7 @@ proto.project_io.ViewElement.Flow.deserializeBinaryFromReader = function(msg, re
       break;
     case 5:
       var value = /** @type {!proto.project_io.ViewElement.LabelSide} */ (reader.readEnum());
-      msg.setLabelside(value);
+      msg.setLabelSide(value);
       break;
     case 6:
       var value = new proto.project_io.ViewElement.FlowPoint;
@@ -3824,7 +3824,7 @@ proto.project_io.ViewElement.Flow.serializeBinaryToWriter = function(message, wr
       f
     );
   }
-  f = message.getLabelside();
+  f = message.getLabelSide();
   if (f !== 0.0) {
     writer.writeEnum(
       5,
@@ -3915,10 +3915,10 @@ proto.project_io.ViewElement.Flow.prototype.setY = function(value) {
 
 
 /**
- * optional LabelSide labelSide = 5;
+ * optional LabelSide label_side = 5;
  * @return {!proto.project_io.ViewElement.LabelSide}
  */
-proto.project_io.ViewElement.Flow.prototype.getLabelside = function() {
+proto.project_io.ViewElement.Flow.prototype.getLabelSide = function() {
   return /** @type {!proto.project_io.ViewElement.LabelSide} */ (jspb.Message.getFieldWithDefault(this, 5, 0));
 };
 
@@ -3927,7 +3927,7 @@ proto.project_io.ViewElement.Flow.prototype.getLabelside = function() {
  * @param {!proto.project_io.ViewElement.LabelSide} value
  * @return {!proto.project_io.ViewElement.Flow} returns this
  */
-proto.project_io.ViewElement.Flow.prototype.setLabelside = function(value) {
+proto.project_io.ViewElement.Flow.prototype.setLabelSide = function(value) {
   return jspb.Message.setProto3EnumField(this, 5, value);
 };
 
@@ -3987,8 +3987,8 @@ proto.project_io.ViewElement.Link.oneofGroups_ = [[4,5,6]];
 proto.project_io.ViewElement.Link.ShapeCase = {
   SHAPE_NOT_SET: 0,
   ARC: 4,
-  ISSTRAIGHT: 5,
-  MULTIPOINT: 6
+  IS_STRAIGHT: 5,
+  MULTI_POINT: 6
 };
 
 /**
@@ -4030,11 +4030,11 @@ proto.project_io.ViewElement.Link.prototype.toObject = function(opt_includeInsta
 proto.project_io.ViewElement.Link.toObject = function(includeInstance, msg) {
   var f, obj = {
     uid: jspb.Message.getFieldWithDefault(msg, 1, 0),
-    fromuid: jspb.Message.getFieldWithDefault(msg, 2, 0),
-    touid: jspb.Message.getFieldWithDefault(msg, 3, 0),
+    fromUid: jspb.Message.getFieldWithDefault(msg, 2, 0),
+    toUid: jspb.Message.getFieldWithDefault(msg, 3, 0),
     arc: jspb.Message.getFloatingPointFieldWithDefault(msg, 4, 0.0),
-    isstraight: jspb.Message.getBooleanFieldWithDefault(msg, 5, false),
-    multipoint: (f = msg.getMultipoint()) && proto.project_io.ViewElement.Link.LinkPoints.toObject(includeInstance, f)
+    isStraight: jspb.Message.getBooleanFieldWithDefault(msg, 5, false),
+    multiPoint: (f = msg.getMultiPoint()) && proto.project_io.ViewElement.Link.LinkPoints.toObject(includeInstance, f)
   };
 
   if (includeInstance) {
@@ -4077,11 +4077,11 @@ proto.project_io.ViewElement.Link.deserializeBinaryFromReader = function(msg, re
       break;
     case 2:
       var value = /** @type {number} */ (reader.readInt32());
-      msg.setFromuid(value);
+      msg.setFromUid(value);
       break;
     case 3:
       var value = /** @type {number} */ (reader.readInt32());
-      msg.setTouid(value);
+      msg.setToUid(value);
       break;
     case 4:
       var value = /** @type {number} */ (reader.readDouble());
@@ -4089,12 +4089,12 @@ proto.project_io.ViewElement.Link.deserializeBinaryFromReader = function(msg, re
       break;
     case 5:
       var value = /** @type {boolean} */ (reader.readBool());
-      msg.setIsstraight(value);
+      msg.setIsStraight(value);
       break;
     case 6:
       var value = new proto.project_io.ViewElement.Link.LinkPoints;
       reader.readMessage(value,proto.project_io.ViewElement.Link.LinkPoints.deserializeBinaryFromReader);
-      msg.setMultipoint(value);
+      msg.setMultiPoint(value);
       break;
     default:
       reader.skipField();
@@ -4132,14 +4132,14 @@ proto.project_io.ViewElement.Link.serializeBinaryToWriter = function(message, wr
       f
     );
   }
-  f = message.getFromuid();
+  f = message.getFromUid();
   if (f !== 0) {
     writer.writeInt32(
       2,
       f
     );
   }
-  f = message.getTouid();
+  f = message.getToUid();
   if (f !== 0) {
     writer.writeInt32(
       3,
@@ -4160,7 +4160,7 @@ proto.project_io.ViewElement.Link.serializeBinaryToWriter = function(message, wr
       f
     );
   }
-  f = message.getMultipoint();
+  f = message.getMultiPoint();
   if (f != null) {
     writer.writeMessage(
       6,
@@ -4350,10 +4350,10 @@ proto.project_io.ViewElement.Link.prototype.setUid = function(value) {
 
 
 /**
- * optional int32 fromUid = 2;
+ * optional int32 from_uid = 2;
  * @return {number}
  */
-proto.project_io.ViewElement.Link.prototype.getFromuid = function() {
+proto.project_io.ViewElement.Link.prototype.getFromUid = function() {
   return /** @type {number} */ (jspb.Message.getFieldWithDefault(this, 2, 0));
 };
 
@@ -4362,16 +4362,16 @@ proto.project_io.ViewElement.Link.prototype.getFromuid = function() {
  * @param {number} value
  * @return {!proto.project_io.ViewElement.Link} returns this
  */
-proto.project_io.ViewElement.Link.prototype.setFromuid = function(value) {
+proto.project_io.ViewElement.Link.prototype.setFromUid = function(value) {
   return jspb.Message.setProto3IntField(this, 2, value);
 };
 
 
 /**
- * optional int32 toUid = 3;
+ * optional int32 to_uid = 3;
  * @return {number}
  */
-proto.project_io.ViewElement.Link.prototype.getTouid = function() {
+proto.project_io.ViewElement.Link.prototype.getToUid = function() {
   return /** @type {number} */ (jspb.Message.getFieldWithDefault(this, 3, 0));
 };
 
@@ -4380,7 +4380,7 @@ proto.project_io.ViewElement.Link.prototype.getTouid = function() {
  * @param {number} value
  * @return {!proto.project_io.ViewElement.Link} returns this
  */
-proto.project_io.ViewElement.Link.prototype.setTouid = function(value) {
+proto.project_io.ViewElement.Link.prototype.setToUid = function(value) {
   return jspb.Message.setProto3IntField(this, 3, value);
 };
 
@@ -4422,10 +4422,10 @@ proto.project_io.ViewElement.Link.prototype.hasArc = function() {
 
 
 /**
- * optional bool isStraight = 5;
+ * optional bool is_straight = 5;
  * @return {boolean}
  */
-proto.project_io.ViewElement.Link.prototype.getIsstraight = function() {
+proto.project_io.ViewElement.Link.prototype.getIsStraight = function() {
   return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 5, false));
 };
 
@@ -4434,7 +4434,7 @@ proto.project_io.ViewElement.Link.prototype.getIsstraight = function() {
  * @param {boolean} value
  * @return {!proto.project_io.ViewElement.Link} returns this
  */
-proto.project_io.ViewElement.Link.prototype.setIsstraight = function(value) {
+proto.project_io.ViewElement.Link.prototype.setIsStraight = function(value) {
   return jspb.Message.setOneofField(this, 5, proto.project_io.ViewElement.Link.oneofGroups_[0], value);
 };
 
@@ -4443,7 +4443,7 @@ proto.project_io.ViewElement.Link.prototype.setIsstraight = function(value) {
  * Clears the field making it undefined.
  * @return {!proto.project_io.ViewElement.Link} returns this
  */
-proto.project_io.ViewElement.Link.prototype.clearIsstraight = function() {
+proto.project_io.ViewElement.Link.prototype.clearIsStraight = function() {
   return jspb.Message.setOneofField(this, 5, proto.project_io.ViewElement.Link.oneofGroups_[0], undefined);
 };
 
@@ -4452,16 +4452,16 @@ proto.project_io.ViewElement.Link.prototype.clearIsstraight = function() {
  * Returns whether this field is set.
  * @return {boolean}
  */
-proto.project_io.ViewElement.Link.prototype.hasIsstraight = function() {
+proto.project_io.ViewElement.Link.prototype.hasIsStraight = function() {
   return jspb.Message.getField(this, 5) != null;
 };
 
 
 /**
- * optional LinkPoints multiPoint = 6;
+ * optional LinkPoints multi_point = 6;
  * @return {?proto.project_io.ViewElement.Link.LinkPoints}
  */
-proto.project_io.ViewElement.Link.prototype.getMultipoint = function() {
+proto.project_io.ViewElement.Link.prototype.getMultiPoint = function() {
   return /** @type{?proto.project_io.ViewElement.Link.LinkPoints} */ (
     jspb.Message.getWrapperField(this, proto.project_io.ViewElement.Link.LinkPoints, 6));
 };
@@ -4471,7 +4471,7 @@ proto.project_io.ViewElement.Link.prototype.getMultipoint = function() {
  * @param {?proto.project_io.ViewElement.Link.LinkPoints|undefined} value
  * @return {!proto.project_io.ViewElement.Link} returns this
 */
-proto.project_io.ViewElement.Link.prototype.setMultipoint = function(value) {
+proto.project_io.ViewElement.Link.prototype.setMultiPoint = function(value) {
   return jspb.Message.setOneofWrapperField(this, 6, proto.project_io.ViewElement.Link.oneofGroups_[0], value);
 };
 
@@ -4480,8 +4480,8 @@ proto.project_io.ViewElement.Link.prototype.setMultipoint = function(value) {
  * Clears the message field making it undefined.
  * @return {!proto.project_io.ViewElement.Link} returns this
  */
-proto.project_io.ViewElement.Link.prototype.clearMultipoint = function() {
-  return this.setMultipoint(undefined);
+proto.project_io.ViewElement.Link.prototype.clearMultiPoint = function() {
+  return this.setMultiPoint(undefined);
 };
 
 
@@ -4489,7 +4489,7 @@ proto.project_io.ViewElement.Link.prototype.clearMultipoint = function() {
  * Returns whether this field is set.
  * @return {boolean}
  */
-proto.project_io.ViewElement.Link.prototype.hasMultipoint = function() {
+proto.project_io.ViewElement.Link.prototype.hasMultiPoint = function() {
   return jspb.Message.getField(this, 6) != null;
 };
 
@@ -4777,7 +4777,7 @@ proto.project_io.ViewElement.Alias.prototype.toObject = function(opt_includeInst
 proto.project_io.ViewElement.Alias.toObject = function(includeInstance, msg) {
   var f, obj = {
     uid: jspb.Message.getFieldWithDefault(msg, 1, 0),
-    aliasofuid: jspb.Message.getFieldWithDefault(msg, 2, 0),
+    aliasOfUid: jspb.Message.getFieldWithDefault(msg, 2, 0),
     x: jspb.Message.getFloatingPointFieldWithDefault(msg, 3, 0.0),
     y: jspb.Message.getFloatingPointFieldWithDefault(msg, 4, 0.0),
     labelSide: jspb.Message.getFieldWithDefault(msg, 5, 0)
@@ -4823,7 +4823,7 @@ proto.project_io.ViewElement.Alias.deserializeBinaryFromReader = function(msg, r
       break;
     case 2:
       var value = /** @type {number} */ (reader.readInt32());
-      msg.setAliasofuid(value);
+      msg.setAliasOfUid(value);
       break;
     case 3:
       var value = /** @type {number} */ (reader.readDouble());
@@ -4873,7 +4873,7 @@ proto.project_io.ViewElement.Alias.serializeBinaryToWriter = function(message, w
       f
     );
   }
-  f = message.getAliasofuid();
+  f = message.getAliasOfUid();
   if (f !== 0) {
     writer.writeInt32(
       2,
@@ -4923,10 +4923,10 @@ proto.project_io.ViewElement.Alias.prototype.setUid = function(value) {
 
 
 /**
- * optional int32 aliasOfUid = 2;
+ * optional int32 alias_of_uid = 2;
  * @return {number}
  */
-proto.project_io.ViewElement.Alias.prototype.getAliasofuid = function() {
+proto.project_io.ViewElement.Alias.prototype.getAliasOfUid = function() {
   return /** @type {number} */ (jspb.Message.getFieldWithDefault(this, 2, 0));
 };
 
@@ -4935,7 +4935,7 @@ proto.project_io.ViewElement.Alias.prototype.getAliasofuid = function() {
  * @param {number} value
  * @return {!proto.project_io.ViewElement.Alias} returns this
  */
-proto.project_io.ViewElement.Alias.prototype.setAliasofuid = function(value) {
+proto.project_io.ViewElement.Alias.prototype.setAliasOfUid = function(value) {
   return jspb.Message.setProto3IntField(this, 2, value);
 };
 
@@ -5027,7 +5027,7 @@ proto.project_io.ViewElement.Cloud.prototype.toObject = function(opt_includeInst
 proto.project_io.ViewElement.Cloud.toObject = function(includeInstance, msg) {
   var f, obj = {
     uid: jspb.Message.getFieldWithDefault(msg, 1, 0),
-    flowuid: jspb.Message.getFieldWithDefault(msg, 2, 0),
+    flowUid: jspb.Message.getFieldWithDefault(msg, 2, 0),
     x: jspb.Message.getFloatingPointFieldWithDefault(msg, 3, 0.0),
     y: jspb.Message.getFloatingPointFieldWithDefault(msg, 4, 0.0)
   };
@@ -5072,7 +5072,7 @@ proto.project_io.ViewElement.Cloud.deserializeBinaryFromReader = function(msg, r
       break;
     case 2:
       var value = /** @type {number} */ (reader.readInt32());
-      msg.setFlowuid(value);
+      msg.setFlowUid(value);
       break;
     case 3:
       var value = /** @type {number} */ (reader.readDouble());
@@ -5118,7 +5118,7 @@ proto.project_io.ViewElement.Cloud.serializeBinaryToWriter = function(message, w
       f
     );
   }
-  f = message.getFlowuid();
+  f = message.getFlowUid();
   if (f !== 0) {
     writer.writeInt32(
       2,
@@ -5161,10 +5161,10 @@ proto.project_io.ViewElement.Cloud.prototype.setUid = function(value) {
 
 
 /**
- * optional int32 flowUid = 2;
+ * optional int32 flow_uid = 2;
  * @return {number}
  */
-proto.project_io.ViewElement.Cloud.prototype.getFlowuid = function() {
+proto.project_io.ViewElement.Cloud.prototype.getFlowUid = function() {
   return /** @type {number} */ (jspb.Message.getFieldWithDefault(this, 2, 0));
 };
 
@@ -5173,7 +5173,7 @@ proto.project_io.ViewElement.Cloud.prototype.getFlowuid = function() {
  * @param {number} value
  * @return {!proto.project_io.ViewElement.Cloud} returns this
  */
-proto.project_io.ViewElement.Cloud.prototype.setFlowuid = function(value) {
+proto.project_io.ViewElement.Cloud.prototype.setFlowUid = function(value) {
   return jspb.Message.setProto3IntField(this, 2, value);
 };
 
@@ -5946,7 +5946,7 @@ proto.project_io.Dt.prototype.toObject = function(opt_includeInstance) {
 proto.project_io.Dt.toObject = function(includeInstance, msg) {
   var f, obj = {
     value: jspb.Message.getFloatingPointFieldWithDefault(msg, 1, 0.0),
-    isreciprocal: jspb.Message.getBooleanFieldWithDefault(msg, 2, false)
+    isReciprocal: jspb.Message.getBooleanFieldWithDefault(msg, 2, false)
   };
 
   if (includeInstance) {
@@ -5989,7 +5989,7 @@ proto.project_io.Dt.deserializeBinaryFromReader = function(msg, reader) {
       break;
     case 2:
       var value = /** @type {boolean} */ (reader.readBool());
-      msg.setIsreciprocal(value);
+      msg.setIsReciprocal(value);
       break;
     default:
       reader.skipField();
@@ -6027,7 +6027,7 @@ proto.project_io.Dt.serializeBinaryToWriter = function(message, writer) {
       f
     );
   }
-  f = message.getIsreciprocal();
+  f = message.getIsReciprocal();
   if (f) {
     writer.writeBool(
       2,
@@ -6056,10 +6056,10 @@ proto.project_io.Dt.prototype.setValue = function(value) {
 
 
 /**
- * optional bool isReciprocal = 2;
+ * optional bool is_reciprocal = 2;
  * @return {boolean}
  */
-proto.project_io.Dt.prototype.getIsreciprocal = function() {
+proto.project_io.Dt.prototype.getIsReciprocal = function() {
   return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 2, false));
 };
 
@@ -6068,7 +6068,7 @@ proto.project_io.Dt.prototype.getIsreciprocal = function() {
  * @param {boolean} value
  * @return {!proto.project_io.Dt} returns this
  */
-proto.project_io.Dt.prototype.setIsreciprocal = function(value) {
+proto.project_io.Dt.prototype.setIsReciprocal = function(value) {
   return jspb.Message.setProto3BooleanField(this, 2, value);
 };
 
@@ -6108,9 +6108,9 @@ proto.project_io.SimSpecs.toObject = function(includeInstance, msg) {
     start: jspb.Message.getFloatingPointFieldWithDefault(msg, 1, 0.0),
     stop: jspb.Message.getFloatingPointFieldWithDefault(msg, 2, 0.0),
     dt: (f = msg.getDt()) && proto.project_io.Dt.toObject(includeInstance, f),
-    savestep: (f = msg.getSavestep()) && proto.project_io.Dt.toObject(includeInstance, f),
-    simmethod: jspb.Message.getFieldWithDefault(msg, 5, 0),
-    timeunits: jspb.Message.getFieldWithDefault(msg, 6, "")
+    saveStep: (f = msg.getSaveStep()) && proto.project_io.Dt.toObject(includeInstance, f),
+    simMethod: jspb.Message.getFieldWithDefault(msg, 5, 0),
+    timeUnits: jspb.Message.getFieldWithDefault(msg, 6, "")
   };
 
   if (includeInstance) {
@@ -6163,15 +6163,15 @@ proto.project_io.SimSpecs.deserializeBinaryFromReader = function(msg, reader) {
     case 4:
       var value = new proto.project_io.Dt;
       reader.readMessage(value,proto.project_io.Dt.deserializeBinaryFromReader);
-      msg.setSavestep(value);
+      msg.setSaveStep(value);
       break;
     case 5:
       var value = /** @type {!proto.project_io.SimMethod} */ (reader.readEnum());
-      msg.setSimmethod(value);
+      msg.setSimMethod(value);
       break;
     case 6:
       var value = /** @type {string} */ (reader.readString());
-      msg.setTimeunits(value);
+      msg.setTimeUnits(value);
       break;
     default:
       reader.skipField();
@@ -6224,7 +6224,7 @@ proto.project_io.SimSpecs.serializeBinaryToWriter = function(message, writer) {
       proto.project_io.Dt.serializeBinaryToWriter
     );
   }
-  f = message.getSavestep();
+  f = message.getSaveStep();
   if (f != null) {
     writer.writeMessage(
       4,
@@ -6232,14 +6232,14 @@ proto.project_io.SimSpecs.serializeBinaryToWriter = function(message, writer) {
       proto.project_io.Dt.serializeBinaryToWriter
     );
   }
-  f = message.getSimmethod();
+  f = message.getSimMethod();
   if (f !== 0.0) {
     writer.writeEnum(
       5,
       f
     );
   }
-  f = message.getTimeunits();
+  f = message.getTimeUnits();
   if (f.length > 0) {
     writer.writeString(
       6,
@@ -6323,10 +6323,10 @@ proto.project_io.SimSpecs.prototype.hasDt = function() {
 
 
 /**
- * optional Dt saveStep = 4;
+ * optional Dt save_step = 4;
  * @return {?proto.project_io.Dt}
  */
-proto.project_io.SimSpecs.prototype.getSavestep = function() {
+proto.project_io.SimSpecs.prototype.getSaveStep = function() {
   return /** @type{?proto.project_io.Dt} */ (
     jspb.Message.getWrapperField(this, proto.project_io.Dt, 4));
 };
@@ -6336,7 +6336,7 @@ proto.project_io.SimSpecs.prototype.getSavestep = function() {
  * @param {?proto.project_io.Dt|undefined} value
  * @return {!proto.project_io.SimSpecs} returns this
 */
-proto.project_io.SimSpecs.prototype.setSavestep = function(value) {
+proto.project_io.SimSpecs.prototype.setSaveStep = function(value) {
   return jspb.Message.setWrapperField(this, 4, value);
 };
 
@@ -6345,8 +6345,8 @@ proto.project_io.SimSpecs.prototype.setSavestep = function(value) {
  * Clears the message field making it undefined.
  * @return {!proto.project_io.SimSpecs} returns this
  */
-proto.project_io.SimSpecs.prototype.clearSavestep = function() {
-  return this.setSavestep(undefined);
+proto.project_io.SimSpecs.prototype.clearSaveStep = function() {
+  return this.setSaveStep(undefined);
 };
 
 
@@ -6354,16 +6354,16 @@ proto.project_io.SimSpecs.prototype.clearSavestep = function() {
  * Returns whether this field is set.
  * @return {boolean}
  */
-proto.project_io.SimSpecs.prototype.hasSavestep = function() {
+proto.project_io.SimSpecs.prototype.hasSaveStep = function() {
   return jspb.Message.getField(this, 4) != null;
 };
 
 
 /**
- * optional SimMethod simMethod = 5;
+ * optional SimMethod sim_method = 5;
  * @return {!proto.project_io.SimMethod}
  */
-proto.project_io.SimSpecs.prototype.getSimmethod = function() {
+proto.project_io.SimSpecs.prototype.getSimMethod = function() {
   return /** @type {!proto.project_io.SimMethod} */ (jspb.Message.getFieldWithDefault(this, 5, 0));
 };
 
@@ -6372,16 +6372,16 @@ proto.project_io.SimSpecs.prototype.getSimmethod = function() {
  * @param {!proto.project_io.SimMethod} value
  * @return {!proto.project_io.SimSpecs} returns this
  */
-proto.project_io.SimSpecs.prototype.setSimmethod = function(value) {
+proto.project_io.SimSpecs.prototype.setSimMethod = function(value) {
   return jspb.Message.setProto3EnumField(this, 5, value);
 };
 
 
 /**
- * optional string timeUnits = 6;
+ * optional string time_units = 6;
  * @return {string}
  */
-proto.project_io.SimSpecs.prototype.getTimeunits = function() {
+proto.project_io.SimSpecs.prototype.getTimeUnits = function() {
   return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 6, ""));
 };
 
@@ -6390,7 +6390,7 @@ proto.project_io.SimSpecs.prototype.getTimeunits = function() {
  * @param {string} value
  * @return {!proto.project_io.SimSpecs} returns this
  */
-proto.project_io.SimSpecs.prototype.setTimeunits = function(value) {
+proto.project_io.SimSpecs.prototype.setTimeUnits = function(value) {
   return jspb.Message.setProto3StringField(this, 6, value);
 };
 
@@ -6435,7 +6435,7 @@ proto.project_io.Project.prototype.toObject = function(opt_includeInstance) {
 proto.project_io.Project.toObject = function(includeInstance, msg) {
   var f, obj = {
     name: jspb.Message.getFieldWithDefault(msg, 1, ""),
-    simspecs: (f = msg.getSimspecs()) && proto.project_io.SimSpecs.toObject(includeInstance, f),
+    simSpecs: (f = msg.getSimSpecs()) && proto.project_io.SimSpecs.toObject(includeInstance, f),
     modelsList: jspb.Message.toObjectList(msg.getModelsList(),
     proto.project_io.Model.toObject, includeInstance)
   };
@@ -6481,7 +6481,7 @@ proto.project_io.Project.deserializeBinaryFromReader = function(msg, reader) {
     case 2:
       var value = new proto.project_io.SimSpecs;
       reader.readMessage(value,proto.project_io.SimSpecs.deserializeBinaryFromReader);
-      msg.setSimspecs(value);
+      msg.setSimSpecs(value);
       break;
     case 3:
       var value = new proto.project_io.Model;
@@ -6524,7 +6524,7 @@ proto.project_io.Project.serializeBinaryToWriter = function(message, writer) {
       f
     );
   }
-  f = message.getSimspecs();
+  f = message.getSimSpecs();
   if (f != null) {
     writer.writeMessage(
       2,
@@ -6562,10 +6562,10 @@ proto.project_io.Project.prototype.setName = function(value) {
 
 
 /**
- * optional SimSpecs simSpecs = 2;
+ * optional SimSpecs sim_specs = 2;
  * @return {?proto.project_io.SimSpecs}
  */
-proto.project_io.Project.prototype.getSimspecs = function() {
+proto.project_io.Project.prototype.getSimSpecs = function() {
   return /** @type{?proto.project_io.SimSpecs} */ (
     jspb.Message.getWrapperField(this, proto.project_io.SimSpecs, 2));
 };
@@ -6575,7 +6575,7 @@ proto.project_io.Project.prototype.getSimspecs = function() {
  * @param {?proto.project_io.SimSpecs|undefined} value
  * @return {!proto.project_io.Project} returns this
 */
-proto.project_io.Project.prototype.setSimspecs = function(value) {
+proto.project_io.Project.prototype.setSimSpecs = function(value) {
   return jspb.Message.setWrapperField(this, 2, value);
 };
 
@@ -6584,8 +6584,8 @@ proto.project_io.Project.prototype.setSimspecs = function(value) {
  * Clears the message field making it undefined.
  * @return {!proto.project_io.Project} returns this
  */
-proto.project_io.Project.prototype.clearSimspecs = function() {
-  return this.setSimspecs(undefined);
+proto.project_io.Project.prototype.clearSimSpecs = function() {
+  return this.setSimSpecs(undefined);
 };
 
 
@@ -6593,7 +6593,7 @@ proto.project_io.Project.prototype.clearSimspecs = function() {
  * Returns whether this field is set.
  * @return {boolean}
  */
-proto.project_io.Project.prototype.hasSimspecs = function() {
+proto.project_io.Project.prototype.hasSimSpecs = function() {
   return jspb.Message.getField(this, 2) != null;
 };
 
