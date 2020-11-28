@@ -14,6 +14,8 @@ import { Canvg } from 'canvg';
 
 import { Project as ProjectPB } from './../../system-dynamics-engine/src/project_io_pb';
 
+import { Project as DmProject } from '../datamodel';
+
 import { Model } from '../../engine/model';
 import { Project, stdProject } from '../../engine/project';
 import { Sim } from '../../engine/sim';
@@ -365,7 +367,11 @@ export const Editor = withStyles(styles)(
         return;
       }
 
+      const dmProject = new DmProject(projectPB);
+
       console.log(projectPB);
+      console.log(dmProject);
+      debugger;
 
       const [project, err2] = stdProject.addFile(defined(file));
       if (err2 || !project) {
