@@ -1174,12 +1174,11 @@ fn enumerate_modules(
     model_name: &str,
     modules: &mut HashSet<(Ident, Vec<Ident>)>,
 ) -> Result<()> {
-    use crate::common::{Error, ErrorCode};
-    let model = project.models.get(model_name).ok_or_else(|| {
-        Error::SimulationError(
-            ErrorCode::NotSimulatable,
-            format!("model for module '{}' not found", model_name),
-        )
+    use crate::common::{Error, ErrorCode, ErrorKind};
+    let model = project.models.get(model_name).ok_or_else(|| Error {
+        kind: ErrorKind::Simulation,
+        code: ErrorCode::NotSimulatable,
+        details: Some(format!("model for module '{}' not found", model_name)),
     })?;
     let model = Rc::clone(model);
     for (_id, v) in model.variables.iter() {

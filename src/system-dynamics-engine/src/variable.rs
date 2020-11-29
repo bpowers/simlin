@@ -8,7 +8,7 @@ use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
 use crate::builtins_visitor::instantiate_implicit_modules;
-use crate::common::{EquationError, Error, Ident, Result};
+use crate::common::{EquationError, EquationResult, Ident};
 use crate::datamodel;
 use crate::model::resolve_relative;
 
@@ -38,7 +38,7 @@ pub enum Variable {
         inflows: Vec<Ident>,
         outflows: Vec<Ident>,
         non_negative: bool,
-        errors: Vec<Error>,
+        errors: Vec<EquationError>,
         direct_deps: HashSet<Ident>,
     },
     Var {
@@ -50,7 +50,7 @@ pub enum Variable {
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
-        errors: Vec<Error>,
+        errors: Vec<EquationError>,
         direct_deps: HashSet<Ident>,
     },
     Module {
@@ -59,7 +59,7 @@ pub enum Variable {
         model_name: Ident,
         units: Option<String>,
         inputs: Vec<ModuleInput>,
-        errors: Vec<Error>,
+        errors: Vec<EquationError>,
         direct_deps: HashSet<Ident>,
     },
 }
@@ -97,7 +97,7 @@ impl Variable {
         }
     }
 
-    pub fn errors(&self) -> Option<&Vec<Error>> {
+    pub fn errors(&self) -> Option<&Vec<EquationError>> {
         let errors = match self {
             Variable::Stock { errors, .. } => errors,
             Variable::Var { errors, .. } => errors,
@@ -120,7 +120,7 @@ impl Variable {
     }
 }
 
-fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> Result<Option<Table>> {
+fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Option<Table>> {
     if gf.is_none() {
         return Ok(None);
     }
@@ -230,10 +230,6 @@ pub fn parse_var(
         datamodel::Variable::Stock(v) => {
             let ident = v.ident.clone();
             let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
-            let errors = errors
-                .into_iter()
-                .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
-                .collect();
             Variable::Stock {
                 ident,
                 ast,
@@ -249,10 +245,7 @@ pub fn parse_var(
         datamodel::Variable::Flow(v) => {
             let ident = v.ident.clone();
             let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
-            let mut errors: Vec<Error> = errors
-                .into_iter()
-                .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
-                .collect();
+            let mut errors: Vec<EquationError> = errors;
             let table = match parse_table(&v.gf) {
                 Ok(table) => table,
                 Err(err) => {
@@ -276,10 +269,7 @@ pub fn parse_var(
         datamodel::Variable::Aux(v) => {
             let ident = v.ident.clone();
             let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
-            let mut errors: Vec<Error> = errors
-                .into_iter()
-                .map(|e| Error::VariableError(e.code, ident.clone(), Some(e.location)))
-                .collect();
+            let mut errors: Vec<EquationError> = errors;
             let table = match parse_table(&v.gf) {
                 Ok(table) => table,
                 Err(err) => {
@@ -302,16 +292,17 @@ pub fn parse_var(
         }
         datamodel::Variable::Module(v) => {
             let ident = v.ident.clone();
-            let inputs: Vec<Result<ModuleInput>> = v
+            let inputs: Vec<EquationResult<ModuleInput>> = v
                 .references
                 .iter()
                 .map(|mi| {
                     crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
                 })
                 .collect();
-            let (inputs, errors): (Vec<_>, Vec<_>) = inputs.into_iter().partition(Result::is_ok);
+            let (inputs, errors): (Vec<_>, Vec<_>) =
+                inputs.into_iter().partition(EquationResult::is_ok);
             let inputs: Vec<ModuleInput> = inputs.into_iter().map(|i| i.unwrap()).collect();
-            let errors: Vec<Error> = errors.into_iter().map(|e| e.unwrap_err()).collect();
+            let errors: Vec<EquationError> = errors.into_iter().map(|e| e.unwrap_err()).collect();
 
             let direct_deps = inputs
                 .iter()

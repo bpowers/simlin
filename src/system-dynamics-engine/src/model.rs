@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Error, Ident, Result};
+use crate::common::{EquationResult, Error, Ident, Result};
 use crate::variable::{parse_var, ModuleInput, Variable};
 use crate::{datamodel, model_err, var_err};
 
@@ -146,7 +146,7 @@ pub fn resolve_module_input<'a>(
     ident: &str,
     orig_src: &'a str,
     orig_dst: &'a str,
-) -> Result<ModuleInput> {
+) -> EquationResult<ModuleInput> {
     use crate::common::canonicalize;
     let input_prefix = format!("{}.", ident);
     let maybe_strip_leading_dot = |s: &'a str| -> &'a str {
@@ -161,7 +161,7 @@ pub fn resolve_module_input<'a>(
 
     let dst = dst.strip_prefix(&input_prefix);
     if dst.is_none() {
-        return var_err!(BadModuleInputDst, orig_dst.to_string());
+        return var_err!(BadModuleInputDst, 0);
     }
     let dst = dst.unwrap().to_string();
 

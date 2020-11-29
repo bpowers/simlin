@@ -5,12 +5,16 @@
 use std::fmt;
 use std::{error, result};
 
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
 use lazy_static::lazy_static;
 use regex::Regex;
 
 pub type Ident = String;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
     DoesNotExist, // the named entity doesn't exist
     XmlDeserialization,
@@ -62,6 +66,7 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EquationError {
     pub location: usize,
@@ -95,59 +100,75 @@ macro_rules! eqn_err(
 #[macro_export]
 macro_rules! model_err(
     ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode};
-        Err(Error::ModelError(ErrorCode::$code, $str))
+        use crate::common::{Error, ErrorCode, ErrorKind};
+        Err(Error{
+            kind: ErrorKind::Model,
+            code: ErrorCode::$code,
+            details: Some($str),
+        })
     }}
 );
 
 #[macro_export]
 macro_rules! var_err(
     ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode};
-        Err(Error::VariableError(ErrorCode::$code, $str, None))
-    }};
-    ($code:tt, $str:expr, $loc:expr) => {{
-        use crate::common::{Error, ErrorCode};
-        Err(Error::VariableError(ErrorCode::$code, $str, Some($loc)))
-    }};
+        use crate::common::{EquationError, ErrorCode};
+        Err(EquationError{
+            code: ErrorCode::$code,
+            location: 0,
+        })
+    }}
 );
 
 #[macro_export]
 macro_rules! sim_err(
     ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode};
-        Err(Error::SimulationError(ErrorCode::$code, $str))
+        use crate::common::{Error, ErrorCode, ErrorKind};
+        Err(Error{
+            kind: ErrorKind::Simulation,
+            code: ErrorCode::$code,
+            details: Some($str),
+        })
     }}
 );
 
-type ModelName = String;
-type VariableName = String;
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    Import,
+    Model,
+    Simulation,
+    Variable,
+}
 
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error {
-    // error reading XML file or hydrating xmile structures
-    ImportError(ErrorCode, String),
-    ModelError(ErrorCode, ModelName),
-    VariableError(ErrorCode, VariableName, Option<usize>),
-    SimulationError(ErrorCode, VariableName),
+pub struct Error {
+    pub kind: ErrorKind,
+    pub code: ErrorCode,
+    pub details: Option<String>,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Error::ImportError(code, msg) => write!(f, "ImportError{{{}: {}}}", msg, code),
-            Error::ModelError(code, model) => write!(f, "ModelError{{{}: {}}}", model, code),
-            Error::VariableError(code, var, pos) => {
-                write!(f, "VariableError{{{}:{}: {}}}", var, pos.unwrap_or(0), code)
-            }
-            Error::SimulationError(code, var) => write!(f, "SimulationError{{{}: {}}}", var, code),
-        }
+        let kind = match self.kind {
+            ErrorKind::Import => "ImportError",
+            ErrorKind::Model => "ModelError",
+            ErrorKind::Simulation => "SimulationError",
+            ErrorKind::Variable => "VariableError",
+        };
+        let details: &str = match self.details {
+            Some(ref details) => details,
+            None => "",
+        };
+        write!(f, "{}{{{}: {}}}", kind, self.code, details)
     }
 }
 
 impl error::Error for Error {}
 
 pub type Result<T> = result::Result<T, Error>;
+pub type EquationResult<T> = result::Result<T, EquationError>;
 
 pub fn canonicalize(name: &str) -> String {
     // remove leading and trailing whitespace, do this before testing

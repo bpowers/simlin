@@ -13,8 +13,12 @@ use system_dynamics_engine::datamodel::ViewElement;
 
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
-        use system_dynamics_engine::common::{Error, ErrorCode};
-        Err(Error::ImportError(ErrorCode::$code, $str))
+        use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+        Err(Error{
+            kind: ErrorKind::Model,
+            code: ErrorCode::$code,
+            details: Some($str),
+        })
     }}
 );
 

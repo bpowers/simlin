@@ -40,9 +40,14 @@ pub use self::sim::Specs as SimSpecs;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
-    pub name: String,
-    datamodel: datamodel::Project,
+    pub datamodel: datamodel::Project,
     pub models: HashMap<String, Rc<model::Model>>,
+}
+
+impl Project {
+    pub fn name(&self) -> &str {
+        &self.datamodel.name
+    }
 }
 
 impl From<datamodel::Project> for Project {
@@ -77,7 +82,6 @@ impl From<datamodel::Project> for Project {
             .collect();
 
         Project {
-            name: "test".to_string(),
             datamodel: project_datamodel,
             models,
         }
