@@ -31,6 +31,10 @@ highlight = "all"
 name = "strsim"
 version = "=0.8.0"
 
+[[bans.skip]]
+name = "cfg-if"
+version = "=0.1"
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
