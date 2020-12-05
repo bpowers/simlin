@@ -2,14 +2,19 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum GraphicalFunctionKind {
     Continuous,
     Extrapolate,
     Discrete,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
@@ -87,10 +92,23 @@ impl Variable {
             Variable::Module(module) => module.ident.as_str(),
         }
     }
+
+    pub fn set_equation(&mut self, equation: &str) {
+        match self {
+            Variable::Stock(stock) => stock.equation = equation.to_string(),
+            Variable::Flow(flow) => flow.equation = equation.to_string(),
+            Variable::Aux(aux) => aux.equation = equation.to_string(),
+            Variable::Module(_module) => {}
+        }
+    }
 }
 
 pub mod view_element {
-    #[derive(Clone, PartialEq, Eq, Debug)]
+    #[cfg(feature = "wasm")]
+    use wasm_bindgen::prelude::*;
+
+    #[cfg_attr(feature = "wasm", wasm_bindgen)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub enum LabelSide {
         Top,
         Left,
@@ -117,6 +135,7 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
+    #[cfg_attr(feature = "wasm", wasm_bindgen)]
     #[derive(Clone, PartialEq, Debug)]
     pub struct FlowPoint {
         pub x: f64,
@@ -160,6 +179,7 @@ pub mod view_element {
         pub label_side: LabelSide,
     }
 
+    #[cfg_attr(feature = "wasm", wasm_bindgen)]
     #[derive(Clone, PartialEq, Debug)]
     pub struct Alias {
         pub uid: i32,
@@ -206,6 +226,7 @@ pub struct Model {
     pub views: Vec<View>,
 }
 
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SimMethod {
     Euler,

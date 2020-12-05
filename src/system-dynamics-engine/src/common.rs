@@ -16,6 +16,7 @@ pub type Ident = String;
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
+    NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
     XmlDeserialization,
     InvalidToken,
@@ -41,6 +42,7 @@ impl fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use ErrorCode::*;
         let name = match self {
+            NoError => "no_error",
             DoesNotExist => "does_not_exist",
             XmlDeserialization => "xml_deserialization",
             InvalidToken => "invalid_token",
@@ -146,7 +148,21 @@ pub enum ErrorKind {
 pub struct Error {
     pub kind: ErrorKind,
     pub code: ErrorCode,
-    pub details: Option<String>,
+    pub(crate) details: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
+impl Error {
+    pub fn new(kind: ErrorKind, code: ErrorCode, details: Option<String>) -> Self {
+        Error {
+            kind,
+            code,
+            details,
+        }
+    }
+    pub fn get_details(&self) -> Option<String> {
+        self.details.clone()
+    }
 }
 
 impl fmt::Display for Error {

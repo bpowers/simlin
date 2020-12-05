@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine" }
+system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine", features = ["wasm"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

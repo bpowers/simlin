@@ -14,11 +14,7 @@ use system_dynamics_engine::datamodel::ViewElement;
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
         use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
-        Err(Error{
-            kind: ErrorKind::Model,
-            code: ErrorCode::$code,
-            details: Some($str),
-        })
+        Err(Error::new(ErrorKind::Model, ErrorCode::$code, Some($str)))
     }}
 );
 

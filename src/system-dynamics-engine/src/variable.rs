@@ -143,8 +143,8 @@ fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Opti
     Ok(Some(Table {
         x,
         y: gf.y_points.clone(),
-        x_range: gf.x_scale.clone(),
-        y_range: gf.y_scale.clone(),
+        x_range: gf.x_scale,
+        y_range: gf.y_scale,
     }))
 }
 
