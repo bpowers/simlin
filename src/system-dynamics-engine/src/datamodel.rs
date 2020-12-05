@@ -14,7 +14,7 @@ pub enum GraphicalFunctionKind {
 }
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,

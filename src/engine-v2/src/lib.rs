@@ -7,7 +7,6 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 use system_dynamics_engine as engine;
-use system_dynamics_engine::common::Result;
 use system_dynamics_engine::{datamodel, project_io, prost, serde, Error};
 
 #[wasm_bindgen]
@@ -17,6 +16,7 @@ pub struct Project {
     sim: Option<engine::Simulation>,
 }
 
+#[wasm_bindgen]
 impl Project {
     fn instantiate_sim(&mut self) {
         // TODO: expose the simulation error message here
@@ -111,23 +111,18 @@ impl Project {
         _model_name: &str,
         _kind: &str,
         _name: &str,
-    ) -> Result<Vec<u8>> {
-        Ok(self.serialize_to_protobuf())
+    ) -> Option<Error> {
+        None
     }
 
-    pub fn delete_variables(&mut self, _model_name: &str, _names: Vec<String>) -> Result<Vec<u8>> {
+    pub fn delete_variable(&mut self, _model_name: &str, _ident: &str) -> Option<Error> {
         // TODO: to convert names to idents
 
-        Ok(self.serialize_to_protobuf())
+        None
     }
 
-    pub fn add_stocks_flow(
-        &mut self,
-        _model_name: &str,
-        _flow: &str,
-        _dir: &str,
-    ) -> Result<Vec<u8>> {
-        Ok(self.serialize_to_protobuf())
+    pub fn add_stocks_flow(&mut self, _model_name: &str, _flow: &str, _dir: &str) -> Option<Error> {
+        None
     }
 
     pub fn remove_stocks_flow(
@@ -135,8 +130,8 @@ impl Project {
         _model_name: &str,
         _flow: &str,
         _dir: &str,
-    ) -> Result<Vec<u8>> {
-        Ok(self.serialize_to_protobuf())
+    ) -> Option<Error> {
+        None
     }
 
     pub fn set_equation(
@@ -164,8 +159,8 @@ impl Project {
         _model_name: &str,
         _ident: &str,
         _gf: Option<String>,
-    ) -> Result<Vec<u8>> {
-        Ok(self.serialize_to_protobuf())
+    ) -> Option<Error> {
+        None
     }
 
     pub fn rename(
@@ -173,8 +168,8 @@ impl Project {
         _model_name: &str,
         _old_ident: &str,
         _new_ident: &str,
-    ) -> Result<Vec<u8>> {
-        Ok(self.serialize_to_protobuf())
+    ) -> Option<Error> {
+        None
     }
 
     // view control
