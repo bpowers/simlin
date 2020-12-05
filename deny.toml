@@ -28,10 +28,6 @@ wildcards = "deny"
 highlight = "all"
 
 [[bans.skip]]
-name = "strsim"
-version = "=0.8.0"
-
-[[bans.skip]]
 name = "cfg-if"
 version = "=0.1"
 

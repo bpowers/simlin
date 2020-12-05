@@ -2,11 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::rc::Rc;
 
-use clap::{App, Arg, SubCommand};
+use pico_args::Arguments;
 
 use system_dynamics_compat::engine::{eprintln, serde, Project, Simulation};
 use system_dynamics_compat::prost::Message;
@@ -24,6 +25,32 @@ macro_rules! die(
     } }
 );
 
+fn usage() -> ! {
+    let argv0 = std::env::args()
+        .next()
+        .unwrap_or_else(|| "<mdl>".to_string());
+    die!(
+        concat!(
+            "mdl {}: Simulate system dynamics models.\n\
+         \n\
+         USAGE:\n",
+            "    {} [SUBCOMMAND] [OPTION...] PATH\n",
+            "\n\
+         OPTIONS:\n",
+            "    -h, --help    show this message\n",
+            "    --vensim      model is a Vensim .mdl file\n",
+            "    --model-only  for conversion, only output model instead of project\n",
+            "    --output FILE path to write output file\n",
+            "\n\
+         SUBCOMMANDS:\n",
+            "    simulate      Simulate a model and display output\n",
+            "    convert       Convert an XMILE or Vensim model to protobuf\n"
+        ),
+        VERSION,
+        argv0
+    );
+}
+
 #[derive(Clone, Default, Debug)]
 struct Args {
     path: Option<String>,
@@ -33,57 +60,52 @@ struct Args {
     is_model_only: bool,
 }
 
-fn parse_args() -> Args {
-    let matches = App::new("mdl")
-        .version(VERSION)
-        .author("Bobby Powers <bobbypowers@gmail.com>")
-        .about("Simulate and convert XMILE and Vensim system dynamics models")
-        .arg(
-            Arg::with_name("INPUT")
-                .help("Input model path")
-                .required(true)
-                .index(1),
-        )
-        .arg(
-            Arg::with_name("vensim")
-                .long("vensim")
-                .help("Sets a custom config file"),
-        )
-        .subcommand(
-            SubCommand::with_name("convert")
-                .about("Convert ")
-                .arg(
-                    Arg::with_name("output")
-                        .short("o")
-                        .long("output")
-                        .value_name("OUTPUT")
-                        .help("Output protobuf-encoded model path")
-                        .takes_value(true)
-                        .required(true),
-                )
-                .arg(
-                    Arg::with_name("model-only")
-                        .long("model-only")
-                        .help("Only output the model, not the project"),
-                ),
-        )
-        .get_matches();
-
-    let mut args: Args = Default::default();
-    args.path = matches.value_of("INPUT").map(|p| p.to_string());
-    args.is_vensim = matches.is_present("vensim");
-    if matches.subcommand_name() == Some("convert") {
-        args.is_convert = true;
-        let matches = matches.subcommand_matches("convert").unwrap();
-        args.output = matches.value_of("output").map(|p| p.to_string());
-        args.is_model_only = matches.is_present("model-only");
+fn parse_args() -> Result<Args, Box<dyn Error>> {
+    let mut parsed = Arguments::from_env();
+    if parsed.contains(["-h", "--help"]) {
+        usage();
     }
 
-    args
+    let subcommand = parsed.subcommand()?;
+    if subcommand.is_none() {
+        eprintln!("error: subcommand required");
+        usage();
+    }
+
+    let mut args: Args = Default::default();
+
+    let subcommand = subcommand.unwrap();
+    if subcommand == "convert" {
+        args.is_convert = true;
+    } else if subcommand == "simulate" {
+    } else {
+        eprintln!("error: unknown subcommand {}", subcommand);
+        usage();
+    }
+
+    args.output = parsed.value_from_str("--output").ok();
+    args.is_model_only = parsed.contains("--model-only");
+    args.is_vensim = parsed.contains("--vensim");
+
+    let free_arguments = parsed.free()?;
+    if free_arguments.is_empty() {
+        eprintln!("error: input path required");
+        usage();
+    }
+
+    args.path = Some(free_arguments[0].clone());
+
+    Ok(args)
 }
 
 fn main() {
-    let args = parse_args();
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("error: {}", err);
+            usage();
+        }
+    };
     let file_path = args.path.unwrap_or_else(|| "/dev/stdin".to_string());
     let file = File::open(&file_path).unwrap();
     let mut reader = BufReader::new(file);
