@@ -120,7 +120,6 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/Level.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/State.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/TableFunction.cpp");
-    println!("cargo:rerun-if-changed=third_party/xmutil/Main.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Model.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Equation.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Expression.cpp");
@@ -135,7 +134,6 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/UnitExpression.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Units.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Variable.cpp");
-    println!("cargo:rerun-if-changed=third_party/xmutil/UI/Main_Window.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimLex.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParse.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParseFunctions.cpp");
@@ -169,7 +167,6 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/UnitExpression.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Units.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Variable.h");
-    println!("cargo:rerun-if-changed=third_party/xmutil/UI/Main_Window.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimLex.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParseFunctions.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParse.h");
