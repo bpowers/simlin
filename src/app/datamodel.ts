@@ -350,25 +350,30 @@ export class StockFlowView extends View {
 
 export class Model {
   readonly name: string;
-  readonly variables: Variable[];
+  readonly variables: Map<string, Variable>;
   readonly views: View[];
 
   constructor(model: pb.Model) {
     this.name = model.getName();
-    this.variables = model.getVariablesList().map((v: pb.Variable) => {
-      switch (v.getVCase()) {
-        case pb.Variable.VCase.STOCK:
-          return new Stock(defined(v.getStock()));
-        case pb.Variable.VCase.FLOW:
-          return new Flow(defined(v.getFlow()));
-        case pb.Variable.VCase.AUX:
-          return new Aux(defined(v.getAux()));
-        case pb.Variable.VCase.MODULE:
-          return new Module(defined(v.getModule()));
-        default:
-          throw new Error('invariant broken: protobuf variable with empty oneof');
-      }
-    });
+    this.variables = new Map(
+      model
+        .getVariablesList()
+        .map((v: pb.Variable) => {
+          switch (v.getVCase()) {
+            case pb.Variable.VCase.STOCK:
+              return new Stock(defined(v.getStock())) as Variable;
+            case pb.Variable.VCase.FLOW:
+              return new Flow(defined(v.getFlow())) as Variable;
+            case pb.Variable.VCase.AUX:
+              return new Aux(defined(v.getAux())) as Variable;
+            case pb.Variable.VCase.MODULE:
+              return new Module(defined(v.getModule())) as Variable;
+            default:
+              throw new Error('invariant broken: protobuf variable with empty oneof');
+          }
+        })
+        .map((v: Variable) => [v.ident, v]),
+    );
     this.views = model.getViewsList().map((view) => {
       switch (view.getKind()) {
         case pb.View.ViewType.STOCK_FLOW:
@@ -442,12 +447,12 @@ export class SimSpecs {
 export class Project {
   readonly name: string;
   readonly simSpecs: SimSpecs;
-  readonly models: Model[];
+  readonly models: Map<string, Model>;
 
   constructor(project: pb.Project) {
     this.name = project.getName();
     this.simSpecs = new SimSpecs(defined(project.getSimSpecs()));
-    this.models = project.getModelsList().map((model) => new Model(model));
+    this.models = new Map(project.getModelsList().map((model) => [model.getName(), new Model(model)]));
 
     // TODO: remove
     Object.freeze(this);
