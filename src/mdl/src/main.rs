@@ -139,7 +139,8 @@ fn main() {
             buf
         };
 
-        let mut output_file = File::create(&args.output.unwrap()).unwrap();
+        let mut output_file =
+            File::create(&args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
         output_file.write_all(&buf).unwrap();
     } else {
         let project = Rc::new(Project::from(project));
