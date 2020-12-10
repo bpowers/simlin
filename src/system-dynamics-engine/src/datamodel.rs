@@ -29,6 +29,16 @@ pub struct GraphicalFunction {
     pub y_scale: GraphicalFunctionScale,
 }
 
+pub type DimensionName = String;
+pub type ElementName = String;
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Equation {
+    Scalar(String),
+    ApplyToAll(Vec<DimensionName>),
+    Arrayed(Vec<DimensionName>, Vec<(ElementName, String)>),
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Stock {
     pub ident: String,
@@ -258,10 +268,16 @@ pub struct SimSpecs {
     pub time_units: Option<String>,
 }
 
-#[allow(dead_code)]
+#[derive(Clone, PartialEq, Debug)]
+pub struct Dimension {
+    pub name: String,
+    pub elements: Vec<String>,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,
+    pub dimensions: Vec<Dimension>,
     pub models: Vec<Model>,
 }

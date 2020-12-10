@@ -3,9 +3,9 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::datamodel::{
-    view_element, Aux, Dt, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
-    Model, Module, ModuleReference, Project, SimMethod, SimSpecs, Stock, StockFlow, Variable, View,
-    ViewElement,
+    view_element, Aux, Dimension, Dt, Flow, GraphicalFunction, GraphicalFunctionKind,
+    GraphicalFunctionScale, Model, Module, ModuleReference, Project, SimMethod, SimSpecs, Stock,
+    StockFlow, Variable, View, ViewElement,
 };
 use crate::project_io;
 
@@ -1256,11 +1256,34 @@ impl From<project_io::Model> for Model {
     }
 }
 
+impl From<Dimension> for project_io::Dimension {
+    fn from(dimension: Dimension) -> Self {
+        project_io::Dimension {
+            name: dimension.name,
+            elements: dimension.elements,
+        }
+    }
+}
+
+impl From<project_io::Dimension> for Dimension {
+    fn from(dimension: project_io::Dimension) -> Self {
+        Dimension {
+            name: dimension.name,
+            elements: dimension.elements,
+        }
+    }
+}
+
 impl From<Project> for project_io::Project {
     fn from(project: Project) -> Self {
         project_io::Project {
             name: project.name,
             sim_specs: Some(project_io::SimSpecs::from(project.sim_specs)),
+            dimensions: project
+                .dimensions
+                .into_iter()
+                .map(project_io::Dimension::from)
+                .collect(),
             models: project
                 .models
                 .into_iter()
@@ -1275,6 +1298,11 @@ impl From<project_io::Project> for Project {
         Project {
             name: project.name,
             sim_specs: SimSpecs::from(project.sim_specs.unwrap()),
+            dimensions: project
+                .dimensions
+                .into_iter()
+                .map(Dimension::from)
+                .collect(),
             models: project.models.into_iter().map(Model::from).collect(),
         }
     }

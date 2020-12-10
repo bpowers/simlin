@@ -205,8 +205,14 @@ message SimSpecs {
   string time_units = 6;
 };
 
+message Dimension {
+  string name = 1;
+  repeated string elements = 2;
+};
+
 message Project {
   string name = 1;
   SimSpecs sim_specs = 2;
+  repeated Dimension dimensions = 4;
   repeated Model models = 3;
 };

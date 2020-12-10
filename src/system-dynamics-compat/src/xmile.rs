@@ -58,6 +58,15 @@ impl From<File> for datamodel::Project {
                 method: None,
                 time_units: None,
             })),
+            dimensions: match file.dimensions {
+                None => vec![],
+                Some(dimensions) => dimensions
+                    .dimensions
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(datamodel::Dimension::from)
+                    .collect(),
+            },
             models: file
                 .models
                 .into_iter()
@@ -90,7 +99,7 @@ pub struct VarDimension {
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Dimensions {
-    #[serde(rename = "dimension")]
+    #[serde(rename = "dim")]
     pub dimensions: Option<Vec<Dimension>>,
 }
 
@@ -276,6 +285,20 @@ pub struct Dimension {
     pub size: Option<u32>,
     #[serde(rename = "elem")]
     pub elements: Option<Vec<Index>>,
+}
+
+impl From<Dimension> for datamodel::Dimension {
+    fn from(dimension: Dimension) -> Self {
+        datamodel::Dimension {
+            name: dimension.name,
+            elements: dimension
+                .elements
+                .unwrap_or_default()
+                .into_iter()
+                .map(|i| i.name)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -1508,6 +1531,11 @@ pub struct Connect {
 pub struct NonNegative {}
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct VarElement {
+    pub eqn: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Stock {
     pub name: String,
     pub eqn: Option<String>,
@@ -1519,6 +1547,8 @@ pub struct Stock {
     pub outflows: Option<Vec<String>>,
     pub non_negative: Option<NonNegative>,
     pub dimensions: Option<VarDimensions>,
+    #[serde(rename = "element", default)]
+    pub elements: Option<VarElement>,
 }
 
 impl From<Stock> for datamodel::Stock {
@@ -1578,6 +1608,7 @@ impl From<datamodel::Stock> for Stock {
                 None
             },
             dimensions: None,
+            elements: None,
         }
     }
 }
@@ -1591,6 +1622,8 @@ pub struct Flow {
     pub gf: Option<GF>,
     pub non_negative: Option<NonNegative>,
     pub dimensions: Option<VarDimensions>,
+    #[serde(rename = "element", default)]
+    pub elements: Option<VarElement>,
 }
 
 impl From<Flow> for datamodel::Flow {
@@ -1634,6 +1667,7 @@ impl From<datamodel::Flow> for Flow {
                 None
             },
             dimensions: None,
+            elements: None,
         }
     }
 }
@@ -1646,6 +1680,8 @@ pub struct Aux {
     pub units: Option<String>,
     pub gf: Option<GF>,
     pub dimensions: Option<VarDimensions>,
+    #[serde(rename = "element", default)]
+    pub elements: Option<VarElement>,
 }
 
 impl From<Aux> for datamodel::Aux {
@@ -1683,6 +1719,7 @@ impl From<datamodel::Aux> for Aux {
                 None => None,
             },
             dimensions: None,
+            elements: None,
         }
     }
 }
@@ -1746,6 +1783,7 @@ fn test_canonicalize_stock_inflows() {
         ]),
         non_negative: None,
         dimensions: None,
+        elements: None,
     });
 
     let expected = datamodel::Variable::Stock(datamodel::Stock {
@@ -1811,6 +1849,7 @@ fn test_xml_stock_parsing() {
         outflows: Some(vec!["succumbing".to_string(), "succumbing_2".to_string()]),
         non_negative: None,
         dimensions: None,
+        elements: None,
     };
 
     use quick_xml::de;
@@ -1851,6 +1890,7 @@ fn test_xml_gf_parsing() {
             y_pts: Some("0,0,1,1,0,0,-1,-1,0,0".to_string()),
         }),
         dimensions: None,
+        elements: None,
     };
 
     use quick_xml::de;
