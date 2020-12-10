@@ -1548,7 +1548,7 @@ pub struct Stock {
     pub non_negative: Option<NonNegative>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
-    pub elements: Option<VarElement>,
+    pub elements: Option<Vec<VarElement>>,
 }
 
 impl From<Stock> for datamodel::Stock {
@@ -1623,7 +1623,7 @@ pub struct Flow {
     pub non_negative: Option<NonNegative>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
-    pub elements: Option<VarElement>,
+    pub elements: Option<Vec<VarElement>>,
 }
 
 impl From<Flow> for datamodel::Flow {
@@ -1681,7 +1681,7 @@ pub struct Aux {
     pub gf: Option<GF>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
-    pub elements: Option<VarElement>,
+    pub elements: Option<Vec<VarElement>>,
 }
 
 impl From<Aux> for datamodel::Aux {
