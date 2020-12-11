@@ -12,7 +12,7 @@ use crate::common::{Ident, Result};
 use crate::datamodel::{self, Dt, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
-use crate::variable::Variable;
+use crate::variable::{Variable, AST};
 use crate::{sim_err, Project};
 use std::borrow::BorrowMut;
 
@@ -489,7 +489,11 @@ impl Var {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
                         }
-                        Expr::AssignCurr(off, Box::new(ctx.lower(ast.as_ref().unwrap())?))
+                        if let AST::Scalar(ast) = ast.as_ref().unwrap() {
+                            Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))
+                        } else {
+                            return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                        }
                     } else {
                         Expr::AssignNext(off, Box::new(ctx.build_stock_update_expr(off, var)?))
                     }
@@ -499,11 +503,15 @@ impl Var {
                 } => {
                     let off = ctx.get_offset(var.ident())?;
                     if let Some(ast) = ast {
-                        let expr = ctx.lower(ast)?;
-                        let expr = if table.is_some() {
-                            Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
+                        let expr = if let AST::Scalar(ast) = ast {
+                            let expr = ctx.lower(ast)?;
+                            if table.is_some() {
+                                Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
+                            } else {
+                                expr
+                            }
                         } else {
-                            expr
+                            return sim_err!(ArraysNotImplemented, var.ident().to_string());
                         };
                         Expr::AssignCurr(off, Box::new(expr))
                     } else {

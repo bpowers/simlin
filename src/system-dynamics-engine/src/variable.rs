@@ -29,10 +29,20 @@ pub struct ModuleInput {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub enum AST {
+    Scalar(ast::Expr),
+    ApplyToAll(Vec<datamodel::DimensionName>, ast::Expr),
+    Arrayed(
+        Vec<datamodel::DimensionName>,
+        Vec<(datamodel::ElementName, ast::Expr)>,
+    ),
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum Variable {
     Stock {
         ident: Ident,
-        ast: Option<ast::Expr>,
+        ast: Option<AST>,
         eqn: Option<datamodel::Equation>,
         units: Option<String>,
         inflows: Vec<Ident>,
@@ -43,7 +53,7 @@ pub enum Variable {
     },
     Var {
         ident: Ident,
-        ast: Option<ast::Expr>,
+        ast: Option<AST>,
         eqn: Option<datamodel::Equation>,
         units: Option<String>,
         table: Option<Table>,
@@ -211,7 +221,7 @@ pub fn parse_var(
 ) -> Variable {
     let mut parse_and_lower_eqn = |ident: &str,
                                    eqn: &datamodel::Equation|
-     -> (Option<Expr>, HashSet<Ident>, Vec<EquationError>) {
+     -> (Option<AST>, HashSet<Ident>, Vec<EquationError>) {
         let scalar_eqn = if let datamodel::Equation::Scalar(eqn) = eqn {
             eqn.as_str()
         } else {
@@ -243,7 +253,7 @@ pub fn parse_var(
             None => HashSet::new(),
         };
 
-        (ast, direct_deps, errors)
+        (ast.map(|ast| AST::Scalar(ast)), direct_deps, errors)
     };
     match v {
         datamodel::Variable::Stock(v) => {
@@ -578,7 +588,7 @@ fn test_tables() {
 
     let expected = Variable::Var {
         ident: "lookup_function_table".to_string(),
-        ast: Some(Expr::Const("0".to_string(), 0.0)),
+        ast: Some(AST::Scalar(Expr::Const("0".to_string(), 0.0))),
         eqn: Some(datamodel::Equation::Scalar("0".to_string())),
         units: None,
         table: Some(Table {

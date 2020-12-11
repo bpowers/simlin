@@ -36,6 +36,7 @@ pub enum ErrorCode {
     BadSimSpecs,
     NoAbsoluteReferences,
     CircularDependency,
+    ArraysNotImplemented,
 }
 
 impl fmt::Display for ErrorCode {
@@ -62,6 +63,7 @@ impl fmt::Display for ErrorCode {
             BadSimSpecs => "bad_sim_specs",
             NoAbsoluteReferences => "no_absolute_references",
             CircularDependency => "circular_dependency",
+            ArraysNotImplemented => "arrays_not_implemented",
         };
 
         write!(f, "{}", name)
