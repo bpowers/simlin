@@ -35,14 +35,14 @@ pub type ElementName = String;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Equation {
     Scalar(String),
-    ApplyToAll(Vec<DimensionName>),
+    ApplyToAll(Vec<DimensionName>, String),
     Arrayed(Vec<DimensionName>, Vec<(ElementName, String)>),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Stock {
     pub ident: String,
-    pub equation: String,
+    pub equation: Equation,
     pub documentation: String,
     pub units: Option<String>,
     pub inflows: Vec<String>,
@@ -53,7 +53,7 @@ pub struct Stock {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Flow {
     pub ident: String,
-    pub equation: String,
+    pub equation: Equation,
     pub documentation: String,
     pub units: Option<String>,
     pub gf: Option<GraphicalFunction>,
@@ -63,7 +63,7 @@ pub struct Flow {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Aux {
     pub ident: String,
-    pub equation: String,
+    pub equation: Equation,
     pub documentation: String,
     pub units: Option<String>,
     pub gf: Option<GraphicalFunction>,
@@ -103,11 +103,11 @@ impl Variable {
         }
     }
 
-    pub fn set_equation(&mut self, equation: &str) {
+    pub fn set_scalar_equation(&mut self, equation: &str) {
         match self {
-            Variable::Stock(stock) => stock.equation = equation.to_string(),
-            Variable::Flow(flow) => flow.equation = equation.to_string(),
-            Variable::Aux(aux) => aux.equation = equation.to_string(),
+            Variable::Stock(stock) => stock.equation = Equation::Scalar(equation.to_string()),
+            Variable::Flow(flow) => flow.equation = Equation::Scalar(equation.to_string()),
+            Variable::Aux(aux) => aux.equation = Equation::Scalar(equation.to_string()),
             Variable::Module(_module) => {}
         }
     }

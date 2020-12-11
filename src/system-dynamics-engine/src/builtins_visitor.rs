@@ -71,7 +71,7 @@ impl<'a> BuiltinVisitor<'a> {
                             let eqn = print_eqn(&arg);
                             let x_var = datamodel::Variable::Aux(datamodel::Aux {
                                 ident: id.clone(),
-                                equation: eqn,
+                                equation: datamodel::Equation::Scalar(eqn),
                                 documentation: "".to_string(),
                                 units: None,
                                 gf: None,

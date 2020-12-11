@@ -8,7 +8,7 @@ use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor};
 use crate::builtins_visitor::instantiate_implicit_modules;
-use crate::common::{EquationError, EquationResult, Ident};
+use crate::common::{EquationError, EquationResult, ErrorCode, Ident};
 use crate::datamodel;
 use crate::model::resolve_relative;
 
@@ -33,7 +33,7 @@ pub enum Variable {
     Stock {
         ident: Ident,
         ast: Option<ast::Expr>,
-        eqn: Option<String>,
+        eqn: Option<datamodel::Equation>,
         units: Option<String>,
         inflows: Vec<Ident>,
         outflows: Vec<Ident>,
@@ -44,7 +44,7 @@ pub enum Variable {
     Var {
         ident: Ident,
         ast: Option<ast::Expr>,
-        eqn: Option<String>,
+        eqn: Option<datamodel::Equation>,
         units: Option<String>,
         table: Option<Table>,
         non_negative: bool,
@@ -75,8 +75,14 @@ impl Variable {
 
     pub fn eqn(&self) -> Option<&String> {
         match self {
-            Variable::Stock { eqn: Some(s), .. } => Some(s),
-            Variable::Var { eqn: Some(s), .. } => Some(s),
+            Variable::Stock {
+                eqn: Some(datamodel::Equation::Scalar(s)),
+                ..
+            } => Some(s),
+            Variable::Var {
+                eqn: Some(datamodel::Equation::Scalar(s)),
+                ..
+            } => Some(s),
             _ => None,
         }
     }
@@ -203,29 +209,42 @@ pub fn parse_var(
     v: &datamodel::Variable,
     implicit_vars: &mut Vec<datamodel::Variable>,
 ) -> Variable {
-    let mut parse_and_lower_eqn =
-        |ident: &str, eqn: &str| -> (Option<Expr>, HashSet<Ident>, Vec<EquationError>) {
-            let (ast, mut errors) = parse_eqn(eqn);
-            let ast = match ast {
-                Some(ast) => match instantiate_implicit_modules(ident, ast) {
-                    Ok((ast, mut new_vars)) => {
-                        implicit_vars.append(&mut new_vars);
-                        Some(ast)
-                    }
-                    Err(err) => {
-                        errors.push(err);
-                        None
-                    }
-                },
-                None => None,
-            };
-            let direct_deps = match &ast {
-                Some(ast) => identifier_set(ast),
-                None => HashSet::new(),
-            };
-
-            (ast, direct_deps, errors)
+    let mut parse_and_lower_eqn = |ident: &str,
+                                   eqn: &datamodel::Equation|
+     -> (Option<Expr>, HashSet<Ident>, Vec<EquationError>) {
+        let scalar_eqn = if let datamodel::Equation::Scalar(eqn) = eqn {
+            eqn.as_str()
+        } else {
+            return (
+                None,
+                HashSet::new(),
+                vec![EquationError {
+                    location: 0,
+                    code: ErrorCode::EmptyEquation,
+                }],
+            );
         };
+        let (ast, mut errors) = parse_eqn(scalar_eqn);
+        let ast = match ast {
+            Some(ast) => match instantiate_implicit_modules(ident, ast) {
+                Ok((ast, mut new_vars)) => {
+                    implicit_vars.append(&mut new_vars);
+                    Some(ast)
+                }
+                Err(err) => {
+                    errors.push(err);
+                    None
+                }
+            },
+            None => None,
+        };
+        let direct_deps = match &ast {
+            Some(ast) => identifier_set(ast),
+            None => HashSet::new(),
+        };
+
+        (ast, direct_deps, errors)
+    };
     match v {
         datamodel::Variable::Stock(v) => {
             let ident = v.ident.clone();
@@ -539,7 +558,7 @@ fn test_tables() {
     use crate::common::canonicalize;
     let input = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize("lookup function table"),
-        equation: "0".to_string(),
+        equation: datamodel::Equation::Scalar("0".to_string()),
         documentation: "".to_string(),
         units: None,
         gf: Some(datamodel::GraphicalFunction {
@@ -560,7 +579,7 @@ fn test_tables() {
     let expected = Variable::Var {
         ident: "lookup_function_table".to_string(),
         ast: Some(Expr::Const("0".to_string(), 0.0)),
-        eqn: Some("0".to_string()),
+        eqn: Some(datamodel::Equation::Scalar("0".to_string())),
         units: None,
         table: Some(Table {
             x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],

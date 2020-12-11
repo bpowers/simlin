@@ -264,10 +264,10 @@ fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
 
 #[cfg(test)]
 fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
-    use datamodel::{Flow, Variable};
+    use datamodel::{Equation, Flow, Variable};
     Variable::Flow(Flow {
         ident: ident.to_string(),
-        equation: eqn.to_string(),
+        equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
         units: None,
         gf: None,
@@ -287,10 +287,10 @@ fn flow(ident: &str, eqn: &str) -> Variable {
 
 #[cfg(test)]
 fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
-    use datamodel::{Aux, Variable};
+    use datamodel::{Aux, Equation, Variable};
     Variable::Aux(Aux {
         ident: ident.to_string(),
-        equation: eqn.to_string(),
+        equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
         units: None,
         gf: None,
@@ -309,10 +309,10 @@ fn aux(ident: &str, eqn: &str) -> Variable {
 
 #[cfg(test)]
 fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> datamodel::Variable {
-    use datamodel::{Stock, Variable};
+    use datamodel::{Equation, Stock, Variable};
     Variable::Stock(Stock {
         ident: ident.to_string(),
-        equation: eqn.to_string(),
+        equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
         units: None,
         inflows: optional_vec(inflows),

@@ -144,7 +144,7 @@ impl Project {
 
         for m in project.models.iter_mut().filter(|m| m.name == model_name) {
             for v in m.variables.iter_mut().filter(|v| v.get_ident() == ident) {
-                v.set_equation(new_equation);
+                v.set_scalar_equation(new_equation);
             }
         }
 

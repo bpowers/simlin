@@ -24,9 +24,36 @@ message GraphicalFunction {
 }
 
 message Variable {
+  message ScalarEquation {
+    string equation = 1;
+  };
+
+  message ApplyToAllEquation {
+    repeated string dimension_names = 1;
+    string equation = 2;
+  };
+
+  message ArrayedEquation {
+    message Element {
+      string subscript = 1;
+      string equation = 2;
+    };
+
+    repeated string dimension_names = 1;
+    repeated Element elements = 2;
+  };
+
+  message Equation {
+    oneof equation {
+      ScalarEquation scalar = 1;
+      ApplyToAllEquation apply_to_all = 2;
+      ArrayedEquation arrayed = 3;
+    }
+  };
+
   message Stock {
     string ident = 1;
-    string equation = 2;
+    Equation equation = 8;
     string documentation = 3;
     string units = 4;
     repeated string inflows = 5;
@@ -37,7 +64,7 @@ message Variable {
 
   message Flow {
     string ident = 1;
-    string equation = 2;
+    Equation equation = 8;
     string documentation = 3;
     string units = 4;
     GraphicalFunction gf = 5;
@@ -47,7 +74,7 @@ message Variable {
 
   message Aux {
     string ident = 1;
-    string equation = 2;
+    Equation equation = 6;
     string documentation = 3;
     string units = 4;
     GraphicalFunction gf = 5;
