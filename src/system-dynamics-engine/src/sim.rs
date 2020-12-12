@@ -555,9 +555,9 @@ enum StepPart {
 pub struct Module {
     ident: Ident,
     n_slots: usize, // number of f64s we need storage for
-    runlist_initials: Vec<Var>,
-    runlist_flows: Vec<Var>,
-    runlist_stocks: Vec<Var>,
+    runlist_initials: Vec<Expr>,
+    runlist_flows: Vec<Expr>,
+    runlist_stocks: Vec<Expr>,
     offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
     tables: HashMap<Ident, Table>,
 }
@@ -820,6 +820,11 @@ impl Module {
             let v = &model.variables[*id];
             !inputs_set.contains(*id) && (v.is_stock() || v.is_module())
         })?;
+
+        // flatten out the variables so that we're just dealing with lists of expressions
+        let runlist_initials = runlist_initials.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_flows = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_stocks = runlist_stocks.into_iter().flat_map(|v| v.ast).collect();
 
         let tables: Result<HashMap<String, Table>> = var_names
             .iter()
@@ -1297,10 +1302,8 @@ impl Simulation {
             sim: self,
         };
 
-        for v in runlist.iter() {
-            for ast in &v.ast {
-                step.eval(ast);
-            }
+        for expr in runlist.iter() {
+            step.eval(expr);
         }
     }
 
