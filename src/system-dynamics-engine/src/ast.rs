@@ -12,6 +12,7 @@ pub enum Expr<AppId = Ident> {
     Const(String, f64),
     Var(Ident),
     App(AppId, Vec<Expr>),
+    Subscript(Ident, Vec<Expr>),
     Op1(UnaryOp, Box<Expr>),
     Op2(BinaryOp, Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -62,6 +63,10 @@ impl Visitor<String> for PrintVisitor {
             Expr::App(func, args) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 format!("{}({})", func, args.join(", "))
+            }
+            Expr::Subscript(id, args) => {
+                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+                format!("{}[{}]", id, args.join(", "))
             }
             Expr::Op1(op, l) => {
                 let l = self.walk(l);

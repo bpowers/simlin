@@ -253,7 +253,7 @@ pub fn parse_var(
             None => HashSet::new(),
         };
 
-        (ast.map(|ast| AST::Scalar(ast)), direct_deps, errors)
+        (ast.map(AST::Scalar), direct_deps, errors)
     };
     match v {
         datamodel::Variable::Stock(v) => {
@@ -388,6 +388,12 @@ impl Visitor<()> for IdentifierSetVisitor {
                     self.walk(arg);
                 }
             }
+            Expr::Subscript(id, args) => {
+                self.identifiers.insert(id.clone());
+                for arg in args.iter() {
+                    self.walk(arg);
+                }
+            }
             Expr::Op2(_, l, r) => {
                 self.walk(l);
                 self.walk(r);
@@ -480,6 +486,15 @@ fn test_parse() {
         Box::new(Var("oh_dear".to_string())),
     ));
 
+    let subscript1 = Box::new(Subscript("a".to_owned(), vec![Const("1".to_owned(), 1.0)]));
+    let subscript2 = Box::new(Subscript(
+        "a".to_owned(),
+        vec![
+            Const("2".to_owned(), 2.0),
+            App("int".to_owned(), vec![Var("b".to_owned())]),
+        ],
+    ));
+
     use crate::ast::print_eqn;
 
     let cases = [
@@ -514,6 +529,8 @@ fn test_parse() {
             quoting_eq.clone(),
             "(oh_dear = oh_dear)",
         ),
+        ("a[1]", subscript1.clone(), "a[1]"),
+        ("a[2, INT(b)]", subscript2.clone(), "a[2, int(b)]"),
     ];
 
     for case in cases.iter() {

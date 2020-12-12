@@ -232,6 +232,9 @@ impl<'a> Context<'a> {
                 };
                 Expr::App(builtin)
             }
+            ast::Expr::Subscript(id, _args) => {
+                return sim_err!(ArraysNotImplemented, id.clone());
+            }
             ast::Expr::Op1(op, l) => {
                 let l = self.lower(l)?;
                 match op {

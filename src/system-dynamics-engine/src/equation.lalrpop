@@ -67,6 +67,11 @@ Exp: Expr = {
 
 App: Expr = {
     <id:Ident> "(" <args:Exprs> ")" => App(id, args),
+    Subscript,
+};
+
+Subscript: Expr = {
+    <id:Ident> "[" <args:Exprs> "]" => Subscript(id, args),
     Atom,
 };
 

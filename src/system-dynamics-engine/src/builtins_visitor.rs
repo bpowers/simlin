@@ -104,6 +104,12 @@ impl<'a> BuiltinVisitor<'a> {
                 self.n += 1;
                 Var(module_output_name)
             }
+            Subscript(id, args) => {
+                let args: std::result::Result<Vec<Expr>, EquationError> =
+                    args.into_iter().map(|e| self.walk(e)).collect();
+                let args = args?;
+                Subscript(id, args)
+            }
             Op1(op, mut r) => {
                 *r = self.walk(mem::take(&mut *r))?;
                 Op1(op, r)

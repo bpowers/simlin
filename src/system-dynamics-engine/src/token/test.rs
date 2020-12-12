@@ -105,8 +105,25 @@ fn idents() {
 
 #[test]
 fn numbers() {
-    test("4.0e5", vec![("~~~~~", Num("4.0e5"))]);
-    test("4.0e-5", vec![("~~~~~~", Num("4.0e-5"))]);
+    #[rustfmt::skip]
+    test("4.0e5", vec![
+        ("~~~~~", Num("4.0e5")),
+    ]);
+    #[rustfmt::skip]
+    test("4.0e-5", vec![
+        ("~~~~~~", Num("4.0e-5")),
+    ]);
+}
+
+#[test]
+fn subscripts() {
+    #[rustfmt::skip]
+    test("aux[1]", vec![
+        ("~~~   ", Ident("aux")),
+        ("   ~  ", LBracket),
+        ("    ~ ", Num("1")),
+        ("     ~", RBracket),
+    ]);
 }
 
 #[test]
