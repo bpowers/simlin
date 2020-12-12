@@ -421,7 +421,7 @@ fn test_lower() {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Var {
-    ast: Expr,
+    ast: Vec<Expr>,
 }
 
 #[test]
@@ -463,13 +463,16 @@ fn test_fold_flows() {
 impl Var {
     fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
-        let ast = if let Some((off, ident)) = ctx
+        let ast: Vec<Expr> = if let Some((off, ident)) = ctx
             .inputs
             .iter()
             .enumerate()
             .find(|(_i, n)| *n == var.ident())
         {
-            Expr::AssignCurr(ctx.get_offset(ident)?, Box::new(Expr::ModuleInput(off)))
+            vec![Expr::AssignCurr(
+                ctx.get_offset(ident)?,
+                Box::new(Expr::ModuleInput(off)),
+            )]
         } else {
             match var {
                 Variable::Module {
@@ -484,7 +487,7 @@ impl Var {
                         .into_iter()
                         .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap()))
                         .collect();
-                    Expr::EvalModule(ident.clone(), model_name.clone(), inputs)
+                    vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
                 }
                 Variable::Stock { ast, .. } => {
                     let off = ctx.get_offset(var.ident())?;
@@ -492,33 +495,47 @@ impl Var {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
                         }
-                        if let AST::Scalar(ast) = ast.as_ref().unwrap() {
-                            Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))
-                        } else {
-                            return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                        match ast.as_ref().unwrap() {
+                            AST::Scalar(ast) => {
+                                vec![Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))]
+                            }
+                            AST::ApplyToAll(_, _) => {
+                                return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                            }
+                            AST::Arrayed(_, _) => {
+                                return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                            }
                         }
                     } else {
-                        Expr::AssignNext(off, Box::new(ctx.build_stock_update_expr(off, var)?))
+                        vec![Expr::AssignNext(
+                            off,
+                            Box::new(ctx.build_stock_update_expr(off, var)?),
+                        )]
                     }
                 }
                 Variable::Var {
                     ident, table, ast, ..
                 } => {
                     let off = ctx.get_offset(var.ident())?;
-                    if let Some(ast) = ast {
-                        let expr = if let AST::Scalar(ast) = ast {
+                    if ast.is_none() {
+                        return sim_err!(EmptyEquation, var.ident().to_string());
+                    }
+                    match ast.as_ref().unwrap() {
+                        AST::Scalar(ast) => {
                             let expr = ctx.lower(ast)?;
-                            if table.is_some() {
+                            let expr = if table.is_some() {
                                 Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
                             } else {
                                 expr
-                            }
-                        } else {
+                            };
+                            vec![Expr::AssignCurr(off, Box::new(expr))]
+                        }
+                        AST::ApplyToAll(_, _) => {
                             return sim_err!(ArraysNotImplemented, var.ident().to_string());
-                        };
-                        Expr::AssignCurr(off, Box::new(expr))
-                    } else {
-                        return sim_err!(EmptyEquation, var.ident().to_string());
+                        }
+                        AST::Arrayed(_, _) => {
+                            return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                        }
                     }
                 }
             }
@@ -1281,7 +1298,9 @@ impl Simulation {
         };
 
         for v in runlist.iter() {
-            step.eval(&v.ast);
+            for ast in &v.ast {
+                step.eval(ast);
+            }
         }
     }
 
