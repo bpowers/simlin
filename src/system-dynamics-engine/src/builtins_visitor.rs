@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{print_eqn, Expr};
+use crate::ast::{print_eqn, Expr, AST};
 use crate::builtins::is_builtin_fn;
 use crate::common::{EquationError, Ident};
 use crate::{datamodel, eqn_err};
@@ -136,10 +136,14 @@ fn test_builtin_visitor() {}
 
 pub fn instantiate_implicit_modules(
     variable_name: &str,
-    ast: Expr,
-) -> std::result::Result<(Expr, Vec<datamodel::Variable>), EquationError> {
+    ast: AST,
+) -> std::result::Result<(AST, Vec<datamodel::Variable>), EquationError> {
     let mut builtin_visitor = BuiltinVisitor::new(variable_name);
-    let ast = builtin_visitor.walk(ast)?;
+    let ast = match ast {
+        AST::Scalar(ast) => AST::Scalar(builtin_visitor.walk(ast)?),
+        AST::ApplyToAll(dimensions, ast) => AST::ApplyToAll(dimensions, builtin_visitor.walk(ast)?),
+        AST::Arrayed(_dimensions, _elements) => unreachable!(),
+    };
     let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
     Ok((ast, vars))
 }

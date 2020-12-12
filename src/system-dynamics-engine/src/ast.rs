@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::common::Ident;
+use crate::common::{DimensionName, ElementName, Ident};
 
 // we use Boxs here because we may walk and update ASTs a number of times,
 // and we want to avoid copying and reallocating subexpressions all over
@@ -22,6 +22,13 @@ impl Default for Expr {
     fn default() -> Self {
         Expr::Const("0.0".to_string(), 0.0)
     }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum AST {
+    Scalar(Expr),
+    ApplyToAll(Vec<DimensionName>, Expr),
+    Arrayed(Vec<DimensionName>, Vec<(ElementName, Expr)>),
 }
 
 pub trait Visitor<T> {

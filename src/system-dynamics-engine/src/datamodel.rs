@@ -5,6 +5,8 @@
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+use crate::common::{DimensionName, ElementName};
+
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum GraphicalFunctionKind {
@@ -28,9 +30,6 @@ pub struct GraphicalFunction {
     pub x_scale: GraphicalFunctionScale,
     pub y_scale: GraphicalFunctionScale,
 }
-
-pub type DimensionName = String;
-pub type ElementName = String;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Equation {

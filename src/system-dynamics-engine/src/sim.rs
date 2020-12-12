@@ -7,12 +7,12 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::ast;
+use crate::ast::{self, AST};
 use crate::common::{Ident, Result};
 use crate::datamodel::{self, Dt, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
-use crate::variable::{Variable, AST};
+use crate::variable::Variable;
 use crate::{sim_err, Project};
 use std::borrow::BorrowMut;
 

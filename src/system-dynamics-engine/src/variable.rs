@@ -6,9 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use lalrpop_util::ParseError;
 
-use crate::ast::{self, Expr, Visitor};
+use crate::ast::{self, Expr, Visitor, AST};
 use crate::builtins_visitor::instantiate_implicit_modules;
-use crate::common::{EquationError, EquationResult, ErrorCode, Ident};
+use crate::common::{EquationError, EquationResult, Ident};
 use crate::datamodel;
 use crate::model::resolve_relative;
 
@@ -26,16 +26,6 @@ pub struct ModuleInput {
     pub src: Ident,
     // the Variable identifier in the module's model we will override
     pub dst: Ident,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum AST {
-    Scalar(ast::Expr),
-    ApplyToAll(Vec<datamodel::DimensionName>, ast::Expr),
-    Arrayed(
-        Vec<datamodel::DimensionName>,
-        Vec<(datamodel::ElementName, ast::Expr)>,
-    ),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -163,8 +153,26 @@ fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Opti
         y_range: gf.y_scale.clone(),
     }))
 }
+fn parse_equation(eqn: &datamodel::Equation) -> (Option<AST>, Vec<EquationError>) {
+    match eqn {
+        datamodel::Equation::Scalar(eqn) => {
+            let (ast, errors) = parse_single_equation(eqn);
+            (ast.map(AST::Scalar), errors)
+        }
+        datamodel::Equation::ApplyToAll(dimensions, eqn) => {
+            let (ast, errors) = parse_single_equation(eqn);
+            (
+                ast.map(|ast| AST::ApplyToAll(dimensions.clone(), ast)),
+                errors,
+            )
+        }
+        datamodel::Equation::Arrayed(_dimensions, _elements) => {
+            unreachable!();
+        }
+    }
+}
 
-fn parse_eqn(eqn: &str) -> (Option<ast::Expr>, Vec<EquationError>) {
+fn parse_single_equation(eqn: &str) -> (Option<ast::Expr>, Vec<EquationError>) {
     let mut errs = Vec::new();
 
     let lexer = crate::token::Lexer::new(eqn);
@@ -222,19 +230,7 @@ pub fn parse_var(
     let mut parse_and_lower_eqn = |ident: &str,
                                    eqn: &datamodel::Equation|
      -> (Option<AST>, HashSet<Ident>, Vec<EquationError>) {
-        let scalar_eqn = if let datamodel::Equation::Scalar(eqn) = eqn {
-            eqn.as_str()
-        } else {
-            return (
-                None,
-                HashSet::new(),
-                vec![EquationError {
-                    location: 0,
-                    code: ErrorCode::EmptyEquation,
-                }],
-            );
-        };
-        let (ast, mut errors) = parse_eqn(scalar_eqn);
+        let (ast, mut errors) = parse_equation(eqn);
         let ast = match ast {
             Some(ast) => match instantiate_implicit_modules(ident, ast) {
                 Ok((ast, mut new_vars)) => {
@@ -253,7 +249,7 @@ pub fn parse_var(
             None => HashSet::new(),
         };
 
-        (ast.map(AST::Scalar), direct_deps, errors)
+        (ast, direct_deps, errors)
     };
     match v {
         datamodel::Variable::Stock(v) => {
@@ -410,11 +406,19 @@ impl Visitor<()> for IdentifierSetVisitor {
     }
 }
 
-pub fn identifier_set(e: &Expr) -> HashSet<Ident> {
+pub fn identifier_set(ast: &AST) -> HashSet<Ident> {
     let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
     };
-    id_visitor.walk(e);
+    match ast {
+        AST::Scalar(ast) => id_visitor.walk(ast),
+        AST::ApplyToAll(_, ast) => id_visitor.walk(ast),
+        AST::Arrayed(_, elements) => {
+            for (_, ast) in elements {
+                id_visitor.walk(ast);
+            }
+        }
+    };
     id_visitor.identifiers
 }
 
@@ -429,7 +433,7 @@ fn test_identifier_sets() {
     ];
 
     for (eqn, id_list) in cases.iter() {
-        let (ast, err) = parse_eqn(eqn);
+        let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()));
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let ast = ast.unwrap();
@@ -535,7 +539,7 @@ fn test_parse() {
 
     for case in cases.iter() {
         let eqn = case.0;
-        let (ast, err) = parse_eqn(eqn);
+        let (ast, err) = parse_single_equation(eqn);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let ast = ast.unwrap();
@@ -544,7 +548,7 @@ fn test_parse() {
         assert_eq!(case.2, &printed);
     }
 
-    let (ast, err) = parse_eqn("NAN");
+    let (ast, err) = parse_single_equation("NAN");
     assert_eq!(err.len(), 0);
     assert!(ast.is_some());
     let ast = ast.unwrap();
@@ -574,7 +578,7 @@ fn test_parse_failures() {
     ];
 
     for case in failures {
-        let (ast, err) = parse_eqn(case);
+        let (ast, err) = parse_single_equation(case);
         assert!(ast.is_none());
         assert!(err.len() > 0);
     }

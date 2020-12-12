@@ -12,6 +12,8 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 pub type Ident = String;
+pub type DimensionName = String;
+pub type ElementName = String;
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
