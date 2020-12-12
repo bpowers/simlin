@@ -166,8 +166,20 @@ fn parse_equation(eqn: &datamodel::Equation) -> (Option<AST>, Vec<EquationError>
                 errors,
             )
         }
-        datamodel::Equation::Arrayed(_dimensions, _elements) => {
-            unreachable!();
+        datamodel::Equation::Arrayed(dimensions, elements) => {
+            let mut errors: Vec<EquationError> = vec![];
+            let elements: Vec<_> = elements
+                .iter()
+                .map(|(subscript, equation)| {
+                    let (ast, single_errors) = parse_single_equation(equation);
+                    errors.extend(single_errors);
+                    (subscript.clone(), ast)
+                })
+                .filter(|(_, ast)| ast.is_some())
+                .map(|(subscript, ast)| (subscript, ast.unwrap()))
+                .collect();
+
+            (Some(AST::Arrayed(dimensions.clone(), elements)), errors)
         }
     }
 }

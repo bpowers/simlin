@@ -186,6 +186,11 @@ fn simulates_models_correctly() {
 }
 
 #[test]
+fn simulates_arrays() {
+    simulate_path("../../test/arrays.stmx");
+}
+
+#[test]
 fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
     let mut f = BufReader::new(f);

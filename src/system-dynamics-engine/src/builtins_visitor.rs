@@ -142,7 +142,15 @@ pub fn instantiate_implicit_modules(
     let ast = match ast {
         AST::Scalar(ast) => AST::Scalar(builtin_visitor.walk(ast)?),
         AST::ApplyToAll(dimensions, ast) => AST::ApplyToAll(dimensions, builtin_visitor.walk(ast)?),
-        AST::Arrayed(_dimensions, _elements) => unreachable!(),
+        AST::Arrayed(dimensions, elements) => {
+            let elements: std::result::Result<Vec<_>, EquationError> = elements
+                .into_iter()
+                .map(|(subscript, equation)| {
+                    builtin_visitor.walk(equation).map(|ast| (subscript, ast))
+                })
+                .collect();
+            AST::Arrayed(dimensions, elements?)
+        }
     };
     let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();
     Ok((ast, vars))
