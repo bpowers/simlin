@@ -142,6 +142,7 @@ fn main() {
         let mut output_file =
             File::create(&args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
         output_file.write_all(&buf).unwrap();
+    // eprintln!("{:?}", project);
     } else {
         let project = Rc::new(Project::from(project));
         let sim = Simulation::new(&project, "main").unwrap();

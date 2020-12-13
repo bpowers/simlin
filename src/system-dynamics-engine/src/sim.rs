@@ -1406,3 +1406,76 @@ impl Simulation {
         })
     }
 }
+
+#[test]
+fn test_arrays() {
+    let project = {
+        use crate::datamodel::*;
+        Project {
+            name: "arrays".to_owned(),
+            sim_specs: SimSpecs {
+                start: 0.0,
+                stop: 12.0,
+                dt: Dt::Dt(0.25),
+                save_step: None,
+                sim_method: SimMethod::Euler,
+                time_units: Some("time".to_owned()),
+            },
+            dimensions: vec![Dimension {
+                name: "letters".to_owned(),
+                elements: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            }],
+            models: vec![Model {
+                name: "main".to_owned(),
+                variables: vec![
+                    Variable::Aux(Aux {
+                        ident: "constants".to_owned(),
+                        equation: Equation::Arrayed(
+                            vec!["letters".to_owned()],
+                            vec![
+                                ("a".to_owned(), "9".to_owned()),
+                                ("b".to_owned(), "7".to_owned()),
+                                ("c".to_owned(), "5".to_owned()),
+                                ("d".to_owned(), "3".to_owned()),
+                                ("e".to_owned(), "1".to_owned()),
+                            ],
+                        ),
+                        documentation: "".to_owned(),
+                        units: None,
+                        gf: None,
+                    }),
+                    Variable::Aux(Aux {
+                        ident: "picked".to_owned(),
+                        equation: Equation::Scalar("aux[INT(TIME MOD 5) + 1]".to_owned()),
+                        documentation: "".to_owned(),
+                        units: None,
+                        gf: None,
+                    }),
+                    Variable::Aux(Aux {
+                        ident: "aux".to_owned(),
+                        equation: Equation::ApplyToAll(
+                            vec!["letters".to_owned()],
+                            "constants".to_owned(),
+                        ),
+                        documentation: "".to_owned(),
+                        units: None,
+                        gf: None,
+                    }),
+                    Variable::Aux(Aux {
+                        ident: "picked2".to_owned(),
+                        equation: Equation::Scalar("aux[a]".to_owned()),
+                        documentation: "".to_owned(),
+                        units: None,
+                        gf: None,
+                    }),
+                ],
+                views: vec![],
+            }],
+        }
+    };
+
+    let parsed_project = Rc::new(Project::from(project));
+
+    let sim = Simulation::new(&parsed_project, "main");
+    assert!(sim.is_ok());
+}
