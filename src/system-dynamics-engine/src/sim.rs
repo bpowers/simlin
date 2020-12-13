@@ -9,7 +9,7 @@ use float_cmp::approx_eq;
 
 use crate::ast::{self, AST};
 use crate::common::{Ident, Result};
-use crate::datamodel::{self, Dt, Equation, SimMethod};
+use crate::datamodel::{self, Dt, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
@@ -683,6 +683,20 @@ fn calc_offsets(
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             all_offsets.extend(all_sub_offsets);
             sub_size
+        } else if let Some(AST::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
+            if dims.len() != 1 {
+                panic!("multi-dimensional arrays aren't supported yet");
+            }
+            let subscript_count = dims[0].elements.len();
+            offsets.insert((*ident).to_owned(), (i, subscript_count));
+            subscript_count
+        } else if let Some(AST::Arrayed(dims, _)) = &model.variables[*ident].ast() {
+            if dims.len() != 1 {
+                panic!("multi-dimensional arrays aren't supported yet");
+            }
+            let subscript_count = dims[0].elements.len();
+            offsets.insert((*ident).to_owned(), (i, subscript_count));
+            subscript_count
         } else {
             1
         };
@@ -730,10 +744,22 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
             }
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
-        } else if let Some(Equation::ApplyToAll(_dims, _)) = &model.variables[*ident].equation() {
-            1
-        } else if let Some(Equation::Arrayed(_dims, _)) = &model.variables[*ident].equation() {
-            1
+        } else if let Some(AST::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
+            if dims.len() != 1 {
+                panic!("multi-dimensional arrays aren't supported yet");
+            }
+            for (j, subscript) in dims[0].elements.iter().enumerate() {
+                offsets.insert(format!("{}[{}]", ident, subscript), (i + j, 1));
+            }
+            dims[0].elements.len()
+        } else if let Some(AST::Arrayed(dims, _)) = &model.variables[*ident].ast() {
+            if dims.len() != 1 {
+                panic!("multi-dimensional arrays aren't supported yet");
+            }
+            for (j, subscript) in dims[0].elements.iter().enumerate() {
+                offsets.insert(format!("{}[{}]", ident, subscript), (i + j, 1));
+            }
+            dims[0].elements.len()
         } else {
             offsets.insert(ident.to_string(), (i, 1));
             1
@@ -1484,9 +1510,49 @@ fn test_arrays() {
 
     let parsed_project = Rc::new(Project::from(project));
 
-    let flattened_offsets = calc_flattened_offsets(&parsed_project, "main");
-    eprintln!("{:?}", flattened_offsets);
+    {
+        let actual = calc_flattened_offsets(&parsed_project, "main");
+        let expected: HashMap<_, _> = vec![
+            ("time".to_owned(), (0, 1)),
+            ("dt".to_owned(), (1, 1)),
+            ("initial_time".to_owned(), (2, 1)),
+            ("final_time".to_owned(), (3, 1)),
+            ("aux[a]".to_owned(), (4, 1)),
+            ("aux[b]".to_owned(), (5, 1)),
+            ("aux[c]".to_owned(), (6, 1)),
+            ("constants[a]".to_owned(), (7, 1)),
+            ("constants[b]".to_owned(), (8, 1)),
+            ("constants[c]".to_owned(), (9, 1)),
+            ("picked".to_owned(), (10, 1)),
+            ("picked2".to_owned(), (11, 1)),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
+    }
 
-    let sim = Simulation::new(&parsed_project, "main");
-    assert!(sim.is_ok());
+    {
+        let actual = calc_offsets(&parsed_project, "main");
+        let expected: HashMap<_, HashMap<_, _>> = vec![(
+            "main".to_string(),
+            vec![
+                ("time".to_owned(), (0, 1)),
+                ("dt".to_owned(), (1, 1)),
+                ("initial_time".to_owned(), (2, 1)),
+                ("final_time".to_owned(), (3, 1)),
+                ("aux".to_owned(), (4, 3)),
+                ("constants".to_owned(), (7, 3)),
+                ("picked".to_owned(), (10, 1)),
+                ("picked2".to_owned(), (11, 1)),
+            ]
+            .into_iter()
+            .collect(),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
+    }
+
+    // let sim = Simulation::new(&parsed_project, "main");
+    // assert!(sim.is_ok());
 }

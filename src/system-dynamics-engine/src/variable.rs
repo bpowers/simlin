@@ -74,15 +74,15 @@ impl Variable {
         }
     }
 
-    pub fn equation(&self) -> Option<&datamodel::Equation> {
+    pub fn ast(&self) -> Option<&AST> {
         match self {
-            Variable::Stock { eqn: Some(eqn), .. } => Some(eqn),
-            Variable::Var { eqn: Some(eqn), .. } => Some(eqn),
+            Variable::Stock { ast: Some(ast), .. } => Some(ast),
+            Variable::Var { ast: Some(ast), .. } => Some(ast),
             _ => None,
         }
     }
 
-    pub fn eqn(&self) -> Option<&String> {
+    pub fn scalar_equation(&self) -> Option<&String> {
         match self {
             Variable::Stock {
                 eqn: Some(datamodel::Equation::Scalar(s)),
