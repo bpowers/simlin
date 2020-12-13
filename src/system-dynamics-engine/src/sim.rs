@@ -9,7 +9,7 @@ use float_cmp::approx_eq;
 
 use crate::ast::{self, AST};
 use crate::common::{Ident, Result};
-use crate::datamodel::{self, Dt, SimMethod};
+use crate::datamodel::{self, Dt, Equation, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
@@ -104,6 +104,7 @@ pub enum Expr {
 }
 
 struct Context<'a> {
+    #[allow(dead_code)]
     dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
     ident: &'a str,
@@ -118,6 +119,7 @@ impl<'a> Context<'a> {
         self.get_submodel_offset(self.model_name, ident)
     }
 
+    #[allow(dead_code)]
     fn get_dimension(&self, name: &str) -> Result<&datamodel::Dimension> {
         for dim in self.dimensions {
             if dim.name == name {
@@ -550,7 +552,7 @@ impl Var {
                         }
                         AST::Arrayed(dimensions, _) => {
                             for dim in dimensions {
-                                eprintln!("dim: {:?}", ctx.get_dimension(dim)?);
+                                eprintln!("dim: {:?}", dim);
                             }
                             eprintln!("allright allright allright");
                             return sim_err!(ArraysNotImplemented, var.ident().to_string());
@@ -693,7 +695,11 @@ fn calc_offsets(
     all_offsets
 }
 
-fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident, (usize, usize)> {
+/// calc_flattened_offsets generates a mapping from name to offset
+/// for all individual variables and subscripts in a model, including
+/// in submodels.  For example a variable named "offset" in a module
+/// instantiated with name "sector" will produce the key "sector.offset".
+fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident, (usize, usize)> {
     let is_root = model_name == "main";
 
     let mut offsets: HashMap<Ident, (usize, usize)> = HashMap::new();
@@ -715,7 +721,7 @@ fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
 
     for ident in var_names.iter() {
         let size = if let Variable::Module { model_name, .. } = &model.variables[*ident] {
-            let sub_offsets = calc_recursive_offsets(project, model_name);
+            let sub_offsets = calc_flattened_offsets(project, model_name);
             let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
             sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
@@ -724,6 +730,10 @@ fn calc_recursive_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
             }
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
+        } else if let Some(Equation::ApplyToAll(_dims, _)) = &model.variables[*ident].equation() {
+            1
+        } else if let Some(Equation::Arrayed(_dims, _)) = &model.variables[*ident].equation() {
+            1
         } else {
             offsets.insert(ident.to_string(), (i, 1));
             1
@@ -1393,7 +1403,7 @@ impl Simulation {
             assert!(curr[TIME_OFF] > stop);
         }
 
-        let offsets = calc_recursive_offsets(&self.project, &module.ident);
+        let offsets = calc_flattened_offsets(&self.project, &module.ident);
         let offsets: HashMap<Ident, usize> =
             offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
 
@@ -1436,8 +1446,6 @@ fn test_arrays() {
                                 ("a".to_owned(), "9".to_owned()),
                                 ("b".to_owned(), "7".to_owned()),
                                 ("c".to_owned(), "5".to_owned()),
-                                ("d".to_owned(), "3".to_owned()),
-                                ("e".to_owned(), "1".to_owned()),
                             ],
                         ),
                         documentation: "".to_owned(),
@@ -1475,6 +1483,9 @@ fn test_arrays() {
     };
 
     let parsed_project = Rc::new(Project::from(project));
+
+    let flattened_offsets = calc_flattened_offsets(&parsed_project, "main");
+    eprintln!("{:?}", flattened_offsets);
 
     let sim = Simulation::new(&parsed_project, "main");
     assert!(sim.is_ok());

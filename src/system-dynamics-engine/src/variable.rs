@@ -8,9 +8,10 @@ use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor, AST};
 use crate::builtins_visitor::instantiate_implicit_modules;
-use crate::common::{EquationError, EquationResult, Ident};
-use crate::datamodel;
+use crate::common::{DimensionName, EquationError, EquationResult, Ident};
+use crate::datamodel::Dimension;
 use crate::model::resolve_relative;
+use crate::{datamodel, eqn_err};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
@@ -70,6 +71,14 @@ impl Variable {
             Variable::Stock { ident: name, .. } => name.as_str(),
             Variable::Var { ident: name, .. } => name.as_str(),
             Variable::Module { ident: name, .. } => name.as_str(),
+        }
+    }
+
+    pub fn equation(&self) -> Option<&datamodel::Equation> {
+        match self {
+            Variable::Stock { eqn: Some(eqn), .. } => Some(eqn),
+            Variable::Var { eqn: Some(eqn), .. } => Some(eqn),
+            _ => None,
         }
     }
 
@@ -153,20 +162,44 @@ fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Opti
         y_range: gf.y_scale.clone(),
     }))
 }
-fn parse_equation(eqn: &datamodel::Equation) -> (Option<AST>, Vec<EquationError>) {
+
+fn get_dimensions(
+    dimensions: &[Dimension],
+    names: &[DimensionName],
+) -> Result<Vec<datamodel::Dimension>, EquationError> {
+    names
+        .iter()
+        .map(|name| -> Result<datamodel::Dimension, EquationError> {
+            for dim in dimensions {
+                if dim.name == *name {
+                    return Ok(dim.clone());
+                }
+            }
+            eqn_err!(BadDimensionName, 0)
+        })
+        .collect()
+}
+
+fn parse_equation(
+    eqn: &datamodel::Equation,
+    dimensions: &[Dimension],
+) -> (Option<AST>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
             let (ast, errors) = parse_single_equation(eqn);
             (ast.map(AST::Scalar), errors)
         }
-        datamodel::Equation::ApplyToAll(dimensions, eqn) => {
-            let (ast, errors) = parse_single_equation(eqn);
-            (
-                ast.map(|ast| AST::ApplyToAll(dimensions.clone(), ast)),
-                errors,
-            )
+        datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
+            let (ast, mut errors) = parse_single_equation(eqn);
+            match get_dimensions(dimensions, dimension_names) {
+                Ok(dims) => (ast.map(|ast| AST::ApplyToAll(dims, ast)), errors),
+                Err(err) => {
+                    errors.push(err);
+                    (None, errors)
+                }
+            }
         }
-        datamodel::Equation::Arrayed(dimensions, elements) => {
+        datamodel::Equation::Arrayed(dimension_names, elements) => {
             let mut errors: Vec<EquationError> = vec![];
             let elements: Vec<_> = elements
                 .iter()
@@ -179,7 +212,13 @@ fn parse_equation(eqn: &datamodel::Equation) -> (Option<AST>, Vec<EquationError>
                 .map(|(subscript, ast)| (subscript, ast.unwrap()))
                 .collect();
 
-            (Some(AST::Arrayed(dimensions.clone(), elements)), errors)
+            match get_dimensions(dimensions, dimension_names) {
+                Ok(dims) => (Some(AST::Arrayed(dims, elements)), errors),
+                Err(err) => {
+                    errors.push(err);
+                    (None, errors)
+                }
+            }
         }
     }
 }
@@ -236,13 +275,14 @@ fn parse_single_equation(eqn: &str) -> (Option<ast::Expr>, Vec<EquationError>) {
 pub fn parse_var(
     models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
     model_name: &str,
+    dimensions: &[Dimension],
     v: &datamodel::Variable,
     implicit_vars: &mut Vec<datamodel::Variable>,
 ) -> Variable {
     let mut parse_and_lower_eqn = |ident: &str,
                                    eqn: &datamodel::Equation|
      -> (Option<AST>, HashSet<Ident>, Vec<EquationError>) {
-        let (ast, mut errors) = parse_equation(eqn);
+        let (ast, mut errors) = parse_equation(eqn, dimensions);
         let ast = match ast {
             Some(ast) => match instantiate_implicit_modules(ident, ast) {
                 Ok((ast, mut new_vars)) => {
@@ -445,7 +485,7 @@ fn test_identifier_sets() {
     ];
 
     for (eqn, id_list) in cases.iter() {
-        let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()));
+        let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let ast = ast.unwrap();
@@ -653,7 +693,7 @@ fn test_tables() {
     }
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let output = parse_var(&HashMap::new(), "main", &input, &mut implicit_vars);
+    let output = parse_var(&HashMap::new(), "main", &[], &input, &mut implicit_vars);
 
     assert_eq!(expected, output);
 }

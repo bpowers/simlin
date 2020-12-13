@@ -60,7 +60,7 @@ impl From<datamodel::Project> for Project {
         let mut models_list: Vec<Model> = self::stdlib::MODEL_NAMES
             .iter()
             .map(|name| self::stdlib::get(name).unwrap())
-            .map(|x_model| Model::new(&models, &x_model))
+            .map(|x_model| Model::new(&models, &x_model, &project_datamodel.dimensions))
             .collect();
 
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = project_datamodel
@@ -73,7 +73,7 @@ impl From<datamodel::Project> for Project {
             project_datamodel
                 .models
                 .iter()
-                .map(|m| Model::new(&models, m)),
+                .map(|m| Model::new(&models, m, &project_datamodel.dimensions)),
         );
 
         let models = models_list

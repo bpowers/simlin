@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{EquationResult, Error, Ident, Result};
+use crate::datamodel::Dimension;
 use crate::variable::{parse_var, ModuleInput, Variable};
 use crate::{datamodel, model_err, var_err};
 
@@ -181,23 +182,28 @@ impl Model {
     pub fn new(
         models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
         x_model: &datamodel::Model,
+        dimensions: &[Dimension],
     ) -> Self {
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
 
         let mut variable_list: Vec<Variable> = x_model
             .variables
             .iter()
-            .map(|v| parse_var(models, &x_model.name, v, &mut implicit_vars))
+            .map(|v| parse_var(models, &x_model.name, dimensions, v, &mut implicit_vars))
             .collect();
 
         {
             // FIXME: this is an unfortunate API choice
             let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
-            variable_list.extend(
-                implicit_vars.into_iter().map(|x_var| {
-                    parse_var(models, &x_model.name, &x_var, &mut dummy_implicit_vars)
-                }),
-            );
+            variable_list.extend(implicit_vars.into_iter().map(|x_var| {
+                parse_var(
+                    models,
+                    &x_model.name,
+                    dimensions,
+                    &x_var,
+                    &mut dummy_implicit_vars,
+                )
+            }));
             assert_eq!(0, dummy_implicit_vars.len());
         }
 
@@ -279,7 +285,7 @@ fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
 fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
+    let var = parse_var(&HashMap::new(), "main", &[], &var, &mut implicit_vars);
     assert!(var.errors().is_none());
     assert!(implicit_vars.is_empty());
     var
@@ -301,7 +307,7 @@ fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
 fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
+    let var = parse_var(&HashMap::new(), "main", &[], &var, &mut implicit_vars);
     assert!(var.errors().is_none());
     assert!(implicit_vars.is_empty());
     var
@@ -325,7 +331,7 @@ fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> datam
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let var = parse_var(&HashMap::new(), "main", &var, &mut implicit_vars);
+    let var = parse_var(&HashMap::new(), "main", &[], &var, &mut implicit_vars);
     assert!(var.errors().is_none());
     assert!(implicit_vars.is_empty());
     var
@@ -440,7 +446,13 @@ fn test_module_parse() {
     .collect();
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let actual = parse_var(&models, "main", models["main"]["hares"], &mut implicit_vars);
+    let actual = parse_var(
+        &models,
+        "main",
+        &[],
+        models["main"]["hares"],
+        &mut implicit_vars,
+    );
     assert!(actual.errors().is_none());
     assert!(implicit_vars.is_empty());
     assert_eq!(expected, actual);
@@ -523,7 +535,13 @@ fn test_all_deps() {
             .collect();
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let mod_1 = parse_var(&models, "main", models["main"]["mod_1"], &mut implicit_vars);
+    let mod_1 = parse_var(
+        &models,
+        "main",
+        &[],
+        models["main"]["mod_1"],
+        &mut implicit_vars,
+    );
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
     let inflow = flow("inflow", "mod_1.output");

@@ -2,7 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::common::{DimensionName, ElementName, Ident};
+use crate::common::{ElementName, Ident};
+use crate::datamodel::Dimension;
 
 // we use Boxs here because we may walk and update ASTs a number of times,
 // and we want to avoid copying and reallocating subexpressions all over
@@ -25,10 +26,10 @@ impl Default for Expr {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum AST<Dim = DimensionName> {
+pub enum AST {
     Scalar(Expr),
-    ApplyToAll(Vec<Dim>, Expr),
-    Arrayed(Vec<Dim>, Vec<(ElementName, Expr)>),
+    ApplyToAll(Vec<Dimension>, Expr),
+    Arrayed(Vec<Dimension>, Vec<(ElementName, Expr)>),
 }
 
 pub trait Visitor<T> {
