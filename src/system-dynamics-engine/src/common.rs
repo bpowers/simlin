@@ -39,6 +39,7 @@ pub enum ErrorCode {
     NoAbsoluteReferences,
     CircularDependency,
     ArraysNotImplemented,
+    BadDimensionName,
 }
 
 impl fmt::Display for ErrorCode {
@@ -66,6 +67,7 @@ impl fmt::Display for ErrorCode {
             NoAbsoluteReferences => "no_absolute_references",
             CircularDependency => "circular_dependency",
             ArraysNotImplemented => "arrays_not_implemented",
+            BadDimensionName => "bad_dimension_name",
         };
 
         write!(f, "{}", name)

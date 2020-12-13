@@ -25,10 +25,10 @@ impl Default for Expr {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum AST {
+pub enum AST<Dim = DimensionName> {
     Scalar(Expr),
-    ApplyToAll(Vec<DimensionName>, Expr),
-    Arrayed(Vec<DimensionName>, Vec<(ElementName, Expr)>),
+    ApplyToAll(Vec<Dim>, Expr),
+    Arrayed(Vec<Dim>, Vec<(ElementName, Expr)>),
 }
 
 pub trait Visitor<T> {

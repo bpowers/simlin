@@ -104,6 +104,7 @@ pub enum Expr {
 }
 
 struct Context<'a> {
+    dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
     ident: &'a str,
     offsets: &'a HashMap<Ident, HashMap<Ident, (usize, usize)>>,
@@ -115,6 +116,15 @@ struct Context<'a> {
 impl<'a> Context<'a> {
     fn get_offset(&self, ident: &str) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident)
+    }
+
+    fn get_dimension(&self, name: &str) -> Result<&datamodel::Dimension> {
+        for dim in self.dimensions {
+            if dim.name == name {
+                return Ok(dim);
+            }
+        }
+        return sim_err!(BadDimensionName, name.to_owned());
     }
 
     fn get_submodel_offset(&self, model: &str, ident: &str) -> Result<usize> {
@@ -353,7 +363,9 @@ fn test_lower() {
     offsets.insert("false_input".to_string(), (8, 1));
     let mut offsets2 = HashMap::new();
     offsets2.insert("main".to_string(), offsets);
+    let dimensions: Vec<datamodel::Dimension> = vec![];
     let context = Context {
+        dimensions: &dimensions,
         model_name: "main",
         ident: "test",
         offsets: &offsets2,
@@ -397,6 +409,7 @@ fn test_lower() {
     let mut offsets2 = HashMap::new();
     offsets2.insert("main".to_string(), offsets);
     let context = Context {
+        dimensions: &dimensions,
         model_name: "main",
         ident: "test",
         offsets: &offsets2,
@@ -438,8 +451,10 @@ fn test_fold_flows() {
     );
     let mut offsets2 = HashMap::new();
     offsets2.insert("main".to_string(), offsets);
+    let dimensions: Vec<datamodel::Dimension> = vec![];
 
     let ctx = Context {
+        dimensions: &dimensions,
         model_name: "main",
         ident: "test",
         offsets: &offsets2,
@@ -533,7 +548,11 @@ impl Var {
                         AST::ApplyToAll(_, _) => {
                             return sim_err!(ArraysNotImplemented, var.ident().to_string());
                         }
-                        AST::Arrayed(_, _) => {
+                        AST::Arrayed(dimensions, _) => {
+                            for dim in dimensions {
+                                eprintln!("dim: {:?}", ctx.get_dimension(dim)?);
+                            }
+                            eprintln!("allright allright allright");
                             return sim_err!(ArraysNotImplemented, var.ident().to_string());
                         }
                     }
@@ -786,6 +805,7 @@ impl Module {
                 .map(|ident| {
                     Var::new(
                         &Context {
+                            dimensions: &project.datamodel.dimensions,
                             model_name,
                             ident,
                             offsets: &offsets,
