@@ -733,7 +733,7 @@ impl Var {
                     vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
                 }
                 Variable::Stock { ast, .. } => {
-                    let off = ctx.get_offset(var.ident())?;
+                    let off = ctx.get_base_offset(var.ident())?;
                     if ctx.is_initial {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
@@ -742,14 +742,26 @@ impl Var {
                             AST::Scalar(ast) => {
                                 vec![Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))]
                             }
-                            AST::ApplyToAll(dims, _) => {
+                            AST::ApplyToAll(dims, ast) => {
                                 if dims.len() != 1 {
                                     return sim_err!(
                                         MultiDimensionalArraysNotImplemented,
                                         var.ident().to_string()
                                     );
                                 }
-                                return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                                let exprs: Result<Vec<Expr>> = dims[0]
+                                    .elements
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, subscript)| {
+                                        let mut ctx = ctx.clone();
+                                        ctx.active_dimension = Some(dims[0].clone());
+                                        ctx.active_subscript = Some(subscript);
+                                        ctx.lower(ast)
+                                            .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                    })
+                                    .collect();
+                                exprs?
                             }
                             AST::Arrayed(dims, elements) => {
                                 if dims.len() != 1 {
@@ -772,10 +784,28 @@ impl Var {
                             }
                         }
                     } else {
-                        vec![Expr::AssignNext(
-                            off,
-                            Box::new(ctx.build_stock_update_expr(off, var)?),
-                        )]
+                        match ast.as_ref().unwrap() {
+                            AST::Scalar(_) => vec![Expr::AssignNext(
+                                off,
+                                Box::new(ctx.build_stock_update_expr(off, var)?),
+                            )],
+                            AST::ApplyToAll(dims, _) | AST::Arrayed(dims, _) => {
+                                let exprs: Result<Vec<Expr>> = dims[0]
+                                    .elements
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, subscript)| {
+                                        let mut ctx = ctx.clone();
+                                        ctx.active_dimension = Some(dims[0].clone());
+                                        ctx.active_subscript = Some(subscript);
+                                        let update_expr = ctx.build_stock_update_expr(off, var);
+                                        update_expr
+                                            .map(|ast| Expr::AssignNext(off + i, Box::new(ast)))
+                                    })
+                                    .collect();
+                                exprs?
+                            }
+                        }
                     }
                 }
                 Variable::Var {
