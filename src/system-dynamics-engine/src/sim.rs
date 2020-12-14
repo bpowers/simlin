@@ -172,6 +172,9 @@ impl<'a> Context<'a> {
             Ok(submodel_off
                 + self.get_submodel_offset(submodel_name, submodel_var, ignore_arrays)?)
         } else if !ignore_arrays {
+            if !metadata.contains_key(ident) {
+                panic!("internal error: unknown var {}?", ident);
+            }
             if let Some(dims) = metadata[ident].var.get_dimensions() {
                 if dims.len() != 1 {
                     panic!("FIXME: only 1D arrays supported for now");
@@ -1744,31 +1747,36 @@ impl Simulation {
         })
     }
 
-    pub fn debug_print_runlists(&self, model_name: &str) {
-        let module = &self.modules[model_name];
-        let offsets = &module.offsets[model_name];
-        let mut idents: Vec<_> = offsets.keys().collect();
-        idents.sort_unstable();
+    pub fn debug_print_runlists(&self, _model_name: &str) {
+        let mut model_names: Vec<_> = self.modules.keys().collect();
+        model_names.sort_unstable();
+        for model_name in model_names {
+            eprintln!("\n\nMODEL: {}", model_name);
+            let module = &self.modules[model_name];
+            let offsets = &module.offsets[model_name];
+            let mut idents: Vec<_> = offsets.keys().collect();
+            idents.sort_unstable();
 
-        eprintln!("offsets");
-        for ident in idents {
-            let (off, size) = offsets[ident];
-            eprintln!("\t{}: {}, {}", ident, off, size);
-        }
+            eprintln!("offsets");
+            for ident in idents {
+                let (off, size) = offsets[ident];
+                eprintln!("\t{}: {}, {}", ident, off, size);
+            }
 
-        eprintln!("\ninital runlist:");
-        for expr in module.runlist_initials.iter() {
-            eprintln!("\t{}", pretty(expr));
-        }
+            eprintln!("\ninital runlist:");
+            for expr in module.runlist_initials.iter() {
+                eprintln!("\t{}", pretty(expr));
+            }
 
-        eprintln!("\nflows runlist:");
-        for expr in module.runlist_flows.iter() {
-            eprintln!("\t{}", pretty(expr));
-        }
+            eprintln!("\nflows runlist:");
+            for expr in module.runlist_flows.iter() {
+                eprintln!("\t{}", pretty(expr));
+            }
 
-        eprintln!("\nstocks runlist:");
-        for expr in module.runlist_stocks.iter() {
-            eprintln!("\t{}", pretty(expr));
+            eprintln!("\nstocks runlist:");
+            for expr in module.runlist_stocks.iter() {
+                eprintln!("\t{}", pretty(expr));
+            }
         }
     }
 

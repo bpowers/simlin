@@ -44,6 +44,7 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
     // "test/test-models/tests/subscript_selection/subscript_selection.xmile",
     //
+    "test/test-models/tests/trend/test_trend.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",

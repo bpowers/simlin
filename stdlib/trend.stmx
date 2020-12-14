@@ -22,7 +22,7 @@
 	<model name="stdlib·trend">
 		<variables>
 			<stock name="Stock">
-				<eqn>IF (initial_value = NAN) THEN input ELSE initial_value</eqn>
+				<eqn>IF (initial_value = NAN) THEN input ELSE (input / (1 + delay_time * initial_value))</eqn>
 				<inflow>flow</inflow>
 				<units>unit</units>
 			</stock>
@@ -31,7 +31,7 @@
 				<units>unit/time unit</units>
 			</flow>
 			<aux name="output" access="output">
-				<eqn>(input-Stock)/(Stock*delay_time)</eqn>
+				<eqn>SAFEDIV(input-Stock, ABS(Stock)*delay_time)</eqn>
 				<units>1/time unit</units>
 			</aux>
 			<aux name="delay time" access="input">
