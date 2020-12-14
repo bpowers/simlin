@@ -798,7 +798,12 @@ impl Var {
                                         let mut ctx = ctx.clone();
                                         ctx.active_dimension = Some(dims[0].clone());
                                         ctx.active_subscript = Some(subscript);
-                                        let update_expr = ctx.build_stock_update_expr(off, var);
+                                        // when building the stock update expression, we need
+                                        // the specific index of this subscript, not the base offset
+                                        let update_expr = ctx.build_stock_update_expr(
+                                            ctx.get_offset(var.ident())?,
+                                            var,
+                                        );
                                         update_expr
                                             .map(|ast| Expr::AssignNext(off + i, Box::new(ast)))
                                     })
@@ -962,68 +967,30 @@ fn calc_module_model_map(
 fn build_metadata(
     project: &Project,
     model_name: &str,
+    is_root: bool,
 ) -> HashMap<Ident, HashMap<Ident, VariableMetadata>> {
-    let is_root = model_name == "main";
-
     let mut all_offsets: HashMap<Ident, HashMap<Ident, VariableMetadata>> = HashMap::new();
 
     let mut offsets: HashMap<Ident, VariableMetadata> = HashMap::new();
     let mut i = 0;
     if is_root {
-        let time = Variable::Var {
-            ident: "time".to_string(),
-            ast: None,
-            eqn: None,
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: false,
-            is_table_only: false,
-            errors: vec![],
-            direct_deps: Default::default(),
-        };
-        let dt = Variable::Var {
-            ident: "dt".to_string(),
-            ast: None,
-            eqn: None,
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: false,
-            is_table_only: false,
-            errors: vec![],
-            direct_deps: Default::default(),
-        };
-        let initial_time = Variable::Var {
-            ident: "initial_time".to_string(),
-            ast: None,
-            eqn: None,
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: false,
-            is_table_only: false,
-            errors: vec![],
-            direct_deps: Default::default(),
-        };
-        let final_time = Variable::Var {
-            ident: "final_time".to_string(),
-            ast: None,
-            eqn: None,
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: false,
-            is_table_only: false,
-            errors: vec![],
-            direct_deps: Default::default(),
-        };
         offsets.insert(
             "time".to_string(),
             VariableMetadata {
                 offset: 0,
                 size: 1,
-                var: time,
+                var: Variable::Var {
+                    ident: "time".to_string(),
+                    ast: None,
+                    eqn: None,
+                    units: None,
+                    table: None,
+                    non_negative: false,
+                    is_flow: false,
+                    is_table_only: false,
+                    errors: vec![],
+                    direct_deps: Default::default(),
+                },
             },
         );
         offsets.insert(
@@ -1031,7 +998,18 @@ fn build_metadata(
             VariableMetadata {
                 offset: 1,
                 size: 1,
-                var: dt,
+                var: Variable::Var {
+                    ident: "dt".to_string(),
+                    ast: None,
+                    eqn: None,
+                    units: None,
+                    table: None,
+                    non_negative: false,
+                    is_flow: false,
+                    is_table_only: false,
+                    errors: vec![],
+                    direct_deps: Default::default(),
+                },
             },
         );
         offsets.insert(
@@ -1039,7 +1017,18 @@ fn build_metadata(
             VariableMetadata {
                 offset: 2,
                 size: 1,
-                var: initial_time,
+                var: Variable::Var {
+                    ident: "initial_time".to_string(),
+                    ast: None,
+                    eqn: None,
+                    units: None,
+                    table: None,
+                    non_negative: false,
+                    is_flow: false,
+                    is_table_only: false,
+                    errors: vec![],
+                    direct_deps: Default::default(),
+                },
             },
         );
         offsets.insert(
@@ -1047,7 +1036,18 @@ fn build_metadata(
             VariableMetadata {
                 offset: 3,
                 size: 1,
-                var: final_time,
+                var: Variable::Var {
+                    ident: "final_time".to_string(),
+                    ast: None,
+                    eqn: None,
+                    units: None,
+                    table: None,
+                    non_negative: false,
+                    is_flow: false,
+                    is_table_only: false,
+                    errors: vec![],
+                    direct_deps: Default::default(),
+                },
             },
         );
         i += IMPLICIT_VAR_COUNT;
@@ -1062,7 +1062,7 @@ fn build_metadata(
 
     for ident in var_names.iter() {
         let size = if let Variable::Module { model_name, .. } = &model.variables[*ident] {
-            let all_sub_offsets = build_metadata(project, model_name);
+            let all_sub_offsets = build_metadata(project, model_name, false);
             let sub_offsets = &all_sub_offsets[model_name];
             let sub_size: usize = sub_offsets.values().map(|metadata| metadata.size).sum();
             all_offsets.extend(all_sub_offsets);
@@ -1173,10 +1173,9 @@ impl Module {
         }
 
         let model_name: &str = &model.name;
-        let metadata = build_metadata(project, model_name);
+        let metadata = build_metadata(project, model_name, is_root);
 
-        let n_slots_start_off = if is_root { IMPLICIT_VAR_COUNT } else { 0 };
-        let n_slots = n_slots_start_off + calc_n_slots(&metadata, model_name);
+        let n_slots = calc_n_slots(&metadata, model_name);
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
             var_names.sort_unstable();
@@ -1347,6 +1346,9 @@ impl<'a> ModuleEvaluator<'a> {
             }
             Expr::AssignCurr(off, r) => {
                 let rhs = self.eval(r);
+                if self.off + *off > self.curr.len() {
+                    unreachable!();
+                }
                 self.curr[self.off + *off] = rhs;
                 0.0
             }
@@ -1742,6 +1744,34 @@ impl Simulation {
         })
     }
 
+    pub fn debug_print_runlists(&self, model_name: &str) {
+        let module = &self.modules[model_name];
+        let offsets = &module.offsets[model_name];
+        let mut idents: Vec<_> = offsets.keys().collect();
+        idents.sort_unstable();
+
+        eprintln!("offsets");
+        for ident in idents {
+            let (off, size) = offsets[ident];
+            eprintln!("\t{}: {}, {}", ident, off, size);
+        }
+
+        eprintln!("\ninital runlist:");
+        for expr in module.runlist_initials.iter() {
+            eprintln!("\t{}", pretty(expr));
+        }
+
+        eprintln!("\nflows runlist:");
+        for expr in module.runlist_flows.iter() {
+            eprintln!("\t{}", pretty(expr));
+        }
+
+        eprintln!("\nstocks runlist:");
+        for expr in module.runlist_stocks.iter() {
+            eprintln!("\t{}", pretty(expr));
+        }
+    }
+
     fn calc(
         &self,
         step_part: StepPart,
@@ -1787,7 +1817,7 @@ impl Simulation {
             spec.dt
         };
         let n_chunks: usize = ((spec.stop - spec.start) / save_step + 1.0) as usize;
-        let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5) as usize);
+        let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5).floor() as usize);
 
         let dt = spec.dt;
         let stop = spec.stop;
@@ -1812,6 +1842,7 @@ impl Simulation {
             curr[INITIAL_TIME_OFF] = self.specs.start;
             curr[FINAL_TIME_OFF] = self.specs.stop;
             self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
+            let mut is_initial_timestep = true;
             let mut step = 0;
             loop {
                 self.calc(StepPart::Flows, module, 0, module_inputs, curr, next);
@@ -1821,7 +1852,7 @@ impl Simulation {
                 curr[INITIAL_TIME_OFF] = self.specs.start;
                 curr[FINAL_TIME_OFF] = self.specs.stop;
                 step += 1;
-                if step != save_every {
+                if step != save_every && !is_initial_timestep {
                     let curr = curr.borrow_mut();
                     curr.copy_from_slice(next);
                 } else {
@@ -1832,6 +1863,7 @@ impl Simulation {
                     }
                     next = maybe_next.unwrap();
                     step = 0;
+                    is_initial_timestep = false;
                 }
             }
             // ensure we've calculated stock + flow values for the dt <= end_time
@@ -1940,7 +1972,7 @@ fn test_arrays() {
         assert_eq!(actual, expected);
     }
 
-    let metadata = build_metadata(&parsed_project, "main");
+    let metadata = build_metadata(&parsed_project, "main", true);
     let main_metadata = &metadata["main"];
     assert_eq!(main_metadata["aux"].offset, 4);
     assert_eq!(main_metadata["aux"].size, 3);

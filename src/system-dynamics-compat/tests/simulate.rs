@@ -21,7 +21,8 @@ const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", 
 const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
 
 static TEST_MODELS: &[&str] = &[
-    // "test/test-models/tests/subscript_1d_arrays/test_subscript_1d_arrays.xmile",
+    "test/test-models/tests/lookups_with_expr/test_lookups_with_expr.xmile",
+    "test/test-models/tests/subscript_1d_arrays/test_subscript_1d_arrays.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/tests/delays2/delays.xmile",
@@ -140,6 +141,7 @@ fn simulate_path(xmile_path: &str) {
 
     let project = Rc::new(project);
     let sim = Simulation::new(&project, "main").unwrap();
+    sim.debug_print_runlists("main");
     let results = sim.run_to_end();
     assert!(results.is_ok());
 
@@ -165,7 +167,7 @@ fn simulate_path(xmile_path: &str) {
                 && approx_eq!(f64, actual, 0.0, epsilon = 1e-6);
 
             // this ulps determined empirically /shrug
-            if !around_zero && !approx_eq!(f64, expected, actual, ulps = 300000000000) {
+            if !around_zero && !approx_eq!(f64, expected, actual, epsilon = 2e-3) {
                 eprintln!(
                     "step {}: {}: {} (expected) != {} (actual)",
                     step, ident, expected, actual
@@ -178,6 +180,10 @@ fn simulate_path(xmile_path: &str) {
     }
 
     assert_eq!(expected.step_count, step);
+
+    // UNKNOWN is a sentinal value we use -- it should never show up
+    // unless we've wrongly sized our data slices
+    assert!(!results.offsets.contains_key("UNKNOWN"));
 }
 
 #[test]
