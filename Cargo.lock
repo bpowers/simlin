@@ -11,9 +11,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.34"
+version = "1.0.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf8dcb5b4bbaa28653b647d8c77bd4ed40183b48882e130c1f1ffb73de069fd7"
+checksum = "2c0df63cb2955042487fad3aefd2c6e3ae7389ac5dc1beb28921de0b69f779d4"
 
 [[package]]
 name = "arrayref"
@@ -418,9 +418,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.80"
+version = "0.2.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d58d1b70b004888f764dfbf6a26a3b0342a1632d33968e4a179d8011c760614"
+checksum = "1482821306169ec4d07f6aca392a4681f66c75c9918aa49641a2595db64053cb"
 
 [[package]]
 name = "log"
@@ -522,7 +522,7 @@ dependencies = [
 [[package]]
 name = "prost"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
+source = "git+https://github.com/danburkert/prost?rev=423f5ec5bd165a7007a388edfb2b485d5bbf40c7#423f5ec5bd165a7007a388edfb2b485d5bbf40c7"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -531,7 +531,7 @@ dependencies = [
 [[package]]
 name = "prost-build"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
+source = "git+https://github.com/danburkert/prost?rev=423f5ec5bd165a7007a388edfb2b485d5bbf40c7#423f5ec5bd165a7007a388edfb2b485d5bbf40c7"
 dependencies = [
  "bytes",
  "heck",
@@ -548,7 +548,7 @@ dependencies = [
 [[package]]
 name = "prost-derive"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
+source = "git+https://github.com/danburkert/prost?rev=423f5ec5bd165a7007a388edfb2b485d5bbf40c7#423f5ec5bd165a7007a388edfb2b485d5bbf40c7"
 dependencies = [
  "anyhow",
  "itertools",
@@ -560,7 +560,7 @@ dependencies = [
 [[package]]
 name = "prost-types"
 version = "0.6.1"
-source = "git+https://github.com/danburkert/prost?rev=b664fef20ebb0dd9edbdfb69462c05f1a2005a55#b664fef20ebb0dd9edbdfb69462c05f1a2005a55"
+source = "git+https://github.com/danburkert/prost?rev=423f5ec5bd165a7007a388edfb2b485d5bbf40c7#423f5ec5bd165a7007a388edfb2b485d5bbf40c7"
 dependencies = [
  "bytes",
  "prost",
@@ -705,18 +705,18 @@ checksum = "ea6a9290e3c9cf0f18145ef7ffa62d68ee0bf5fcd651017e586dc7fd5da448c2"
 
 [[package]]
 name = "serde"
-version = "1.0.117"
+version = "1.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b88fa983de7720629c9387e9f517353ed404164b1e482c970a90c1a4aaf7dc1a"
+checksum = "06c64263859d87aa2eb554587e2d23183398d617427327cf2b3d0ed8c69e4800"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.117"
+version = "1.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbd1ae72adb44aab48f325a02444a5fc079349a8d804c1fc922aed3f7454c74e"
+checksum = "c84d3526699cd55261af4b941e4e725444df67aa4f9e6a3564f18030d12672df"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -768,9 +768,9 @@ checksum = "6446ced80d6c486436db5c078dde11a9f73d42b57fb273121e160b84f63d894c"
 
 [[package]]
 name = "syn"
-version = "1.0.53"
+version = "1.0.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8833e20724c24de12bbaba5ad230ea61c3eafb05b881c7c9d3cfe8638b187e68"
+checksum = "9a2af957a63d6bd42255c359c93d9bfdb97076bd3b820897ce55ffbfbf107f44"
 dependencies = [
  "proc-macro2",
  "quote",
