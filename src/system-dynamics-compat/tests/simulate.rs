@@ -21,6 +21,8 @@ const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", 
 const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
 
 static TEST_MODELS: &[&str] = &[
+    "test/test-models/samples/arrays/a2a/a2a.stmx",
+    "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/tests/delays2/delays.xmile",
     "test/test-models/tests/smooth_and_stock/test_smooth_and_stock.xmile",
     "test/test-models/samples/SIR/SIR.xmile",

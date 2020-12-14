@@ -290,12 +290,12 @@ pub struct Dimension {
 impl From<Dimension> for datamodel::Dimension {
     fn from(dimension: Dimension) -> Self {
         datamodel::Dimension {
-            name: dimension.name,
+            name: canonicalize(&dimension.name),
             elements: dimension
                 .elements
                 .unwrap_or_default()
                 .into_iter()
-                .map(|i| i.name)
+                .map(|i| canonicalize(&i.name))
                 .collect(),
         }
     }
@@ -531,6 +531,7 @@ impl From<Model> for datamodel::Model {
                 Some(vars) => vars
                     .variables
                     .into_iter()
+                    .filter(|v| !matches!(v, Var::Unhandled))
                     .map(datamodel::Variable::from)
                     .collect(),
                 None => vec![],
@@ -1556,13 +1557,13 @@ macro_rules! convert_equation(
     ($var:expr) => {{
         if let Some(elements) = $var.elements {
             let dimensions = match $var.dimensions {
-                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| e.name).collect(),
+                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name)).collect(),
                 None => vec![],
             };
-            let elements = elements.into_iter().map(|e| (e.subscript, e.eqn)).collect();
+            let elements = elements.into_iter().map(|e| (canonicalize(&e.subscript), e.eqn)).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
-            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| e.name).collect();
+            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name)).collect();
             datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default())
         } else {
             datamodel::Equation::Scalar($var.eqn.unwrap_or_default())
@@ -1861,6 +1862,9 @@ pub enum Var {
     Flow(Flow),
     Aux(Aux),
     Module(Module),
+    // for things we don't care about like 'isee:dependencies'
+    #[serde(other)]
+    Unhandled,
 }
 
 impl Var {
@@ -1871,6 +1875,7 @@ impl Var {
             Var::Flow(flow) => flow.name.as_str(),
             Var::Aux(aux) => aux.name.as_str(),
             Var::Module(module) => module.name.as_str(),
+            Var::Unhandled => unreachable!(),
         }
     }
 }
@@ -1882,6 +1887,7 @@ impl From<Var> for datamodel::Variable {
             Var::Flow(flow) => datamodel::Variable::Flow(datamodel::Flow::from(flow)),
             Var::Aux(aux) => datamodel::Variable::Aux(datamodel::Aux::from(aux)),
             Var::Module(module) => datamodel::Variable::Module(datamodel::Module::from(module)),
+            Var::Unhandled => unreachable!(),
         }
     }
 }
