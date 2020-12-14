@@ -124,6 +124,22 @@ fn subscripts() {
         ("    ~ ", Num("1")),
         ("     ~", RBracket),
     ]);
+
+    #[rustfmt::skip]
+    test("aux[INT(TIME MOD 5) + 1])", vec![
+        ("~~~                      ", Ident("aux")),
+        ("   ~                     ", LBracket),
+        ("    ~~~                  ", Ident("INT")),
+        ("       ~                 ", LParen),
+        ("        ~~~~             ", Ident("TIME")),
+        ("             ~~~         ", Mod),
+        ("                 ~       ", Num("5")),
+        ("                  ~      ", RParen),
+        ("                    ~    ", Plus),
+        ("                      ~  ", Num("1")),
+        ("                       ~ ", RBracket),
+        ("                        ~", RParen),
+    ]);
 }
 
 #[test]

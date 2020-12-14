@@ -50,6 +50,7 @@ Add: Expr = {
 Mul: Expr = {
     <l:Mul> "*" <r:Unary> => Op2(Mul, Box::new(l), Box::new(r)),
     <l:Mul> "/" <r:Unary> => Op2(Div, Box::new(l), Box::new(r)),
+    <l:Mul> "%" <r:Unary> => Op2(Mod, Box::new(l), Box::new(r)),
     Unary,
 };
 
@@ -122,6 +123,7 @@ extern {
         "-" => Token::Minus,
         "*" => Token::Mul,
         "/" => Token::Div,
+        "%" => Token::Mod,
         "!" => Token::Not,
         "(" => Token::LParen,
         ")" => Token::RParen,
