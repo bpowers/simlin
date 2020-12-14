@@ -96,6 +96,28 @@ impl Variable {
         }
     }
 
+    pub fn get_dimensions(&self) -> Option<&[Dimension]> {
+        match self {
+            Variable::Stock {
+                ast: Some(AST::Arrayed(dims, _)),
+                ..
+            } => Some(dims),
+            Variable::Stock {
+                ast: Some(AST::ApplyToAll(dims, _)),
+                ..
+            } => Some(dims),
+            Variable::Var {
+                ast: Some(AST::Arrayed(dims, _)),
+                ..
+            } => Some(dims),
+            Variable::Var {
+                ast: Some(AST::ApplyToAll(dims, _)),
+                ..
+            } => Some(dims),
+            _ => None,
+        }
+    }
+
     pub fn is_stock(&self) -> bool {
         matches!(self, Variable::Stock { .. })
     }

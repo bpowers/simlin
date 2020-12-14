@@ -117,7 +117,8 @@ struct Context<'a> {
     dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
     ident: &'a str,
-    subscript: Option<&'a str>,
+    active_dimension: Option<datamodel::Dimension>,
+    active_subscript: Option<&'a str>,
     metadata: &'a HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
     is_initial: bool,
@@ -126,7 +127,12 @@ struct Context<'a> {
 
 impl<'a> Context<'a> {
     fn get_offset(&self, ident: &str) -> Result<usize> {
-        self.get_submodel_offset(self.model_name, ident)
+        self.get_submodel_offset(self.model_name, ident, false)
+    }
+
+    /// get_base_offset ignores arrays and should only be used from Var::new
+    fn get_base_offset(&self, ident: &str) -> Result<usize> {
+        self.get_submodel_offset(self.model_name, ident, true)
     }
 
     #[allow(dead_code)]
@@ -139,14 +145,36 @@ impl<'a> Context<'a> {
         return sim_err!(BadDimensionName, name.to_owned());
     }
 
-    fn get_submodel_offset(&self, model: &str, ident: &str) -> Result<usize> {
+    fn get_submodel_offset(&self, model: &str, ident: &str, ignore_arrays: bool) -> Result<usize> {
         let metadata = &self.metadata[model];
         if let Some(pos) = ident.find('.') {
             let submodel_module_name = &ident[..pos];
             let submodel_name = &self.module_models[model][submodel_module_name];
             let submodel_var = &ident[pos + 1..];
             let submodel_off = metadata[submodel_module_name].offset;
-            Ok(submodel_off + self.get_submodel_offset(submodel_name, submodel_var)?)
+            Ok(submodel_off
+                + self.get_submodel_offset(submodel_name, submodel_var, ignore_arrays)?)
+        } else if !ignore_arrays {
+            if let Some(dims) = metadata[ident].var.get_dimensions() {
+                if dims.len() != 1 {
+                    panic!("FIXME: only 1D arrays supported for now");
+                }
+                if self.active_dimension.is_none() {
+                    return sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident.to_owned());
+                }
+                let var_dim = &dims[0];
+                let active_dim = self.active_dimension.as_ref().unwrap();
+                if active_dim.name != var_dim.name {
+                    return sim_err!(MismatchedDimensions, ident.to_owned());
+                }
+                if let Some(off) = var_dim.get_offset(self.active_subscript.unwrap()) {
+                    Ok(metadata[ident].offset + off)
+                } else {
+                    return sim_err!(MismatchedDimensions, ident.to_owned());
+                }
+            } else {
+                Ok(metadata[ident].offset)
+            }
         } else {
             Ok(metadata[ident].offset)
         }
@@ -416,7 +444,8 @@ fn test_lower() {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
-        subscript: None,
+        active_dimension: None,
+        active_subscript: None,
         metadata: &metadata2,
         module_models: &module_models,
         is_initial: false,
@@ -497,7 +526,8 @@ fn test_lower() {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
-        subscript: None,
+        active_dimension: None,
+        active_subscript: None,
         metadata: &metadata2,
         module_models: &module_models,
         is_initial: false,
@@ -611,7 +641,8 @@ fn test_fold_flows() {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
-        subscript: None,
+        active_dimension: None,
+        active_subscript: None,
         metadata: &metadata2,
         module_models: &module_models,
         is_initial: false,
@@ -708,7 +739,7 @@ impl Var {
                 Variable::Var {
                     ident, table, ast, ..
                 } => {
-                    let off = ctx.get_offset(var.ident())?;
+                    let off = ctx.get_base_offset(var.ident())?;
                     if ast.is_none() {
                         return sim_err!(EmptyEquation, var.ident().to_string());
                     }
@@ -735,7 +766,8 @@ impl Var {
                                 .enumerate()
                                 .map(|(i, subscript)| {
                                     let mut ctx = ctx.clone();
-                                    ctx.subscript = Some(subscript);
+                                    ctx.active_dimension = Some(dims[0].clone());
+                                    ctx.active_subscript = Some(subscript);
                                     ctx.lower(ast)
                                         .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                 })
@@ -1127,7 +1159,8 @@ impl Module {
                             dimensions: &project.datamodel.dimensions,
                             model_name,
                             ident,
-                            subscript: None,
+                            active_dimension: None,
+                            active_subscript: None,
                             metadata: &metadata,
                             module_models: &module_models,
                             is_initial,
@@ -1841,13 +1874,13 @@ fn test_arrays() {
     let module_models = calc_module_model_map(&parsed_project, "main");
 
     let arrayed_constants_var = &parsed_project.models["main"].variables["constants"];
-    eprintln!("{:?}", arrayed_constants_var);
     let parsed_var = Var::new(
         &Context {
             dimensions: &parsed_project.datamodel.dimensions,
             model_name: "main",
             ident: arrayed_constants_var.ident(),
-            subscript: None,
+            active_dimension: None,
+            active_subscript: None,
             metadata: &metadata,
             module_models: &module_models,
             is_initial: false,
@@ -1863,6 +1896,32 @@ fn test_arrays() {
             Expr::AssignCurr(7, Box::new(Expr::Const(9.0))),
             Expr::AssignCurr(8, Box::new(Expr::Const(7.0))),
             Expr::AssignCurr(9, Box::new(Expr::Const(5.0))),
+        ],
+    };
+    assert_eq!(expected, parsed_var.unwrap());
+
+    let arrayed_aux_var = &parsed_project.models["main"].variables["aux"];
+    let parsed_var = Var::new(
+        &Context {
+            dimensions: &parsed_project.datamodel.dimensions,
+            model_name: "main",
+            ident: arrayed_aux_var.ident(),
+            active_dimension: None,
+            active_subscript: None,
+            metadata: &metadata,
+            module_models: &module_models,
+            is_initial: false,
+            inputs: &[],
+        },
+        arrayed_aux_var,
+    );
+
+    assert!(parsed_var.is_ok());
+    let expected = Var {
+        ast: vec![
+            Expr::AssignCurr(4, Box::new(Expr::Var(7))),
+            Expr::AssignCurr(5, Box::new(Expr::Var(8))),
+            Expr::AssignCurr(6, Box::new(Expr::Var(9))),
         ],
     };
     assert_eq!(expected, parsed_var.unwrap());

@@ -273,6 +273,17 @@ pub struct Dimension {
     pub elements: Vec<String>,
 }
 
+impl Dimension {
+    pub fn get_offset(&self, subscript: &str) -> Option<usize> {
+        for (i, element) in self.elements.iter().enumerate() {
+            if element == subscript {
+                return Some(i);
+            }
+        }
+        None
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub name: String,

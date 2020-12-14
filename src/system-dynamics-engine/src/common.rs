@@ -41,6 +41,8 @@ pub enum ErrorCode {
     ArraysNotImplemented,
     MultiDimensionalArraysNotImplemented,
     BadDimensionName,
+    MismatchedDimensions,
+    ArrayReferenceNeedsExplicitSubscripts,
 }
 
 impl fmt::Display for ErrorCode {
@@ -70,6 +72,8 @@ impl fmt::Display for ErrorCode {
             ArraysNotImplemented => "arrays_not_implemented",
             MultiDimensionalArraysNotImplemented => "multi_dimensional_arrays_not_implemented",
             BadDimensionName => "bad_dimension_name",
+            MismatchedDimensions => "mismatched_dimensions",
+            ArrayReferenceNeedsExplicitSubscripts => "array_reference_needs_explicit_subscripts",
         };
 
         write!(f, "{}", name)
