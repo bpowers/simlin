@@ -1127,20 +1127,13 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
     offsets
 }
 
-fn calc_n_slots(project: &Project, model_name: &str) -> usize {
-    let model = Rc::clone(&project.models[model_name]);
+fn calc_n_slots(
+    all_metadata: &HashMap<Ident, HashMap<Ident, VariableMetadata>>,
+    model_name: &str,
+) -> usize {
+    let metadata = &all_metadata[model_name];
 
-    model
-        .variables
-        .iter()
-        .map(|(_name, var)| {
-            if let Variable::Module { model_name, .. } = var {
-                calc_n_slots(project, model_name)
-            } else {
-                1
-            }
-        })
-        .sum()
+    metadata.values().map(|v| v.size).sum()
 }
 
 impl Module {
@@ -1150,15 +1143,15 @@ impl Module {
         }
 
         let model_name: &str = &model.name;
+        let metadata = build_metadata(project, model_name);
+
         let n_slots_start_off = if is_root { IMPLICIT_VAR_COUNT } else { 0 };
-        let n_slots = n_slots_start_off + calc_n_slots(project, model_name);
+        let n_slots = n_slots_start_off + calc_n_slots(&metadata, model_name);
         let var_names: Vec<&str> = {
             let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
             var_names.sort_unstable();
             var_names
         };
-
-        let metadata = build_metadata(project, model_name);
         let module_models = calc_module_model_map(project, model_name);
 
         let build_runlist = |deps: &HashMap<Ident, HashSet<Ident>>,
