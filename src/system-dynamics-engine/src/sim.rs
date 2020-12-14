@@ -13,7 +13,7 @@ use crate::datamodel::{self, Dt, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
-use crate::{sim_err, Project};
+use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
 
 const TIME_OFF: usize = 0;
@@ -103,11 +103,13 @@ pub enum Expr {
     AssignNext(usize, Box<Expr>),
 }
 
+#[derive(Clone, Debug)]
 struct Context<'a> {
     #[allow(dead_code)]
     dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
     ident: &'a str,
+    subscript: Option<&'a str>,
     offsets: &'a HashMap<Ident, HashMap<Ident, (usize, usize)>>,
     module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
     is_initial: bool,
@@ -370,6 +372,7 @@ fn test_lower() {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
+        subscript: None,
         offsets: &offsets2,
         module_models: &module_models,
         is_initial: false,
@@ -414,6 +417,7 @@ fn test_lower() {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
+        subscript: None,
         offsets: &offsets2,
         module_models: &module_models,
         is_initial: false,
@@ -459,6 +463,7 @@ fn test_fold_flows() {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
+        subscript: None,
         offsets: &offsets2,
         module_models: &module_models,
         is_initial: false,
@@ -516,11 +521,33 @@ impl Var {
                             AST::Scalar(ast) => {
                                 vec![Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))]
                             }
-                            AST::ApplyToAll(_, _) => {
+                            AST::ApplyToAll(dims, _) => {
+                                if dims.len() != 1 {
+                                    return sim_err!(
+                                        MultiDimensionalArraysNotImplemented,
+                                        var.ident().to_string()
+                                    );
+                                }
                                 return sim_err!(ArraysNotImplemented, var.ident().to_string());
                             }
-                            AST::Arrayed(_, _) => {
-                                return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                            AST::Arrayed(dims, elements) => {
+                                if dims.len() != 1 {
+                                    return sim_err!(
+                                        MultiDimensionalArraysNotImplemented,
+                                        var.ident().to_string()
+                                    );
+                                }
+                                let exprs: Result<Vec<Expr>> = dims[0]
+                                    .elements
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, subscript)| {
+                                        let ast = &elements[subscript];
+                                        ctx.lower(ast)
+                                            .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                    })
+                                    .collect();
+                                exprs?
                             }
                         }
                     } else {
@@ -547,15 +574,44 @@ impl Var {
                             };
                             vec![Expr::AssignCurr(off, Box::new(expr))]
                         }
-                        AST::ApplyToAll(_, _) => {
-                            return sim_err!(ArraysNotImplemented, var.ident().to_string());
-                        }
-                        AST::Arrayed(dimensions, _) => {
-                            for dim in dimensions {
-                                eprintln!("dim: {:?}", dim);
+                        AST::ApplyToAll(dims, ast) => {
+                            if dims.len() != 1 {
+                                return sim_err!(
+                                    MultiDimensionalArraysNotImplemented,
+                                    var.ident().to_string()
+                                );
                             }
-                            eprintln!("allright allright allright");
-                            return sim_err!(ArraysNotImplemented, var.ident().to_string());
+                            let exprs: Result<Vec<Expr>> = dims[0]
+                                .elements
+                                .iter()
+                                .enumerate()
+                                .map(|(i, subscript)| {
+                                    let mut ctx = ctx.clone();
+                                    ctx.subscript = Some(subscript);
+                                    ctx.lower(ast)
+                                        .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                })
+                                .collect();
+                            exprs?
+                        }
+                        AST::Arrayed(dims, elements) => {
+                            if dims.len() != 1 {
+                                return sim_err!(
+                                    MultiDimensionalArraysNotImplemented,
+                                    var.ident().to_string()
+                                );
+                            }
+                            let exprs: Result<Vec<Expr>> = dims[0]
+                                .elements
+                                .iter()
+                                .enumerate()
+                                .map(|(i, subscript)| {
+                                    let ast = &elements[subscript];
+                                    ctx.lower(ast)
+                                        .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                })
+                                .collect();
+                            exprs?
                         }
                     }
                 }
@@ -844,6 +900,7 @@ impl Module {
                             dimensions: &project.datamodel.dimensions,
                             model_name,
                             ident,
+                            subscript: None,
                             offsets: &offsets,
                             module_models: &module_models,
                             is_initial,
@@ -1263,7 +1320,7 @@ fn enumerate_modules(
     model_name: &str,
     modules: &mut HashSet<(Ident, Vec<Ident>)>,
 ) -> Result<()> {
-    use crate::common::{Error, ErrorCode, ErrorKind};
+    use crate::common::{ErrorCode, ErrorKind};
     let model = project.models.get(model_name).ok_or_else(|| Error {
         kind: ErrorKind::Simulation,
         code: ErrorCode::NotSimulatable,
@@ -1497,7 +1554,7 @@ fn test_arrays() {
                     }),
                     Variable::Aux(Aux {
                         ident: "picked2".to_owned(),
-                        equation: Equation::Scalar("aux[a]".to_owned()),
+                        equation: Equation::Scalar("aux[b]".to_owned()),
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
@@ -1531,27 +1588,54 @@ fn test_arrays() {
         assert_eq!(actual, expected);
     }
 
-    {
-        let actual = calc_offsets(&parsed_project, "main");
-        let expected: HashMap<_, HashMap<_, _>> = vec![(
-            "main".to_string(),
-            vec![
-                ("time".to_owned(), (0, 1)),
-                ("dt".to_owned(), (1, 1)),
-                ("initial_time".to_owned(), (2, 1)),
-                ("final_time".to_owned(), (3, 1)),
-                ("aux".to_owned(), (4, 3)),
-                ("constants".to_owned(), (7, 3)),
-                ("picked".to_owned(), (10, 1)),
-                ("picked2".to_owned(), (11, 1)),
-            ]
-            .into_iter()
-            .collect(),
-        )]
+    let offsets = calc_offsets(&parsed_project, "main");
+    let expected: HashMap<_, HashMap<_, _>> = vec![(
+        "main".to_string(),
+        vec![
+            ("time".to_owned(), (0, 1)),
+            ("dt".to_owned(), (1, 1)),
+            ("initial_time".to_owned(), (2, 1)),
+            ("final_time".to_owned(), (3, 1)),
+            ("aux".to_owned(), (4, 3)),
+            ("constants".to_owned(), (7, 3)),
+            ("picked".to_owned(), (10, 1)),
+            ("picked2".to_owned(), (11, 1)),
+        ]
         .into_iter()
-        .collect();
-        assert_eq!(actual, expected);
-    }
+        .collect(),
+    )]
+    .into_iter()
+    .collect();
+    assert_eq!(offsets, expected);
+
+    let module_models = calc_module_model_map(&parsed_project, "main");
+
+    let arrayed_constants_var = &parsed_project.models["main"].variables["constants"];
+    eprintln!("{:?}", arrayed_constants_var);
+    let parsed_var = Var::new(
+        &Context {
+            dimensions: &parsed_project.datamodel.dimensions,
+            model_name: "main",
+            ident: arrayed_constants_var.ident(),
+            subscript: None,
+            offsets: &offsets,
+            module_models: &module_models,
+            is_initial: false,
+            inputs: &[],
+        },
+        arrayed_constants_var,
+    );
+
+    assert!(parsed_var.is_ok());
+
+    let expected = Var {
+        ast: vec![
+            Expr::AssignCurr(7, Box::new(Expr::Const(9.0))),
+            Expr::AssignCurr(8, Box::new(Expr::Const(7.0))),
+            Expr::AssignCurr(9, Box::new(Expr::Const(5.0))),
+        ],
+    };
+    assert_eq!(expected, parsed_var.unwrap());
 
     // let sim = Simulation::new(&parsed_project, "main");
     // assert!(sim.is_ok());

@@ -143,7 +143,7 @@ pub fn instantiate_implicit_modules(
         AST::Scalar(ast) => AST::Scalar(builtin_visitor.walk(ast)?),
         AST::ApplyToAll(dimensions, ast) => AST::ApplyToAll(dimensions, builtin_visitor.walk(ast)?),
         AST::Arrayed(dimensions, elements) => {
-            let elements: std::result::Result<Vec<_>, EquationError> = elements
+            let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
                 .into_iter()
                 .map(|(subscript, equation)| {
                     builtin_visitor.walk(equation).map(|ast| (subscript, ast))

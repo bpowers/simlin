@@ -213,7 +213,10 @@ fn parse_equation(
                 .collect();
 
             match get_dimensions(dimensions, dimension_names) {
-                Ok(dims) => (Some(AST::Arrayed(dims, elements)), errors),
+                Ok(dims) => (
+                    Some(AST::Arrayed(dims, elements.iter().cloned().collect())),
+                    errors,
+                ),
                 Err(err) => {
                     errors.push(err);
                     (None, errors)
@@ -466,7 +469,7 @@ pub fn identifier_set(ast: &AST) -> HashSet<Ident> {
         AST::Scalar(ast) => id_visitor.walk(ast),
         AST::ApplyToAll(_, ast) => id_visitor.walk(ast),
         AST::Arrayed(_, elements) => {
-            for (_, ast) in elements {
+            for ast in elements.values() {
                 id_visitor.walk(ast);
             }
         }

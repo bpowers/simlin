@@ -39,6 +39,7 @@ pub enum ErrorCode {
     NoAbsoluteReferences,
     CircularDependency,
     ArraysNotImplemented,
+    MultiDimensionalArraysNotImplemented,
     BadDimensionName,
 }
 
@@ -67,6 +68,7 @@ impl fmt::Display for ErrorCode {
             NoAbsoluteReferences => "no_absolute_references",
             CircularDependency => "circular_dependency",
             ArraysNotImplemented => "arrays_not_implemented",
+            MultiDimensionalArraysNotImplemented => "multi_dimensional_arrays_not_implemented",
             BadDimensionName => "bad_dimension_name",
         };
 

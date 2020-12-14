@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::HashMap;
+
 use crate::common::{ElementName, Ident};
 use crate::datamodel::Dimension;
 
@@ -29,7 +31,7 @@ impl Default for Expr {
 pub enum AST {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),
-    Arrayed(Vec<Dimension>, Vec<(ElementName, Expr)>),
+    Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
 }
 
 pub trait Visitor<T> {
