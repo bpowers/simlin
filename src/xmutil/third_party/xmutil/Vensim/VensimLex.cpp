@@ -425,7 +425,7 @@ int VensimLex::TestColonKeyword() {
 // target assumed upper case
 bool VensimLex::KeywordMatch(const char *target) {
   std::string buffer;
-  char c;
+  char c = 0;
   int i;
   for (i = 0; target[i]; i++) {
     c = GetNextChar(true);
