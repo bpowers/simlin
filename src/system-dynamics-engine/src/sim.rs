@@ -104,13 +104,21 @@ pub enum Expr {
 }
 
 #[derive(Clone, Debug)]
+struct VariableMetadata {
+    offset: usize,
+    size: usize,
+    // FIXME: this should be able to be borrowed
+    var: Variable,
+}
+
+#[derive(Clone, Debug)]
 struct Context<'a> {
     #[allow(dead_code)]
     dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
     ident: &'a str,
     subscript: Option<&'a str>,
-    offsets: &'a HashMap<Ident, HashMap<Ident, (usize, usize)>>,
+    metadata: &'a HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
     is_initial: bool,
     inputs: &'a [Ident],
@@ -132,15 +140,15 @@ impl<'a> Context<'a> {
     }
 
     fn get_submodel_offset(&self, model: &str, ident: &str) -> Result<usize> {
-        let offsets = &self.offsets[model];
+        let metadata = &self.metadata[model];
         if let Some(pos) = ident.find('.') {
             let submodel_module_name = &ident[..pos];
             let submodel_name = &self.module_models[model][submodel_module_name];
             let submodel_var = &ident[pos + 1..];
-            let submodel_off = offsets[submodel_module_name].0;
+            let submodel_off = metadata[submodel_module_name].offset;
             Ok(submodel_off + self.get_submodel_offset(submodel_name, submodel_var)?)
         } else {
-            Ok(offsets[ident].0)
+            Ok(metadata[ident].offset)
         }
     }
 
@@ -362,18 +370,54 @@ fn test_lower() {
 
     let inputs = &[];
     let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
-    let mut offsets: HashMap<String, (usize, usize)> = HashMap::new();
-    offsets.insert("true_input".to_string(), (7, 1));
-    offsets.insert("false_input".to_string(), (8, 1));
-    let mut offsets2 = HashMap::new();
-    offsets2.insert("main".to_string(), offsets);
+    let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
+    metadata.insert(
+        "true_input".to_string(),
+        VariableMetadata {
+            offset: 7,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
+    );
+    metadata.insert(
+        "false_input".to_string(),
+        VariableMetadata {
+            offset: 8,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
+    );
+    let mut metadata2 = HashMap::new();
+    metadata2.insert("main".to_string(), metadata);
     let dimensions: Vec<datamodel::Dimension> = vec![];
     let context = Context {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
         subscript: None,
-        offsets: &offsets2,
+        metadata: &metadata2,
         module_models: &module_models,
         is_initial: false,
         inputs,
@@ -408,17 +452,53 @@ fn test_lower() {
 
     let inputs = &[];
     let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
-    let mut offsets: HashMap<String, (usize, usize)> = HashMap::new();
-    offsets.insert("true_input".to_string(), (7, 1));
-    offsets.insert("false_input".to_string(), (8, 1));
-    let mut offsets2 = HashMap::new();
-    offsets2.insert("main".to_string(), offsets);
+    let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
+    metadata.insert(
+        "true_input".to_string(),
+        VariableMetadata {
+            offset: 7,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
+    );
+    metadata.insert(
+        "false_input".to_string(),
+        VariableMetadata {
+            offset: 8,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
+    );
+    let mut metadata2 = HashMap::new();
+    metadata2.insert("main".to_string(), metadata);
     let context = Context {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
         subscript: None,
-        offsets: &offsets2,
+        metadata: &metadata2,
         module_models: &module_models,
         is_initial: false,
         inputs,
@@ -445,26 +525,94 @@ pub struct Var {
 
 #[test]
 fn test_fold_flows() {
-    use std::iter::FromIterator;
-
     let inputs = &[];
     let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
-    let offsets: &[(&str, usize)] = &[("time", 0), ("a", 1), ("b", 2), ("c", 3), ("d", 4)];
-    let offsets: HashMap<String, (usize, usize)> = HashMap::from_iter(
-        offsets
-            .into_iter()
-            .map(|(k, v)| ((*k).to_string(), (*v, 1))),
+    let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
+    metadata.insert(
+        "a".to_string(),
+        VariableMetadata {
+            offset: 1,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
     );
-    let mut offsets2 = HashMap::new();
-    offsets2.insert("main".to_string(), offsets);
+    metadata.insert(
+        "b".to_string(),
+        VariableMetadata {
+            offset: 2,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
+    );
+    metadata.insert(
+        "c".to_string(),
+        VariableMetadata {
+            offset: 3,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
+    );
+    metadata.insert(
+        "d".to_string(),
+        VariableMetadata {
+            offset: 4,
+            size: 1,
+            var: Variable::Var {
+                ident: "".to_string(),
+                ast: None,
+                eqn: None,
+                units: None,
+                table: None,
+                non_negative: false,
+                is_flow: false,
+                is_table_only: false,
+                errors: vec![],
+                direct_deps: Default::default(),
+            },
+        },
+    );
+    let mut metadata2 = HashMap::new();
+    metadata2.insert("main".to_string(), metadata);
     let dimensions: Vec<datamodel::Dimension> = vec![];
-
     let ctx = Context {
         dimensions: &dimensions,
         model_name: "main",
         ident: "test",
         subscript: None,
-        offsets: &offsets2,
+        metadata: &metadata2,
         module_models: &module_models,
         is_initial: false,
         inputs,
@@ -707,21 +855,97 @@ fn calc_module_model_map(
 }
 
 // TODO: this should memoize
-fn calc_offsets(
+fn build_metadata(
     project: &Project,
     model_name: &str,
-) -> HashMap<Ident, HashMap<Ident, (usize, usize)>> {
+) -> HashMap<Ident, HashMap<Ident, VariableMetadata>> {
     let is_root = model_name == "main";
 
-    let mut all_offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>> = HashMap::new();
+    let mut all_offsets: HashMap<Ident, HashMap<Ident, VariableMetadata>> = HashMap::new();
 
-    let mut offsets: HashMap<Ident, (usize, usize)> = HashMap::new();
+    let mut offsets: HashMap<Ident, VariableMetadata> = HashMap::new();
     let mut i = 0;
     if is_root {
-        offsets.insert("time".to_string(), (0, 1));
-        offsets.insert("dt".to_string(), (1, 1));
-        offsets.insert("initial_time".to_string(), (2, 1));
-        offsets.insert("final_time".to_string(), (3, 1));
+        let time = Variable::Var {
+            ident: "time".to_string(),
+            ast: None,
+            eqn: None,
+            units: None,
+            table: None,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            direct_deps: Default::default(),
+        };
+        let dt = Variable::Var {
+            ident: "dt".to_string(),
+            ast: None,
+            eqn: None,
+            units: None,
+            table: None,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            direct_deps: Default::default(),
+        };
+        let initial_time = Variable::Var {
+            ident: "initial_time".to_string(),
+            ast: None,
+            eqn: None,
+            units: None,
+            table: None,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            direct_deps: Default::default(),
+        };
+        let final_time = Variable::Var {
+            ident: "final_time".to_string(),
+            ast: None,
+            eqn: None,
+            units: None,
+            table: None,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            direct_deps: Default::default(),
+        };
+        offsets.insert(
+            "time".to_string(),
+            VariableMetadata {
+                offset: 0,
+                size: 1,
+                var: time,
+            },
+        );
+        offsets.insert(
+            "dt".to_string(),
+            VariableMetadata {
+                offset: 1,
+                size: 1,
+                var: dt,
+            },
+        );
+        offsets.insert(
+            "initial_time".to_string(),
+            VariableMetadata {
+                offset: 2,
+                size: 1,
+                var: initial_time,
+            },
+        );
+        offsets.insert(
+            "final_time".to_string(),
+            VariableMetadata {
+                offset: 3,
+                size: 1,
+                var: final_time,
+            },
+        );
         i += IMPLICIT_VAR_COUNT;
     }
 
@@ -734,29 +958,32 @@ fn calc_offsets(
 
     for ident in var_names.iter() {
         let size = if let Variable::Module { model_name, .. } = &model.variables[*ident] {
-            let all_sub_offsets = calc_offsets(project, model_name);
+            let all_sub_offsets = build_metadata(project, model_name);
             let sub_offsets = &all_sub_offsets[model_name];
-            let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
+            let sub_size: usize = sub_offsets.values().map(|metadata| metadata.size).sum();
             all_offsets.extend(all_sub_offsets);
             sub_size
-        } else if let Some(AST::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
+        } else if let Some(AST::ApplyToAll(dims, _)) = model.variables[*ident].ast() {
             if dims.len() != 1 {
                 panic!("multi-dimensional arrays aren't supported yet");
             }
-            let subscript_count = dims[0].elements.len();
-            offsets.insert((*ident).to_owned(), (i, subscript_count));
-            subscript_count
-        } else if let Some(AST::Arrayed(dims, _)) = &model.variables[*ident].ast() {
+            dims[0].elements.len()
+        } else if let Some(AST::Arrayed(dims, _)) = model.variables[*ident].ast() {
             if dims.len() != 1 {
                 panic!("multi-dimensional arrays aren't supported yet");
             }
-            let subscript_count = dims[0].elements.len();
-            offsets.insert((*ident).to_owned(), (i, subscript_count));
-            subscript_count
+            dims[0].elements.len()
         } else {
             1
         };
-        offsets.insert(ident.to_string(), (i, size));
+        offsets.insert(
+            (*ident).to_owned(),
+            VariableMetadata {
+                offset: i,
+                size,
+                var: model.variables[*ident].clone(),
+            },
+        );
         i += size;
     }
 
@@ -857,7 +1084,7 @@ impl Module {
             var_names
         };
 
-        let offsets = calc_offsets(project, model_name);
+        let metadata = build_metadata(project, model_name);
         let module_models = calc_module_model_map(project, model_name);
 
         let build_runlist = |deps: &HashMap<Ident, HashSet<Ident>>,
@@ -901,7 +1128,7 @@ impl Module {
                             model_name,
                             ident,
                             subscript: None,
-                            offsets: &offsets,
+                            metadata: &metadata,
                             module_models: &module_models,
                             is_initial,
                             inputs,
@@ -950,6 +1177,18 @@ impl Module {
             })
             .collect();
         let tables = tables?;
+
+        let offsets = metadata
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    v.iter()
+                        .map(|(k, v)| (k.clone(), (v.offset, v.size)))
+                        .collect(),
+                )
+            })
+            .collect();
 
         Ok(Module {
             ident: model_name.to_string(),
@@ -1588,25 +1827,16 @@ fn test_arrays() {
         assert_eq!(actual, expected);
     }
 
-    let offsets = calc_offsets(&parsed_project, "main");
-    let expected: HashMap<_, HashMap<_, _>> = vec![(
-        "main".to_string(),
-        vec![
-            ("time".to_owned(), (0, 1)),
-            ("dt".to_owned(), (1, 1)),
-            ("initial_time".to_owned(), (2, 1)),
-            ("final_time".to_owned(), (3, 1)),
-            ("aux".to_owned(), (4, 3)),
-            ("constants".to_owned(), (7, 3)),
-            ("picked".to_owned(), (10, 1)),
-            ("picked2".to_owned(), (11, 1)),
-        ]
-        .into_iter()
-        .collect(),
-    )]
-    .into_iter()
-    .collect();
-    assert_eq!(offsets, expected);
+    let metadata = build_metadata(&parsed_project, "main");
+    let main_metadata = &metadata["main"];
+    assert_eq!(main_metadata["aux"].offset, 4);
+    assert_eq!(main_metadata["aux"].size, 3);
+    assert_eq!(main_metadata["constants"].offset, 7);
+    assert_eq!(main_metadata["constants"].size, 3);
+    assert_eq!(main_metadata["picked"].offset, 10);
+    assert_eq!(main_metadata["picked"].size, 1);
+    assert_eq!(main_metadata["picked2"].offset, 11);
+    assert_eq!(main_metadata["picked2"].size, 1);
 
     let module_models = calc_module_model_map(&parsed_project, "main");
 
@@ -1618,7 +1848,7 @@ fn test_arrays() {
             model_name: "main",
             ident: arrayed_constants_var.ident(),
             subscript: None,
-            offsets: &offsets,
+            metadata: &metadata,
             module_models: &module_models,
             is_initial: false,
             inputs: &[],
