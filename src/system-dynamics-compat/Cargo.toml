@@ -12,7 +12,7 @@ crate-type = ["rlib"]
 vensim = ["xmutil"]
 
 [dependencies]
-quick-xml = { version = "0.20", features = [ "serialize" ] }
+quick-xml = { version = "0.20", features = [ "serialize" ], git = "https://github.com/tafia/quick-xml", rev = "b3167bfe4ed1deea377eed001eebc581a43850ba" }
 serde = { version = "1", features = [ "derive" ] }
 system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine" }
 xmutil = { version = "1", path = "../xmutil", optional = true }
