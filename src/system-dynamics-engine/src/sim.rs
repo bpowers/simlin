@@ -91,7 +91,8 @@ type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(f64),
-    Var(usize), // offset
+    Var(usize),                         // offset
+    Subscript(usize, Box<Expr>, usize), // offset, index expression, bounds
     Dt,
     App(BuiltinFn),
     EvalModule(Ident, Ident, Vec<Expr>),
@@ -130,7 +131,7 @@ impl<'a> Context<'a> {
         self.get_submodel_offset(self.model_name, ident, false)
     }
 
-    /// get_base_offset ignores arrays and should only be used from Var::new
+    /// get_base_offset ignores arrays and should only be used from Var::new and Expr::Subscript
     fn get_base_offset(&self, ident: &str) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, true)
     }
@@ -143,6 +144,22 @@ impl<'a> Context<'a> {
             }
         }
         return sim_err!(BadDimensionName, name.to_owned());
+    }
+
+    fn get_metadata(&self, ident: &str) -> Result<&VariableMetadata> {
+        self.get_submodel_metadata(self.model_name, ident)
+    }
+
+    fn get_submodel_metadata(&self, model: &str, ident: &str) -> Result<&VariableMetadata> {
+        let metadata = &self.metadata[model];
+        if let Some(pos) = ident.find('.') {
+            let submodel_module_name = &ident[..pos];
+            let submodel_name = &self.module_models[model][submodel_module_name];
+            let submodel_var = &ident[pos + 1..];
+            self.get_submodel_metadata(submodel_name, submodel_var)
+        } else {
+            Ok(&metadata[ident])
+        }
     }
 
     fn get_submodel_offset(&self, model: &str, ident: &str, ignore_arrays: bool) -> Result<usize> {
@@ -282,8 +299,33 @@ impl<'a> Context<'a> {
                 };
                 Expr::App(builtin)
             }
-            ast::Expr::Subscript(id, _args) => {
-                return sim_err!(ArraysNotImplemented, id.clone());
+            ast::Expr::Subscript(id, args) => {
+                if args.len() != 1 {
+                    return sim_err!(MultiDimensionalArraysNotImplemented, id.clone());
+                }
+                let off = self.get_base_offset(id)?;
+                let metadata = self.get_metadata(id)?;
+                let dims = metadata.var.get_dimensions().unwrap();
+                if dims.len() != 1 {
+                    return sim_err!(MultiDimensionalArraysNotImplemented, id.clone());
+                }
+                let dim = &dims[0];
+                let arg = &args[0];
+                if let ast::Expr::Var(ident) = arg {
+                    // we need to check to make sure that any explicit subscript names are
+                    // converted to offsets here and not passed to self.lower
+                    if let Some(subscript_off) = dim.get_offset(ident) {
+                        Expr::Subscript(
+                            off,
+                            Box::new(Expr::Const((subscript_off + 1) as f64)),
+                            dim.elements.len(),
+                        )
+                    } else {
+                        Expr::Subscript(off, Box::new(self.lower(&args[0])?), dim.elements.len())
+                    }
+                } else {
+                    Expr::Subscript(off, Box::new(self.lower(&args[0])?), dim.elements.len())
+                }
             }
             ast::Expr::Op1(op, l) => {
                 let l = self.lower(l)?;
@@ -1268,6 +1310,18 @@ impl<'a> ModuleEvaluator<'a> {
                 0.0
             }
             Expr::Var(off) => self.curr[self.off + *off],
+            Expr::Subscript(off, r, bounds) => {
+                let rhs = self.eval(r);
+                // we are 1 indexed here, because the spec sucks
+                if approx_eq!(f64, rhs, 0.0) || (rhs.floor() as usize) > *bounds {
+                    // 3.7.1 Arrays: If a subscript expression results in an invalid subscript index (i.e., it is out of range), a zero (0) MUST be returned[10]
+                    // note 10: Note this can be NaN if so specified in the <uses_arrays> tag of the header options block
+                    // 0 makes less sense than NaN, so lets do that until real models force us to do otherwise
+                    f64::NAN
+                } else {
+                    self.curr[self.off + *off + ((rhs - 1.0).floor() as usize)]
+                }
+            }
             Expr::AssignCurr(off, r) => {
                 let rhs = self.eval(r);
                 self.curr[self.off + *off] = rhs;
@@ -1451,6 +1505,9 @@ pub fn pretty(expr: &Expr) -> String {
     match expr {
         Expr::Const(n) => format!("{}", n),
         Expr::Var(off) => format!("curr[{}]", off),
+        Expr::Subscript(off, r, bounds) => {
+            format!("curr[{} + (({}) - 1); bounds: {}]", off, pretty(r), bounds)
+        }
         Expr::Dt => "dt".to_string(),
         Expr::App(builtin) => match builtin {
             BuiltinFn::Lookup(table, idx) => format!("lookup({}, {})", table, pretty(idx)),
@@ -1926,6 +1983,68 @@ fn test_arrays() {
     };
     assert_eq!(expected, parsed_var.unwrap());
 
-    // let sim = Simulation::new(&parsed_project, "main");
-    // assert!(sim.is_ok());
+    let var = &parsed_project.models["main"].variables["picked2"];
+    let parsed_var = Var::new(
+        &Context {
+            dimensions: &parsed_project.datamodel.dimensions,
+            model_name: "main",
+            ident: var.ident(),
+            active_dimension: None,
+            active_subscript: None,
+            metadata: &metadata,
+            module_models: &module_models,
+            is_initial: false,
+            inputs: &[],
+        },
+        var,
+    );
+
+    assert!(parsed_var.is_ok());
+    let expected = Var {
+        ast: vec![Expr::AssignCurr(
+            11,
+            Box::new(Expr::Subscript(4, Box::new(Expr::Const(2.0)), 3)),
+        )],
+    };
+    assert_eq!(expected, parsed_var.unwrap());
+
+    let var = &parsed_project.models["main"].variables["picked"];
+    let parsed_var = Var::new(
+        &Context {
+            dimensions: &parsed_project.datamodel.dimensions,
+            model_name: "main",
+            ident: var.ident(),
+            active_dimension: None,
+            active_subscript: None,
+            metadata: &metadata,
+            module_models: &module_models,
+            is_initial: false,
+            inputs: &[],
+        },
+        var,
+    );
+
+    assert!(parsed_var.is_ok());
+    let expected = Var {
+        ast: vec![Expr::AssignCurr(
+            10,
+            Box::new(Expr::Subscript(
+                4,
+                Box::new(Expr::Op2(
+                    BinaryOp::Add,
+                    Box::new(Expr::App(BuiltinFn::Int(Box::new(Expr::Op2(
+                        BinaryOp::Mod,
+                        Box::new(Expr::Var(0)), // TIME
+                        Box::new(Expr::Const(5.0)),
+                    ))))),
+                    Box::new(Expr::Const(1.0)),
+                )),
+                3,
+            )),
+        )],
+    };
+    assert_eq!(expected, parsed_var.unwrap());
+
+    let sim = Simulation::new(&parsed_project, "main");
+    assert!(sim.is_ok());
 }
