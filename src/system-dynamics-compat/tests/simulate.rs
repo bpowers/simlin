@@ -21,6 +21,29 @@ const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", 
 const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
 
 static TEST_MODELS: &[&str] = &[
+    // failing testcases (various reasons)
+    // "test/test-models/tests/arguments/test_arguments.xmile",
+    // "test/test-models/tests/delay_parentheses/test_delay_parentheses.xmile",
+    // "test/test-models/tests/delay_pipeline/test_pipeline_delays.xmile",
+    // "test/test-models/tests/input_functions/test_inputs.xmile",
+    // "test/test-models/tests/macro_expression/test_macro_expression.xmile",
+    // "test/test-models/tests/macro_multi_expression/test_macro_multi_expression.xmile",
+    // "test/test-models/tests/macro_stock/test_macro_stock.xmile",
+    // "test/test-models/tests/rounding/test_rounding.xmile",
+    // "test/test-models/tests/special_characters/test_special_variable_names.xmile",
+    // "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
+    // "test/test-models/tests/trend/test_trend.xmile",
+
+    // failing testcases (arrays)
+    // "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
+    // "test/test-models/tests/subscript_3d_arrays/test_subscript_3d_arrays.xmile",
+    // "test/test-models/tests/subscript_docs/subscript_docs.xmile",
+    // "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays_from_floats/subscript_individually_defined_1_of_2d_arrays_from_floats.xmile",
+    // "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays/subscript_individually_defined_1_of_2d_arrays.xmile",
+    // "test/test-models/tests/subscript_mixed_assembly/test_subscript_mixed_assembly.xmile",
+    // "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
+    // "test/test-models/tests/subscript_selection/subscript_selection.xmile",
+    //
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
@@ -35,6 +58,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/comparisons/comparisons.xmile",
     "test/test-models/tests/constant_expressions/test_constant_expressions.xmile",
     "test/test-models/tests/delays2/delays.xmile",
+    "test/test-models/tests/euler_step_vs_saveper/test_euler_step_vs_saveper.xmile",
     "test/test-models/tests/eval_order/eval_order.xmile",
     "test/test-models/tests/exponentiation/exponentiation.xmile",
     "test/test-models/tests/exp/test_exp.xmile",
@@ -47,6 +71,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/ln/test_ln.xmile",
     "test/test-models/tests/logicals/test_logicals.xmile",
     "test/test-models/tests/log/test_log.xmile",
+    "test/test-models/tests/lookups_inline_bounded/test_lookups_inline_bounded.xmile",
     "test/test-models/tests/lookups_inline/test_lookups_inline.xmile",
     "test/test-models/tests/lookups/test_lookups_no-indirect.xmile",
     "test/test-models/tests/lookups/test_lookups.xmile",
