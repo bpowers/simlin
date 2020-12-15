@@ -6,10 +6,10 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ViewElement } from '../../../engine/xmile';
+import { StockViewElement, ViewElement } from '../../datamodel';
 
 import { displayName, mergeBounds, Point, Rect } from './common';
-import { findSide, Label, labelBounds, LabelProps } from './Label';
+import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
 import { defined, Series } from '../../common';
@@ -62,7 +62,7 @@ interface StockPropsFull extends WithStyles<typeof styles> {
   series: Series | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
-  element: ViewElement;
+  element: StockViewElement;
 }
 
 export type StockProps = Pick<
@@ -73,8 +73,8 @@ export type StockProps = Pick<
 export function stockContains(element: ViewElement, point: Point): boolean {
   const cx = element.cx;
   const cy = element.cy;
-  const width = element.width ? element.width : StockWidth;
-  const height = element.height ? element.height : StockHeight;
+  const width = StockWidth;
+  const height = StockHeight;
 
   const dx = Math.abs(point.x - cx);
   const dy = Math.abs(point.y - cy);
@@ -82,10 +82,10 @@ export function stockContains(element: ViewElement, point: Point): boolean {
   return dx <= width / 2 && dy <= height / 2;
 }
 
-export function stockBounds(element: ViewElement): Rect {
+export function stockBounds(element: StockViewElement): Rect {
   const { cx, cy } = element;
-  const width = element.width ? element.width : StockWidth;
-  const height = element.height ? element.height : StockHeight;
+  const width = StockWidth;
+  const height = StockHeight;
   const bounds = {
     top: cy - height / 2,
     left: cx - width / 2,
@@ -93,7 +93,7 @@ export function stockBounds(element: ViewElement): Rect {
     bottom: cy + height / 2,
   };
 
-  const side = findSide(element, 'top');
+  const side = element.labelSide;
   const labelProps: LabelProps = {
     cx,
     cy,
@@ -131,8 +131,8 @@ export const Stock = withStyles(styles)(
       }
 
       const { classes, element } = this.props;
-      const w = element.width ? element.width : 45;
-      const h = element.height ? element.height : 35;
+      const w = StockWidth;
+      const h = StockHeight;
 
       const cx = element.cx + w / 2 - 1;
       const cy = element.cy - h / 2 + 1;
@@ -147,8 +147,8 @@ export const Stock = withStyles(styles)(
       const { element } = this.props;
       const cx = element.cx;
       const cy = element.cy;
-      const w = element.width ? element.width : 45;
-      const h = element.height ? element.height : 35;
+      const w = StockWidth;
+      const h = StockHeight;
 
       return (
         <g transform={`translate(${cx + 1 - w / 2} ${cy + 1 - h / 2})`}>
@@ -159,14 +159,14 @@ export const Stock = withStyles(styles)(
 
     render() {
       const { element, isEditingName, isSelected, isValidTarget, classes } = this.props;
-      const w = element.width ? element.width : 45;
-      const h = element.height ? element.height : 35;
+      const w = StockWidth;
+      const h = StockHeight;
       const cx = element.cx;
       const cy = element.cy;
 
       const series = this.props.series;
 
-      const side = findSide(element, 'top');
+      const side = element.labelSide;
       const label = isEditingName ? undefined : (
         <Label
           uid={element.uid}

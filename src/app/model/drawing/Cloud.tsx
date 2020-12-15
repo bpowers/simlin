@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ViewElement } from '../../../engine/xmile';
+import { ViewElement, CloudViewElement } from '../../datamodel';
 
 import { Point, Rect, square } from './common';
 import { CloudRadius, CloudWidth } from './default';
@@ -44,20 +44,20 @@ type CloudState = {};
 export interface CloudPropsFull extends WithStyles<typeof styles> {
   isSelected: boolean;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
-  element: ViewElement;
+  element: CloudViewElement;
 }
 
 export type CloudProps = Pick<CloudPropsFull, 'isSelected' | 'onSelection' | 'element'>;
 
-export function cloudContains(element: ViewElement, point: Point): boolean {
-  const cx = element.cx;
-  const cy = element.cy;
+export function cloudContains(element: CloudViewElement, point: Point): boolean {
+  const cx = element.x;
+  const cy = element.y;
 
   const distance = Math.sqrt(square(point.x - cx) + square(point.y - cy));
   return distance <= CloudRadius;
 }
 
-export function cloudBounds(element: ViewElement): Rect {
+export function cloudBounds(element: CloudViewElement): Rect {
   const { x, y } = element;
   const radius = CloudRadius;
   return {

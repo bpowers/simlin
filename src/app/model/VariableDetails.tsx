@@ -14,8 +14,7 @@ import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 import { Button, Card, CardActions, CardContent, Tab, Tabs } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { Table, Variable } from '../../engine/vars';
-import { GF, Scale, ViewElement } from '../../engine/xmile';
+import { StockViewElement, ViewElement, Variable, GraphicalFunction, GraphicalFunctionScale } from '../datamodel';
 
 import { defined, Series } from '../common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
@@ -56,7 +55,7 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   viewElement: ViewElement;
   onDelete: (ident: string) => void;
   onEquationChange: (ident: string, newEquation: string) => void;
-  onTableChange: (ident: string, newTable: GF | null) => void;
+  onTableChange: (ident: string, newTable: GraphicalFunction | null) => void;
   data: Series | undefined;
   activeTab: number;
   onActiveTabChange: (newActiveTab: number) => void;
@@ -78,7 +77,7 @@ function valueFromEquation(equation: string): Node[] {
 }
 
 function equationFor(variable: Variable): string {
-  return (defined(variable.xmile).eqn || '').trim();
+  return defined(variable.equation).trim();
 }
 
 export const VariableDetails = withStyles(styles)(
@@ -102,7 +101,7 @@ export const VariableDetails = withStyles(styles)(
     };
 
     handleVariableDelete = (): void => {
-      this.props.onDelete(this.props.viewElement.ident);
+      this.props.onDelete(defined(this.props.viewElement.ident()));
     };
 
     handleNotesChange = (_event: React.ChangeEvent<HTMLInputElement>): void => {};
@@ -119,7 +118,7 @@ export const VariableDetails = withStyles(styles)(
 
       const newEquation = equationFromValue(equation);
       if (initialEquation !== newEquation) {
-        this.props.onEquationChange(this.props.viewElement.ident, newEquation);
+        this.props.onEquationChange(defined(this.props.viewElement.ident()), newEquation);
       }
     };
 
@@ -133,10 +132,12 @@ export const VariableDetails = withStyles(styles)(
     };
 
     handleAddLookupTable = (): void => {
-      const ident = this.props.viewElement.ident;
-      const gf = new GF({
-        xScale: new Scale({ min: 0, max: 1 }),
-        yScale: new Scale({ min: 0, max: 1 }),
+      const ident = defined(this.props.viewElement.ident());
+      const gf = GraphicalFunction.from({
+        kind: 'continuous',
+        xScale: GraphicalFunctionScale.from({ min: 0, max: 1 }),
+        yScale: GraphicalFunctionScale.from({ min: 0, max: 1 }),
+        xPoints: undefined,
         yPoints: List([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
       });
       this.props.onTableChange(ident, gf);
@@ -247,7 +248,7 @@ export const VariableDetails = withStyles(styles)(
       );
     }
 
-    handleLookupChange = (ident: string, newTable: GF | null) => {
+    handleLookupChange = (ident: string, newTable: GraphicalFunction | null) => {
       this.props.onTableChange(ident, newTable);
     };
 
@@ -255,7 +256,7 @@ export const VariableDetails = withStyles(styles)(
       const { classes, variable } = this.props;
 
       let table;
-      if (variable instanceof Table) {
+      if (variable.gf) {
         table = <LookupEditor variable={variable} onLookupChange={this.handleLookupChange} />;
       } else {
         table = (
@@ -283,9 +284,9 @@ export const VariableDetails = withStyles(styles)(
     render() {
       const { activeTab, classes, viewElement } = this.props;
 
-      const equationType = viewElement.type === 'stock' ? 'Initial Value' : 'Equation';
+      const equationType = viewElement instanceof StockViewElement ? 'Initial Value' : 'Equation';
       const content = activeTab === 0 ? this.renderEquation() : this.renderLookup();
-      const lookupTab = viewElement.type === 'stock' ? undefined : <Tab label="Lookup Function" />;
+      const lookupTab = viewElement instanceof StockViewElement ? undefined : <Tab label="Lookup Function" />;
 
       return (
         <Card className={classes.card} elevation={1}>

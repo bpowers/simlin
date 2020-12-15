@@ -1,10 +1,10 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2020 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
 
-import { toUint8Array } from 'js-base64';
+import { toUint8Array, fromUint8Array } from 'js-base64';
 
 import { List, Map, Set, Stack } from 'immutable';
 
@@ -12,20 +12,18 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import { Project as ProjectPB } from './../../system-dynamics-engine/src/project_io_pb';
+import { Project as ProjectPB } from '../../system-dynamics-engine/src/project_io_pb';
 
-import { Project as DmProject, Model as DmModel } from '../datamodel';
+import { Engine as IEngine } from '../../engine-interface';
 
-import { Model } from '../../engine/model';
-import { Project, stdProject } from '../../engine/project';
-import { Sim } from '../../engine/sim';
-import { Stock as StockVar } from '../../engine/vars';
-import { FileFromJSON, GF, Point as XmilePoint, UID, View, ViewElement } from '../../engine/xmile';
+import { Project, Model, UID, ViewElement, NamedViewElement, StockFlowView, GraphicalFunction } from '../datamodel';
 
-import { Canvas, fauxTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
+import { uint8ArraysEqual } from '../common';
+
+import { Canvas /* fauxTargetUid, inCreationCloudUid, inCreationUid */ } from './drawing/Canvas';
 import { Point } from './drawing/common';
-import { canvasToXmileAngle, takeoffθ } from './drawing/Connector';
-import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
+// import { takeoffθ } from './drawing/Connector';
+// import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 
 import { baseURL, defined, exists, Series } from '../common';
 
@@ -65,9 +63,9 @@ import CardContent from '@material-ui/core/CardContent';
 
 const MaxUndoSize = 5;
 
-function radToDeg(r: number): number {
-  return (r * 180) / Math.PI;
-}
+// function radToDeg(r: number): number {
+//   return (r * 180) / Math.PI;
+// }
 
 const styles = ({ spacing, palette }: Theme) =>
   createStyles({
@@ -167,14 +165,14 @@ class ModelError implements Error {
 
 interface EditorState {
   modelErrors: List<Error>;
-  projectDataModel?: DmProject;
-  projectHistory: Stack<Project>;
+  activeProject?: Project;
+  activeEngine?: IEngine;
+  projectHistory: Stack<Readonly<Uint8Array>>;
   projectOffset: number;
   modelName: string;
   dialOpen: boolean;
   dialVisible: boolean;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
-  sim?: Sim;
   data: Map<string, Series>;
   selection: Set<UID>;
   drawerOpen: boolean;
@@ -197,7 +195,7 @@ export const Editor = withStyles(styles)(
       super(props);
 
       this.state = {
-        projectHistory: Stack<Project>(),
+        projectHistory: Stack<Readonly<Uint8Array>>(),
         projectOffset: 0,
         modelErrors: List<Error>(),
         modelName: 'main',
@@ -219,41 +217,47 @@ export const Editor = withStyles(styles)(
           return;
         }
 
-        await this.loadSim(project);
+        this.scheduleSimRun();
       });
     }
 
-    private project(optionalOffset?: number): Project | undefined {
-      if (this.state.projectHistory.size === 0) {
-        return undefined;
-      }
+    private project(): Project | undefined {
+      return this.state.activeProject;
+      // if (this.state.projectHistory.size === 0) {
+      //   return undefined;
+      // }
+      //
+      // const off = optionalOffset !== undefined ? optionalOffset : this.state.projectOffset;
+      // return this.state.projectHistory.get(off);
+    }
 
-      const off = optionalOffset !== undefined ? optionalOffset : this.state.projectOffset;
-      return this.state.projectHistory.get(off);
+    private engine(): IEngine | undefined {
+      return this.state.activeEngine;
     }
 
     private scheduleSimRun(): void {
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
-      setTimeout(async () => {
-        const project = this.project();
-        if (!project) {
+      setTimeout(() => {
+        const engine = this.engine();
+        if (!engine) {
           return;
         }
-        await this.loadSim(project);
+        this.loadSim(engine);
       });
     }
 
-    private async loadSim(project: Project): Promise<void> {
-      if (!project.isSimulatable(this.state.modelName)) {
+    private loadSim(engine: IEngine) {
+      if (!engine.isSimulatable()) {
         return;
       }
       try {
-        const sim = new Sim(project, defined(project.main), false);
-        await sim.runToEnd();
-        const names = await sim.varNames();
-        const data = await sim.series(...names);
+        engine.simRunToEnd();
+        const idents = engine.simVarNames() as string[];
+        const time = engine.simSeries('time');
+        const data = Map<string, Series>(
+          idents.map((ident) => [ident, { name: ident, time, values: engine.simSeries(ident) }]),
+        );
         setTimeout(() => {
-          sim.close();
+          engine.simClose();
         });
         this.setState({ data });
       } catch (e) {
@@ -263,22 +267,26 @@ export const Editor = withStyles(styles)(
       }
     }
 
-    private updateProject(project: Project) {
-      // ignore the update if nothing has changed
-      if (project.equals(this.project())) {
-        return;
+    private updateProject(serializedProject: Readonly<Uint8Array>, scheduleSave = true) {
+      if (this.state.projectHistory.size > 0) {
+        const current = this.state.projectHistory.get(this.state.projectOffset);
+        if (uint8ArraysEqual(serializedProject, current)) {
+          return;
+        }
       }
 
-      const priorHistory = this.state.projectHistory.slice(this.state.projectOffset);
+      const priorHistory = this.state.projectHistory.slice();
 
       this.setState({
-        projectHistory: priorHistory.unshift(project).slice(0, MaxUndoSize),
+        projectHistory: priorHistory.unshift(serializedProject).slice(0, MaxUndoSize),
         projectOffset: 0,
       });
-      this.scheduleSave(project);
+      if (scheduleSave) {
+        this.scheduleSave(serializedProject);
+      }
     }
 
-    private scheduleSave(project: Project): void {
+    private scheduleSave(project: Readonly<Uint8Array>): void {
       const { projectVersion } = this.state;
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
@@ -286,18 +294,15 @@ export const Editor = withStyles(styles)(
       });
     }
 
-    private async save(project: Project, currVersion: number): Promise<void> {
+    private async save(project: Readonly<Uint8Array>, currVersion: number): Promise<void> {
       console.log(`saving project version ${currVersion + 1}`);
-      const file = project.toFile();
-      // ensure we've converted to plain-old JavaScript objects
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const projectJSON = JSON.parse(JSON.stringify(file));
 
+      const copied = project.slice();
       const bodyContents = {
         currVersion,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        file: projectJSON,
+        project: fromUint8Array(copied),
       };
+      console.log(`modified? ${!uint8ArraysEqual(project, copied)}`);
 
       const base = this.getBaseURL();
       const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
@@ -349,43 +354,34 @@ export const Editor = withStyles(styles)(
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectResponse = await response.json();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const fileJSON = JSON.parse(projectResponse.file);
-      let file;
-      try {
-        file = FileFromJSON(fileJSON);
-      } catch (err) {
-        this.appendModelError(`FileFromJSON: ${err.message}`);
-        return;
-      }
 
+      let projectBinary: Uint8Array;
       let projectPB: ProjectPB;
       try {
-        const binary = toUint8Array(projectResponse.pb);
-        projectPB = ProjectPB.deserializeBinary(binary);
+        projectBinary = toUint8Array(projectResponse.pb);
+        projectPB = ProjectPB.deserializeBinary(projectBinary);
       } catch (err) {
         this.appendModelError(`project protobuf: ${err.message}`);
         return;
       }
 
-      const dmProject = new DmProject(projectPB);
+      const project = new Project(projectPB);
 
-      console.log(projectPB);
-      console.log(dmProject);
-      debugger;
+      const { open } = await import('../../engine-v2/pkg');
 
-      const [project, err2] = stdProject.addFile(defined(file));
-      if (err2 || !project) {
-        this.appendModelError(`addFile: ${err2 && err2.message}`);
+      const engine = open(projectBinary);
+      if (!engine) {
+        this.appendModelError(`opening the project in the engine failed`);
         return;
       }
 
       // we don't call updateProject here because we don't want to
       // POST a new version up when we've just downloaded it.
       this.setState({
-        projectDataModel: dmProject,
+        activeProject: project,
+        activeEngine: engine,
         projectVersion: defined(projectResponse.version) as number,
-        projectHistory: Stack([project]),
+        projectHistory: Stack([projectBinary]),
         projectOffset: 0,
       });
 
@@ -411,15 +407,25 @@ export const Editor = withStyles(styles)(
     };
 
     handleRename = (oldName: string, newName: string) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
       let newProject;
       try {
-        newProject = project.rename(this.state.modelName, oldName, newName);
+        const err = engine.rename(this.state.modelName, oldName, newName);
+        if (err) {
+          throw err;
+        }
+        newProject = engine.serializeToProtobuf();
       } catch (err) {
-        this.appendModelError(err.message);
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        if (err.hasOwnProperty('code')) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+          this.appendModelError(`error code ${err.code}: ${err.get_details()}`);
+        } else {
+          this.appendModelError(err.message);
+        }
         return;
       }
       this.scheduleSimRun();
@@ -434,12 +440,13 @@ export const Editor = withStyles(styles)(
     };
 
     handleSelectionDelete = () => {
+      /*
       const selection = this.state.selection;
       const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
+      const updatePath = ['models', modelName, 'views', 0];
       let project = defined(this.project()).updateIn(
         updatePath,
-        (view: View): View => {
+        (view: StockFlowView): StockFlowView => {
           const isSelected = (ident: string | undefined): boolean => {
             if (ident === undefined) {
               return false;
@@ -493,13 +500,15 @@ export const Editor = withStyles(styles)(
         },
       );
       project = project.deleteVariables(this.state.modelName, this.getSelectionIdents());
+       */
       this.setState({
         selection: Set<number>(),
       });
-      this.updateProject(project);
+      // this.updateProject(project);
     };
 
-    handleMoveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {
+    handleMoveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right') => {
+      /*
       const { modelName } = this.state;
       const updatePath = ['models', modelName, 'xModel', 'views', 0];
       const project = defined(this.project()).updateIn(
@@ -516,9 +525,11 @@ export const Editor = withStyles(styles)(
         },
       );
       this.updateProject(project);
+       */
     };
 
-    handleFlowAttach = (flow: ViewElement, targetUid: number, cursorMoveDelta: Point) => {
+    handleFlowAttach = (_flow: ViewElement, _targetUid: number, _cursorMoveDelta: Point) => {
+      /*
       let { selection } = this.state;
       const { modelName } = this.state;
       const updatePath = ['models', modelName, 'xModel', 'views', 0];
@@ -703,9 +714,12 @@ export const Editor = withStyles(styles)(
       this.setState({ selection });
       this.updateProject(project);
       this.scheduleSimRun();
+
+       */
     };
 
-    handleLinkAttach = (link: ViewElement, newTarget: string) => {
+    handleLinkAttach = (_link: ViewElement, _newTarget: string) => {
+      /*
       let { selection } = this.state;
       const { modelName } = this.state;
       const updatePath = ['models', modelName, 'xModel', 'views', 0];
@@ -763,9 +777,12 @@ export const Editor = withStyles(styles)(
       );
       this.setState({ selection });
       this.updateProject(project);
+
+       */
     };
 
-    handleCreateVariable = (element: ViewElement) => {
+    handleCreateVariable = (_element: ViewElement) => {
+      /*
       const updatePath = ['models', this.state.modelName, 'xModel', 'views', 0];
       let project = defined(this.project()).updateIn(
         updatePath,
@@ -783,9 +800,11 @@ export const Editor = withStyles(styles)(
         selection: Set<number>(),
       });
       this.updateProject(project);
+       */
     };
 
-    handleSelectionMove = (delta: Point, arcPoint?: Point) => {
+    handleSelectionMove = (_delta: Point, _arcPoint?: Point) => {
+      /*
       const origElements = defined(defined(defined(this.project()).model(this.state.modelName)).view(0)).elements;
       let origNamedElements = Map<string, ViewElement>();
       for (const e of origElements) {
@@ -923,6 +942,8 @@ export const Editor = withStyles(styles)(
         },
       );
       this.updateProject(project);
+
+       */
     };
 
     handleDrawerToggle = (isOpen: boolean) => {
@@ -932,42 +953,46 @@ export const Editor = withStyles(styles)(
     };
 
     handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('start', Number(event.target.value));
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = Number(event.target.value);
+      engine.setSimSpecStart(value);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     handleStopTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('stop', Number(event.target.value));
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = Number(event.target.value);
+      engine.setSimSpecStop(value);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     handleDtChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('dt', Number(event.target.value));
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = Number(event.target.value);
+      engine.setSimSpecDt(value, false);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     handleTimeUnitsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('timeUnits', event.target.value);
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = event.target.value;
+      engine.setSimSpecTimeUnits(value);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
@@ -977,12 +1002,17 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      const model = project.model(this.state.modelName);
+      const model = project.models.get(this.state.modelName);
       if (!model) {
         return;
       }
 
-      const simSpec = defined(project.simSpec);
+      const simSpec = project.simSpecs;
+
+      let dt = simSpec.dt.dt;
+      if (simSpec.dt.isReciprocal) {
+        dt = 1 / dt;
+      }
 
       return (
         <ModelPropertiesDrawer
@@ -991,7 +1021,7 @@ export const Editor = withStyles(styles)(
           onDrawerToggle={this.handleDrawerToggle}
           startTime={simSpec.start}
           stopTime={simSpec.stop}
-          dt={simSpec.dt}
+          dt={dt}
           timeUnits={simSpec.timeUnits || ''}
           onStartTimeChange={this.handleStartTimeChange}
           onStopTimeChange={this.handleStopTimeChange}
@@ -1001,8 +1031,8 @@ export const Editor = withStyles(styles)(
       );
     }
 
-    getDmModel(): DmModel | undefined {
-      const project = defined(this.state.projectDataModel);
+    getModel(): Model | undefined {
+      const project = this.project();
       if (!project) {
         return;
       }
@@ -1010,13 +1040,18 @@ export const Editor = withStyles(styles)(
       return project.models.get(modelName);
     }
 
-    getModel(): Model | undefined {
+    getView(): StockFlowView | undefined {
       const project = this.project();
       if (!project) {
         return;
       }
       const modelName = this.state.modelName;
-      return project.model(modelName);
+      const model = project.models.get(modelName);
+      if (!model) {
+        return;
+      }
+
+      return model.views.first();
     }
 
     getCanvas() {
@@ -1031,18 +1066,18 @@ export const Editor = withStyles(styles)(
       if (!model) {
         return;
       }
-      const dmProject = defined(this.state.projectDataModel);
-      const dmModel = defined(this.getDmModel());
+
+      const view = this.getView();
+      if (!view) {
+        return;
+      }
 
       return (
         <Canvas
           embedded={!!embedded}
-          project={project}
-          dmProject={dmProject}
-          model={model}
-          dmModel={defined(dmModel)}
-          view={defined(model.view(0))}
-          dmView={defined(dmModel.views.get(0))}
+          dmProject={project}
+          dmModel={model}
+          dmView={view}
           data={this.state.data}
           selectedTool={this.state.selectedTool}
           selection={this.state.selection}
@@ -1093,15 +1128,14 @@ export const Editor = withStyles(styles)(
     getSelectionIdents(): string[] {
       const names: string[] = [];
       const { selection } = this.state;
-      const model = this.getModel();
-      if (!model) {
+      const view = this.getView();
+      if (!view) {
         return names;
       }
-      const view = defined(model.xModel.views.get(0));
 
       for (const e of view.elements) {
-        if (selection.contains(e.uid) && e.hasName) {
-          names.push(e.ident);
+        if (selection.contains(e.uid) && e.isNamed()) {
+          names.push(defined(e.ident()));
         }
       }
 
@@ -1115,14 +1149,14 @@ export const Editor = withStyles(styles)(
       }
 
       const uid = defined(this.state.selection.first());
-      const model = this.getModel();
-      if (!model) {
+
+      const view = this.getView();
+      if (!view) {
         return;
       }
-      const view = defined(model.xModel.views.get(0));
 
       for (const e of view.elements) {
-        if (e.uid === uid && e.hasName) {
+        if (e.uid === uid && e.isNamed()) {
           return e;
         }
       }
@@ -1148,12 +1182,12 @@ export const Editor = withStyles(styles)(
       let name;
       let placeholder: string | undefined = 'Find in Model';
       if (namedElement) {
-        name = defined(namedElement.name).replace('\\n', ' ');
+        name = defined((namedElement as NamedViewElement).name).replace('\\n', ' ');
         placeholder = undefined;
       }
 
-      const project = this.project();
-      const status = !project || project.isSimulatable(this.state.modelName) ? 'ok' : 'error';
+      const engine = this.engine();
+      const status = !engine || engine.isSimulatable() ? 'ok' : 'error';
 
       return (
         <Paper className={classes.paper} elevation={2}>
@@ -1178,27 +1212,32 @@ export const Editor = withStyles(styles)(
     }
 
     handleEquationChange = (ident: string, newEquation: string) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-
-      this.updateProject(project.setEquation(this.state.modelName, ident, newEquation));
+      engine.setEquation(this.state.modelName, ident, newEquation);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
-    handleTableChange = (ident: string, newTable: GF | null) => {
-      const project = this.project();
-      if (!project) {
+    handleTableChange = (ident: string, newTable: GraphicalFunction | null) => {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
 
-      this.updateProject(project.setTable(this.state.modelName, ident, newTable));
+      if (newTable) {
+        const gf = GraphicalFunction.toPb(newTable);
+        engine.setGraphicalFunction(this.state.modelName, ident, gf.serializeBinary());
+      } else {
+        engine.removeGraphicalFunction(this.state.modelName, ident);
+      }
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     getVariableDetails() {
-      const project = this.project();
       const { embedded } = this.props;
       const classes = this.props.classes;
 
@@ -1211,19 +1250,20 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      const model = defined(project).model(this.state.modelName);
+      const model = this.getModel();
       if (!model) {
         return;
       }
 
-      const variable = defined(model.vars.get(namedElement.ident));
-      const series = this.state.data.get(namedElement.ident);
+      const ident = defined(namedElement.ident());
+      const variable = defined(model.variables.get(ident));
+      const series = this.state.data.get(ident);
       const activeTab = this.state.variableDetailsActiveTab;
 
       return (
         <div className={classes.varDetails}>
           <VariableDetails
-            key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${namedElement.ident}`}
+            key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
             variable={variable}
             viewElement={namedElement}
             data={series}
@@ -1247,7 +1287,7 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      if (namedElement.ident !== ident) {
+      if (namedElement.ident() !== ident) {
         return;
       }
 
@@ -1298,7 +1338,7 @@ export const Editor = withStyles(styles)(
       projectOffset = Math.max(projectOffset, 0);
       this.setState({ projectOffset });
       this.scheduleSimRun();
-      this.scheduleSave(defined(this.project(projectOffset)));
+      this.scheduleSave(defined(this.state.projectHistory.get(projectOffset)));
     };
 
     async takeSnapshot() {
@@ -1306,10 +1346,9 @@ export const Editor = withStyles(styles)(
       if (!project || !this.state.modelName) {
         return;
       }
-      const dmProject = defined(this.state.projectDataModel);
       const { data, modelName } = this.state;
 
-      const [svg, viewbox] = renderSvgToString(project, dmProject, modelName, data);
+      const [svg, viewbox] = renderSvgToString(project, modelName, data);
       const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
       const ctx = osCanvas.getContext('2d');
       const canvas = Canvg.fromString(exists(ctx), svg, {

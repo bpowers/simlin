@@ -172,6 +172,8 @@ impl Error {
             details,
         }
     }
+
+    #[cfg_attr(feature = "wasm", wasm_bindgen(js_name = getDetails))]
     pub fn get_details(&self) -> Option<String> {
         self.details.clone()
     }

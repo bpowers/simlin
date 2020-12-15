@@ -11,8 +11,6 @@ import { AuxRadius } from './default';
 
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
 
-export { findSide } from './CommonLabel';
-
 const styles = createStyles({
   alignLeft: {
     '& text': {

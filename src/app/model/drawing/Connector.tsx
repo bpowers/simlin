@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ViewElement } from '../../../engine/xmile';
+import { LinkViewElement, ModuleViewElement, StockViewElement, ViewElement } from '../../datamodel';
 
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';
@@ -38,25 +38,6 @@ const cos = Math.cos;
 const tan = Math.tan;
 const PI = Math.PI;
 const sqrt = Math.sqrt;
-
-// converts an angle associated with a connector (in degrees) into an
-// angle in the coordinate system of SVG canvases where the origin is
-// in the upper-left of the screen and Y grows down, and the domain is
-// -180 to 180.
-function xmileToCanvasAngle(inDeg: number): number {
-  let outDeg = (360 - inDeg) % 360;
-  if (outDeg > 180) {
-    outDeg -= 360;
-  }
-  return outDeg;
-}
-
-export function canvasToXmileAngle(inDeg: number): number {
-  if (inDeg < 0) {
-    inDeg += 360;
-  }
-  return (360 - inDeg) % 360;
-}
 
 const degToRad = (d: number): number => {
   return (d / 180) * PI;
@@ -99,13 +80,13 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
 
     return fromθ + degToRad(((sweep && inv) || (!sweep && !inv) ? -1 : 1) * 90);
   }
-  if (element.angle !== undefined) {
+  if (element.arc !== undefined) {
     // convert from counter-clockwise (XMILE) to
     // clockwise (display, where Y grows down
     // instead of up)
-    return degToRad(xmileToCanvasAngle(element.angle));
+    return degToRad(element.arc);
   } else {
-    console.log(`connector from ${element.from || ''} doesn't have x, y, or angle`);
+    console.log(`connector from ${element.fromUid || ''} doesn't have x, y, or angle`);
     return NaN;
   }
 }
@@ -113,9 +94,9 @@ export function takeoffθ(props: Pick<ConnectorProps, 'element' | 'from' | 'to' 
 export function intersectElementArc(element: ViewElement, circ: Circle, inv: boolean): Point {
   let r: number = AuxRadius;
   // FIXME: actually calculate intersections
-  if (element.type === 'module') {
+  if (element instanceof ModuleViewElement) {
     r = 25;
-  } else if (element.type === 'stock') {
+  } else if (element instanceof StockViewElement) {
     r = 15;
   } else if (element.isZeroRadius) {
     r = 0;
@@ -167,7 +148,7 @@ export function circleFromPoints(p1: Point, p2: Point, p3: Point): Circle {
 interface ConnectorPropsFull extends WithStyles<typeof styles> {
   isSelected: boolean;
   from: ViewElement;
-  element: ViewElement;
+  element: LinkViewElement;
   to: ViewElement;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean) => void;
   arcPoint?: Point;
@@ -195,9 +176,9 @@ export const Connector = withStyles(styles)(
     private static intersectElementStraight(element: ViewElement, θ: number): Point {
       let r: number = AuxRadius;
       // FIXME: actually calculate intersections
-      if (element.type === 'module') {
+      if (element instanceof ModuleViewElement) {
         r = 25;
-      } else if (element.type === 'stock') {
+      } else if (element instanceof StockViewElement) {
         r = 15;
       } else if (element.isZeroRadius) {
         r = 0;

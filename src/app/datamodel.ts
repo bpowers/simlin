@@ -7,6 +7,9 @@ import { defined } from './common';
 import { List, Map, Record } from 'immutable';
 
 import * as pb from '../system-dynamics-engine/src/project_io_pb';
+import { canonicalize } from '../engine/common';
+
+export type UID = number;
 
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
 
@@ -14,11 +17,11 @@ function getGraphicalFunctionKind(
   kind: pb.GraphicalFunction.KindMap[keyof pb.GraphicalFunction.KindMap],
 ): GraphicalFunctionKind {
   switch (kind) {
-    case 0:
+    case pb.GraphicalFunction.Kind.CONTINUOUS:
       return 'continuous';
-    case 1:
+    case pb.GraphicalFunction.Kind.EXTRAPOLATE:
       return 'extrapolate';
-    case 2:
+    case pb.GraphicalFunction.Kind.DISCRETE:
       return 'discrete';
     default:
       return 'continuous';
@@ -35,6 +38,15 @@ export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefault
       min: scale.getMin(),
       max: scale.getMax(),
     });
+  }
+  static from(props: typeof graphicalFunctionScaleDefaults): GraphicalFunctionScale {
+    return new GraphicalFunctionScale(GraphicalFunctionScale.toPb(props));
+  }
+  static toPb(props: typeof graphicalFunctionScaleDefaults): pb.GraphicalFunction.Scale {
+    const scale = new pb.GraphicalFunction.Scale();
+    scale.setMin(props.min);
+    scale.setMax(props.max);
+    return scale;
   }
 }
 
@@ -56,10 +68,44 @@ export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
       yScale: new GraphicalFunctionScale(defined(gf.getYScale())),
     });
   }
+  static toPb(props: typeof graphicalFunctionDefaults): pb.GraphicalFunction {
+    const gf = new pb.GraphicalFunction();
+    if (props.kind) {
+      switch (props.kind) {
+        case 'continuous':
+          gf.setKind(pb.GraphicalFunction.Kind.CONTINUOUS);
+          break;
+        case 'discrete':
+          gf.setKind(pb.GraphicalFunction.Kind.DISCRETE);
+          break;
+        case 'extrapolate':
+          gf.setKind(pb.GraphicalFunction.Kind.EXTRAPOLATE);
+          break;
+      }
+    }
+    if (props.xPoints && props.xPoints.size > 0) {
+      gf.setXPointsList(props.xPoints.toArray());
+    }
+    if (props.yPoints) {
+      gf.setYPointsList(props.yPoints.toArray());
+    }
+    if (props.xScale) {
+      gf.setXScale(GraphicalFunctionScale.toPb(props.xScale));
+    }
+    if (props.yScale) {
+      gf.setYScale(GraphicalFunctionScale.toPb(props.yScale));
+    }
+    return gf;
+  }
+  static from(props: typeof graphicalFunctionDefaults): GraphicalFunction {
+    return new GraphicalFunction(GraphicalFunction.toPb(props));
+  }
 }
 
 export interface Variable {
   readonly ident: string;
+  readonly equation: string | undefined;
+  readonly gf: GraphicalFunction | undefined;
 }
 
 const stockDefaults = {
@@ -82,6 +128,9 @@ export class Stock extends Record(stockDefaults) implements Variable {
       outflows: List(stock.getOutflowsList()),
       nonNegative: stock.getNonNegative(),
     });
+  }
+  get gf(): undefined {
+    return undefined;
   }
 }
 
@@ -157,6 +206,12 @@ export class Module extends Record(moduleDefaults) implements Variable {
       references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
     });
   }
+  get equation(): undefined {
+    return undefined;
+  }
+  get gf(): undefined {
+    return undefined;
+  }
 }
 
 export type LabelSide = 'top' | 'left' | 'center' | 'bottom' | 'right';
@@ -179,7 +234,12 @@ function getLabelSide(labelSide: pb.ViewElement.LabelSideMap[keyof pb.ViewElemen
 }
 
 export interface ViewElement {
+  readonly isZeroRadius: boolean;
   readonly uid: number;
+  readonly cx: number;
+  readonly cy: number;
+  isNamed(): boolean;
+  ident(): string | undefined;
 }
 
 const auxViewElementDefaults = {
@@ -188,6 +248,7 @@ const auxViewElementDefaults = {
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
+  isZeroRadius: false,
 };
 export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
   constructor(aux: pb.ViewElement.Aux) {
@@ -199,6 +260,18 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
       labelSide: getLabelSide(aux.getLabelSide()),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
+  }
 }
 
 const stockViewElementDefaults = {
@@ -207,6 +280,7 @@ const stockViewElementDefaults = {
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
+  isZeroRadius: false,
 };
 export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
   constructor(stock: pb.ViewElement.Stock) {
@@ -217,6 +291,18 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
       y: stock.getY(),
       labelSide: getLabelSide(stock.getLabelSide()),
     });
+  }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
   }
 }
 
@@ -234,6 +320,15 @@ export class Point extends Record(pointDefaults) {
       attachedToUid: attachedToUid ? attachedToUid : undefined,
     });
   }
+  static from(props: typeof pointDefaults): Point {
+    const point = new pb.ViewElement.FlowPoint();
+    point.setX(props.x);
+    point.setY(props.y);
+    if (props.attachedToUid) {
+      point.setAttachedToUid(props.attachedToUid);
+    }
+    return new Point(point);
+  }
 }
 
 const flowViewElementDefaults = {
@@ -243,6 +338,7 @@ const flowViewElementDefaults = {
   y: -1,
   labelSide: 'center' as LabelSide,
   points: List<Point>(),
+  isZeroRadius: false,
 };
 export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
   constructor(flow: pb.ViewElement.Flow) {
@@ -255,6 +351,18 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
       points: List(flow.getPointsList().map((point) => new Point(point))),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
+  }
 }
 
 const linkViewElementDefaults = {
@@ -264,12 +372,13 @@ const linkViewElementDefaults = {
   arc: 0.0 as number | undefined,
   isStraight: false,
   multiPoint: undefined as List<Point> | undefined,
+  isZeroRadius: false,
 };
 export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
   constructor(link: pb.ViewElement.Link) {
-    let arc: number | undefined;
-    let isStraight: boolean;
-    let multiPoint: List<Point> | undefined;
+    let arc: number | undefined = undefined;
+    let isStraight = true;
+    let multiPoint: List<Point> | undefined = undefined;
     switch (link.getShapeCase()) {
       case pb.ViewElement.Link.ShapeCase.ARC:
         arc = link.getArc();
@@ -290,8 +399,6 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
             .map((point) => new Point(point)),
         );
         break;
-      default:
-        throw new Error('invariant broken: protobuf link with empty shape');
     }
     super({
       uid: link.getUid(),
@@ -302,6 +409,18 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       multiPoint,
     });
   }
+  get cx(): number {
+    return NaN;
+  }
+  get cy(): number {
+    return NaN;
+  }
+  isNamed(): boolean {
+    return false;
+  }
+  ident(): undefined {
+    return undefined;
+  }
 }
 
 const moduleViewElementDefaults = {
@@ -310,6 +429,7 @@ const moduleViewElementDefaults = {
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
+  isZeroRadius: false,
 };
 export class ModuleViewElement extends Record(moduleViewElementDefaults) implements ViewElement {
   constructor(module: pb.ViewElement.Module) {
@@ -321,6 +441,18 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
       labelSide: getLabelSide(module.getLabelSide()),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
+  }
 }
 
 const aliasViewElementDefaults = {
@@ -329,6 +461,7 @@ const aliasViewElementDefaults = {
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
+  isZeroRadius: false,
 };
 export class AliasViewElement extends Record(aliasViewElementDefaults) implements ViewElement {
   constructor(alias: pb.ViewElement.Alias) {
@@ -340,6 +473,18 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
       labelSide: getLabelSide(alias.getLabelSide()),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return false;
+  }
+  ident(): undefined {
+    return undefined;
+  }
 }
 
 const cloudViewElementDefaults = {
@@ -347,6 +492,7 @@ const cloudViewElementDefaults = {
   flowUid: -1,
   x: -1,
   y: -1,
+  isZeroRadius: false,
 };
 export class CloudViewElement extends Record(cloudViewElementDefaults) implements ViewElement {
   constructor(cloud: pb.ViewElement.Cloud) {
@@ -357,7 +503,21 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
       y: cloud.getY(),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return false;
+  }
+  ident(): undefined {
+    return undefined;
+  }
 }
+
+export type NamedViewElement = StockViewElement | AuxViewElement | ModuleViewElement | FlowViewElement;
 
 const stockFlowViewDefaults = {
   elements: List<ViewElement>(),
