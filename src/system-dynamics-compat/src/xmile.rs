@@ -612,6 +612,42 @@ pub mod view_element {
     use serde::{Deserialize, Serialize};
     use system_dynamics_engine::datamodel::view_element::LinkShape;
 
+    // converts an angle associated with a connector (in degrees) into an
+    // angle in the coordinate system of SVG canvases where the origin is
+    // in the upper-left of the screen and Y grows down, and the domain is
+    // -180 to 180.
+    fn convert_angle_from_xmile_to_canvas(in_degrees: f64) -> f64 {
+        let out_degrees = (360.0 - in_degrees) % 360.0;
+        if out_degrees > 180.0 {
+            out_degrees - 360.0
+        } else {
+            out_degrees
+        }
+    }
+
+    // converts an angle associated with a connector (in degrees) into an
+    // angle in the coordinate system of SVG canvases where the origin is
+    // in the upper-left of the screen and Y grows down, and the domain is
+    // -180 to 180.
+    fn convert_angle_from_canvas_to_xmile(in_degrees: f64) -> f64 {
+        let out_degrees = if in_degrees < 0.0 {
+            in_degrees + 360.0
+        } else {
+            in_degrees
+        };
+        (360.0 - out_degrees) % 360.0
+    }
+
+    #[test]
+    fn test_convert_angles() {
+        let cases: &[(f64, f64)] = &[(0.0, 0.0), (45.0, -45.0), (270.0, 90.0)];
+
+        for (input, output) in cases {
+            assert_eq!(*output, convert_angle_from_xmile_to_canvas(*input));
+            assert_eq!(*input, convert_angle_from_canvas_to_xmile(*output));
+        }
+    }
+
     #[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
     pub enum LabelSide {
@@ -939,7 +975,9 @@ pub mod view_element {
                         .collect(),
                 )
             } else {
-                datamodel::view_element::LinkShape::Arc(v.angle.unwrap_or(0.0))
+                datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(
+                    v.angle.unwrap_or(0.0),
+                ))
             };
             datamodel::view_element::Link {
                 uid: v.uid.unwrap_or(-1),
@@ -954,7 +992,9 @@ pub mod view_element {
         fn from(v: datamodel::view_element::Link) -> Self {
             let (is_straight, angle, points) = match v.shape {
                 LinkShape::Straight => (Some(true), None, None),
-                LinkShape::Arc(angle) => (None, Some(angle), None),
+                LinkShape::Arc(angle) => {
+                    (None, Some(convert_angle_from_xmile_to_canvas(angle)), None)
+                }
                 LinkShape::MultiPoint(points) => (
                     None,
                     None,
