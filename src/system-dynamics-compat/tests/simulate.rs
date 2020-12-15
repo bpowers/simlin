@@ -43,6 +43,7 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
     // "test/test-models/tests/subscript_selection/subscript_selection.xmile",
     //
+    "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
@@ -85,6 +86,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/trend/test_trend.xmile",
     "test/test-models/tests/trig/test_trig.xmile",
     "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
+    "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 ];
 
 fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
@@ -94,7 +96,11 @@ fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
 
     let header = rdr.headers().unwrap();
     let offsets: HashMap<String, usize> =
-        HashMap::from_iter(header.iter().enumerate().map(|(i, r)| (canonicalize(r), i)));
+        HashMap::from_iter(header.iter().enumerate().map(|(i, r)| {
+            // stella outputs the first 'time' column as the time _units_, which is bonkers
+            let name = if i == 0 { "time" } else { r };
+            (canonicalize(name), i)
+        }));
 
     let step_size = offsets.len();
     let mut step_data: Vec<Vec<f64>> = Vec::new();

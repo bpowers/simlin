@@ -1999,6 +1999,31 @@ fn test_xml_stock_parsing() {
 }
 
 #[test]
+fn test_xml_gt_parsing() {
+    let input = "<aux name=\"test_gt\">
+                <eqn>( IF Time &gt; 25 THEN 5 ELSE 0 )</eqn>
+            </aux>";
+    let expected = Aux {
+        name: "test_gt".to_string(),
+        eqn: Some("( IF Time > 25 THEN 5 ELSE 0 )".to_string()),
+        doc: None,
+        units: None,
+        gf: None,
+        dimensions: None,
+        elements: None,
+    };
+
+    use quick_xml::de;
+    let aux: Var = de::from_reader(input.as_bytes()).unwrap();
+
+    if let Var::Aux(aux) = aux {
+        assert_eq!(expected, aux);
+    } else {
+        assert!(false);
+    }
+}
+
+#[test]
 fn test_xml_gf_parsing() {
     let input = "            <aux name=\"lookup function table\">
                 <eqn>0</eqn>

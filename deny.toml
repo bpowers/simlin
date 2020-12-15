@@ -36,4 +36,5 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/danburkert/prost",
+    "https://github.com/tafia/quick-xml",
 ]
