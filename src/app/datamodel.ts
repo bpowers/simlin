@@ -30,9 +30,6 @@ export class GraphicalFunctionScale {
   constructor(scale: pb.GraphicalFunction.Scale) {
     this.min = scale.getMin();
     this.max = scale.getMax();
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
 
@@ -77,9 +74,6 @@ export class Stock extends Variable {
     this.inflows = stock.getInflowsList();
     this.outflows = stock.getOutflowsList();
     this.nonNegative = stock.getNonNegative();
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
 
@@ -98,9 +92,6 @@ export class Flow extends Variable {
     const gf = flow.getGf();
     this.gf = gf ? new GraphicalFunction(gf) : undefined;
     this.nonNegative = flow.getNonNegative();
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
 
@@ -117,9 +108,6 @@ export class Aux extends Variable {
     this.units = aux.getUnits();
     const gf = aux.getGf();
     this.gf = gf ? new GraphicalFunction(gf) : undefined;
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
 
@@ -130,9 +118,6 @@ export class ModuleReference {
   constructor(modRef: pb.Variable.Module.Reference) {
     this.src = modRef.getSrc();
     this.dst = modRef.getDst();
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
 
@@ -148,9 +133,6 @@ export class Module extends Variable {
     this.documentation = module.getDocumentation();
     this.units = module.getUnits();
     this.references = module.getReferencesList().map((modRef) => new ModuleReference(modRef));
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
 
@@ -392,9 +374,6 @@ export class Dt {
   constructor(dt: pb.Dt) {
     this.dt = dt.getValue();
     this.isReciprocal = dt.getIsReciprocal();
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
 
@@ -427,9 +406,6 @@ export class SimSpecs {
     this.saveStep = saveStep ? new Dt(saveStep) : undefined;
     this.simMethod = getSimMethod(simSpecs.getSimMethod());
     this.timeUnits = simSpecs.getTimeUnits();
-
-    // TODO: remove
-    Object.freeze(this);
   }
 
   static default(): SimSpecs {
@@ -453,8 +429,5 @@ export class Project {
     this.name = project.getName();
     this.simSpecs = new SimSpecs(defined(project.getSimSpecs()));
     this.models = new Map(project.getModelsList().map((model) => [model.getName(), new Model(model)]));
-
-    // TODO: remove
-    Object.freeze(this);
   }
 }
