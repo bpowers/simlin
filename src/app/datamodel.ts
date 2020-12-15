@@ -4,6 +4,8 @@
 
 import { defined } from './common';
 
+import { List, Map, Record } from 'immutable';
+
 import * as pb from '../system-dynamics-engine/src/project_io_pb';
 
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
@@ -23,116 +25,137 @@ function getGraphicalFunctionKind(
   }
 }
 
-export class GraphicalFunctionScale {
-  readonly min: number;
-  readonly max: number;
-
+const graphicalFunctionScaleDefaults = {
+  min: 0.0,
+  max: 0.0,
+};
+export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefaults) {
   constructor(scale: pb.GraphicalFunction.Scale) {
-    this.min = scale.getMin();
-    this.max = scale.getMax();
+    super({
+      min: scale.getMin(),
+      max: scale.getMax(),
+    });
   }
 }
 
-export class GraphicalFunction {
-  readonly kind: GraphicalFunctionKind;
-  readonly xPoints?: number[];
-  readonly yPoints: number[];
-  readonly xScale: GraphicalFunctionScale;
-  readonly yScale: GraphicalFunctionScale;
-
+const graphicalFunctionDefaults = {
+  kind: 'continuous' as GraphicalFunctionKind,
+  xPoints: undefined as List<number> | undefined,
+  yPoints: List<number>(),
+  xScale: new GraphicalFunctionScale(new pb.GraphicalFunction.Scale()),
+  yScale: new GraphicalFunctionScale(new pb.GraphicalFunction.Scale()),
+};
+export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
   constructor(gf: pb.GraphicalFunction) {
-    this.kind = getGraphicalFunctionKind(gf.getKind());
     const xPoints = gf.getXPointsList();
-    this.xPoints = xPoints.length !== 0 ? xPoints : undefined;
-    this.yPoints = gf.getYPointsList();
-    this.xScale = new GraphicalFunctionScale(defined(gf.getXScale()));
-    this.yScale = new GraphicalFunctionScale(defined(gf.getYScale()));
+    super({
+      kind: getGraphicalFunctionKind(gf.getKind()),
+      xPoints: xPoints.length !== 0 ? List(xPoints) : undefined,
+      yPoints: List(gf.getYPointsList()),
+      xScale: new GraphicalFunctionScale(defined(gf.getXScale())),
+      yScale: new GraphicalFunctionScale(defined(gf.getYScale())),
+    });
   }
 }
 
-export class Variable {
+export interface Variable {
   readonly ident: string;
-
-  constructor(ident: string) {
-    this.ident = ident;
-  }
 }
 
-export class Stock extends Variable {
-  readonly equation: string;
-  readonly documentation: string;
-  readonly units: string;
-  readonly inflows: string[];
-  readonly outflows: string[];
-  readonly nonNegative: boolean;
-
+const stockDefaults = {
+  ident: '',
+  equation: '',
+  documentation: '',
+  units: '',
+  inflows: List<string>(),
+  outflows: List<string>(),
+  nonNegative: false,
+};
+export class Stock extends Record(stockDefaults) implements Variable {
   constructor(stock: pb.Variable.Stock) {
-    super(stock.getIdent());
-    this.equation = stock.getEquation();
-    this.documentation = stock.getDocumentation();
-    this.units = stock.getUnits();
-    this.inflows = stock.getInflowsList();
-    this.outflows = stock.getOutflowsList();
-    this.nonNegative = stock.getNonNegative();
+    super({
+      ident: stock.getIdent(),
+      equation: stock.getEquation(),
+      documentation: stock.getDocumentation(),
+      units: stock.getUnits(),
+      inflows: List(stock.getInflowsList()),
+      outflows: List(stock.getOutflowsList()),
+      nonNegative: stock.getNonNegative(),
+    });
   }
 }
 
-export class Flow extends Variable {
-  readonly equation: string;
-  readonly documentation: string;
-  readonly units: string;
-  readonly gf?: GraphicalFunction;
-  readonly nonNegative: boolean;
-
+const flowDefaults = {
+  ident: '',
+  equation: '',
+  documentation: '',
+  units: '',
+  gf: undefined as GraphicalFunction | undefined,
+  nonNegative: false,
+};
+export class Flow extends Record(flowDefaults) implements Variable {
   constructor(flow: pb.Variable.Flow) {
-    super(flow.getIdent());
-    this.equation = flow.getEquation();
-    this.documentation = flow.getDocumentation();
-    this.units = flow.getUnits();
     const gf = flow.getGf();
-    this.gf = gf ? new GraphicalFunction(gf) : undefined;
-    this.nonNegative = flow.getNonNegative();
+    super({
+      ident: flow.getIdent(),
+      equation: flow.getEquation(),
+      documentation: flow.getDocumentation(),
+      units: flow.getUnits(),
+      gf: gf ? new GraphicalFunction(gf) : undefined,
+      nonNegative: flow.getNonNegative(),
+    });
   }
 }
 
-export class Aux extends Variable {
-  readonly equation: string;
-  readonly documentation: string;
-  readonly units: string;
-  readonly gf?: GraphicalFunction;
-
+const auxDefaults = {
+  ident: '',
+  equation: '',
+  documentation: '',
+  units: '',
+  gf: undefined as GraphicalFunction | undefined,
+};
+export class Aux extends Record(auxDefaults) implements Variable {
   constructor(aux: pb.Variable.Aux) {
-    super(aux.getIdent());
-    this.equation = aux.getEquation();
-    this.documentation = aux.getDocumentation();
-    this.units = aux.getUnits();
     const gf = aux.getGf();
-    this.gf = gf ? new GraphicalFunction(gf) : undefined;
+    super({
+      ident: aux.getIdent(),
+      equation: aux.getEquation(),
+      documentation: aux.getDocumentation(),
+      units: aux.getUnits(),
+      gf: gf ? new GraphicalFunction(gf) : undefined,
+    });
   }
 }
 
-export class ModuleReference {
-  readonly src: string;
-  readonly dst: string;
-
+const moduleReferenceDefaults = {
+  src: '',
+  dst: '',
+};
+export class ModuleReference extends Record(moduleReferenceDefaults) {
   constructor(modRef: pb.Variable.Module.Reference) {
-    this.src = modRef.getSrc();
-    this.dst = modRef.getDst();
+    super({
+      src: modRef.getSrc(),
+      dst: modRef.getDst(),
+    });
   }
 }
 
-export class Module extends Variable {
-  readonly modelName: string;
-  readonly documentation: string;
-  readonly units: string;
-  readonly references: ModuleReference[];
-
+const moduleDefaults = {
+  ident: '',
+  modelName: '',
+  documentation: '',
+  units: '',
+  references: List<ModuleReference>(),
+};
+export class Module extends Record(moduleDefaults) implements Variable {
   constructor(module: pb.Variable.Module) {
-    super(module.getIdent());
-    this.modelName = module.getModelName();
-    this.documentation = module.getDocumentation();
-    this.units = module.getUnits();
-    this.references = module.getReferencesList().map((modRef) => new ModuleReference(modRef));
+    super({
+      ident: module.getIdent(),
+      modelName: module.getModelName(),
+      documentation: module.getDocumentation(),
+      units: module.getUnits(),
+      references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
+    });
   }
 }
 
@@ -155,225 +178,272 @@ function getLabelSide(labelSide: pb.ViewElement.LabelSideMap[keyof pb.ViewElemen
   }
 }
 
-export class ViewElement {
+export interface ViewElement {
   readonly uid: number;
-
-  constructor(uid: number) {
-    this.uid = uid;
-  }
 }
 
-export class AuxViewElement extends ViewElement {
-  readonly name: string;
-  readonly x: number;
-  readonly y: number;
-  readonly labelSide: LabelSide;
-
+const auxViewElementDefaults = {
+  uid: -1,
+  name: '',
+  x: -1,
+  y: -1,
+  labelSide: 'center' as LabelSide,
+};
+export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
   constructor(aux: pb.ViewElement.Aux) {
-    super(aux.getUid());
-    this.name = aux.getName();
-    this.x = aux.getX();
-    this.y = aux.getY();
-    this.labelSide = getLabelSide(aux.getLabelSide());
+    super({
+      uid: aux.getUid(),
+      name: aux.getName(),
+      x: aux.getX(),
+      y: aux.getY(),
+      labelSide: getLabelSide(aux.getLabelSide()),
+    });
   }
 }
 
-export class StockViewElement extends ViewElement {
-  readonly name: string;
-  readonly x: number;
-  readonly y: number;
-  readonly labelSide: LabelSide;
-
+const stockViewElementDefaults = {
+  uid: -1,
+  name: '',
+  x: -1,
+  y: -1,
+  labelSide: 'center' as LabelSide,
+};
+export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
   constructor(stock: pb.ViewElement.Stock) {
-    super(stock.getUid());
-    this.name = stock.getName();
-    this.x = stock.getX();
-    this.y = stock.getY();
-    this.labelSide = getLabelSide(stock.getLabelSide());
+    super({
+      uid: stock.getUid(),
+      name: stock.getName(),
+      x: stock.getX(),
+      y: stock.getY(),
+      labelSide: getLabelSide(stock.getLabelSide()),
+    });
   }
 }
 
-export class Point {
-  readonly x: number;
-  readonly y: number;
-  readonly attachedToUid: number;
-
+const pointDefaults = {
+  x: -1,
+  y: -1,
+  attachedToUid: undefined as number | undefined,
+};
+export class Point extends Record(pointDefaults) {
   constructor(point: pb.ViewElement.FlowPoint) {
-    this.x = point.getX();
-    this.y = point.getY();
-    this.attachedToUid = point.getAttachedToUid();
+    const attachedToUid = point.getAttachedToUid();
+    super({
+      x: point.getX(),
+      y: point.getY(),
+      attachedToUid: attachedToUid ? attachedToUid : undefined,
+    });
   }
 }
 
-export class FlowViewElement extends ViewElement {
-  readonly name: string;
-  readonly x: number;
-  readonly y: number;
-  readonly labelSide: LabelSide;
-  readonly points: Point[];
-
+const flowViewElementDefaults = {
+  uid: -1,
+  name: '',
+  x: -1,
+  y: -1,
+  labelSide: 'center' as LabelSide,
+  points: List<Point>(),
+};
+export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
   constructor(flow: pb.ViewElement.Flow) {
-    super(flow.getUid());
-    this.name = flow.getName();
-    this.x = flow.getX();
-    this.y = flow.getY();
-    this.labelSide = getLabelSide(flow.getLabelSide());
-    this.points = flow.getPointsList().map((point) => new Point(point));
+    super({
+      uid: flow.getUid(),
+      name: flow.getName(),
+      x: flow.getX(),
+      y: flow.getY(),
+      labelSide: getLabelSide(flow.getLabelSide()),
+      points: List(flow.getPointsList().map((point) => new Point(point))),
+    });
   }
 }
 
-export class LinkViewElement extends ViewElement {
-  readonly fromUid: number;
-  readonly toUid: number;
-  readonly arc?: number;
-  readonly isStraight: boolean;
-  readonly multiPoint?: Point[];
-
+const linkViewElementDefaults = {
+  uid: -1,
+  fromUid: -1,
+  toUid: -1,
+  arc: 0.0 as number | undefined,
+  isStraight: false,
+  multiPoint: undefined as List<Point> | undefined,
+};
+export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
   constructor(link: pb.ViewElement.Link) {
-    super(link.getUid());
-    this.fromUid = link.getFromUid();
-    this.toUid = link.getToUid();
+    let arc: number | undefined;
+    let isStraight: boolean;
+    let multiPoint: List<Point> | undefined;
     switch (link.getShapeCase()) {
       case pb.ViewElement.Link.ShapeCase.ARC:
-        this.arc = link.getArc();
-        this.isStraight = false;
-        this.multiPoint = undefined;
+        arc = link.getArc();
+        isStraight = false;
+        multiPoint = undefined;
         break;
       case pb.ViewElement.Link.ShapeCase.IS_STRAIGHT:
-        this.arc = undefined;
-        this.isStraight = link.getIsStraight();
-        this.multiPoint = undefined;
+        arc = undefined;
+        isStraight = link.getIsStraight();
+        multiPoint = undefined;
         break;
       case pb.ViewElement.Link.ShapeCase.MULTI_POINT:
-        this.arc = undefined;
-        this.isStraight = false;
-        this.multiPoint = defined(link.getMultiPoint())
-          .getPointsList()
-          .map((point) => new Point(point));
+        arc = undefined;
+        isStraight = false;
+        multiPoint = List(
+          defined(link.getMultiPoint())
+            .getPointsList()
+            .map((point) => new Point(point)),
+        );
         break;
       default:
         throw new Error('invariant broken: protobuf link with empty shape');
     }
+    super({
+      uid: link.getUid(),
+      fromUid: link.getFromUid(),
+      toUid: link.getToUid(),
+      arc,
+      isStraight,
+      multiPoint,
+    });
   }
 }
 
-export class ModuleViewElement extends ViewElement {
-  readonly name: string;
-  readonly x: number;
-  readonly y: number;
-  readonly labelSide: LabelSide;
-
+const moduleViewElementDefaults = {
+  uid: -1,
+  name: '',
+  x: -1,
+  y: -1,
+  labelSide: 'center' as LabelSide,
+};
+export class ModuleViewElement extends Record(moduleViewElementDefaults) implements ViewElement {
   constructor(module: pb.ViewElement.Module) {
-    super(module.getUid());
-    this.name = module.getName();
-    this.x = module.getX();
-    this.y = module.getY();
-    this.labelSide = getLabelSide(module.getLabelSide());
+    super({
+      uid: module.getUid(),
+      name: module.getName(),
+      x: module.getX(),
+      y: module.getY(),
+      labelSide: getLabelSide(module.getLabelSide()),
+    });
   }
 }
 
-export class AliasViewElement extends ViewElement {
-  readonly aliasOfUid: number;
-  readonly x: number;
-  readonly y: number;
-  readonly labelSide: LabelSide;
-
+const aliasViewElementDefaults = {
+  uid: -1,
+  aliasOfUid: -1,
+  x: -1,
+  y: -1,
+  labelSide: 'center' as LabelSide,
+};
+export class AliasViewElement extends Record(aliasViewElementDefaults) implements ViewElement {
   constructor(alias: pb.ViewElement.Alias) {
-    super(alias.getUid());
-    this.aliasOfUid = alias.getAliasOfUid();
-    this.x = alias.getX();
-    this.y = alias.getY();
-    this.labelSide = getLabelSide(alias.getLabelSide());
+    super({
+      uid: alias.getUid(),
+      aliasOfUid: alias.getAliasOfUid(),
+      x: alias.getX(),
+      y: alias.getY(),
+      labelSide: getLabelSide(alias.getLabelSide()),
+    });
   }
 }
 
-export class CloudViewElement extends ViewElement {
-  readonly flowUid: number;
-  readonly x: number;
-  readonly y: number;
-
+const cloudViewElementDefaults = {
+  uid: -1,
+  flowUid: -1,
+  x: -1,
+  y: -1,
+};
+export class CloudViewElement extends Record(cloudViewElementDefaults) implements ViewElement {
   constructor(cloud: pb.ViewElement.Cloud) {
-    super(cloud.getUid());
-    this.flowUid = cloud.getFlowUid();
-    this.x = cloud.getX();
-    this.y = cloud.getY();
+    super({
+      uid: cloud.getUid(),
+      flowUid: cloud.getFlowUid(),
+      x: cloud.getX(),
+      y: cloud.getY(),
+    });
   }
 }
 
-export class View {}
-
-export class StockFlowView extends View {
-  readonly elements: ViewElement[];
-
+const stockFlowViewDefaults = {
+  elements: List<ViewElement>(),
+};
+export class StockFlowView extends Record(stockFlowViewDefaults) {
   constructor(view: pb.View) {
-    super();
-    this.elements = view.getElementsList().map((element) => {
-      switch (element.getElementCase()) {
-        case pb.ViewElement.ElementCase.AUX:
-          return new AuxViewElement(defined(element.getAux()));
-        case pb.ViewElement.ElementCase.STOCK:
-          return new StockViewElement(defined(element.getStock()));
-        case pb.ViewElement.ElementCase.FLOW:
-          return new FlowViewElement(defined(element.getFlow()));
-        case pb.ViewElement.ElementCase.LINK:
-          return new LinkViewElement(defined(element.getLink()));
-        case pb.ViewElement.ElementCase.MODULE:
-          return new ModuleViewElement(defined(element.getModule()));
-        case pb.ViewElement.ElementCase.ALIAS:
-          return new AliasViewElement(defined(element.getAlias()));
-        case pb.ViewElement.ElementCase.CLOUD:
-          return new CloudViewElement(defined(element.getCloud()));
-        default:
-          throw new Error('invariant broken: protobuf variable with empty oneof');
-      }
-    });
-  }
-}
-
-export class Model {
-  readonly name: string;
-  readonly variables: Map<string, Variable>;
-  readonly views: View[];
-
-  constructor(model: pb.Model) {
-    this.name = model.getName();
-    this.variables = new Map(
-      model
-        .getVariablesList()
-        .map((v: pb.Variable) => {
-          switch (v.getVCase()) {
-            case pb.Variable.VCase.STOCK:
-              return new Stock(defined(v.getStock())) as Variable;
-            case pb.Variable.VCase.FLOW:
-              return new Flow(defined(v.getFlow())) as Variable;
-            case pb.Variable.VCase.AUX:
-              return new Aux(defined(v.getAux())) as Variable;
-            case pb.Variable.VCase.MODULE:
-              return new Module(defined(v.getModule())) as Variable;
-            default:
-              throw new Error('invariant broken: protobuf variable with empty oneof');
-          }
-        })
-        .map((v: Variable) => [v.ident, v]),
+    const elements = List(
+      view.getElementsList().map((element) => {
+        switch (element.getElementCase()) {
+          case pb.ViewElement.ElementCase.AUX:
+            return new AuxViewElement(defined(element.getAux()));
+          case pb.ViewElement.ElementCase.STOCK:
+            return new StockViewElement(defined(element.getStock()));
+          case pb.ViewElement.ElementCase.FLOW:
+            return new FlowViewElement(defined(element.getFlow()));
+          case pb.ViewElement.ElementCase.LINK:
+            return new LinkViewElement(defined(element.getLink()));
+          case pb.ViewElement.ElementCase.MODULE:
+            return new ModuleViewElement(defined(element.getModule()));
+          case pb.ViewElement.ElementCase.ALIAS:
+            return new AliasViewElement(defined(element.getAlias()));
+          case pb.ViewElement.ElementCase.CLOUD:
+            return new CloudViewElement(defined(element.getCloud()));
+          default:
+            throw new Error('invariant broken: protobuf variable with empty oneof');
+        }
+      }),
     );
-    this.views = model.getViewsList().map((view) => {
-      switch (view.getKind()) {
-        case pb.View.ViewType.STOCK_FLOW:
-          return new StockFlowView(view);
-        default:
-          throw new Error('invariant broken: protobuf view with unknown kind');
-      }
+    super({
+      elements,
     });
   }
 }
 
-export class Dt {
-  readonly dt: number;
-  readonly isReciprocal: boolean;
+const modelDefaults = {
+  name: '',
+  variables: Map<string, Variable>(),
+  views: List<StockFlowView>(),
+};
+export class Model extends Record(modelDefaults) {
+  constructor(model: pb.Model) {
+    super({
+      name: model.getName(),
+      variables: Map(
+        model
+          .getVariablesList()
+          .map((v: pb.Variable) => {
+            switch (v.getVCase()) {
+              case pb.Variable.VCase.STOCK:
+                return new Stock(defined(v.getStock())) as Variable;
+              case pb.Variable.VCase.FLOW:
+                return new Flow(defined(v.getFlow())) as Variable;
+              case pb.Variable.VCase.AUX:
+                return new Aux(defined(v.getAux())) as Variable;
+              case pb.Variable.VCase.MODULE:
+                return new Module(defined(v.getModule())) as Variable;
+              default:
+                throw new Error('invariant broken: protobuf variable with empty oneof');
+            }
+          })
+          .map((v: Variable) => [v.ident, v]),
+      ),
+      views: List(
+        model.getViewsList().map((view) => {
+          switch (view.getKind()) {
+            case pb.View.ViewType.STOCK_FLOW:
+              return new StockFlowView(view);
+            default:
+              throw new Error('invariant broken: protobuf view with unknown kind');
+          }
+        }),
+      ),
+    });
+  }
+}
 
+const dtDefaults = {
+  dt: -1,
+  isReciprocal: false,
+};
+export class Dt extends Record(dtDefaults) {
   constructor(dt: pb.Dt) {
-    this.dt = dt.getValue();
-    this.isReciprocal = dt.getIsReciprocal();
+    super({
+      dt: dt.getValue(),
+      isReciprocal: dt.getIsReciprocal(),
+    });
   }
 }
 
@@ -390,22 +460,25 @@ function getSimMethod(method: pb.SimMethodMap[keyof pb.SimMethodMap]): SimMethod
   }
 }
 
-export class SimSpecs {
-  readonly start: number;
-  readonly stop: number;
-  readonly dt: Dt;
-  readonly saveStep?: Dt;
-  readonly simMethod: SimMethod;
-  readonly timeUnits?: string;
-
+const simSpecsDefaults = {
+  start: -1,
+  stop: -1,
+  dt: new Dt(new pb.Dt()),
+  saveStep: undefined as Dt | undefined,
+  simMethod: 'euler' as SimMethod,
+  timeUnits: undefined as string | undefined,
+};
+export class SimSpecs extends Record(simSpecsDefaults) {
   constructor(simSpecs: pb.SimSpecs) {
-    this.start = simSpecs.getStart();
-    this.stop = simSpecs.getStop();
-    this.dt = new Dt(defined(simSpecs.getDt()));
     const saveStep = simSpecs.getSaveStep();
-    this.saveStep = saveStep ? new Dt(saveStep) : undefined;
-    this.simMethod = getSimMethod(simSpecs.getSimMethod());
-    this.timeUnits = simSpecs.getTimeUnits();
+    super({
+      start: simSpecs.getStart(),
+      stop: simSpecs.getStop(),
+      dt: new Dt(defined(simSpecs.getDt())),
+      saveStep: saveStep ? new Dt(saveStep) : undefined,
+      simMethod: getSimMethod(simSpecs.getSimMethod()),
+      timeUnits: simSpecs.getTimeUnits(),
+    });
   }
 
   static default(): SimSpecs {
@@ -420,14 +493,17 @@ export class SimSpecs {
   }
 }
 
-export class Project {
-  readonly name: string;
-  readonly simSpecs: SimSpecs;
-  readonly models: Map<string, Model>;
-
+const projectDefaults = {
+  name: '',
+  simSpecs: SimSpecs.default(),
+  models: Map<string, Model>(),
+};
+export class Project extends Record(projectDefaults) {
   constructor(project: pb.Project) {
-    this.name = project.getName();
-    this.simSpecs = new SimSpecs(defined(project.getSimSpecs()));
-    this.models = new Map(project.getModelsList().map((model) => [model.getName(), new Model(model)]));
+    super({
+      name: project.getName(),
+      simSpecs: new SimSpecs(defined(project.getSimSpecs())),
+      models: Map(project.getModelsList().map((model) => [model.getName(), new Model(model)])),
+    });
   }
 }

@@ -12,6 +12,8 @@ import { List, Map, Set } from 'immutable';
 
 import { defined, Series } from '../../common';
 
+import * as datamodel from '../../datamodel';
+import { Project as DmProject, ViewElement as DmViewElement } from '../../datamodel';
 import { Model } from '../../../engine/model';
 import { Project } from '../../../engine/project';
 import { Stock as StockVar } from '../../../engine/vars';
@@ -127,8 +129,11 @@ interface CanvasState {
 interface CanvasPropsFull extends WithStyles<typeof styles> {
   embedded: boolean;
   project: Project;
+  dmProject: DmProject;
   model: Model;
+  dmModel: datamodel.Model;
   view: View;
+  dmView: datamodel.StockFlowView;
   data: Map<string, Series>;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   selection: Set<UID>;
@@ -147,8 +152,11 @@ export type CanvasProps = Pick<
   CanvasPropsFull,
   | 'embedded'
   | 'project'
+  | 'dmProject'
   | 'model'
+  | 'dmModel'
   | 'view'
+  | 'dmView'
   | 'data'
   | 'selectedTool'
   | 'selection'
@@ -184,7 +192,7 @@ export const Canvas = withStyles(styles)(
 
     // a helper object to go from well-known element types to constructors
     readonly builder: {
-      [K in WellKnownElement]: (v: ViewElement) => React.ReactElement | undefined;
+      [K in WellKnownElement]: (v: ViewElement, v2: DmViewElement) => React.ReactElement | undefined;
     };
 
     constructor(props: CanvasPropsFull) {
@@ -257,9 +265,9 @@ export const Canvas = withStyles(styles)(
       return this.props.selection.has(element.uid);
     }
 
-    private alias = (element: ViewElement): React.ReactElement => {
+    private alias = (element: ViewElement, element2: DmViewElement): React.ReactElement => {
       // FIXME
-      return this.aux(element, true);
+      return this.aux(element, element2, true);
     };
 
     private cloud = (element: ViewElement): React.ReactElement | undefined => {
@@ -351,7 +359,7 @@ export const Canvas = withStyles(styles)(
       return element.type === 'flow' || element.type === 'aux';
     }
 
-    private aux = (element: ViewElement, _isGhost = false): React.ReactElement => {
+    private aux = (element: ViewElement, element2: DmViewElement, _isGhost = false): React.ReactElement => {
       const variableErrors = this.props.model.vars.get(element.ident)?.errors.size || 0;
       const isSelected = this.isSelected(element);
       const series = this.props.data.get(element.ident);
@@ -371,7 +379,7 @@ export const Canvas = withStyles(styles)(
       return <Aux key={element.ident} {...props} />;
     };
 
-    private stock = (element: ViewElement): React.ReactElement => {
+    private stock = (element: ViewElement, element2: DmViewElement): React.ReactElement => {
       const variableErrors = this.props.model.vars.get(element.ident)?.errors.size || 0;
       const isSelected = this.isSelected(element);
       const series = this.props.data.get(element.ident);
@@ -389,7 +397,7 @@ export const Canvas = withStyles(styles)(
       return <Stock key={element.ident} {...props} />;
     };
 
-    private module = (element: ViewElement) => {
+    private module = (element: ViewElement, element2: DmViewElement) => {
       const isSelected = this.isSelected(element);
       const props: ModuleProps = {
         element,
@@ -399,7 +407,7 @@ export const Canvas = withStyles(styles)(
       return <Module key={element.ident} {...props} />;
     };
 
-    private connector = (element: ViewElement) => {
+    private connector = (element: ViewElement, element2: DmViewElement) => {
       const { isMovingArrow } = this.state;
       const isSelected = this.props.selection.has(element.uid);
 
@@ -470,7 +478,7 @@ export const Canvas = withStyles(styles)(
       });
     }
 
-    private flow = (element: ViewElement) => {
+    private flow = (element: ViewElement, element2: DmViewElement) => {
       const variableErrors = this.props.model.vars.get(element.ident)?.errors.size || 0;
       const { isMovingArrow } = this.state;
       const isSelected = this.isSelected(element);
@@ -575,7 +583,10 @@ export const Canvas = withStyles(styles)(
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
 
-    private populateNamedElements(displayElements: List<ViewElement>): void {
+    private populateNamedElements(
+      displayElements: List<ViewElement>,
+      dmDisplayElements: List<datamodel.ViewElement>,
+    ): void {
       if (!this.cachedElements.equals(displayElements)) {
         this.nameMap = Map(displayElements.filter((el) => el.hasName).map((el) => [el.ident, el.uid])).set(
           fauxTarget.ident,
@@ -1047,11 +1058,13 @@ export const Canvas = withStyles(styles)(
     }
 
     render() {
-      const { view, embedded, classes } = this.props;
+      const { view, dmView, embedded, classes } = this.props;
 
       if (!this.props.selection.equals(this.selection)) {
         this.selection = this.props.selection;
       }
+
+      const dmViewElements = dmView.elements;
 
       // filter all the elements in this XMILE view down to just the ones
       // we know how to display.
@@ -1070,7 +1083,7 @@ export const Canvas = withStyles(styles)(
       }
 
       // phase 1: build up a map of ident -> ViewElement
-      this.populateNamedElements(displayElements);
+      this.populateNamedElements(displayElements, dmViewElements);
 
       // FIXME: this is so gross
       this.elementBounds = List<Rect | undefined>();

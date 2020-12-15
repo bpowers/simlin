@@ -15,6 +15,7 @@ import { UID, ViewElement } from './engine/xmile';
 import { createMuiTheme } from '@material-ui/core/styles';
 import { ServerStyleSheets, ThemeProvider } from '@material-ui/styles';
 
+import { Project as DmProject } from './app/datamodel';
 import { defined, exists, Series } from './app/common';
 import { Canvas } from './app/model/drawing/Canvas';
 import { Box, Point } from './app/model/drawing/common';
@@ -23,8 +24,14 @@ const theme = createMuiTheme({
   palette: {},
 });
 
-export function renderSvgToString(project: Project, modelName: string, data?: Map<string, Series>): [string, Box] {
+export function renderSvgToString(
+  project: Project,
+  dmProject: DmProject,
+  modelName: string,
+  data?: Map<string, Series>,
+): [string, Box] {
   const model = defined(project.model(modelName));
+  const dmModel = defined(dmProject.models.get(modelName));
 
   if (!data) {
     data = Map<string, Series>();
@@ -45,8 +52,11 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
     <Canvas
       embedded={true}
       project={defined(project)}
+      dmProject={dmProject}
       model={model}
+      dmModel={dmModel}
       view={defined(model.view(0))}
+      dmView={defined(dmModel.views.get(0))}
       data={data}
       selectedTool={undefined}
       selection={Set()}

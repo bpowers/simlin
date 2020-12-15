@@ -14,7 +14,7 @@ import { Canvg } from 'canvg';
 
 import { Project as ProjectPB } from './../../system-dynamics-engine/src/project_io_pb';
 
-import { Project as DmProject } from '../datamodel';
+import { Project as DmProject, Model as DmModel } from '../datamodel';
 
 import { Model } from '../../engine/model';
 import { Project, stdProject } from '../../engine/project';
@@ -167,6 +167,7 @@ class ModelError implements Error {
 
 interface EditorState {
   modelErrors: List<Error>;
+  projectDataModel?: DmProject;
   projectHistory: Stack<Project>;
   projectOffset: number;
   modelName: string;
@@ -382,6 +383,7 @@ export const Editor = withStyles(styles)(
       // we don't call updateProject here because we don't want to
       // POST a new version up when we've just downloaded it.
       this.setState({
+        projectDataModel: dmProject,
         projectVersion: defined(projectResponse.version) as number,
         projectHistory: Stack([project]),
         projectOffset: 0,
@@ -999,6 +1001,15 @@ export const Editor = withStyles(styles)(
       );
     }
 
+    getDmModel(): DmModel | undefined {
+      const project = defined(this.state.projectDataModel);
+      if (!project) {
+        return;
+      }
+      const modelName = this.state.modelName;
+      return project.models.get(modelName);
+    }
+
     getModel(): Model | undefined {
       const project = this.project();
       if (!project) {
@@ -1020,12 +1031,18 @@ export const Editor = withStyles(styles)(
       if (!model) {
         return;
       }
+      const dmProject = defined(this.state.projectDataModel);
+      const dmModel = defined(this.getDmModel());
+
       return (
         <Canvas
           embedded={!!embedded}
           project={project}
+          dmProject={dmProject}
           model={model}
+          dmModel={defined(dmModel)}
           view={defined(model.view(0))}
+          dmView={defined(dmModel.views.get(0))}
           data={this.state.data}
           selectedTool={this.state.selectedTool}
           selection={this.state.selection}
@@ -1289,9 +1306,10 @@ export const Editor = withStyles(styles)(
       if (!project || !this.state.modelName) {
         return;
       }
+      const dmProject = defined(this.state.projectDataModel);
       const { data, modelName } = this.state;
 
-      const [svg, viewbox] = renderSvgToString(project, modelName, data);
+      const [svg, viewbox] = renderSvgToString(project, dmProject, modelName, data);
       const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
       const ctx = osCanvas.getContext('2d');
       const canvas = Canvg.fromString(exists(ctx), svg, {

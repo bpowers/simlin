@@ -10,11 +10,13 @@ import { Canvg, presets } from 'canvg';
 import fetch from 'node-fetch';
 import { DOMParser } from 'xmldom';
 
-import { exists } from './engine/common';
 import { stdProject } from './engine/project';
 import { FileFromJSON } from './engine/xmile';
 
-import { defined } from './app/common';
+import { Project as ProjectPB } from './system-dynamics-engine/src/project_io_pb';
+
+import { exists, defined } from './app/common';
+import { Project as DmProject } from './app/datamodel';
 import { renderSvgToString } from './render-common';
 import { File } from './schemas/file_pb';
 
@@ -26,13 +28,15 @@ const preset = presets.node({
 
 export async function renderToPNG(fileDoc: File): Promise<Buffer> {
   const sdFile = FileFromJSON(JSON.parse(fileDoc.getJsonContents()));
+  const projectPB = ProjectPB.deserializeBinary(fileDoc.getProjectContents_asU8());
+  const dmProject = new DmProject(projectPB);
 
   const [sdProject, err2] = stdProject.addFile(defined(sdFile) as any);
   if (err2) {
     throw new Error(`stdProject.addFile: ${err2.message}`);
   }
 
-  const [svg, viewbox] = renderSvgToString(defined(sdProject), 'main');
+  const [svg, viewbox] = renderSvgToString(defined(sdProject), dmProject, 'main');
 
   canvas.registerFont('fonts/Roboto-Light.ttf', { family: 'Roboto' });
 
