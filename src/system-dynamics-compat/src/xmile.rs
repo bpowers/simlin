@@ -770,13 +770,22 @@ pub mod view_element {
 
     impl From<Stock> for datamodel::view_element::Stock {
         fn from(v: Stock) -> Self {
+            let x = match v.width {
+                Some(w) => v.x + w / 2.0,
+                None => v.x,
+            };
+            let y = match v.height {
+                Some(h) => v.y + h / 2.0,
+                None => v.y,
+            };
             datamodel::view_element::Stock {
                 name: v.name,
                 uid: v.uid.unwrap_or(-1),
-                x: v.x,
-                y: v.y,
+                x,
+                y,
+                // isee's default label side is top
                 label_side: datamodel::view_element::LabelSide::from(
-                    v.label_side.unwrap_or(LabelSide::Bottom),
+                    v.label_side.unwrap_or(LabelSide::Top),
                 ),
             }
         }
