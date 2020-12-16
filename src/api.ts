@@ -245,8 +245,8 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      if (!req.body.file) {
-        res.status(400).json({ error: 'file is required' });
+      if (!req.body.projectPB) {
+        res.status(400).json({ error: 'projectPB is required' });
         return;
       }
 

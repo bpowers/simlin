@@ -166,7 +166,6 @@ class ModelError implements Error {
 interface EditorState {
   modelErrors: List<Error>;
   activeProject?: Project;
-  activeEngine?: IEngine;
   projectHistory: Stack<Readonly<Uint8Array>>;
   projectOffset: number;
   modelName: string;
@@ -191,6 +190,8 @@ interface EditorProps extends WithStyles<typeof styles> {
 
 export const Editor = withStyles(styles)(
   class InnerEditor extends React.PureComponent<EditorProps, EditorState> {
+    private activeEngine?: IEngine;
+
     constructor(props: EditorProps) {
       super(props);
 
@@ -232,7 +233,7 @@ export const Editor = withStyles(styles)(
     }
 
     private engine(): IEngine | undefined {
-      return this.state.activeEngine;
+      return this.activeEngine;
     }
 
     private scheduleSimRun(): void {
@@ -275,10 +276,14 @@ export const Editor = withStyles(styles)(
         }
       }
 
+      const activeProjectPB = ProjectPB.deserializeBinary(serializedProject as Uint8Array);
+      const activeProject = new Project(activeProjectPB);
+
       const priorHistory = this.state.projectHistory.slice();
 
       this.setState({
         projectHistory: priorHistory.unshift(serializedProject).slice(0, MaxUndoSize),
+        activeProject,
         projectOffset: 0,
       });
       if (scheduleSave) {
@@ -295,14 +300,10 @@ export const Editor = withStyles(styles)(
     }
 
     private async save(project: Readonly<Uint8Array>, currVersion: number): Promise<void> {
-      console.log(`saving project version ${currVersion + 1}`);
-
-      const copied = project.slice();
       const bodyContents = {
         currVersion,
-        projectPB: fromUint8Array(copied),
+        projectPB: fromUint8Array(project as Uint8Array),
       };
-      console.log(`modified? ${!uint8ArraysEqual(project, copied)}`);
 
       const base = this.getBaseURL();
       const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
@@ -366,20 +367,17 @@ export const Editor = withStyles(styles)(
       }
 
       const project = new Project(projectPB);
-
-      const { open } = await import('../../engine-v2/pkg');
-
-      const engine = open(projectBinary);
+      const engine = await this.openEngine(projectBinary);
       if (!engine) {
-        this.appendModelError(`opening the project in the engine failed`);
         return;
       }
+
+      this.activeEngine = engine;
 
       // we don't call updateProject here because we don't want to
       // POST a new version up when we've just downloaded it.
       this.setState({
         activeProject: project,
-        activeEngine: engine,
         projectVersion: defined(projectResponse.version) as number,
         projectHistory: Stack([projectBinary]),
         projectOffset: 0,
@@ -1330,15 +1328,36 @@ export const Editor = withStyles(styles)(
       });
     };
 
+    async openEngine(serializedProject: Readonly<Uint8Array>): Promise<IEngine | undefined> {
+      const { open } = await import('../../engine-v2/pkg');
+
+      const engine = open(serializedProject as Uint8Array);
+      if (!engine) {
+        this.appendModelError(`opening the project in the engine failed`);
+        return;
+      }
+
+      return engine;
+    }
+
     handleUndoRedo = (kind: 'undo' | 'redo') => {
       const delta = kind === 'undo' ? 1 : -1;
       let projectOffset = this.state.projectOffset + delta;
       // ensure our offset is always valid
       projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
       projectOffset = Math.max(projectOffset, 0);
-      this.setState({ projectOffset });
-      this.scheduleSimRun();
-      this.scheduleSave(defined(this.state.projectHistory.get(projectOffset)));
+      const serializedProject = defined(this.state.projectHistory.get(projectOffset));
+      const activeProjectPB = ProjectPB.deserializeBinary(serializedProject as Uint8Array);
+      const activeProject = new Project(activeProjectPB);
+      this.setState({ activeProject, projectOffset });
+
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      setTimeout(async () => {
+        this.activeEngine?.free();
+        this.activeEngine = await this.openEngine(serializedProject);
+        this.scheduleSimRun();
+        this.scheduleSave(serializedProject);
+      });
     };
 
     async takeSnapshot() {
