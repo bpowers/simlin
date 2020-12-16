@@ -19,8 +19,6 @@ import TextField from '@material-ui/core/TextField';
 import Typography from '@material-ui/core/Typography';
 import ExpandMoreIcon from '@material-ui/icons/ExpandMore';
 
-import { stdProject } from '../engine/project';
-
 import { Project } from './Project';
 import { User } from './User';
 
@@ -40,7 +38,6 @@ interface NewProjectState {
   descriptionField: string;
   errorMsg?: string;
   expanded: boolean;
-  projectJSON?: any;
   projectPB?: Uint8Array;
   isPublic?: boolean;
 }
@@ -91,10 +88,6 @@ export const NewProject = withStyles(styles)(
         projectName: this.state.projectNameField,
         description: this.state.descriptionField,
       };
-      if (this.state.projectJSON) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        bodyContents.projectJSON = this.state.projectJSON;
-      }
       if (this.state.projectPB) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         bodyContents.projectPB = fromUint8Array(this.state.projectPB);
@@ -147,10 +140,6 @@ export const NewProject = withStyles(styles)(
       }
     };
 
-    handleExpandClick = (): void => {
-      this.setState((state) => ({ expanded: !state.expanded }));
-    };
-
     handlePublicChecked = (): void => {
       this.setState((state) => ({ isPublic: !state.isPublic }));
     };
@@ -161,15 +150,6 @@ export const NewProject = withStyles(styles)(
         return;
       }
       const contents = await readFile(event.target.files[0]);
-      let doc: XMLDocument;
-      try {
-        doc = new DOMParser().parseFromString(contents, 'application/xml');
-      } catch (e) {
-        this.setState({
-          errorMsg: `DOMParser: ${e}`,
-        });
-        return;
-      }
 
       try {
         const { from_xmile } = await import('../importer/pkg');
@@ -181,29 +161,6 @@ export const NewProject = withStyles(styles)(
         });
         return;
       }
-
-      const [project, err] = stdProject.addXmileFile(doc, true);
-      if (err) {
-        console.log(err);
-        this.setState({
-          errorMsg: `error parsing model: ${err.message}`,
-        });
-        return;
-      }
-      if (!project) {
-        this.setState({
-          errorMsg: `unknown file creation error`,
-        });
-        return;
-      }
-
-      const file = project.toFile();
-      // ensure we've converted to plain-old JavaScript objects
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const projectJSON = JSON.parse(JSON.stringify(file));
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      this.setState({ projectJSON });
     };
 
     render() {

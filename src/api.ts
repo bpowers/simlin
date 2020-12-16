@@ -81,19 +81,14 @@ export const apiRouter = (app: Application): Router => {
         const project = createProject(user, projectName, projectDescription, isPublic);
         const json = project.toObject();
 
-        let sdJSON: string;
-        if (req.body.projectJSON) {
-          // TODO: ensure this is really a valid project...
-          sdJSON = JSON.stringify(req.body.projectJSON);
-        } else {
-          sdJSON = JSON.stringify(emptyProject(projectName, user.getDisplayName()));
-        }
         let sdPB: Buffer | undefined;
         if (req.body.projectPB) {
           sdPB = Buffer.from(req.body.projectPB, 'base64');
+        } else {
+          sdPB = Buffer.from(emptyProject(projectName, user.getDisplayName()).serializeBinary());
         }
 
-        const filePb = createFile(project.getId(), user.getId(), undefined, sdJSON, sdPB);
+        const filePb = createFile(project.getId(), user.getId(), undefined, sdPB);
 
         await app.db.file.create(filePb.getId(), filePb);
 
@@ -257,16 +252,13 @@ export const apiRouter = (app: Application): Router => {
 
       const projectVersion = req.body.currVersion as number;
       const newVersion = projectVersion + 1;
-      const fileContents = req.body.file as string;
-
-      const jsonContents = JSON.stringify(fileContents);
 
       let pbContents: Buffer | undefined;
       if (req.body.projectPB) {
         pbContents = Buffer.from(req.body.projectPB, 'base64');
       }
 
-      const file = createFile(projectModel.getId(), user.getId(), undefined, jsonContents, pbContents);
+      const file = createFile(projectModel.getId(), user.getId(), undefined, pbContents);
       await app.db.file.create(file.getId(), file);
 
       // only update if the version matches

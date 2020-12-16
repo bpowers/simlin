@@ -5,9 +5,7 @@
 import { parse as parseToml } from '@iarna/toml';
 import { promises as fs } from 'fs';
 import * as logger from 'winston';
-import { DOMParser } from 'xmldom';
 
-import { stdProject } from './engine/project';
 import { Database } from './models/db-interfaces';
 import { Table } from './models/table';
 import { createFile, createProject } from './project-creation';
@@ -16,20 +14,9 @@ import { User } from './schemas/user_pb';
 import { from_xmile } from './importer/pkg';
 
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
-  const xml = new DOMParser().parseFromString(xmile, 'application/xml');
-  const [project, err] = stdProject.addXmileFile(xml);
-  if (err) {
-    throw err;
-  }
-  if (!project) {
-    throw new Error('project not defined');
-  }
-
-  const sdFile = project.toFile();
-  const sdJson = JSON.stringify(sdFile);
   const sdPB: Uint8Array = from_xmile(xmile);
 
-  const file = createFile(projectId, userId, undefined, sdJson, sdPB);
+  const file = createFile(projectId, userId, undefined, sdPB);
   await files.create(file.getId(), file);
 
   return file;

@@ -4,40 +4,32 @@
 
 import { createHash } from 'crypto';
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
-import { List } from 'immutable';
-
-import {
-  File as XmileFile,
-  Header as XmileHeader,
-  Model as XmileModel,
-  Product as XmileProduct,
-  SimSpec as XmileSimSpec,
-  View as XmileView,
-  ViewDefaults,
-} from './engine/xmile';
 
 import { File as FilePb } from './schemas/file_pb';
 import { Project as ProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 
-export function emptyProject(name: string, userName: string): XmileFile {
-  return new XmileFile({
-    header: new XmileHeader({
-      vendor: 'systemdynamics.net',
-      product: new XmileProduct({ name: 'Model v1.0' }),
-      name,
-      author: userName,
-    }),
-    simSpec: new XmileSimSpec({
-      start: 0,
-      stop: 100,
-    }),
-    models: List([
-      new XmileModel({
-        views: List([new XmileView(ViewDefaults)]),
-      }),
-    ]),
-  });
+import * as pb from './system-dynamics-engine/src/project_io_pb';
+
+export function emptyProject(name: string, _userName: string): pb.Project {
+  const model = new pb.Model();
+  model.setName('main');
+  model.setViewsList([new pb.View()]);
+
+  const dt = new pb.Dt();
+  dt.setValue(1);
+
+  const simSpecs = new pb.SimSpecs();
+  simSpecs.setStart(0);
+  simSpecs.setStop(100);
+  simSpecs.setDt(dt);
+
+  const project = new pb.Project();
+  project.setName(name);
+  project.setModelsList([model]);
+  project.setSimSpecs(simSpecs);
+
+  return project;
 }
 
 const whitespace = /\s/gi;
@@ -70,7 +62,6 @@ export function createFile(
   projectId: string,
   userId: string,
   prevId: string | undefined,
-  jsonContents: string,
   pbContents: Uint8Array | undefined,
 ): FilePb {
   const created = new Timestamp();
@@ -80,7 +71,6 @@ export function createFile(
   filePb.setProjectId(projectId);
   filePb.setUserId(userId);
   filePb.setCreated(created);
-  filePb.setJsonContents(jsonContents);
   if (pbContents) {
     filePb.setProjectContents(pbContents);
   }

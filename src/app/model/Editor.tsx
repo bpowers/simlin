@@ -300,7 +300,7 @@ export const Editor = withStyles(styles)(
       const copied = project.slice();
       const bodyContents = {
         currVersion,
-        project: fromUint8Array(copied),
+        projectPB: fromUint8Array(copied),
       };
       console.log(`modified? ${!uint8ArraysEqual(project, copied)}`);
 
