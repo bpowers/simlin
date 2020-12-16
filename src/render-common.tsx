@@ -14,7 +14,7 @@ import { UID, ViewElement, Project } from './app/datamodel';
 import { createMuiTheme } from '@material-ui/core/styles';
 import { ServerStyleSheets, ThemeProvider } from '@material-ui/styles';
 
-import { defined, exists, Series } from './app/common';
+import { defined, Series } from './app/common';
 import { Canvas } from './app/model/drawing/Canvas';
 import { Box, Point } from './app/model/drawing/common';
 
@@ -63,13 +63,16 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
 
   let svg = renderToString(sheets.collect(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>));
 
+  let width = 100;
+  let height = 100;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
-  const viewboxStr = exists(svg.match(/viewBox="[^"]*"/))[0]
-    .split('"')[1]
-    .trim();
-  const viewboxParts = viewboxStr.split(' ').map(Number);
-  const width = viewboxParts[2];
-  const height = viewboxParts[3];
+  const viewboxMatch = svg.match(/viewBox="[^"]*"/);
+  if (viewboxMatch) {
+    const viewboxStr = viewboxMatch[0].split('"')[1].trim();
+    const viewboxParts = viewboxStr.split(' ').map(Number);
+    width = viewboxParts[2];
+    height = viewboxParts[3];
+  }
 
   const styles = `<style>\n${sheets.toString()}\n</style>\n<defs>\n`;
 
