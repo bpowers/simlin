@@ -16,6 +16,7 @@ pub struct Project {
     #[allow(dead_code)]
     project: Rc<engine::Project>,
     sim: Option<engine::Simulation>,
+    results: Option<engine::Results>,
 }
 
 #[wasm_bindgen]
@@ -206,20 +207,48 @@ impl Project {
     // simulation control
 
     #[wasm_bindgen(js_name = simRunToEnd)]
-    pub fn sim_run_to_end(&mut self) {}
+    pub fn sim_run_to_end(&mut self) {
+        if self.sim.is_none() {
+            return;
+        }
+        let sim = self.sim.as_ref().unwrap();
+
+        self.results = sim.run_to_end().ok();
+    }
 
     #[wasm_bindgen(js_name = simVarNames, typescript_type = "Array<string>")]
     pub fn sim_var_names(&self) -> Array {
-        vec!["foo"].into_iter().map(JsValue::from).collect()
+        if self.results.is_none() {
+            let empty: Vec<String> = vec![];
+            return empty.into_iter().map(JsValue::from).collect();
+        }
+        let results = self.results.as_ref().unwrap();
+        results
+            .offsets
+            .keys()
+            .into_iter()
+            .map(JsValue::from)
+            .collect()
     }
 
     #[wasm_bindgen(js_name = simSeries)]
-    pub fn sim_series(&self, _ident: &str) -> Vec<f64> {
-        vec![]
+    pub fn sim_series(&self, ident: &str) -> Vec<f64> {
+        if self.results.is_none() {
+            return vec![];
+        }
+        let results = self.results.as_ref().unwrap();
+        if !results.offsets.contains_key(ident) {
+            return vec![];
+        }
+
+        let off = results.offsets[ident];
+        results.iter().map(|curr| curr[off]).collect()
     }
 
     #[wasm_bindgen(js_name = simClose)]
-    pub fn sim_close(&self) {}
+    pub fn sim_close(&mut self) {
+        self.results = None
+    }
 }
 
 #[wasm_bindgen]
@@ -231,7 +260,11 @@ pub fn open(project_pb: &[u8]) -> Option<Project> {
     };
 
     let project = Rc::new(project.into());
-    let mut project = Project { project, sim: None };
+    let mut project = Project {
+        project,
+        sim: None,
+        results: None,
+    };
     project.instantiate_sim();
 
     Some(project)

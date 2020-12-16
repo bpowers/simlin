@@ -1644,7 +1644,7 @@ impl Results {
             }
         }
 
-        for curr in self.data.chunks(self.step_size) {
+        for curr in self.iter() {
             if curr[TIME_OFF] > self.specs.stop {
                 break;
             }
@@ -1659,8 +1659,8 @@ impl Results {
         }
     }
 
-    pub fn iter(&self) -> std::slice::Chunks<f64> {
-        self.data.chunks(self.step_size)
+    pub fn iter(&self) -> std::iter::Take<std::slice::Chunks<f64>> {
+        self.data.chunks(self.step_size).take(self.step_count)
     }
 }
 
