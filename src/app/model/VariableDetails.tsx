@@ -17,6 +17,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import { StockViewElement, ViewElement, Variable, GraphicalFunction, GraphicalFunctionScale } from '../datamodel';
 
 import { defined, Series } from '../common';
+import { ScalarEquation } from '../datamodel';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { LookupEditor } from './LookupEditor';
 
@@ -76,8 +77,12 @@ function valueFromEquation(equation: string): Node[] {
   return plainDeserialize(equation);
 }
 
-function equationFor(variable: Variable): string {
-  return defined(variable.equation).trim();
+function scalarEquationFor(variable: Variable): string {
+  if (variable.equation instanceof ScalarEquation) {
+    return variable.equation.equation;
+  } else {
+    return "{ TODO: arrayed variables aren't supported yet}";
+  }
 }
 
 export const VariableDetails = withStyles(styles)(
@@ -92,7 +97,7 @@ export const VariableDetails = withStyles(styles)(
 
       this.state = {
         editor: withHistory(withReact(createEditor())),
-        equation: valueFromEquation(equationFor(variable)),
+        equation: valueFromEquation(scalarEquationFor(variable)),
       };
     }
 
@@ -108,13 +113,13 @@ export const VariableDetails = withStyles(styles)(
 
     handleEquationCancel = (): void => {
       this.setState({
-        equation: valueFromEquation(equationFor(this.props.variable)),
+        equation: valueFromEquation(scalarEquationFor(this.props.variable)),
       });
     };
 
     handleEquationSave = (): void => {
       const { equation } = this.state;
-      const initialEquation = equationFor(this.props.variable);
+      const initialEquation = scalarEquationFor(this.props.variable);
 
       const newEquation = equationFromValue(equation);
       if (initialEquation !== newEquation) {
@@ -146,7 +151,7 @@ export const VariableDetails = withStyles(styles)(
     renderEquation() {
       const { data, classes } = this.props;
       const { equation } = this.state;
-      const initialEquation = equationFor(this.props.variable);
+      const initialEquation = scalarEquationFor(this.props.variable);
 
       let yMin = 0;
       let yMax = 0;

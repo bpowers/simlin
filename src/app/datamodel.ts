@@ -102,15 +102,62 @@ export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
   }
 }
 
+export type Equation = ScalarEquation | ApplyToAllEquation | ArrayedEquation;
+
+const scalarEquationDefaults = {
+  equation: '',
+};
+export class ScalarEquation extends Record(scalarEquationDefaults) {
+  constructor(v: pb.Variable.ScalarEquation) {
+    super({
+      equation: v.getEquation(),
+    });
+  }
+  static toPb(props: typeof scalarEquationDefaults): pb.Variable.ScalarEquation {
+    const eqn = new pb.Variable.ScalarEquation();
+    eqn.setEquation(props.equation);
+    return eqn;
+  }
+  static from(props: typeof scalarEquationDefaults): ScalarEquation {
+    return new ScalarEquation(ScalarEquation.toPb(props));
+  }
+}
+
+const applyToAllEquationDefaults = {
+  dimensionNames: List<string>(),
+  equation: '',
+};
+export class ApplyToAllEquation extends Record(applyToAllEquationDefaults) {
+  constructor(v: pb.Variable.ApplyToAllEquation) {
+    super({
+      dimensionNames: List(v.getDimensionNamesList()),
+      equation: v.getEquation(),
+    });
+  }
+}
+
+const arrayedEquationDefaults = {
+  dimensionNames: List<string>(),
+  elements: Map<string, string>(),
+};
+export class ArrayedEquation extends Record(arrayedEquationDefaults) {
+  constructor(v: pb.Variable.ArrayedEquation) {
+    super({
+      dimensionNames: List(v.getDimensionNamesList()),
+      elements: Map(v.getElementsList().map((el) => [el.getSubscript(), el.getEquation()])),
+    });
+  }
+}
+
 export interface Variable {
   readonly ident: string;
-  readonly equation: string | undefined;
+  readonly equation: Equation | undefined;
   readonly gf: GraphicalFunction | undefined;
 }
 
 const stockDefaults = {
   ident: '',
-  equation: '',
+  equation: ScalarEquation.from({ equation: '' }) as Equation,
   documentation: '',
   units: '',
   inflows: List<string>(),
@@ -119,9 +166,18 @@ const stockDefaults = {
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   constructor(stock: pb.Variable.Stock) {
+    const pbEquation = stock.getEquation();
+    let equation: Equation = ScalarEquation.from({ equation: '' });
+    if (pbEquation?.hasApplyToAll()) {
+      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
+    } else if (pbEquation?.hasArrayed()) {
+      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
+    } else if (pbEquation?.hasScalar()) {
+      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
+    }
     super({
       ident: stock.getIdent(),
-      equation: stock.getEquation(),
+      equation,
       documentation: stock.getDocumentation(),
       units: stock.getUnits(),
       inflows: List(stock.getInflowsList()),
@@ -136,7 +192,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
 
 const flowDefaults = {
   ident: '',
-  equation: '',
+  equation: ScalarEquation.from({ equation: '' }) as Equation,
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
@@ -144,10 +200,19 @@ const flowDefaults = {
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   constructor(flow: pb.Variable.Flow) {
+    const pbEquation = flow.getEquation();
+    let equation: Equation = ScalarEquation.from({ equation: '' });
+    if (pbEquation?.hasApplyToAll()) {
+      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
+    } else if (pbEquation?.hasArrayed()) {
+      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
+    } else if (pbEquation?.hasScalar()) {
+      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
+    }
     const gf = flow.getGf();
     super({
       ident: flow.getIdent(),
-      equation: flow.getEquation(),
+      equation,
       documentation: flow.getDocumentation(),
       units: flow.getUnits(),
       gf: gf ? new GraphicalFunction(gf) : undefined,
@@ -158,17 +223,26 @@ export class Flow extends Record(flowDefaults) implements Variable {
 
 const auxDefaults = {
   ident: '',
-  equation: '',
+  equation: ScalarEquation.from({ equation: '' }) as Equation,
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   constructor(aux: pb.Variable.Aux) {
+    const pbEquation = aux.getEquation();
+    let equation: Equation = ScalarEquation.from({ equation: '' });
+    if (pbEquation?.hasApplyToAll()) {
+      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
+    } else if (pbEquation?.hasArrayed()) {
+      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
+    } else if (pbEquation?.hasScalar()) {
+      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
+    }
     const gf = aux.getGf();
     super({
       ident: aux.getIdent(),
-      equation: aux.getEquation(),
+      equation,
       documentation: aux.getDocumentation(),
       units: aux.getUnits(),
       gf: gf ? new GraphicalFunction(gf) : undefined,
