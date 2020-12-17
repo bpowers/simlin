@@ -1669,7 +1669,7 @@ pub struct Simulation {
     modules: HashMap<Ident, Module>,
     specs: Specs,
     root: String,
-    project: Rc<Project>,
+    offsets: HashMap<Ident, usize>,
 }
 
 fn enumerate_modules(
@@ -1702,8 +1702,7 @@ fn enumerate_modules(
 }
 
 impl Simulation {
-    pub fn new(project_rc: &Rc<Project>, main_model_name: &str) -> Result<Self> {
-        let project = project_rc.as_ref();
+    pub fn new(project: &Project, main_model_name: &str) -> Result<Self> {
         if !project.models.contains_key(main_model_name) {
             return sim_err!(
                 NotSimulatable,
@@ -1739,11 +1738,15 @@ impl Simulation {
 
         let specs = Specs::from(&project.datamodel.sim_specs);
 
+        let offsets = calc_flattened_offsets(project, main_model_name);
+        let offsets: HashMap<Ident, usize> =
+            offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
+
         Ok(Simulation {
             modules: compiled_modules,
             specs,
             root: main_model_name.to_string(),
-            project: Rc::clone(project_rc),
+            offsets,
         })
     }
 
@@ -1878,12 +1881,8 @@ impl Simulation {
             assert!(curr[TIME_OFF] > stop);
         }
 
-        let offsets = calc_flattened_offsets(&self.project, &module.ident);
-        let offsets: HashMap<Ident, usize> =
-            offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
-
         Ok(Results {
-            offsets,
+            offsets: self.offsets.clone(),
             data: boxed_slab,
             step_size: n_slots,
             step_count: n_chunks,

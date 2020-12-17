@@ -1392,3 +1392,7 @@ pub fn serialize(project: &Project) -> project_io::Project {
 pub fn deserialize(project: project_io::Project) -> Project {
     Project::from(project)
 }
+
+pub fn deserialize_view(view: project_io::View) -> View {
+    View::from(view)
+}

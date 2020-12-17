@@ -2,19 +2,21 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::rc::Rc;
+use std::cmp::Ordering;
 
 use wasm_bindgen::prelude::*;
 
 use js_sys::Array;
+use prost::Message;
 
 use system_dynamics_engine as engine;
+use system_dynamics_engine::common::{ErrorCode, ErrorKind};
 use system_dynamics_engine::{datamodel, project_io, prost, serde, Error};
 
 #[wasm_bindgen]
 pub struct Project {
     #[allow(dead_code)]
-    project: Rc<engine::Project>,
+    project: engine::Project,
     sim: Option<engine::Simulation>,
     results: Option<engine::Results>,
 }
@@ -39,10 +41,7 @@ impl Project {
     // time control
 
     fn update_sim_specs(&mut self, specs: datamodel::SimSpecs) -> Option<Error> {
-        let mut project = self.project.as_ref().clone();
-        project.datamodel.sim_specs = specs;
-
-        self.project = Rc::new(project);
+        self.project.datamodel.sim_specs = specs;
         self.instantiate_sim();
 
         None
@@ -165,7 +164,7 @@ impl Project {
             }
         }
 
-        self.project = Rc::new(project.into());
+        self.project = project.into();
         self.instantiate_sim();
 
         None
@@ -198,7 +197,34 @@ impl Project {
     // view control
 
     #[wasm_bindgen(js_name = setView)]
-    pub fn set_view(&mut self, _model_name: &str, _view_off: usize, _view_pb: &[u8]) {}
+    pub fn set_view(&mut self, model_name: &str, view_off: usize, view_pb: &[u8]) -> Option<Error> {
+        let project = &mut self.project.datamodel;
+
+        let view = match project_io::View::decode(view_pb) {
+            Ok(view) => serde::deserialize_view(view),
+            Err(err) => {
+                return Some(Error::new(
+                    ErrorKind::Model,
+                    ErrorCode::ProtobufDecode,
+                    Some(format!("{}", err)),
+                ));
+            }
+        };
+
+        project
+            .models
+            .iter_mut()
+            .filter(|m| m.name == model_name)
+            .for_each(|model| match view_off.cmp(&model.views.len()) {
+                Ordering::Less => model.views[view_off] = view.clone(),
+                Ordering::Equal => model.views.push(view.clone()),
+                Ordering::Greater => {}
+            });
+
+        self.instantiate_sim();
+
+        None
+    }
 
     // simulation control
 
@@ -249,15 +275,15 @@ impl Project {
 
 #[wasm_bindgen]
 pub fn open(project_pb: &[u8]) -> Option<Project> {
-    use prost::Message;
     let project = match project_io::Project::decode(project_pb) {
         Ok(project) => serde::deserialize(project),
-        Err(err) => panic!("decode failed: {}", err),
+        Err(_err) => {
+            return None;
+        }
     };
 
-    let project = Rc::new(project.into());
     let mut project = Project {
-        project,
+        project: project.into(),
         sim: None,
         results: None,
     };

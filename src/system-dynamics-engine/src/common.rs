@@ -22,6 +22,7 @@ pub enum ErrorCode {
     DoesNotExist, // the named entity doesn't exist
     XmlDeserialization,
     VensimConversion,
+    ProtobufDecode,
     InvalidToken,
     UnrecognizedEOF,
     UnrecognizedToken,
@@ -42,6 +43,7 @@ pub enum ErrorCode {
     ArraysNotImplemented,
     MultiDimensionalArraysNotImplemented,
     BadDimensionName,
+    BadModelName,
     MismatchedDimensions,
     ArrayReferenceNeedsExplicitSubscripts,
 }
@@ -54,6 +56,7 @@ impl fmt::Display for ErrorCode {
             DoesNotExist => "does_not_exist",
             XmlDeserialization => "xml_deserialization",
             VensimConversion => "vensim_conversion",
+            ProtobufDecode => "protobuf_decode",
             InvalidToken => "invalid_token",
             UnrecognizedEOF => "unrecognized_eof",
             UnrecognizedToken => "unrecognized_token",
@@ -74,6 +77,7 @@ impl fmt::Display for ErrorCode {
             ArraysNotImplemented => "arrays_not_implemented",
             MultiDimensionalArraysNotImplemented => "multi_dimensional_arrays_not_implemented",
             BadDimensionName => "bad_dimension_name",
+            BadModelName => "bad_model_name",
             MismatchedDimensions => "mismatched_dimensions",
             ArrayReferenceNeedsExplicitSubscripts => "array_reference_needs_explicit_subscripts",
         };
