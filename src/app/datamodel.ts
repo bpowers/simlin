@@ -594,34 +594,47 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
 export type NamedViewElement = StockViewElement | AuxViewElement | ModuleViewElement | FlowViewElement;
 
 const stockFlowViewDefaults = {
+  nextUid: -1,
   elements: List<ViewElement>(),
 };
 export class StockFlowView extends Record(stockFlowViewDefaults) {
   constructor(view: pb.View) {
+    let maxUid = -1;
     const elements = List(
       view.getElementsList().map((element) => {
+        let e: ViewElement;
         switch (element.getElementCase()) {
           case pb.ViewElement.ElementCase.AUX:
-            return new AuxViewElement(defined(element.getAux()));
+            e = new AuxViewElement(defined(element.getAux()));
+            break;
           case pb.ViewElement.ElementCase.STOCK:
-            return new StockViewElement(defined(element.getStock()));
+            e = new StockViewElement(defined(element.getStock()));
+            break;
           case pb.ViewElement.ElementCase.FLOW:
-            return new FlowViewElement(defined(element.getFlow()));
+            e = new FlowViewElement(defined(element.getFlow()));
+            break;
           case pb.ViewElement.ElementCase.LINK:
-            return new LinkViewElement(defined(element.getLink()));
+            e = new LinkViewElement(defined(element.getLink()));
+            break;
           case pb.ViewElement.ElementCase.MODULE:
-            return new ModuleViewElement(defined(element.getModule()));
+            e = new ModuleViewElement(defined(element.getModule()));
+            break;
           case pb.ViewElement.ElementCase.ALIAS:
-            return new AliasViewElement(defined(element.getAlias()));
+            e = new AliasViewElement(defined(element.getAlias()));
+            break;
           case pb.ViewElement.ElementCase.CLOUD:
-            return new CloudViewElement(defined(element.getCloud()));
+            e = new CloudViewElement(defined(element.getCloud()));
+            break;
           default:
             throw new Error('invariant broken: protobuf variable with empty oneof');
         }
+        maxUid = Math.max(e.uid, maxUid);
+        return e;
       }),
     );
     super({
       elements,
+      nextUid: maxUid + 1,
     });
   }
 }

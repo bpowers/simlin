@@ -16,11 +16,20 @@ import { Project as ProjectPB } from '../../system-dynamics-engine/src/project_i
 
 import { Engine as IEngine } from '../../engine-interface';
 
-import { Project, Model, UID, ViewElement, NamedViewElement, StockFlowView, GraphicalFunction } from '../datamodel';
+import {
+  Project,
+  Model,
+  UID,
+  ViewElement,
+  NamedViewElement,
+  StockFlowView,
+  GraphicalFunction,
+  LinkViewElement,
+} from '../datamodel';
 
 import { uint8ArraysEqual } from '../common';
 
-import { Canvas /* fauxTargetUid, inCreationCloudUid, inCreationUid */ } from './drawing/Canvas';
+import { Canvas, inCreationUid /* fauxTargetUid, inCreationCloudUid, inCreationUid */ } from './drawing/Canvas';
 import { Point } from './drawing/common';
 // import { takeoffθ } from './drawing/Connector';
 // import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
@@ -63,9 +72,9 @@ import CardContent from '@material-ui/core/CardContent';
 
 const MaxUndoSize = 5;
 
-// function radToDeg(r: number): number {
-//   return (r * 180) / Math.PI;
-// }
+function radToDeg(r: number): number {
+  return (r * 180) / Math.PI;
+}
 
 const styles = ({ spacing, palette }: Theme) =>
   createStyles({
@@ -716,67 +725,76 @@ export const Editor = withStyles(styles)(
        */
     };
 
-    handleLinkAttach = (_link: ViewElement, _newTarget: string) => {
-      /*
+    handleLinkAttach = (link: LinkViewElement, newTarget: string) => {
       let { selection } = this.state;
-      const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      const project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          const getName = (ident: string) => {
-            for (const e of view.elements) {
-              if (e.hasName && e.ident === ident) {
-                return e;
-              }
-            }
-            throw new Error(`unknown name ${ident}`);
-          };
-          let elements = view.elements.map((element: ViewElement) => {
-            if (element.uid !== link.uid) {
-              return element;
-            }
+      let view = defined(this.getView());
 
-            const from = getName(defined(element.from));
-            const oldTo = getName(defined(element.to));
-            const to = getName(defined(newTarget));
-
-            const oldθ = Math.atan2(oldTo.cy - from.cy, oldTo.cx - from.cx);
-            const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
-            const diffθ = oldθ - newθ;
-            const angle = (element.angle || 180) + radToDeg(diffθ);
-
-            return element.merge({
-              angle,
-              to: newTarget,
-            });
-          });
-          let nextUid = view.nextUid;
-          if (link.uid === inCreationUid) {
-            const fromName = defined(link.from);
-            const from = defined(elements.find((e) => e.hasName && e.ident === fromName));
-            const to = defined(elements.find((e) => e.hasName && e.ident === newTarget));
-
-            const oldθ = Math.atan2(0 - from.cy, 0 - from.cx);
-            const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
-            const diffθ = oldθ - newθ;
-            const angle = (link.angle || 180) + radToDeg(diffθ);
-
-            const newLink = link.merge({
-              uid: nextUid++,
-              to: newTarget,
-              angle,
-            });
-            elements = elements.push(newLink);
-            selection = Set([newLink.uid]);
+      const getUid = (uid: number) => {
+        for (const e of view.elements) {
+          if (e.uid === uid) {
+            return e;
           }
-          return view.merge({ nextUid, elements });
-        },
-      );
-      this.setState({ selection });
-      this.updateProject(project);
+        }
+        throw new Error(`unknown uid ${uid}`);
+      };
 
-       */
+      const getName = (ident: string) => {
+        for (const e of view.elements) {
+          if (e.isNamed() && e.ident() === ident) {
+            return e;
+          }
+        }
+        throw new Error(`unknown name ${ident}`);
+      };
+
+      let elements = view.elements.map((element: ViewElement) => {
+        if (element.uid !== link.uid) {
+          return element;
+        }
+
+        if (!(element instanceof LinkViewElement)) {
+          return element;
+        }
+
+        const from = getUid(element.fromUid);
+        const oldTo = getUid(element.toUid);
+        const to = getName(defined(newTarget));
+
+        const oldθ = Math.atan2(oldTo.cy - from.cy, oldTo.cx - from.cx);
+        const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
+        const diffθ = oldθ - newθ;
+        const angle = (element.arc || 180) - radToDeg(diffθ);
+
+        return element.merge({
+          arc: angle,
+          toUid: to.uid,
+        });
+      });
+      let nextUid = view.nextUid;
+      if (link.uid === inCreationUid) {
+        const from = getUid(link.fromUid);
+        const to = getName(newTarget);
+
+        const oldθ = Math.atan2(0 - from.cy, 0 - from.cx);
+        const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
+        const diffθ = oldθ - newθ;
+        const angle = (link.arc || 180) - radToDeg(diffθ);
+
+        const newLink = link.merge({
+          uid: nextUid++,
+          toUid: to.uid,
+          arc: angle,
+        });
+        elements = elements.push(newLink);
+        selection = Set([newLink.uid]);
+      }
+      view = view.merge({ nextUid, elements });
+
+      const activeProject = this.project()?.setIn(['models', this.state.modelName, 'views', 0], view);
+
+      this.setState({ selection, activeProject });
+      // TODO: need to push this into the engine
+      // this.updateProject(project);
     };
 
     handleCreateVariable = (_element: ViewElement) => {
