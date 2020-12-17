@@ -21,6 +21,8 @@ import ExpandMoreIcon from '@material-ui/icons/ExpandMore';
 
 import { Project } from './Project';
 import { User } from './User';
+import { Project as ProjectPB } from '../system-dynamics-engine/src/project_io_pb';
+import { Project as ProjectDM } from './datamodel';
 
 const styles = createStyles({
   newSubtitle: {
@@ -149,11 +151,28 @@ export const NewProject = withStyles(styles)(
         console.log('expected non-empty list of files?');
         return;
       }
-      const contents = await readFile(event.target.files[0]);
+      const file = event.target.files[0];
+      let contents = await readFile(file);
+
+      // convert vensim files to xmile
+      if (file.name.endsWith('.mdl')) {
+        const { convertMdlToXmile } = await import('../xmutil-js');
+        contents = convertMdlToXmile(contents, false);
+      }
 
       try {
         const { from_xmile } = await import('../importer/pkg');
         const projectPB: Uint8Array = from_xmile(contents);
+        const activeProjectPB = ProjectPB.deserializeBinary(projectPB);
+        const activeProject = new ProjectDM(activeProjectPB);
+        const views = activeProject.models.get('main')?.views;
+        if (!views || views.isEmpty()) {
+          this.setState({
+            errorMsg: `can't import model with no view at this time.`,
+          });
+          return;
+        }
+
         this.setState({ projectPB });
       } catch (e) {
         this.setState({
@@ -222,7 +241,7 @@ export const NewProject = withStyles(styles)(
                       Select
                       <input
                         style={{ display: 'none' }}
-                        accept=".stmx,.itmx,.xmile"
+                        accept=".stmx,.itmx,.xmile,.mdl"
                         id="xmile-model-file"
                         type="file"
                         onChange={this.uploadModel}
