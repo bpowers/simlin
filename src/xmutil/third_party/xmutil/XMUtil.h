@@ -57,9 +57,11 @@ inline void __cdecl operator delete[](void *p) {
 #endif
 #endif
 
+#define XMUTIL_EXPORT __attribute__((visibility("default")))
+
 extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
-char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool isCompact);
+XMUTIL_EXPORT char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool isCompact);
 }
 
 char *utf8ToLower(const char *src, size_t srcLen);
