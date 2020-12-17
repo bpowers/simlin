@@ -17,9 +17,14 @@ pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
     use xmutil::convert_vensim_mdl;
 
     let contents: String = reader.lines().fold("".to_string(), |a, b| a + &b.unwrap());
-    let xmile_src: Option<String> = convert_vensim_mdl(&contents, true);
+    let xmile_src: Option<String> = convert_vensim_mdl(&contents, false);
     if xmile_src.is_none() {
-        eprintln!("couldn't convert vensim model.\n");
+        use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+        return Err(Error::new(
+            ErrorKind::Import,
+            ErrorCode::VensimConversion,
+            Some("unknown xmutil error".to_owned()),
+        ));
     }
     let xmile_src = xmile_src.unwrap();
     let mut f = BufReader::new(xmile_src.as_bytes());

@@ -21,6 +21,7 @@ pub enum ErrorCode {
     NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
     XmlDeserialization,
+    VensimConversion,
     InvalidToken,
     UnrecognizedEOF,
     UnrecognizedToken,
@@ -52,6 +53,7 @@ impl fmt::Display for ErrorCode {
             NoError => "no_error",
             DoesNotExist => "does_not_exist",
             XmlDeserialization => "xml_deserialization",
+            VensimConversion => "vensim_conversion",
             InvalidToken => "invalid_token",
             UnrecognizedEOF => "unrecognized_eof",
             UnrecognizedToken => "unrecognized_token",

@@ -1306,15 +1306,23 @@ impl View {
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
                 link.from_uid = uid_map.get(&canonicalize(&link.from)).cloned();
-                if link.from_uid == None {
-                    panic!("unable to look up Link 'from' {}", link.from);
-                }
                 link.to_uid = uid_map.get(&canonicalize(&link.to)).cloned();
-                if link.to_uid == None {
-                    panic!("unable to look up Link 'to' {}", link.to);
-                }
             }
         }
+
+        // if there were links we couldn't resolve, dump them
+        self.objects = self
+            .objects
+            .iter()
+            .cloned()
+            .filter(|o| {
+                if let ViewObject::Link(link) = o {
+                    link.from_uid.is_some() && link.to_uid.is_some()
+                } else {
+                    true
+                }
+            })
+            .collect();
 
         self.next_uid = Some(next_uid);
         uid_map
@@ -1425,7 +1433,7 @@ impl View {
     }
 
     fn normalize(&mut self, model: &Model) {
-        if self.kind.unwrap_or(ViewType::VendorSpecific) != ViewType::StockFlow {
+        if self.kind.unwrap_or(ViewType::StockFlow) != ViewType::StockFlow {
             return;
         }
         let uid_map = self.assign_uids();
