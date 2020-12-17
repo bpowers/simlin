@@ -79,7 +79,6 @@ export const apiRouter = (app: Application): Router => {
 
       try {
         const project = createProject(user, projectName, projectDescription, isPublic);
-        const json = project.toObject();
 
         let sdPB: Buffer | undefined;
         if (req.body.projectPB) {
@@ -95,7 +94,7 @@ export const apiRouter = (app: Application): Router => {
         project.setFileId(filePb.getId());
         await app.db.project.create(project.getId(), project);
 
-        res.status(200).json(json);
+        res.status(200).json(project.toObject());
       } catch (err) {
         if (err.code === MongoDuplicateKeyCode) {
           res.status(400).json({ error: 'project name already taken' });
