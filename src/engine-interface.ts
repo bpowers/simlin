@@ -107,6 +107,13 @@ export interface Engine {
    */
   rename(_model_name: string, _old_ident: string, _new_ident: string): Error | undefined;
   /**
+   * @param {string} model_name
+   * @param {number} view_off
+   * @param {Uint8Array} view_pb
+   * @returns {Error | undefined}
+   */
+  setView(model_name: string, view_off: number, view_pb: Uint8Array): Error | undefined;
+  /**
    */
   simRunToEnd(): void;
   /**

@@ -790,11 +790,17 @@ export const Editor = withStyles(styles)(
       }
       view = view.merge({ nextUid, elements });
 
-      const activeProject = this.project()?.setIn(['models', this.state.modelName, 'views', 0], view);
-
-      this.setState({ selection, activeProject });
-      // TODO: need to push this into the engine
-      // this.updateProject(project);
+      const viewPb = view.toPb();
+      const serializedView = viewPb.serializeBinary();
+      const engine = this.engine();
+      if (engine) {
+        const err = engine.setView(this.state.modelName, 0, serializedView);
+        if (err) {
+          this.appendModelError(`updating the view failed (code ${err.code}, details: '${err.getDetails()}')`);
+        }
+        this.updateProject(engine.serializeToProtobuf());
+      }
+      this.setState({ selection });
     };
 
     handleCreateVariable = (_element: ViewElement) => {

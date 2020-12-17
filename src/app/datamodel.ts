@@ -292,18 +292,33 @@ export type LabelSide = 'top' | 'left' | 'center' | 'bottom' | 'right';
 
 function getLabelSide(labelSide: pb.ViewElement.LabelSideMap[keyof pb.ViewElement.LabelSideMap]): LabelSide {
   switch (labelSide) {
-    case 0:
+    case pb.ViewElement.LabelSide.TOP:
       return 'top';
-    case 1:
+    case pb.ViewElement.LabelSide.LEFT:
       return 'left';
-    case 2:
+    case pb.ViewElement.LabelSide.CENTER:
       return 'center';
-    case 3:
+    case pb.ViewElement.LabelSide.BOTTOM:
       return 'bottom';
-    case 4:
+    case pb.ViewElement.LabelSide.RIGHT:
       return 'right';
     default:
       return 'top';
+  }
+}
+
+function labelSideToPb(labelSide: LabelSide): pb.ViewElement.LabelSideMap[keyof pb.ViewElement.LabelSideMap] {
+  switch (labelSide) {
+    case 'top':
+      return pb.ViewElement.LabelSide.TOP;
+    case 'left':
+      return pb.ViewElement.LabelSide.LEFT;
+    case 'center':
+      return pb.ViewElement.LabelSide.CENTER;
+    case 'bottom':
+      return pb.ViewElement.LabelSide.BOTTOM;
+    case 'right':
+      return pb.ViewElement.LabelSide.RIGHT;
   }
 }
 
@@ -346,6 +361,16 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
   ident(): string {
     return canonicalize(this.name);
   }
+
+  toPb(): pb.ViewElement.Aux {
+    const element = new pb.ViewElement.Aux();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
 }
 
 const stockViewElementDefaults = {
@@ -378,6 +403,16 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
   ident(): string {
     return canonicalize(this.name);
   }
+
+  toPb(): pb.ViewElement.Stock {
+    const element = new pb.ViewElement.Stock();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
 }
 
 const pointDefaults = {
@@ -402,6 +437,16 @@ export class Point extends Record(pointDefaults) {
       point.setAttachedToUid(props.attachedToUid);
     }
     return new Point(point);
+  }
+
+  toPb(): pb.ViewElement.FlowPoint {
+    const element = new pb.ViewElement.FlowPoint();
+    element.setX(this.x);
+    element.setY(this.y);
+    if (this.attachedToUid !== undefined) {
+      element.setAttachedToUid(this.attachedToUid);
+    }
+    return element;
   }
 }
 
@@ -436,6 +481,17 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   }
   ident(): string {
     return canonicalize(this.name);
+  }
+
+  toPb(): pb.ViewElement.Flow {
+    const element = new pb.ViewElement.Flow();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setPointsList(this.points.map((p) => p.toPb()).toArray());
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
   }
 }
 
@@ -495,6 +551,23 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
   ident(): undefined {
     return undefined;
   }
+
+  toPb(): pb.ViewElement.Link {
+    const element = new pb.ViewElement.Link();
+    element.setUid(this.uid);
+    element.setFromUid(this.fromUid);
+    element.setToUid(this.toUid);
+    if (this.arc !== undefined) {
+      element.setArc(this.arc);
+    } else if (this.multiPoint) {
+      const linkPoints = new pb.ViewElement.Link.LinkPoints();
+      linkPoints.setPointsList(this.multiPoint.map((p) => p.toPb()).toArray());
+      element.setMultiPoint(linkPoints);
+    } else {
+      element.setIsStraight(this.isStraight);
+    }
+    return element;
+  }
 }
 
 const moduleViewElementDefaults = {
@@ -526,6 +599,16 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
   }
   ident(): string {
     return canonicalize(this.name);
+  }
+
+  toPb(): pb.ViewElement.Module {
+    const element = new pb.ViewElement.Module();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
   }
 }
 
@@ -559,6 +642,16 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
   ident(): undefined {
     return undefined;
   }
+
+  toPb(): pb.ViewElement.Alias {
+    const element = new pb.ViewElement.Alias();
+    element.setUid(this.uid);
+    element.setAliasOfUid(this.aliasOfUid);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
 }
 
 const cloudViewElementDefaults = {
@@ -588,6 +681,15 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
   }
   ident(): undefined {
     return undefined;
+  }
+
+  toPb(): pb.ViewElement.Cloud {
+    const element = new pb.ViewElement.Cloud();
+    element.setUid(this.uid);
+    element.setFlowUid(this.flowUid);
+    element.setX(this.x);
+    element.setY(this.y);
+    return element;
   }
 }
 
@@ -636,6 +738,40 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
       elements,
       nextUid: maxUid + 1,
     });
+  }
+
+  toPb(): pb.View {
+    const view = new pb.View();
+
+    view.setKind(pb.View.ViewType.STOCK_FLOW);
+
+    const elements = this.elements
+      .map((element) => {
+        const e = new pb.ViewElement();
+        if (element instanceof AuxViewElement) {
+          e.setAux(element.toPb());
+        } else if (element instanceof StockViewElement) {
+          e.setStock(element.toPb());
+        } else if (element instanceof FlowViewElement) {
+          e.setFlow(element.toPb());
+        } else if (element instanceof LinkViewElement) {
+          e.setLink(element.toPb());
+        } else if (element instanceof ModuleViewElement) {
+          e.setModule(element.toPb());
+        } else if (element instanceof AliasViewElement) {
+          e.setAlias(element.toPb());
+        } else if (element instanceof CloudViewElement) {
+          e.setCloud(element.toPb());
+        } else {
+          throw new Error('unknown view element variant');
+        }
+        return e;
+      })
+      .toArray();
+
+    view.setElementsList(elements);
+
+    return view;
   }
 }
 
