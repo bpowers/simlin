@@ -518,7 +518,7 @@ impl From<Model> for datamodel::Model {
             .view
             .unwrap_or_default()
             .into_iter()
-            .filter(|v| v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow)
+            .filter(|v| v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow)
             .map(|v| {
                 let mut v = v;
                 v.normalize(&model);
@@ -1435,7 +1435,7 @@ impl View {
 
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
-        if v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow {
+        if v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow {
             datamodel::View::StockFlow(datamodel::StockFlow {
                 elements: v
                     .objects
