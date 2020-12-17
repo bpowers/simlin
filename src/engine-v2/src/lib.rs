@@ -197,12 +197,8 @@ impl Project {
 
     // view control
 
-    // selection_delete
-    // set_label_position
-    // attach_flow
-    // link_attach
-    // create_variable
-    // selection_move
+    #[wasm_bindgen(js_name = setView)]
+    pub fn set_view(&mut self, _model_name: &str, _view_off: usize, _view_pb: &[u8]) {}
 
     // simulation control
 
