@@ -20,19 +20,24 @@ import {
   Project,
   Model,
   UID,
+  Stock as StockVar,
   ViewElement,
   NamedViewElement,
   StockFlowView,
   GraphicalFunction,
   LinkViewElement,
+  AuxViewElement,
+  FlowViewElement,
+  StockViewElement,
+  CloudViewElement,
 } from '../datamodel';
 
 import { uint8ArraysEqual } from '../common';
 
-import { Canvas, inCreationUid /* fauxTargetUid, inCreationCloudUid, inCreationUid */ } from './drawing/Canvas';
+import { Canvas, /* fauxTargetUid, inCreationCloudUid, */ inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
-// import { takeoffθ } from './drawing/Connector';
-// import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
+import { takeoffθ } from './drawing/Connector';
+import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 
 import { baseURL, defined, exists, Series } from '../common';
 
@@ -514,25 +519,17 @@ export const Editor = withStyles(styles)(
       // this.updateProject(project);
     };
 
-    handleMoveLabel = (_uid: UID, _side: 'top' | 'left' | 'bottom' | 'right') => {
-      /*
-      const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      const project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          const elements = view.elements.map((element: ViewElement) => {
-            if (element.uid !== uid) {
-              return element;
-            }
-            return element.set('labelSide', side);
-          });
+    handleMoveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {
+      const view = defined(this.getView());
 
-          return view.set('elements', elements);
-        },
-      );
-      this.updateProject(project);
-       */
+      const elements = view.elements.map((element: ViewElement) => {
+        if (element.uid !== uid || !element.isNamed()) {
+          return element;
+        }
+        return (element as AuxViewElement).set('labelSide', side);
+      });
+
+      this.updateView(view.set('elements', elements));
     };
 
     handleFlowAttach = (_flow: ViewElement, _targetUid: number, _cursorMoveDelta: Point) => {
@@ -790,6 +787,11 @@ export const Editor = withStyles(styles)(
       }
       view = view.merge({ nextUid, elements });
 
+      this.updateView(view);
+      this.setState({ selection });
+    };
+
+    updateView(view: StockFlowView) {
       const viewPb = view.toPb();
       const serializedView = viewPb.serializeBinary();
       const engine = this.engine();
@@ -800,8 +802,7 @@ export const Editor = withStyles(styles)(
         }
         this.updateProject(engine.serializeToProtobuf());
       }
-      this.setState({ selection });
-    };
+    }
 
     handleCreateVariable = (_element: ViewElement) => {
       /*
@@ -825,147 +826,132 @@ export const Editor = withStyles(styles)(
        */
     };
 
-    handleSelectionMove = (_delta: Point, _arcPoint?: Point) => {
-      /*
-      const origElements = defined(defined(defined(this.project()).model(this.state.modelName)).view(0)).elements;
-      let origNamedElements = Map<string, ViewElement>();
-      for (const e of origElements) {
-        if (e.hasName) {
-          origNamedElements = origNamedElements.set(e.ident, e);
-        }
-      }
-      const selection = this.state.selection;
-      const updatePath = ['models', this.state.modelName, 'xModel', 'views', 0];
-      const project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          const getName = (ident: string) => {
-            for (const e of view.elements) {
-              if (e.hasName && e.ident === ident) {
-                return e;
-              }
-            }
-            throw new Error(`unknown name ${ident}`);
-          };
-          const getUid = (uid: UID) => {
-            for (const e of view.elements) {
-              if (e.uid === uid) {
-                return e;
-              }
-            }
-            throw new Error(`unknown UID ${uid}`);
-          };
-
-          let updatedElements = List<ViewElement>();
-
-          let elements = view.elements.map((element: ViewElement) => {
-            if (!selection.has(element.uid)) {
-              return element;
-            }
-
-            if (selection.size === 1 && element.type === 'flow') {
-              const pts = defined(element.pts);
-              const sourceId = defined(defined(pts.get(0)).uid);
-              const source = getUid(sourceId);
-
-              const sinkId = defined(defined(pts.get(pts.size - 1)).uid);
-              const sink = getUid(sinkId);
-
-              const ends = List<ViewElement>([source, sink]);
-              const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta);
-              element = newElement;
-              updatedElements = updatedElements.concat(newUpdatedClouds);
-            } else if (selection.size === 1 && element.type === 'cloud') {
-              const flow = defined(getUid(defined(element.flowUid)));
-              const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
-              element = newCloud;
-              updatedElements = updatedElements.push(newUpdatedFlow);
-            } else if (selection.size === 1 && element.type === 'stock') {
-              const stock = defined(defined(this.getModel()).vars.get(element.ident)) as StockVar;
-              const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-              const flows: List<ViewElement> = flowNames.map((ident) => {
-                for (const element of view.elements) {
-                  if (element.hasName && element.ident === ident) {
-                    return element;
-                  }
-                }
-                throw new Error('unreachable');
-              });
-              const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows, delta);
-              element = newElement;
-              updatedElements = updatedElements.concat(newUpdatedFlows);
-            } else if (element.type === 'connector') {
-              const from = getName(defined(element.from));
-              const to = getName(defined(element.to));
-              const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
-              const newTakeoff = canvasToXmileAngle(radToDeg(newTakeoffθ));
-              element = element.merge({
-                angle: newTakeoff,
-              });
-            } else {
-              element = element.merge({
-                x: defined(element.x) - delta.x,
-                y: defined(element.y) - delta.y,
-              });
-            }
-            return element;
-          });
-
-          const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
-          elements = elements.map((element) => {
-            if (updatedFlowsByUid.has(element.uid)) {
-              return defined(updatedFlowsByUid.get(element.uid));
-            }
-            return element;
-          });
-
-          let namedElements = Map<string, ViewElement>();
-          let selectedElements = Map<string, ViewElement>();
-          for (const e of elements) {
-            if (!e.hasName) {
-              continue;
-            }
-            if (selection.has(e.uid)) {
-              selectedElements = selectedElements.set(e.ident, e);
-            }
-            namedElements = namedElements.set(e.ident, selectedElements.get(e.ident, e));
-          }
-
-          elements = elements.map((element: ViewElement) => {
-            if (element.type !== 'connector') {
-              return element.hasName ? defined(namedElements.get(element.ident)) : element;
-            }
-            const fromName = defined(element.from);
-            const toName = defined(element.to);
-            // if it hasn't been updated, nothing to do
-            if (!(selectedElements.has(fromName) || selectedElements.has(toName))) {
-              return element;
-            }
-            const from = selectedElements.get(fromName) || namedElements.get(fromName);
-            if (!from) {
-              return element;
-            }
-            const to = selectedElements.get(toName) || namedElements.get(toName);
-            if (!to) {
-              return element;
-            }
-            const atan2 = Math.atan2;
-            const oldTo = defined(origNamedElements.get(toName));
-            const oldFrom = defined(origNamedElements.get(fromName));
-            const oldθ = atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
-            const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
-            const diffθ = oldθ - newθ;
-
-            return element.update('angle', (angle) => {
-              return defined(angle) + radToDeg(diffθ);
-            });
-          });
-          return view.merge({ elements });
-        },
+    handleSelectionMove = (delta: Point, arcPoint?: Point) => {
+      const view = defined(this.getView());
+      const origElements = view.elements;
+      const origNamedElements = Map<string, ViewElement>(
+        origElements.filter((e) => e.isNamed()).map((e) => [defined(e.ident()), e]),
       );
-      this.updateProject(project);
+      const selection = this.state.selection;
 
-       */
+      const getName = (ident: string) => {
+        for (const e of view.elements) {
+          if (e.isNamed() && e.ident() === ident) {
+            return e;
+          }
+        }
+        throw new Error(`unknown name ${ident}`);
+      };
+      const getUid = (uid: UID) => {
+        for (const e of view.elements) {
+          if (e.uid === uid) {
+            return e;
+          }
+        }
+        throw new Error(`unknown UID ${uid}`);
+      };
+
+      let updatedElements = List<ViewElement>();
+
+      let elements = view.elements.map((element: ViewElement) => {
+        if (!selection.has(element.uid)) {
+          return element;
+        }
+
+        if (selection.size === 1 && element instanceof FlowViewElement) {
+          const pts = element.points;
+          const sourceId = defined(defined(pts.first()).attachedToUid);
+          const source = getUid(sourceId) as StockViewElement | CloudViewElement;
+
+          const sinkId = defined(defined(pts.last()).attachedToUid);
+          const sink = getUid(sinkId) as StockViewElement | CloudViewElement;
+
+          const ends = List<StockViewElement | CloudViewElement>([source, sink]);
+          const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta);
+          element = newElement;
+          updatedElements = updatedElements.concat(newUpdatedClouds);
+        } else if (selection.size === 1 && element instanceof CloudViewElement) {
+          const flow = defined(getUid(defined(element.flowUid))) as FlowViewElement;
+          const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
+          element = newCloud;
+          updatedElements = updatedElements.push(newUpdatedFlow);
+        } else if (selection.size === 1 && element instanceof StockViewElement) {
+          const stock = defined(defined(this.getModel()).variables.get(element.ident())) as StockVar;
+          const flowNames: List<string> = stock.inflows.concat(stock.outflows);
+          const flows: List<ViewElement> = flowNames.map(getName);
+          const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows as List<FlowViewElement>, delta);
+          element = newElement;
+          updatedElements = updatedElements.concat(newUpdatedFlows);
+        } else if (element instanceof LinkViewElement) {
+          const from = getUid(element.fromUid);
+          const to = getUid(element.toUid);
+          const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
+          const newTakeoff = radToDeg(newTakeoffθ);
+          element = element.merge({
+            arc: newTakeoff,
+          });
+        } else {
+          // everything else has an x and a y, the cast is to make typescript
+          // happy with our dumb type decisions
+          element = (element as AuxViewElement).merge({
+            x: element.cx - delta.x,
+            y: element.cy - delta.y,
+          });
+        }
+        return element;
+      });
+
+      const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
+      elements = elements.map((element) => {
+        if (updatedFlowsByUid.has(element.uid)) {
+          return defined(updatedFlowsByUid.get(element.uid));
+        }
+        return element;
+      });
+
+      let namedElements = Map<string, ViewElement>();
+      let selectedElements = Map<string, ViewElement>();
+      for (const e of elements) {
+        if (!e.isNamed()) {
+          continue;
+        }
+        const ident = defined(e.ident());
+        if (selection.has(e.uid)) {
+          selectedElements = selectedElements.set(ident, e);
+        }
+        namedElements = namedElements.set(ident, selectedElements.get(ident, e));
+      }
+
+      elements = elements.map((element: ViewElement) => {
+        if (!(element instanceof LinkViewElement)) {
+          return element.isNamed() ? defined(namedElements.get(defined(element.ident()))) : element;
+        }
+        const fromName = defined(getUid(element.fromUid).ident());
+        const toName = defined(getUid(element.toUid).ident());
+        // if it hasn't been updated, nothing to do
+        if (!(selectedElements.has(fromName) || selectedElements.has(toName))) {
+          return element;
+        }
+        const from = selectedElements.get(fromName) || namedElements.get(fromName);
+        if (!from) {
+          return element;
+        }
+        const to = selectedElements.get(toName) || namedElements.get(toName);
+        if (!to) {
+          return element;
+        }
+        const atan2 = Math.atan2;
+        const oldTo = defined(origNamedElements.get(toName));
+        const oldFrom = defined(origNamedElements.get(fromName));
+        const oldθ = atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
+        const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
+        const diffθ = oldθ - newθ;
+
+        return element.update('arc', (angle) => {
+          return defined(angle) - radToDeg(diffθ);
+        });
+      });
+      this.updateView(view.merge({ elements }));
     };
 
     handleDrawerToggle = (isOpen: boolean) => {
