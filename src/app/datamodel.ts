@@ -329,6 +329,7 @@ export interface ViewElement {
   readonly cy: number;
   isNamed(): boolean;
   ident(): string | undefined;
+  set(prop: 'uid', uid: number): ViewElement;
 }
 
 const auxViewElementDefaults = {
@@ -670,6 +671,14 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
       y: cloud.getY(),
     });
   }
+  static from(props: typeof cloudViewElementDefaults): CloudViewElement {
+    const element = new pb.ViewElement.Cloud();
+    element.setUid(props.uid);
+    element.setFlowUid(props.flowUid);
+    element.setX(props.x);
+    element.setY(props.y);
+    return new CloudViewElement(element);
+  }
   get cx(): number {
     return this.x;
   }
@@ -772,6 +781,28 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
     view.setElementsList(elements);
 
     return view;
+  }
+}
+
+export function viewElementType(
+  element: ViewElement,
+): 'aux' | 'stock' | 'flow' | 'link' | 'module' | 'alias' | 'cloud' {
+  if (element instanceof AuxViewElement) {
+    return 'aux';
+  } else if (element instanceof StockViewElement) {
+    return 'stock';
+  } else if (element instanceof FlowViewElement) {
+    return 'flow';
+  } else if (element instanceof LinkViewElement) {
+    return 'link';
+  } else if (element instanceof ModuleViewElement) {
+    return 'module';
+  } else if (element instanceof AliasViewElement) {
+    return 'alias';
+  } else if (element instanceof CloudViewElement) {
+    return 'cloud';
+  } else {
+    throw new Error('unknown view element variant');
   }
 }
 

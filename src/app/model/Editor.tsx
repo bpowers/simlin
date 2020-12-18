@@ -30,6 +30,7 @@ import {
   FlowViewElement,
   StockViewElement,
   CloudViewElement,
+  viewElementType,
 } from '../datamodel';
 
 import { uint8ArraysEqual } from '../common';
@@ -452,71 +453,58 @@ export const Editor = withStyles(styles)(
     };
 
     handleSelectionDelete = () => {
-      /*
       const selection = this.state.selection;
       const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'views', 0];
-      let project = defined(this.project()).updateIn(
-        updatePath,
-        (view: StockFlowView): StockFlowView => {
-          const isSelected = (ident: string | undefined): boolean => {
-            if (ident === undefined) {
-              return false;
-            }
-            for (const e of view.elements) {
-              if (e.hasName && e.ident === ident) {
-                return selection.contains(e.uid);
-              }
-            }
-            return false;
-          };
+      const view = defined(this.getView());
 
-          // this will remove the selected elements, clouds, and connectors
-          let elements = view.elements.filter((element: ViewElement) => {
-            const remove =
-              selection.contains(element.uid) ||
-              (element.type === 'cloud' && selection.contains(defined(element.flowUid))) ||
-              (element.type === 'connector' && (isSelected(element.to) || isSelected(element.from)));
-            return !remove;
+      // this will remove the selected elements, clouds, and connectors
+      let elements = view.elements.filter((element: ViewElement) => {
+        const remove =
+          selection.contains(element.uid) ||
+          (element instanceof CloudViewElement && selection.contains(element.flowUid)) ||
+          (element instanceof LinkViewElement &&
+            (selection.contains(element.toUid) || selection.contains(element.fromUid)));
+        return !remove;
+      });
+
+      // next we have to potentially make new clouds if we've deleted a stock
+      let { nextUid } = view;
+      const clouds: CloudViewElement[] = [];
+      elements = elements.map((element: ViewElement) => {
+        if (!(element instanceof FlowViewElement)) {
+          return element;
+        }
+        const points = element.points.map((pt) => {
+          if (!pt.attachedToUid || !selection.contains(pt.attachedToUid)) {
+            return pt;
+          }
+
+          const cloud = CloudViewElement.from({
+            uid: nextUid++,
+            x: pt.x,
+            y: pt.y,
+            flowUid: element.uid,
+            isZeroRadius: false,
           });
 
-          // next we have to potentially make new clouds if we've deleted a stock
-          let { nextUid } = view;
-          const clouds: ViewElement[] = [];
-          elements = elements.map((element: ViewElement) => {
-            if (element.type !== 'flow' || !element.pts) {
-              return element;
-            }
-            const pts = element.pts.map((pt) => {
-              if (!pt.uid || !selection.contains(pt.uid)) {
-                return pt;
-              }
+          clouds.push(cloud);
 
-              const cloud = new ViewElement({
-                type: 'cloud',
-                uid: nextUid++,
-                x: pt.x,
-                y: pt.y,
-                flowUid: element.uid,
-              });
+          return pt.set('attachedToUid', cloud.uid);
+        });
+        element = element.set('points', points);
+        return element;
+      });
+      elements = elements.concat(clouds);
 
-              clouds.push(cloud);
-
-              return pt.set('uid', cloud.uid);
-            });
-            element = element.set('pts', pts);
-            return element;
-          });
-          elements = elements.concat(clouds);
-          return view.merge({ elements, nextUid });
-        },
-      );
-      project = project.deleteVariables(this.state.modelName, this.getSelectionIdents());
-       */
+      const engine = defined(this.engine());
+      for (const ident of this.getSelectionIdents()) {
+        engine.deleteVariable(modelName, ident);
+      }
+      // this will ensure that deletions the engine does above are also serialized to the state
+      this.updateView(view.merge({ elements, nextUid }));
       this.setState({
         selection: Set<number>(),
       });
-      // this.updateProject(project);
     };
 
     handleMoveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {
@@ -804,26 +792,17 @@ export const Editor = withStyles(styles)(
       }
     }
 
-    handleCreateVariable = (_element: ViewElement) => {
-      /*
-      const updatePath = ['models', this.state.modelName, 'xModel', 'views', 0];
-      let project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          let nextUid = view.nextUid;
-          element = element.set('uid', nextUid++);
-          const elements = view.elements.push(element);
-          return view.merge({ nextUid, elements });
-        },
-      );
+    handleCreateVariable = (element: ViewElement) => {
+      const view = defined(this.getView());
 
-      project = project.addNewVariable(this.state.modelName, element.type, defined(element.name));
+      let nextUid = view.nextUid;
+      const elements = view.elements.push(element.set('uid', nextUid++));
 
+      this.engine()?.addNewVariable(this.state.modelName, viewElementType(element), (element as NamedViewElement).name);
+      this.updateView(view.merge({ nextUid, elements }));
       this.setState({
         selection: Set<number>(),
       });
-      this.updateProject(project);
-       */
     };
 
     handleSelectionMove = (delta: Point, arcPoint?: Point) => {
