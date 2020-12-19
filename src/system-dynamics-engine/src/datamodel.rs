@@ -235,6 +235,17 @@ pub struct Model {
     pub views: Vec<View>,
 }
 
+impl Model {
+    pub fn get_variable_mut(&mut self, ident: &str) -> Option<&mut Variable> {
+        for var in self.variables.iter_mut() {
+            if var.get_ident() == ident {
+                return Some(var);
+            }
+        }
+        None
+    }
+}
+
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SimMethod {
@@ -290,4 +301,15 @@ pub struct Project {
     pub sim_specs: SimSpecs,
     pub dimensions: Vec<Dimension>,
     pub models: Vec<Model>,
+}
+
+impl Project {
+    pub fn get_model_mut(&mut self, model_name: &str) -> Option<&mut Model> {
+        for model in self.models.iter_mut() {
+            if model.name == model_name {
+                return Some(model);
+            }
+        }
+        None
+    }
 }

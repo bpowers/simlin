@@ -11,7 +11,7 @@ use prost::Message;
 
 use system_dynamics_engine as engine;
 use system_dynamics_engine::common::{ErrorCode, ErrorKind};
-use system_dynamics_engine::{datamodel, project_io, prost, serde, Error};
+use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error};
 
 #[wasm_bindgen]
 pub struct Project {
@@ -118,18 +118,69 @@ impl Project {
     // model control
 
     #[wasm_bindgen(js_name = addNewVariable)]
-    pub fn add_new_variable(
-        &mut self,
-        _model_name: &str,
-        _kind: &str,
-        _name: &str,
-    ) -> Option<Error> {
+    pub fn add_new_variable(&mut self, model_name: &str, kind: &str, name: &str) -> Option<Error> {
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+        let ident = canonicalize(name);
+        if model.get_variable_mut(&ident).is_some() {
+            return Some(Error::new(
+                ErrorKind::Model,
+                ErrorCode::DuplicateVariable,
+                None,
+            ));
+        }
+
+        let var = match kind {
+            "aux" => datamodel::Variable::Aux(datamodel::Aux {
+                ident,
+                equation: datamodel::Equation::Scalar("".to_owned()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+            }),
+            "flow" => datamodel::Variable::Flow(datamodel::Flow {
+                ident,
+                equation: datamodel::Equation::Scalar("".to_owned()),
+                documentation: "".to_string(),
+                units: None,
+                gf: None,
+                non_negative: false,
+            }),
+            "stock" => datamodel::Variable::Stock(datamodel::Stock {
+                ident,
+                equation: datamodel::Equation::Scalar("".to_owned()),
+                documentation: "".to_string(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                non_negative: false,
+            }),
+            _ => return None,
+        };
+
+        model.variables.push(var);
+
+        self.project = project.into();
+        self.instantiate_sim();
+
         None
     }
 
     #[wasm_bindgen(js_name = deleteVariable)]
-    pub fn delete_variable(&mut self, _model_name: &str, _ident: &str) -> Option<Error> {
-        // TODO: to convert names to idents
+    pub fn delete_variable(&mut self, model_name: &str, ident: &str) -> Option<Error> {
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+
+        // this is O(n), but variables is usually pretty short
+        let off = model
+            .variables
+            .iter()
+            .position(|v| v.get_ident() == ident)
+            .unwrap();
+        model.variables.remove(off);
+
+        self.project = project.into();
+        self.instantiate_sim();
 
         None
     }
@@ -137,22 +188,64 @@ impl Project {
     #[wasm_bindgen(js_name = addStocksFlow)]
     pub fn add_stocks_flow(
         &mut self,
-        _model_name: &str,
-        _stock: &str,
-        _flow: &str,
-        _dir: &str,
+        model_name: &str,
+        stock: &str,
+        flow: &str,
+        dir: &str,
     ) -> Option<Error> {
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+        match model.get_variable_mut(stock) {
+            Some(datamodel::Variable::Stock(stock)) => match dir {
+                "in" => stock.inflows.push(flow.to_owned()),
+                "out" => stock.outflows.push(flow.to_owned()),
+                _ => {
+                    return None;
+                }
+            },
+            _ => {
+                return None;
+            }
+        }
+
+        self.project = project.into();
+        self.instantiate_sim();
+
         None
     }
 
     #[wasm_bindgen(js_name = removeStocksFlow)]
     pub fn remove_stocks_flow(
         &mut self,
-        _model_name: &str,
-        _stock: &str,
-        _flow: &str,
-        _dir: &str,
+        model_name: &str,
+        stock: &str,
+        flow: &str,
+        dir: &str,
     ) -> Option<Error> {
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+        match model.get_variable_mut(stock) {
+            Some(datamodel::Variable::Stock(stock)) => match dir {
+                "in" => {
+                    let off = stock.inflows.iter().position(|f| f == flow).unwrap();
+                    stock.inflows.remove(off);
+                }
+                "out" => {
+                    let off = stock.outflows.iter().position(|f| f == flow).unwrap();
+                    stock.outflows.remove(off);
+                }
+                _ => {
+                    return None;
+                }
+            },
+            _ => {
+                return None;
+            }
+        }
+
+        self.project = project.into();
+        self.instantiate_sim();
+
         None
     }
 

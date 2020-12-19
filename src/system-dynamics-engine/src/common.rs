@@ -46,6 +46,7 @@ pub enum ErrorCode {
     BadModelName,
     MismatchedDimensions,
     ArrayReferenceNeedsExplicitSubscripts,
+    DuplicateVariable,
 }
 
 impl fmt::Display for ErrorCode {
@@ -80,6 +81,7 @@ impl fmt::Display for ErrorCode {
             BadModelName => "bad_model_name",
             MismatchedDimensions => "mismatched_dimensions",
             ArrayReferenceNeedsExplicitSubscripts => "array_reference_needs_explicit_subscripts",
+            DuplicateVariable => "duplciate_variable",
         };
 
         write!(f, "{}", name)
