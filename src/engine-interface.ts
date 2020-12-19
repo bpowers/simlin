@@ -67,18 +67,20 @@ export interface Engine {
   deleteVariable(_model_name: string, _ident: string): Error | undefined;
   /**
    * @param {string} _model_name
+   * @param {string} _stock
    * @param {string} _flow
    * @param {string} _dir
    * @returns {Error | undefined}
    */
-  addStocksFlow(_model_name: string, _flow: string, _dir: string): Error | undefined;
+  addStocksFlow(_model_name: string, _stock: string, _flow: string, _dir: string): Error | undefined;
   /**
    * @param {string} _model_name
+   * @param {string} _stock
    * @param {string} _flow
    * @param {string} _dir
    * @returns {Error | undefined}
    */
-  removeStocksFlow(_model_name: string, _flow: string, _dir: string): Error | undefined;
+  removeStocksFlow(_model_name: string, _stock: string, _flow: string, _dir: string): Error | undefined;
   /**
    * @param {string} model_name
    * @param {string} ident
@@ -121,10 +123,10 @@ export interface Engine {
    */
   simVarNames(): Array<any>;
   /**
-   * @param {string} _ident
+   * @param {string} ident
    * @returns {Float64Array}
    */
-  simSeries(_ident: string): Float64Array;
+  simSeries(ident: string): Float64Array;
   /**
    */
   simClose(): void;

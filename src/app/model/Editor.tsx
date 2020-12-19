@@ -35,7 +35,7 @@ import {
 
 import { uint8ArraysEqual } from '../common';
 
-import { Canvas, /* fauxTargetUid, inCreationCloudUid, */ inCreationUid } from './drawing/Canvas';
+import { Canvas, fauxTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
@@ -239,12 +239,6 @@ export const Editor = withStyles(styles)(
 
     private project(): Project | undefined {
       return this.state.activeProject;
-      // if (this.state.projectHistory.size === 0) {
-      //   return undefined;
-      // }
-      //
-      // const off = optionalOffset !== undefined ? optionalOffset : this.state.projectOffset;
-      // return this.state.projectHistory.get(off);
     }
 
     private engine(): IEngine | undefined {
@@ -428,17 +422,12 @@ export const Editor = withStyles(styles)(
       try {
         const err = engine.rename(this.state.modelName, oldName, newName);
         if (err) {
-          throw err;
+          this.appendModelError(`error code ${err.code}: ${err.getDetails()}`);
+          return;
         }
         newProject = engine.serializeToProtobuf();
       } catch (err) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-        if (err.hasOwnProperty('code')) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-          this.appendModelError(`error code ${err.code}: ${err.get_details()}`);
-        } else {
-          this.appendModelError(err.message);
-        }
+        this.appendModelError(err.message);
         return;
       }
       this.scheduleSimRun();
@@ -520,11 +509,10 @@ export const Editor = withStyles(styles)(
       this.updateView(view.set('elements', elements));
     };
 
-    handleFlowAttach = (_flow: ViewElement, _targetUid: number, _cursorMoveDelta: Point) => {
-      /*
+    handleFlowAttach = (flow: FlowViewElement, targetUid: number, cursorMoveDelta: Point) => {
       let { selection } = this.state;
-      const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
+      const view = defined(this.getView());
+
       let isCreatingNew = false;
       let stockDetachingIdent: string | undefined;
       let stockAttachingIdent: string | undefined;
@@ -532,182 +520,183 @@ export const Editor = withStyles(styles)(
       let uidToDelete: number | undefined;
       let updatedCloud: ViewElement | undefined;
       let newClouds = List<ViewElement>();
-      let project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          let nextUid = view.nextUid;
-          const getUid = (uid: number) => {
-            for (const e of view.elements) {
-              if (e.uid === uid) {
-                return e;
-              }
-            }
-            throw new Error(`unknown uid ${uid}`);
-          };
-          let elements = view.elements.map((element: ViewElement) => {
-            if (element.uid !== flow.uid) {
-              return element;
-            }
 
-            const oldTo = getUid(defined(defined(defined(element.pts).last()).uid));
-            let newCloud = false;
-            let updateCloud = false;
-            let to: ViewElement;
-            if (targetUid) {
-              if (oldTo.type === 'cloud') {
-                uidToDelete = oldTo.uid;
-              }
-              to = getUid(targetUid);
-            } else if (oldTo.type === 'cloud') {
-              updateCloud = true;
-              to = oldTo.merge({
-                x: oldTo.cx - cursorMoveDelta.x,
-                y: oldTo.cy - cursorMoveDelta.y,
-              });
-            } else {
-              newCloud = true;
-              to = new ViewElement({
-                uid: nextUid++,
-                type: 'cloud',
-                x: oldTo.cx - cursorMoveDelta.x,
-                y: oldTo.cy - cursorMoveDelta.y,
-                flowUid: flow.uid,
-              });
-            }
-
-            if (oldTo.uid !== to.uid) {
-              if (oldTo.type === 'stock') {
-                stockDetachingIdent = oldTo.ident;
-              }
-              if (to.type === 'stock') {
-                stockAttachingIdent = to.ident;
-              }
-            }
-
-            const moveDelta = {
-              x: oldTo.cx - to.cx,
-              y: oldTo.cy - to.cy,
-            };
-            const pts = (element.pts || List<XmilePoint>()).map((point, _i) => {
-              if (point.uid !== oldTo.uid) {
-                return point;
-              }
-              return point.set('uid', to.uid);
-            });
-            to = to.merge({
-              x: oldTo.cx,
-              y: oldTo.cy,
-              width: undefined,
-              height: undefined,
-            });
-            element = element.set('pts', pts);
-
-            [to, element] = UpdateCloudAndFlow(to, element, moveDelta);
-            if (newCloud) {
-              newClouds = newClouds.push(to);
-            } else if (updateCloud) {
-              updatedCloud = to;
-            }
-
-            return element;
-          });
-          // we might have updated some clouds
-          elements = elements.map((element: ViewElement) => {
-            if (updatedCloud && updatedCloud.uid === element.uid) {
-              return updatedCloud;
-            }
-            return element;
-          });
-          // if we have something to delete, do it here
-          elements = elements.filter((e) => e.uid !== uidToDelete);
-          if (flow.uid === inCreationUid) {
-            flow = flow.merge({
-              uid: nextUid++,
-            });
-            const firstPt = defined(defined(flow.pts).first());
-            const sourceUid = firstPt.uid;
-            if (sourceUid === inCreationCloudUid) {
-              const newCloud = new ViewElement({
-                type: 'cloud',
-                uid: nextUid++,
-                x: firstPt.x,
-                y: firstPt.y,
-                flowUid: flow.uid,
-              });
-              elements = elements.push(newCloud);
-              flow = flow.set(
-                'pts',
-                (flow.pts || List<XmilePoint>()).map((pt) => {
-                  if (pt.uid === inCreationCloudUid) {
-                    return pt.set('uid', newCloud.uid);
-                  }
-                  return pt;
-                }),
-              );
-            } else if (sourceUid) {
-              const sourceStock = getUid(sourceUid);
-              sourceStockIdent = sourceStock.ident;
-            }
-            const lastPt = defined(defined(flow.pts).last());
-            if (lastPt.uid === fauxTargetUid) {
-              let newCloud = false;
-              let to: ViewElement;
-              if (targetUid) {
-                to = getUid(targetUid);
-                stockAttachingIdent = to.ident;
-                cursorMoveDelta = {
-                  x: 0,
-                  y: 0,
-                };
-              } else {
-                to = new ViewElement({
-                  type: 'cloud',
-                  uid: nextUid++,
-                  x: lastPt.x,
-                  y: lastPt.y,
-                  flowUid: flow.uid,
-                });
-                newCloud = true;
-              }
-              flow = flow.set(
-                'pts',
-                (flow.pts || List<XmilePoint>()).map((pt) => {
-                  if (pt.uid === fauxTargetUid) {
-                    return pt.set('uid', to.uid);
-                  }
-                  return pt;
-                }),
-              );
-              [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
-              if (newCloud) {
-                elements = elements.push(to);
-              }
-            }
-            elements = elements.push(flow);
-            selection = Set([flow.uid]);
-            isCreatingNew = true;
+      let nextUid = view.nextUid;
+      const getUid = (uid: number) => {
+        for (const e of view.elements) {
+          if (e.uid === uid) {
+            return e;
           }
-          elements = elements.concat(newClouds);
-          return view.merge({ nextUid, elements });
-        },
-      );
+        }
+        throw new Error(`unknown uid ${uid}`);
+      };
+
+      let elements = view.elements.map((element: ViewElement) => {
+        if (element.uid !== flow.uid) {
+          return element;
+        }
+        if (!(element instanceof FlowViewElement)) {
+          return element;
+        }
+
+        const oldTo = getUid(defined(defined(element.points.last()).attachedToUid));
+        let newCloud = false;
+        let updateCloud = false;
+        let to: StockViewElement | CloudViewElement;
+        if (targetUid) {
+          if (oldTo instanceof CloudViewElement) {
+            uidToDelete = oldTo.uid;
+          }
+          const newTarget = getUid(targetUid);
+          if (!(newTarget instanceof StockViewElement || newTarget instanceof CloudViewElement)) {
+            throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
+          }
+          to = newTarget;
+        } else if (oldTo instanceof CloudViewElement) {
+          updateCloud = true;
+          to = oldTo.merge({
+            x: oldTo.cx - cursorMoveDelta.x,
+            y: oldTo.cy - cursorMoveDelta.y,
+          });
+        } else {
+          newCloud = true;
+          to = CloudViewElement.from({
+            uid: nextUid++,
+            x: oldTo.cx - cursorMoveDelta.x,
+            y: oldTo.cy - cursorMoveDelta.y,
+            flowUid: flow.uid,
+            isZeroRadius: false,
+          });
+        }
+
+        if (oldTo.uid !== to.uid) {
+          if (oldTo instanceof StockViewElement) {
+            stockDetachingIdent = oldTo.ident();
+          }
+          if (to instanceof StockViewElement) {
+            stockAttachingIdent = to.ident();
+          }
+        }
+
+        const moveDelta = {
+          x: oldTo.cx - to.cx,
+          y: oldTo.cy - to.cy,
+        };
+        const points = element.points.map((point) => {
+          if (point.attachedToUid !== oldTo.uid) {
+            return point;
+          }
+          return point.set('attachedToUid', to.uid);
+        });
+        to = (to as StockViewElement).merge({
+          x: oldTo.cx,
+          y: oldTo.cy,
+        });
+        element = element.set('points', points);
+
+        [to, element] = UpdateCloudAndFlow(to, element as FlowViewElement, moveDelta);
+        if (newCloud) {
+          newClouds = newClouds.push(to);
+        } else if (updateCloud) {
+          updatedCloud = to;
+        }
+
+        return element;
+      });
+      // we might have updated some clouds
+      elements = elements.map((element: ViewElement) => {
+        if (updatedCloud && updatedCloud.uid === element.uid) {
+          return updatedCloud;
+        }
+        return element;
+      });
+      // if we have something to delete, do it here
+      elements = elements.filter((e) => e.uid !== uidToDelete);
+      if (flow.uid === inCreationUid) {
+        flow = flow.merge({
+          uid: nextUid++,
+        });
+        const firstPt = defined(flow.points.first());
+        const sourceUid = firstPt.attachedToUid;
+        if (sourceUid === inCreationCloudUid) {
+          const newCloud = CloudViewElement.from({
+            uid: nextUid++,
+            x: firstPt.x,
+            y: firstPt.y,
+            flowUid: flow.uid,
+            isZeroRadius: false,
+          });
+          elements = elements.push(newCloud);
+          flow = flow.set(
+            'points',
+            flow.points.map((pt) => {
+              if (pt.attachedToUid === inCreationCloudUid) {
+                return pt.set('attachedToUid', newCloud.uid);
+              }
+              return pt;
+            }),
+          );
+        } else if (sourceUid) {
+          const sourceStock = getUid(sourceUid);
+          sourceStockIdent = defined(sourceStock.ident());
+        }
+        const lastPt = defined(flow.points.last());
+        if (lastPt.attachedToUid === fauxTargetUid) {
+          let newCloud = false;
+          let to: StockViewElement | CloudViewElement;
+          if (targetUid) {
+            to = getUid(targetUid) as StockViewElement | CloudViewElement;
+            stockAttachingIdent = defined(to.ident());
+            cursorMoveDelta = {
+              x: 0,
+              y: 0,
+            };
+          } else {
+            to = CloudViewElement.from({
+              uid: nextUid++,
+              x: lastPt.x,
+              y: lastPt.y,
+              flowUid: flow.uid,
+              isZeroRadius: false,
+            });
+            newCloud = true;
+          }
+          flow = flow.set(
+            'points',
+            flow.points.map((pt) => {
+              if (pt.attachedToUid === fauxTargetUid) {
+                return pt.set('attachedToUid', to.uid);
+              }
+              return pt;
+            }),
+          );
+          [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
+          if (newCloud) {
+            elements = elements.push(to);
+          }
+        }
+        elements = elements.push(flow);
+        selection = Set([flow.uid]);
+        isCreatingNew = true;
+      }
+      elements = elements.concat(newClouds);
+
+      const engine = defined(this.engine());
       if (isCreatingNew) {
-        project = project.addNewVariable(this.state.modelName, flow.type, defined(flow.name));
+        engine.addNewVariable(this.state.modelName, 'flow', (flow as NamedViewElement).name);
         if (sourceStockIdent) {
-          project = project.addStocksFlow(this.state.modelName, sourceStockIdent, flow.ident, 'out');
+          engine.addStocksFlow(this.state.modelName, sourceStockIdent, flow.ident(), 'out');
         }
       }
       if (stockAttachingIdent) {
-        project = project.addStocksFlow(this.state.modelName, stockAttachingIdent, flow.ident, 'in');
+        engine.addStocksFlow(this.state.modelName, stockAttachingIdent, flow.ident(), 'in');
       }
       if (stockDetachingIdent) {
-        project = project.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident, 'in');
+        engine.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident(), 'in');
       }
+      this.updateView(view.merge({ nextUid, elements }));
       this.setState({ selection });
-      this.updateProject(project);
       this.scheduleSimRun();
-
-       */
     };
 
     handleLinkAttach = (link: LinkViewElement, newTarget: string) => {

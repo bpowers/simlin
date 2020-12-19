@@ -135,7 +135,13 @@ impl Project {
     }
 
     #[wasm_bindgen(js_name = addStocksFlow)]
-    pub fn add_stocks_flow(&mut self, _model_name: &str, _flow: &str, _dir: &str) -> Option<Error> {
+    pub fn add_stocks_flow(
+        &mut self,
+        _model_name: &str,
+        _stock: &str,
+        _flow: &str,
+        _dir: &str,
+    ) -> Option<Error> {
         None
     }
 
@@ -143,6 +149,7 @@ impl Project {
     pub fn remove_stocks_flow(
         &mut self,
         _model_name: &str,
+        _stock: &str,
         _flow: &str,
         _dir: &str,
     ) -> Option<Error> {

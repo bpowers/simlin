@@ -330,6 +330,8 @@ export interface ViewElement {
   isNamed(): boolean;
   ident(): string | undefined;
   set(prop: 'uid', uid: number): ViewElement;
+  set(prop: 'x', x: number): ViewElement;
+  set(prop: 'y', x: number): ViewElement;
 }
 
 const auxViewElementDefaults = {
