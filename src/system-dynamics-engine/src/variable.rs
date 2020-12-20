@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use lalrpop_util::ParseError;
 
 use crate::ast::{self, Expr, Visitor, AST};
+use crate::builtins::{is_builtin_fn, is_builtin_fn_or_time};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;
@@ -322,7 +323,7 @@ pub fn parse_var(
             None => None,
         };
         let direct_deps = match &ast {
-            Some(ast) => identifier_set(ast),
+            Some(ast) => identifier_set(ast, dimensions),
             None => HashSet::new(),
         };
 
@@ -444,27 +445,53 @@ pub fn parse_var(
     }
 }
 
-struct IdentifierSetVisitor {
+struct IdentifierSetVisitor<'a> {
     identifiers: HashSet<Ident>,
+    dimensions: &'a [Dimension],
 }
 
-impl Visitor<()> for IdentifierSetVisitor {
+impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
     fn walk(&mut self, e: &Expr) {
         match e {
             Expr::Const(_, _) => (),
             Expr::Var(id) => {
-                self.identifiers.insert(id.clone());
+                if !is_builtin_fn_or_time(id) {
+                    self.identifiers.insert(id.clone());
+                }
             }
             Expr::App(func, args) => {
-                self.identifiers.insert(func.clone());
+                if !is_builtin_fn(func) {
+                    self.identifiers.insert(func.clone());
+                }
                 for arg in args.iter() {
                     self.walk(arg);
                 }
             }
             Expr::Subscript(id, args) => {
-                self.identifiers.insert(id.clone());
+                if !is_builtin_fn_or_time(id) {
+                    self.identifiers.insert(id.clone());
+                }
                 for arg in args.iter() {
-                    self.walk(arg);
+                    if let Expr::Var(arg_ident) = arg {
+                        let mut is_subscript_or_dimension = false;
+                        // TODO: this should be optimized
+                        for dim in self.dimensions.iter() {
+                            if arg_ident == &dim.name {
+                                is_subscript_or_dimension = true;
+                            }
+                            for element_name in dim.elements.iter() {
+                                // subscript names aren't dependencies
+                                if arg_ident == element_name {
+                                    is_subscript_or_dimension = true;
+                                }
+                            }
+                        }
+                        if !is_subscript_or_dimension {
+                            self.walk(arg);
+                        }
+                    } else {
+                        self.walk(arg)
+                    }
                 }
             }
             Expr::Op2(_, l, r) => {
@@ -483,9 +510,10 @@ impl Visitor<()> for IdentifierSetVisitor {
     }
 }
 
-pub fn identifier_set(ast: &AST) -> HashSet<Ident> {
+pub fn identifier_set(ast: &AST, dimensions: &[Dimension]) -> HashSet<Ident> {
     let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
+        dimensions,
     };
     match ast {
         AST::Scalar(ast) => id_visitor.walk(ast),
@@ -507,7 +535,13 @@ fn test_identifier_sets() {
         ("-(a)", &["a"]),
         ("if a = 1 then -c else c(1, d, b)", &["a", "b", "c", "d"]),
         ("if a.d then b else c", &["a.d", "b", "c"]),
+        ("g[foo]", &["g"]),
     ];
+
+    let dimensions: &[Dimension] = &[Dimension {
+        name: "dim1".to_string(),
+        elements: vec!["foo".to_owned()],
+    }];
 
     for (eqn, id_list) in cases.iter() {
         let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
@@ -515,7 +549,7 @@ fn test_identifier_sets() {
         assert!(ast.is_some());
         let ast = ast.unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
-        let id_set_test = identifier_set(&ast);
+        let id_set_test = identifier_set(&ast, &dimensions);
         assert_eq!(id_set_expected, id_set_test);
     }
 }

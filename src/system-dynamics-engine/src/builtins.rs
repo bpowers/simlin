@@ -25,14 +25,33 @@ pub enum BuiltinFn<Expr> {
     Tan(Box<Expr>),
 }
 
+pub fn is_builtin_fn_or_time(name: &str) -> bool {
+    is_builtin_fn(name) || matches!(name, "time" | "dt" | "initial_time" | "final_time")
+}
+
 pub fn is_builtin_fn(name: &str) -> bool {
-    match name {
-        "lookup" | "abs" | "arccos" | "arcsin" | "arctan" | "cos" | "exp" | "inf" | "int"
-        | "ln" | "log10" | "max" | "min" | "pi" | "pulse" | "safediv" | "sin" | "sqrt" | "tan" => {
-            true
-        }
-        _ => false,
-    }
+    matches!(
+        name,
+        "lookup"
+            | "abs"
+            | "arccos"
+            | "arcsin"
+            | "arctan"
+            | "cos"
+            | "exp"
+            | "inf"
+            | "int"
+            | "ln"
+            | "log10"
+            | "max"
+            | "min"
+            | "pi"
+            | "pulse"
+            | "safediv"
+            | "sin"
+            | "sqrt"
+            | "tan"
+    )
 }
 
 #[test]

@@ -232,6 +232,11 @@ impl Model {
 
         for (ident, var) in variables.iter() {
             for dep in var.direct_deps().iter() {
+                let dep = if let Some(dot_off) = dep.find('.') {
+                    &dep[..dot_off]
+                } else {
+                    dep.as_str()
+                };
                 if !variables.contains_key(dep) {
                     errors.push(Error::new(
                         ErrorKind::Variable,
