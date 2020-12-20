@@ -6,7 +6,7 @@ import { defined } from './common';
 
 import { List, Map, Record } from 'immutable';
 
-import * as pb from '../system-dynamics-engine/src/project_io_pb';
+import { project_io as pb } from '../system-dynamics-engine/src/project_io_pb';
 import { canonicalize } from '../canonicalize';
 
 export type UID = number;
@@ -991,5 +991,10 @@ export class Project extends Record(projectDefaults) {
       simSpecs: new SimSpecs(defined(project.getSimSpecs())),
       models: Map(project.getModelsList().map((model) => [model.getName(), new Model(model)])),
     });
+  }
+
+  static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {
+    const project = pb.Project.deserializeBinary(serializedPb as Uint8Array);
+    return new Project(project);
   }
 }

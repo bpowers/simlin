@@ -10,8 +10,6 @@ import { Canvg, presets } from 'canvg';
 import fetch from 'node-fetch';
 import { DOMParser } from 'xmldom';
 
-import { Project as ProjectPB } from './system-dynamics-engine/src/project_io_pb';
-
 import { exists } from './app/common';
 import { Project as DmProject } from './app/datamodel';
 import { renderSvgToString } from './render-common';
@@ -24,8 +22,7 @@ const preset = presets.node({
 });
 
 export async function renderToPNG(fileDoc: File): Promise<Buffer> {
-  const projectPB = ProjectPB.deserializeBinary(fileDoc.getProjectContents_asU8());
-  const project = new DmProject(projectPB);
+  const project = DmProject.deserializeBinary(fileDoc.getProjectContents_asU8());
 
   const [svg, viewbox] = renderSvgToString(project, 'main');
 

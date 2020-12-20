@@ -897,6 +897,7 @@ export const Canvas = withStyles(styles)(
           name: 'New Flow',
           x,
           y,
+          labelSide: 'bottom',
           points: List([
             datamodel.Point.from({ x, y, attachedToUid: inCreationCloud.uid }),
             datamodel.Point.from({ x, y, attachedToUid: fauxCloudTarget.uid }),

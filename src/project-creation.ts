@@ -9,7 +9,7 @@ import { File as FilePb } from './schemas/file_pb';
 import { Project as ProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 
-import * as pb from './system-dynamics-engine/src/project_io_pb';
+import { project_io as pb } from './system-dynamics-engine/src/project_io_pb';
 
 export function emptyProject(name: string, _userName: string): pb.Project {
   const model = new pb.Model();

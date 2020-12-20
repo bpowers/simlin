@@ -12,8 +12,6 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import { Project as ProjectPB } from '../../system-dynamics-engine/src/project_io_pb';
-
 import { Engine as IEngine } from '../../engine-interface';
 
 import {
@@ -285,8 +283,7 @@ export const Editor = withStyles(styles)(
         }
       }
 
-      const activeProjectPB = ProjectPB.deserializeBinary(serializedProject as Uint8Array);
-      const activeProject = new Project(activeProjectPB);
+      const activeProject = Project.deserializeBinary(serializedProject);
 
       const priorHistory = this.state.projectHistory.slice();
 
@@ -370,17 +367,8 @@ export const Editor = withStyles(styles)(
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectResponse = await response.json();
 
-      let projectBinary: Uint8Array;
-      let projectPB: ProjectPB;
-      try {
-        projectBinary = toUint8Array(projectResponse.pb);
-        projectPB = ProjectPB.deserializeBinary(projectBinary);
-      } catch (err) {
-        this.appendModelError(`project protobuf: ${err.message}`);
-        return;
-      }
-
-      const project = new Project(projectPB);
+      const projectBinary = toUint8Array(projectResponse.pb);
+      const project = Project.deserializeBinary(projectBinary);
       const engine = await this.openEngine(projectBinary);
       if (!engine) {
         return;
@@ -1317,8 +1305,7 @@ export const Editor = withStyles(styles)(
       projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
       projectOffset = Math.max(projectOffset, 0);
       const serializedProject = defined(this.state.projectHistory.get(projectOffset));
-      const activeProjectPB = ProjectPB.deserializeBinary(serializedProject as Uint8Array);
-      const activeProject = new Project(activeProjectPB);
+      const activeProject = Project.deserializeBinary(serializedProject);
       this.setState({ activeProject, projectOffset });
 
       // eslint-disable-next-line @typescript-eslint/no-misused-promises

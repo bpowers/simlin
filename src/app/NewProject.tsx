@@ -21,7 +21,6 @@ import ExpandMoreIcon from '@material-ui/icons/ExpandMore';
 
 import { Project } from './Project';
 import { User } from './User';
-import { Project as ProjectPB } from '../system-dynamics-engine/src/project_io_pb';
 import { Project as ProjectDM } from './datamodel';
 
 const styles = createStyles({
@@ -163,8 +162,7 @@ export const NewProject = withStyles(styles)(
       try {
         const { from_xmile } = await import('../importer/pkg');
         const projectPB: Uint8Array = from_xmile(contents);
-        const activeProjectPB = ProjectPB.deserializeBinary(projectPB);
-        const activeProject = new ProjectDM(activeProjectPB);
+        const activeProject = ProjectDM.deserializeBinary(projectPB);
         const views = activeProject.models.get('main')?.views;
         if (!views || views.isEmpty()) {
           this.setState({
