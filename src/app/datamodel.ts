@@ -528,6 +528,17 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
   }
+
+  static from(props: typeof flowViewElementDefaults): FlowViewElement {
+    const element = new pb.ViewElement.Flow();
+    element.setUid(props.uid);
+    element.setName(props.name);
+    element.setX(props.x);
+    element.setY(props.y);
+    element.setPointsList(props.points.map((p) => p.toPb()).toArray());
+    element.setLabelSide(labelSideToPb(props.labelSide));
+    return new FlowViewElement(element);
+  }
 }
 
 const linkViewElementDefaults = {
@@ -602,6 +613,23 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       element.setIsStraight(this.isStraight);
     }
     return element;
+  }
+
+  static from(props: typeof linkViewElementDefaults): LinkViewElement {
+    const element = new pb.ViewElement.Link();
+    element.setUid(props.uid);
+    element.setFromUid(props.fromUid);
+    element.setToUid(props.toUid);
+    if (props.arc !== undefined) {
+      element.setArc(props.arc);
+    } else if (props.multiPoint) {
+      const linkPoints = new pb.ViewElement.Link.LinkPoints();
+      linkPoints.setPointsList(props.multiPoint.map((p) => p.toPb()).toArray());
+      element.setMultiPoint(linkPoints);
+    } else {
+      element.setIsStraight(props.isStraight);
+    }
+    return new LinkViewElement(element);
   }
 }
 

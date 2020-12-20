@@ -12,8 +12,6 @@ import { List, Map, Set } from 'immutable';
 
 import { defined, Series } from '../../common';
 
-import * as pb from '../../../system-dynamics-engine/src/project_io_pb';
-
 import * as datamodel from '../../datamodel';
 import {
   AliasViewElement,
@@ -24,6 +22,7 @@ import {
   ModuleViewElement,
   StockViewElement,
   NamedViewElement,
+  Point as FlowPoint,
   UID,
   LabelSide,
 } from '../../datamodel';
@@ -885,14 +884,15 @@ export const Canvas = withStyles(styles)(
         const x = e.clientX - canvasOffset.x;
         const y = e.clientY - canvasOffset.y;
 
-        const inCreationCloud = new CloudViewElement(new pb.ViewElement.Cloud()).merge({
+        const inCreationCloud = CloudViewElement.from({
           uid: inCreationCloudUid,
           flowUid: inCreationUid,
           x,
           y,
+          isZeroRadius: false,
         });
 
-        const inCreation = new FlowViewElement(new pb.ViewElement.Flow()).merge({
+        const inCreation = FlowViewElement.from({
           uid: inCreationUid,
           name: 'New Flow',
           x,
@@ -901,6 +901,7 @@ export const Canvas = withStyles(styles)(
             datamodel.Point.from({ x, y, attachedToUid: inCreationCloud.uid }),
             datamodel.Point.from({ x, y, attachedToUid: fauxCloudTarget.uid }),
           ]),
+          isZeroRadius: false,
         });
 
         this.selectionCenterOffset = {
@@ -995,30 +996,38 @@ export const Canvas = withStyles(styles)(
       if (selectedTool === 'link' && element.isNamed()) {
         isEditingName = false;
         isMovingArrow = true;
-        const link = new pb.ViewElement.Link();
-        link.setUid(inCreationUid);
-        link.setFromUid(element.uid);
-        link.setToUid(fauxTarget.uid);
-        inCreation = new LinkViewElement(link);
+        inCreation = LinkViewElement.from({
+          uid: inCreationUid,
+          fromUid: element.uid,
+          toUid: fauxTarget.uid,
+          arc: 0.0,
+          multiPoint: undefined,
+          isStraight: false,
+          isZeroRadius: false,
+        });
         element = inCreation;
       } else if (selectedTool === 'flow' && element instanceof datamodel.StockViewElement) {
         isEditingName = false;
         isMovingArrow = true;
-        const flow = new pb.ViewElement.Flow();
-        flow.setUid(inCreationUid);
-        flow.setName('New Flow');
-        flow.setX(element.cx);
-        flow.setY(element.cy);
-        const point1 = new pb.ViewElement.FlowPoint();
-        point1.setX(element.cx);
-        point1.setY(element.cy);
-        point1.setAttachedToUid(element.uid);
-        const point2 = new pb.ViewElement.FlowPoint();
-        point2.setX(element.cx);
-        point2.setY(element.cy);
-        point2.setAttachedToUid(fauxCloudTarget.uid);
-        flow.setPointsList([point1, point2]);
-        inCreation = new FlowViewElement(flow);
+        const startPoint = FlowPoint.from({
+          x: element.cx,
+          y: element.cy,
+          attachedToUid: element.uid,
+        });
+        const endPoint = FlowPoint.from({
+          x: element.cx,
+          y: element.cy,
+          attachedToUid: fauxCloudTarget.uid,
+        });
+        inCreation = FlowViewElement.from({
+          uid: inCreationUid,
+          name: 'New Flow',
+          x: element.cx,
+          y: element.cy,
+          labelSide: 'bottom',
+          points: List([startPoint, endPoint]),
+          isZeroRadius: false,
+        });
         element = inCreation;
       } else {
         // not an action we recognize, deselect th tool and continue on
