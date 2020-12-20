@@ -1175,6 +1175,11 @@ impl Module {
             return sim_err!(NotSimulatable, model.name.clone());
         }
 
+        // TODO: eventually we should try to simulate subsets of the model in the face of errors
+        if model.errors.is_some() && !model.errors.as_ref().unwrap().is_empty() {
+            return sim_err!(NotSimulatable, model.name.clone());
+        }
+
         let model_name: &str = &model.name;
         let metadata = build_metadata(project, model_name, is_root);
 
