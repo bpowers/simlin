@@ -162,7 +162,9 @@ class App {
       'frame-ancestors': ["'self'"],
       'img-src': ["'self'", 'data:', 'https://*.googleusercontent.com'],
       'object-src': ["'none'"],
-      'script-src': ["'self'", 'blob:'].concat(additionalScriptSrcs),
+      // FIXME: unsafe-eval is necessary for wasm in Chrome for now until
+      //   https://bugs.chromium.org/p/chromium/issues/detail?id=961485
+      'script-src': ["'self'", 'blob:', "'unsafe-eval'"].concat(additionalScriptSrcs),
       'script-src-attr': ["'none'"],
       'style-src': ["'self'", 'https://fonts.googleapis.com', "'unsafe-inline'"],
       'upgrade-insecure-requests': [],
