@@ -18,6 +18,11 @@ handlers:
   upload: public/index.html
   secure: always
 
+- url: /new$
+  static_files: public/index.html
+  upload: public/index.html
+  secure: always
+
 - url: /(legal|legal/cookies|privacy)$
   static_files: public/\1/index.html
   upload: public/(legal|legal/cookies|privacy)/index.html
