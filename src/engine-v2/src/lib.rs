@@ -11,10 +11,11 @@ use prost::Message;
 
 use system_dynamics_engine as engine;
 use system_dynamics_engine::common::{ErrorCode, ErrorKind};
+use system_dynamics_engine::datamodel::GraphicalFunction;
 use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error};
 
 #[wasm_bindgen]
-pub struct Project {
+pub struct Engine {
     #[allow(dead_code)]
     project: engine::Project,
     sim: Option<engine::Simulation>,
@@ -22,7 +23,7 @@ pub struct Project {
 }
 
 #[wasm_bindgen]
-impl Project {
+impl Engine {
     fn instantiate_sim(&mut self) {
         // TODO: expose the simulation error message here
         self.sim = engine::Simulation::new(&self.project, "main").ok();
@@ -257,10 +258,32 @@ impl Project {
         new_equation: &str,
     ) -> Option<Error> {
         let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+        match model.get_variable_mut(ident) {
+            Some(var) => var.set_scalar_equation(new_equation),
+            _ => {
+                return None;
+            }
+        }
 
-        for m in project.models.iter_mut().filter(|m| m.name == model_name) {
-            for v in m.variables.iter_mut().filter(|v| v.get_ident() == ident) {
-                v.set_scalar_equation(new_equation);
+        self.project = project.into();
+        self.instantiate_sim();
+
+        None
+    }
+
+    fn set_graphical_function_common(
+        &mut self,
+        model_name: &str,
+        ident: &str,
+        gf: Option<GraphicalFunction>,
+    ) -> Option<Error> {
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+        match model.get_variable_mut(ident) {
+            Some(var) => var.set_graphical_function(gf),
+            _ => {
+                return None;
             }
         }
 
@@ -273,24 +296,51 @@ impl Project {
     #[wasm_bindgen(js_name = setGraphicalFunction)]
     pub fn set_graphical_function(
         &mut self,
-        _model_name: &str,
-        _ident: &str,
-        _gf: &[u8],
+        model_name: &str,
+        ident: &str,
+        graphical_function_pb: &[u8],
     ) -> Option<Error> {
-        None
+        let gf = match project_io::GraphicalFunction::decode(graphical_function_pb) {
+            Ok(gf) => serde::deserialize_graphical_function(gf),
+            Err(_err) => {
+                return None;
+            }
+        };
+
+        self.set_graphical_function_common(model_name, ident, Some(gf))
     }
 
     #[wasm_bindgen(js_name = removeGraphicalFunction)]
-    pub fn remove_graphical_function(&mut self, _model_name: &str, _ident: &str) -> Option<Error> {
-        None
+    pub fn remove_graphical_function(&mut self, model_name: &str, ident: &str) -> Option<Error> {
+        self.set_graphical_function_common(model_name, ident, None)
     }
 
-    pub fn rename(
-        &mut self,
-        _model_name: &str,
-        _old_ident: &str,
-        _new_ident: &str,
-    ) -> Option<Error> {
+    pub fn rename(&mut self, model_name: &str, old_name: &str, new_name: &str) -> Option<Error> {
+        let old_ident = canonicalize(old_name);
+        let new_ident = canonicalize(new_name);
+
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+
+        // if there is already a variable by that name, its an error
+        if model.get_variable_mut(&new_ident).is_some() {
+            return Some(Error::new(
+                ErrorKind::Model,
+                ErrorCode::DuplicateVariable,
+                None,
+            ));
+        }
+
+        match model.get_variable_mut(&old_ident) {
+            Some(var) => var.set_ident(new_ident),
+            _ => {
+                return None;
+            }
+        }
+
+        self.project = project.into();
+        self.instantiate_sim();
+
         None
     }
 
@@ -374,7 +424,7 @@ impl Project {
 }
 
 #[wasm_bindgen]
-pub fn open(project_pb: &[u8]) -> Option<Project> {
+pub fn open(project_pb: &[u8]) -> Option<Engine> {
     let project = match project_io::Project::decode(project_pb) {
         Ok(project) => serde::deserialize(project),
         Err(_err) => {
@@ -382,7 +432,7 @@ pub fn open(project_pb: &[u8]) -> Option<Project> {
         }
     };
 
-    let mut project = Project {
+    let mut project = Engine {
         project: project.into(),
         sim: None,
         results: None,
