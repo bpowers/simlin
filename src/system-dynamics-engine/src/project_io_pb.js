@@ -10,45 +10,45 @@
 
 var jspb = require('google-protobuf');
 var goog = jspb;
-var global = Function('return this')();
+var proto = {};
 
-goog.exportSymbol('proto.project_io.Dimension', null, global);
-goog.exportSymbol('proto.project_io.Dt', null, global);
-goog.exportSymbol('proto.project_io.GraphicalFunction', null, global);
-goog.exportSymbol('proto.project_io.GraphicalFunction.Kind', null, global);
-goog.exportSymbol('proto.project_io.GraphicalFunction.Scale', null, global);
-goog.exportSymbol('proto.project_io.Model', null, global);
-goog.exportSymbol('proto.project_io.Project', null, global);
-goog.exportSymbol('proto.project_io.SimMethod', null, global);
-goog.exportSymbol('proto.project_io.SimSpecs', null, global);
-goog.exportSymbol('proto.project_io.Variable', null, global);
-goog.exportSymbol('proto.project_io.Variable.ApplyToAllEquation', null, global);
-goog.exportSymbol('proto.project_io.Variable.ArrayedEquation', null, global);
-goog.exportSymbol('proto.project_io.Variable.ArrayedEquation.Element', null, global);
-goog.exportSymbol('proto.project_io.Variable.Aux', null, global);
-goog.exportSymbol('proto.project_io.Variable.Equation', null, global);
-goog.exportSymbol('proto.project_io.Variable.Equation.EquationCase', null, global);
-goog.exportSymbol('proto.project_io.Variable.Flow', null, global);
-goog.exportSymbol('proto.project_io.Variable.Module', null, global);
-goog.exportSymbol('proto.project_io.Variable.Module.Reference', null, global);
-goog.exportSymbol('proto.project_io.Variable.ScalarEquation', null, global);
-goog.exportSymbol('proto.project_io.Variable.Stock', null, global);
-goog.exportSymbol('proto.project_io.Variable.VCase', null, global);
-goog.exportSymbol('proto.project_io.View', null, global);
-goog.exportSymbol('proto.project_io.View.ViewType', null, global);
-goog.exportSymbol('proto.project_io.ViewElement', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Alias', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Aux', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Cloud', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.ElementCase', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Flow', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.FlowPoint', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.LabelSide', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Link', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Link.LinkPoints', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Link.ShapeCase', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Module', null, global);
-goog.exportSymbol('proto.project_io.ViewElement.Stock', null, global);
+goog.exportSymbol('project_io.Dimension', null, proto);
+goog.exportSymbol('project_io.Dt', null, proto);
+goog.exportSymbol('project_io.GraphicalFunction', null, proto);
+goog.exportSymbol('project_io.GraphicalFunction.Kind', null, proto);
+goog.exportSymbol('project_io.GraphicalFunction.Scale', null, proto);
+goog.exportSymbol('project_io.Model', null, proto);
+goog.exportSymbol('project_io.Project', null, proto);
+goog.exportSymbol('project_io.SimMethod', null, proto);
+goog.exportSymbol('project_io.SimSpecs', null, proto);
+goog.exportSymbol('project_io.Variable', null, proto);
+goog.exportSymbol('project_io.Variable.ApplyToAllEquation', null, proto);
+goog.exportSymbol('project_io.Variable.ArrayedEquation', null, proto);
+goog.exportSymbol('project_io.Variable.ArrayedEquation.Element', null, proto);
+goog.exportSymbol('project_io.Variable.Aux', null, proto);
+goog.exportSymbol('project_io.Variable.Equation', null, proto);
+goog.exportSymbol('project_io.Variable.Equation.EquationCase', null, proto);
+goog.exportSymbol('project_io.Variable.Flow', null, proto);
+goog.exportSymbol('project_io.Variable.Module', null, proto);
+goog.exportSymbol('project_io.Variable.Module.Reference', null, proto);
+goog.exportSymbol('project_io.Variable.ScalarEquation', null, proto);
+goog.exportSymbol('project_io.Variable.Stock', null, proto);
+goog.exportSymbol('project_io.Variable.VCase', null, proto);
+goog.exportSymbol('project_io.View', null, proto);
+goog.exportSymbol('project_io.View.ViewType', null, proto);
+goog.exportSymbol('project_io.ViewElement', null, proto);
+goog.exportSymbol('project_io.ViewElement.Alias', null, proto);
+goog.exportSymbol('project_io.ViewElement.Aux', null, proto);
+goog.exportSymbol('project_io.ViewElement.Cloud', null, proto);
+goog.exportSymbol('project_io.ViewElement.ElementCase', null, proto);
+goog.exportSymbol('project_io.ViewElement.Flow', null, proto);
+goog.exportSymbol('project_io.ViewElement.FlowPoint', null, proto);
+goog.exportSymbol('project_io.ViewElement.LabelSide', null, proto);
+goog.exportSymbol('project_io.ViewElement.Link', null, proto);
+goog.exportSymbol('project_io.ViewElement.Link.LinkPoints', null, proto);
+goog.exportSymbol('project_io.ViewElement.Link.ShapeCase', null, proto);
+goog.exportSymbol('project_io.ViewElement.Module', null, proto);
+goog.exportSymbol('project_io.ViewElement.Stock', null, proto);
 /**
  * Generated by JsPbCodeGenerator.
  * @param {Array=} opt_data Optional initial data array, typically from a
@@ -8044,4 +8044,4 @@ proto.project_io.SimMethod = {
   RUNGE_KUTTA_4: 1
 };
 
-goog.object.extend(exports, proto.project_io);
+goog.object.extend(exports, proto);

@@ -44,7 +44,7 @@
     "build:runtime0": "tsc -p .tsconfig.rt.json",
     "build:runtime1": "node support/build-runtime.js src/engine/runtime.ts",
     "build:runtime": "npm-run-all build:pre build:runtime0 build:runtime1",
-    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs,binary:.' --ts_out=. $(find src -name '*.proto')",
+    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src -name '*.proto')",
     "rebuild-stdlib": "cargo build && for input in stdlib/*.stmx; do model=\"$(basename $input | cut -d '.' -f 1)\"; target/debug/mdl convert --model-only \"$input\" --output src/system-dynamics-engine/src/stdlib/\"$model\".pb; done",
     "test": "jest",
     "rtest": "yarn run build:backend && ./test/test-models/regression-test.py -x '(subscript|macro|xscale|initial_function|stocks_with_expressions|active_initial|smooth_and_stock|euler_step_vs_saveper|special_characters)' ./bin/mdl.js test/test-models",
