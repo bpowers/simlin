@@ -408,11 +408,32 @@ export const Editor = withStyles(styles)(
 
     handleRename = (oldName: string, newName: string) => {
       const engine = defined(this.engine());
-      const err = engine.rename(this.state.modelName, oldName, newName);
+      let err = engine.rename(this.state.modelName, oldName, newName);
       if (err) {
         this.appendModelError(`error code ${err.code}: ${err.getDetails()}`);
         return;
       }
+      const view = defined(this.getView());
+
+      const elements = view.elements.map((element: ViewElement) => {
+        if (!element.isNamed()) {
+          return element;
+        }
+        const namedElement = element as AuxViewElement;
+        if (namedElement.name !== oldName) {
+          return element;
+        }
+
+        return namedElement.set('name', newName);
+      });
+
+      const viewPb = view.set('elements', elements).toPb();
+      const serializedView = viewPb.serializeBinary();
+      err = engine.setView(this.state.modelName, 0, serializedView);
+      if (err) {
+        this.appendModelError(`updating the view failed (code ${err.code}, details: '${err.getDetails()}')`);
+      }
+
       this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
