@@ -149,9 +149,8 @@ const Home = withWidth()(
         });
       };
 
-      handleProjectCreated = (_project: Project) => {
-        // TODO
-        window.location.pathname = '/';
+      handleProjectCreated = (project: Project) => {
+        window.location.pathname = '/' + project.id;
       };
 
       getGridListCols = () => {

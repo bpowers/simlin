@@ -19,10 +19,10 @@ import TextField from '@material-ui/core/TextField';
 import Typography from '@material-ui/core/Typography';
 import ExpandMoreIcon from '@material-ui/icons/ExpandMore';
 
-import { stdProject } from '../engine/project';
-
 import { Project } from './Project';
 import { User } from './User';
+import { Project as ProjectPB } from '../system-dynamics-engine/src/project_io_pb';
+import { Project as ProjectDM } from './datamodel';
 
 const styles = createStyles({
   newSubtitle: {
@@ -40,7 +40,6 @@ interface NewProjectState {
   descriptionField: string;
   errorMsg?: string;
   expanded: boolean;
-  projectJSON?: any;
   projectPB?: Uint8Array;
   isPublic?: boolean;
 }
@@ -91,10 +90,6 @@ export const NewProject = withStyles(styles)(
         projectName: this.state.projectNameField,
         description: this.state.descriptionField,
       };
-      if (this.state.projectJSON) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        bodyContents.projectJSON = this.state.projectJSON;
-      }
       if (this.state.projectPB) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         bodyContents.projectPB = fromUint8Array(this.state.projectPB);
@@ -147,10 +142,6 @@ export const NewProject = withStyles(styles)(
       }
     };
 
-    handleExpandClick = (): void => {
-      this.setState((state) => ({ expanded: !state.expanded }));
-    };
-
     handlePublicChecked = (): void => {
       this.setState((state) => ({ isPublic: !state.isPublic }));
     };
@@ -160,20 +151,28 @@ export const NewProject = withStyles(styles)(
         console.log('expected non-empty list of files?');
         return;
       }
-      const contents = await readFile(event.target.files[0]);
-      let doc: XMLDocument;
-      try {
-        doc = new DOMParser().parseFromString(contents, 'application/xml');
-      } catch (e) {
-        this.setState({
-          errorMsg: `DOMParser: ${e}`,
-        });
-        return;
+      const file = event.target.files[0];
+      let contents = await readFile(file);
+
+      // convert vensim files to xmile
+      if (file.name.endsWith('.mdl')) {
+        const { convertMdlToXmile } = await import('../xmutil-js');
+        contents = convertMdlToXmile(contents, false);
       }
 
       try {
         const { from_xmile } = await import('../importer/pkg');
         const projectPB: Uint8Array = from_xmile(contents);
+        const activeProjectPB = ProjectPB.deserializeBinary(projectPB);
+        const activeProject = new ProjectDM(activeProjectPB);
+        const views = activeProject.models.get('main')?.views;
+        if (!views || views.isEmpty()) {
+          this.setState({
+            errorMsg: `can't import model with no view at this time.`,
+          });
+          return;
+        }
+
         this.setState({ projectPB });
       } catch (e) {
         this.setState({
@@ -181,29 +180,6 @@ export const NewProject = withStyles(styles)(
         });
         return;
       }
-
-      const [project, err] = stdProject.addXmileFile(doc, true);
-      if (err) {
-        console.log(err);
-        this.setState({
-          errorMsg: `error parsing model: ${err.message}`,
-        });
-        return;
-      }
-      if (!project) {
-        this.setState({
-          errorMsg: `unknown file creation error`,
-        });
-        return;
-      }
-
-      const file = project.toFile();
-      // ensure we've converted to plain-old JavaScript objects
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const projectJSON = JSON.parse(JSON.stringify(file));
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      this.setState({ projectJSON });
     };
 
     render() {
@@ -265,7 +241,7 @@ export const NewProject = withStyles(styles)(
                       Select
                       <input
                         style={{ display: 'none' }}
-                        accept=".stmx,.itmx,.xmile"
+                        accept=".stmx,.itmx,.xmile,.mdl"
                         id="xmile-model-file"
                         type="file"
                         onChange={this.uploadModel}

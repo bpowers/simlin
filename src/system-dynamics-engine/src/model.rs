@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{EquationResult, Error, Ident, Result};
+use crate::common::{EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::variable::{parse_var, ModuleInput, Variable};
 use crate::{datamodel, model_err, var_err};
@@ -225,6 +225,28 @@ impl Model {
             }
         };
 
+        let variables: HashMap<String, Variable> = variable_list
+            .into_iter()
+            .map(|v| (v.ident().to_string(), v))
+            .collect();
+
+        for (ident, var) in variables.iter() {
+            for dep in var.direct_deps().iter() {
+                let dep = if let Some(dot_off) = dep.find('.') {
+                    &dep[..dot_off]
+                } else {
+                    dep.as_str()
+                };
+                if !variables.contains_key(dep) {
+                    errors.push(Error::new(
+                        ErrorKind::Variable,
+                        ErrorCode::UnknownDependency,
+                        Some(ident.clone()),
+                    ));
+                }
+            }
+        }
+
         let maybe_errors = match errors.len() {
             0 => None,
             _ => Some(errors),
@@ -232,10 +254,7 @@ impl Model {
 
         Model {
             name: x_model.name.clone(),
-            variables: variable_list
-                .into_iter()
-                .map(|v| (v.ident().to_string(), v))
-                .collect(),
+            variables,
             errors: maybe_errors,
             dt_deps,
             initial_deps,

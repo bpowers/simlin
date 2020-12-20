@@ -8,12 +8,12 @@ import { List } from 'immutable';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { Point as XmilePoint, ViewElement } from '../../../engine/xmile';
+import { Point, FlowViewElement, ViewElement, StockViewElement, CloudViewElement } from '../../datamodel';
 
 import { Arrowhead } from './Arrowhead';
-import { displayName, Point } from './common';
+import { displayName, Point as IPoint } from './common';
 import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default';
-import { findSide, Label } from './Label';
+import { Label } from './Label';
 import { Sparkline } from './Sparkline';
 import { StockHeight, StockWidth } from './Stock';
 
@@ -82,10 +82,14 @@ function eq(a: number, b: number, relTol = 1e-9, absTol = 0.0): boolean {
   return diff <= Math.abs(relTol * b) || diff <= Math.abs(relTol * a) || diff <= absTol;
 }
 
-function isAdjacent(stockEl: ViewElement, flow: ViewElement, side: 'left' | 'right' | 'top' | 'bottom'): boolean {
+function isAdjacent(
+  stockEl: StockViewElement,
+  flow: FlowViewElement,
+  side: 'left' | 'right' | 'top' | 'bottom',
+): boolean {
   // want to look at first point and last point.
-  const points = (flow.pts || List<XmilePoint>()).filter((_, i) => {
-    return i === 0 || i === (flow.pts ? flow.pts.size - 1 : 0);
+  const points = flow.points.filter((_, i) => {
+    return i === 0 || i === flow.points.size - 1;
   });
 
   for (const point of points) {
@@ -103,9 +107,9 @@ function isAdjacent(stockEl: ViewElement, flow: ViewElement, side: 'left' | 'rig
   return false;
 }
 
-function getComparePoint(flow: ViewElement, _stock: ViewElement): Point {
-  if (defined(flow.pts).size !== 2) {
-    console.log(`TODO: multipoint flows for ${flow.ident}`);
+function getComparePoint(flow: FlowViewElement, _stock: ViewElement): IPoint {
+  if (flow.points.size !== 2) {
+    console.log(`TODO: multipoint flows for ${flow.ident()}`);
   }
   return {
     x: flow.cx,
@@ -114,20 +118,20 @@ function getComparePoint(flow: ViewElement, _stock: ViewElement): Point {
 }
 
 function adjustFlows(
-  origStock: ViewElement,
-  stock: ViewElement,
-  flows: List<ViewElement>,
+  origStock: StockViewElement | CloudViewElement,
+  stock: StockViewElement | CloudViewElement,
+  flows: List<FlowViewElement>,
   isCloud?: boolean,
-): List<ViewElement> {
-  let otherEnd: Point | undefined;
-  return flows.map((flow: ViewElement) => {
-    const points = (flow.pts || List<XmilePoint>()).map((point, i) => {
+): List<FlowViewElement> {
+  let otherEnd: IPoint | undefined;
+  return flows.map((flow: FlowViewElement) => {
+    const points = flow.points.map((point, i) => {
       // if its not the start or end point, don't change it.
-      if (!(i === 0 || i === (flow.pts ? flow.pts.size - 1 : 0))) {
+      if (!(i === 0 || i === flow.points.size - 1)) {
         return point;
       }
 
-      if (point.uid !== stock.uid) {
+      if (point.attachedToUid !== stock.uid) {
         otherEnd = point;
         return point;
       }
@@ -144,7 +148,7 @@ function adjustFlows(
         x: StockWidth / 2,
         y: StockHeight / 2,
       };
-      if (stock.type === 'cloud' || stock.isZeroRadius) {
+      if (stock instanceof CloudViewElement || stock.isZeroRadius) {
         adjust.x = 0;
         adjust.y = 0;
       }
@@ -201,33 +205,34 @@ function adjustFlows(
       });
     }
 
-    return flow.set('pts', points);
+    return flow.set('points', points);
   });
 }
 
 export function UpdateStockAndFlows(
-  stockEl: ViewElement,
-  flows: List<ViewElement>,
-  moveDelta: Point,
-): [ViewElement, List<ViewElement>] {
+  stockEl: StockViewElement,
+  flows: List<FlowViewElement>,
+  moveDelta: IPoint,
+): [StockViewElement, List<FlowViewElement>] {
   const left = flows.filter((e) => isAdjacent(stockEl, e, 'left'));
   const right = flows.filter((e) => isAdjacent(stockEl, e, 'right'));
   const top = flows.filter((e) => isAdjacent(stockEl, e, 'top'));
   const bottom = flows.filter((e) => isAdjacent(stockEl, e, 'bottom'));
 
-  let proposed = new XmilePoint({
+  let proposed = Point.from({
     x: stockEl.cx - moveDelta.x,
     y: stockEl.cy - moveDelta.y,
+    attachedToUid: undefined,
   });
 
-  proposed = left.concat(right).reduce((p, flowEl: ViewElement) => {
+  proposed = left.concat(right).reduce((p, flowEl: FlowViewElement) => {
     let y = p.y;
     y = Math.max(y, flowEl.cy - StockHeight / 2 + 3);
     y = Math.min(y, flowEl.cy + StockHeight / 2 - 3);
     return p.set('y', y);
   }, proposed);
 
-  proposed = top.concat(bottom).reduce((p, flowEl: ViewElement) => {
+  proposed = top.concat(bottom).reduce((p, flowEl: FlowViewElement) => {
     let x = p.x;
     x = Math.max(x, flowEl.cx - StockWidth / 2 + 3);
     x = Math.min(x, flowEl.cx + StockWidth / 2 - 3);
@@ -238,8 +243,6 @@ export function UpdateStockAndFlows(
   stockEl = stockEl.merge({
     x: proposed.x,
     y: proposed.y,
-    width: undefined,
-    height: undefined,
   });
 
   flows = adjustFlows(origStockEl, stockEl, flows);
@@ -247,14 +250,14 @@ export function UpdateStockAndFlows(
   return [stockEl, flows];
 }
 
-function allEqual<T>(extractor: (pt: XmilePoint) => T): (flow: ViewElement) => boolean {
-  return (flow: ViewElement) => {
-    if (!flow.pts || flow.pts.size === 0) {
+function allEqual<T>(extractor: (pt: Point) => T): (flow: FlowViewElement) => boolean {
+  return (flow: FlowViewElement) => {
+    if (flow.points.size === 0) {
       return false;
     }
 
-    const first = extractor(defined(flow.pts.get(0)));
-    return flow.pts.every((pt) => extractor(pt) === first);
+    const first = extractor(defined(flow.points.get(0)));
+    return flow.points.every((pt) => extractor(pt) === first);
   };
 }
 
@@ -262,16 +265,17 @@ const isHorizontal = allEqual((pt) => pt.y);
 const isVertical = allEqual((pt) => pt.x);
 
 export function UpdateCloudAndFlow(
-  cloud: ViewElement,
-  flow: ViewElement,
-  moveDelta: Point,
-): [ViewElement, ViewElement] {
-  let proposed = new XmilePoint({
+  cloud: StockViewElement | CloudViewElement,
+  flow: FlowViewElement,
+  moveDelta: IPoint,
+): [StockViewElement | CloudViewElement, FlowViewElement] {
+  let proposed = Point.from({
     x: cloud.cx - moveDelta.x,
     y: cloud.cy - moveDelta.y,
+    attachedToUid: undefined,
   });
 
-  const start = defined(defined(flow.pts).get(0));
+  const start = defined(flow.points.get(0));
 
   if (isHorizontal(flow) && isVertical(flow)) {
     const d = {
@@ -295,8 +299,6 @@ export function UpdateCloudAndFlow(
   cloud = cloud.merge({
     x: proposed.x,
     y: proposed.y,
-    width: undefined,
-    height: undefined,
   });
 
   flow = defined(adjustFlows(origCloud, cloud, List([flow]), true).first());
@@ -305,23 +307,28 @@ export function UpdateCloudAndFlow(
 }
 
 export function UpdateFlow(
-  flowEl: ViewElement,
-  ends: List<ViewElement>,
-  moveDelta: Point,
-): [ViewElement, List<ViewElement>] {
-  const stocks = ends.filter((e) => e.type === 'stock');
-  const clouds = ends.filter((e) => e.type === 'cloud');
+  flowEl: FlowViewElement,
+  ends: List<StockViewElement | CloudViewElement>,
+  moveDelta: IPoint,
+): [FlowViewElement, List<CloudViewElement>] {
+  const stocks = ends.filter((e) => e instanceof StockViewElement);
+  const clouds = ends.filter((e) => e instanceof CloudViewElement);
 
-  const center = new XmilePoint({ x: flowEl.cx, y: flowEl.cy });
+  const center = Point.from({
+    x: flowEl.cx,
+    y: flowEl.cy,
+    attachedToUid: undefined,
+  });
 
-  let points = defined(flowEl.pts);
+  let points = flowEl.points;
   const origPoints = points;
   const start = defined(points.get(0));
   const end = defined(points.get(points.size - 1));
 
-  let proposed = new XmilePoint({
+  let proposed = Point.from({
     x: center.x - moveDelta.x,
     y: center.y - moveDelta.y,
+    attachedToUid: undefined,
   });
 
   // if we don't have any stocks, its a flow from cloud to cloud and as such
@@ -364,8 +371,8 @@ export function UpdateFlow(
   }
 
   const updatedClouds = clouds.map((cloud) => {
-    const origPoint = defined(origPoints.find((pt) => pt.uid === cloud.uid));
-    const updatedPoint = defined(points.find((pt) => pt.uid === cloud.uid));
+    const origPoint = defined(origPoints.find((pt) => pt.attachedToUid === cloud.uid));
+    const updatedPoint = defined(points.find((pt) => pt.attachedToUid === cloud.uid));
     const delta = {
       x: updatedPoint.x - origPoint.x,
       y: updatedPoint.y - origPoint.y,
@@ -374,13 +381,13 @@ export function UpdateFlow(
     return cloud.merge({
       x: cloud.cx + delta.x,
       y: cloud.cy + delta.y,
-    });
+    }) as CloudViewElement;
   });
 
   flowEl = flowEl.merge({
     x: proposed.x,
     y: proposed.y,
-    pts: points,
+    points,
   });
   return [flowEl, updatedClouds];
 }
@@ -394,9 +401,9 @@ export interface FlowPropsFull extends WithStyles<typeof styles> {
   series: Series | undefined;
   onSelection: (el: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean, isArrowhead?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
-  source: ViewElement;
-  element: ViewElement;
-  sink: ViewElement;
+  source: StockViewElement | CloudViewElement;
+  element: FlowViewElement;
+  sink: StockViewElement | CloudViewElement;
 }
 
 export type FlowProps = Pick<
@@ -440,15 +447,7 @@ export const Flow = withStyles(styles)(
     };
 
     radius(): number {
-      const { element } = this.props;
-      let r = AuxRadius;
-      if (element.width) {
-        r = element.width / 2;
-      }
-      if (element.height) {
-        r = element.height / 2;
-      }
-      return r;
+      return AuxRadius;
     }
 
     indicators() {
@@ -485,12 +484,12 @@ export const Flow = withStyles(styles)(
     render() {
       const { classes, element, isEditingName, isMovingArrow, isSelected, isValidTarget, series, sink } = this.props;
 
-      let pts = defined(this.props.element.pts);
+      let pts = this.props.element.points;
       if (pts.size < 2) {
         throw new Error('expected at least two points on a flow');
       }
 
-      if (sink.type === 'cloud' && !isMovingArrow) {
+      if (sink instanceof CloudViewElement && !isMovingArrow) {
         const x = defined(pts.get(pts.size - 1)).x;
         const y = defined(pts.get(pts.size - 1)).y;
         const prevX = defined(pts.get(pts.size - 2)).x;
@@ -541,16 +540,10 @@ export const Flow = withStyles(styles)(
 
       const cx = element.cx;
       const cy = element.cy;
-      let r = AuxRadius;
-      if (element.width) {
-        r = element.width / 2;
-      }
-      if (element.height) {
-        r = element.height / 2;
-      }
+      const r = this.radius();
 
       const lastPt = defined(pts.get(pts.size - 1));
-      const side = findSide(element);
+      const side = element.labelSide;
       const label = isEditingName ? undefined : (
         <Label
           uid={element.uid}

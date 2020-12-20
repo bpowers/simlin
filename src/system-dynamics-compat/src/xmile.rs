@@ -518,7 +518,7 @@ impl From<Model> for datamodel::Model {
             .view
             .unwrap_or_default()
             .into_iter()
-            .filter(|v| v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow)
+            .filter(|v| v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow)
             .map(|v| {
                 let mut v = v;
                 v.normalize(&model);
@@ -611,6 +611,42 @@ pub mod view_element {
     use super::datamodel;
     use serde::{Deserialize, Serialize};
     use system_dynamics_engine::datamodel::view_element::LinkShape;
+
+    // converts an angle associated with a connector (in degrees) into an
+    // angle in the coordinate system of SVG canvases where the origin is
+    // in the upper-left of the screen and Y grows down, and the domain is
+    // -180 to 180.
+    fn convert_angle_from_xmile_to_canvas(in_degrees: f64) -> f64 {
+        let out_degrees = (360.0 - in_degrees) % 360.0;
+        if out_degrees > 180.0 {
+            out_degrees - 360.0
+        } else {
+            out_degrees
+        }
+    }
+
+    // converts an angle associated with a connector (in degrees) into an
+    // angle in the coordinate system of SVG canvases where the origin is
+    // in the upper-left of the screen and Y grows down, and the domain is
+    // -180 to 180.
+    fn convert_angle_from_canvas_to_xmile(in_degrees: f64) -> f64 {
+        let out_degrees = if in_degrees < 0.0 {
+            in_degrees + 360.0
+        } else {
+            in_degrees
+        };
+        (360.0 - out_degrees) % 360.0
+    }
+
+    #[test]
+    fn test_convert_angles() {
+        let cases: &[(f64, f64)] = &[(0.0, 0.0), (45.0, -45.0), (270.0, 90.0)];
+
+        for (input, output) in cases {
+            assert_eq!(*output, convert_angle_from_xmile_to_canvas(*input));
+            assert_eq!(*input, convert_angle_from_canvas_to_xmile(*output));
+        }
+    }
 
     #[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
@@ -734,13 +770,22 @@ pub mod view_element {
 
     impl From<Stock> for datamodel::view_element::Stock {
         fn from(v: Stock) -> Self {
+            let x = match v.width {
+                Some(w) => v.x + w / 2.0,
+                None => v.x,
+            };
+            let y = match v.height {
+                Some(h) => v.y + h / 2.0,
+                None => v.y,
+            };
             datamodel::view_element::Stock {
                 name: v.name,
                 uid: v.uid.unwrap_or(-1),
-                x: v.x,
-                y: v.y,
+                x,
+                y,
+                // isee's default label side is top
                 label_side: datamodel::view_element::LabelSide::from(
-                    v.label_side.unwrap_or(LabelSide::Bottom),
+                    v.label_side.unwrap_or(LabelSide::Top),
                 ),
             }
         }
@@ -939,7 +984,9 @@ pub mod view_element {
                         .collect(),
                 )
             } else {
-                datamodel::view_element::LinkShape::Arc(v.angle.unwrap_or(0.0))
+                datamodel::view_element::LinkShape::Arc(convert_angle_from_canvas_to_xmile(
+                    v.angle.unwrap_or(0.0),
+                ))
             };
             datamodel::view_element::Link {
                 uid: v.uid.unwrap_or(-1),
@@ -954,7 +1001,9 @@ pub mod view_element {
         fn from(v: datamodel::view_element::Link) -> Self {
             let (is_straight, angle, points) = match v.shape {
                 LinkShape::Straight => (Some(true), None, None),
-                LinkShape::Arc(angle) => (None, Some(angle), None),
+                LinkShape::Arc(angle) => {
+                    (None, Some(convert_angle_from_xmile_to_canvas(angle)), None)
+                }
                 LinkShape::MultiPoint(points) => (
                     None,
                     None,
@@ -1257,15 +1306,23 @@ impl View {
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
                 link.from_uid = uid_map.get(&canonicalize(&link.from)).cloned();
-                if link.from_uid == None {
-                    panic!("unable to look up Link 'from' {}", link.from);
-                }
                 link.to_uid = uid_map.get(&canonicalize(&link.to)).cloned();
-                if link.to_uid == None {
-                    panic!("unable to look up Link 'to' {}", link.to);
-                }
             }
         }
+
+        // if there were links we couldn't resolve, dump them
+        self.objects = self
+            .objects
+            .iter()
+            .cloned()
+            .filter(|o| {
+                if let ViewObject::Link(link) = o {
+                    link.from_uid.is_some() && link.to_uid.is_some()
+                } else {
+                    true
+                }
+            })
+            .collect();
 
         self.next_uid = Some(next_uid);
         uid_map
@@ -1376,7 +1433,7 @@ impl View {
     }
 
     fn normalize(&mut self, model: &Model) {
-        if self.kind.unwrap_or(ViewType::VendorSpecific) != ViewType::StockFlow {
+        if self.kind.unwrap_or(ViewType::StockFlow) != ViewType::StockFlow {
             return;
         }
         let uid_map = self.assign_uids();
@@ -1386,7 +1443,7 @@ impl View {
 
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
-        if v.kind.unwrap_or(ViewType::VendorSpecific) == ViewType::StockFlow {
+        if v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow {
             datamodel::View::StockFlow(datamodel::StockFlow {
                 elements: v
                     .objects

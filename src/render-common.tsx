@@ -9,14 +9,12 @@ import * as React from 'react';
 import { Map, Set } from 'immutable';
 import { renderToString } from 'react-dom/server';
 
-import { Project } from './engine/project';
-import { UID, ViewElement } from './engine/xmile';
+import { UID, ViewElement, Project } from './app/datamodel';
 
 import { createMuiTheme } from '@material-ui/core/styles';
 import { ServerStyleSheets, ThemeProvider } from '@material-ui/styles';
 
-import { Project as DmProject } from './app/datamodel';
-import { defined, exists, Series } from './app/common';
+import { defined, Series } from './app/common';
 import { Canvas } from './app/model/drawing/Canvas';
 import { Box, Point } from './app/model/drawing/common';
 
@@ -24,14 +22,8 @@ const theme = createMuiTheme({
   palette: {},
 });
 
-export function renderSvgToString(
-  project: Project,
-  dmProject: DmProject,
-  modelName: string,
-  data?: Map<string, Series>,
-): [string, Box] {
-  const model = defined(project.model(modelName));
-  const dmModel = defined(dmProject.models.get(modelName));
+export function renderSvgToString(project: Project, modelName: string, data?: Map<string, Series>): [string, Box] {
+  const model = defined(project.models.get(modelName));
 
   if (!data) {
     data = Map<string, Series>();
@@ -51,12 +43,10 @@ export function renderSvgToString(
   const canvasElement = (
     <Canvas
       embedded={true}
-      project={defined(project)}
-      dmProject={dmProject}
+      project={project}
       model={model}
-      dmModel={dmModel}
-      view={defined(model.view(0))}
-      dmView={defined(dmModel.views.get(0))}
+      view={defined(model.views.get(0))}
+      version={1}
       data={data}
       selectedTool={undefined}
       selection={Set()}
@@ -74,13 +64,16 @@ export function renderSvgToString(
 
   let svg = renderToString(sheets.collect(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>));
 
+  let width = 100;
+  let height = 100;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
-  const viewboxStr = exists(svg.match(/viewBox="[^"]*"/))[0]
-    .split('"')[1]
-    .trim();
-  const viewboxParts = viewboxStr.split(' ').map(Number);
-  const width = viewboxParts[2];
-  const height = viewboxParts[3];
+  const viewboxMatch = svg.match(/viewBox="[^"]*"/);
+  if (viewboxMatch) {
+    const viewboxStr = viewboxMatch[0].split('"')[1].trim();
+    const viewboxParts = viewboxStr.split(' ').map(Number);
+    width = viewboxParts[2];
+    height = viewboxParts[3];
+  }
 
   const styles = `<style>\n${sheets.toString()}\n</style>\n<defs>\n`;
 

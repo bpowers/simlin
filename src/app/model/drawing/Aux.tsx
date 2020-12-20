@@ -6,11 +6,11 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ViewElement } from '../../../engine/xmile';
+import { AuxViewElement, ViewElement } from '../../datamodel';
 
 import { displayName, mergeBounds, Point, Rect, square } from './common';
 import { AuxRadius } from './default';
-import { findSide, Label, labelBounds, LabelProps } from './Label';
+import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
 import { defined, Series } from '../../common';
@@ -55,7 +55,7 @@ export interface AuxPropsFull extends WithStyles<typeof styles> {
   series: Series | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
-  element: ViewElement;
+  element: AuxViewElement;
 }
 
 export type AuxProps = Pick<
@@ -71,15 +71,9 @@ export function auxContains(element: ViewElement, point: Point): boolean {
   return distance <= AuxRadius;
 }
 
-export function auxBounds(element: ViewElement): Rect {
+export function auxBounds(element: AuxViewElement): Rect {
   const { cx, cy } = element;
-  let r = AuxRadius;
-  if (element.width) {
-    r = element.width / 2;
-  }
-  if (element.height) {
-    r = element.height / 2;
-  }
+  const r = AuxRadius;
 
   const bounds = {
     top: cy - r,
@@ -88,7 +82,7 @@ export function auxBounds(element: ViewElement): Rect {
     bottom: cy + r,
   };
 
-  const side = findSide(element);
+  const side = element.labelSide;
   const labelProps: LabelProps = {
     cx,
     cy,
@@ -114,15 +108,7 @@ export const Aux = withStyles(styles)(
     };
 
     radius(): number {
-      const { element } = this.props;
-      let r = AuxRadius;
-      if (element.width) {
-        r = element.width / 2;
-      }
-      if (element.height) {
-        r = element.height / 2;
-      }
-      return r;
+      return AuxRadius;
     }
 
     indicators() {
@@ -162,7 +148,7 @@ export const Aux = withStyles(styles)(
       const cy = element.cy;
       const r = this.radius();
 
-      const side = findSide(element);
+      const side = element.labelSide;
       const label = isEditingName ? undefined : (
         <Label
           uid={element.uid}

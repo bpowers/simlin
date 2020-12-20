@@ -10,8 +10,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { defined } from '../common';
 import { isEqual } from './drawing/common';
-import { Table } from '../../engine/vars';
-import { GF, GFTable, Scale } from '../../engine/xmile';
+import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '../datamodel';
 import { List } from 'immutable';
 
 const styles = createStyles({
@@ -47,9 +46,50 @@ const styles = createStyles({
   },
 });
 
+// GFTable is a consistent format for the data from a GF that can be
+// used for efficient lookup operations
+export interface GFTable {
+  type: GraphicalFunctionKind;
+  size: number;
+  x: Float64Array;
+  y: Float64Array;
+}
+
+function tableFrom(gf: GraphicalFunction): GFTable | undefined {
+  const xpts = gf.xPoints;
+  const xscale = gf.xScale;
+  const xmin = xscale ? xscale.min : 0;
+  const xmax = xscale ? xscale.max : 0;
+
+  if (!gf.yPoints) {
+    return undefined;
+  }
+  const ypts: List<number> = gf.yPoints;
+
+  const size = gf.yPoints.size;
+  const xList = new Float64Array(size);
+  const yList = new Float64Array(size);
+
+  for (let i = 0; i < ypts.size; i++) {
+    // either the x points have been explicitly specified, or
+    // it is a linear mapping of points between xmin and xmax,
+    // inclusive
+    const x = xpts ? defined(xpts.get(i)) : (i / (size - 1)) * (xmax - xmin) + xmin;
+    xList[i] = x;
+    yList[i] = defined(ypts.get(i));
+  }
+
+  return {
+    size,
+    type: gf.kind,
+    x: xList,
+    y: yList,
+  };
+}
+
 interface LookupEditorPropsFull extends WithStyles<typeof styles> {
-  variable: Table;
-  onLookupChange: (ident: string, newTable: GF | null) => void;
+  variable: Variable;
+  onLookupChange: (ident: string, newTable: GraphicalFunction | null) => void;
 }
 
 // export type LookupEditorProps = Pick<LookupEditorPropsFull, 'variable' | 'viewElement' | 'data'>;
@@ -57,7 +97,7 @@ interface LookupEditorPropsFull extends WithStyles<typeof styles> {
 interface LookupEditorState {
   inDrag: boolean;
   hasChange: boolean;
-  gf: GF;
+  gf: GraphicalFunction;
   table: GFTable;
   yMin: number;
   yMax: number;
@@ -125,7 +165,7 @@ export const LookupEditor = withStyles(styles)(
       super(props);
 
       const gf = this.getVariableGF();
-      const table = defined(gf.table());
+      const table = defined(tableFrom(gf));
 
       this.lookupRef = React.createRef();
       this.state = {
@@ -139,17 +179,16 @@ export const LookupEditor = withStyles(styles)(
       };
     }
 
-    getVariableGF(): GF {
+    getVariableGF(): GraphicalFunction {
       const { variable } = this.props;
-      const xVar = defined(variable.xmile);
-      let gf = defined(xVar.gf);
+      let gf = defined(variable.gf);
 
       // ensure yScale always exists
       if (!gf.yScale) {
         let min = 0;
         let max = 0;
-        for (let i = 0; i < variable.x.size; i++) {
-          const y = defined(variable.y.get(i));
+        for (let i = 0; i < gf.yPoints.size; i++) {
+          const y = defined(gf.yPoints.get(i));
           if (y < min) {
             min = y;
           }
@@ -160,7 +199,7 @@ export const LookupEditor = withStyles(styles)(
         min = Math.floor(min);
         max = Math.ceil(max);
 
-        gf = gf.set('yScale', new Scale({ min, max }));
+        gf = gf.set('yScale', GraphicalFunctionScale.from({ min, max }));
       }
 
       return gf;
@@ -308,7 +347,7 @@ export const LookupEditor = withStyles(styles)(
         this.setState({
           gf: this.state.gf.set(
             'yScale',
-            new Scale({
+            GraphicalFunctionScale.from({
               min: value,
               max: yMax,
             }),
@@ -329,7 +368,7 @@ export const LookupEditor = withStyles(styles)(
         this.setState({
           gf: this.state.gf.set(
             'yScale',
-            new Scale({
+            GraphicalFunctionScale.from({
               min: yMin,
               max: value,
             }),
@@ -338,7 +377,7 @@ export const LookupEditor = withStyles(styles)(
       }
     };
 
-    static rescaleX(gf: GF, table: GFTable): GFTable {
+    static rescaleX(gf: GraphicalFunction, table: GFTable): GFTable {
       const newTable = Object.assign({}, table);
       newTable.x = new Float64Array(table.x);
 
@@ -434,7 +473,7 @@ export const LookupEditor = withStyles(styles)(
 
     handleLookupCancel = (): void => {
       const gf = this.getVariableGF();
-      const table = defined(gf.table());
+      const table = defined(tableFrom(gf));
       this.setState({
         hasChange: false,
         gf,

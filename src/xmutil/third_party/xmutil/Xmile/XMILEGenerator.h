@@ -2,7 +2,7 @@
 #ifndef __XMILE_H
 #define __XMILE_H
 
-#include <tinyxml2.h>
+#include "../../third_party/tinyxml2/tinyxml2.h"
 
 #include <string>
 #include <vector>

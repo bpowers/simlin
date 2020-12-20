@@ -7,6 +7,9 @@ import { defined } from './common';
 import { List, Map, Record } from 'immutable';
 
 import * as pb from '../system-dynamics-engine/src/project_io_pb';
+import { canonicalize } from '../canonicalize';
+
+export type UID = number;
 
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
 
@@ -14,11 +17,11 @@ function getGraphicalFunctionKind(
   kind: pb.GraphicalFunction.KindMap[keyof pb.GraphicalFunction.KindMap],
 ): GraphicalFunctionKind {
   switch (kind) {
-    case 0:
+    case pb.GraphicalFunction.Kind.CONTINUOUS:
       return 'continuous';
-    case 1:
+    case pb.GraphicalFunction.Kind.EXTRAPOLATE:
       return 'extrapolate';
-    case 2:
+    case pb.GraphicalFunction.Kind.DISCRETE:
       return 'discrete';
     default:
       return 'continuous';
@@ -35,6 +38,15 @@ export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefault
       min: scale.getMin(),
       max: scale.getMax(),
     });
+  }
+  static from(props: typeof graphicalFunctionScaleDefaults): GraphicalFunctionScale {
+    return new GraphicalFunctionScale(GraphicalFunctionScale.toPb(props));
+  }
+  static toPb(props: typeof graphicalFunctionScaleDefaults): pb.GraphicalFunction.Scale {
+    const scale = new pb.GraphicalFunction.Scale();
+    scale.setMin(props.min);
+    scale.setMax(props.max);
+    return scale;
   }
 }
 
@@ -56,15 +68,96 @@ export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
       yScale: new GraphicalFunctionScale(defined(gf.getYScale())),
     });
   }
+  static toPb(props: typeof graphicalFunctionDefaults): pb.GraphicalFunction {
+    const gf = new pb.GraphicalFunction();
+    if (props.kind) {
+      switch (props.kind) {
+        case 'continuous':
+          gf.setKind(pb.GraphicalFunction.Kind.CONTINUOUS);
+          break;
+        case 'discrete':
+          gf.setKind(pb.GraphicalFunction.Kind.DISCRETE);
+          break;
+        case 'extrapolate':
+          gf.setKind(pb.GraphicalFunction.Kind.EXTRAPOLATE);
+          break;
+      }
+    }
+    if (props.xPoints && props.xPoints.size > 0) {
+      gf.setXPointsList(props.xPoints.toArray());
+    }
+    if (props.yPoints) {
+      gf.setYPointsList(props.yPoints.toArray());
+    }
+    if (props.xScale) {
+      gf.setXScale(GraphicalFunctionScale.toPb(props.xScale));
+    }
+    if (props.yScale) {
+      gf.setYScale(GraphicalFunctionScale.toPb(props.yScale));
+    }
+    return gf;
+  }
+  static from(props: typeof graphicalFunctionDefaults): GraphicalFunction {
+    return new GraphicalFunction(GraphicalFunction.toPb(props));
+  }
+}
+
+export type Equation = ScalarEquation | ApplyToAllEquation | ArrayedEquation;
+
+const scalarEquationDefaults = {
+  equation: '',
+};
+export class ScalarEquation extends Record(scalarEquationDefaults) {
+  constructor(v: pb.Variable.ScalarEquation) {
+    super({
+      equation: v.getEquation(),
+    });
+  }
+  static toPb(props: typeof scalarEquationDefaults): pb.Variable.ScalarEquation {
+    const eqn = new pb.Variable.ScalarEquation();
+    eqn.setEquation(props.equation);
+    return eqn;
+  }
+  static from(props: typeof scalarEquationDefaults): ScalarEquation {
+    return new ScalarEquation(ScalarEquation.toPb(props));
+  }
+}
+
+const applyToAllEquationDefaults = {
+  dimensionNames: List<string>(),
+  equation: '',
+};
+export class ApplyToAllEquation extends Record(applyToAllEquationDefaults) {
+  constructor(v: pb.Variable.ApplyToAllEquation) {
+    super({
+      dimensionNames: List(v.getDimensionNamesList()),
+      equation: v.getEquation(),
+    });
+  }
+}
+
+const arrayedEquationDefaults = {
+  dimensionNames: List<string>(),
+  elements: Map<string, string>(),
+};
+export class ArrayedEquation extends Record(arrayedEquationDefaults) {
+  constructor(v: pb.Variable.ArrayedEquation) {
+    super({
+      dimensionNames: List(v.getDimensionNamesList()),
+      elements: Map(v.getElementsList().map((el) => [el.getSubscript(), el.getEquation()])),
+    });
+  }
 }
 
 export interface Variable {
   readonly ident: string;
+  readonly equation: Equation | undefined;
+  readonly gf: GraphicalFunction | undefined;
 }
 
 const stockDefaults = {
   ident: '',
-  equation: '',
+  equation: ScalarEquation.from({ equation: '' }) as Equation,
   documentation: '',
   units: '',
   inflows: List<string>(),
@@ -73,9 +166,18 @@ const stockDefaults = {
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   constructor(stock: pb.Variable.Stock) {
+    const pbEquation = stock.getEquation();
+    let equation: Equation = ScalarEquation.from({ equation: '' });
+    if (pbEquation?.hasApplyToAll()) {
+      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
+    } else if (pbEquation?.hasArrayed()) {
+      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
+    } else if (pbEquation?.hasScalar()) {
+      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
+    }
     super({
       ident: stock.getIdent(),
-      equation: stock.getEquation(),
+      equation,
       documentation: stock.getDocumentation(),
       units: stock.getUnits(),
       inflows: List(stock.getInflowsList()),
@@ -83,11 +185,14 @@ export class Stock extends Record(stockDefaults) implements Variable {
       nonNegative: stock.getNonNegative(),
     });
   }
+  get gf(): undefined {
+    return undefined;
+  }
 }
 
 const flowDefaults = {
   ident: '',
-  equation: '',
+  equation: ScalarEquation.from({ equation: '' }) as Equation,
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
@@ -95,10 +200,19 @@ const flowDefaults = {
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   constructor(flow: pb.Variable.Flow) {
+    const pbEquation = flow.getEquation();
+    let equation: Equation = ScalarEquation.from({ equation: '' });
+    if (pbEquation?.hasApplyToAll()) {
+      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
+    } else if (pbEquation?.hasArrayed()) {
+      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
+    } else if (pbEquation?.hasScalar()) {
+      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
+    }
     const gf = flow.getGf();
     super({
       ident: flow.getIdent(),
-      equation: flow.getEquation(),
+      equation,
       documentation: flow.getDocumentation(),
       units: flow.getUnits(),
       gf: gf ? new GraphicalFunction(gf) : undefined,
@@ -109,17 +223,26 @@ export class Flow extends Record(flowDefaults) implements Variable {
 
 const auxDefaults = {
   ident: '',
-  equation: '',
+  equation: ScalarEquation.from({ equation: '' }) as Equation,
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   constructor(aux: pb.Variable.Aux) {
+    const pbEquation = aux.getEquation();
+    let equation: Equation = ScalarEquation.from({ equation: '' });
+    if (pbEquation?.hasApplyToAll()) {
+      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
+    } else if (pbEquation?.hasArrayed()) {
+      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
+    } else if (pbEquation?.hasScalar()) {
+      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
+    }
     const gf = aux.getGf();
     super({
       ident: aux.getIdent(),
-      equation: aux.getEquation(),
+      equation,
       documentation: aux.getDocumentation(),
       units: aux.getUnits(),
       gf: gf ? new GraphicalFunction(gf) : undefined,
@@ -157,29 +280,58 @@ export class Module extends Record(moduleDefaults) implements Variable {
       references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
     });
   }
+  get equation(): undefined {
+    return undefined;
+  }
+  get gf(): undefined {
+    return undefined;
+  }
 }
 
 export type LabelSide = 'top' | 'left' | 'center' | 'bottom' | 'right';
 
 function getLabelSide(labelSide: pb.ViewElement.LabelSideMap[keyof pb.ViewElement.LabelSideMap]): LabelSide {
   switch (labelSide) {
-    case 0:
+    case pb.ViewElement.LabelSide.TOP:
       return 'top';
-    case 1:
+    case pb.ViewElement.LabelSide.LEFT:
       return 'left';
-    case 2:
+    case pb.ViewElement.LabelSide.CENTER:
       return 'center';
-    case 3:
+    case pb.ViewElement.LabelSide.BOTTOM:
       return 'bottom';
-    case 4:
+    case pb.ViewElement.LabelSide.RIGHT:
       return 'right';
     default:
       return 'top';
   }
 }
 
+function labelSideToPb(labelSide: LabelSide): pb.ViewElement.LabelSideMap[keyof pb.ViewElement.LabelSideMap] {
+  switch (labelSide) {
+    case 'top':
+      return pb.ViewElement.LabelSide.TOP;
+    case 'left':
+      return pb.ViewElement.LabelSide.LEFT;
+    case 'center':
+      return pb.ViewElement.LabelSide.CENTER;
+    case 'bottom':
+      return pb.ViewElement.LabelSide.BOTTOM;
+    case 'right':
+      return pb.ViewElement.LabelSide.RIGHT;
+  }
+}
+
 export interface ViewElement {
+  readonly isZeroRadius: boolean;
   readonly uid: number;
+  readonly cx: number;
+  readonly cy: number;
+  isNamed(): boolean;
+  ident(): string | undefined;
+  set(prop: 'uid', uid: number): ViewElement;
+  set(prop: 'x', x: number): ViewElement;
+  set(prop: 'y', x: number): ViewElement;
 }
 
 const auxViewElementDefaults = {
@@ -187,7 +339,8 @@ const auxViewElementDefaults = {
   name: '',
   x: -1,
   y: -1,
-  labelSide: 'center' as LabelSide,
+  labelSide: 'right' as LabelSide,
+  isZeroRadius: false,
 };
 export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
   constructor(aux: pb.ViewElement.Aux) {
@@ -199,6 +352,44 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
       labelSide: getLabelSide(aux.getLabelSide()),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
+  }
+
+  toPb(): pb.ViewElement.Aux {
+    const element = new pb.ViewElement.Aux();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
+
+  static from(props: typeof auxViewElementDefaults): AuxViewElement {
+    const element = new pb.ViewElement.Aux();
+    element.setUid(props.uid);
+    element.setName(props.name);
+    element.setX(props.x);
+    element.setY(props.y);
+    element.setLabelSide(labelSideToPb(props.labelSide));
+
+    const aux = new AuxViewElement(element);
+    if (props.isZeroRadius) {
+      return aux.set('isZeroRadius', true);
+    } else {
+      return aux;
+    }
+  }
 }
 
 const stockViewElementDefaults = {
@@ -207,6 +398,7 @@ const stockViewElementDefaults = {
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
+  isZeroRadius: false,
 };
 export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
   constructor(stock: pb.ViewElement.Stock) {
@@ -217,6 +409,44 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
       y: stock.getY(),
       labelSide: getLabelSide(stock.getLabelSide()),
     });
+  }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
+  }
+
+  toPb(): pb.ViewElement.Stock {
+    const element = new pb.ViewElement.Stock();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
+
+  static from(props: typeof stockViewElementDefaults): StockViewElement {
+    const element = new pb.ViewElement.Stock();
+    element.setUid(props.uid);
+    element.setName(props.name);
+    element.setX(props.x);
+    element.setY(props.y);
+    element.setLabelSide(labelSideToPb(props.labelSide));
+
+    const stock = new StockViewElement(element);
+    if (props.isZeroRadius) {
+      return stock.set('isZeroRadius', true);
+    } else {
+      return stock;
+    }
   }
 }
 
@@ -234,6 +464,25 @@ export class Point extends Record(pointDefaults) {
       attachedToUid: attachedToUid ? attachedToUid : undefined,
     });
   }
+  static from(props: typeof pointDefaults): Point {
+    const point = new pb.ViewElement.FlowPoint();
+    point.setX(props.x);
+    point.setY(props.y);
+    if (props.attachedToUid) {
+      point.setAttachedToUid(props.attachedToUid);
+    }
+    return new Point(point);
+  }
+
+  toPb(): pb.ViewElement.FlowPoint {
+    const element = new pb.ViewElement.FlowPoint();
+    element.setX(this.x);
+    element.setY(this.y);
+    if (this.attachedToUid !== undefined) {
+      element.setAttachedToUid(this.attachedToUid);
+    }
+    return element;
+  }
 }
 
 const flowViewElementDefaults = {
@@ -243,6 +492,7 @@ const flowViewElementDefaults = {
   y: -1,
   labelSide: 'center' as LabelSide,
   points: List<Point>(),
+  isZeroRadius: false,
 };
 export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
   constructor(flow: pb.ViewElement.Flow) {
@@ -255,6 +505,29 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
       points: List(flow.getPointsList().map((point) => new Point(point))),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
+  }
+
+  toPb(): pb.ViewElement.Flow {
+    const element = new pb.ViewElement.Flow();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setPointsList(this.points.map((p) => p.toPb()).toArray());
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
 }
 
 const linkViewElementDefaults = {
@@ -264,12 +537,13 @@ const linkViewElementDefaults = {
   arc: 0.0 as number | undefined,
   isStraight: false,
   multiPoint: undefined as List<Point> | undefined,
+  isZeroRadius: false,
 };
 export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
   constructor(link: pb.ViewElement.Link) {
-    let arc: number | undefined;
-    let isStraight: boolean;
-    let multiPoint: List<Point> | undefined;
+    let arc: number | undefined = undefined;
+    let isStraight = true;
+    let multiPoint: List<Point> | undefined = undefined;
     switch (link.getShapeCase()) {
       case pb.ViewElement.Link.ShapeCase.ARC:
         arc = link.getArc();
@@ -290,8 +564,6 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
             .map((point) => new Point(point)),
         );
         break;
-      default:
-        throw new Error('invariant broken: protobuf link with empty shape');
     }
     super({
       uid: link.getUid(),
@@ -302,6 +574,35 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       multiPoint,
     });
   }
+  get cx(): number {
+    return NaN;
+  }
+  get cy(): number {
+    return NaN;
+  }
+  isNamed(): boolean {
+    return false;
+  }
+  ident(): undefined {
+    return undefined;
+  }
+
+  toPb(): pb.ViewElement.Link {
+    const element = new pb.ViewElement.Link();
+    element.setUid(this.uid);
+    element.setFromUid(this.fromUid);
+    element.setToUid(this.toUid);
+    if (this.arc !== undefined) {
+      element.setArc(this.arc);
+    } else if (this.multiPoint) {
+      const linkPoints = new pb.ViewElement.Link.LinkPoints();
+      linkPoints.setPointsList(this.multiPoint.map((p) => p.toPb()).toArray());
+      element.setMultiPoint(linkPoints);
+    } else {
+      element.setIsStraight(this.isStraight);
+    }
+    return element;
+  }
 }
 
 const moduleViewElementDefaults = {
@@ -310,6 +611,7 @@ const moduleViewElementDefaults = {
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
+  isZeroRadius: false,
 };
 export class ModuleViewElement extends Record(moduleViewElementDefaults) implements ViewElement {
   constructor(module: pb.ViewElement.Module) {
@@ -321,6 +623,28 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
       labelSide: getLabelSide(module.getLabelSide()),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return true;
+  }
+  ident(): string {
+    return canonicalize(this.name);
+  }
+
+  toPb(): pb.ViewElement.Module {
+    const element = new pb.ViewElement.Module();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
 }
 
 const aliasViewElementDefaults = {
@@ -329,6 +653,7 @@ const aliasViewElementDefaults = {
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
+  isZeroRadius: false,
 };
 export class AliasViewElement extends Record(aliasViewElementDefaults) implements ViewElement {
   constructor(alias: pb.ViewElement.Alias) {
@@ -340,6 +665,28 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
       labelSide: getLabelSide(alias.getLabelSide()),
     });
   }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return false;
+  }
+  ident(): undefined {
+    return undefined;
+  }
+
+  toPb(): pb.ViewElement.Alias {
+    const element = new pb.ViewElement.Alias();
+    element.setUid(this.uid);
+    element.setAliasOfUid(this.aliasOfUid);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
+  }
 }
 
 const cloudViewElementDefaults = {
@@ -347,6 +694,7 @@ const cloudViewElementDefaults = {
   flowUid: -1,
   x: -1,
   y: -1,
+  isZeroRadius: false,
 };
 export class CloudViewElement extends Record(cloudViewElementDefaults) implements ViewElement {
   constructor(cloud: pb.ViewElement.Cloud) {
@@ -357,38 +705,148 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
       y: cloud.getY(),
     });
   }
+  static from(props: typeof cloudViewElementDefaults): CloudViewElement {
+    const element = new pb.ViewElement.Cloud();
+    element.setUid(props.uid);
+    element.setFlowUid(props.flowUid);
+    element.setX(props.x);
+    element.setY(props.y);
+    const cloud = new CloudViewElement(element);
+    if (props.isZeroRadius) {
+      return cloud.set('isZeroRadius', true);
+    } else {
+      return cloud;
+    }
+  }
+  get cx(): number {
+    return this.x;
+  }
+  get cy(): number {
+    return this.y;
+  }
+  isNamed(): boolean {
+    return false;
+  }
+  ident(): undefined {
+    return undefined;
+  }
+
+  toPb(): pb.ViewElement.Cloud {
+    const element = new pb.ViewElement.Cloud();
+    element.setUid(this.uid);
+    element.setFlowUid(this.flowUid);
+    element.setX(this.x);
+    element.setY(this.y);
+    return element;
+  }
 }
 
+export type NamedViewElement = StockViewElement | AuxViewElement | ModuleViewElement | FlowViewElement;
+
 const stockFlowViewDefaults = {
+  nextUid: -1,
   elements: List<ViewElement>(),
 };
 export class StockFlowView extends Record(stockFlowViewDefaults) {
   constructor(view: pb.View) {
+    let maxUid = -1;
     const elements = List(
       view.getElementsList().map((element) => {
+        let e: ViewElement;
         switch (element.getElementCase()) {
           case pb.ViewElement.ElementCase.AUX:
-            return new AuxViewElement(defined(element.getAux()));
+            e = new AuxViewElement(defined(element.getAux()));
+            break;
           case pb.ViewElement.ElementCase.STOCK:
-            return new StockViewElement(defined(element.getStock()));
+            e = new StockViewElement(defined(element.getStock()));
+            break;
           case pb.ViewElement.ElementCase.FLOW:
-            return new FlowViewElement(defined(element.getFlow()));
+            e = new FlowViewElement(defined(element.getFlow()));
+            break;
           case pb.ViewElement.ElementCase.LINK:
-            return new LinkViewElement(defined(element.getLink()));
+            e = new LinkViewElement(defined(element.getLink()));
+            break;
           case pb.ViewElement.ElementCase.MODULE:
-            return new ModuleViewElement(defined(element.getModule()));
+            e = new ModuleViewElement(defined(element.getModule()));
+            break;
           case pb.ViewElement.ElementCase.ALIAS:
-            return new AliasViewElement(defined(element.getAlias()));
+            e = new AliasViewElement(defined(element.getAlias()));
+            break;
           case pb.ViewElement.ElementCase.CLOUD:
-            return new CloudViewElement(defined(element.getCloud()));
+            e = new CloudViewElement(defined(element.getCloud()));
+            break;
           default:
             throw new Error('invariant broken: protobuf variable with empty oneof');
         }
+        maxUid = Math.max(e.uid, maxUid);
+        return e;
       }),
     );
+    let nextUid = maxUid + 1;
+    // if this is an empty view, start the numbering at 1
+    if (nextUid === 0) {
+      nextUid = 1;
+    }
     super({
       elements,
+      nextUid,
     });
+  }
+
+  toPb(): pb.View {
+    const view = new pb.View();
+
+    view.setKind(pb.View.ViewType.STOCK_FLOW);
+
+    const elements = this.elements
+      .map((element) => {
+        const e = new pb.ViewElement();
+        if (element instanceof AuxViewElement) {
+          e.setAux(element.toPb());
+        } else if (element instanceof StockViewElement) {
+          e.setStock(element.toPb());
+        } else if (element instanceof FlowViewElement) {
+          e.setFlow(element.toPb());
+        } else if (element instanceof LinkViewElement) {
+          e.setLink(element.toPb());
+        } else if (element instanceof ModuleViewElement) {
+          e.setModule(element.toPb());
+        } else if (element instanceof AliasViewElement) {
+          e.setAlias(element.toPb());
+        } else if (element instanceof CloudViewElement) {
+          e.setCloud(element.toPb());
+        } else {
+          throw new Error('unknown view element variant');
+        }
+        return e;
+      })
+      .toArray();
+
+    view.setElementsList(elements);
+
+    return view;
+  }
+}
+
+export function viewElementType(
+  element: ViewElement,
+): 'aux' | 'stock' | 'flow' | 'link' | 'module' | 'alias' | 'cloud' {
+  if (element instanceof AuxViewElement) {
+    return 'aux';
+  } else if (element instanceof StockViewElement) {
+    return 'stock';
+  } else if (element instanceof FlowViewElement) {
+    return 'flow';
+  } else if (element instanceof LinkViewElement) {
+    return 'link';
+  } else if (element instanceof ModuleViewElement) {
+    return 'module';
+  } else if (element instanceof AliasViewElement) {
+    return 'alias';
+  } else if (element instanceof CloudViewElement) {
+    return 'cloud';
+  } else {
+    throw new Error('unknown view element variant');
   }
 }
 

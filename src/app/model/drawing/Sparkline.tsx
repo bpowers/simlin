@@ -23,11 +23,11 @@ const styles = createStyles({
   },
 });
 
-function last(arr: Float64Array): number {
+function last(arr: Readonly<Float64Array>): number {
   return arr[arr.length - 1];
 }
 
-function min(arr: Float64Array): number {
+function min(arr: Readonly<Float64Array>): number {
   const len = arr.length;
   if (len < 1) {
     return -Infinity;
@@ -42,7 +42,7 @@ function min(arr: Float64Array): number {
   return n;
 }
 
-function max(arr: Float64Array): number {
+function max(arr: Readonly<Float64Array>): number {
   const len = arr.length;
   if (len < 1) {
     return -Infinity;

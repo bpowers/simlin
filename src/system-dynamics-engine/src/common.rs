@@ -21,6 +21,8 @@ pub enum ErrorCode {
     NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
     XmlDeserialization,
+    VensimConversion,
+    ProtobufDecode,
     InvalidToken,
     UnrecognizedEOF,
     UnrecognizedToken,
@@ -41,8 +43,11 @@ pub enum ErrorCode {
     ArraysNotImplemented,
     MultiDimensionalArraysNotImplemented,
     BadDimensionName,
+    BadModelName,
     MismatchedDimensions,
     ArrayReferenceNeedsExplicitSubscripts,
+    DuplicateVariable,
+    UnknownDependency,
 }
 
 impl fmt::Display for ErrorCode {
@@ -52,6 +57,8 @@ impl fmt::Display for ErrorCode {
             NoError => "no_error",
             DoesNotExist => "does_not_exist",
             XmlDeserialization => "xml_deserialization",
+            VensimConversion => "vensim_conversion",
+            ProtobufDecode => "protobuf_decode",
             InvalidToken => "invalid_token",
             UnrecognizedEOF => "unrecognized_eof",
             UnrecognizedToken => "unrecognized_token",
@@ -72,8 +79,11 @@ impl fmt::Display for ErrorCode {
             ArraysNotImplemented => "arrays_not_implemented",
             MultiDimensionalArraysNotImplemented => "multi_dimensional_arrays_not_implemented",
             BadDimensionName => "bad_dimension_name",
+            BadModelName => "bad_model_name",
             MismatchedDimensions => "mismatched_dimensions",
             ArrayReferenceNeedsExplicitSubscripts => "array_reference_needs_explicit_subscripts",
+            DuplicateVariable => "duplicate_variable",
+            UnknownDependency => "unknown_dependency",
         };
 
         write!(f, "{}", name)
@@ -172,6 +182,8 @@ impl Error {
             details,
         }
     }
+
+    #[cfg_attr(feature = "wasm", wasm_bindgen(js_name = getDetails))]
     pub fn get_details(&self) -> Option<String> {
         self.details.clone()
     }

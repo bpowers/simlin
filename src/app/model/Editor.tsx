@@ -1,10 +1,10 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2020 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
 
-import { toUint8Array } from 'js-base64';
+import { toUint8Array, fromUint8Array } from 'js-base64';
 
 import { List, Map, Set, Stack } from 'immutable';
 
@@ -12,19 +12,32 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import { Project as ProjectPB } from './../../system-dynamics-engine/src/project_io_pb';
+import { Project as ProjectPB } from '../../system-dynamics-engine/src/project_io_pb';
 
-import { Project as DmProject, Model as DmModel } from '../datamodel';
+import { Engine as IEngine } from '../../engine-interface';
 
-import { Model } from '../../engine/model';
-import { Project, stdProject } from '../../engine/project';
-import { Sim } from '../../engine/sim';
-import { Stock as StockVar } from '../../engine/vars';
-import { FileFromJSON, GF, Point as XmilePoint, UID, View, ViewElement } from '../../engine/xmile';
+import {
+  Project,
+  Model,
+  UID,
+  Stock as StockVar,
+  ViewElement,
+  NamedViewElement,
+  StockFlowView,
+  GraphicalFunction,
+  LinkViewElement,
+  AuxViewElement,
+  FlowViewElement,
+  StockViewElement,
+  CloudViewElement,
+  viewElementType,
+} from '../datamodel';
 
-import { Canvas, fauxTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
+import { toInt, uint8ArraysEqual } from '../common';
+
+import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
-import { canvasToXmileAngle, takeoffθ } from './drawing/Connector';
+import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 
 import { baseURL, defined, exists, Series } from '../common';
@@ -167,14 +180,13 @@ class ModelError implements Error {
 
 interface EditorState {
   modelErrors: List<Error>;
-  projectDataModel?: DmProject;
-  projectHistory: Stack<Project>;
+  activeProject?: Project;
+  projectHistory: Stack<Readonly<Uint8Array>>;
   projectOffset: number;
   modelName: string;
   dialOpen: boolean;
   dialVisible: boolean;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
-  sim?: Sim;
   data: Map<string, Series>;
   selection: Set<UID>;
   drawerOpen: boolean;
@@ -193,11 +205,13 @@ interface EditorProps extends WithStyles<typeof styles> {
 
 export const Editor = withStyles(styles)(
   class InnerEditor extends React.PureComponent<EditorProps, EditorState> {
+    private activeEngine?: IEngine;
+
     constructor(props: EditorProps) {
       super(props);
 
       this.state = {
-        projectHistory: Stack<Project>(),
+        projectHistory: Stack<Readonly<Uint8Array>>(),
         projectOffset: 0,
         modelErrors: List<Error>(),
         modelName: 'main',
@@ -219,41 +233,41 @@ export const Editor = withStyles(styles)(
           return;
         }
 
-        await this.loadSim(project);
+        this.scheduleSimRun();
       });
     }
 
-    private project(optionalOffset?: number): Project | undefined {
-      if (this.state.projectHistory.size === 0) {
-        return undefined;
-      }
+    private project(): Project | undefined {
+      return this.state.activeProject;
+    }
 
-      const off = optionalOffset !== undefined ? optionalOffset : this.state.projectOffset;
-      return this.state.projectHistory.get(off);
+    private engine(): IEngine | undefined {
+      return this.activeEngine;
     }
 
     private scheduleSimRun(): void {
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
-      setTimeout(async () => {
-        const project = this.project();
-        if (!project) {
+      setTimeout(() => {
+        const engine = this.engine();
+        if (!engine) {
           return;
         }
-        await this.loadSim(project);
+        this.loadSim(engine);
       });
     }
 
-    private async loadSim(project: Project): Promise<void> {
-      if (!project.isSimulatable(this.state.modelName)) {
+    private loadSim(engine: IEngine) {
+      if (!engine.isSimulatable()) {
         return;
       }
       try {
-        const sim = new Sim(project, defined(project.main), false);
-        await sim.runToEnd();
-        const names = await sim.varNames();
-        const data = await sim.series(...names);
+        engine.simRunToEnd();
+        const idents = engine.simVarNames() as string[];
+        const time = engine.simSeries('time');
+        const data = Map<string, Series>(
+          idents.map((ident) => [ident, { name: ident, time, values: engine.simSeries(ident) }]),
+        );
         setTimeout(() => {
-          sim.close();
+          engine.simClose();
         });
         this.setState({ data });
       } catch (e) {
@@ -263,40 +277,46 @@ export const Editor = withStyles(styles)(
       }
     }
 
-    private updateProject(project: Project) {
-      // ignore the update if nothing has changed
-      if (project.equals(this.project())) {
-        return;
+    private updateProject(serializedProject: Readonly<Uint8Array>, scheduleSave = true) {
+      if (this.state.projectHistory.size > 0) {
+        const current = this.state.projectHistory.get(this.state.projectOffset);
+        if (uint8ArraysEqual(serializedProject, current)) {
+          return;
+        }
       }
 
-      const priorHistory = this.state.projectHistory.slice(this.state.projectOffset);
+      const activeProjectPB = ProjectPB.deserializeBinary(serializedProject as Uint8Array);
+      const activeProject = new Project(activeProjectPB);
+
+      const priorHistory = this.state.projectHistory.slice();
+
+      // fractionally increase the version -- the server will only send back integer versions,
+      // but this will ensure we can use a simple version check in the Canvas to invalidate caches.
+      const projectVersion = this.state.projectVersion + 0.01;
 
       this.setState({
-        projectHistory: priorHistory.unshift(project).slice(0, MaxUndoSize),
+        projectHistory: priorHistory.unshift(serializedProject).slice(0, MaxUndoSize),
+        activeProject,
+        projectVersion,
         projectOffset: 0,
       });
-      this.scheduleSave(project);
+      if (scheduleSave) {
+        this.scheduleSave(serializedProject);
+      }
     }
 
-    private scheduleSave(project: Project): void {
+    private scheduleSave(project: Readonly<Uint8Array>): void {
       const { projectVersion } = this.state;
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
-        await this.save(project, projectVersion);
+        await this.save(project, toInt(projectVersion));
       });
     }
 
-    private async save(project: Project, currVersion: number): Promise<void> {
-      console.log(`saving project version ${currVersion + 1}`);
-      const file = project.toFile();
-      // ensure we've converted to plain-old JavaScript objects
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const projectJSON = JSON.parse(JSON.stringify(file));
-
+    private async save(project: Readonly<Uint8Array>, currVersion: number): Promise<void> {
       const bodyContents = {
         currVersion,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        file: projectJSON,
+        projectPB: fromUint8Array(project as Uint8Array),
       };
 
       const base = this.getBaseURL();
@@ -349,43 +369,31 @@ export const Editor = withStyles(styles)(
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectResponse = await response.json();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const fileJSON = JSON.parse(projectResponse.file);
-      let file;
-      try {
-        file = FileFromJSON(fileJSON);
-      } catch (err) {
-        this.appendModelError(`FileFromJSON: ${err.message}`);
-        return;
-      }
 
+      let projectBinary: Uint8Array;
       let projectPB: ProjectPB;
       try {
-        const binary = toUint8Array(projectResponse.pb);
-        projectPB = ProjectPB.deserializeBinary(binary);
+        projectBinary = toUint8Array(projectResponse.pb);
+        projectPB = ProjectPB.deserializeBinary(projectBinary);
       } catch (err) {
         this.appendModelError(`project protobuf: ${err.message}`);
         return;
       }
 
-      const dmProject = new DmProject(projectPB);
-
-      console.log(projectPB);
-      console.log(dmProject);
-      debugger;
-
-      const [project, err2] = stdProject.addFile(defined(file));
-      if (err2 || !project) {
-        this.appendModelError(`addFile: ${err2 && err2.message}`);
+      const project = new Project(projectPB);
+      const engine = await this.openEngine(projectBinary);
+      if (!engine) {
         return;
       }
+
+      this.activeEngine = engine;
 
       // we don't call updateProject here because we don't want to
       // POST a new version up when we've just downloaded it.
       this.setState({
-        projectDataModel: dmProject,
+        activeProject: project,
         projectVersion: defined(projectResponse.version) as number,
-        projectHistory: Stack([project]),
+        projectHistory: Stack([projectBinary]),
         projectOffset: 0,
       });
 
@@ -411,19 +419,14 @@ export const Editor = withStyles(styles)(
     };
 
     handleRename = (oldName: string, newName: string) => {
-      const project = this.project();
-      if (!project) {
+      const engine = defined(this.engine());
+      const err = engine.rename(this.state.modelName, oldName, newName);
+      if (err) {
+        this.appendModelError(`error code ${err.code}: ${err.getDetails()}`);
         return;
       }
-      let newProject;
-      try {
-        newProject = project.rename(this.state.modelName, oldName, newName);
-      } catch (err) {
-        this.appendModelError(err.message);
-        return;
-      }
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
-      this.updateProject(newProject);
     };
 
     handleSelection = (selection: Set<UID>) => {
@@ -436,92 +439,75 @@ export const Editor = withStyles(styles)(
     handleSelectionDelete = () => {
       const selection = this.state.selection;
       const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      let project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          const isSelected = (ident: string | undefined): boolean => {
-            if (ident === undefined) {
-              return false;
-            }
-            for (const e of view.elements) {
-              if (e.hasName && e.ident === ident) {
-                return selection.contains(e.uid);
-              }
-            }
-            return false;
-          };
+      const view = defined(this.getView());
 
-          // this will remove the selected elements, clouds, and connectors
-          let elements = view.elements.filter((element: ViewElement) => {
-            const remove =
-              selection.contains(element.uid) ||
-              (element.type === 'cloud' && selection.contains(defined(element.flowUid))) ||
-              (element.type === 'connector' && (isSelected(element.to) || isSelected(element.from)));
-            return !remove;
+      // this will remove the selected elements, clouds, and connectors
+      let elements = view.elements.filter((element: ViewElement) => {
+        const remove =
+          selection.contains(element.uid) ||
+          (element instanceof CloudViewElement && selection.contains(element.flowUid)) ||
+          (element instanceof LinkViewElement &&
+            (selection.contains(element.toUid) || selection.contains(element.fromUid)));
+        return !remove;
+      });
+
+      // next we have to potentially make new clouds if we've deleted a stock
+      let { nextUid } = view;
+      const clouds: CloudViewElement[] = [];
+      elements = elements.map((element: ViewElement) => {
+        if (!(element instanceof FlowViewElement)) {
+          return element;
+        }
+        const points = element.points.map((pt) => {
+          if (!pt.attachedToUid || !selection.contains(pt.attachedToUid)) {
+            return pt;
+          }
+
+          const cloud = CloudViewElement.from({
+            uid: nextUid++,
+            x: pt.x,
+            y: pt.y,
+            flowUid: element.uid,
+            isZeroRadius: false,
           });
 
-          // next we have to potentially make new clouds if we've deleted a stock
-          let { nextUid } = view;
-          const clouds: ViewElement[] = [];
-          elements = elements.map((element: ViewElement) => {
-            if (element.type !== 'flow' || !element.pts) {
-              return element;
-            }
-            const pts = element.pts.map((pt) => {
-              if (!pt.uid || !selection.contains(pt.uid)) {
-                return pt;
-              }
+          clouds.push(cloud);
 
-              const cloud = new ViewElement({
-                type: 'cloud',
-                uid: nextUid++,
-                x: pt.x,
-                y: pt.y,
-                flowUid: element.uid,
-              });
+          return pt.set('attachedToUid', cloud.uid);
+        });
+        element = element.set('points', points);
+        return element;
+      });
+      elements = elements.concat(clouds);
 
-              clouds.push(cloud);
-
-              return pt.set('uid', cloud.uid);
-            });
-            element = element.set('pts', pts);
-            return element;
-          });
-          elements = elements.concat(clouds);
-          return view.merge({ elements, nextUid });
-        },
-      );
-      project = project.deleteVariables(this.state.modelName, this.getSelectionIdents());
+      const engine = defined(this.engine());
+      for (const ident of this.getSelectionIdents()) {
+        engine.deleteVariable(modelName, ident);
+      }
+      // this will ensure that deletions the engine does above are also serialized to the state
+      this.updateView(view.merge({ elements, nextUid }));
       this.setState({
         selection: Set<number>(),
       });
-      this.updateProject(project);
     };
 
     handleMoveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {
-      const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      const project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          const elements = view.elements.map((element: ViewElement) => {
-            if (element.uid !== uid) {
-              return element;
-            }
-            return element.set('labelSide', side);
-          });
+      const view = defined(this.getView());
 
-          return view.set('elements', elements);
-        },
-      );
-      this.updateProject(project);
+      const elements = view.elements.map((element: ViewElement) => {
+        if (element.uid !== uid || !element.isNamed()) {
+          return element;
+        }
+        return (element as AuxViewElement).set('labelSide', side);
+      });
+
+      this.updateView(view.set('elements', elements));
     };
 
-    handleFlowAttach = (flow: ViewElement, targetUid: number, cursorMoveDelta: Point) => {
+    handleFlowAttach = (flow: FlowViewElement, targetUid: number, cursorMoveDelta: Point) => {
       let { selection } = this.state;
-      const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
+      const view = defined(this.getView());
+
       let isCreatingNew = false;
       let stockDetachingIdent: string | undefined;
       let stockAttachingIdent: string | undefined;
@@ -529,400 +515,406 @@ export const Editor = withStyles(styles)(
       let uidToDelete: number | undefined;
       let updatedCloud: ViewElement | undefined;
       let newClouds = List<ViewElement>();
-      let project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          let nextUid = view.nextUid;
-          const getUid = (uid: number) => {
-            for (const e of view.elements) {
-              if (e.uid === uid) {
-                return e;
-              }
-            }
-            throw new Error(`unknown uid ${uid}`);
-          };
-          let elements = view.elements.map((element: ViewElement) => {
-            if (element.uid !== flow.uid) {
-              return element;
-            }
 
-            const oldTo = getUid(defined(defined(defined(element.pts).last()).uid));
-            let newCloud = false;
-            let updateCloud = false;
-            let to: ViewElement;
-            if (targetUid) {
-              if (oldTo.type === 'cloud') {
-                uidToDelete = oldTo.uid;
-              }
-              to = getUid(targetUid);
-            } else if (oldTo.type === 'cloud') {
-              updateCloud = true;
-              to = oldTo.merge({
-                x: oldTo.cx - cursorMoveDelta.x,
-                y: oldTo.cy - cursorMoveDelta.y,
-              });
-            } else {
-              newCloud = true;
-              to = new ViewElement({
-                uid: nextUid++,
-                type: 'cloud',
-                x: oldTo.cx - cursorMoveDelta.x,
-                y: oldTo.cy - cursorMoveDelta.y,
-                flowUid: flow.uid,
-              });
-            }
-
-            if (oldTo.uid !== to.uid) {
-              if (oldTo.type === 'stock') {
-                stockDetachingIdent = oldTo.ident;
-              }
-              if (to.type === 'stock') {
-                stockAttachingIdent = to.ident;
-              }
-            }
-
-            const moveDelta = {
-              x: oldTo.cx - to.cx,
-              y: oldTo.cy - to.cy,
-            };
-            const pts = (element.pts || List<XmilePoint>()).map((point, _i) => {
-              if (point.uid !== oldTo.uid) {
-                return point;
-              }
-              return point.set('uid', to.uid);
-            });
-            to = to.merge({
-              x: oldTo.cx,
-              y: oldTo.cy,
-              width: undefined,
-              height: undefined,
-            });
-            element = element.set('pts', pts);
-
-            [to, element] = UpdateCloudAndFlow(to, element, moveDelta);
-            if (newCloud) {
-              newClouds = newClouds.push(to);
-            } else if (updateCloud) {
-              updatedCloud = to;
-            }
-
-            return element;
-          });
-          // we might have updated some clouds
-          elements = elements.map((element: ViewElement) => {
-            if (updatedCloud && updatedCloud.uid === element.uid) {
-              return updatedCloud;
-            }
-            return element;
-          });
-          // if we have something to delete, do it here
-          elements = elements.filter((e) => e.uid !== uidToDelete);
-          if (flow.uid === inCreationUid) {
-            flow = flow.merge({
-              uid: nextUid++,
-            });
-            const firstPt = defined(defined(flow.pts).first());
-            const sourceUid = firstPt.uid;
-            if (sourceUid === inCreationCloudUid) {
-              const newCloud = new ViewElement({
-                type: 'cloud',
-                uid: nextUid++,
-                x: firstPt.x,
-                y: firstPt.y,
-                flowUid: flow.uid,
-              });
-              elements = elements.push(newCloud);
-              flow = flow.set(
-                'pts',
-                (flow.pts || List<XmilePoint>()).map((pt) => {
-                  if (pt.uid === inCreationCloudUid) {
-                    return pt.set('uid', newCloud.uid);
-                  }
-                  return pt;
-                }),
-              );
-            } else if (sourceUid) {
-              const sourceStock = getUid(sourceUid);
-              sourceStockIdent = sourceStock.ident;
-            }
-            const lastPt = defined(defined(flow.pts).last());
-            if (lastPt.uid === fauxTargetUid) {
-              let newCloud = false;
-              let to: ViewElement;
-              if (targetUid) {
-                to = getUid(targetUid);
-                stockAttachingIdent = to.ident;
-                cursorMoveDelta = {
-                  x: 0,
-                  y: 0,
-                };
-              } else {
-                to = new ViewElement({
-                  type: 'cloud',
-                  uid: nextUid++,
-                  x: lastPt.x,
-                  y: lastPt.y,
-                  flowUid: flow.uid,
-                });
-                newCloud = true;
-              }
-              flow = flow.set(
-                'pts',
-                (flow.pts || List<XmilePoint>()).map((pt) => {
-                  if (pt.uid === fauxTargetUid) {
-                    return pt.set('uid', to.uid);
-                  }
-                  return pt;
-                }),
-              );
-              [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
-              if (newCloud) {
-                elements = elements.push(to);
-              }
-            }
-            elements = elements.push(flow);
-            selection = Set([flow.uid]);
-            isCreatingNew = true;
+      let nextUid = view.nextUid;
+      const getUid = (uid: number) => {
+        for (const e of view.elements) {
+          if (e.uid === uid) {
+            return e;
           }
-          elements = elements.concat(newClouds);
-          return view.merge({ nextUid, elements });
-        },
-      );
+        }
+        throw new Error(`unknown uid ${uid}`);
+      };
+
+      let elements = view.elements.map((element: ViewElement) => {
+        if (element.uid !== flow.uid) {
+          return element;
+        }
+        if (!(element instanceof FlowViewElement)) {
+          return element;
+        }
+
+        const oldTo = getUid(defined(defined(element.points.last()).attachedToUid));
+        let newCloud = false;
+        let updateCloud = false;
+        let to: StockViewElement | CloudViewElement;
+        if (targetUid) {
+          if (oldTo instanceof CloudViewElement) {
+            uidToDelete = oldTo.uid;
+          }
+          const newTarget = getUid(targetUid);
+          if (!(newTarget instanceof StockViewElement || newTarget instanceof CloudViewElement)) {
+            throw new Error(`new target isn't a stock or cloud (uid ${newTarget.uid})`);
+          }
+          to = newTarget;
+        } else if (oldTo instanceof CloudViewElement) {
+          updateCloud = true;
+          to = oldTo.merge({
+            x: oldTo.cx - cursorMoveDelta.x,
+            y: oldTo.cy - cursorMoveDelta.y,
+          });
+        } else {
+          newCloud = true;
+          to = CloudViewElement.from({
+            uid: nextUid++,
+            x: oldTo.cx - cursorMoveDelta.x,
+            y: oldTo.cy - cursorMoveDelta.y,
+            flowUid: flow.uid,
+            isZeroRadius: false,
+          });
+        }
+
+        if (oldTo.uid !== to.uid) {
+          if (oldTo instanceof StockViewElement) {
+            stockDetachingIdent = oldTo.ident();
+          }
+          if (to instanceof StockViewElement) {
+            stockAttachingIdent = to.ident();
+          }
+        }
+
+        const moveDelta = {
+          x: oldTo.cx - to.cx,
+          y: oldTo.cy - to.cy,
+        };
+        const points = element.points.map((point) => {
+          if (point.attachedToUid !== oldTo.uid) {
+            return point;
+          }
+          return point.set('attachedToUid', to.uid);
+        });
+        to = (to as StockViewElement).merge({
+          x: oldTo.cx,
+          y: oldTo.cy,
+        });
+        element = element.set('points', points);
+
+        [to, element] = UpdateCloudAndFlow(to, element as FlowViewElement, moveDelta);
+        if (newCloud) {
+          newClouds = newClouds.push(to);
+        } else if (updateCloud) {
+          updatedCloud = to;
+        }
+
+        return element;
+      });
+      // we might have updated some clouds
+      elements = elements.map((element: ViewElement) => {
+        if (updatedCloud && updatedCloud.uid === element.uid) {
+          return updatedCloud;
+        }
+        return element;
+      });
+      // if we have something to delete, do it here
+      elements = elements.filter((e) => e.uid !== uidToDelete);
+      if (flow.uid === inCreationUid) {
+        flow = flow.merge({
+          uid: nextUid++,
+        });
+        const firstPt = defined(flow.points.first());
+        const sourceUid = firstPt.attachedToUid;
+        if (sourceUid === inCreationCloudUid) {
+          const newCloud = CloudViewElement.from({
+            uid: nextUid++,
+            x: firstPt.x,
+            y: firstPt.y,
+            flowUid: flow.uid,
+            isZeroRadius: false,
+          });
+          elements = elements.push(newCloud);
+          flow = flow.set(
+            'points',
+            flow.points.map((pt) => {
+              if (pt.attachedToUid === inCreationCloudUid) {
+                return pt.set('attachedToUid', newCloud.uid);
+              }
+              return pt;
+            }),
+          );
+        } else if (sourceUid) {
+          const sourceStock = getUid(sourceUid);
+          sourceStockIdent = defined(sourceStock.ident());
+        }
+        const lastPt = defined(flow.points.last());
+        if (lastPt.attachedToUid === fauxCloudTargetUid) {
+          let newCloud = false;
+          let to: StockViewElement | CloudViewElement;
+          if (targetUid) {
+            to = getUid(targetUid) as StockViewElement | CloudViewElement;
+            stockAttachingIdent = defined(to.ident());
+            cursorMoveDelta = {
+              x: 0,
+              y: 0,
+            };
+          } else {
+            to = CloudViewElement.from({
+              uid: nextUid++,
+              x: lastPt.x,
+              y: lastPt.y,
+              flowUid: flow.uid,
+              isZeroRadius: false,
+            });
+            newCloud = true;
+          }
+          flow = flow.set(
+            'points',
+            flow.points.map((pt) => {
+              if (pt.attachedToUid === fauxCloudTargetUid) {
+                return pt.set('attachedToUid', to.uid);
+              }
+              return pt;
+            }),
+          );
+          [to, flow] = UpdateCloudAndFlow(to, flow, cursorMoveDelta);
+          if (newCloud) {
+            elements = elements.push(to);
+          }
+        }
+        elements = elements.push(flow);
+        selection = Set([flow.uid]);
+        isCreatingNew = true;
+      }
+      elements = elements.concat(newClouds);
+
+      const engine = defined(this.engine());
       if (isCreatingNew) {
-        project = project.addNewVariable(this.state.modelName, flow.type, defined(flow.name));
+        engine.addNewVariable(this.state.modelName, 'flow', (flow as NamedViewElement).name);
         if (sourceStockIdent) {
-          project = project.addStocksFlow(this.state.modelName, sourceStockIdent, flow.ident, 'out');
+          engine.addStocksFlow(this.state.modelName, sourceStockIdent, flow.ident(), 'out');
         }
       }
       if (stockAttachingIdent) {
-        project = project.addStocksFlow(this.state.modelName, stockAttachingIdent, flow.ident, 'in');
+        engine.addStocksFlow(this.state.modelName, stockAttachingIdent, flow.ident(), 'in');
       }
       if (stockDetachingIdent) {
-        project = project.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident, 'in');
+        engine.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident(), 'in');
       }
+      this.updateView(view.merge({ nextUid, elements }));
       this.setState({ selection });
-      this.updateProject(project);
       this.scheduleSimRun();
     };
 
-    handleLinkAttach = (link: ViewElement, newTarget: string) => {
+    handleLinkAttach = (link: LinkViewElement, newTarget: string) => {
       let { selection } = this.state;
-      const { modelName } = this.state;
-      const updatePath = ['models', modelName, 'xModel', 'views', 0];
-      const project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          const getName = (ident: string) => {
-            for (const e of view.elements) {
-              if (e.hasName && e.ident === ident) {
-                return e;
-              }
-            }
-            throw new Error(`unknown name ${ident}`);
-          };
-          let elements = view.elements.map((element: ViewElement) => {
-            if (element.uid !== link.uid) {
-              return element;
-            }
+      let view = defined(this.getView());
 
-            const from = getName(defined(element.from));
-            const oldTo = getName(defined(element.to));
-            const to = getName(defined(newTarget));
-
-            const oldθ = Math.atan2(oldTo.cy - from.cy, oldTo.cx - from.cx);
-            const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
-            const diffθ = oldθ - newθ;
-            const angle = (element.angle || 180) + radToDeg(diffθ);
-
-            return element.merge({
-              angle,
-              to: newTarget,
-            });
-          });
-          let nextUid = view.nextUid;
-          if (link.uid === inCreationUid) {
-            const fromName = defined(link.from);
-            const from = defined(elements.find((e) => e.hasName && e.ident === fromName));
-            const to = defined(elements.find((e) => e.hasName && e.ident === newTarget));
-
-            const oldθ = Math.atan2(0 - from.cy, 0 - from.cx);
-            const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
-            const diffθ = oldθ - newθ;
-            const angle = (link.angle || 180) + radToDeg(diffθ);
-
-            const newLink = link.merge({
-              uid: nextUid++,
-              to: newTarget,
-              angle,
-            });
-            elements = elements.push(newLink);
-            selection = Set([newLink.uid]);
+      const getUid = (uid: number) => {
+        for (const e of view.elements) {
+          if (e.uid === uid) {
+            return e;
           }
-          return view.merge({ nextUid, elements });
-        },
-      );
+        }
+        throw new Error(`unknown uid ${uid}`);
+      };
+
+      const getName = (ident: string) => {
+        for (const e of view.elements) {
+          if (e.isNamed() && e.ident() === ident) {
+            return e;
+          }
+        }
+        throw new Error(`unknown name ${ident}`);
+      };
+
+      let elements = view.elements.map((element: ViewElement) => {
+        if (element.uid !== link.uid) {
+          return element;
+        }
+
+        if (!(element instanceof LinkViewElement)) {
+          return element;
+        }
+
+        const from = getUid(element.fromUid);
+        const oldTo = getUid(element.toUid);
+        const to = getName(defined(newTarget));
+
+        const oldθ = Math.atan2(oldTo.cy - from.cy, oldTo.cx - from.cx);
+        const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
+        const diffθ = oldθ - newθ;
+        const angle = (element.arc || 180) - radToDeg(diffθ);
+
+        return element.merge({
+          arc: angle,
+          toUid: to.uid,
+        });
+      });
+      let nextUid = view.nextUid;
+      if (link.uid === inCreationUid) {
+        const from = getUid(link.fromUid);
+        const to = getName(newTarget);
+
+        const oldθ = Math.atan2(0 - from.cy, 0 - from.cx);
+        const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
+        const diffθ = oldθ - newθ;
+        const angle = (link.arc || 180) - radToDeg(diffθ);
+
+        const newLink = link.merge({
+          uid: nextUid++,
+          toUid: to.uid,
+          arc: angle,
+        });
+        elements = elements.push(newLink);
+        selection = Set([newLink.uid]);
+      }
+      view = view.merge({ nextUid, elements });
+
+      this.updateView(view);
       this.setState({ selection });
-      this.updateProject(project);
     };
 
+    updateView(view: StockFlowView) {
+      const viewPb = view.toPb();
+      const serializedView = viewPb.serializeBinary();
+      const engine = this.engine();
+      if (engine) {
+        const err = engine.setView(this.state.modelName, 0, serializedView);
+        if (err) {
+          this.appendModelError(`updating the view failed (code ${err.code}, details: '${err.getDetails()}')`);
+        }
+        this.updateProject(engine.serializeToProtobuf());
+      }
+    }
+
     handleCreateVariable = (element: ViewElement) => {
-      const updatePath = ['models', this.state.modelName, 'xModel', 'views', 0];
-      let project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          let nextUid = view.nextUid;
-          element = element.set('uid', nextUid++);
-          const elements = view.elements.push(element);
-          return view.merge({ nextUid, elements });
-        },
-      );
+      const view = defined(this.getView());
 
-      project = project.addNewVariable(this.state.modelName, element.type, defined(element.name));
+      let nextUid = view.nextUid;
+      const elements = view.elements.push(element.set('uid', nextUid++));
 
+      this.engine()?.addNewVariable(this.state.modelName, viewElementType(element), (element as NamedViewElement).name);
+      this.updateView(view.merge({ nextUid, elements }));
       this.setState({
         selection: Set<number>(),
       });
-      this.updateProject(project);
     };
 
     handleSelectionMove = (delta: Point, arcPoint?: Point) => {
-      const origElements = defined(defined(defined(this.project()).model(this.state.modelName)).view(0)).elements;
-      let origNamedElements = Map<string, ViewElement>();
-      for (const e of origElements) {
-        if (e.hasName) {
-          origNamedElements = origNamedElements.set(e.ident, e);
-        }
-      }
-      const selection = this.state.selection;
-      const updatePath = ['models', this.state.modelName, 'xModel', 'views', 0];
-      const project = defined(this.project()).updateIn(
-        updatePath,
-        (view: View): View => {
-          const getName = (ident: string) => {
-            for (const e of view.elements) {
-              if (e.hasName && e.ident === ident) {
-                return e;
-              }
-            }
-            throw new Error(`unknown name ${ident}`);
-          };
-          const getUid = (uid: UID) => {
-            for (const e of view.elements) {
-              if (e.uid === uid) {
-                return e;
-              }
-            }
-            throw new Error(`unknown UID ${uid}`);
-          };
-
-          let updatedElements = List<ViewElement>();
-
-          let elements = view.elements.map((element: ViewElement) => {
-            if (!selection.has(element.uid)) {
-              return element;
-            }
-
-            if (selection.size === 1 && element.type === 'flow') {
-              const pts = defined(element.pts);
-              const sourceId = defined(defined(pts.get(0)).uid);
-              const source = getUid(sourceId);
-
-              const sinkId = defined(defined(pts.get(pts.size - 1)).uid);
-              const sink = getUid(sinkId);
-
-              const ends = List<ViewElement>([source, sink]);
-              const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta);
-              element = newElement;
-              updatedElements = updatedElements.concat(newUpdatedClouds);
-            } else if (selection.size === 1 && element.type === 'cloud') {
-              const flow = defined(getUid(defined(element.flowUid)));
-              const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
-              element = newCloud;
-              updatedElements = updatedElements.push(newUpdatedFlow);
-            } else if (selection.size === 1 && element.type === 'stock') {
-              const stock = defined(defined(this.getModel()).vars.get(element.ident)) as StockVar;
-              const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-              const flows: List<ViewElement> = flowNames.map((ident) => {
-                for (const element of view.elements) {
-                  if (element.hasName && element.ident === ident) {
-                    return element;
-                  }
-                }
-                throw new Error('unreachable');
-              });
-              const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows, delta);
-              element = newElement;
-              updatedElements = updatedElements.concat(newUpdatedFlows);
-            } else if (element.type === 'connector') {
-              const from = getName(defined(element.from));
-              const to = getName(defined(element.to));
-              const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
-              const newTakeoff = canvasToXmileAngle(radToDeg(newTakeoffθ));
-              element = element.merge({
-                angle: newTakeoff,
-              });
-            } else {
-              element = element.merge({
-                x: defined(element.x) - delta.x,
-                y: defined(element.y) - delta.y,
-              });
-            }
-            return element;
-          });
-
-          const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
-          elements = elements.map((element) => {
-            if (updatedFlowsByUid.has(element.uid)) {
-              return defined(updatedFlowsByUid.get(element.uid));
-            }
-            return element;
-          });
-
-          let namedElements = Map<string, ViewElement>();
-          let selectedElements = Map<string, ViewElement>();
-          for (const e of elements) {
-            if (!e.hasName) {
-              continue;
-            }
-            if (selection.has(e.uid)) {
-              selectedElements = selectedElements.set(e.ident, e);
-            }
-            namedElements = namedElements.set(e.ident, selectedElements.get(e.ident, e));
-          }
-
-          elements = elements.map((element: ViewElement) => {
-            if (element.type !== 'connector') {
-              return element.hasName ? defined(namedElements.get(element.ident)) : element;
-            }
-            const fromName = defined(element.from);
-            const toName = defined(element.to);
-            // if it hasn't been updated, nothing to do
-            if (!(selectedElements.has(fromName) || selectedElements.has(toName))) {
-              return element;
-            }
-            const from = selectedElements.get(fromName) || namedElements.get(fromName);
-            if (!from) {
-              return element;
-            }
-            const to = selectedElements.get(toName) || namedElements.get(toName);
-            if (!to) {
-              return element;
-            }
-            const atan2 = Math.atan2;
-            const oldTo = defined(origNamedElements.get(toName));
-            const oldFrom = defined(origNamedElements.get(fromName));
-            const oldθ = atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
-            const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
-            const diffθ = oldθ - newθ;
-
-            return element.update('angle', (angle) => {
-              return defined(angle) + radToDeg(diffθ);
-            });
-          });
-          return view.merge({ elements });
-        },
+      const view = defined(this.getView());
+      const origElements = view.elements;
+      const origNamedElements = Map<string, ViewElement>(
+        origElements.filter((e) => e.isNamed()).map((e) => [defined(e.ident()), e]),
       );
-      this.updateProject(project);
+      const selection = this.state.selection;
+
+      const getName = (ident: string) => {
+        for (const e of view.elements) {
+          if (e.isNamed() && e.ident() === ident) {
+            return e;
+          }
+        }
+        throw new Error(`unknown name ${ident}`);
+      };
+      const getUid = (uid: UID) => {
+        for (const e of view.elements) {
+          if (e.uid === uid) {
+            return e;
+          }
+        }
+        throw new Error(`unknown UID ${uid}`);
+      };
+
+      let updatedElements = List<ViewElement>();
+
+      let elements = view.elements.map((element: ViewElement) => {
+        if (!selection.has(element.uid)) {
+          return element;
+        }
+
+        if (selection.size === 1 && element instanceof FlowViewElement) {
+          const pts = element.points;
+          const sourceId = defined(defined(pts.first()).attachedToUid);
+          const source = getUid(sourceId) as StockViewElement | CloudViewElement;
+
+          const sinkId = defined(defined(pts.last()).attachedToUid);
+          const sink = getUid(sinkId) as StockViewElement | CloudViewElement;
+
+          const ends = List<StockViewElement | CloudViewElement>([source, sink]);
+          const [newElement, newUpdatedClouds] = UpdateFlow(element, ends, delta);
+          element = newElement;
+          updatedElements = updatedElements.concat(newUpdatedClouds);
+        } else if (selection.size === 1 && element instanceof CloudViewElement) {
+          const flow = defined(getUid(defined(element.flowUid))) as FlowViewElement;
+          const [newCloud, newUpdatedFlow] = UpdateCloudAndFlow(element, flow, delta);
+          element = newCloud;
+          updatedElements = updatedElements.push(newUpdatedFlow);
+        } else if (selection.size === 1 && element instanceof StockViewElement) {
+          const stock = defined(defined(this.getModel()).variables.get(element.ident())) as StockVar;
+          const flowNames: List<string> = stock.inflows.concat(stock.outflows);
+          const flows: List<ViewElement> = flowNames.map(getName);
+          const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows as List<FlowViewElement>, delta);
+          element = newElement;
+          updatedElements = updatedElements.concat(newUpdatedFlows);
+        } else if (element instanceof LinkViewElement) {
+          const from = getUid(element.fromUid);
+          const to = getUid(element.toUid);
+          const newTakeoffθ = takeoffθ({ element, from, to, arcPoint: defined(arcPoint) });
+          const newTakeoff = radToDeg(newTakeoffθ);
+          element = element.merge({
+            arc: newTakeoff,
+          });
+        } else {
+          // everything else has an x and a y, the cast is to make typescript
+          // happy with our dumb type decisions
+          element = (element as AuxViewElement).merge({
+            x: element.cx - delta.x,
+            y: element.cy - delta.y,
+          });
+        }
+        return element;
+      });
+
+      const updatedFlowsByUid: Map<UID, ViewElement> = updatedElements.toMap().mapKeys((_, e) => e.uid);
+      elements = elements.map((element) => {
+        if (updatedFlowsByUid.has(element.uid)) {
+          return defined(updatedFlowsByUid.get(element.uid));
+        }
+        return element;
+      });
+
+      let namedElements = Map<string, ViewElement>();
+      let selectedElements = Map<string, ViewElement>();
+      for (const e of elements) {
+        if (!e.isNamed()) {
+          continue;
+        }
+        const ident = defined(e.ident());
+        if (selection.has(e.uid)) {
+          selectedElements = selectedElements.set(ident, e);
+        }
+        namedElements = namedElements.set(ident, selectedElements.get(ident, e));
+      }
+
+      elements = elements.map((element: ViewElement) => {
+        if (!(element instanceof LinkViewElement)) {
+          return element.isNamed() ? defined(namedElements.get(defined(element.ident()))) : element;
+        }
+        const fromName = defined(getUid(element.fromUid).ident());
+        const toName = defined(getUid(element.toUid).ident());
+        // if it hasn't been updated, nothing to do
+        if (!(selectedElements.has(fromName) || selectedElements.has(toName))) {
+          return element;
+        }
+        const from = selectedElements.get(fromName) || namedElements.get(fromName);
+        if (!from) {
+          return element;
+        }
+        const to = selectedElements.get(toName) || namedElements.get(toName);
+        if (!to) {
+          return element;
+        }
+        const atan2 = Math.atan2;
+        const oldTo = defined(origNamedElements.get(toName));
+        const oldFrom = defined(origNamedElements.get(fromName));
+        const oldθ = atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
+        const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
+        const diffθ = oldθ - newθ;
+
+        return element.update('arc', (angle) => {
+          return defined(angle) - radToDeg(diffθ);
+        });
+      });
+      this.updateView(view.merge({ elements }));
     };
 
     handleDrawerToggle = (isOpen: boolean) => {
@@ -932,42 +924,46 @@ export const Editor = withStyles(styles)(
     };
 
     handleStartTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('start', Number(event.target.value));
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = Number(event.target.value);
+      engine.setSimSpecStart(value);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     handleStopTimeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('stop', Number(event.target.value));
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = Number(event.target.value);
+      engine.setSimSpecStop(value);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     handleDtChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('dt', Number(event.target.value));
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = Number(event.target.value);
+      engine.setSimSpecDt(value, false);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     handleTimeUnitsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-      const newSimSpec = project.simSpec.set('timeUnits', event.target.value);
-      this.updateProject(project.setSimSpec(newSimSpec));
+      const value = event.target.value;
+      engine.setSimSpecTimeUnits(value);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
@@ -977,12 +973,17 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      const model = project.model(this.state.modelName);
+      const model = project.models.get(this.state.modelName);
       if (!model) {
         return;
       }
 
-      const simSpec = defined(project.simSpec);
+      const simSpec = project.simSpecs;
+
+      let dt = simSpec.dt.dt;
+      if (simSpec.dt.isReciprocal) {
+        dt = 1 / dt;
+      }
 
       return (
         <ModelPropertiesDrawer
@@ -991,7 +992,7 @@ export const Editor = withStyles(styles)(
           onDrawerToggle={this.handleDrawerToggle}
           startTime={simSpec.start}
           stopTime={simSpec.stop}
-          dt={simSpec.dt}
+          dt={dt}
           timeUnits={simSpec.timeUnits || ''}
           onStartTimeChange={this.handleStartTimeChange}
           onStopTimeChange={this.handleStopTimeChange}
@@ -1001,8 +1002,8 @@ export const Editor = withStyles(styles)(
       );
     }
 
-    getDmModel(): DmModel | undefined {
-      const project = defined(this.state.projectDataModel);
+    getModel(): Model | undefined {
+      const project = this.project();
       if (!project) {
         return;
       }
@@ -1010,13 +1011,18 @@ export const Editor = withStyles(styles)(
       return project.models.get(modelName);
     }
 
-    getModel(): Model | undefined {
+    getView(): StockFlowView | undefined {
       const project = this.project();
       if (!project) {
         return;
       }
       const modelName = this.state.modelName;
-      return project.model(modelName);
+      const model = project.models.get(modelName);
+      if (!model) {
+        return;
+      }
+
+      return model.views.first();
     }
 
     getCanvas() {
@@ -1031,18 +1037,19 @@ export const Editor = withStyles(styles)(
       if (!model) {
         return;
       }
-      const dmProject = defined(this.state.projectDataModel);
-      const dmModel = defined(this.getDmModel());
+
+      const view = this.getView();
+      if (!view) {
+        return;
+      }
 
       return (
         <Canvas
           embedded={!!embedded}
           project={project}
-          dmProject={dmProject}
           model={model}
-          dmModel={defined(dmModel)}
-          view={defined(model.view(0))}
-          dmView={defined(dmModel.views.get(0))}
+          view={view}
+          version={this.state.projectVersion}
           data={this.state.data}
           selectedTool={this.state.selectedTool}
           selection={this.state.selection}
@@ -1093,15 +1100,14 @@ export const Editor = withStyles(styles)(
     getSelectionIdents(): string[] {
       const names: string[] = [];
       const { selection } = this.state;
-      const model = this.getModel();
-      if (!model) {
+      const view = this.getView();
+      if (!view) {
         return names;
       }
-      const view = defined(model.xModel.views.get(0));
 
       for (const e of view.elements) {
-        if (selection.contains(e.uid) && e.hasName) {
-          names.push(e.ident);
+        if (selection.contains(e.uid) && e.isNamed()) {
+          names.push(defined(e.ident()));
         }
       }
 
@@ -1115,14 +1121,14 @@ export const Editor = withStyles(styles)(
       }
 
       const uid = defined(this.state.selection.first());
-      const model = this.getModel();
-      if (!model) {
+
+      const view = this.getView();
+      if (!view) {
         return;
       }
-      const view = defined(model.xModel.views.get(0));
 
       for (const e of view.elements) {
-        if (e.uid === uid && e.hasName) {
+        if (e.uid === uid && e.isNamed()) {
           return e;
         }
       }
@@ -1148,12 +1154,12 @@ export const Editor = withStyles(styles)(
       let name;
       let placeholder: string | undefined = 'Find in Model';
       if (namedElement) {
-        name = defined(namedElement.name).replace('\\n', ' ');
+        name = defined((namedElement as NamedViewElement).name).replace('\\n', ' ');
         placeholder = undefined;
       }
 
-      const project = this.project();
-      const status = !project || project.isSimulatable(this.state.modelName) ? 'ok' : 'error';
+      const engine = this.engine();
+      const status = !engine || engine.isSimulatable() ? 'ok' : 'error';
 
       return (
         <Paper className={classes.paper} elevation={2}>
@@ -1178,27 +1184,28 @@ export const Editor = withStyles(styles)(
     }
 
     handleEquationChange = (ident: string, newEquation: string) => {
-      const project = this.project();
-      if (!project) {
+      const engine = this.engine();
+      if (!engine) {
         return;
       }
-
-      this.updateProject(project.setEquation(this.state.modelName, ident, newEquation));
+      engine.setEquation(this.state.modelName, ident, newEquation);
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
-    handleTableChange = (ident: string, newTable: GF | null) => {
-      const project = this.project();
-      if (!project) {
-        return;
+    handleTableChange = (ident: string, newTable: GraphicalFunction | null) => {
+      const engine = defined(this.engine());
+      if (newTable) {
+        const gf = GraphicalFunction.toPb(newTable);
+        engine.setGraphicalFunction(this.state.modelName, ident, gf.serializeBinary());
+      } else {
+        engine.removeGraphicalFunction(this.state.modelName, ident);
       }
-
-      this.updateProject(project.setTable(this.state.modelName, ident, newTable));
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
 
     getVariableDetails() {
-      const project = this.project();
       const { embedded } = this.props;
       const classes = this.props.classes;
 
@@ -1211,19 +1218,20 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      const model = defined(project).model(this.state.modelName);
+      const model = this.getModel();
       if (!model) {
         return;
       }
 
-      const variable = defined(model.vars.get(namedElement.ident));
-      const series = this.state.data.get(namedElement.ident);
+      const ident = defined(namedElement.ident());
+      const variable = defined(model.variables.get(ident));
+      const series = this.state.data.get(ident);
       const activeTab = this.state.variableDetailsActiveTab;
 
       return (
         <div className={classes.varDetails}>
           <VariableDetails
-            key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${namedElement.ident}`}
+            key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
             variable={variable}
             viewElement={namedElement}
             data={series}
@@ -1247,7 +1255,7 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      if (namedElement.ident !== ident) {
+      if (namedElement.ident() !== ident) {
         return;
       }
 
@@ -1290,15 +1298,36 @@ export const Editor = withStyles(styles)(
       });
     };
 
+    async openEngine(serializedProject: Readonly<Uint8Array>): Promise<IEngine | undefined> {
+      const { open } = await import('../../engine-v2/pkg');
+
+      const engine = open(serializedProject as Uint8Array);
+      if (!engine) {
+        this.appendModelError(`opening the project in the engine failed`);
+        return;
+      }
+
+      return engine;
+    }
+
     handleUndoRedo = (kind: 'undo' | 'redo') => {
       const delta = kind === 'undo' ? 1 : -1;
       let projectOffset = this.state.projectOffset + delta;
       // ensure our offset is always valid
       projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
       projectOffset = Math.max(projectOffset, 0);
-      this.setState({ projectOffset });
-      this.scheduleSimRun();
-      this.scheduleSave(defined(this.project(projectOffset)));
+      const serializedProject = defined(this.state.projectHistory.get(projectOffset));
+      const activeProjectPB = ProjectPB.deserializeBinary(serializedProject as Uint8Array);
+      const activeProject = new Project(activeProjectPB);
+      this.setState({ activeProject, projectOffset });
+
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      setTimeout(async () => {
+        this.activeEngine?.free();
+        this.activeEngine = await this.openEngine(serializedProject);
+        this.scheduleSimRun();
+        this.scheduleSave(serializedProject);
+      });
     };
 
     async takeSnapshot() {
@@ -1306,10 +1335,9 @@ export const Editor = withStyles(styles)(
       if (!project || !this.state.modelName) {
         return;
       }
-      const dmProject = defined(this.state.projectDataModel);
       const { data, modelName } = this.state;
 
-      const [svg, viewbox] = renderSvgToString(project, dmProject, modelName, data);
+      const [svg, viewbox] = renderSvgToString(project, modelName, data);
       const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
       const ctx = osCanvas.getContext('2d');
       const canvas = Canvg.fromString(exists(ctx), svg, {

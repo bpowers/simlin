@@ -119,12 +119,154 @@ export namespace Variable {
     module?: Variable.Module.AsObject;
   };
 
+  export class ScalarEquation extends jspb.Message {
+    getEquation(): string;
+    setEquation(value: string): void;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): ScalarEquation.AsObject;
+    static toObject(includeInstance: boolean, msg: ScalarEquation): ScalarEquation.AsObject;
+    static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+    static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+    static serializeBinaryToWriter(message: ScalarEquation, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): ScalarEquation;
+    static deserializeBinaryFromReader(message: ScalarEquation, reader: jspb.BinaryReader): ScalarEquation;
+  }
+
+  export namespace ScalarEquation {
+    export type AsObject = {
+      equation: string;
+    };
+  }
+
+  export class ApplyToAllEquation extends jspb.Message {
+    clearDimensionNamesList(): void;
+    getDimensionNamesList(): Array<string>;
+    setDimensionNamesList(value: Array<string>): void;
+    addDimensionNames(value: string, index?: number): string;
+
+    getEquation(): string;
+    setEquation(value: string): void;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): ApplyToAllEquation.AsObject;
+    static toObject(includeInstance: boolean, msg: ApplyToAllEquation): ApplyToAllEquation.AsObject;
+    static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+    static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+    static serializeBinaryToWriter(message: ApplyToAllEquation, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): ApplyToAllEquation;
+    static deserializeBinaryFromReader(message: ApplyToAllEquation, reader: jspb.BinaryReader): ApplyToAllEquation;
+  }
+
+  export namespace ApplyToAllEquation {
+    export type AsObject = {
+      dimensionNamesList: Array<string>;
+      equation: string;
+    };
+  }
+
+  export class ArrayedEquation extends jspb.Message {
+    clearDimensionNamesList(): void;
+    getDimensionNamesList(): Array<string>;
+    setDimensionNamesList(value: Array<string>): void;
+    addDimensionNames(value: string, index?: number): string;
+
+    clearElementsList(): void;
+    getElementsList(): Array<Variable.ArrayedEquation.Element>;
+    setElementsList(value: Array<Variable.ArrayedEquation.Element>): void;
+    addElements(value?: Variable.ArrayedEquation.Element, index?: number): Variable.ArrayedEquation.Element;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): ArrayedEquation.AsObject;
+    static toObject(includeInstance: boolean, msg: ArrayedEquation): ArrayedEquation.AsObject;
+    static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+    static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+    static serializeBinaryToWriter(message: ArrayedEquation, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): ArrayedEquation;
+    static deserializeBinaryFromReader(message: ArrayedEquation, reader: jspb.BinaryReader): ArrayedEquation;
+  }
+
+  export namespace ArrayedEquation {
+    export type AsObject = {
+      dimensionNamesList: Array<string>;
+      elementsList: Array<Variable.ArrayedEquation.Element.AsObject>;
+    };
+
+    export class Element extends jspb.Message {
+      getSubscript(): string;
+      setSubscript(value: string): void;
+
+      getEquation(): string;
+      setEquation(value: string): void;
+
+      serializeBinary(): Uint8Array;
+      toObject(includeInstance?: boolean): Element.AsObject;
+      static toObject(includeInstance: boolean, msg: Element): Element.AsObject;
+      static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+      static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+      static serializeBinaryToWriter(message: Element, writer: jspb.BinaryWriter): void;
+      static deserializeBinary(bytes: Uint8Array): Element;
+      static deserializeBinaryFromReader(message: Element, reader: jspb.BinaryReader): Element;
+    }
+
+    export namespace Element {
+      export type AsObject = {
+        subscript: string;
+        equation: string;
+      };
+    }
+  }
+
+  export class Equation extends jspb.Message {
+    hasScalar(): boolean;
+    clearScalar(): void;
+    getScalar(): Variable.ScalarEquation | undefined;
+    setScalar(value?: Variable.ScalarEquation): void;
+
+    hasApplyToAll(): boolean;
+    clearApplyToAll(): void;
+    getApplyToAll(): Variable.ApplyToAllEquation | undefined;
+    setApplyToAll(value?: Variable.ApplyToAllEquation): void;
+
+    hasArrayed(): boolean;
+    clearArrayed(): void;
+    getArrayed(): Variable.ArrayedEquation | undefined;
+    setArrayed(value?: Variable.ArrayedEquation): void;
+
+    getEquationCase(): Equation.EquationCase;
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): Equation.AsObject;
+    static toObject(includeInstance: boolean, msg: Equation): Equation.AsObject;
+    static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+    static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+    static serializeBinaryToWriter(message: Equation, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): Equation;
+    static deserializeBinaryFromReader(message: Equation, reader: jspb.BinaryReader): Equation;
+  }
+
+  export namespace Equation {
+    export type AsObject = {
+      scalar?: Variable.ScalarEquation.AsObject;
+      applyToAll?: Variable.ApplyToAllEquation.AsObject;
+      arrayed?: Variable.ArrayedEquation.AsObject;
+    };
+
+    export enum EquationCase {
+      EQUATION_NOT_SET = 0,
+      SCALAR = 1,
+      APPLY_TO_ALL = 2,
+      ARRAYED = 3,
+    }
+  }
+
   export class Stock extends jspb.Message {
     getIdent(): string;
     setIdent(value: string): void;
 
-    getEquation(): string;
-    setEquation(value: string): void;
+    hasEquation(): boolean;
+    clearEquation(): void;
+    getEquation(): Variable.Equation | undefined;
+    setEquation(value?: Variable.Equation): void;
 
     getDocumentation(): string;
     setDocumentation(value: string): void;
@@ -158,7 +300,7 @@ export namespace Variable {
   export namespace Stock {
     export type AsObject = {
       ident: string;
-      equation: string;
+      equation?: Variable.Equation.AsObject;
       documentation: string;
       units: string;
       inflowsList: Array<string>;
@@ -171,8 +313,10 @@ export namespace Variable {
     getIdent(): string;
     setIdent(value: string): void;
 
-    getEquation(): string;
-    setEquation(value: string): void;
+    hasEquation(): boolean;
+    clearEquation(): void;
+    getEquation(): Variable.Equation | undefined;
+    setEquation(value?: Variable.Equation): void;
 
     getDocumentation(): string;
     setDocumentation(value: string): void;
@@ -201,7 +345,7 @@ export namespace Variable {
   export namespace Flow {
     export type AsObject = {
       ident: string;
-      equation: string;
+      equation?: Variable.Equation.AsObject;
       documentation: string;
       units: string;
       gf?: GraphicalFunction.AsObject;
@@ -213,8 +357,10 @@ export namespace Variable {
     getIdent(): string;
     setIdent(value: string): void;
 
-    getEquation(): string;
-    setEquation(value: string): void;
+    hasEquation(): boolean;
+    clearEquation(): void;
+    getEquation(): Variable.Equation | undefined;
+    setEquation(value?: Variable.Equation): void;
 
     getDocumentation(): string;
     setDocumentation(value: string): void;
@@ -240,7 +386,7 @@ export namespace Variable {
   export namespace Aux {
     export type AsObject = {
       ident: string;
-      equation: string;
+      equation?: Variable.Equation.AsObject;
       documentation: string;
       units: string;
       gf?: GraphicalFunction.AsObject;
@@ -852,6 +998,32 @@ export namespace SimSpecs {
   };
 }
 
+export class Dimension extends jspb.Message {
+  getName(): string;
+  setName(value: string): void;
+
+  clearElementsList(): void;
+  getElementsList(): Array<string>;
+  setElementsList(value: Array<string>): void;
+  addElements(value: string, index?: number): string;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): Dimension.AsObject;
+  static toObject(includeInstance: boolean, msg: Dimension): Dimension.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: Dimension, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): Dimension;
+  static deserializeBinaryFromReader(message: Dimension, reader: jspb.BinaryReader): Dimension;
+}
+
+export namespace Dimension {
+  export type AsObject = {
+    name: string;
+    elementsList: Array<string>;
+  };
+}
+
 export class Project extends jspb.Message {
   getName(): string;
   setName(value: string): void;
@@ -860,6 +1032,11 @@ export class Project extends jspb.Message {
   clearSimSpecs(): void;
   getSimSpecs(): SimSpecs | undefined;
   setSimSpecs(value?: SimSpecs): void;
+
+  clearDimensionsList(): void;
+  getDimensionsList(): Array<Dimension>;
+  setDimensionsList(value: Array<Dimension>): void;
+  addDimensions(value?: Dimension, index?: number): Dimension;
 
   clearModelsList(): void;
   getModelsList(): Array<Model>;
@@ -880,6 +1057,7 @@ export namespace Project {
   export type AsObject = {
     name: string;
     simSpecs?: SimSpecs.AsObject;
+    dimensionsList: Array<Dimension.AsObject>;
     modelsList: Array<Model.AsObject>;
   };
 }

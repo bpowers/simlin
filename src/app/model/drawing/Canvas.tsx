@@ -12,17 +12,27 @@ import { List, Map, Set } from 'immutable';
 
 import { defined, Series } from '../../common';
 
+import * as pb from '../../../system-dynamics-engine/src/project_io_pb';
+
 import * as datamodel from '../../datamodel';
-import { Project as DmProject, ViewElement as DmViewElement } from '../../datamodel';
-import { Model } from '../../../engine/model';
-import { Project } from '../../../engine/project';
-import { Stock as StockVar } from '../../../engine/vars';
-import { Point as XmilePoint, UID, View, ViewElement } from '../../../engine/xmile';
+import {
+  AliasViewElement,
+  AuxViewElement,
+  CloudViewElement,
+  FlowViewElement,
+  LinkViewElement,
+  ModuleViewElement,
+  StockViewElement,
+  NamedViewElement,
+  UID,
+  LabelSide,
+} from '../../datamodel';
+
+import { Project, Model, Stock as StockVar } from '../../datamodel';
 
 import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect } from './common';
-import { findSide } from './CommonLabel';
 import { Connector, ConnectorProps } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
@@ -33,13 +43,23 @@ import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;
 export const inCreationCloudUid = -4;
+export const fauxCloudTargetUid = -5;
 
-const fauxTarget = new ViewElement({
-  type: 'aux',
+const fauxTarget = AuxViewElement.from({
   name: '$·model-internal-faux-target',
   uid: fauxTargetUid,
   x: 0,
   y: 0,
+  labelSide: 'right' as LabelSide,
+  isZeroRadius: true,
+});
+
+const fauxCloudTarget = CloudViewElement.from({
+  uid: fauxCloudTargetUid,
+  flowUid: -1,
+  x: 0,
+  y: 0,
+  isZeroRadius: true,
 });
 
 const styles = createStyles({
@@ -90,13 +110,10 @@ function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
 }
 
-const ZOrder = Map<
-  'flow' | 'module' | 'stock' | 'aux' | 'connector' | 'style' | 'reference' | 'cloud' | 'alias',
-  number
->([
+const ZOrder = Map<'flow' | 'module' | 'stock' | 'aux' | 'link' | 'style' | 'reference' | 'cloud' | 'alias', number>([
   ['style', 0],
   ['module', 1],
-  ['connector', 2],
+  ['link', 2],
   ['flow', 3],
   ['cloud', 4],
   ['stock', 4],
@@ -106,10 +123,6 @@ const ZOrder = Map<
 ]);
 
 const ZMax = 6;
-
-type WellKnownElement = 'stock' | 'flow' | 'aux' | 'connector' | 'module' | 'alias' | 'cloud';
-
-const KnownTypes = Set<string>(['stock', 'flow', 'aux', 'connector', 'module', 'alias', 'cloud']);
 
 interface CanvasState {
   isMovingCanvas: boolean;
@@ -122,28 +135,26 @@ interface CanvasState {
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
   canvasOffset: Point;
-  inCreation: ViewElement | undefined;
-  inCreationCloud: ViewElement | undefined;
+  inCreation: datamodel.ViewElement | undefined;
+  inCreationCloud: CloudViewElement | undefined;
 }
 
 interface CanvasPropsFull extends WithStyles<typeof styles> {
   embedded: boolean;
   project: Project;
-  dmProject: DmProject;
   model: Model;
-  dmModel: datamodel.Model;
-  view: View;
-  dmView: datamodel.StockFlowView;
+  view: datamodel.StockFlowView;
+  version: number;
   data: Map<string, Series>;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   selection: Set<UID>;
   onRenameVariable: (oldName: string, newName: string) => void;
   onSetSelection: (selected: Set<UID>) => void;
   onMoveSelection: (position: Point, arcPoint?: Point) => void;
-  onMoveFlow: (link: ViewElement, targetUid: number, moveDetla: Point) => void;
+  onMoveFlow: (flow: FlowViewElement, targetUid: number, moveDelta: Point) => void;
   onMoveLabel: (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => void;
-  onAttachLink: (link: ViewElement, newTarget: string) => void;
-  onCreateVariable: (element: ViewElement) => void;
+  onAttachLink: (link: LinkViewElement, newTarget: string) => void;
+  onCreateVariable: (element: datamodel.ViewElement) => void;
   onClearSelectedTool: () => void;
   onDeleteSelection: () => void;
 }
@@ -152,11 +163,9 @@ export type CanvasProps = Pick<
   CanvasPropsFull,
   | 'embedded'
   | 'project'
-  | 'dmProject'
   | 'model'
-  | 'dmModel'
   | 'view'
-  | 'dmView'
+  | 'version'
   | 'data'
   | 'selectedTool'
   | 'selection'
@@ -185,28 +194,14 @@ export const Canvas = withStyles(styles)(
     // we have to regenerate selectionUpdates when selection !== props.selection
     private selection = Set<UID>();
 
-    private cachedElements = List<ViewElement>();
-    private elements = Map<UID, ViewElement>();
+    private cachedVersion = -Infinity;
+    private cachedElements = List<datamodel.ViewElement>();
+    private elements = Map<UID, datamodel.ViewElement>();
     private nameMap = Map<string, UID>();
-    private selectionUpdates = Map<UID, ViewElement>();
-
-    // a helper object to go from well-known element types to constructors
-    readonly builder: {
-      [K in WellKnownElement]: (v: ViewElement, v2: DmViewElement) => React.ReactElement | undefined;
-    };
+    private selectionUpdates = Map<UID, datamodel.ViewElement>();
 
     constructor(props: CanvasPropsFull) {
       super(props);
-
-      this.builder = {
-        aux: this.aux,
-        stock: this.stock,
-        flow: this.flow,
-        connector: this.connector,
-        module: this.module,
-        alias: this.alias,
-        cloud: this.cloud,
-      };
 
       this.state = {
         isMovingArrow: false,
@@ -224,11 +219,13 @@ export const Canvas = withStyles(styles)(
       };
     }
 
-    getElementByUid(uid: UID): ViewElement {
+    getElementByUid(uid: UID): datamodel.ViewElement {
       if (uid === inCreationUid) {
         return defined(this.state.inCreation);
       } else if (uid === fauxTargetUid) {
         return fauxTarget;
+      } else if (uid === fauxCloudTargetUid) {
+        return fauxCloudTarget;
       } else if (uid === inCreationCloudUid) {
         return defined(this.state.inCreationCloud);
       }
@@ -238,10 +235,10 @@ export const Canvas = withStyles(styles)(
     // for resolving connector ends
     static buildSelectionMap(
       props: CanvasProps,
-      elements: Map<UID, ViewElement>,
-      inCreation?: ViewElement,
-    ): Map<UID, ViewElement> {
-      let selection = Map<UID, ViewElement>();
+      elements: Map<UID, datamodel.ViewElement>,
+      inCreation?: datamodel.ViewElement,
+    ): Map<UID, datamodel.ViewElement> {
+      let selection = Map<UID, datamodel.ViewElement>();
       for (const uid of props.selection) {
         if (uid === inCreationUid && inCreation) {
           selection = selection.set(uid, inCreation);
@@ -253,7 +250,7 @@ export const Canvas = withStyles(styles)(
       return selection;
     }
 
-    private getNamedElement(name: string): ViewElement | undefined {
+    private getNamedElement(name: string): datamodel.ViewElement | undefined {
       const uid = this.nameMap.get(name);
       if (!uid) {
         return undefined;
@@ -261,22 +258,21 @@ export const Canvas = withStyles(styles)(
       return this.selectionUpdates.get(uid) || this.elements.get(uid);
     }
 
-    private isSelected(element: ViewElement): boolean {
+    private isSelected(element: datamodel.ViewElement): boolean {
       return this.props.selection.has(element.uid);
     }
 
-    private alias = (element: ViewElement, element2: DmViewElement): React.ReactElement => {
-      // FIXME
-      return this.aux(element, element2, true);
+    private alias = (_element: AliasViewElement): React.ReactElement => {
+      throw new Error('FIXME: aliases not supported yet');
     };
 
-    private cloud = (element: ViewElement): React.ReactElement | undefined => {
+    private cloud = (element: CloudViewElement): React.ReactElement | undefined => {
       const isSelected = this.isSelected(element);
 
-      const flow = this.getElementByUid(defined(element.flowUid));
+      const flow = this.getElementByUid(defined(element.flowUid)) as FlowViewElement;
 
       if (this.state.isMovingArrow && this.isSelected(flow)) {
-        if (defined(defined(flow.pts).last()).uid === element.uid) {
+        if (defined(flow.points.last()).attachedToUid === element.uid) {
           return undefined;
         }
       }
@@ -292,7 +288,7 @@ export const Canvas = withStyles(styles)(
       return <Cloud key={element.uid} {...props} />;
     };
 
-    private isValidTarget(element: ViewElement): boolean | undefined {
+    private isValidTarget(element: datamodel.ViewElement): boolean | undefined {
       if (!this.state.isMovingArrow || !this.selectionCenterOffset) {
         return undefined;
       }
@@ -308,61 +304,59 @@ export const Canvas = withStyles(styles)(
       };
 
       let isTarget = false;
-      switch (element.type) {
-        case 'cloud':
-          isTarget = cloudContains(element, pointer);
-          break;
-        case 'stock':
-          isTarget = stockContains(element, pointer);
-          break;
-        case 'flow':
-        case 'aux':
-          isTarget = auxContains(element, pointer);
-          break;
+      if (element instanceof CloudViewElement) {
+        isTarget = cloudContains(element, pointer);
+      } else if (element instanceof datamodel.StockViewElement) {
+        isTarget = stockContains(element, pointer);
+      } else if (element instanceof AuxViewElement) {
+        isTarget = auxContains(element, pointer);
+      } else if (element instanceof FlowViewElement) {
+        isTarget = auxContains(element, pointer);
       }
       if (!isTarget) {
         return undefined;
       }
 
       // don't allow connectors from and to the same element
-      if (arrow.type === 'connector' && arrow.from === element.ident) {
+      if (arrow instanceof LinkViewElement && arrow.fromUid === element.uid) {
         return undefined;
       }
 
       // dont allow duplicate links between the same two elements
-      if (arrow.type === 'connector') {
+      if (arrow instanceof LinkViewElement) {
         const { view } = this.props;
-        for (const e of view.elements) {
+        for (const e of view) {
           // skip if its not a connector, or if it is the currently selected connector
-          if (e.type !== 'connector' || e.uid === arrow.uid) {
+          if (!(e instanceof LinkViewElement) || e.uid === arrow.uid) {
             continue;
           }
 
-          if (e.from === arrow.from && e.to === element.ident) {
+          if (e.fromUid === arrow.fromUid && e.toUid === element.uid) {
             return false;
           }
         }
       }
 
-      if (arrow.type === 'flow') {
-        if (element.type !== 'stock') {
+      if (arrow instanceof FlowViewElement) {
+        if (!(element instanceof datamodel.StockViewElement)) {
           return false;
         }
-        const first = defined(defined(arrow.pts).first());
+        const first = defined(arrow.points.first());
         // make sure we don't point a flow back at its source
-        if (first.uid === element.uid) {
+        if (first.attachedToUid === element.uid) {
           return false;
         }
         return Math.abs(first.x - element.cx) < StockWidth / 2 || Math.abs(first.y - element.cy) < StockHeight / 2;
       }
 
-      return element.type === 'flow' || element.type === 'aux';
+      return element instanceof FlowViewElement || element instanceof AuxViewElement;
     }
 
-    private aux = (element: ViewElement, element2: DmViewElement, _isGhost = false): React.ReactElement => {
-      const variableErrors = this.props.model.vars.get(element.ident)?.errors.size || 0;
+    private aux = (element: AuxViewElement, _isGhost = false): React.ReactElement => {
+      // FIXME
+      const variableErrors = 0; // this.props.model.vars.get(element.ident())?.errors.size || 0;
       const isSelected = this.isSelected(element);
-      const series = this.props.data.get(element.ident);
+      const series = this.props.data.get(element.ident());
       const props: AuxProps = {
         element,
         series,
@@ -376,13 +370,14 @@ export const Canvas = withStyles(styles)(
 
       this.elementBounds = this.elementBounds.push(auxBounds(element));
 
-      return <Aux key={element.ident} {...props} />;
+      return <Aux key={element.ident()} {...props} />;
     };
 
-    private stock = (element: ViewElement, element2: DmViewElement): React.ReactElement => {
-      const variableErrors = this.props.model.vars.get(element.ident)?.errors.size || 0;
+    private stock = (element: StockViewElement): React.ReactElement => {
+      // FIXME
+      const variableErrors = 0; // this.props.model.vars.get(element.ident())?.errors.size || 0;
       const isSelected = this.isSelected(element);
-      const series = this.props.data.get(element.ident);
+      const series = this.props.data.get(element.ident());
       const props: StockProps = {
         element,
         series,
@@ -394,38 +389,30 @@ export const Canvas = withStyles(styles)(
         hasWarning: variableErrors > 0,
       };
       this.elementBounds = this.elementBounds.push(stockBounds(element));
-      return <Stock key={element.ident} {...props} />;
+      return <Stock key={element.ident()} {...props} />;
     };
 
-    private module = (element: ViewElement, element2: DmViewElement) => {
+    private module = (element: ModuleViewElement) => {
       const isSelected = this.isSelected(element);
       const props: ModuleProps = {
         element,
         isSelected,
       };
       this.elementBounds = this.elementBounds.push(moduleBounds(props));
-      return <Module key={element.ident} {...props} />;
+      return <Module key={element.ident()} {...props} />;
     };
 
-    private connector = (element: ViewElement, element2: DmViewElement) => {
+    private connector = (element: LinkViewElement) => {
       const { isMovingArrow } = this.state;
       const isSelected = this.props.selection.has(element.uid);
 
-      const from = this.getNamedElement(defined(element.from));
-      if (!from) {
-        console.log(`connector with unknown from ${element.from}`);
-        return;
-      }
-      let to = this.getNamedElement(defined(element.to));
-      if (!to) {
-        console.log(`connector with unknown to ${element.to}`);
-        return;
-      }
+      const from = this.selectionUpdates.get(element.fromUid) || this.getElementByUid(element.fromUid);
+      let to = this.selectionUpdates.get(element.toUid) || this.getElementByUid(element.toUid);
       const toUid = to.uid;
       let isSticky = false;
       if (isMovingArrow && isSelected && this.selectionCenterOffset) {
-        const validTarget = this.cachedElements.find((e: ViewElement) => {
-          if (!(e.type === 'aux' || e.type === 'flow')) {
+        const validTarget = this.cachedElements.find((e: datamodel.ViewElement) => {
+          if (!(e instanceof AuxViewElement || e instanceof FlowViewElement)) {
             return false;
           }
           return this.isValidTarget(e) || false;
@@ -436,11 +423,12 @@ export const Canvas = withStyles(styles)(
         } else {
           const off = this.selectionCenterOffset;
           const delta = this.state.moveDelta || { x: 0, y: 0 };
-          to = to.merge({
+          // if to isn't a valid target, that means it is the fauxTarget
+          to = (to as AuxViewElement).merge({
             x: off.x - delta.x - this.state.canvasOffset.x,
             y: off.y - delta.y - this.state.canvasOffset.y,
             isZeroRadius: true,
-          });
+          }) as datamodel.ViewElement;
         }
       }
       if (isMovingArrow || this.isSelected(from) || this.isSelected(to)) {
@@ -449,8 +437,8 @@ export const Canvas = withStyles(styles)(
         const oldθ = Math.atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
         const newθ = Math.atan2(to.cy - from.cy, to.cx - from.cx);
         const diffθ = oldθ - newθ;
-        const angle = element.angle || 180;
-        element = element.set('angle', angle + radToDeg(diffθ));
+        const angle = element.arc || 180.0;
+        element = element.set('arc', angle - radToDeg(diffθ));
       }
       const props: ConnectorProps = {
         element,
@@ -466,39 +454,48 @@ export const Canvas = withStyles(styles)(
       return <Connector key={element.uid} {...props} />;
     };
 
-    private getArcPoint(): XmilePoint | undefined {
+    private getArcPoint(): datamodel.Point | undefined {
       if (!this.selectionCenterOffset) {
         return undefined;
       }
       const off = defined(this.selectionCenterOffset);
       const delta = this.state.moveDelta || { x: 0, y: 0 };
-      return new XmilePoint({
+      return datamodel.Point.from({
         x: off.x - delta.x - this.state.canvasOffset.x,
         y: off.y - delta.y - this.state.canvasOffset.y,
+        attachedToUid: undefined,
       });
     }
 
-    private flow = (element: ViewElement, element2: DmViewElement) => {
-      const variableErrors = this.props.model.vars.get(element.ident)?.errors.size || 0;
+    private flow = (element: FlowViewElement) => {
+      const ident = element.ident();
+      // FIXME
+      const variableErrors = 0; // this.props.model.vars.get(ident)?.errors.size || 0;
       const { isMovingArrow } = this.state;
       const isSelected = this.isSelected(element);
-      const data = this.props.data.get(element.ident);
+      const data = this.props.data.get(ident);
 
-      if (!element.pts || element.pts.size < 2) {
+      if (element.points.size < 2) {
         return;
       }
 
-      const sourceId = defined(element.pts.get(0)).uid;
+      const sourceId = defined(element.points.first()).attachedToUid;
       if (!sourceId) {
         return;
       }
       const source = this.getElementByUid(sourceId);
+      if (!(source instanceof StockViewElement || source instanceof CloudViewElement)) {
+        throw new Error('invariant broken');
+      }
 
-      const sinkId = defined(element.pts.get(element.pts.size - 1)).uid;
+      const sinkId = defined(element.points.last()).attachedToUid;
       if (!sinkId) {
         return;
       }
       const sink = this.getElementByUid(sinkId);
+      if (!(sink instanceof StockViewElement || sink instanceof CloudViewElement)) {
+        throw new Error('invariant broken');
+      }
 
       return (
         <Flow
@@ -518,27 +515,36 @@ export const Canvas = withStyles(styles)(
       );
     };
 
-    private constrainFlowMovement(flow: ViewElement, moveDelta: Point): [ViewElement, List<ViewElement>] {
-      if (!flow.pts || flow.pts.size !== 2) {
+    private constrainFlowMovement(
+      flow: FlowViewElement,
+      moveDelta: Point,
+    ): [FlowViewElement, List<StockViewElement | CloudViewElement>] {
+      if (flow.points.size !== 2) {
         console.log('TODO: non-simple flow');
-        return [flow, List<ViewElement>()];
+        return [flow, List<StockViewElement | CloudViewElement>()];
       }
 
-      const sourceId = defined(defined(flow.pts.first()).uid);
-      const source = this.getElementByUid(sourceId);
+      const sourceId = defined(defined(flow.points.first()).attachedToUid);
+      const source = this.getElementByUid(sourceId) as StockViewElement | CloudViewElement;
+      if (!(source instanceof StockViewElement || source instanceof CloudViewElement)) {
+        throw new Error('invariant broken');
+      }
 
-      const sinkId = defined(defined(flow.pts.last()).uid);
-      let sink = this.getElementByUid(sinkId);
+      const sinkId = defined(defined(defined(flow.points.last()).attachedToUid));
+      let sink = this.getElementByUid(sinkId) as StockViewElement | CloudViewElement;
+      if (!(sink instanceof StockViewElement || sink instanceof CloudViewElement)) {
+        throw new Error('invariant broken');
+      }
 
       const { isMovingArrow } = this.state;
       if (isMovingArrow && this.selectionCenterOffset) {
-        const validTarget = this.cachedElements.find((e: ViewElement) => {
+        const validTarget = this.cachedElements.find((e: datamodel.ViewElement) => {
           // connecting both the inflow + outflow of a stock to itself wouldn't make sense.
-          if (!(e.type === 'stock') || e.uid === sourceId) {
+          if (!(e instanceof StockViewElement) || e.uid === sourceId) {
             return false;
           }
           return this.isValidTarget(e) || false;
-        });
+        }) as StockViewElement;
         if (validTarget) {
           moveDelta = {
             x: sink.cx - validTarget.cx,
@@ -548,16 +554,13 @@ export const Canvas = withStyles(styles)(
             uid: sinkId,
             x: sink.cx,
             y: sink.cy,
-            width: undefined,
-            height: undefined,
           });
         } else {
           const off = this.selectionCenterOffset;
-          sink = sink.merge({
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-assignment
+          sink = ((sink as unknown) as any).merge({
             x: off.x - this.state.canvasOffset.x,
             y: off.y - this.state.canvasOffset.y,
-            width: undefined,
-            height: undefined,
             isZeroRadius: true,
           });
         }
@@ -566,70 +569,77 @@ export const Canvas = withStyles(styles)(
         return [flow, List([])];
       }
 
-      const ends = List<ViewElement>([source, sink]);
+      const ends = List<StockViewElement | CloudViewElement>([source, sink]);
       return UpdateFlow(flow, ends, moveDelta);
     }
 
-    private constrainCloudMovement(cloudEl: ViewElement, moveDelta: Point): [ViewElement, ViewElement] {
-      const flow = this.getElementByUid(defined(cloudEl.flowUid));
+    private constrainCloudMovement(
+      cloudEl: CloudViewElement,
+      moveDelta: Point,
+    ): [StockViewElement | CloudViewElement, FlowViewElement] {
+      const flow = this.getElementByUid(defined(cloudEl.flowUid)) as FlowViewElement;
       return UpdateCloudAndFlow(cloudEl, flow, moveDelta);
     }
 
-    private constrainStockMovement(stockEl: ViewElement, moveDelta: Point): [ViewElement, List<ViewElement>] {
-      const stock = defined(this.props.model.vars.get(stockEl.ident)) as StockVar;
+    private constrainStockMovement(
+      stockEl: StockViewElement,
+      moveDelta: Point,
+    ): [StockViewElement, List<FlowViewElement>] {
+      const stock = defined(this.props.model.variables.get(stockEl.ident())) as StockVar;
       const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-      const flows: List<ViewElement> = flowNames.map((ident) => defined(this.getNamedElement(ident)));
+      const flows: List<FlowViewElement> = flowNames.map(
+        (ident) => defined(this.getNamedElement(ident)) as FlowViewElement,
+      );
 
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
 
-    private populateNamedElements(
-      displayElements: List<ViewElement>,
-      dmDisplayElements: List<datamodel.ViewElement>,
-    ): void {
-      if (!this.cachedElements.equals(displayElements)) {
-        this.nameMap = Map(displayElements.filter((el) => el.hasName).map((el) => [el.ident, el.uid])).set(
-          fauxTarget.ident,
-          fauxTarget.uid,
-        );
-        this.elements = Map(displayElements.map((el) => [el.uid, el])).set(fauxTarget.uid, fauxTarget);
+    private populateNamedElements(displayElements: List<datamodel.ViewElement>): void {
+      if (this.props.version !== this.cachedVersion) {
+        this.nameMap = Map(displayElements.filter((el) => el.isNamed()).map((el) => [defined(el.ident()), el.uid]));
+        this.elements = Map(displayElements.map((el) => [el.uid, el]))
+          .set(fauxTarget.uid, fauxTarget)
+          .set(fauxCloudTarget.uid, fauxCloudTarget);
         this.cachedElements = displayElements;
+        this.cachedVersion = this.props.version;
       }
 
       this.selectionUpdates = InnerCanvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
       if (this.state.labelSide) {
         this.selectionUpdates = this.selectionUpdates.map((el) => {
-          return el.set('labelSide', this.state.labelSide);
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+          return (el as AuxViewElement).set('labelSide', defined(this.state.labelSide));
         });
       }
       if (this.state.moveDelta) {
-        let otherUpdates = List<ViewElement>();
+        let otherUpdates = List<datamodel.ViewElement>();
         const { x, y } = defined(this.state.moveDelta);
         this.selectionUpdates = this.selectionUpdates.map((initialEl) => {
           // only constrain flow movement if we're not doing a group-move
-          if (initialEl.type === 'flow' && this.selectionUpdates.size === 1) {
+          if (initialEl instanceof FlowViewElement && this.selectionUpdates.size === 1) {
             const [flow, updatedClouds] = this.constrainFlowMovement(initialEl, defined(this.state.moveDelta));
             otherUpdates = otherUpdates.concat(updatedClouds);
             return flow;
-          } else if (initialEl.type === 'stock' && this.selectionUpdates.size === 1) {
+          } else if (initialEl instanceof StockViewElement && this.selectionUpdates.size === 1) {
             const [stock, updatedFlows] = this.constrainStockMovement(initialEl, defined(this.state.moveDelta));
             otherUpdates = otherUpdates.concat(updatedFlows);
             return stock;
-          } else if (initialEl.type === 'cloud' && this.selectionUpdates.size === 1) {
+          } else if (initialEl instanceof CloudViewElement && this.selectionUpdates.size === 1) {
             const [cloud, updatedFlow] = this.constrainCloudMovement(initialEl, defined(this.state.moveDelta));
             otherUpdates = otherUpdates.push(updatedFlow);
             return cloud;
-          } else if (initialEl.type !== 'connector') {
-            return initialEl.merge({
-              x: defined(initialEl.x) - x,
-              y: defined(initialEl.y) - y,
+          } else if (!(initialEl instanceof LinkViewElement)) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+            return (initialEl as AuxViewElement).merge({
+              x: initialEl.cx - x,
+              y: initialEl.cy - y,
             });
           } else {
             return initialEl;
           }
         });
         // now add flows that also were updated
-        const namedUpdates: Map<UID, ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
+        const namedUpdates: Map<UID, datamodel.ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
         this.selectionUpdates = this.selectionUpdates.concat(namedUpdates);
       }
     }
@@ -685,14 +695,19 @@ export const Canvas = withStyles(styles)(
           } else {
             const element = this.getElementByUid(defined(this.props.selection.first()));
             let foundInvalidTarget = false;
-            const validTarget = this.cachedElements.find((e: ViewElement) => {
+            const validTarget = this.cachedElements.find((e: datamodel.ViewElement) => {
               const isValid = this.isValidTarget(e);
               foundInvalidTarget = foundInvalidTarget || isValid === false;
               return isValid || false;
             });
-            if (element.type === 'connector' && validTarget) {
-              this.props.onAttachLink(element, validTarget.ident);
-            } else if (element.type === 'flow') {
+            if (element instanceof LinkViewElement && validTarget) {
+              this.props.onAttachLink(element, defined(validTarget.ident()));
+            } else if (element instanceof FlowViewElement) {
+              // don't create a flow stacked on top of 2 clouds due to a misclick
+              if (this.state.moveDelta.x === 0 && this.state.moveDelta.y === 0 && this.state.inCreation) {
+                this.clearPointerState();
+                return;
+              }
               this.props.onMoveFlow(element, validTarget ? validTarget.uid : 0, delta);
               if (this.state.inCreation) {
                 this.setState({
@@ -834,14 +849,26 @@ export const Canvas = withStyles(styles)(
 
       const { selectedTool } = this.props;
       if (selectedTool === 'aux' || selectedTool === 'stock') {
-        const inCreation = new ViewElement({
-          type: selectedTool,
-          uid: inCreationUid,
-          x: e.clientX - this.state.canvasOffset.x,
-          y: e.clientY - this.state.canvasOffset.y,
-          name: selectedTool === 'stock' ? 'New Stock' : 'New Variable',
-          labelSide: selectedTool === 'aux' ? 'right' : undefined,
-        });
+        let inCreation: AuxViewElement | StockViewElement;
+        if (selectedTool === 'aux') {
+          inCreation = AuxViewElement.from({
+            uid: inCreationUid,
+            x: e.clientX - this.state.canvasOffset.x,
+            y: e.clientY - this.state.canvasOffset.y,
+            name: 'New Variable',
+            labelSide: 'right',
+            isZeroRadius: false,
+          });
+        } else {
+          inCreation = StockViewElement.from({
+            uid: inCreationUid,
+            x: e.clientX - this.state.canvasOffset.x,
+            y: e.clientY - this.state.canvasOffset.y,
+            name: 'New Stock',
+            labelSide: 'bottom',
+            isZeroRadius: false,
+          });
+        }
         const editingName = plainDeserialize(displayName(defined(inCreation.name)));
         this.setState({
           isEditingName: true,
@@ -858,24 +885,21 @@ export const Canvas = withStyles(styles)(
         const x = e.clientX - canvasOffset.x;
         const y = e.clientY - canvasOffset.y;
 
-        const inCreationCloud = new ViewElement({
-          type: 'cloud',
-          name: '$·model-internal-flow-creation-cloud',
+        const inCreationCloud = new CloudViewElement(new pb.ViewElement.Cloud()).merge({
           uid: inCreationCloudUid,
+          flowUid: inCreationUid,
           x,
           y,
-          flowUid: inCreationUid,
         });
 
-        const inCreation = new ViewElement({
-          type: 'flow',
+        const inCreation = new FlowViewElement(new pb.ViewElement.Flow()).merge({
           uid: inCreationUid,
           name: 'New Flow',
           x,
           y,
-          pts: List([
-            new XmilePoint({ x, y, uid: inCreationCloud.uid }),
-            new XmilePoint({ x, y, uid: fauxTarget.uid }),
+          points: List([
+            datamodel.Point.from({ x, y, attachedToUid: inCreationCloud.uid }),
+            datamodel.Point.from({ x, y, attachedToUid: fauxCloudTarget.uid }),
           ]),
         });
 
@@ -935,13 +959,17 @@ export const Canvas = withStyles(styles)(
       this.handleEditingNameDone(false);
     };
 
-    handleEditConnector = (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void => {
+    handleEditConnector = (
+      element: datamodel.ViewElement,
+      e: React.PointerEvent<SVGElement>,
+      isArrowhead: boolean,
+    ): void => {
       this.handleSetSelection(element, e, false, isArrowhead);
     };
 
     // called from handleMouseDown in elements like Aux
     handleSetSelection = (
-      element: ViewElement,
+      element: datamodel.ViewElement,
       e: React.PointerEvent<SVGElement>,
       isText?: boolean,
       isArrowhead?: boolean,
@@ -962,33 +990,35 @@ export const Canvas = withStyles(styles)(
       }
 
       const { selectedTool } = this.props;
-      let inCreation: ViewElement | undefined;
+      let inCreation: datamodel.ViewElement | undefined;
 
-      if (selectedTool === 'link' && (element.type === 'aux' || element.type === 'flow' || element.type === 'stock')) {
+      if (selectedTool === 'link' && element.isNamed()) {
         isEditingName = false;
         isMovingArrow = true;
-        const fromName = element.ident;
-        inCreation = new ViewElement({
-          type: 'connector',
-          uid: inCreationUid,
-          from: fromName,
-          to: fauxTarget.ident,
-        });
+        const link = new pb.ViewElement.Link();
+        link.setUid(inCreationUid);
+        link.setFromUid(element.uid);
+        link.setToUid(fauxTarget.uid);
+        inCreation = new LinkViewElement(link);
         element = inCreation;
-      } else if (selectedTool === 'flow' && element.type === 'stock') {
+      } else if (selectedTool === 'flow' && element instanceof datamodel.StockViewElement) {
         isEditingName = false;
         isMovingArrow = true;
-        inCreation = new ViewElement({
-          type: 'flow',
-          uid: inCreationUid,
-          name: 'New Flow',
-          x: element.cx,
-          y: element.cy,
-          pts: List([
-            new XmilePoint({ x: element.cx, y: element.cy, uid: element.uid }),
-            new XmilePoint({ x: element.cx, y: element.cy, uid: fauxTarget.uid }),
-          ]),
-        });
+        const flow = new pb.ViewElement.Flow();
+        flow.setUid(inCreationUid);
+        flow.setName('New Flow');
+        flow.setX(element.cx);
+        flow.setY(element.cy);
+        const point1 = new pb.ViewElement.FlowPoint();
+        point1.setX(element.cx);
+        point1.setY(element.cy);
+        point1.setAttachedToUid(element.uid);
+        const point2 = new pb.ViewElement.FlowPoint();
+        point2.setX(element.cx);
+        point2.setY(element.cy);
+        point2.setAttachedToUid(fauxCloudTarget.uid);
+        flow.setPointsList([point1, point2]);
+        inCreation = new FlowViewElement(flow);
         element = inCreation;
       } else {
         // not an action we recognize, deselect th tool and continue on
@@ -999,7 +1029,7 @@ export const Canvas = withStyles(styles)(
 
         if (isEditingName) {
           const uid = defined(selection.first());
-          const editingElement = this.getElementByUid(uid);
+          const editingElement = this.getElementByUid(uid) as NamedViewElement;
           editingName = plainDeserialize(displayName(defined(editingElement.name)));
         }
       }
@@ -1034,11 +1064,12 @@ export const Canvas = withStyles(styles)(
 
       const uid = defined(this.props.selection.first());
       const element = this.getElementByUid(uid);
-      const oldName = displayName(defined(element.name));
+      const oldName = displayName(defined((element as NamedViewElement).name));
       const newName = plainSerialize(defined(this.state.editingName));
 
       if (uid === inCreationUid) {
-        this.props.onCreateVariable(element.set('name', newName));
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        this.props.onCreateVariable(((element as unknown) as any).set('name', newName));
       } else {
         this.props.onRenameVariable(oldName, newName);
       }
@@ -1058,17 +1089,14 @@ export const Canvas = withStyles(styles)(
     }
 
     render() {
-      const { view, dmView, embedded, classes } = this.props;
+      const { view, embedded, classes } = this.props;
 
       if (!this.props.selection.equals(this.selection)) {
         this.selection = this.props.selection;
       }
 
-      const dmViewElements = dmView.elements;
+      let displayElements = view.elements;
 
-      // filter all the elements in this XMILE view down to just the ones
-      // we know how to display.
-      let displayElements = view.elements.filter((e) => KnownTypes.has(e.type));
       if (this.state.inCreation) {
         displayElements = displayElements.push(this.state.inCreation);
       }
@@ -1083,28 +1111,48 @@ export const Canvas = withStyles(styles)(
       }
 
       // phase 1: build up a map of ident -> ViewElement
-      this.populateNamedElements(displayElements, dmViewElements);
+      this.populateNamedElements(displayElements);
 
       // FIXME: this is so gross
       this.elementBounds = List<Rect | undefined>();
 
       // phase 3: create React components and add them to the appropriate layer
       for (let element of displayElements) {
-        if (!this[element.type]) {
-          continue;
-        }
-
         if (this.selectionUpdates.has(element.uid)) {
           element = defined(this.selectionUpdates.get(element.uid));
         }
 
-        if (!this.builder.hasOwnProperty(element.type)) {
+        let zOrder = 0;
+        let component: React.ReactElement | undefined;
+        if (element instanceof AliasViewElement) {
+          component = this.alias(element);
+          zOrder = defined(ZOrder.get('alias'));
+        } else if (element instanceof AuxViewElement) {
+          component = this.aux(element);
+          zOrder = defined(ZOrder.get('aux'));
+        } else if (element instanceof CloudViewElement) {
+          component = this.cloud(element);
+          zOrder = defined(ZOrder.get('cloud'));
+        } else if (element instanceof FlowViewElement) {
+          component = this.flow(element);
+          zOrder = defined(ZOrder.get('flow'));
+        } else if (element instanceof LinkViewElement) {
+          component = this.connector(element);
+          zOrder = defined(ZOrder.get('link'));
+        } else if (element instanceof ModuleViewElement) {
+          component = this.module(element);
+          zOrder = defined(ZOrder.get('module'));
+        } else if (element instanceof StockViewElement) {
+          component = this.stock(element);
+          zOrder = defined(ZOrder.get('stock'));
+        }
+
+        if (!component) {
           continue;
         }
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-        const component = this.builder[element.type](element) as React.ReactElement;
-        zLayers[defined(ZOrder.get(element.type))].push(component);
+        zLayers[zOrder].push(component);
       }
 
       let overlayClass = classes.overlay;
@@ -1128,11 +1176,10 @@ export const Canvas = withStyles(styles)(
         overlayClass += ' ' + classes.noPointerEvents;
       } else {
         const editingUid = defined(this.props.selection.first());
-        const editingElement = this.getElementByUid(editingUid);
-        const defaultSide = editingElement.type === 'stock' ? 'top' : 'bottom';
-        const rw = editingElement.type === 'stock' ? 45 / 2 : AuxRadius;
-        const rh = editingElement.type === 'stock' ? 35 / 2 : AuxRadius;
-        const side = findSide(editingElement, defaultSide);
+        const editingElement = this.getElementByUid(editingUid) as NamedViewElement;
+        const rw = editingElement instanceof StockViewElement ? StockWidth / 2 : AuxRadius;
+        const rh = editingElement instanceof StockViewElement ? StockHeight / 2 : AuxRadius;
+        const side = editingElement.labelSide;
         const offset = this.state.canvasOffset;
         nameEditor = (
           <EditableLabel
@@ -1173,7 +1220,7 @@ export const Canvas = withStyles(styles)(
 
       // we don't need these things anymore
       this.elementBounds = List<Rect | undefined>();
-      this.selectionUpdates = Map<UID, ViewElement>();
+      this.selectionUpdates = Map<UID, datamodel.ViewElement>();
       // n.b. we don't want to clear this.elements or this.nameMap, as thats used when handling callbacks
 
       return (

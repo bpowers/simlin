@@ -6,13 +6,16 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ViewElement } from '../../../engine/xmile';
+import { ModuleViewElement } from '../../datamodel';
 
 import { displayName, Rect } from './common';
 import { ModuleRadius } from './default';
-import { findSide, Label } from './Label';
+import { Label } from './Label';
 
 import { defined } from '../../common';
+
+export const ModuleWidth = 55;
+export const ModuleHeight = 45;
 
 const styles = createStyles({
   module: {
@@ -24,7 +27,7 @@ const styles = createStyles({
 
 interface ModulePropsFull extends WithStyles<typeof styles> {
   isSelected: boolean;
-  element: ViewElement;
+  element: ModuleViewElement;
 }
 
 export type ModuleProps = Pick<ModulePropsFull, 'isSelected' | 'element'>;
@@ -32,8 +35,8 @@ export type ModuleProps = Pick<ModulePropsFull, 'isSelected' | 'element'>;
 export function moduleBounds(props: ModuleProps): Rect {
   const { element } = props;
   const { cx, cy } = element;
-  const width = element.width ? element.width : 55;
-  const height = element.height ? element.height : 45;
+  const width = ModuleWidth;
+  const height = ModuleHeight;
   return {
     top: cy - height / 2,
     left: cx - width / 2,
@@ -46,12 +49,11 @@ export const Module = withStyles(styles)(
   class Module extends React.PureComponent<ModulePropsFull> {
     render() {
       const { element, classes } = this.props;
-      const w = element.width ? element.width : 55;
-      const h = element.height ? element.height : 45;
+      const w = ModuleWidth;
+      const h = ModuleHeight;
       const cx = element.cx;
       const cy = element.cy;
-
-      const side = findSide(element);
+      const side = element.labelSide;
 
       return (
         <g>
