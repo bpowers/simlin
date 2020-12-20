@@ -1390,9 +1390,13 @@ pub fn serialize(project: &Project) -> project_io::Project {
 }
 
 pub fn deserialize(project: project_io::Project) -> Project {
-    Project::from(project)
+    project.into()
 }
 
 pub fn deserialize_view(view: project_io::View) -> View {
-    View::from(view)
+    view.into()
+}
+
+pub fn deserialize_graphical_function(gf: project_io::GraphicalFunction) -> GraphicalFunction {
+    gf.into()
 }

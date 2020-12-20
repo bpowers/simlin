@@ -102,11 +102,29 @@ impl Variable {
         }
     }
 
+    pub fn set_ident(&mut self, ident: String) {
+        match self {
+            Variable::Stock(stock) => stock.ident = ident,
+            Variable::Flow(flow) => flow.ident = ident,
+            Variable::Aux(aux) => aux.ident = ident,
+            Variable::Module(module) => module.ident = ident,
+        }
+    }
+
     pub fn set_scalar_equation(&mut self, equation: &str) {
         match self {
             Variable::Stock(stock) => stock.equation = Equation::Scalar(equation.to_string()),
             Variable::Flow(flow) => flow.equation = Equation::Scalar(equation.to_string()),
             Variable::Aux(aux) => aux.equation = Equation::Scalar(equation.to_string()),
+            Variable::Module(_module) => {}
+        }
+    }
+
+    pub fn set_graphical_function(&mut self, gf: Option<GraphicalFunction>) {
+        match self {
+            Variable::Stock(_stock) => {}
+            Variable::Flow(flow) => flow.gf = gf,
+            Variable::Aux(aux) => aux.gf = gf,
             Variable::Module(_module) => {}
         }
     }
