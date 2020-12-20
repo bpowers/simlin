@@ -339,7 +339,7 @@ const auxViewElementDefaults = {
   name: '',
   x: -1,
   y: -1,
-  labelSide: 'center' as LabelSide,
+  labelSide: 'right' as LabelSide,
   isZeroRadius: false,
 };
 export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
@@ -373,6 +373,22 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
     element.setY(this.y);
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
+  }
+
+  static from(props: typeof auxViewElementDefaults): AuxViewElement {
+    const element = new pb.ViewElement.Aux();
+    element.setUid(props.uid);
+    element.setName(props.name);
+    element.setX(props.x);
+    element.setY(props.y);
+    element.setLabelSide(labelSideToPb(props.labelSide));
+
+    const aux = new AuxViewElement(element);
+    if (props.isZeroRadius) {
+      return aux.set('isZeroRadius', true);
+    } else {
+      return aux;
+    }
   }
 }
 
@@ -415,6 +431,22 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
     element.setY(this.y);
     element.setLabelSide(labelSideToPb(this.labelSide));
     return element;
+  }
+
+  static from(props: typeof stockViewElementDefaults): StockViewElement {
+    const element = new pb.ViewElement.Stock();
+    element.setUid(props.uid);
+    element.setName(props.name);
+    element.setX(props.x);
+    element.setY(props.y);
+    element.setLabelSide(labelSideToPb(props.labelSide));
+
+    const stock = new StockViewElement(element);
+    if (props.isZeroRadius) {
+      return stock.set('isZeroRadius', true);
+    } else {
+      return stock;
+    }
   }
 }
 
@@ -679,7 +711,12 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
     element.setFlowUid(props.flowUid);
     element.setX(props.x);
     element.setY(props.y);
-    return new CloudViewElement(element);
+    const cloud = new CloudViewElement(element);
+    if (props.isZeroRadius) {
+      return cloud.set('isZeroRadius', true);
+    } else {
+      return cloud;
+    }
   }
   get cx(): number {
     return this.x;
@@ -745,9 +782,14 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
         return e;
       }),
     );
+    let nextUid = maxUid + 1;
+    // if this is an empty view, start the numbering at 1
+    if (nextUid === 0) {
+      nextUid = 1;
+    }
     super({
       elements,
-      nextUid: maxUid + 1,
+      nextUid,
     });
   }
 

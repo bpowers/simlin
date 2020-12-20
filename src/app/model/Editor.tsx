@@ -33,9 +33,9 @@ import {
   viewElementType,
 } from '../datamodel';
 
-import { uint8ArraysEqual } from '../common';
+import { toInt, uint8ArraysEqual } from '../common';
 
-import { Canvas, fauxTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
+import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
@@ -290,9 +290,14 @@ export const Editor = withStyles(styles)(
 
       const priorHistory = this.state.projectHistory.slice();
 
+      // fractionally increase the version -- the server will only send back integer versions,
+      // but this will ensure we can use a simple version check in the Canvas to invalidate caches.
+      const projectVersion = this.state.projectVersion + 0.01;
+
       this.setState({
         projectHistory: priorHistory.unshift(serializedProject).slice(0, MaxUndoSize),
         activeProject,
+        projectVersion,
         projectOffset: 0,
       });
       if (scheduleSave) {
@@ -304,7 +309,7 @@ export const Editor = withStyles(styles)(
       const { projectVersion } = this.state;
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
-        await this.save(project, projectVersion);
+        await this.save(project, toInt(projectVersion));
       });
     }
 
@@ -414,24 +419,14 @@ export const Editor = withStyles(styles)(
     };
 
     handleRename = (oldName: string, newName: string) => {
-      const engine = this.engine();
-      if (!engine) {
+      const engine = defined(this.engine());
+      const err = engine.rename(this.state.modelName, oldName, newName);
+      if (err) {
+        this.appendModelError(`error code ${err.code}: ${err.getDetails()}`);
         return;
       }
-      let newProject;
-      try {
-        const err = engine.rename(this.state.modelName, oldName, newName);
-        if (err) {
-          this.appendModelError(`error code ${err.code}: ${err.getDetails()}`);
-          return;
-        }
-        newProject = engine.serializeToProtobuf();
-      } catch (err) {
-        this.appendModelError(err.message);
-        return;
-      }
+      this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
-      this.updateProject(newProject);
     };
 
     handleSelection = (selection: Set<UID>) => {
@@ -641,7 +636,7 @@ export const Editor = withStyles(styles)(
           sourceStockIdent = defined(sourceStock.ident());
         }
         const lastPt = defined(flow.points.last());
-        if (lastPt.attachedToUid === fauxTargetUid) {
+        if (lastPt.attachedToUid === fauxCloudTargetUid) {
           let newCloud = false;
           let to: StockViewElement | CloudViewElement;
           if (targetUid) {
@@ -664,7 +659,7 @@ export const Editor = withStyles(styles)(
           flow = flow.set(
             'points',
             flow.points.map((pt) => {
-              if (pt.attachedToUid === fauxTargetUid) {
+              if (pt.attachedToUid === fauxCloudTargetUid) {
                 return pt.set('attachedToUid', to.uid);
               }
               return pt;
@@ -1051,9 +1046,10 @@ export const Editor = withStyles(styles)(
       return (
         <Canvas
           embedded={!!embedded}
-          dmProject={project}
-          dmModel={model}
-          dmView={view}
+          project={project}
+          model={model}
+          view={view}
+          version={this.state.projectVersion}
           data={this.state.data}
           selectedTool={this.state.selectedTool}
           selection={this.state.selection}
@@ -1198,11 +1194,7 @@ export const Editor = withStyles(styles)(
     };
 
     handleTableChange = (ident: string, newTable: GraphicalFunction | null) => {
-      const engine = this.engine();
-      if (!engine) {
-        return;
-      }
-
+      const engine = defined(this.engine());
       if (newTable) {
         const gf = GraphicalFunction.toPb(newTable);
         engine.setGraphicalFunction(this.state.modelName, ident, gf.serializeBinary());

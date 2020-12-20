@@ -38,7 +38,7 @@
     "build:frontend": "node scripts/build.js",
     "build:wasm-engine": "./src/engine-v2/build.sh",
     "build:wasm-importer": "./src/importer/build.sh",
-    "build:wasm": "npm-run-all -p build:wasm-importer build:wasm-engine",
+    "build:wasm": "npm-run-all build:wasm-importer build:wasm-engine format",
     "build:webcomponent": "node scripts/build-component.js",
     "build:pre": "node support/mkdirp.js build-rt lib build",
     "build:runtime0": "tsc -p .tsconfig.rt.json",

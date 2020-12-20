@@ -18,6 +18,10 @@ export function defined<T>(object: T | undefined): T {
   return object;
 }
 
+export function toInt(n: number): number {
+  return n | 0;
+}
+
 export interface SeriesProps {
   readonly name: string;
   readonly time: Readonly<Float64Array>;

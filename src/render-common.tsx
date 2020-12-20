@@ -43,9 +43,10 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
   const canvasElement = (
     <Canvas
       embedded={true}
-      dmProject={project}
-      dmModel={model}
-      dmView={defined(model.views.get(0))}
+      project={project}
+      model={model}
+      view={defined(model.views.get(0))}
+      version={1}
       data={data}
       selectedTool={undefined}
       selection={Set()}

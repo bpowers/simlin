@@ -25,6 +25,7 @@ import {
   StockViewElement,
   NamedViewElement,
   UID,
+  LabelSide,
 } from '../../datamodel';
 
 import { Project, Model, Stock as StockVar } from '../../datamodel';
@@ -42,12 +43,23 @@ import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;
 export const inCreationCloudUid = -4;
+export const fauxCloudTargetUid = -5;
 
-const fauxTarget = new AuxViewElement(new pb.ViewElement.Aux()).merge({
+const fauxTarget = AuxViewElement.from({
   name: '$·model-internal-faux-target',
   uid: fauxTargetUid,
   x: 0,
   y: 0,
+  labelSide: 'right' as LabelSide,
+  isZeroRadius: true,
+});
+
+const fauxCloudTarget = CloudViewElement.from({
+  uid: fauxCloudTargetUid,
+  flowUid: -1,
+  x: 0,
+  y: 0,
+  isZeroRadius: true,
 });
 
 const styles = createStyles({
@@ -124,14 +136,15 @@ interface CanvasState {
   moveDelta: Point | undefined;
   canvasOffset: Point;
   inCreation: datamodel.ViewElement | undefined;
-  inCreationCloud: datamodel.ViewElement | undefined;
+  inCreationCloud: CloudViewElement | undefined;
 }
 
 interface CanvasPropsFull extends WithStyles<typeof styles> {
   embedded: boolean;
-  dmProject: Project;
-  dmModel: Model;
-  dmView: datamodel.StockFlowView;
+  project: Project;
+  model: Model;
+  view: datamodel.StockFlowView;
+  version: number;
   data: Map<string, Series>;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   selection: Set<UID>;
@@ -149,9 +162,10 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
 export type CanvasProps = Pick<
   CanvasPropsFull,
   | 'embedded'
-  | 'dmProject'
-  | 'dmModel'
-  | 'dmView'
+  | 'project'
+  | 'model'
+  | 'view'
+  | 'version'
   | 'data'
   | 'selectedTool'
   | 'selection'
@@ -180,6 +194,7 @@ export const Canvas = withStyles(styles)(
     // we have to regenerate selectionUpdates when selection !== props.selection
     private selection = Set<UID>();
 
+    private cachedVersion = -Infinity;
     private cachedElements = List<datamodel.ViewElement>();
     private elements = Map<UID, datamodel.ViewElement>();
     private nameMap = Map<string, UID>();
@@ -209,6 +224,8 @@ export const Canvas = withStyles(styles)(
         return defined(this.state.inCreation);
       } else if (uid === fauxTargetUid) {
         return fauxTarget;
+      } else if (uid === fauxCloudTargetUid) {
+        return fauxCloudTarget;
       } else if (uid === inCreationCloudUid) {
         return defined(this.state.inCreationCloud);
       }
@@ -293,6 +310,8 @@ export const Canvas = withStyles(styles)(
         isTarget = stockContains(element, pointer);
       } else if (element instanceof AuxViewElement) {
         isTarget = auxContains(element, pointer);
+      } else if (element instanceof FlowViewElement) {
+        isTarget = auxContains(element, pointer);
       }
       if (!isTarget) {
         return undefined;
@@ -305,8 +324,8 @@ export const Canvas = withStyles(styles)(
 
       // dont allow duplicate links between the same two elements
       if (arrow instanceof LinkViewElement) {
-        const { dmView } = this.props;
-        for (const e of dmView) {
+        const { view } = this.props;
+        for (const e of view) {
           // skip if its not a connector, or if it is the currently selected connector
           if (!(e instanceof LinkViewElement) || e.uid === arrow.uid) {
             continue;
@@ -566,7 +585,7 @@ export const Canvas = withStyles(styles)(
       stockEl: StockViewElement,
       moveDelta: Point,
     ): [StockViewElement, List<FlowViewElement>] {
-      const stock = defined(this.props.dmModel.variables.get(stockEl.ident())) as StockVar;
+      const stock = defined(this.props.model.variables.get(stockEl.ident())) as StockVar;
       const flowNames: List<string> = stock.inflows.concat(stock.outflows);
       const flows: List<FlowViewElement> = flowNames.map(
         (ident) => defined(this.getNamedElement(ident)) as FlowViewElement,
@@ -576,13 +595,13 @@ export const Canvas = withStyles(styles)(
     }
 
     private populateNamedElements(displayElements: List<datamodel.ViewElement>): void {
-      if (!this.cachedElements.equals(displayElements)) {
-        this.nameMap = Map(displayElements.filter((el) => el.isNamed()).map((el) => [defined(el.ident()), el.uid])).set(
-          fauxTarget.ident(),
-          fauxTarget.uid,
-        );
-        this.elements = Map(displayElements.map((el) => [el.uid, el])).set(fauxTarget.uid, fauxTarget);
+      if (this.props.version !== this.cachedVersion) {
+        this.nameMap = Map(displayElements.filter((el) => el.isNamed()).map((el) => [defined(el.ident()), el.uid]));
+        this.elements = Map(displayElements.map((el) => [el.uid, el]))
+          .set(fauxTarget.uid, fauxTarget)
+          .set(fauxCloudTarget.uid, fauxCloudTarget);
         this.cachedElements = displayElements;
+        this.cachedVersion = this.props.version;
       }
 
       this.selectionUpdates = InnerCanvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
@@ -684,6 +703,11 @@ export const Canvas = withStyles(styles)(
             if (element instanceof LinkViewElement && validTarget) {
               this.props.onAttachLink(element, defined(validTarget.ident()));
             } else if (element instanceof FlowViewElement) {
+              // don't create a flow stacked on top of 2 clouds due to a misclick
+              if (this.state.moveDelta.x === 0 && this.state.moveDelta.y === 0 && this.state.inCreation) {
+                this.clearPointerState();
+                return;
+              }
               this.props.onMoveFlow(element, validTarget ? validTarget.uid : 0, delta);
               if (this.state.inCreation) {
                 this.setState({
@@ -827,20 +851,22 @@ export const Canvas = withStyles(styles)(
       if (selectedTool === 'aux' || selectedTool === 'stock') {
         let inCreation: AuxViewElement | StockViewElement;
         if (selectedTool === 'aux') {
-          inCreation = new AuxViewElement(new pb.ViewElement.Aux()).merge({
+          inCreation = AuxViewElement.from({
             uid: inCreationUid,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
             name: 'New Variable',
             labelSide: 'right',
+            isZeroRadius: false,
           });
         } else {
-          inCreation = new AuxViewElement(new pb.ViewElement.Aux()).merge({
+          inCreation = StockViewElement.from({
             uid: inCreationUid,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
             name: 'New Stock',
             labelSide: 'bottom',
+            isZeroRadius: false,
           });
         }
         const editingName = plainDeserialize(displayName(defined(inCreation.name)));
@@ -860,7 +886,7 @@ export const Canvas = withStyles(styles)(
         const y = e.clientY - canvasOffset.y;
 
         const inCreationCloud = new CloudViewElement(new pb.ViewElement.Cloud()).merge({
-          uid: fauxTargetUid,
+          uid: inCreationCloudUid,
           flowUid: inCreationUid,
           x,
           y,
@@ -873,7 +899,7 @@ export const Canvas = withStyles(styles)(
           y,
           points: List([
             datamodel.Point.from({ x, y, attachedToUid: inCreationCloud.uid }),
-            datamodel.Point.from({ x, y, attachedToUid: fauxTarget.uid }),
+            datamodel.Point.from({ x, y, attachedToUid: fauxCloudTarget.uid }),
           ]),
         });
 
@@ -990,7 +1016,7 @@ export const Canvas = withStyles(styles)(
         const point2 = new pb.ViewElement.FlowPoint();
         point2.setX(element.cx);
         point2.setY(element.cy);
-        point2.setAttachedToUid(fauxTarget.uid);
+        point2.setAttachedToUid(fauxCloudTarget.uid);
         flow.setPointsList([point1, point2]);
         inCreation = new FlowViewElement(flow);
         element = inCreation;
@@ -1063,16 +1089,14 @@ export const Canvas = withStyles(styles)(
     }
 
     render() {
-      const { dmView, embedded, classes } = this.props;
+      const { view, embedded, classes } = this.props;
 
       if (!this.props.selection.equals(this.selection)) {
         this.selection = this.props.selection;
       }
 
-      let displayElements = dmView.elements;
+      let displayElements = view.elements;
 
-      // filter all the elements in this XMILE view down to just the ones
-      // we know how to display.
       if (this.state.inCreation) {
         displayElements = displayElements.push(this.state.inCreation);
       }
