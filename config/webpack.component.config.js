@@ -130,12 +130,12 @@ module.exports = function (webpackEnv) {
             // the webpack plugin takes care of injecting the dev client for us.
             webpackDevClientEntry,
             // Finally, this is your app's code:
-            paths.appIndexJs,
+            paths.componentIndexJs,
             // We include the app code last so that if there is a runtime error during
             // initialization, it doesn't blow up the WebpackDevServer client, and
             // changing JS code would still trigger a refresh.
           ]
-        : paths.appIndexJs,
+        : paths.componentIndexJs,
     output: {
       // The build folder.
       path: isEnvProduction ? paths.componentBuild : undefined,

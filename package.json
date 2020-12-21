@@ -32,7 +32,7 @@
     "lint": "npm-run-all -p js-lint rust-lint",
     "js-lint": "eslint 'src/**/*.ts' 'src/**/*.tsx'",
     "rust-lint": "cargo clippy",
-    "deploy": "export NODE_ENV=production && yarn build:wasm && yarn build && cp -r build/* public && cp -r build-component/static/js/sd-component* ./public/static/js/ && gcloud app deploy ./.app.prod.yaml && git checkout HEAD -- public/index.html && rm -r public/asset-manifest.json public/static/js public/static/wasm build build-component lib",
+    "deploy": "export NODE_ENV=production && yarn build:wasm && yarn build && cp -r build/* public && cp -r build-component/static/js/* ./public/static/js/ && cp -r build-component/static/wasm/* ./public/static/wasm/ && gcloud app deploy ./.app.prod.yaml && git checkout HEAD -- public/index.html && rm -r public/asset-manifest.json public/static/js public/static/wasm build build-component lib",
     "build": "npm-run-all -p build:backend build:frontend build:webcomponent",
     "build:backend": "tsc && mkdir -p lib/importer lib/engine-v2 && cp -a src/importer/pkg lib/importer && cp -a src/engine-v2/pkg lib/engine-v2 ",
     "build:frontend": "node scripts/build.js",
