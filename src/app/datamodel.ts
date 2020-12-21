@@ -6,7 +6,7 @@ import { defined } from './common';
 
 import { List, Map, Record } from 'immutable';
 
-import { project_io as pb } from '../system-dynamics-engine/src/project_io_pb';
+import * as pb from '../system-dynamics-engine/src/project_io_pb';
 import { canonicalize } from '../canonicalize';
 
 export type UID = number;

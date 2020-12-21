@@ -8044,4 +8044,4 @@ proto.project_io.SimMethod = {
   RUNGE_KUTTA_4: 1
 };
 
-goog.object.extend(exports, proto);
+goog.object.extend(exports, proto.project_io);
