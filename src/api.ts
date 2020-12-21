@@ -43,6 +43,14 @@ export async function updatePreview(db: Database, project: ProjectPb): Promise<P
   return preview;
 }
 
+export const maybeGetUser = (req: Request, _res: Response): UserPb | undefined => {
+  const user = (req.user as unknown) as UserPb | undefined;
+  if (!user) {
+    return undefined;
+  }
+  return user;
+};
+
 export const getUser = (req: Request, res: Response): UserPb => {
   const user = (req.user as unknown) as UserPb | undefined;
   if (!user) {
@@ -122,8 +130,13 @@ export const apiRouter = (app: Application): Router => {
     '/projects/:username/:projectName',
     // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
-      let authorUser: UserPb | undefined = getUser(req, res);
-      if (authorUser.getId() !== req.params.username) {
+      const requestUser = maybeGetUser(req, res);
+      // avoid doing 2 DB queries to look up the same user, if the
+      // author is the one making this request
+      let authorUser: UserPb | undefined;
+      if (requestUser && requestUser.getId() === req.params.username) {
+        authorUser = requestUser;
+      } else {
         authorUser = await app.db.user.findOne(req.params.username);
       }
       if (!authorUser) {
@@ -137,12 +150,7 @@ export const apiRouter = (app: Application): Router => {
       // the username check is skipped if the model exists and is public
       if (!projectModel?.getIsPublic()) {
         // TODO: implement collaborators
-        if (
-          !req.session ||
-          !req.session.passport ||
-          !req.session.passport.user ||
-          authorUser.getId() !== req.session.passport.user.id
-        ) {
+        if (requestUser?.getId() !== authorUser.getId()) {
           res.status(401).json({});
           return;
         }
