@@ -392,7 +392,7 @@ module.exports = function (webpackEnv) {
         'default-src': "'self'",
         'base-uri': "'self'",
         "block-all-mixed-content": [],
-        'font-src': ["'self'", "https://fonts.gstatic.com", "data:"],
+        'font-src': ["'self'", "data:"],
         'img-src': ["'self'", "data:", "https://*.googleusercontent.com"],
         'object-src': "'none'",
         // FIXME: unsafe-eval is necessary for wasm in Chrome for now until

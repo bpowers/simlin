@@ -158,7 +158,7 @@ class App {
       'default-src': ["'self'"],
       'base-uri': ["'self'"],
       'block-all-mixed-content': [],
-      'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      'font-src': ["'self'", 'data:'],
       'frame-ancestors': ["'self'"],
       'img-src': ["'self'", 'data:', 'https://*.googleusercontent.com'],
       'object-src': ["'none'"],
