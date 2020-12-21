@@ -319,6 +319,12 @@ impl Engine {
         let old_ident = canonicalize(old_name);
         let new_ident = canonicalize(new_name);
 
+        // the rename might result in the same identifier -- which isn't a
+        // problem or error.
+        if old_ident == new_ident {
+            return None;
+        }
+
         let mut project = self.project.datamodel.clone();
         let model = project.get_model_mut(model_name).unwrap();
 
