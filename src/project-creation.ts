@@ -5,26 +5,26 @@
 import { createHash } from 'crypto';
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 
-import { File as FilePb } from './schemas/file_pb';
-import { Project as ProjectPb } from './schemas/project_pb';
+import { File as DbFilePb } from './schemas/file_pb';
+import { Project as DbProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 
-import * as pb from './system-dynamics-engine/src/project_io_pb';
+import { Model, Dt, SimSpecs, Project, View } from './system-dynamics-engine/src/project_io_pb';
 
-export function emptyProject(name: string, _userName: string): pb.Project {
-  const model = new pb.Model();
+export function emptyProject(name: string, _userName: string): Project {
+  const model = new Model();
   model.setName('main');
-  model.setViewsList([new pb.View()]);
+  model.setViewsList([new View()]);
 
-  const dt = new pb.Dt();
+  const dt = new Dt();
   dt.setValue(1);
 
-  const simSpecs = new pb.SimSpecs();
+  const simSpecs = new SimSpecs();
   simSpecs.setStart(0);
   simSpecs.setStop(100);
   simSpecs.setDt(dt);
 
-  const project = new pb.Project();
+  const project = new Project();
   project.setName(name);
   project.setModelsList([model]);
   project.setSimSpecs(simSpecs);
@@ -39,7 +39,7 @@ export function createProject(
   projectName: string,
   projectDescription: string,
   isPublic: boolean,
-): ProjectPb {
+): DbProjectPb {
   if (!user.getCanCreateProjects()) {
     throw new Error(`user ${user.getId()} can't create projects`);
   }
@@ -47,7 +47,7 @@ export function createProject(
   const userId = user.getId();
   const id = `${userId}/${projectSlug}`;
 
-  const projectPb = new ProjectPb();
+  const projectPb = new DbProjectPb();
   projectPb.setId(id);
   projectPb.setDisplayName(projectName);
   projectPb.setOwnerId(userId);
@@ -63,11 +63,11 @@ export function createFile(
   userId: string,
   prevId: string | undefined,
   pbContents: Uint8Array | undefined,
-): FilePb {
+): DbFilePb {
   const created = new Timestamp();
   created.fromDate(new Date());
 
-  const filePb = new FilePb();
+  const filePb = new DbFilePb();
   filePb.setProjectId(projectId);
   filePb.setUserId(userId);
   filePb.setCreated(created);

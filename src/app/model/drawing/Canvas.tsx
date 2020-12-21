@@ -12,8 +12,8 @@ import { List, Map, Set } from 'immutable';
 
 import { defined, Series } from '../../common';
 
-import * as datamodel from '../../datamodel';
 import {
+  ViewElement,
   AliasViewElement,
   AuxViewElement,
   CloudViewElement,
@@ -25,6 +25,7 @@ import {
   Point as FlowPoint,
   UID,
   LabelSide,
+  StockFlowView,
 } from '../../datamodel';
 
 import { Project, Model, Stock as StockVar } from '../../datamodel';
@@ -134,7 +135,7 @@ interface CanvasState {
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
   canvasOffset: Point;
-  inCreation: datamodel.ViewElement | undefined;
+  inCreation: ViewElement | undefined;
   inCreationCloud: CloudViewElement | undefined;
 }
 
@@ -142,7 +143,7 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   embedded: boolean;
   project: Project;
   model: Model;
-  view: datamodel.StockFlowView;
+  view: StockFlowView;
   version: number;
   data: Map<string, Series>;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
@@ -153,7 +154,7 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   onMoveFlow: (flow: FlowViewElement, targetUid: number, moveDelta: Point) => void;
   onMoveLabel: (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => void;
   onAttachLink: (link: LinkViewElement, newTarget: string) => void;
-  onCreateVariable: (element: datamodel.ViewElement) => void;
+  onCreateVariable: (element: ViewElement) => void;
   onClearSelectedTool: () => void;
   onDeleteSelection: () => void;
 }
@@ -194,10 +195,10 @@ export const Canvas = withStyles(styles)(
     private selection = Set<UID>();
 
     private cachedVersion = -Infinity;
-    private cachedElements = List<datamodel.ViewElement>();
-    private elements = Map<UID, datamodel.ViewElement>();
+    private cachedElements = List<ViewElement>();
+    private elements = Map<UID, ViewElement>();
     private nameMap = Map<string, UID>();
-    private selectionUpdates = Map<UID, datamodel.ViewElement>();
+    private selectionUpdates = Map<UID, ViewElement>();
 
     constructor(props: CanvasPropsFull) {
       super(props);
@@ -218,7 +219,7 @@ export const Canvas = withStyles(styles)(
       };
     }
 
-    getElementByUid(uid: UID): datamodel.ViewElement {
+    getElementByUid(uid: UID): ViewElement {
       if (uid === inCreationUid) {
         return defined(this.state.inCreation);
       } else if (uid === fauxTargetUid) {
@@ -234,10 +235,10 @@ export const Canvas = withStyles(styles)(
     // for resolving connector ends
     static buildSelectionMap(
       props: CanvasProps,
-      elements: Map<UID, datamodel.ViewElement>,
-      inCreation?: datamodel.ViewElement,
-    ): Map<UID, datamodel.ViewElement> {
-      let selection = Map<UID, datamodel.ViewElement>();
+      elements: Map<UID, ViewElement>,
+      inCreation?: ViewElement,
+    ): Map<UID, ViewElement> {
+      let selection = Map<UID, ViewElement>();
       for (const uid of props.selection) {
         if (uid === inCreationUid && inCreation) {
           selection = selection.set(uid, inCreation);
@@ -249,7 +250,7 @@ export const Canvas = withStyles(styles)(
       return selection;
     }
 
-    private getNamedElement(name: string): datamodel.ViewElement | undefined {
+    private getNamedElement(name: string): ViewElement | undefined {
       const uid = this.nameMap.get(name);
       if (!uid) {
         return undefined;
@@ -257,7 +258,7 @@ export const Canvas = withStyles(styles)(
       return this.selectionUpdates.get(uid) || this.elements.get(uid);
     }
 
-    private isSelected(element: datamodel.ViewElement): boolean {
+    private isSelected(element: ViewElement): boolean {
       return this.props.selection.has(element.uid);
     }
 
@@ -287,7 +288,7 @@ export const Canvas = withStyles(styles)(
       return <Cloud key={element.uid} {...props} />;
     };
 
-    private isValidTarget(element: datamodel.ViewElement): boolean | undefined {
+    private isValidTarget(element: ViewElement): boolean | undefined {
       if (!this.state.isMovingArrow || !this.selectionCenterOffset) {
         return undefined;
       }
@@ -305,7 +306,7 @@ export const Canvas = withStyles(styles)(
       let isTarget = false;
       if (element instanceof CloudViewElement) {
         isTarget = cloudContains(element, pointer);
-      } else if (element instanceof datamodel.StockViewElement) {
+      } else if (element instanceof StockViewElement) {
         isTarget = stockContains(element, pointer);
       } else if (element instanceof AuxViewElement) {
         isTarget = auxContains(element, pointer);
@@ -337,7 +338,7 @@ export const Canvas = withStyles(styles)(
       }
 
       if (arrow instanceof FlowViewElement) {
-        if (!(element instanceof datamodel.StockViewElement)) {
+        if (!(element instanceof StockViewElement)) {
           return false;
         }
         const first = defined(arrow.points.first());
@@ -410,7 +411,7 @@ export const Canvas = withStyles(styles)(
       const toUid = to.uid;
       let isSticky = false;
       if (isMovingArrow && isSelected && this.selectionCenterOffset) {
-        const validTarget = this.cachedElements.find((e: datamodel.ViewElement) => {
+        const validTarget = this.cachedElements.find((e: ViewElement) => {
           if (!(e instanceof AuxViewElement || e instanceof FlowViewElement)) {
             return false;
           }
@@ -427,7 +428,7 @@ export const Canvas = withStyles(styles)(
             x: off.x - delta.x - this.state.canvasOffset.x,
             y: off.y - delta.y - this.state.canvasOffset.y,
             isZeroRadius: true,
-          }) as datamodel.ViewElement;
+          }) as ViewElement;
         }
       }
       if (isMovingArrow || this.isSelected(from) || this.isSelected(to)) {
@@ -453,13 +454,13 @@ export const Canvas = withStyles(styles)(
       return <Connector key={element.uid} {...props} />;
     };
 
-    private getArcPoint(): datamodel.Point | undefined {
+    private getArcPoint(): FlowPoint | undefined {
       if (!this.selectionCenterOffset) {
         return undefined;
       }
       const off = defined(this.selectionCenterOffset);
       const delta = this.state.moveDelta || { x: 0, y: 0 };
-      return datamodel.Point.from({
+      return FlowPoint.from({
         x: off.x - delta.x - this.state.canvasOffset.x,
         y: off.y - delta.y - this.state.canvasOffset.y,
         attachedToUid: undefined,
@@ -537,7 +538,7 @@ export const Canvas = withStyles(styles)(
 
       const { isMovingArrow } = this.state;
       if (isMovingArrow && this.selectionCenterOffset) {
-        const validTarget = this.cachedElements.find((e: datamodel.ViewElement) => {
+        const validTarget = this.cachedElements.find((e: ViewElement) => {
           // connecting both the inflow + outflow of a stock to itself wouldn't make sense.
           if (!(e instanceof StockViewElement) || e.uid === sourceId) {
             return false;
@@ -593,7 +594,7 @@ export const Canvas = withStyles(styles)(
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
 
-    private populateNamedElements(displayElements: List<datamodel.ViewElement>): void {
+    private populateNamedElements(displayElements: List<ViewElement>): void {
       if (this.props.version !== this.cachedVersion) {
         this.nameMap = Map(displayElements.filter((el) => el.isNamed()).map((el) => [defined(el.ident()), el.uid]));
         this.elements = Map(displayElements.map((el) => [el.uid, el]))
@@ -611,7 +612,7 @@ export const Canvas = withStyles(styles)(
         });
       }
       if (this.state.moveDelta) {
-        let otherUpdates = List<datamodel.ViewElement>();
+        let otherUpdates = List<ViewElement>();
         const { x, y } = defined(this.state.moveDelta);
         this.selectionUpdates = this.selectionUpdates.map((initialEl) => {
           // only constrain flow movement if we're not doing a group-move
@@ -638,7 +639,7 @@ export const Canvas = withStyles(styles)(
           }
         });
         // now add flows that also were updated
-        const namedUpdates: Map<UID, datamodel.ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
+        const namedUpdates: Map<UID, ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
         this.selectionUpdates = this.selectionUpdates.concat(namedUpdates);
       }
     }
@@ -694,7 +695,7 @@ export const Canvas = withStyles(styles)(
           } else {
             const element = this.getElementByUid(defined(this.props.selection.first()));
             let foundInvalidTarget = false;
-            const validTarget = this.cachedElements.find((e: datamodel.ViewElement) => {
+            const validTarget = this.cachedElements.find((e: ViewElement) => {
               const isValid = this.isValidTarget(e);
               foundInvalidTarget = foundInvalidTarget || isValid === false;
               return isValid || false;
@@ -899,8 +900,8 @@ export const Canvas = withStyles(styles)(
           y,
           labelSide: 'bottom',
           points: List([
-            datamodel.Point.from({ x, y, attachedToUid: inCreationCloud.uid }),
-            datamodel.Point.from({ x, y, attachedToUid: fauxCloudTarget.uid }),
+            FlowPoint.from({ x, y, attachedToUid: inCreationCloud.uid }),
+            FlowPoint.from({ x, y, attachedToUid: fauxCloudTarget.uid }),
           ]),
           isZeroRadius: false,
         });
@@ -961,17 +962,13 @@ export const Canvas = withStyles(styles)(
       this.handleEditingNameDone(false);
     };
 
-    handleEditConnector = (
-      element: datamodel.ViewElement,
-      e: React.PointerEvent<SVGElement>,
-      isArrowhead: boolean,
-    ): void => {
+    handleEditConnector = (element: ViewElement, e: React.PointerEvent<SVGElement>, isArrowhead: boolean): void => {
       this.handleSetSelection(element, e, false, isArrowhead);
     };
 
     // called from handleMouseDown in elements like Aux
     handleSetSelection = (
-      element: datamodel.ViewElement,
+      element: ViewElement,
       e: React.PointerEvent<SVGElement>,
       isText?: boolean,
       isArrowhead?: boolean,
@@ -992,7 +989,7 @@ export const Canvas = withStyles(styles)(
       }
 
       const { selectedTool } = this.props;
-      let inCreation: datamodel.ViewElement | undefined;
+      let inCreation: ViewElement | undefined;
 
       if (selectedTool === 'link' && element.isNamed()) {
         isEditingName = false;
@@ -1007,7 +1004,7 @@ export const Canvas = withStyles(styles)(
           isZeroRadius: false,
         });
         element = inCreation;
-      } else if (selectedTool === 'flow' && element instanceof datamodel.StockViewElement) {
+      } else if (selectedTool === 'flow' && element instanceof StockViewElement) {
         isEditingName = false;
         isMovingArrow = true;
         const startPoint = FlowPoint.from({
@@ -1230,7 +1227,7 @@ export const Canvas = withStyles(styles)(
 
       // we don't need these things anymore
       this.elementBounds = List<Rect | undefined>();
-      this.selectionUpdates = Map<UID, datamodel.ViewElement>();
+      this.selectionUpdates = Map<UID, ViewElement>();
       // n.b. we don't want to clear this.elements or this.nameMap, as thats used when handling callbacks
 
       return (

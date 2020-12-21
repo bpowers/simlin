@@ -6,7 +6,18 @@ import { defined } from './common';
 
 import { List, Map, Record } from 'immutable';
 
-import * as pb from '../system-dynamics-engine/src/project_io_pb';
+import {
+  GraphicalFunction as PbGraphicalFunction,
+  Variable as PbVariable,
+  ViewElement as PbViewElement,
+  View as PbView,
+  Dt as PbDt,
+  Project as PbProject,
+  Model as PbModel,
+  SimSpecs as PbSimSpecs,
+  SimMethod as PbSimMethod,
+  SimMethodMap as PbSimMethodMap,
+} from '../system-dynamics-engine/src/project_io_pb';
 import { canonicalize } from '../canonicalize';
 
 export type UID = number;
@@ -14,14 +25,14 @@ export type UID = number;
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
 
 function getGraphicalFunctionKind(
-  kind: pb.GraphicalFunction.KindMap[keyof pb.GraphicalFunction.KindMap],
+  kind: PbGraphicalFunction.KindMap[keyof PbGraphicalFunction.KindMap],
 ): GraphicalFunctionKind {
   switch (kind) {
-    case pb.GraphicalFunction.Kind.CONTINUOUS:
+    case PbGraphicalFunction.Kind.CONTINUOUS:
       return 'continuous';
-    case pb.GraphicalFunction.Kind.EXTRAPOLATE:
+    case PbGraphicalFunction.Kind.EXTRAPOLATE:
       return 'extrapolate';
-    case pb.GraphicalFunction.Kind.DISCRETE:
+    case PbGraphicalFunction.Kind.DISCRETE:
       return 'discrete';
     default:
       return 'continuous';
@@ -33,7 +44,7 @@ const graphicalFunctionScaleDefaults = {
   max: 0.0,
 };
 export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefaults) {
-  constructor(scale: pb.GraphicalFunction.Scale) {
+  constructor(scale: PbGraphicalFunction.Scale) {
     super({
       min: scale.getMin(),
       max: scale.getMax(),
@@ -42,8 +53,8 @@ export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefault
   static from(props: typeof graphicalFunctionScaleDefaults): GraphicalFunctionScale {
     return new GraphicalFunctionScale(GraphicalFunctionScale.toPb(props));
   }
-  static toPb(props: typeof graphicalFunctionScaleDefaults): pb.GraphicalFunction.Scale {
-    const scale = new pb.GraphicalFunction.Scale();
+  static toPb(props: typeof graphicalFunctionScaleDefaults): PbGraphicalFunction.Scale {
+    const scale = new PbGraphicalFunction.Scale();
     scale.setMin(props.min);
     scale.setMax(props.max);
     return scale;
@@ -54,11 +65,11 @@ const graphicalFunctionDefaults = {
   kind: 'continuous' as GraphicalFunctionKind,
   xPoints: undefined as List<number> | undefined,
   yPoints: List<number>(),
-  xScale: new GraphicalFunctionScale(new pb.GraphicalFunction.Scale()),
-  yScale: new GraphicalFunctionScale(new pb.GraphicalFunction.Scale()),
+  xScale: new GraphicalFunctionScale(new PbGraphicalFunction.Scale()),
+  yScale: new GraphicalFunctionScale(new PbGraphicalFunction.Scale()),
 };
 export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
-  constructor(gf: pb.GraphicalFunction) {
+  constructor(gf: PbGraphicalFunction) {
     const xPoints = gf.getXPointsList();
     super({
       kind: getGraphicalFunctionKind(gf.getKind()),
@@ -68,18 +79,18 @@ export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
       yScale: new GraphicalFunctionScale(defined(gf.getYScale())),
     });
   }
-  static toPb(props: typeof graphicalFunctionDefaults): pb.GraphicalFunction {
-    const gf = new pb.GraphicalFunction();
+  static toPb(props: typeof graphicalFunctionDefaults): PbGraphicalFunction {
+    const gf = new PbGraphicalFunction();
     if (props.kind) {
       switch (props.kind) {
         case 'continuous':
-          gf.setKind(pb.GraphicalFunction.Kind.CONTINUOUS);
+          gf.setKind(PbGraphicalFunction.Kind.CONTINUOUS);
           break;
         case 'discrete':
-          gf.setKind(pb.GraphicalFunction.Kind.DISCRETE);
+          gf.setKind(PbGraphicalFunction.Kind.DISCRETE);
           break;
         case 'extrapolate':
-          gf.setKind(pb.GraphicalFunction.Kind.EXTRAPOLATE);
+          gf.setKind(PbGraphicalFunction.Kind.EXTRAPOLATE);
           break;
       }
     }
@@ -108,13 +119,13 @@ const scalarEquationDefaults = {
   equation: '',
 };
 export class ScalarEquation extends Record(scalarEquationDefaults) {
-  constructor(v: pb.Variable.ScalarEquation) {
+  constructor(v: PbVariable.ScalarEquation) {
     super({
       equation: v.getEquation(),
     });
   }
-  static toPb(props: typeof scalarEquationDefaults): pb.Variable.ScalarEquation {
-    const eqn = new pb.Variable.ScalarEquation();
+  static toPb(props: typeof scalarEquationDefaults): PbVariable.ScalarEquation {
+    const eqn = new PbVariable.ScalarEquation();
     eqn.setEquation(props.equation);
     return eqn;
   }
@@ -128,7 +139,7 @@ const applyToAllEquationDefaults = {
   equation: '',
 };
 export class ApplyToAllEquation extends Record(applyToAllEquationDefaults) {
-  constructor(v: pb.Variable.ApplyToAllEquation) {
+  constructor(v: PbVariable.ApplyToAllEquation) {
     super({
       dimensionNames: List(v.getDimensionNamesList()),
       equation: v.getEquation(),
@@ -141,7 +152,7 @@ const arrayedEquationDefaults = {
   elements: Map<string, string>(),
 };
 export class ArrayedEquation extends Record(arrayedEquationDefaults) {
-  constructor(v: pb.Variable.ArrayedEquation) {
+  constructor(v: PbVariable.ArrayedEquation) {
     super({
       dimensionNames: List(v.getDimensionNamesList()),
       elements: Map(v.getElementsList().map((el) => [el.getSubscript(), el.getEquation()])),
@@ -165,7 +176,7 @@ const stockDefaults = {
   nonNegative: false,
 };
 export class Stock extends Record(stockDefaults) implements Variable {
-  constructor(stock: pb.Variable.Stock) {
+  constructor(stock: PbVariable.Stock) {
     const pbEquation = stock.getEquation();
     let equation: Equation = ScalarEquation.from({ equation: '' });
     if (pbEquation?.hasApplyToAll()) {
@@ -199,7 +210,7 @@ const flowDefaults = {
   nonNegative: false,
 };
 export class Flow extends Record(flowDefaults) implements Variable {
-  constructor(flow: pb.Variable.Flow) {
+  constructor(flow: PbVariable.Flow) {
     const pbEquation = flow.getEquation();
     let equation: Equation = ScalarEquation.from({ equation: '' });
     if (pbEquation?.hasApplyToAll()) {
@@ -229,7 +240,7 @@ const auxDefaults = {
   gf: undefined as GraphicalFunction | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
-  constructor(aux: pb.Variable.Aux) {
+  constructor(aux: PbVariable.Aux) {
     const pbEquation = aux.getEquation();
     let equation: Equation = ScalarEquation.from({ equation: '' });
     if (pbEquation?.hasApplyToAll()) {
@@ -255,7 +266,7 @@ const moduleReferenceDefaults = {
   dst: '',
 };
 export class ModuleReference extends Record(moduleReferenceDefaults) {
-  constructor(modRef: pb.Variable.Module.Reference) {
+  constructor(modRef: PbVariable.Module.Reference) {
     super({
       src: modRef.getSrc(),
       dst: modRef.getDst(),
@@ -271,7 +282,7 @@ const moduleDefaults = {
   references: List<ModuleReference>(),
 };
 export class Module extends Record(moduleDefaults) implements Variable {
-  constructor(module: pb.Variable.Module) {
+  constructor(module: PbVariable.Module) {
     super({
       ident: module.getIdent(),
       modelName: module.getModelName(),
@@ -290,35 +301,35 @@ export class Module extends Record(moduleDefaults) implements Variable {
 
 export type LabelSide = 'top' | 'left' | 'center' | 'bottom' | 'right';
 
-function getLabelSide(labelSide: pb.ViewElement.LabelSideMap[keyof pb.ViewElement.LabelSideMap]): LabelSide {
+function getLabelSide(labelSide: PbViewElement.LabelSideMap[keyof PbViewElement.LabelSideMap]): LabelSide {
   switch (labelSide) {
-    case pb.ViewElement.LabelSide.TOP:
+    case PbViewElement.LabelSide.TOP:
       return 'top';
-    case pb.ViewElement.LabelSide.LEFT:
+    case PbViewElement.LabelSide.LEFT:
       return 'left';
-    case pb.ViewElement.LabelSide.CENTER:
+    case PbViewElement.LabelSide.CENTER:
       return 'center';
-    case pb.ViewElement.LabelSide.BOTTOM:
+    case PbViewElement.LabelSide.BOTTOM:
       return 'bottom';
-    case pb.ViewElement.LabelSide.RIGHT:
+    case PbViewElement.LabelSide.RIGHT:
       return 'right';
     default:
       return 'top';
   }
 }
 
-function labelSideToPb(labelSide: LabelSide): pb.ViewElement.LabelSideMap[keyof pb.ViewElement.LabelSideMap] {
+function labelSideToPb(labelSide: LabelSide): PbViewElement.LabelSideMap[keyof PbViewElement.LabelSideMap] {
   switch (labelSide) {
     case 'top':
-      return pb.ViewElement.LabelSide.TOP;
+      return PbViewElement.LabelSide.TOP;
     case 'left':
-      return pb.ViewElement.LabelSide.LEFT;
+      return PbViewElement.LabelSide.LEFT;
     case 'center':
-      return pb.ViewElement.LabelSide.CENTER;
+      return PbViewElement.LabelSide.CENTER;
     case 'bottom':
-      return pb.ViewElement.LabelSide.BOTTOM;
+      return PbViewElement.LabelSide.BOTTOM;
     case 'right':
-      return pb.ViewElement.LabelSide.RIGHT;
+      return PbViewElement.LabelSide.RIGHT;
   }
 }
 
@@ -343,7 +354,7 @@ const auxViewElementDefaults = {
   isZeroRadius: false,
 };
 export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
-  constructor(aux: pb.ViewElement.Aux) {
+  constructor(aux: PbViewElement.Aux) {
     super({
       uid: aux.getUid(),
       name: aux.getName(),
@@ -365,8 +376,8 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
     return canonicalize(this.name);
   }
 
-  toPb(): pb.ViewElement.Aux {
-    const element = new pb.ViewElement.Aux();
+  toPb(): PbViewElement.Aux {
+    const element = new PbViewElement.Aux();
     element.setUid(this.uid);
     element.setName(this.name);
     element.setX(this.x);
@@ -376,7 +387,7 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
   }
 
   static from(props: typeof auxViewElementDefaults): AuxViewElement {
-    const element = new pb.ViewElement.Aux();
+    const element = new PbViewElement.Aux();
     element.setUid(props.uid);
     element.setName(props.name);
     element.setX(props.x);
@@ -401,7 +412,7 @@ const stockViewElementDefaults = {
   isZeroRadius: false,
 };
 export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
-  constructor(stock: pb.ViewElement.Stock) {
+  constructor(stock: PbViewElement.Stock) {
     super({
       uid: stock.getUid(),
       name: stock.getName(),
@@ -423,8 +434,8 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
     return canonicalize(this.name);
   }
 
-  toPb(): pb.ViewElement.Stock {
-    const element = new pb.ViewElement.Stock();
+  toPb(): PbViewElement.Stock {
+    const element = new PbViewElement.Stock();
     element.setUid(this.uid);
     element.setName(this.name);
     element.setX(this.x);
@@ -434,7 +445,7 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
   }
 
   static from(props: typeof stockViewElementDefaults): StockViewElement {
-    const element = new pb.ViewElement.Stock();
+    const element = new PbViewElement.Stock();
     element.setUid(props.uid);
     element.setName(props.name);
     element.setX(props.x);
@@ -456,7 +467,7 @@ const pointDefaults = {
   attachedToUid: undefined as number | undefined,
 };
 export class Point extends Record(pointDefaults) {
-  constructor(point: pb.ViewElement.FlowPoint) {
+  constructor(point: PbViewElement.FlowPoint) {
     const attachedToUid = point.getAttachedToUid();
     super({
       x: point.getX(),
@@ -465,7 +476,7 @@ export class Point extends Record(pointDefaults) {
     });
   }
   static from(props: typeof pointDefaults): Point {
-    const point = new pb.ViewElement.FlowPoint();
+    const point = new PbViewElement.FlowPoint();
     point.setX(props.x);
     point.setY(props.y);
     if (props.attachedToUid) {
@@ -474,8 +485,8 @@ export class Point extends Record(pointDefaults) {
     return new Point(point);
   }
 
-  toPb(): pb.ViewElement.FlowPoint {
-    const element = new pb.ViewElement.FlowPoint();
+  toPb(): PbViewElement.FlowPoint {
+    const element = new PbViewElement.FlowPoint();
     element.setX(this.x);
     element.setY(this.y);
     if (this.attachedToUid !== undefined) {
@@ -495,7 +506,7 @@ const flowViewElementDefaults = {
   isZeroRadius: false,
 };
 export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
-  constructor(flow: pb.ViewElement.Flow) {
+  constructor(flow: PbViewElement.Flow) {
     super({
       uid: flow.getUid(),
       name: flow.getName(),
@@ -518,8 +529,8 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
     return canonicalize(this.name);
   }
 
-  toPb(): pb.ViewElement.Flow {
-    const element = new pb.ViewElement.Flow();
+  toPb(): PbViewElement.Flow {
+    const element = new PbViewElement.Flow();
     element.setUid(this.uid);
     element.setName(this.name);
     element.setX(this.x);
@@ -530,7 +541,7 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   }
 
   static from(props: typeof flowViewElementDefaults): FlowViewElement {
-    const element = new pb.ViewElement.Flow();
+    const element = new PbViewElement.Flow();
     element.setUid(props.uid);
     element.setName(props.name);
     element.setX(props.x);
@@ -551,22 +562,22 @@ const linkViewElementDefaults = {
   isZeroRadius: false,
 };
 export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
-  constructor(link: pb.ViewElement.Link) {
+  constructor(link: PbViewElement.Link) {
     let arc: number | undefined = undefined;
     let isStraight = true;
     let multiPoint: List<Point> | undefined = undefined;
     switch (link.getShapeCase()) {
-      case pb.ViewElement.Link.ShapeCase.ARC:
+      case PbViewElement.Link.ShapeCase.ARC:
         arc = link.getArc();
         isStraight = false;
         multiPoint = undefined;
         break;
-      case pb.ViewElement.Link.ShapeCase.IS_STRAIGHT:
+      case PbViewElement.Link.ShapeCase.IS_STRAIGHT:
         arc = undefined;
         isStraight = link.getIsStraight();
         multiPoint = undefined;
         break;
-      case pb.ViewElement.Link.ShapeCase.MULTI_POINT:
+      case PbViewElement.Link.ShapeCase.MULTI_POINT:
         arc = undefined;
         isStraight = false;
         multiPoint = List(
@@ -598,15 +609,15 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
     return undefined;
   }
 
-  toPb(): pb.ViewElement.Link {
-    const element = new pb.ViewElement.Link();
+  toPb(): PbViewElement.Link {
+    const element = new PbViewElement.Link();
     element.setUid(this.uid);
     element.setFromUid(this.fromUid);
     element.setToUid(this.toUid);
     if (this.arc !== undefined) {
       element.setArc(this.arc);
     } else if (this.multiPoint) {
-      const linkPoints = new pb.ViewElement.Link.LinkPoints();
+      const linkPoints = new PbViewElement.Link.LinkPoints();
       linkPoints.setPointsList(this.multiPoint.map((p) => p.toPb()).toArray());
       element.setMultiPoint(linkPoints);
     } else {
@@ -616,14 +627,14 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
   }
 
   static from(props: typeof linkViewElementDefaults): LinkViewElement {
-    const element = new pb.ViewElement.Link();
+    const element = new PbViewElement.Link();
     element.setUid(props.uid);
     element.setFromUid(props.fromUid);
     element.setToUid(props.toUid);
     if (props.arc !== undefined) {
       element.setArc(props.arc);
     } else if (props.multiPoint) {
-      const linkPoints = new pb.ViewElement.Link.LinkPoints();
+      const linkPoints = new PbViewElement.Link.LinkPoints();
       linkPoints.setPointsList(props.multiPoint.map((p) => p.toPb()).toArray());
       element.setMultiPoint(linkPoints);
     } else {
@@ -642,7 +653,7 @@ const moduleViewElementDefaults = {
   isZeroRadius: false,
 };
 export class ModuleViewElement extends Record(moduleViewElementDefaults) implements ViewElement {
-  constructor(module: pb.ViewElement.Module) {
+  constructor(module: PbViewElement.Module) {
     super({
       uid: module.getUid(),
       name: module.getName(),
@@ -664,8 +675,8 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
     return canonicalize(this.name);
   }
 
-  toPb(): pb.ViewElement.Module {
-    const element = new pb.ViewElement.Module();
+  toPb(): PbViewElement.Module {
+    const element = new PbViewElement.Module();
     element.setUid(this.uid);
     element.setName(this.name);
     element.setX(this.x);
@@ -684,7 +695,7 @@ const aliasViewElementDefaults = {
   isZeroRadius: false,
 };
 export class AliasViewElement extends Record(aliasViewElementDefaults) implements ViewElement {
-  constructor(alias: pb.ViewElement.Alias) {
+  constructor(alias: PbViewElement.Alias) {
     super({
       uid: alias.getUid(),
       aliasOfUid: alias.getAliasOfUid(),
@@ -706,8 +717,8 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
     return undefined;
   }
 
-  toPb(): pb.ViewElement.Alias {
-    const element = new pb.ViewElement.Alias();
+  toPb(): PbViewElement.Alias {
+    const element = new PbViewElement.Alias();
     element.setUid(this.uid);
     element.setAliasOfUid(this.aliasOfUid);
     element.setX(this.x);
@@ -725,7 +736,7 @@ const cloudViewElementDefaults = {
   isZeroRadius: false,
 };
 export class CloudViewElement extends Record(cloudViewElementDefaults) implements ViewElement {
-  constructor(cloud: pb.ViewElement.Cloud) {
+  constructor(cloud: PbViewElement.Cloud) {
     super({
       uid: cloud.getUid(),
       flowUid: cloud.getFlowUid(),
@@ -734,7 +745,7 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
     });
   }
   static from(props: typeof cloudViewElementDefaults): CloudViewElement {
-    const element = new pb.ViewElement.Cloud();
+    const element = new PbViewElement.Cloud();
     element.setUid(props.uid);
     element.setFlowUid(props.flowUid);
     element.setX(props.x);
@@ -759,8 +770,8 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
     return undefined;
   }
 
-  toPb(): pb.ViewElement.Cloud {
-    const element = new pb.ViewElement.Cloud();
+  toPb(): PbViewElement.Cloud {
+    const element = new PbViewElement.Cloud();
     element.setUid(this.uid);
     element.setFlowUid(this.flowUid);
     element.setX(this.x);
@@ -776,31 +787,31 @@ const stockFlowViewDefaults = {
   elements: List<ViewElement>(),
 };
 export class StockFlowView extends Record(stockFlowViewDefaults) {
-  constructor(view: pb.View) {
+  constructor(view: PbView) {
     let maxUid = -1;
     const elements = List(
       view.getElementsList().map((element) => {
         let e: ViewElement;
         switch (element.getElementCase()) {
-          case pb.ViewElement.ElementCase.AUX:
+          case PbViewElement.ElementCase.AUX:
             e = new AuxViewElement(defined(element.getAux()));
             break;
-          case pb.ViewElement.ElementCase.STOCK:
+          case PbViewElement.ElementCase.STOCK:
             e = new StockViewElement(defined(element.getStock()));
             break;
-          case pb.ViewElement.ElementCase.FLOW:
+          case PbViewElement.ElementCase.FLOW:
             e = new FlowViewElement(defined(element.getFlow()));
             break;
-          case pb.ViewElement.ElementCase.LINK:
+          case PbViewElement.ElementCase.LINK:
             e = new LinkViewElement(defined(element.getLink()));
             break;
-          case pb.ViewElement.ElementCase.MODULE:
+          case PbViewElement.ElementCase.MODULE:
             e = new ModuleViewElement(defined(element.getModule()));
             break;
-          case pb.ViewElement.ElementCase.ALIAS:
+          case PbViewElement.ElementCase.ALIAS:
             e = new AliasViewElement(defined(element.getAlias()));
             break;
-          case pb.ViewElement.ElementCase.CLOUD:
+          case PbViewElement.ElementCase.CLOUD:
             e = new CloudViewElement(defined(element.getCloud()));
             break;
           default:
@@ -821,14 +832,14 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
     });
   }
 
-  toPb(): pb.View {
-    const view = new pb.View();
+  toPb(): PbView {
+    const view = new PbView();
 
-    view.setKind(pb.View.ViewType.STOCK_FLOW);
+    view.setKind(PbView.ViewType.STOCK_FLOW);
 
     const elements = this.elements
       .map((element) => {
-        const e = new pb.ViewElement();
+        const e = new PbViewElement();
         if (element instanceof AuxViewElement) {
           e.setAux(element.toPb());
         } else if (element instanceof StockViewElement) {
@@ -884,21 +895,21 @@ const modelDefaults = {
   views: List<StockFlowView>(),
 };
 export class Model extends Record(modelDefaults) {
-  constructor(model: pb.Model) {
+  constructor(model: PbModel) {
     super({
       name: model.getName(),
       variables: Map(
         model
           .getVariablesList()
-          .map((v: pb.Variable) => {
+          .map((v: PbVariable) => {
             switch (v.getVCase()) {
-              case pb.Variable.VCase.STOCK:
+              case PbVariable.VCase.STOCK:
                 return new Stock(defined(v.getStock())) as Variable;
-              case pb.Variable.VCase.FLOW:
+              case PbVariable.VCase.FLOW:
                 return new Flow(defined(v.getFlow())) as Variable;
-              case pb.Variable.VCase.AUX:
+              case PbVariable.VCase.AUX:
                 return new Aux(defined(v.getAux())) as Variable;
-              case pb.Variable.VCase.MODULE:
+              case PbVariable.VCase.MODULE:
                 return new Module(defined(v.getModule())) as Variable;
               default:
                 throw new Error('invariant broken: protobuf variable with empty oneof');
@@ -909,7 +920,7 @@ export class Model extends Record(modelDefaults) {
       views: List(
         model.getViewsList().map((view) => {
           switch (view.getKind()) {
-            case pb.View.ViewType.STOCK_FLOW:
+            case PbView.ViewType.STOCK_FLOW:
               return new StockFlowView(view);
             default:
               throw new Error('invariant broken: protobuf view with unknown kind');
@@ -925,7 +936,7 @@ const dtDefaults = {
   isReciprocal: false,
 };
 export class Dt extends Record(dtDefaults) {
-  constructor(dt: pb.Dt) {
+  constructor(dt: PbDt) {
     super({
       dt: dt.getValue(),
       isReciprocal: dt.getIsReciprocal(),
@@ -935,7 +946,7 @@ export class Dt extends Record(dtDefaults) {
 
 export type SimMethod = 'euler' | 'rk4';
 
-function getSimMethod(method: pb.SimMethodMap[keyof pb.SimMethodMap]): SimMethod {
+function getSimMethod(method: PbSimMethodMap[keyof PbSimMethodMap]): SimMethod {
   switch (method) {
     case 0:
       return 'euler';
@@ -949,13 +960,13 @@ function getSimMethod(method: pb.SimMethodMap[keyof pb.SimMethodMap]): SimMethod
 const simSpecsDefaults = {
   start: -1,
   stop: -1,
-  dt: new Dt(new pb.Dt()),
+  dt: new Dt(new PbDt()),
   saveStep: undefined as Dt | undefined,
   simMethod: 'euler' as SimMethod,
   timeUnits: undefined as string | undefined,
 };
 export class SimSpecs extends Record(simSpecsDefaults) {
-  constructor(simSpecs: pb.SimSpecs) {
+  constructor(simSpecs: PbSimSpecs) {
     const saveStep = simSpecs.getSaveStep();
     super({
       start: simSpecs.getStart(),
@@ -968,13 +979,13 @@ export class SimSpecs extends Record(simSpecsDefaults) {
   }
 
   static default(): SimSpecs {
-    const dt = new pb.Dt();
+    const dt = new PbDt();
     dt.setValue(1);
-    const specs = new pb.SimSpecs();
+    const specs = new PbSimSpecs();
     specs.setStart(0);
     specs.setStop(10);
     specs.setDt(dt);
-    specs.setSimMethod(pb.SimMethod.EULER);
+    specs.setSimMethod(PbSimMethod.EULER);
     return new SimSpecs(specs);
   }
 }
@@ -985,7 +996,7 @@ const projectDefaults = {
   models: Map<string, Model>(),
 };
 export class Project extends Record(projectDefaults) {
-  constructor(project: pb.Project) {
+  constructor(project: PbProject) {
     super({
       name: project.getName(),
       simSpecs: new SimSpecs(defined(project.getSimSpecs())),
@@ -994,7 +1005,7 @@ export class Project extends Record(projectDefaults) {
   }
 
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {
-    const project = pb.Project.deserializeBinary(serializedPb as Uint8Array);
+    const project = PbProject.deserializeBinary(serializedPb as Uint8Array);
     return new Project(project);
   }
 }
