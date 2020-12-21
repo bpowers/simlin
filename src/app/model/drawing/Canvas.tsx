@@ -670,6 +670,9 @@ export const Canvas = withStyles(styles)(
     }
 
     handlePointerCancel = (e: React.PointerEvent<SVGElement>): void => {
+      if (this.props.embedded) {
+        return;
+      }
       if (!this.pointerId || this.pointerId !== e.pointerId) {
         return;
       }
@@ -823,6 +826,10 @@ export const Canvas = withStyles(styles)(
     }
 
     handlePointerMove = (e: React.PointerEvent<SVGElement>): void => {
+      if (this.props.embedded) {
+        return;
+      }
+
       if (this.pointerId !== e.pointerId) {
         return;
       } else if (this.pointerId && e.pointerType === 'mouse' && e.buttons === 0) {
@@ -841,6 +848,10 @@ export const Canvas = withStyles(styles)(
     };
 
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
+      if (this.props.embedded) {
+        return;
+      }
+
       if (!e.isPrimary) {
         return;
       }
@@ -973,6 +984,10 @@ export const Canvas = withStyles(styles)(
       isText?: boolean,
       isArrowhead?: boolean,
     ): void => {
+      if (this.props.embedded) {
+        return;
+      }
+
       let isEditingName = !!isText;
       let editingName: Node[] = [];
       let isMovingArrow = !!isArrowhead;
