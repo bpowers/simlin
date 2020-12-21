@@ -9,10 +9,6 @@ handlers:
   static_dir: public/static
   secure: always
 
-- url: /images
-  static_dir: public/images
-  secure: always
-
 - url: /$
   static_files: public/index.html
   upload: public/index.html
