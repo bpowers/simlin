@@ -1068,6 +1068,18 @@ export const Editor = withStyles(styles)(
         return;
       }
 
+      const onRenameVariable = !embedded ? this.handleRename : (_oldName: string, _newName: string): void => {};
+      const onSetSelection = !embedded ? this.handleSelection : (_selected: Set<UID>): void => {};
+      const onMoveSelection = !embedded ? this.handleSelectionMove : (_position: Point): void => {};
+      const onMoveFlow = !embedded ? this.handleFlowAttach : (_e: ViewElement, _t: number, _p: Point): void => {};
+      const onMoveLabel = !embedded
+        ? this.handleMoveLabel
+        : (_u: UID, _s: 'top' | 'left' | 'bottom' | 'right'): void => {};
+      const onAttachLink = !embedded ? this.handleLinkAttach : (_element: ViewElement, _to: string): void => {};
+      const onCreateVariable = !embedded ? this.handleCreateVariable : (_element: ViewElement): void => {};
+      const onClearSelectedTool = !embedded ? this.handleClearSelectedTool : () => {};
+      const onDeleteSelection = !embedded ? this.handleSelectionDelete : () => {};
+
       return (
         <Canvas
           embedded={!!embedded}
@@ -1078,15 +1090,15 @@ export const Editor = withStyles(styles)(
           data={this.state.data}
           selectedTool={this.state.selectedTool}
           selection={this.state.selection}
-          onRenameVariable={this.handleRename}
-          onSetSelection={this.handleSelection}
-          onMoveSelection={this.handleSelectionMove}
-          onMoveFlow={this.handleFlowAttach}
-          onAttachLink={this.handleLinkAttach}
-          onCreateVariable={this.handleCreateVariable}
-          onClearSelectedTool={this.handleClearSelectedTool}
-          onDeleteSelection={this.handleSelectionDelete}
-          onMoveLabel={this.handleMoveLabel}
+          onRenameVariable={onRenameVariable}
+          onSetSelection={onSetSelection}
+          onMoveSelection={onMoveSelection}
+          onMoveFlow={onMoveFlow}
+          onMoveLabel={onMoveLabel}
+          onAttachLink={onAttachLink}
+          onCreateVariable={onCreateVariable}
+          onClearSelectedTool={onClearSelectedTool}
+          onDeleteSelection={onDeleteSelection}
         />
       );
     }
