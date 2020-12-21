@@ -12,7 +12,7 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import { Engine as IEngine } from '../../engine-interface';
+import { Engine as IEngine, errorCodeDescription } from '../../engine-interface';
 
 import {
   Project,
@@ -73,6 +73,7 @@ import { Card } from '@material-ui/core';
 import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
+import { canonicalize } from '../../canonicalize';
 
 const MaxUndoSize = 5;
 
@@ -407,20 +408,29 @@ export const Editor = withStyles(styles)(
     };
 
     handleRename = (oldName: string, newName: string) => {
+      if (oldName === newName) {
+        return;
+      }
+
       const engine = defined(this.engine());
       let err = engine.rename(this.state.modelName, oldName, newName);
       if (err) {
-        this.appendModelError(`error code ${err.code}: ${err.getDetails()}`);
+        const details = err.getDetails();
+        const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
+        this.appendModelError(msg);
         return;
       }
       const view = defined(this.getView());
+
+      const oldIdent = canonicalize(oldName);
+      newName = newName.replace('\n', '\\n');
 
       const elements = view.elements.map((element: ViewElement) => {
         if (!element.isNamed()) {
           return element;
         }
         const namedElement = element as AuxViewElement;
-        if (namedElement.name !== oldName) {
+        if (namedElement.ident() !== oldIdent) {
           return element;
         }
 
@@ -431,7 +441,10 @@ export const Editor = withStyles(styles)(
       const serializedView = viewPb.serializeBinary();
       err = engine.setView(this.state.modelName, 0, serializedView);
       if (err) {
-        this.appendModelError(`updating the view failed (code ${err.code}, details: '${err.getDetails()}')`);
+        const details = err.getDetails();
+        const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
+        this.appendModelError(msg);
+        return;
       }
 
       this.updateProject(engine.serializeToProtobuf());
@@ -779,7 +792,10 @@ export const Editor = withStyles(styles)(
       if (engine) {
         const err = engine.setView(this.state.modelName, 0, serializedView);
         if (err) {
-          this.appendModelError(`updating the view failed (code ${err.code}, details: '${err.getDetails()}')`);
+          const details = err.getDetails();
+          const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
+          this.appendModelError(msg);
+          return;
         }
         this.updateProject(engine.serializeToProtobuf());
       }
