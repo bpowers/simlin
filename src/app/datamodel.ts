@@ -164,6 +164,7 @@ export interface Variable {
   readonly ident: string;
   readonly equation: Equation | undefined;
   readonly gf: GraphicalFunction | undefined;
+  readonly isArrayed: boolean;
 }
 
 const stockDefaults = {
@@ -199,6 +200,9 @@ export class Stock extends Record(stockDefaults) implements Variable {
   get gf(): undefined {
     return undefined;
   }
+  get isArrayed(): boolean {
+    return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
+  }
 }
 
 const flowDefaults = {
@@ -230,6 +234,9 @@ export class Flow extends Record(flowDefaults) implements Variable {
       nonNegative: flow.getNonNegative(),
     });
   }
+  get isArrayed(): boolean {
+    return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
+  }
 }
 
 const auxDefaults = {
@@ -258,6 +265,9 @@ export class Aux extends Record(auxDefaults) implements Variable {
       units: aux.getUnits(),
       gf: gf ? new GraphicalFunction(gf) : undefined,
     });
+  }
+  get isArrayed(): boolean {
+    return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
   }
 }
 
@@ -296,6 +306,9 @@ export class Module extends Record(moduleDefaults) implements Variable {
   }
   get gf(): undefined {
     return undefined;
+  }
+  get isArrayed(): boolean {
+    return false;
   }
 }
 

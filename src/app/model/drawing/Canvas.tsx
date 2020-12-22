@@ -374,11 +374,15 @@ export const Canvas = withStyles(styles)(
     };
 
     private stock = (element: StockViewElement): React.ReactElement => {
-      // FIXME
+      const modelVar = this.props.model.variables.get(element.ident());
+      if (!(modelVar instanceof StockVar)) {
+        throw new Error(`invariant broken: expected Stock for ${element.ident()}`);
+      }
       const variableErrors = 0; // this.props.model.vars.get(element.ident())?.errors.size || 0;
       const isSelected = this.isSelected(element);
       const series = this.props.data.get(element.ident());
       const props: StockProps = {
+        stock: modelVar,
         element,
         series,
         isSelected,

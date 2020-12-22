@@ -12,6 +12,8 @@ import { displayName, mergeBounds, Point, Rect } from './common';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
+import { Stock as StockVar } from '../../datamodel';
+
 import { defined, Series } from '../../common';
 
 const styles = createStyles({
@@ -55,6 +57,7 @@ export const StockWidth = 45;
 export const StockHeight = 35;
 
 interface StockPropsFull extends WithStyles<typeof styles> {
+  stock: StockVar;
   isSelected: boolean;
   isEditingName: boolean;
   isValidTarget?: boolean;
@@ -67,7 +70,15 @@ interface StockPropsFull extends WithStyles<typeof styles> {
 
 export type StockProps = Pick<
   StockPropsFull,
-  'element' | 'series' | 'isSelected' | 'isValidTarget' | 'isEditingName' | 'hasWarning' | 'onSelection' | 'onLabelDrag'
+  | 'stock'
+  | 'element'
+  | 'series'
+  | 'isSelected'
+  | 'isValidTarget'
+  | 'isEditingName'
+  | 'hasWarning'
+  | 'onSelection'
+  | 'onLabelDrag'
 >;
 
 export function stockContains(element: ViewElement, point: Point): boolean {
@@ -166,6 +177,9 @@ export const Stock = withStyles(styles)(
 
       const series = this.props.series;
 
+      const isArrayed = this.props.stock.isArrayed;
+      const arrayedOffset = isArrayed ? 3 : 0;
+
       const side = element.labelSide;
       const label = isEditingName ? undefined : (
         <Label
@@ -173,8 +187,8 @@ export const Stock = withStyles(styles)(
           cx={cx}
           cy={cy}
           side={side}
-          rw={w / 2}
-          rh={h / 2}
+          rw={w / 2 + arrayedOffset}
+          rh={h / 2 + arrayedOffset}
           text={displayName(defined(element.name))}
           onSelection={this.handleLabelSelection}
           onLabelDrag={this.props.onLabelDrag}
@@ -189,9 +203,48 @@ export const Stock = withStyles(styles)(
         groupClassName = isValidTarget ? classes.targetGood : classes.targetBad;
       }
 
+      let rects = [
+        <rect
+          key="1"
+          className={classes.stock}
+          x={Math.ceil(cx - w / 2)}
+          y={Math.ceil(cy - h / 2)}
+          width={w}
+          height={h}
+        />,
+      ];
+      if (isArrayed) {
+        rects = [
+          <rect
+            key="0"
+            className={classes.stock}
+            x={Math.ceil(cx - w / 2) + arrayedOffset}
+            y={Math.ceil(cy - h / 2) + arrayedOffset}
+            width={w}
+            height={h}
+          />,
+          <rect
+            key="1"
+            className={classes.stock}
+            x={Math.ceil(cx - w / 2)}
+            y={Math.ceil(cy - h / 2)}
+            width={w}
+            height={h}
+          />,
+          <rect
+            key="2"
+            className={classes.stock}
+            x={Math.ceil(cx - w / 2) - arrayedOffset}
+            y={Math.ceil(cy - h / 2) - arrayedOffset}
+            width={w}
+            height={h}
+          />,
+        ];
+      }
+
       return (
         <g className={groupClassName} onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
-          <rect className={classes.stock} x={Math.ceil(cx - w / 2)} y={Math.ceil(cy - h / 2)} width={w} height={h} />
+          {rects}
           {sparkline}
           {indicator}
           {label}
