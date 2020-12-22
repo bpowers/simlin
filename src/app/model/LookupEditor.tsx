@@ -199,7 +199,7 @@ export const LookupEditor = withStyles(styles)(
         min = Math.floor(min);
         max = Math.ceil(max);
 
-        gf = gf.set('yScale', GraphicalFunctionScale.from({ min, max }));
+        gf = gf.set('yScale', new GraphicalFunctionScale({ min, max }));
       }
 
       return gf;
@@ -347,7 +347,7 @@ export const LookupEditor = withStyles(styles)(
         this.setState({
           gf: this.state.gf.set(
             'yScale',
-            GraphicalFunctionScale.from({
+            new GraphicalFunctionScale({
               min: value,
               max: yMax,
             }),
@@ -368,7 +368,7 @@ export const LookupEditor = withStyles(styles)(
         this.setState({
           gf: this.state.gf.set(
             'yScale',
-            GraphicalFunctionScale.from({
+            new GraphicalFunctionScale({
               min: yMin,
               max: value,
             }),

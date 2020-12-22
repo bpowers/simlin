@@ -138,10 +138,10 @@ export const VariableDetails = withStyles(styles)(
 
     handleAddLookupTable = (): void => {
       const ident = defined(this.props.viewElement.ident());
-      const gf = GraphicalFunction.from({
+      const gf = new GraphicalFunction({
         kind: 'continuous',
-        xScale: GraphicalFunctionScale.from({ min: 0, max: 1 }),
-        yScale: GraphicalFunctionScale.from({ min: 0, max: 1 }),
+        xScale: new GraphicalFunctionScale({ min: 0, max: 1 }),
+        yScale: new GraphicalFunctionScale({ min: 0, max: 1 }),
         xPoints: undefined,
         yPoints: List([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
       });

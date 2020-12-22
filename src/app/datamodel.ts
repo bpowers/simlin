@@ -44,20 +44,25 @@ const graphicalFunctionScaleDefaults = {
   max: 0.0,
 };
 export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefaults) {
-  constructor(scale: PbGraphicalFunction.Scale) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof graphicalFunctionScaleDefaults) {
+    super(props);
+  }
+  static fromPb(scale: PbGraphicalFunction.Scale): GraphicalFunctionScale {
+    return new GraphicalFunctionScale({
       min: scale.getMin(),
       max: scale.getMax(),
     });
   }
-  static from(props: typeof graphicalFunctionScaleDefaults): GraphicalFunctionScale {
-    return new GraphicalFunctionScale(GraphicalFunctionScale.toPb(props));
-  }
-  static toPb(props: typeof graphicalFunctionScaleDefaults): PbGraphicalFunction.Scale {
+  toPb(): PbGraphicalFunction.Scale {
     const scale = new PbGraphicalFunction.Scale();
-    scale.setMin(props.min);
-    scale.setMax(props.max);
+    scale.setMin(this.min);
+    scale.setMax(this.max);
     return scale;
+  }
+  static default(): GraphicalFunctionScale {
+    return new GraphicalFunctionScale(graphicalFunctionScaleDefaults);
   }
 }
 
@@ -65,24 +70,31 @@ const graphicalFunctionDefaults = {
   kind: 'continuous' as GraphicalFunctionKind,
   xPoints: undefined as List<number> | undefined,
   yPoints: List<number>(),
-  xScale: new GraphicalFunctionScale(new PbGraphicalFunction.Scale()),
-  yScale: new GraphicalFunctionScale(new PbGraphicalFunction.Scale()),
+  xScale: GraphicalFunctionScale.default(),
+  yScale: GraphicalFunctionScale.default(),
 };
+
 export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
-  constructor(gf: PbGraphicalFunction) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof graphicalFunctionDefaults) {
+    super(props);
+  }
+
+  static fromPb(gf: PbGraphicalFunction): GraphicalFunction {
     const xPoints = gf.getXPointsList();
-    super({
+    return new GraphicalFunction({
       kind: getGraphicalFunctionKind(gf.getKind()),
       xPoints: xPoints.length !== 0 ? List(xPoints) : undefined,
       yPoints: List(gf.getYPointsList()),
-      xScale: new GraphicalFunctionScale(defined(gf.getXScale())),
-      yScale: new GraphicalFunctionScale(defined(gf.getYScale())),
+      xScale: GraphicalFunctionScale.fromPb(defined(gf.getXScale())),
+      yScale: GraphicalFunctionScale.fromPb(defined(gf.getYScale())),
     });
   }
-  static toPb(props: typeof graphicalFunctionDefaults): PbGraphicalFunction {
+  toPb(): PbGraphicalFunction {
     const gf = new PbGraphicalFunction();
-    if (props.kind) {
-      switch (props.kind) {
+    if (this.kind) {
+      switch (this.kind) {
         case 'continuous':
           gf.setKind(PbGraphicalFunction.Kind.CONTINUOUS);
           break;
@@ -94,22 +106,19 @@ export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
           break;
       }
     }
-    if (props.xPoints && props.xPoints.size > 0) {
-      gf.setXPointsList(props.xPoints.toArray());
+    if (this.xPoints && this.xPoints.size > 0) {
+      gf.setXPointsList(this.xPoints.toArray());
     }
-    if (props.yPoints) {
-      gf.setYPointsList(props.yPoints.toArray());
+    if (this.yPoints) {
+      gf.setYPointsList(this.yPoints.toArray());
     }
-    if (props.xScale) {
-      gf.setXScale(GraphicalFunctionScale.toPb(props.xScale));
+    if (this.xScale) {
+      gf.setXScale(this.xScale.toPb());
     }
-    if (props.yScale) {
-      gf.setYScale(GraphicalFunctionScale.toPb(props.yScale));
+    if (this.yScale) {
+      gf.setYScale(this.yScale.toPb());
     }
     return gf;
-  }
-  static from(props: typeof graphicalFunctionDefaults): GraphicalFunction {
-    return new GraphicalFunction(GraphicalFunction.toPb(props));
   }
 }
 
@@ -119,18 +128,25 @@ const scalarEquationDefaults = {
   equation: '',
 };
 export class ScalarEquation extends Record(scalarEquationDefaults) {
-  constructor(v: PbVariable.ScalarEquation) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof scalarEquationDefaults) {
+    super(props);
+  }
+  static fromPb(v: PbVariable.ScalarEquation): ScalarEquation {
+    return new ScalarEquation({
       equation: v.getEquation(),
     });
   }
-  static toPb(props: typeof scalarEquationDefaults): PbVariable.ScalarEquation {
+  toPb(): PbVariable.ScalarEquation {
     const eqn = new PbVariable.ScalarEquation();
-    eqn.setEquation(props.equation);
+    eqn.setEquation(this.equation);
     return eqn;
   }
-  static from(props: typeof scalarEquationDefaults): ScalarEquation {
-    return new ScalarEquation(ScalarEquation.toPb(props));
+  static default(): ScalarEquation {
+    return new ScalarEquation({
+      equation: '',
+    });
   }
 }
 
@@ -139,11 +155,22 @@ const applyToAllEquationDefaults = {
   equation: '',
 };
 export class ApplyToAllEquation extends Record(applyToAllEquationDefaults) {
-  constructor(v: PbVariable.ApplyToAllEquation) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof applyToAllEquationDefaults) {
+    super(props);
+  }
+  static fromPb(v: PbVariable.ApplyToAllEquation): ApplyToAllEquation {
+    return new ApplyToAllEquation({
       dimensionNames: List(v.getDimensionNamesList()),
       equation: v.getEquation(),
     });
+  }
+  toPb(): PbVariable.ApplyToAllEquation {
+    const equation = new PbVariable.ApplyToAllEquation();
+    equation.setDimensionNamesList(this.dimensionNames.toArray());
+    equation.setEquation(this.equation);
+    return equation;
   }
 }
 
@@ -152,11 +179,42 @@ const arrayedEquationDefaults = {
   elements: Map<string, string>(),
 };
 export class ArrayedEquation extends Record(arrayedEquationDefaults) {
-  constructor(v: PbVariable.ArrayedEquation) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof arrayedEquationDefaults) {
+    super(props);
+  }
+  static fromPb(v: PbVariable.ArrayedEquation): ArrayedEquation {
+    return new ArrayedEquation({
       dimensionNames: List(v.getDimensionNamesList()),
       elements: Map(v.getElementsList().map((el) => [el.getSubscript(), el.getEquation()])),
     });
+  }
+  toPb(): PbVariable.ArrayedEquation {
+    const equation = new PbVariable.ArrayedEquation();
+    equation.setDimensionNamesList(this.dimensionNames.toArray());
+    equation.setElementsList(
+      this.elements
+        .map((name, eqn) => {
+          const element = new PbVariable.ArrayedEquation.Element();
+          element.setSubscript(name);
+          element.setEquation(eqn);
+          return element;
+        })
+        .valueSeq()
+        .toArray(),
+    );
+    return equation;
+  }
+}
+
+function equationFromPb(pbEquation: PbVariable.Equation | undefined): Equation {
+  if (pbEquation?.hasApplyToAll()) {
+    return ApplyToAllEquation.fromPb(defined(pbEquation?.getApplyToAll()));
+  } else if (pbEquation?.hasArrayed()) {
+    return ArrayedEquation.fromPb(defined(pbEquation?.getArrayed()));
+  } else {
+    return ScalarEquation.fromPb(defined(pbEquation?.getScalar()));
   }
 }
 
@@ -169,7 +227,7 @@ export interface Variable {
 
 const stockDefaults = {
   ident: '',
-  equation: ScalarEquation.from({ equation: '' }) as Equation,
+  equation: ScalarEquation.default() as Equation,
   documentation: '',
   units: '',
   inflows: List<string>(),
@@ -177,19 +235,15 @@ const stockDefaults = {
   nonNegative: false,
 };
 export class Stock extends Record(stockDefaults) implements Variable {
-  constructor(stock: PbVariable.Stock) {
-    const pbEquation = stock.getEquation();
-    let equation: Equation = ScalarEquation.from({ equation: '' });
-    if (pbEquation?.hasApplyToAll()) {
-      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
-    } else if (pbEquation?.hasArrayed()) {
-      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
-    } else if (pbEquation?.hasScalar()) {
-      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
-    }
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof stockDefaults) {
+    super(props);
+  }
+  static fromPb(stock: PbVariable.Stock): Stock {
+    return new Stock({
       ident: stock.getIdent(),
-      equation,
+      equation: equationFromPb(stock.getEquation()),
       documentation: stock.getDocumentation(),
       units: stock.getUnits(),
       inflows: List(stock.getInflowsList()),
@@ -207,30 +261,26 @@ export class Stock extends Record(stockDefaults) implements Variable {
 
 const flowDefaults = {
   ident: '',
-  equation: ScalarEquation.from({ equation: '' }) as Equation,
+  equation: ScalarEquation.default() as Equation,
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
   nonNegative: false,
 };
 export class Flow extends Record(flowDefaults) implements Variable {
-  constructor(flow: PbVariable.Flow) {
-    const pbEquation = flow.getEquation();
-    let equation: Equation = ScalarEquation.from({ equation: '' });
-    if (pbEquation?.hasApplyToAll()) {
-      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
-    } else if (pbEquation?.hasArrayed()) {
-      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
-    } else if (pbEquation?.hasScalar()) {
-      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
-    }
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof flowDefaults) {
+    super(props);
+  }
+  static fromPb(flow: PbVariable.Flow): Flow {
     const gf = flow.getGf();
-    super({
+    return new Flow({
       ident: flow.getIdent(),
-      equation,
+      equation: equationFromPb(flow.getEquation()),
       documentation: flow.getDocumentation(),
       units: flow.getUnits(),
-      gf: gf ? new GraphicalFunction(gf) : undefined,
+      gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
       nonNegative: flow.getNonNegative(),
     });
   }
@@ -241,29 +291,25 @@ export class Flow extends Record(flowDefaults) implements Variable {
 
 const auxDefaults = {
   ident: '',
-  equation: ScalarEquation.from({ equation: '' }) as Equation,
+  equation: ScalarEquation.default() as Equation,
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
-  constructor(aux: PbVariable.Aux) {
-    const pbEquation = aux.getEquation();
-    let equation: Equation = ScalarEquation.from({ equation: '' });
-    if (pbEquation?.hasApplyToAll()) {
-      equation = new ApplyToAllEquation(defined(pbEquation?.getApplyToAll()));
-    } else if (pbEquation?.hasArrayed()) {
-      equation = new ArrayedEquation(defined(pbEquation?.getArrayed()));
-    } else if (pbEquation?.hasScalar()) {
-      equation = new ScalarEquation(defined(pbEquation?.getScalar()));
-    }
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof auxDefaults) {
+    super(props);
+  }
+  static fromPb(aux: PbVariable.Aux): Aux {
     const gf = aux.getGf();
-    super({
+    return new Aux({
       ident: aux.getIdent(),
-      equation,
+      equation: equationFromPb(aux.getEquation()),
       documentation: aux.getDocumentation(),
       units: aux.getUnits(),
-      gf: gf ? new GraphicalFunction(gf) : undefined,
+      gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
     });
   }
   get isArrayed(): boolean {
@@ -292,8 +338,13 @@ const moduleDefaults = {
   references: List<ModuleReference>(),
 };
 export class Module extends Record(moduleDefaults) implements Variable {
-  constructor(module: PbVariable.Module) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof moduleDefaults) {
+    super(props);
+  }
+  static fromPb(module: PbVariable.Module): Module {
+    return new Module({
       ident: module.getIdent(),
       modelName: module.getModelName(),
       documentation: module.getDocumentation(),
@@ -917,13 +968,13 @@ export class Model extends Record(modelDefaults) {
           .map((v: PbVariable) => {
             switch (v.getVCase()) {
               case PbVariable.VCase.STOCK:
-                return new Stock(defined(v.getStock())) as Variable;
+                return Stock.fromPb(defined(v.getStock())) as Variable;
               case PbVariable.VCase.FLOW:
-                return new Flow(defined(v.getFlow())) as Variable;
+                return Flow.fromPb(defined(v.getFlow())) as Variable;
               case PbVariable.VCase.AUX:
-                return new Aux(defined(v.getAux())) as Variable;
+                return Aux.fromPb(defined(v.getAux())) as Variable;
               case PbVariable.VCase.MODULE:
-                return new Module(defined(v.getModule())) as Variable;
+                return Module.fromPb(defined(v.getModule())) as Variable;
               default:
                 throw new Error('invariant broken: protobuf variable with empty oneof');
             }

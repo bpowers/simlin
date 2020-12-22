@@ -1233,7 +1233,7 @@ export const Editor = withStyles(styles)(
     handleTableChange = (ident: string, newTable: GraphicalFunction | null) => {
       const engine = defined(this.engine());
       if (newTable) {
-        const gf = GraphicalFunction.toPb(newTable);
+        const gf = newTable.toPb();
         engine.setGraphicalFunction(this.state.modelName, ident, gf.serializeBinary());
       } else {
         engine.removeGraphicalFunction(this.state.modelName, ident);
