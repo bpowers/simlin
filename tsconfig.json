@@ -29,7 +29,6 @@
     "node_modules",
     "build",
     "build-component",
-    "build-rt",
     "scripts",
     "acceptance-tests",
     "webpack",
