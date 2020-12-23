@@ -40,6 +40,6 @@
     "src/setupTests.ts"
   ],
   "include": [
-    "src/app"
+    "src"
   ]
 }
