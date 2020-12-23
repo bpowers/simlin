@@ -47,6 +47,7 @@
     "rtest": "yarn run build:backend && ./test/test-models/regression-test.py -x '(subscript|macro|xscale|initial_function|stocks_with_expressions|active_initial|smooth_and_stock|euler_step_vs_saveper|special_characters)' ./bin/mdl.js test/test-models",
     "jest": "jest",
     "start": "node lib",
+    "start:mongo": "exec docker run -it --rm -v mongo_data:/data/db -e MONGO_INITDB_ROOT_USERNAME=model -e MONGO_INITDB_ROOT_PASSWORD=wKarPlhiHdlazqx5BUCA46dl -e MONGO_INITDB_DATABASE=model -p 27017:27017 mongo:4.2",
     "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092",
     "start:testing": "npm-run-all -p start:backend start:frontend",
     "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; exec node_modules/.bin/ts-node-dev --no-notify --respawn src/index.ts",
