@@ -14,12 +14,21 @@ import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 import { Button, Card, CardActions, CardContent, Tab, Tabs } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { StockViewElement, ViewElement, Variable, GraphicalFunction, GraphicalFunctionScale } from '../datamodel';
+import {
+  StockViewElement,
+  ViewElement,
+  Variable,
+  GraphicalFunction,
+  GraphicalFunctionScale,
+  ApplyToAllEquation,
+} from '../datamodel';
 
 import { defined, Series } from '../common';
 import { ScalarEquation } from '../datamodel';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { LookupEditor } from './LookupEditor';
+
+import { brewer } from 'chroma-js';
 
 const styles = createStyles({
   card: {
@@ -57,7 +66,7 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   onDelete: (ident: string) => void;
   onEquationChange: (ident: string, newEquation: string) => void;
   onTableChange: (ident: string, newTable: GraphicalFunction | null) => void;
-  data: Series | undefined;
+  data: List<Series> | undefined;
   activeTab: number;
   onActiveTabChange: (newActiveTab: number) => void;
 }
@@ -80,6 +89,8 @@ function valueFromEquation(equation: string): Node[] {
 function scalarEquationFor(variable: Variable): string {
   if (variable.equation instanceof ScalarEquation) {
     return variable.equation.equation;
+  } else if (variable.equation instanceof ApplyToAllEquation) {
+    return '{apply-to-all:}\n' + variable.equation.equation;
   } else {
     return "{ TODO: arrayed variables aren't supported yet}";
   }
@@ -153,20 +164,45 @@ export const VariableDetails = withStyles(styles)(
       const { equation } = this.state;
       const initialEquation = scalarEquationFor(this.props.variable);
 
+      const lines = [];
+
       let yMin = 0;
       let yMax = 0;
-      const series: { x: number; y: number }[] = [];
-      for (let i = 0; data && i < data.time.length; i++) {
-        const x = data.time[i];
-        const y = data.values[i];
-        series.push({ x, y });
-        if (y < yMin) {
-          yMin = y;
-        }
-        if (y > yMax) {
-          yMax = y;
+      const series: Array<any> = [];
+      debugger;
+      if (data) {
+        let i = 0;
+        const colors = brewer.Dark2;
+        for (const dataset of data) {
+          const name = data.size === 1 ? 'y' : dataset.name;
+          for (let i = 0; data && i < dataset.time.length; i++) {
+            const x = dataset.time[i];
+            const y = dataset.values[i];
+            const point: any = { x };
+            point[name] = y;
+            series.push(point);
+            if (y < yMin) {
+              yMin = y;
+            }
+            if (y > yMax) {
+              yMax = y;
+            }
+          }
+          const colorOff = i % colors.length;
+          lines.push(
+            <Line
+              yAxisId="1"
+              type="linear"
+              dataKey={name}
+              stroke={colors[colorOff]}
+              animationDuration={300}
+              dot={false}
+            />,
+          );
+          i++;
         }
       }
+
       yMin = Math.floor(yMin);
       yMax = Math.ceil(yMax);
 
@@ -247,7 +283,7 @@ export const VariableDetails = withStyles(styles)(
               yAxisId="1"
             />
             <Tooltip formatter={this.formatValue} />
-            <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" animationDuration={300} dot={false} />
+            {lines}
           </LineChart>
         </CardContent>
       );

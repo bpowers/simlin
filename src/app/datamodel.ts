@@ -16,6 +16,7 @@ import {
   Model as PbModel,
   SimSpecs as PbSimSpecs,
   SimMethodMap as PbSimMethodMap,
+  Dimension as PbDimension,
 } from '../system-dynamics-engine/src/project_io_pb';
 import { canonicalize } from '../canonicalize';
 
@@ -1044,10 +1045,35 @@ export class SimSpecs extends Record(simSpecsDefaults) {
   }
 }
 
+const dimensionDefaults = {
+  name: '',
+  subscripts: List<string>(),
+};
+export class Dimension extends Record(dimensionDefaults) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof dimensionDefaults) {
+    super(props);
+  }
+  static fromPb(dim: PbDimension): Dimension {
+    return new Dimension({
+      name: dim.getName(),
+      subscripts: List(dim.getElementsList()),
+    });
+  }
+  toPb(): PbDimension {
+    const dim = new PbDimension();
+    dim.setName(this.name);
+    dim.setElementsList(this.subscripts.toArray());
+    return dim;
+  }
+}
+
 const projectDefaults = {
   name: '',
   simSpecs: SimSpecs.default(),
   models: Map<string, Model>(),
+  dimensions: Map<string, Dimension>(),
 };
 export class Project extends Record(projectDefaults) {
   // this isn't useless, as it ensures we specify the full object
@@ -1060,6 +1086,7 @@ export class Project extends Record(projectDefaults) {
       name: project.getName(),
       simSpecs: SimSpecs.fromPb(defined(project.getSimSpecs())),
       models: Map(project.getModelsList().map((model) => [model.getName(), Model.fromPb(model)])),
+      dimensions: Map(project.getDimensionsList().map((dim) => [dim.getName(), Dimension.fromPb(dim)])),
     });
   }
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {

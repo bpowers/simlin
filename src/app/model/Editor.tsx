@@ -29,6 +29,8 @@ import {
   StockViewElement,
   CloudViewElement,
   viewElementType,
+  ApplyToAllEquation,
+  ArrayedEquation,
 } from '../datamodel';
 
 import { toInt, uint8ArraysEqual } from '../common';
@@ -1251,14 +1253,34 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      const model = this.getModel();
-      if (!model) {
+      const project = this.project();
+      if (!project) {
         return;
       }
+      const model = defined(this.getModel());
 
       const ident = defined(namedElement.ident());
       const variable = defined(model.variables.get(ident));
-      const series = this.state.data.get(ident);
+
+      const data = this.state.data;
+
+      let series = this.state.data.has(ident) ? List([defined(data.get(ident))]) : undefined;
+      if (variable.isArrayed) {
+        const eqn = defined(variable.equation);
+        if (!(eqn instanceof ApplyToAllEquation || eqn instanceof ArrayedEquation)) {
+          return;
+        }
+        const dimNames = eqn.dimensionNames;
+        if (dimNames.size !== 1) {
+          return;
+        }
+        const dim = defined(project.dimensions.get(defined(dimNames.get(0))));
+        series = dim.subscripts
+          .map((element) => this.state.data.get(`${ident}[${element}]`))
+          .filter((data) => data !== undefined)
+          .map((data) => defined(data));
+      }
+
       const activeTab = this.state.variableDetailsActiveTab;
 
       return (
