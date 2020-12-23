@@ -890,23 +890,53 @@ pub mod view_element {
         pub points: Option<Points>,
     }
 
+    fn is_horizontal(points: &[datamodel::view_element::FlowPoint]) -> bool {
+        if points.len() > 2 {
+            return false;
+        }
+        let start = &points[0];
+        let end = &points[1];
+        let dx = (end.x - start.x).abs();
+        let dy = (end.y - start.y).abs();
+
+        dx > dy
+    }
+
     impl From<Flow> for datamodel::view_element::Flow {
         fn from(v: Flow) -> Self {
+            // position of the flow valve
+            let mut cx = v.x;
+            let mut cy = v.y;
+            let mut points: Vec<_> = v
+                .points
+                .unwrap_or_default()
+                .points
+                .into_iter()
+                .map(datamodel::view_element::FlowPoint::from)
+                .collect();
+            // Vensim imports don't actually enforce horizontal or vertical lines are straight
+            if points.len() == 2 {
+                if is_horizontal(&points) {
+                    let new_y = (points[0].y + points[1].y) / 2.0;
+                    points[0].y = new_y;
+                    points[1].y = new_y;
+                    cy = new_y;
+                } else {
+                    let new_x = (points[0].x + points[1].x) / 2.0;
+                    points[0].x = new_x;
+                    points[1].x = new_x;
+                    cx = new_x;
+                }
+            }
             datamodel::view_element::Flow {
                 name: v.name,
                 uid: v.uid.unwrap_or(-1),
-                x: v.x,
-                y: v.y,
+                x: cx,
+                y: cy,
                 label_side: datamodel::view_element::LabelSide::from(
                     v.label_side.unwrap_or(LabelSide::Bottom),
                 ),
-                points: v
-                    .points
-                    .unwrap_or_default()
-                    .points
-                    .into_iter()
-                    .map(datamodel::view_element::FlowPoint::from)
-                    .collect(),
+                points,
             }
         }
     }
@@ -955,6 +985,88 @@ pub mod view_element {
             let actual = datamodel::view_element::Flow::from(Flow::from(expected.clone()));
             assert_eq!(expected, actual);
         }
+
+        let input_v = datamodel::view_element::Flow {
+            name: "from_vensim_v".to_string(),
+            uid: 76,
+            x: 2.0,
+            y: 5.0,
+            label_side: datamodel::view_element::LabelSide::Bottom,
+            points: vec![
+                datamodel::view_element::FlowPoint {
+                    x: 1.0,
+                    y: 1.0,
+                    attached_to_uid: None,
+                },
+                datamodel::view_element::FlowPoint {
+                    x: 3.0,
+                    y: 9.0,
+                    attached_to_uid: None,
+                },
+            ],
+        };
+        let expected_v = datamodel::view_element::Flow {
+            name: "from_vensim_v".to_string(),
+            uid: 76,
+            x: 2.0,
+            y: 5.0,
+            label_side: datamodel::view_element::LabelSide::Bottom,
+            points: vec![
+                datamodel::view_element::FlowPoint {
+                    x: 2.0,
+                    y: 1.0,
+                    attached_to_uid: None,
+                },
+                datamodel::view_element::FlowPoint {
+                    x: 2.0,
+                    y: 9.0,
+                    attached_to_uid: None,
+                },
+            ],
+        };
+        let actual_v = datamodel::view_element::Flow::from(Flow::from(input_v.clone()));
+        assert_eq!(expected_v, actual_v);
+
+        let input_h = datamodel::view_element::Flow {
+            name: "from_vensim_h".to_string(),
+            uid: 76,
+            x: 5.0,
+            y: 2.0,
+            label_side: datamodel::view_element::LabelSide::Bottom,
+            points: vec![
+                datamodel::view_element::FlowPoint {
+                    x: 1.0,
+                    y: 1.0,
+                    attached_to_uid: None,
+                },
+                datamodel::view_element::FlowPoint {
+                    x: 9.0,
+                    y: 3.0,
+                    attached_to_uid: None,
+                },
+            ],
+        };
+        let expected_h = datamodel::view_element::Flow {
+            name: "from_vensim_h".to_string(),
+            uid: 76,
+            x: 5.0,
+            y: 2.0,
+            label_side: datamodel::view_element::LabelSide::Bottom,
+            points: vec![
+                datamodel::view_element::FlowPoint {
+                    x: 1.0,
+                    y: 2.0,
+                    attached_to_uid: None,
+                },
+                datamodel::view_element::FlowPoint {
+                    x: 9.0,
+                    y: 2.0,
+                    attached_to_uid: None,
+                },
+            ],
+        };
+        let actual_h = datamodel::view_element::Flow::from(Flow::from(input_h.clone()));
+        assert_eq!(expected_h, actual_h);
     }
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
