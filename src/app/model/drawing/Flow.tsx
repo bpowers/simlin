@@ -219,7 +219,7 @@ export function UpdateStockAndFlows(
   const top = flows.filter((e) => isAdjacent(stockEl, e, 'top'));
   const bottom = flows.filter((e) => isAdjacent(stockEl, e, 'bottom'));
 
-  let proposed = Point.from({
+  let proposed = new Point({
     x: stockEl.cx - moveDelta.x,
     y: stockEl.cy - moveDelta.y,
     attachedToUid: undefined,
@@ -269,7 +269,7 @@ export function UpdateCloudAndFlow(
   flow: FlowViewElement,
   moveDelta: IPoint,
 ): [StockViewElement | CloudViewElement, FlowViewElement] {
-  let proposed = Point.from({
+  let proposed = new Point({
     x: cloud.cx - moveDelta.x,
     y: cloud.cy - moveDelta.y,
     attachedToUid: undefined,
@@ -314,7 +314,7 @@ export function UpdateFlow(
   const stocks = ends.filter((e) => e instanceof StockViewElement);
   const clouds = ends.filter((e) => e instanceof CloudViewElement);
 
-  const center = Point.from({
+  const center = new Point({
     x: flowEl.cx,
     y: flowEl.cy,
     attachedToUid: undefined,
@@ -325,7 +325,7 @@ export function UpdateFlow(
   const start = defined(points.get(0));
   const end = defined(points.get(points.size - 1));
 
-  let proposed = Point.from({
+  let proposed = new Point({
     x: center.x - moveDelta.x,
     y: center.y - moveDelta.y,
     attachedToUid: undefined,

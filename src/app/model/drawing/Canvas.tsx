@@ -45,7 +45,7 @@ export const fauxTargetUid = -3;
 export const inCreationCloudUid = -4;
 export const fauxCloudTargetUid = -5;
 
-const fauxTarget = AuxViewElement.from({
+const fauxTarget = new AuxViewElement({
   name: '$·model-internal-faux-target',
   uid: fauxTargetUid,
   x: 0,
@@ -54,7 +54,7 @@ const fauxTarget = AuxViewElement.from({
   isZeroRadius: true,
 });
 
-const fauxCloudTarget = CloudViewElement.from({
+const fauxCloudTarget = new CloudViewElement({
   uid: fauxCloudTargetUid,
   flowUid: -1,
   x: 0,
@@ -464,7 +464,7 @@ export const Canvas = withStyles(styles)(
       }
       const off = defined(this.selectionCenterOffset);
       const delta = this.state.moveDelta || { x: 0, y: 0 };
-      return FlowPoint.from({
+      return new FlowPoint({
         x: off.x - delta.x - this.state.canvasOffset.x,
         y: off.y - delta.y - this.state.canvasOffset.y,
         attachedToUid: undefined,
@@ -866,7 +866,7 @@ export const Canvas = withStyles(styles)(
       if (selectedTool === 'aux' || selectedTool === 'stock') {
         let inCreation: AuxViewElement | StockViewElement;
         if (selectedTool === 'aux') {
-          inCreation = AuxViewElement.from({
+          inCreation = new AuxViewElement({
             uid: inCreationUid,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
@@ -875,7 +875,7 @@ export const Canvas = withStyles(styles)(
             isZeroRadius: false,
           });
         } else {
-          inCreation = StockViewElement.from({
+          inCreation = new StockViewElement({
             uid: inCreationUid,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
@@ -900,7 +900,7 @@ export const Canvas = withStyles(styles)(
         const x = e.clientX - canvasOffset.x;
         const y = e.clientY - canvasOffset.y;
 
-        const inCreationCloud = CloudViewElement.from({
+        const inCreationCloud = new CloudViewElement({
           uid: inCreationCloudUid,
           flowUid: inCreationUid,
           x,
@@ -908,17 +908,16 @@ export const Canvas = withStyles(styles)(
           isZeroRadius: false,
         });
 
-        const inCreation = FlowViewElement.from({
+        const inCreation = new FlowViewElement({
           uid: inCreationUid,
           name: 'New Flow',
           x,
           y,
           labelSide: 'bottom',
           points: List([
-            FlowPoint.from({ x, y, attachedToUid: inCreationCloud.uid }),
-            FlowPoint.from({ x, y, attachedToUid: fauxCloudTarget.uid }),
+            new FlowPoint({ x, y, attachedToUid: inCreationCloud.uid }),
+            new FlowPoint({ x, y, attachedToUid: fauxCloudTarget.uid }),
           ]),
-          isZeroRadius: false,
         });
 
         this.selectionCenterOffset = {
@@ -1013,37 +1012,35 @@ export const Canvas = withStyles(styles)(
       if (selectedTool === 'link' && element.isNamed()) {
         isEditingName = false;
         isMovingArrow = true;
-        inCreation = LinkViewElement.from({
+        inCreation = new LinkViewElement({
           uid: inCreationUid,
           fromUid: element.uid,
           toUid: fauxTarget.uid,
           arc: 0.0,
           multiPoint: undefined,
           isStraight: false,
-          isZeroRadius: false,
         });
         element = inCreation;
       } else if (selectedTool === 'flow' && element instanceof StockViewElement) {
         isEditingName = false;
         isMovingArrow = true;
-        const startPoint = FlowPoint.from({
+        const startPoint = new FlowPoint({
           x: element.cx,
           y: element.cy,
           attachedToUid: element.uid,
         });
-        const endPoint = FlowPoint.from({
+        const endPoint = new FlowPoint({
           x: element.cx,
           y: element.cy,
           attachedToUid: fauxCloudTarget.uid,
         });
-        inCreation = FlowViewElement.from({
+        inCreation = new FlowViewElement({
           uid: inCreationUid,
           name: 'New Flow',
           x: element.cx,
           y: element.cy,
           labelSide: 'bottom',
           points: List([startPoint, endPoint]),
-          isZeroRadius: false,
         });
         element = inCreation;
       } else {

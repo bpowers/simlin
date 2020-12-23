@@ -15,7 +15,6 @@ import {
   Project as PbProject,
   Model as PbModel,
   SimSpecs as PbSimSpecs,
-  SimMethod as PbSimMethod,
   SimMethodMap as PbSimMethodMap,
 } from '../system-dynamics-engine/src/project_io_pb';
 import { canonicalize } from '../canonicalize';
@@ -418,14 +417,29 @@ const auxViewElementDefaults = {
   isZeroRadius: false,
 };
 export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
-  constructor(aux: PbViewElement.Aux) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof auxViewElementDefaults) {
+    super(props);
+  }
+  static fromPb(aux: PbViewElement.Aux): AuxViewElement {
+    return new AuxViewElement({
       uid: aux.getUid(),
       name: aux.getName(),
       x: aux.getX(),
       y: aux.getY(),
       labelSide: getLabelSide(aux.getLabelSide()),
+      isZeroRadius: false,
     });
+  }
+  toPb(): PbViewElement.Aux {
+    const element = new PbViewElement.Aux();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
   }
   get cx(): number {
     return this.x;
@@ -438,32 +452,6 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
   }
   ident(): string {
     return canonicalize(this.name);
-  }
-
-  toPb(): PbViewElement.Aux {
-    const element = new PbViewElement.Aux();
-    element.setUid(this.uid);
-    element.setName(this.name);
-    element.setX(this.x);
-    element.setY(this.y);
-    element.setLabelSide(labelSideToPb(this.labelSide));
-    return element;
-  }
-
-  static from(props: typeof auxViewElementDefaults): AuxViewElement {
-    const element = new PbViewElement.Aux();
-    element.setUid(props.uid);
-    element.setName(props.name);
-    element.setX(props.x);
-    element.setY(props.y);
-    element.setLabelSide(labelSideToPb(props.labelSide));
-
-    const aux = new AuxViewElement(element);
-    if (props.isZeroRadius) {
-      return aux.set('isZeroRadius', true);
-    } else {
-      return aux;
-    }
   }
 }
 
@@ -476,14 +464,29 @@ const stockViewElementDefaults = {
   isZeroRadius: false,
 };
 export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
-  constructor(stock: PbViewElement.Stock) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof stockViewElementDefaults) {
+    super(props);
+  }
+  static fromPb(stock: PbViewElement.Stock): StockViewElement {
+    return new StockViewElement({
       uid: stock.getUid(),
       name: stock.getName(),
       x: stock.getX(),
       y: stock.getY(),
       labelSide: getLabelSide(stock.getLabelSide()),
+      isZeroRadius: false,
     });
+  }
+  toPb(): PbViewElement.Stock {
+    const element = new PbViewElement.Stock();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
   }
   get cx(): number {
     return this.x;
@@ -497,32 +500,6 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
   ident(): string {
     return canonicalize(this.name);
   }
-
-  toPb(): PbViewElement.Stock {
-    const element = new PbViewElement.Stock();
-    element.setUid(this.uid);
-    element.setName(this.name);
-    element.setX(this.x);
-    element.setY(this.y);
-    element.setLabelSide(labelSideToPb(this.labelSide));
-    return element;
-  }
-
-  static from(props: typeof stockViewElementDefaults): StockViewElement {
-    const element = new PbViewElement.Stock();
-    element.setUid(props.uid);
-    element.setName(props.name);
-    element.setX(props.x);
-    element.setY(props.y);
-    element.setLabelSide(labelSideToPb(props.labelSide));
-
-    const stock = new StockViewElement(element);
-    if (props.isZeroRadius) {
-      return stock.set('isZeroRadius', true);
-    } else {
-      return stock;
-    }
-  }
 }
 
 const pointDefaults = {
@@ -531,24 +508,19 @@ const pointDefaults = {
   attachedToUid: undefined as number | undefined,
 };
 export class Point extends Record(pointDefaults) {
-  constructor(point: PbViewElement.FlowPoint) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof pointDefaults) {
+    super(props);
+  }
+  static fromPb(point: PbViewElement.FlowPoint): Point {
     const attachedToUid = point.getAttachedToUid();
-    super({
+    return new Point({
       x: point.getX(),
       y: point.getY(),
       attachedToUid: attachedToUid ? attachedToUid : undefined,
     });
   }
-  static from(props: typeof pointDefaults): Point {
-    const point = new PbViewElement.FlowPoint();
-    point.setX(props.x);
-    point.setY(props.y);
-    if (props.attachedToUid) {
-      point.setAttachedToUid(props.attachedToUid);
-    }
-    return new Point(point);
-  }
-
   toPb(): PbViewElement.FlowPoint {
     const element = new PbViewElement.FlowPoint();
     element.setX(this.x);
@@ -567,18 +539,32 @@ const flowViewElementDefaults = {
   y: -1,
   labelSide: 'center' as LabelSide,
   points: List<Point>(),
-  isZeroRadius: false,
 };
 export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
-  constructor(flow: PbViewElement.Flow) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof flowViewElementDefaults) {
+    super(props);
+  }
+  static fromPb(flow: PbViewElement.Flow): FlowViewElement {
+    return new FlowViewElement({
       uid: flow.getUid(),
       name: flow.getName(),
       x: flow.getX(),
       y: flow.getY(),
       labelSide: getLabelSide(flow.getLabelSide()),
-      points: List(flow.getPointsList().map((point) => new Point(point))),
+      points: List(flow.getPointsList().map((point) => Point.fromPb(point))),
     });
+  }
+  toPb(): PbViewElement.Flow {
+    const element = new PbViewElement.Flow();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setPointsList(this.points.map((p) => p.toPb()).toArray());
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
   }
   get cx(): number {
     return this.x;
@@ -592,27 +578,8 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   ident(): string {
     return canonicalize(this.name);
   }
-
-  toPb(): PbViewElement.Flow {
-    const element = new PbViewElement.Flow();
-    element.setUid(this.uid);
-    element.setName(this.name);
-    element.setX(this.x);
-    element.setY(this.y);
-    element.setPointsList(this.points.map((p) => p.toPb()).toArray());
-    element.setLabelSide(labelSideToPb(this.labelSide));
-    return element;
-  }
-
-  static from(props: typeof flowViewElementDefaults): FlowViewElement {
-    const element = new PbViewElement.Flow();
-    element.setUid(props.uid);
-    element.setName(props.name);
-    element.setX(props.x);
-    element.setY(props.y);
-    element.setPointsList(props.points.map((p) => p.toPb()).toArray());
-    element.setLabelSide(labelSideToPb(props.labelSide));
-    return new FlowViewElement(element);
+  get isZeroRadius(): boolean {
+    return false;
   }
 }
 
@@ -623,10 +590,14 @@ const linkViewElementDefaults = {
   arc: 0.0 as number | undefined,
   isStraight: false,
   multiPoint: undefined as List<Point> | undefined,
-  isZeroRadius: false,
 };
 export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
-  constructor(link: PbViewElement.Link) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof linkViewElementDefaults) {
+    super(props);
+  }
+  static fromPb(link: PbViewElement.Link): LinkViewElement {
     let arc: number | undefined = undefined;
     let isStraight = true;
     let multiPoint: List<Point> | undefined = undefined;
@@ -647,11 +618,11 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
         multiPoint = List(
           defined(link.getMultiPoint())
             .getPointsList()
-            .map((point) => new Point(point)),
+            .map((point) => Point.fromPb(point)),
         );
         break;
     }
-    super({
+    return new LinkViewElement({
       uid: link.getUid(),
       fromUid: link.getFromUid(),
       toUid: link.getToUid(),
@@ -660,19 +631,6 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
       multiPoint,
     });
   }
-  get cx(): number {
-    return NaN;
-  }
-  get cy(): number {
-    return NaN;
-  }
-  isNamed(): boolean {
-    return false;
-  }
-  ident(): undefined {
-    return undefined;
-  }
-
   toPb(): PbViewElement.Link {
     const element = new PbViewElement.Link();
     element.setUid(this.uid);
@@ -689,22 +647,20 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
     }
     return element;
   }
-
-  static from(props: typeof linkViewElementDefaults): LinkViewElement {
-    const element = new PbViewElement.Link();
-    element.setUid(props.uid);
-    element.setFromUid(props.fromUid);
-    element.setToUid(props.toUid);
-    if (props.arc !== undefined) {
-      element.setArc(props.arc);
-    } else if (props.multiPoint) {
-      const linkPoints = new PbViewElement.Link.LinkPoints();
-      linkPoints.setPointsList(props.multiPoint.map((p) => p.toPb()).toArray());
-      element.setMultiPoint(linkPoints);
-    } else {
-      element.setIsStraight(props.isStraight);
-    }
-    return new LinkViewElement(element);
+  get cx(): number {
+    return NaN;
+  }
+  get cy(): number {
+    return NaN;
+  }
+  isNamed(): boolean {
+    return false;
+  }
+  ident(): undefined {
+    return undefined;
+  }
+  get isZeroRadius(): boolean {
+    return false;
   }
 }
 
@@ -717,14 +673,29 @@ const moduleViewElementDefaults = {
   isZeroRadius: false,
 };
 export class ModuleViewElement extends Record(moduleViewElementDefaults) implements ViewElement {
-  constructor(module: PbViewElement.Module) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof moduleViewElementDefaults) {
+    super(props);
+  }
+  static fromPb(module: PbViewElement.Module): ModuleViewElement {
+    return new ModuleViewElement({
       uid: module.getUid(),
       name: module.getName(),
       x: module.getX(),
       y: module.getY(),
       labelSide: getLabelSide(module.getLabelSide()),
+      isZeroRadius: false,
     });
+  }
+  toPb(): PbViewElement.Module {
+    const element = new PbViewElement.Module();
+    element.setUid(this.uid);
+    element.setName(this.name);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
   }
   get cx(): number {
     return this.x;
@@ -738,16 +709,6 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
   ident(): string {
     return canonicalize(this.name);
   }
-
-  toPb(): PbViewElement.Module {
-    const element = new PbViewElement.Module();
-    element.setUid(this.uid);
-    element.setName(this.name);
-    element.setX(this.x);
-    element.setY(this.y);
-    element.setLabelSide(labelSideToPb(this.labelSide));
-    return element;
-  }
 }
 
 const aliasViewElementDefaults = {
@@ -759,14 +720,29 @@ const aliasViewElementDefaults = {
   isZeroRadius: false,
 };
 export class AliasViewElement extends Record(aliasViewElementDefaults) implements ViewElement {
-  constructor(alias: PbViewElement.Alias) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof aliasViewElementDefaults) {
+    super(props);
+  }
+  static fromPb(alias: PbViewElement.Alias): AliasViewElement {
+    return new AliasViewElement({
       uid: alias.getUid(),
       aliasOfUid: alias.getAliasOfUid(),
       x: alias.getX(),
       y: alias.getY(),
       labelSide: getLabelSide(alias.getLabelSide()),
+      isZeroRadius: false,
     });
+  }
+  toPb(): PbViewElement.Alias {
+    const element = new PbViewElement.Alias();
+    element.setUid(this.uid);
+    element.setAliasOfUid(this.aliasOfUid);
+    element.setX(this.x);
+    element.setY(this.y);
+    element.setLabelSide(labelSideToPb(this.labelSide));
+    return element;
   }
   get cx(): number {
     return this.x;
@@ -779,16 +755,6 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
   }
   ident(): undefined {
     return undefined;
-  }
-
-  toPb(): PbViewElement.Alias {
-    const element = new PbViewElement.Alias();
-    element.setUid(this.uid);
-    element.setAliasOfUid(this.aliasOfUid);
-    element.setX(this.x);
-    element.setY(this.y);
-    element.setLabelSide(labelSideToPb(this.labelSide));
-    return element;
   }
 }
 
@@ -800,26 +766,27 @@ const cloudViewElementDefaults = {
   isZeroRadius: false,
 };
 export class CloudViewElement extends Record(cloudViewElementDefaults) implements ViewElement {
-  constructor(cloud: PbViewElement.Cloud) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof cloudViewElementDefaults) {
+    super(props);
+  }
+  static fromPb(cloud: PbViewElement.Cloud): CloudViewElement {
+    return new CloudViewElement({
       uid: cloud.getUid(),
       flowUid: cloud.getFlowUid(),
       x: cloud.getX(),
       y: cloud.getY(),
+      isZeroRadius: false,
     });
   }
-  static from(props: typeof cloudViewElementDefaults): CloudViewElement {
+  toPb(): PbViewElement.Cloud {
     const element = new PbViewElement.Cloud();
-    element.setUid(props.uid);
-    element.setFlowUid(props.flowUid);
-    element.setX(props.x);
-    element.setY(props.y);
-    const cloud = new CloudViewElement(element);
-    if (props.isZeroRadius) {
-      return cloud.set('isZeroRadius', true);
-    } else {
-      return cloud;
-    }
+    element.setUid(this.uid);
+    element.setFlowUid(this.flowUid);
+    element.setX(this.x);
+    element.setY(this.y);
+    return element;
   }
   get cx(): number {
     return this.x;
@@ -830,17 +797,9 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
   isNamed(): boolean {
     return false;
   }
+
   ident(): undefined {
     return undefined;
-  }
-
-  toPb(): PbViewElement.Cloud {
-    const element = new PbViewElement.Cloud();
-    element.setUid(this.uid);
-    element.setFlowUid(this.flowUid);
-    element.setX(this.x);
-    element.setY(this.y);
-    return element;
   }
 }
 
@@ -851,32 +810,37 @@ const stockFlowViewDefaults = {
   elements: List<ViewElement>(),
 };
 export class StockFlowView extends Record(stockFlowViewDefaults) {
-  constructor(view: PbView) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof stockFlowViewDefaults) {
+    super(props);
+  }
+  static fromPb(view: PbView): StockFlowView {
     let maxUid = -1;
     const elements = List(
       view.getElementsList().map((element) => {
         let e: ViewElement;
         switch (element.getElementCase()) {
           case PbViewElement.ElementCase.AUX:
-            e = new AuxViewElement(defined(element.getAux()));
+            e = AuxViewElement.fromPb(defined(element.getAux()));
             break;
           case PbViewElement.ElementCase.STOCK:
-            e = new StockViewElement(defined(element.getStock()));
+            e = StockViewElement.fromPb(defined(element.getStock()));
             break;
           case PbViewElement.ElementCase.FLOW:
-            e = new FlowViewElement(defined(element.getFlow()));
+            e = FlowViewElement.fromPb(defined(element.getFlow()));
             break;
           case PbViewElement.ElementCase.LINK:
-            e = new LinkViewElement(defined(element.getLink()));
+            e = LinkViewElement.fromPb(defined(element.getLink()));
             break;
           case PbViewElement.ElementCase.MODULE:
-            e = new ModuleViewElement(defined(element.getModule()));
+            e = ModuleViewElement.fromPb(defined(element.getModule()));
             break;
           case PbViewElement.ElementCase.ALIAS:
-            e = new AliasViewElement(defined(element.getAlias()));
+            e = AliasViewElement.fromPb(defined(element.getAlias()));
             break;
           case PbViewElement.ElementCase.CLOUD:
-            e = new CloudViewElement(defined(element.getCloud()));
+            e = CloudViewElement.fromPb(defined(element.getCloud()));
             break;
           default:
             throw new Error('invariant broken: protobuf variable with empty oneof');
@@ -890,17 +854,14 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
     if (nextUid === 0) {
       nextUid = 1;
     }
-    super({
+    return new StockFlowView({
       elements,
       nextUid,
     });
   }
-
   toPb(): PbView {
     const view = new PbView();
-
     view.setKind(PbView.ViewType.STOCK_FLOW);
-
     const elements = this.elements
       .map((element) => {
         const e = new PbViewElement();
@@ -959,8 +920,13 @@ const modelDefaults = {
   views: List<StockFlowView>(),
 };
 export class Model extends Record(modelDefaults) {
-  constructor(model: PbModel) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof modelDefaults) {
+    super(props);
+  }
+  static fromPb(model: PbModel): Model {
+    return new Model({
       name: model.getName(),
       variables: Map(
         model
@@ -985,7 +951,7 @@ export class Model extends Record(modelDefaults) {
         model.getViewsList().map((view) => {
           switch (view.getKind()) {
             case PbView.ViewType.STOCK_FLOW:
-              return new StockFlowView(view);
+              return StockFlowView.fromPb(view);
             default:
               throw new Error('invariant broken: protobuf view with unknown kind');
           }
@@ -996,15 +962,29 @@ export class Model extends Record(modelDefaults) {
 }
 
 const dtDefaults = {
-  dt: -1,
+  value: 1,
   isReciprocal: false,
 };
 export class Dt extends Record(dtDefaults) {
-  constructor(dt: PbDt) {
-    super({
-      dt: dt.getValue(),
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof dtDefaults) {
+    super(props);
+  }
+  static fromPb(dt: PbDt): Dt {
+    return new Dt({
+      value: dt.getValue(),
       isReciprocal: dt.getIsReciprocal(),
     });
+  }
+  toPb(): PbDt {
+    const dt = new PbDt();
+    dt.setValue(this.value);
+    dt.setIsReciprocal(this.isReciprocal);
+    return dt;
+  }
+  static default(): Dt {
+    return new Dt(dtDefaults);
   }
 }
 
@@ -1022,35 +1002,32 @@ function getSimMethod(method: PbSimMethodMap[keyof PbSimMethodMap]): SimMethod {
 }
 
 const simSpecsDefaults = {
-  start: -1,
-  stop: -1,
-  dt: new Dt(new PbDt()),
+  start: 0,
+  stop: 10,
+  dt: Dt.default(),
   saveStep: undefined as Dt | undefined,
   simMethod: 'euler' as SimMethod,
   timeUnits: undefined as string | undefined,
 };
 export class SimSpecs extends Record(simSpecsDefaults) {
-  constructor(simSpecs: PbSimSpecs) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof simSpecsDefaults) {
+    super(props);
+  }
+  static fromPb(simSpecs: PbSimSpecs): SimSpecs {
     const saveStep = simSpecs.getSaveStep();
-    super({
+    return new SimSpecs({
       start: simSpecs.getStart(),
       stop: simSpecs.getStop(),
-      dt: new Dt(defined(simSpecs.getDt())),
-      saveStep: saveStep ? new Dt(saveStep) : undefined,
+      dt: Dt.fromPb(defined(simSpecs.getDt())),
+      saveStep: saveStep ? Dt.fromPb(saveStep) : undefined,
       simMethod: getSimMethod(simSpecs.getSimMethod()),
       timeUnits: simSpecs.getTimeUnits(),
     });
   }
-
   static default(): SimSpecs {
-    const dt = new PbDt();
-    dt.setValue(1);
-    const specs = new PbSimSpecs();
-    specs.setStart(0);
-    specs.setStop(10);
-    specs.setDt(dt);
-    specs.setSimMethod(PbSimMethod.EULER);
-    return new SimSpecs(specs);
+    return new SimSpecs(simSpecsDefaults);
   }
 }
 
@@ -1060,16 +1037,20 @@ const projectDefaults = {
   models: Map<string, Model>(),
 };
 export class Project extends Record(projectDefaults) {
-  constructor(project: PbProject) {
-    super({
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof projectDefaults) {
+    super(props);
+  }
+  static fromPb(project: PbProject): Project {
+    return new Project({
       name: project.getName(),
-      simSpecs: new SimSpecs(defined(project.getSimSpecs())),
-      models: Map(project.getModelsList().map((model) => [model.getName(), new Model(model)])),
+      simSpecs: SimSpecs.fromPb(defined(project.getSimSpecs())),
+      models: Map(project.getModelsList().map((model) => [model.getName(), Model.fromPb(model)])),
     });
   }
-
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {
     const project = PbProject.deserializeBinary(serializedPb as Uint8Array);
-    return new Project(project);
+    return Project.fromPb(project);
   }
 }

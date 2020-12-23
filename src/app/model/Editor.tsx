@@ -485,7 +485,7 @@ export const Editor = withStyles(styles)(
             return pt;
           }
 
-          const cloud = CloudViewElement.from({
+          const cloud = new CloudViewElement({
             uid: nextUid++,
             x: pt.x,
             y: pt.y,
@@ -577,7 +577,7 @@ export const Editor = withStyles(styles)(
           });
         } else {
           newCloud = true;
-          to = CloudViewElement.from({
+          to = new CloudViewElement({
             uid: nextUid++,
             x: oldTo.cx - cursorMoveDelta.x,
             y: oldTo.cy - cursorMoveDelta.y,
@@ -636,7 +636,7 @@ export const Editor = withStyles(styles)(
         const firstPt = defined(flow.points.first());
         const sourceUid = firstPt.attachedToUid;
         if (sourceUid === inCreationCloudUid) {
-          const newCloud = CloudViewElement.from({
+          const newCloud = new CloudViewElement({
             uid: nextUid++,
             x: firstPt.x,
             y: firstPt.y,
@@ -669,7 +669,7 @@ export const Editor = withStyles(styles)(
               y: 0,
             };
           } else {
-            to = CloudViewElement.from({
+            to = new CloudViewElement({
               uid: nextUid++,
               x: lastPt.x,
               y: lastPt.y,
@@ -1004,11 +1004,7 @@ export const Editor = withStyles(styles)(
       }
 
       const simSpec = project.simSpecs;
-
-      let dt = simSpec.dt.dt;
-      if (simSpec.dt.isReciprocal) {
-        dt = 1 / dt;
-      }
+      const dt = simSpec.dt.isReciprocal ? 1 / simSpec.dt.value : simSpec.dt.value;
 
       return (
         <ModelPropertiesDrawer
