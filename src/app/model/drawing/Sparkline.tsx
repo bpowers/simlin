@@ -4,9 +4,13 @@
 
 import * as React from 'react';
 
+import { List } from 'immutable';
+
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { Series } from '../../common';
+import { brewer } from 'chroma-js';
+
+import { defined, Series } from '../../common';
 
 const styles = createStyles({
   sparkline: {
@@ -58,7 +62,7 @@ function max(arr: Readonly<Float64Array>): number {
 }
 
 interface SparklineProps extends WithStyles<typeof styles> {
-  series: Series;
+  series: List<Series>;
   width: number;
   height: number;
 }
@@ -67,7 +71,7 @@ export const Sparkline = withStyles(styles)(
   class Sparkline extends React.PureComponent<SparklineProps> {
     render() {
       const { classes } = this.props;
-      const { time, values } = this.props.series;
+      const time = defined(this.props.series.get(0)).time;
       const x = 0;
       const y = 0;
       const w = this.props.width;
@@ -76,23 +80,42 @@ export const Sparkline = withStyles(styles)(
       const xMin = time[0];
       const xMax = last(time);
       const xSpan = xMax - xMin;
-      const yMin = Math.min(0, min(values)); // 0 or below 0
-      const yMax = max(values);
-      const ySpan = yMax - yMin || 1;
-      let p = '';
-      for (let i = 0; i < values.length; i++) {
-        if (isNaN(values[i])) {
-          console.log(`NaN at ${time[i]}`);
-        }
-        const prefix = i === 0 ? 'M' : 'L';
-        p += `${prefix}${x + (w * (time[i] - xMin)) / xSpan},${y + h - (h * (values[i] - yMin)) / ySpan}`;
+
+      let yMin = 0;
+      let yMax = -Infinity;
+      // first build up the min + max across all datasets
+      for (const dataset of this.props.series) {
+        const values = dataset.values;
+        yMin = Math.min(yMin, min(values)); // 0 or below 0
+        yMax = Math.max(yMax, max(values));
       }
+      const ySpan = yMax - yMin || 1;
+
+      const colors = brewer.Dark2;
+      const sparklines = [];
+      let i = 0;
+      for (const dataset of this.props.series) {
+        const values = dataset.values;
+        let p = '';
+        for (let i = 0; i < values.length; i++) {
+          if (isNaN(values[i])) {
+            // console.log(`NaN at ${time[i]}`);
+            continue;
+          }
+          const prefix = i === 0 ? 'M' : 'L';
+          p += `${prefix}${x + (w * (time[i] - xMin)) / xSpan},${y + h - (h * (values[i] - yMin)) / ySpan}`;
+        }
+        const style = this.props.series.size === 1 ? undefined : { stroke: colors[i % colors.length] };
+        sparklines.push(<path key={dataset.name} d={p} className={classes.sparkline} style={style} />);
+        i++;
+      }
+
       const pAxis = `M${x},${y + h - (h * (0 - yMin)) / ySpan}L${x + w},${y + h - (h * (0 - yMin)) / ySpan}`;
 
       return (
         <g>
-          <path d={pAxis} className={classes.axis} />
-          <path d={p} className={classes.sparkline} />
+          <path key="$axis" d={pAxis} className={classes.axis} />
+          {sparklines}
         </g>
       );
     }

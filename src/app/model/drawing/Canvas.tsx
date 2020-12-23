@@ -357,7 +357,7 @@ export const Canvas = withStyles(styles)(
       // FIXME
       const variableErrors = 0; // this.props.model.vars.get(element.ident())?.errors.size || 0;
       const isSelected = this.isSelected(element);
-      const series = this.props.data.get(element.ident());
+      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
       const props: AuxProps = {
         element,
         series,
@@ -381,7 +381,7 @@ export const Canvas = withStyles(styles)(
       }
       const variableErrors = 0; // this.props.model.vars.get(element.ident())?.errors.size || 0;
       const isSelected = this.isSelected(element);
-      const series = this.props.data.get(element.ident());
+      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
       const props: StockProps = {
         element,
         series,
@@ -472,12 +472,11 @@ export const Canvas = withStyles(styles)(
     }
 
     private flow = (element: FlowViewElement) => {
-      const ident = element.ident();
       // FIXME
       const variableErrors = 0; // this.props.model.vars.get(ident)?.errors.size || 0;
       const { isMovingArrow } = this.state;
       const isSelected = this.isSelected(element);
-      const data = this.props.data.get(ident);
+      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
 
       if (element.points.size < 2) {
         return;
@@ -505,7 +504,7 @@ export const Canvas = withStyles(styles)(
         <Flow
           key={element.uid}
           element={element}
-          series={data}
+          series={series}
           source={source}
           sink={sink}
           isSelected={isSelected}

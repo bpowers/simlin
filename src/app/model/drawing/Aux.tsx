@@ -1,8 +1,10 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2020 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
+
+import { List } from 'immutable';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
@@ -52,7 +54,7 @@ export interface AuxPropsFull extends WithStyles<typeof styles> {
   isEditingName: boolean;
   isValidTarget?: boolean;
   hasWarning?: boolean;
-  series: Series | undefined;
+  series: List<Series> | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: AuxViewElement;
@@ -126,13 +128,15 @@ export const Aux = withStyles(styles)(
       return <circle className={classes.indicator} cx={cx} cy={cy} r={3} />;
     }
 
-    sparkline(series: Series | undefined) {
-      if (!series) {
+    sparkline(series: List<Series> | undefined) {
+      if (!series || series.isEmpty()) {
         return undefined;
       }
       const { element } = this.props;
-      const cx = element.cx;
-      const cy = element.cy;
+      const isArrayed = element.var?.isArrayed || false;
+      const arrayedOffset = isArrayed ? 3 : 0;
+      const cx = element.cx - arrayedOffset;
+      const cy = element.cy - arrayedOffset;
       const r = this.radius();
 
       return (

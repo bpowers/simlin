@@ -14,6 +14,8 @@ import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 import { Button, Card, CardActions, CardContent, Tab, Tabs } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
+import { brewer } from 'chroma-js';
+
 import {
   StockViewElement,
   ViewElement,
@@ -27,8 +29,6 @@ import { defined, Series } from '../common';
 import { ScalarEquation } from '../datamodel';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { LookupEditor } from './LookupEditor';
-
-import { brewer } from 'chroma-js';
 
 const styles = createStyles({
   card: {

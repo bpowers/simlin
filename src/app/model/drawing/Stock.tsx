@@ -4,6 +4,8 @@
 
 import * as React from 'react';
 
+import { List } from 'immutable';
+
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { StockViewElement, ViewElement } from '../../datamodel';
@@ -59,7 +61,7 @@ interface StockPropsFull extends WithStyles<typeof styles> {
   isEditingName: boolean;
   isValidTarget?: boolean;
   hasWarning?: boolean;
-  series: Series | undefined;
+  series: List<Series> | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: StockViewElement;
@@ -140,13 +142,15 @@ export const Stock = withStyles(styles)(
       return <circle className={classes.indicator} cx={cx} cy={cy} r={3} />;
     }
 
-    sparkline(series: Series | undefined) {
-      if (!series) {
+    sparkline(series: List<Series> | undefined) {
+      if (!series || series.isEmpty()) {
         return undefined;
       }
       const { element } = this.props;
-      const cx = element.cx;
-      const cy = element.cy;
+      const isArrayed = element.var?.isArrayed || false;
+      const arrayedOffset = isArrayed ? 3 : 0;
+      const cx = element.cx - arrayedOffset;
+      const cy = element.cy - arrayedOffset;
       const w = StockWidth;
       const h = StockHeight;
 

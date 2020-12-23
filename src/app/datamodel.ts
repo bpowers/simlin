@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import { defined } from './common';
+import { defined, Series } from './common';
 
 import { List, Map, Record } from 'immutable';
 
@@ -1092,5 +1092,30 @@ export class Project extends Record(projectDefaults) {
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {
     const project = PbProject.deserializeBinary(serializedPb as Uint8Array);
     return Project.fromPb(project);
+  }
+  getSeries(data: Map<string, Series>, modelName: string, ident: string): List<Series> | undefined {
+    const v = this.models.get(modelName)?.variables?.get(ident);
+    if (!v) {
+      return;
+    }
+    if (data.has(v.ident)) {
+      return List([defined(data.get(v.ident))]);
+    }
+    if (!v.isArrayed) {
+      return;
+    }
+    const eqn = defined(v.equation);
+    if (!(eqn instanceof ApplyToAllEquation || eqn instanceof ArrayedEquation)) {
+      return;
+    }
+    const dimNames = eqn.dimensionNames;
+    if (dimNames.size !== 1) {
+      return;
+    }
+    const dim = defined(this.dimensions.get(defined(dimNames.get(0))));
+    return dim.subscripts
+      .map((element) => data.get(`${ident}[${element}]`))
+      .filter((data) => data !== undefined)
+      .map((data) => defined(data));
   }
 }
