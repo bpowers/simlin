@@ -12,8 +12,6 @@ import { displayName, mergeBounds, Point, Rect } from './common';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
-import { Stock as StockVar } from '../../datamodel';
-
 import { defined, Series } from '../../common';
 
 const styles = createStyles({
@@ -57,7 +55,6 @@ export const StockWidth = 45;
 export const StockHeight = 35;
 
 interface StockPropsFull extends WithStyles<typeof styles> {
-  stock: StockVar;
   isSelected: boolean;
   isEditingName: boolean;
   isValidTarget?: boolean;
@@ -70,15 +67,7 @@ interface StockPropsFull extends WithStyles<typeof styles> {
 
 export type StockProps = Pick<
   StockPropsFull,
-  | 'stock'
-  | 'element'
-  | 'series'
-  | 'isSelected'
-  | 'isValidTarget'
-  | 'isEditingName'
-  | 'hasWarning'
-  | 'onSelection'
-  | 'onLabelDrag'
+  'element' | 'series' | 'isSelected' | 'isValidTarget' | 'isEditingName' | 'hasWarning' | 'onSelection' | 'onLabelDrag'
 >;
 
 export function stockContains(element: ViewElement, point: Point): boolean {
@@ -177,7 +166,7 @@ export const Stock = withStyles(styles)(
 
       const series = this.props.series;
 
-      const isArrayed = this.props.stock.isArrayed;
+      const isArrayed = element.var?.isArrayed || false;
       const arrayedOffset = isArrayed ? 3 : 0;
 
       const side = element.labelSide;

@@ -148,6 +148,9 @@ export const Aux = withStyles(styles)(
       const cy = element.cy;
       const r = this.radius();
 
+      const isArrayed = element.var?.isArrayed || false;
+      const arrayedOffset = isArrayed ? 3 : 0;
+
       const side = element.labelSide;
       const label = isEditingName ? undefined : (
         <Label
@@ -155,6 +158,8 @@ export const Aux = withStyles(styles)(
           cx={cx}
           cy={cy}
           side={side}
+          rw={r + arrayedOffset}
+          rh={r + arrayedOffset}
           text={displayName(defined(element.name))}
           onSelection={this.handleLabelSelection}
           onLabelDrag={this.props.onLabelDrag}
@@ -169,9 +174,18 @@ export const Aux = withStyles(styles)(
         groupClassName = isValidTarget ? classes.targetGood : classes.targetBad;
       }
 
+      let circles = [<circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />];
+      if (isArrayed) {
+        circles = [
+          <circle key="0" className={classes.aux} cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+          <circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />,
+          <circle key="2" className={classes.aux} cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+        ];
+      }
+
       return (
         <g className={groupClassName} onPointerDown={this.handlePointerDown}>
-          <circle className={classes.aux} cx={cx} cy={cy} r={r} />
+          {circles}
           {sparkline}
           {indicator}
           {label}

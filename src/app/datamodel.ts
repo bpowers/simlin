@@ -411,6 +411,7 @@ export interface ViewElement {
 const auxViewElementDefaults = {
   uid: -1,
   name: '',
+  var: undefined as Aux | undefined,
   x: -1,
   y: -1,
   labelSide: 'right' as LabelSide,
@@ -422,10 +423,11 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
   constructor(props: typeof auxViewElementDefaults) {
     super(props);
   }
-  static fromPb(aux: PbViewElement.Aux): AuxViewElement {
+  static fromPb(aux: PbViewElement.Aux, auxVar?: Variable | undefined): AuxViewElement {
     return new AuxViewElement({
       uid: aux.getUid(),
       name: aux.getName(),
+      var: auxVar instanceof Aux ? auxVar : undefined,
       x: aux.getX(),
       y: aux.getY(),
       labelSide: getLabelSide(aux.getLabelSide()),
@@ -458,6 +460,7 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
 const stockViewElementDefaults = {
   uid: -1,
   name: '',
+  var: undefined as Stock | undefined,
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
@@ -469,10 +472,11 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
   constructor(props: typeof stockViewElementDefaults) {
     super(props);
   }
-  static fromPb(stock: PbViewElement.Stock): StockViewElement {
+  static fromPb(stock: PbViewElement.Stock, stockVar?: Variable): StockViewElement {
     return new StockViewElement({
       uid: stock.getUid(),
       name: stock.getName(),
+      var: stockVar instanceof Stock ? stockVar : undefined,
       x: stock.getX(),
       y: stock.getY(),
       labelSide: getLabelSide(stock.getLabelSide()),
@@ -535,6 +539,7 @@ export class Point extends Record(pointDefaults) {
 const flowViewElementDefaults = {
   uid: -1,
   name: '',
+  var: undefined as Flow | undefined,
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
@@ -546,10 +551,11 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   constructor(props: typeof flowViewElementDefaults) {
     super(props);
   }
-  static fromPb(flow: PbViewElement.Flow): FlowViewElement {
+  static fromPb(flow: PbViewElement.Flow, flowVar?: Variable): FlowViewElement {
     return new FlowViewElement({
       uid: flow.getUid(),
       name: flow.getName(),
+      var: flowVar instanceof Flow ? flowVar : undefined,
       x: flow.getX(),
       y: flow.getY(),
       labelSide: getLabelSide(flow.getLabelSide()),
@@ -667,6 +673,7 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
 const moduleViewElementDefaults = {
   uid: -1,
   name: '',
+  var: undefined as Module | undefined,
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
@@ -678,10 +685,11 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
   constructor(props: typeof moduleViewElementDefaults) {
     super(props);
   }
-  static fromPb(module: PbViewElement.Module): ModuleViewElement {
+  static fromPb(module: PbViewElement.Module, moduleVar?: Variable): ModuleViewElement {
     return new ModuleViewElement({
       uid: module.getUid(),
       name: module.getName(),
+      var: moduleVar instanceof Module ? moduleVar : undefined,
       x: module.getX(),
       y: module.getY(),
       labelSide: getLabelSide(module.getLabelSide()),
@@ -815,26 +823,30 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
   constructor(props: typeof stockFlowViewDefaults) {
     super(props);
   }
-  static fromPb(view: PbView): StockFlowView {
+  static fromPb(view: PbView, variables: Map<string, Variable>): StockFlowView {
     let maxUid = -1;
     const elements = List(
       view.getElementsList().map((element) => {
         let e: ViewElement;
         switch (element.getElementCase()) {
           case PbViewElement.ElementCase.AUX:
-            e = AuxViewElement.fromPb(defined(element.getAux()));
+            const aux = defined(element.getAux());
+            e = AuxViewElement.fromPb(aux, variables.get(canonicalize(aux.getName())));
             break;
           case PbViewElement.ElementCase.STOCK:
-            e = StockViewElement.fromPb(defined(element.getStock()));
+            const stock = defined(element.getStock());
+            e = StockViewElement.fromPb(stock, variables.get(canonicalize(stock.getName())));
             break;
           case PbViewElement.ElementCase.FLOW:
-            e = FlowViewElement.fromPb(defined(element.getFlow()));
+            const flow = defined(element.getFlow());
+            e = FlowViewElement.fromPb(flow, variables.get(canonicalize(flow.getName())));
             break;
           case PbViewElement.ElementCase.LINK:
             e = LinkViewElement.fromPb(defined(element.getLink()));
             break;
           case PbViewElement.ElementCase.MODULE:
-            e = ModuleViewElement.fromPb(defined(element.getModule()));
+            const module = defined(element.getModule());
+            e = ModuleViewElement.fromPb(module, variables.get(canonicalize(module.getName())));
             break;
           case PbViewElement.ElementCase.ALIAS:
             e = AliasViewElement.fromPb(defined(element.getAlias()));
@@ -926,32 +938,33 @@ export class Model extends Record(modelDefaults) {
     super(props);
   }
   static fromPb(model: PbModel): Model {
+    const variables = Map(
+      model
+        .getVariablesList()
+        .map((v: PbVariable) => {
+          switch (v.getVCase()) {
+            case PbVariable.VCase.STOCK:
+              return Stock.fromPb(defined(v.getStock())) as Variable;
+            case PbVariable.VCase.FLOW:
+              return Flow.fromPb(defined(v.getFlow())) as Variable;
+            case PbVariable.VCase.AUX:
+              return Aux.fromPb(defined(v.getAux())) as Variable;
+            case PbVariable.VCase.MODULE:
+              return Module.fromPb(defined(v.getModule())) as Variable;
+            default:
+              throw new Error('invariant broken: protobuf variable with empty oneof');
+          }
+        })
+        .map((v: Variable) => [v.ident, v]),
+    );
     return new Model({
       name: model.getName(),
-      variables: Map(
-        model
-          .getVariablesList()
-          .map((v: PbVariable) => {
-            switch (v.getVCase()) {
-              case PbVariable.VCase.STOCK:
-                return Stock.fromPb(defined(v.getStock())) as Variable;
-              case PbVariable.VCase.FLOW:
-                return Flow.fromPb(defined(v.getFlow())) as Variable;
-              case PbVariable.VCase.AUX:
-                return Aux.fromPb(defined(v.getAux())) as Variable;
-              case PbVariable.VCase.MODULE:
-                return Module.fromPb(defined(v.getModule())) as Variable;
-              default:
-                throw new Error('invariant broken: protobuf variable with empty oneof');
-            }
-          })
-          .map((v: Variable) => [v.ident, v]),
-      ),
+      variables,
       views: List(
         model.getViewsList().map((view) => {
           switch (view.getKind()) {
             case PbView.ViewType.STOCK_FLOW:
-              return StockFlowView.fromPb(view);
+              return StockFlowView.fromPb(view, variables);
             default:
               throw new Error('invariant broken: protobuf view with unknown kind');
           }

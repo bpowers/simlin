@@ -484,6 +484,9 @@ export const Flow = withStyles(styles)(
     render() {
       const { classes, element, isEditingName, isMovingArrow, isSelected, isValidTarget, series, sink } = this.props;
 
+      const isArrayed = element.var?.isArrayed || false;
+      const arrayedOffset = isArrayed ? 3 : 0;
+
       let pts = this.props.element.points;
       if (pts.size < 2) {
         throw new Error('expected at least two points on a flow');
@@ -550,6 +553,8 @@ export const Flow = withStyles(styles)(
           cx={cx}
           cy={cy}
           side={side}
+          rw={r + arrayedOffset}
+          rh={r + arrayedOffset}
           text={displayName(defined(element.name))}
           onSelection={this.handleLabelSelection}
           onLabelDrag={this.props.onLabelDrag}
@@ -562,6 +567,15 @@ export const Flow = withStyles(styles)(
       let groupClassName = isSelected ? classes.selected : undefined;
       if (isValidTarget !== undefined) {
         groupClassName = isValidTarget ? classes.targetGood : classes.targetBad;
+      }
+
+      let circles = [<circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />];
+      if (isArrayed) {
+        circles = [
+          <circle key="0" className={classes.aux} cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+          <circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />,
+          <circle key="2" className={classes.aux} cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+        ];
       }
 
       return (
@@ -582,7 +596,7 @@ export const Flow = withStyles(styles)(
           />
           <path d={spath} className={classes.flowInner} />
           <g onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
-            <circle className={classes.aux} cx={cx} cy={cy} r={r} />
+            {circles}
             {sparkline}
           </g>
           {indicator}

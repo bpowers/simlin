@@ -48,6 +48,7 @@ export const fauxCloudTargetUid = -5;
 const fauxTarget = new AuxViewElement({
   name: '$·model-internal-faux-target',
   uid: fauxTargetUid,
+  var: undefined,
   x: 0,
   y: 0,
   labelSide: 'right' as LabelSide,
@@ -382,7 +383,6 @@ export const Canvas = withStyles(styles)(
       const isSelected = this.isSelected(element);
       const series = this.props.data.get(element.ident());
       const props: StockProps = {
-        stock: modelVar,
         element,
         series,
         isSelected,
@@ -868,6 +868,7 @@ export const Canvas = withStyles(styles)(
         if (selectedTool === 'aux') {
           inCreation = new AuxViewElement({
             uid: inCreationUid,
+            var: undefined,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
             name: 'New Variable',
@@ -877,6 +878,7 @@ export const Canvas = withStyles(styles)(
         } else {
           inCreation = new StockViewElement({
             uid: inCreationUid,
+            var: undefined,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
             name: 'New Stock',
@@ -910,6 +912,7 @@ export const Canvas = withStyles(styles)(
 
         const inCreation = new FlowViewElement({
           uid: inCreationUid,
+          var: undefined,
           name: 'New Flow',
           x,
           y,
@@ -1036,6 +1039,7 @@ export const Canvas = withStyles(styles)(
         });
         inCreation = new FlowViewElement({
           uid: inCreationUid,
+          var: undefined,
           name: 'New Flow',
           x: element.cx,
           y: element.cy,
