@@ -11,6 +11,9 @@ use system_dynamics_engine::common::{canonicalize, Result};
 use system_dynamics_engine::datamodel;
 use system_dynamics_engine::datamodel::{Equation, ViewElement};
 
+const STOCK_WIDTH: f64 = 45.0;
+const STOCK_HEIGHT: f64 = 35.0;
+
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
         use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
@@ -609,6 +612,7 @@ pub enum ViewType {
 
 pub mod view_element {
     use super::datamodel;
+    use crate::xmile::{STOCK_HEIGHT, STOCK_WIDTH};
     use serde::{Deserialize, Serialize};
     use system_dynamics_engine::datamodel::view_element::LinkShape;
 
@@ -766,6 +770,21 @@ pub mod view_element {
         pub height: Option<f64>,
         pub label_side: Option<LabelSide>,
         pub label_angle: Option<f64>,
+    }
+
+    impl Stock {
+        pub fn is_right(&self, pt: &Point) -> bool {
+            pt.x > self.x + STOCK_WIDTH / 2.0 && (pt.y - self.y).abs() < STOCK_HEIGHT / 2.0
+        }
+        pub fn is_left(&self, pt: &Point) -> bool {
+            pt.x < self.x + STOCK_WIDTH / 2.0 && (pt.y - self.y).abs() < STOCK_HEIGHT / 2.0
+        }
+        pub fn is_above(&self, pt: &Point) -> bool {
+            pt.y < self.y + STOCK_HEIGHT / 2.0 && (pt.x - self.x).abs() < STOCK_WIDTH / 2.0
+        }
+        pub fn is_below(&self, pt: &Point) -> bool {
+            pt.y > self.y + STOCK_HEIGHT / 2.0 && (pt.x - self.x).abs() < STOCK_WIDTH / 2.0
+        }
     }
 
     impl From<Stock> for datamodel::view_element::Stock {
@@ -1544,12 +1563,63 @@ impl View {
         self.objects.append(&mut clouds);
     }
 
+    fn fixup_flow_takeoffs(&mut self) {
+        let stocks: HashMap<_, _> = self
+            .objects
+            .iter()
+            .filter(|vo| matches!(vo, ViewObject::Stock(_)))
+            .cloned()
+            .map(|vo| (vo.uid().unwrap(), vo))
+            .collect();
+        let maybe_fixup_takeoff = |pt1: &mut view_element::Point, pt2: &view_element::Point| {
+            if let Some(source_uid) = pt1.uid {
+                if let Some(ViewObject::Stock(stock)) = stocks.get(&source_uid) {
+                    if stock.is_right(pt2) {
+                        pt1.x = stock.x + STOCK_WIDTH / 2.0;
+                    } else if stock.is_left(pt2) {
+                        pt1.x = stock.x - STOCK_WIDTH / 2.0;
+                    } else if stock.is_above(pt2) {
+                        pt1.y = stock.y - STOCK_HEIGHT / 2.0;
+                    } else if stock.is_below(pt2) {
+                        pt1.y = stock.y + STOCK_HEIGHT / 2.0;
+                    }
+                }
+            }
+        };
+
+        for view_object in self.objects.iter_mut() {
+            if let ViewObject::Flow(flow) = view_object {
+                if flow.points.is_none() || flow.points.as_ref().unwrap().points.len() != 2 {
+                    continue;
+                }
+                let source_point = flow
+                    .points
+                    .as_ref()
+                    .unwrap()
+                    .points
+                    .first()
+                    .unwrap()
+                    .clone();
+                let sink_point = flow.points.as_ref().unwrap().points.last().unwrap().clone();
+                maybe_fixup_takeoff(
+                    flow.points.as_mut().unwrap().points.first_mut().unwrap(),
+                    &sink_point,
+                );
+                maybe_fixup_takeoff(
+                    flow.points.as_mut().unwrap().points.last_mut().unwrap(),
+                    &source_point,
+                );
+            }
+        }
+    }
+
     fn normalize(&mut self, model: &Model) {
         if self.kind.unwrap_or(ViewType::StockFlow) != ViewType::StockFlow {
             return;
         }
         let uid_map = self.assign_uids();
         self.fixup_clouds(model, &uid_map);
+        self.fixup_flow_takeoffs();
     }
 }
 

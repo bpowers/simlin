@@ -88,9 +88,7 @@ function isAdjacent(
   side: 'left' | 'right' | 'top' | 'bottom',
 ): boolean {
   // want to look at first point and last point.
-  const points = flow.points.filter((_, i) => {
-    return i === 0 || i === flow.points.size - 1;
-  });
+  const points = List([defined(flow.points.first()), defined(flow.points.last())]);
 
   for (const point of points) {
     if (side === 'left' && eq(point.x, stockEl.cx - StockWidth / 2)) {
