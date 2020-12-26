@@ -322,12 +322,10 @@ pub struct Project {
 }
 
 impl Project {
+    pub fn get_model(&self, model_name: &str) -> Option<&Model> {
+        self.models.iter().find(|m| m.name == model_name)
+    }
     pub fn get_model_mut(&mut self, model_name: &str) -> Option<&mut Model> {
-        for model in self.models.iter_mut() {
-            if model.name == model_name {
-                return Some(model);
-            }
-        }
-        None
+        self.models.iter_mut().find(|m| m.name == model_name)
     }
 }

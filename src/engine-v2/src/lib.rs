@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 
 use wasm_bindgen::prelude::*;
 
-use js_sys::Array;
+use js_sys::{Array, Map};
 use prost::Message;
 
 use system_dynamics_engine as engine;
@@ -114,6 +114,40 @@ impl Engine {
     #[wasm_bindgen(js_name = isSimulatable)]
     pub fn is_simulatable(&self) -> bool {
         self.sim.is_some()
+    }
+
+    #[wasm_bindgen(js_name = getModelVariableErrors, typescript_type = "Map<string, EquationError>")]
+    pub fn get_model_variable_errors(&self, model_name: &str) -> JsValue {
+        let model = &self.project.models.get(model_name).unwrap();
+
+        let mut result = Map::new();
+        for (ident, var) in model.variables.iter() {
+            let errors = var.errors();
+            if errors.is_none() {
+                continue;
+            }
+            let js_errors: Array = errors.unwrap().iter().cloned().map(JsValue::from).collect();
+            result = result.set(&JsValue::from(ident.as_str()), &js_errors)
+        }
+
+        result.into()
+    }
+
+    #[wasm_bindgen(js_name = getModelErrors, typescript_type = "Array<Error> | undefined")]
+    pub fn get_model_errors(&self, model_name: &str) -> Array {
+        let model = &self.project.models.get(model_name).unwrap();
+
+        if model.errors.is_none() {
+            return Array::new();
+        }
+        model
+            .errors
+            .as_ref()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(JsValue::from)
+            .collect()
     }
 
     // model control
@@ -343,6 +377,8 @@ impl Engine {
                 return None;
             }
         }
+
+        // TODO: update ASTs of variables that referred to the old equation
 
         self.project = project.into();
         self.instantiate_sim();
