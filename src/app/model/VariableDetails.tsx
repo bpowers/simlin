@@ -169,7 +169,6 @@ export const VariableDetails = withStyles(styles)(
       let yMin = 0;
       let yMax = 0;
       const series: Array<any> = [];
-      debugger;
       if (data) {
         let i = 0;
         const colors = brewer.Dark2;
@@ -191,6 +190,7 @@ export const VariableDetails = withStyles(styles)(
           const colorOff = i % colors.length;
           lines.push(
             <Line
+              key={name}
               yAxisId="1"
               type="linear"
               dataKey={name}

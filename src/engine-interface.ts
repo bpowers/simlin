@@ -53,34 +53,44 @@ export interface Engine {
    */
   isSimulatable(): boolean;
   /**
-   * @param {string} _model_name
-   * @param {string} _kind
-   * @param {string} _name
-   * @returns {Error | undefined}
+   * @param {string} model_name
+   * @returns {any}
    */
-  addNewVariable(_model_name: string, _kind: string, _name: string): Error | undefined;
+  getModelVariableErrors(model_name: string): Map<string, Array<EquationError>>;
   /**
-   * @param {string} _model_name
-   * @param {string} _ident
-   * @returns {Error | undefined}
+   * @param {string} model_name
+   * @returns {Array<any>}
    */
-  deleteVariable(_model_name: string, _ident: string): Error | undefined;
+  getModelErrors(model_name: string): Array<Error>;
   /**
-   * @param {string} _model_name
-   * @param {string} _stock
-   * @param {string} _flow
-   * @param {string} _dir
+   * @param {string} model_name
+   * @param {string} kind
+   * @param {string} name
    * @returns {Error | undefined}
    */
-  addStocksFlow(_model_name: string, _stock: string, _flow: string, _dir: string): Error | undefined;
+  addNewVariable(model_name: string, kind: string, name: string): Error | undefined;
   /**
-   * @param {string} _model_name
-   * @param {string} _stock
-   * @param {string} _flow
-   * @param {string} _dir
+   * @param {string} model_name
+   * @param {string} ident
    * @returns {Error | undefined}
    */
-  removeStocksFlow(_model_name: string, _stock: string, _flow: string, _dir: string): Error | undefined;
+  deleteVariable(model_name: string, ident: string): Error | undefined;
+  /**
+   * @param {string} model_name
+   * @param {string} stock
+   * @param {string} flow
+   * @param {string} dir
+   * @returns {Error | undefined}
+   */
+  addStocksFlow(model_name: string, stock: string, flow: string, dir: string): Error | undefined;
+  /**
+   * @param {string} model_name
+   * @param {string} stock
+   * @param {string} flow
+   * @param {string} dir
+   * @returns {Error | undefined}
+   */
+  removeStocksFlow(model_name: string, stock: string, flow: string, dir: string): Error | undefined;
   /**
    * @param {string} model_name
    * @param {string} ident
@@ -89,25 +99,25 @@ export interface Engine {
    */
   setEquation(model_name: string, ident: string, new_equation: string): Error | undefined;
   /**
-   * @param {string} _model_name
-   * @param {string} _ident
-   * @param {Uint8Array} _gf
+   * @param {string} model_name
+   * @param {string} ident
+   * @param {Uint8Array} graphical_function_pb
    * @returns {Error | undefined}
    */
-  setGraphicalFunction(_model_name: string, _ident: string, _gf: Uint8Array): Error | undefined;
+  setGraphicalFunction(model_name: string, ident: string, graphical_function_pb: Uint8Array): Error | undefined;
   /**
-   * @param {string} _model_name
-   * @param {string} _ident
+   * @param {string} model_name
+   * @param {string} ident
    * @returns {Error | undefined}
    */
-  removeGraphicalFunction(_model_name: string, _ident: string): Error | undefined;
+  removeGraphicalFunction(model_name: string, ident: string): Error | undefined;
   /**
-   * @param {string} _model_name
-   * @param {string} _old_ident
-   * @param {string} _new_ident
+   * @param {string} model_name
+   * @param {string} old_name
+   * @param {string} new_name
    * @returns {Error | undefined}
    */
-  rename(_model_name: string, _old_ident: string, _new_ident: string): Error | undefined;
+  rename(model_name: string, old_name: string, new_name: string): Error | undefined;
   /**
    * @param {string} model_name
    * @param {number} view_off
@@ -148,6 +158,18 @@ export interface Error {
   kind: ErrorKind;
 }
 
+export interface EquationError {
+  free(): void;
+  /**
+   * @returns {number}
+   */
+  code: ErrorCode;
+  /**
+   * @returns {number}
+   */
+  location: number;
+}
+
 export enum ErrorCode {
   NoError,
   DoesNotExist,
@@ -179,6 +201,7 @@ export enum ErrorCode {
   ArrayReferenceNeedsExplicitSubscripts,
   DuplicateVariable,
   UnknownDependency,
+  VariablesHaveErrors,
 }
 
 export function errorCodeDescription(code: ErrorCode): string {
@@ -243,6 +266,8 @@ export function errorCodeDescription(code: ErrorCode): string {
       return 'Duplicate variable';
     case ErrorCode.UnknownDependency:
       return 'Equation refers to unknown variable';
+    case ErrorCode.VariablesHaveErrors:
+      return 'Variables have equation errors';
   }
 }
 

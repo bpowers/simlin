@@ -17,6 +17,7 @@ import { Engine as IEngine, errorCodeDescription } from '../../engine-interface'
 import {
   Project,
   Model,
+  Variable,
   UID,
   Stock as StockVar,
   ViewElement,
@@ -284,7 +285,7 @@ export const Editor = withStyles(styles)(
         }
       }
 
-      const activeProject = Project.deserializeBinary(serializedProject);
+      const activeProject = this.updateVariableErrors(Project.deserializeBinary(serializedProject));
 
       const priorHistory = this.state.projectHistory.slice();
 
@@ -370,12 +371,6 @@ export const Editor = withStyles(styles)(
 
       const projectBinary = toUint8Array(projectResponse.pb);
       const project = Project.deserializeBinary(projectBinary);
-      const engine = await this.openEngine(projectBinary);
-      if (!engine) {
-        return;
-      }
-
-      this.activeEngine = engine;
 
       // we don't call updateProject here because we don't want to
       // POST a new version up when we've just downloaded it.
@@ -385,6 +380,8 @@ export const Editor = withStyles(styles)(
         projectHistory: Stack([projectBinary]),
         projectOffset: 0,
       });
+
+      await this.openEngine(projectBinary, project);
 
       return project;
     }
@@ -1330,14 +1327,42 @@ export const Editor = withStyles(styles)(
       });
     };
 
-    async openEngine(serializedProject: Readonly<Uint8Array>): Promise<IEngine | undefined> {
+    updateVariableErrors(project: Project): Project {
+      const engine = this.engine();
+      if (!engine) {
+        return project;
+      }
+
+      const modelName = this.state.modelName;
+      const varErrors = engine.getModelVariableErrors(modelName);
+      if (varErrors.size > 0) {
+        for (const ident of varErrors.keys()) {
+          project = project.updateIn(
+            ['models', modelName, 'variables', ident],
+            (v: Variable): Variable => {
+              return v.set('hasError', true);
+            },
+          );
+        }
+      }
+
+      return project;
+    }
+
+    async openEngine(serializedProject: Readonly<Uint8Array>, project: Project): Promise<IEngine | undefined> {
+      this.activeEngine?.free();
+      this.activeEngine = undefined;
+
       const { open } = await import('../../engine-v2/pkg');
 
-      const engine = open(serializedProject as Uint8Array);
+      const engine: IEngine | undefined = open(serializedProject as Uint8Array);
       if (!engine) {
         this.appendModelError(`opening the project in the engine failed`);
         return;
       }
+      this.activeEngine = engine;
+
+      this.setState({ activeProject: this.updateVariableErrors(project) });
 
       return engine;
     }
@@ -1354,8 +1379,7 @@ export const Editor = withStyles(styles)(
 
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
-        this.activeEngine?.free();
-        this.activeEngine = await this.openEngine(serializedProject);
+        await this.openEngine(serializedProject, activeProject);
         this.scheduleSimRun();
         this.scheduleSave(serializedProject);
       });

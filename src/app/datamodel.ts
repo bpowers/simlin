@@ -223,6 +223,8 @@ export interface Variable {
   readonly equation: Equation | undefined;
   readonly gf: GraphicalFunction | undefined;
   readonly isArrayed: boolean;
+  readonly hasError: boolean;
+  set(prop: 'hasError', hasError: boolean): Variable;
 }
 
 const stockDefaults = {
@@ -233,6 +235,7 @@ const stockDefaults = {
   inflows: List<string>(),
   outflows: List<string>(),
   nonNegative: false,
+  hasError: false,
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -249,6 +252,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
       inflows: List(stock.getInflowsList()),
       outflows: List(stock.getOutflowsList()),
       nonNegative: stock.getNonNegative(),
+      hasError: false,
     });
   }
   get gf(): undefined {
@@ -266,6 +270,7 @@ const flowDefaults = {
   units: '',
   gf: undefined as GraphicalFunction | undefined,
   nonNegative: false,
+  hasError: false,
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -282,6 +287,7 @@ export class Flow extends Record(flowDefaults) implements Variable {
       units: flow.getUnits(),
       gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
       nonNegative: flow.getNonNegative(),
+      hasError: false,
     });
   }
   get isArrayed(): boolean {
@@ -295,6 +301,7 @@ const auxDefaults = {
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
+  hasError: false,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -310,6 +317,7 @@ export class Aux extends Record(auxDefaults) implements Variable {
       documentation: aux.getDocumentation(),
       units: aux.getUnits(),
       gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
+      hasError: false,
     });
   }
   get isArrayed(): boolean {
@@ -336,6 +344,7 @@ const moduleDefaults = {
   documentation: '',
   units: '',
   references: List<ModuleReference>(),
+  hasError: false,
 };
 export class Module extends Record(moduleDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -350,6 +359,7 @@ export class Module extends Record(moduleDefaults) implements Variable {
       documentation: module.getDocumentation(),
       units: module.getUnits(),
       references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
+      hasError: false,
     });
   }
   get equation(): undefined {

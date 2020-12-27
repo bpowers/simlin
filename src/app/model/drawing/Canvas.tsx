@@ -354,8 +354,7 @@ export const Canvas = withStyles(styles)(
     }
 
     private aux = (element: AuxViewElement, _isGhost = false): React.ReactElement => {
-      // FIXME
-      const variableErrors = 0; // this.props.model.vars.get(element.ident())?.errors.size || 0;
+      const hasWarning = this.props.model.variables.get(element.ident())?.hasError || false;
       const isSelected = this.isSelected(element);
       const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
       const props: AuxProps = {
@@ -366,7 +365,7 @@ export const Canvas = withStyles(styles)(
         isValidTarget: this.isValidTarget(element),
         onSelection: this.handleSetSelection,
         onLabelDrag: this.handleLabelDrag,
-        hasWarning: variableErrors > 0,
+        hasWarning,
       };
 
       this.elementBounds = this.elementBounds.push(auxBounds(element));
@@ -379,7 +378,7 @@ export const Canvas = withStyles(styles)(
       if (!(modelVar instanceof StockVar)) {
         throw new Error(`invariant broken: expected Stock for ${element.ident()}`);
       }
-      const variableErrors = 0; // this.props.model.vars.get(element.ident())?.errors.size || 0;
+      const hasWarning = this.props.model.variables.get(element.ident())?.hasError || false;
       const isSelected = this.isSelected(element);
       const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
       const props: StockProps = {
@@ -390,7 +389,7 @@ export const Canvas = withStyles(styles)(
         isValidTarget: this.isValidTarget(element),
         onSelection: this.handleSetSelection,
         onLabelDrag: this.handleLabelDrag,
-        hasWarning: variableErrors > 0,
+        hasWarning,
       };
       this.elementBounds = this.elementBounds.push(stockBounds(element));
       return <Stock key={element.ident()} {...props} />;
@@ -472,8 +471,7 @@ export const Canvas = withStyles(styles)(
     }
 
     private flow = (element: FlowViewElement) => {
-      // FIXME
-      const variableErrors = 0; // this.props.model.vars.get(ident)?.errors.size || 0;
+      const hasWarning = this.props.model.variables.get(element.ident())?.hasError || false;
       const { isMovingArrow } = this.state;
       const isSelected = this.isSelected(element);
       const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
@@ -508,7 +506,7 @@ export const Canvas = withStyles(styles)(
           source={source}
           sink={sink}
           isSelected={isSelected}
-          hasWarning={variableErrors > 0}
+          hasWarning={hasWarning}
           isMovingArrow={isSelected && isMovingArrow}
           isEditingName={isSelected && this.state.isEditingName}
           isValidTarget={this.isValidTarget(element)}
