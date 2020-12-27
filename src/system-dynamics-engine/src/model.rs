@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
+use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::variable::{parse_var, ModuleInput, Variable};
 use crate::{datamodel, model_err, var_err};
@@ -225,26 +225,41 @@ impl Model {
             }
         };
 
-        let variables: HashMap<String, Variable> = variable_list
+        let mut variables: HashMap<String, Variable> = variable_list
             .into_iter()
             .map(|v| (v.ident().to_string(), v))
             .collect();
+        let variable_names: HashSet<String> = variables.keys().cloned().collect();
 
-        for (ident, var) in variables.iter() {
+        let mut variables_have_errors = false;
+        for (_ident, var) in variables.iter_mut() {
+            let mut missing_dep = false;
             for dep in var.direct_deps().iter() {
                 let dep = if let Some(dot_off) = dep.find('.') {
                     &dep[..dot_off]
                 } else {
                     dep.as_str()
                 };
-                if !variables.contains_key(dep) {
-                    errors.push(Error::new(
-                        ErrorKind::Variable,
-                        ErrorCode::UnknownDependency,
-                        Some(ident.clone()),
-                    ));
+                if !variable_names.contains(dep) {
+                    missing_dep = true;
                 }
             }
+            if missing_dep {
+                // TODO: this should tie in to the location of the ident
+                var.push_error(EquationError {
+                    location: 0,
+                    code: ErrorCode::UnknownDependency,
+                });
+                variables_have_errors = true;
+            }
+        }
+
+        if variables_have_errors {
+            errors.push(Error::new(
+                ErrorKind::Model,
+                ErrorCode::VariablesHaveErrors,
+                None,
+            ));
         }
 
         let maybe_errors = match errors.len() {
@@ -259,6 +274,17 @@ impl Model {
             dt_deps,
             initial_deps,
         }
+    }
+
+    pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
+        self.variables
+            .iter()
+            .filter(|(_, var)| var.errors().is_some())
+            .map(|(ident, var)| {
+                let errors = var.errors().unwrap();
+                (ident.clone(), errors.clone())
+            })
+            .collect()
     }
 }
 
@@ -489,6 +515,37 @@ pub fn build_xvars_map<'a>(
             .map(|v| (v.get_ident().to_string(), v))
             .collect(),
     )
+}
+
+#[test]
+fn test_errors() {
+    let main_model = x_model("main", vec![x_aux("aux_3", "unknown_variable * 3.14")]);
+    let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> =
+        vec![("main".to_string(), &main_model)]
+            .into_iter()
+            .map(|(name, m)| build_xvars_map(name, m))
+            .collect();
+
+    let model = Model::new(&models, &main_model, &[]);
+
+    assert!(model.errors.is_some());
+    assert_eq!(
+        &Error::new(ErrorKind::Model, ErrorCode::VariablesHaveErrors, None),
+        &model.errors.as_ref().unwrap()[0]
+    );
+
+    let var_errors = model.get_variable_errors();
+    assert_eq!(1, var_errors.len());
+    assert!(var_errors.contains_key("aux_3"));
+    assert_eq!(1, var_errors["aux_3"].len());
+    let err = &var_errors["aux_3"][0];
+    assert_eq!(
+        &EquationError {
+            location: 0,
+            code: ErrorCode::UnknownDependency
+        },
+        err
+    );
 }
 
 #[test]

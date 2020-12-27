@@ -149,6 +149,14 @@ impl Variable {
         Some(errors)
     }
 
+    pub fn push_error(&mut self, err: EquationError) {
+        match self {
+            Variable::Stock { errors, .. } => errors.push(err),
+            Variable::Var { errors, .. } => errors.push(err),
+            Variable::Module { errors, .. } => errors.push(err),
+        }
+    }
+
     pub fn table(&self) -> Option<&Table> {
         match self {
             Variable::Stock { .. } => None,

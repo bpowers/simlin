@@ -48,6 +48,7 @@ pub enum ErrorCode {
     ArrayReferenceNeedsExplicitSubscripts,
     DuplicateVariable,
     UnknownDependency,
+    VariablesHaveErrors,
 }
 
 impl fmt::Display for ErrorCode {
@@ -84,6 +85,7 @@ impl fmt::Display for ErrorCode {
             ArrayReferenceNeedsExplicitSubscripts => "array_reference_needs_explicit_subscripts",
             DuplicateVariable => "duplicate_variable",
             UnknownDependency => "unknown_dependency",
+            VariablesHaveErrors => "variables_have_errors",
         };
 
         write!(f, "{}", name)

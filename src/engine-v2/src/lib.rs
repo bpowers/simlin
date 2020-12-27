@@ -121,12 +121,8 @@ impl Engine {
         let model = &self.project.models.get(model_name).unwrap();
 
         let mut result = Map::new();
-        for (ident, var) in model.variables.iter() {
-            let errors = var.errors();
-            if errors.is_none() {
-                continue;
-            }
-            let js_errors: Array = errors.unwrap().iter().cloned().map(JsValue::from).collect();
+        for (ident, errors) in model.get_variable_errors() {
+            let js_errors: Array = errors.into_iter().map(JsValue::from).collect();
             result = result.set(&JsValue::from(ident.as_str()), &js_errors)
         }
 
