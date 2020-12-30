@@ -30,6 +30,7 @@ mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
 
+mod bytecode;
 mod interpreter;
 
 pub use self::common::{canonicalize, Error, Ident, Result};

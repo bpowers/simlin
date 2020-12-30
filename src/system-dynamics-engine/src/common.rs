@@ -49,6 +49,7 @@ pub enum ErrorCode {
     DuplicateVariable,
     UnknownDependency,
     VariablesHaveErrors,
+    Generic,
 }
 
 impl fmt::Display for ErrorCode {
@@ -86,6 +87,7 @@ impl fmt::Display for ErrorCode {
             DuplicateVariable => "duplicate_variable",
             UnknownDependency => "unknown_dependency",
             VariablesHaveErrors => "variables_have_errors",
+            Generic => "generic",
         };
 
         write!(f, "{}", name)
@@ -173,6 +175,16 @@ pub struct Error {
     pub kind: ErrorKind,
     pub code: ErrorCode,
     pub(crate) details: Option<String>,
+}
+
+impl From<Box<dyn std::error::Error>> for Error {
+    fn from(err: Box<dyn std::error::Error>) -> Self {
+        Error {
+            kind: ErrorKind::Simulation,
+            code: ErrorCode::Generic,
+            details: Some(err.to_string()),
+        }
+    }
 }
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]

@@ -2,12 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
 use crate::ast::{self, AST};
+use crate::bytecode::{
+    BuiltinId, ByteCode, ByteCodeContext, GraphicalFunctionId, ModuleDeclaration, ModuleId,
+    ModuleInputOffset, Opcode, Register, VariableOffset, FIRST_CALL_REG,
+};
 use crate::common::{Ident, Result};
 use crate::datamodel::{self, Dt, SimMethod};
 use crate::interpreter::{BinaryOp, UnaryOp};
@@ -15,6 +19,7 @@ use crate::model::Model;
 use crate::variable::Variable;
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
+use std::cmp::Reverse;
 
 const TIME_OFF: usize = 0;
 const DT_OFF: usize = 1;
@@ -1305,6 +1310,365 @@ impl Module {
             tables,
         })
     }
+
+    #[allow(dead_code)]
+    pub fn compile(&self) -> Result<CompiledModule> {
+        let builder = ByteCodeBuilder::new(&self)?;
+
+        builder.compile()
+    }
+}
+
+#[allow(dead_code)]
+struct ByteCodeBuilder<'module> {
+    module: &'module Module,
+    module_decls: Vec<ModuleDeclaration>,
+    graphical_functions: Vec<Vec<(f64, f64)>>,
+    initials_code: ByteCode,
+    flows_code: ByteCode,
+    stocks_code: ByteCode,
+    curr_code: ByteCode,
+    free_registers: BinaryHeap<Reverse<Register>>,
+}
+
+impl<'module> ByteCodeBuilder<'module> {
+    #[allow(dead_code)]
+    fn new(module: &'module Module) -> Result<ByteCodeBuilder> {
+        let mut free_registers = BinaryHeap::new();
+        for n in 0u8..(FIRST_CALL_REG - 1) {
+            free_registers.push(Reverse(n));
+        }
+        Ok(ByteCodeBuilder {
+            module,
+            module_decls: vec![],
+            graphical_functions: vec![],
+            initials_code: ByteCode::default(),
+            flows_code: ByteCode::default(),
+            stocks_code: ByteCode::default(),
+            curr_code: ByteCode::default(),
+            free_registers,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn walk(&mut self, exprs: &[Expr]) -> Result<ByteCode> {
+        for expr in exprs.iter() {
+            self.walk_expr(expr)?;
+        }
+
+        Ok(std::mem::take(&mut self.curr_code))
+    }
+
+    #[allow(dead_code)]
+    fn walk_expr(&mut self, expr: &Expr) -> Result<Option<Register>> {
+        let result = match expr {
+            Expr::Const(value) => {
+                let id = self.curr_code.intern_literal(*value);
+                let dest = self.alloc_register();
+                self.push(Opcode::LoadConstant { dest, id });
+                Some(dest)
+            }
+            Expr::Var(off) => {
+                let dest = self.alloc_register();
+                self.push(Opcode::LoadVar {
+                    dest,
+                    off: *off as VariableOffset,
+                });
+                Some(dest)
+            }
+            Expr::Subscript(off, expr, bounds) => {
+                let dest = self.alloc_register();
+                let index = self.walk_expr(expr)?.unwrap();
+                self.push(Opcode::SetSubscriptIndex {
+                    index,
+                    bounds: *bounds as VariableOffset,
+                });
+                self.push(Opcode::LoadSubscript {
+                    dest,
+                    off: *off as VariableOffset,
+                });
+                self.free_register(index);
+                Some(dest)
+            }
+            Expr::Dt => {
+                let dest = self.alloc_register();
+                self.push(Opcode::LoadVar {
+                    dest,
+                    off: DT_OFF as VariableOffset,
+                });
+                Some(dest)
+            }
+            Expr::App(builtin) => {
+                let dest = self.alloc_register();
+                // lookups are special
+                if let BuiltinFn::Lookup(ident, index) = builtin {
+                    let table = &self.module.tables[ident];
+                    self.graphical_functions.push(table.data.clone());
+                    let gf = (self.graphical_functions.len() - 1) as GraphicalFunctionId;
+                    let value = self.walk_expr(index)?.unwrap();
+                    self.push(Opcode::Lookup { dest, gf, value });
+                    self.free_register(value);
+                    return Ok(Some(dest));
+                };
+
+                match builtin {
+                    BuiltinFn::Lookup(_, _) => unreachable!(),
+                    BuiltinFn::Inf | BuiltinFn::Pi => {
+                        // nothing to do here -- no arguments to push
+                    }
+
+                    BuiltinFn::Abs(a)
+                    | BuiltinFn::Arccos(a)
+                    | BuiltinFn::Arcsin(a)
+                    | BuiltinFn::Arctan(a)
+                    | BuiltinFn::Cos(a)
+                    | BuiltinFn::Exp(a)
+                    | BuiltinFn::Int(a)
+                    | BuiltinFn::Ln(a)
+                    | BuiltinFn::Log10(a)
+                    | BuiltinFn::Sin(a)
+                    | BuiltinFn::Sqrt(a)
+                    | BuiltinFn::Tan(a) => {
+                        let a = self.walk_expr(a)?.unwrap();
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG,
+                            src: a,
+                        });
+                        self.free_register(a);
+                    }
+                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                        let a = self.walk_expr(a)?.unwrap();
+                        let b = self.walk_expr(b)?.unwrap();
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG,
+                            src: a,
+                        });
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG + 1u8,
+                            src: b,
+                        });
+                        self.free_register(a);
+                        self.free_register(b);
+                    }
+                    BuiltinFn::Pulse(a, b, c) => {
+                        let a = self.walk_expr(a)?.unwrap();
+                        let b = self.walk_expr(b)?.unwrap();
+                        let c = self.walk_expr(c)?.unwrap();
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG,
+                            src: a,
+                        });
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG + 1,
+                            src: b,
+                        });
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG + 2,
+                            src: c,
+                        });
+                        self.free_register(a);
+                        self.free_register(b);
+                        self.free_register(c);
+                    }
+                    BuiltinFn::SafeDiv(a, b, c) => {
+                        let a = self.walk_expr(a)?.unwrap();
+                        let b = self.walk_expr(b)?.unwrap();
+                        let c = c.as_ref().map(|c| self.walk_expr(c).unwrap().unwrap());
+
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG,
+                            src: a,
+                        });
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG + 1,
+                            src: b,
+                        });
+                        match c {
+                            Some(c) => {
+                                self.push(Opcode::Mov {
+                                    dst: FIRST_CALL_REG + 2,
+                                    src: c,
+                                });
+                                self.free_register(c);
+                            }
+                            None => {
+                                let id = self.curr_code.intern_literal(0.0);
+                                self.push(Opcode::LoadConstant {
+                                    dest: FIRST_CALL_REG + 2,
+                                    id,
+                                });
+                            }
+                        }
+                        self.free_register(a);
+                        self.free_register(b);
+                    }
+                };
+                let func = match builtin {
+                    BuiltinFn::Lookup(_, _) => unreachable!(),
+                    BuiltinFn::Abs(_) => BuiltinId::Abs,
+                    BuiltinFn::Arccos(_) => BuiltinId::Arccos,
+                    BuiltinFn::Arcsin(_) => BuiltinId::Arcsin,
+                    BuiltinFn::Arctan(_) => BuiltinId::Arctan,
+                    BuiltinFn::Cos(_) => BuiltinId::Cos,
+                    BuiltinFn::Exp(_) => BuiltinId::Exp,
+                    BuiltinFn::Inf => BuiltinId::Inf,
+                    BuiltinFn::Int(_) => BuiltinId::Int,
+                    BuiltinFn::Ln(_) => BuiltinId::Ln,
+                    BuiltinFn::Log10(_) => BuiltinId::Log10,
+                    BuiltinFn::Max(_, _) => BuiltinId::Max,
+                    BuiltinFn::Min(_, _) => BuiltinId::Min,
+                    BuiltinFn::Pi => BuiltinId::Pi,
+                    BuiltinFn::Pulse(_, _, _) => BuiltinId::Pulse,
+                    BuiltinFn::SafeDiv(_, _, _) => BuiltinId::SafeDiv,
+                    BuiltinFn::Sin(_) => BuiltinId::Sin,
+                    BuiltinFn::Sqrt(_) => BuiltinId::Sqrt,
+                    BuiltinFn::Tan(_) => BuiltinId::Tan,
+                };
+
+                self.push(Opcode::Apply { func });
+                Some(dest)
+            }
+            Expr::EvalModule(ident, model_name, args) => {
+                let args: Vec<Register> = args
+                    .iter()
+                    .map(|arg| self.walk_expr(arg).unwrap().unwrap())
+                    .collect();
+                for (i, reg) in args.iter().enumerate() {
+                    self.push(Opcode::Mov {
+                        dst: FIRST_CALL_REG + i as Register,
+                        src: *reg,
+                    });
+                    self.free_register(*reg)
+                }
+                let module_offsets = &self.module.offsets[&self.module.ident];
+                self.module_decls.push(ModuleDeclaration {
+                    model_name: model_name.clone(),
+                    off: module_offsets[ident].0,
+                });
+                let id = (self.module_decls.len() - 1) as ModuleId;
+
+                self.push(Opcode::EvalModule { id });
+                None
+            }
+            Expr::ModuleInput(off) => {
+                let dest = self.alloc_register();
+                self.push(Opcode::LoadModuleInput {
+                    dest,
+                    input: *off as ModuleInputOffset,
+                });
+                Some(dest)
+            }
+            Expr::Op2(op, lhs, rhs) => {
+                let dest = self.alloc_register();
+                let l = self.walk_expr(lhs)?.unwrap();
+                let r = self.walk_expr(rhs)?.unwrap();
+                let opcode = match op {
+                    BinaryOp::Add => Opcode::Add { dest, l, r },
+                    BinaryOp::Sub => Opcode::Sub { dest, l, r },
+                    BinaryOp::Exp => Opcode::Exp { dest, l, r },
+                    BinaryOp::Mul => Opcode::Mul { dest, l, r },
+                    BinaryOp::Div => Opcode::Div { dest, l, r },
+                    BinaryOp::Mod => Opcode::Mod { dest, l, r },
+                    BinaryOp::Gt => Opcode::Gt { dest, l, r },
+                    BinaryOp::Gte => Opcode::Gte { dest, l, r },
+                    BinaryOp::Lt => Opcode::Gte { dest, r, l },
+                    BinaryOp::Lte => Opcode::Gt { dest, r, l },
+                    BinaryOp::Eq => Opcode::Eq { dest, l, r },
+                    BinaryOp::Neq => Opcode::Neq { dest, l, r },
+                    BinaryOp::And => Opcode::And { dest, l, r },
+                    BinaryOp::Or => Opcode::Or { dest, l, r },
+                };
+                self.push(opcode);
+                self.free_register(l);
+                self.free_register(r);
+                Some(dest)
+            }
+            Expr::Op1(op, rhs) => {
+                let dest = self.alloc_register();
+                let r = self.walk_expr(rhs)?.unwrap();
+                match op {
+                    UnaryOp::Not => self.push(Opcode::Not { dest, r }),
+                };
+                self.free_register(r);
+                Some(dest)
+            }
+            Expr::If(cond, t, f) => {
+                let dest = self.alloc_register();
+                let t = self.walk_expr(t)?.unwrap();
+                let f = self.walk_expr(f)?.unwrap();
+                let cond = self.walk_expr(cond)?.unwrap();
+                self.push(Opcode::SetCond { cond });
+                self.push(Opcode::If { dest, t, f });
+                self.free_register(cond);
+                self.free_register(t);
+                self.free_register(f);
+                Some(dest)
+            }
+            Expr::AssignCurr(off, rhs) => {
+                let value = self.walk_expr(rhs)?.unwrap();
+                self.push(Opcode::AssignCurr {
+                    off: *off as VariableOffset,
+                    value,
+                });
+                self.free_register(value);
+                None
+            }
+            Expr::AssignNext(off, rhs) => {
+                let value = self.walk_expr(rhs)?.unwrap();
+                self.push(Opcode::AssignNext {
+                    off: *off as VariableOffset,
+                    value,
+                });
+                self.free_register(value);
+                None
+            }
+        };
+        Ok(result)
+    }
+
+    #[allow(dead_code)]
+    fn push(&mut self, op: Opcode) {
+        self.curr_code.push_opcode(op)
+    }
+
+    #[allow(dead_code)]
+    fn alloc_register(&mut self) -> Register {
+        self.free_registers.pop().unwrap().0
+    }
+
+    #[allow(dead_code)]
+    fn free_register(&mut self, reg: Register) {
+        self.free_registers.push(Reverse(reg));
+    }
+
+    #[allow(dead_code)]
+    fn compile(mut self) -> Result<CompiledModule> {
+        self.initials_code = self.walk(&self.module.runlist_initials)?;
+        self.flows_code = self.walk(&self.module.runlist_flows)?;
+        self.stocks_code = self.walk(&self.module.runlist_stocks)?;
+
+        Ok(CompiledModule {
+            ident: self.module.ident.clone(),
+            n_slots: self.module.n_slots,
+            context: ByteCodeContext {
+                graphical_functions: self.graphical_functions,
+                modules: self.module_decls,
+            },
+            compiled_initials: self.initials_code,
+            compiled_flows: self.flows_code,
+            compiled_stocks: self.stocks_code,
+        })
+    }
+}
+
+#[allow(dead_code)]
+pub struct CompiledModule {
+    ident: Ident,
+    n_slots: usize,
+    context: ByteCodeContext,
+    compiled_initials: ByteCode,
+    compiled_flows: ByteCode,
+    compiled_stocks: ByteCode,
 }
 
 fn is_truthy(n: f64) -> bool {

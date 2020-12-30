@@ -43,15 +43,14 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
     // "test/test-models/tests/subscript_selection/subscript_selection.xmile",
     //
-    "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
+    "test/test-models/samples/SIR/SIR.xmile",
+    "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
     "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
-    "test/test-models/samples/SIR/SIR.xmile",
     "test/test-models/samples/teacup/teacup_w_diagram.xmile",
     "test/test-models/samples/teacup/teacup.xmile",
-    "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/tests/builtin_max/builtin_max.xmile",
     "test/test-models/tests/builtin_min/builtin_min.xmile",
     "test/test-models/tests/chained_initialization/test_chained_initialization.xmile",
@@ -82,6 +81,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/reference_capitalization/test_reference_capitalization.xmile",
     "test/test-models/tests/smooth_and_stock/test_smooth_and_stock.xmile",
     "test/test-models/tests/sqrt/test_sqrt.xmile",
+    "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
     "test/test-models/tests/subscript_1d_arrays/test_subscript_1d_arrays.xmile",
     "test/test-models/tests/trend/test_trend.xmile",
     "test/test-models/tests/trig/test_trig.xmile",
@@ -159,26 +159,7 @@ fn load_expected_results(xmile_path: &str) -> Results {
     unreachable!();
 }
 
-fn simulate_path(xmile_path: &str) {
-    eprintln!("model: {}", xmile_path);
-    let f = File::open(xmile_path).unwrap();
-    let mut f = BufReader::new(f);
-
-    let datamodel_project = xmile::project_from_reader(&mut f);
-    if let Err(ref err) = datamodel_project {
-        eprintln!("model '{}' error: {}", xmile_path, err);
-    }
-    let project = Project::from(datamodel_project.unwrap());
-
-    let project = Rc::new(project);
-    let sim = Simulation::new(&project, "main").unwrap();
-    sim.debug_print_runlists("main");
-    let results = sim.run_to_end();
-    assert!(results.is_ok());
-
-    let results = results.unwrap();
-    let expected = load_expected_results(xmile_path);
-
+fn ensure_results(expected: &Results, results: &Results) {
     assert_eq!(expected.step_count, results.step_count);
 
     let mut step = 0;
@@ -215,6 +196,29 @@ fn simulate_path(xmile_path: &str) {
     // UNKNOWN is a sentinal value we use -- it should never show up
     // unless we've wrongly sized our data slices
     assert!(!results.offsets.contains_key("UNKNOWN"));
+}
+
+fn simulate_path(xmile_path: &str) {
+    eprintln!("model: {}", xmile_path);
+    let f = File::open(xmile_path).unwrap();
+    let mut f = BufReader::new(f);
+
+    let datamodel_project = xmile::project_from_reader(&mut f);
+    if let Err(ref err) = datamodel_project {
+        eprintln!("model '{}' error: {}", xmile_path, err);
+    }
+    let project = Project::from(datamodel_project.unwrap());
+
+    let project = Rc::new(project);
+    let sim = Simulation::new(&project, "main").unwrap();
+    sim.debug_print_runlists("main");
+    let results = sim.run_to_end();
+    assert!(results.is_ok());
+
+    let results = results.unwrap();
+
+    let expected = load_expected_results(xmile_path);
+    ensure_results(&expected, &results);
 }
 
 #[test]
