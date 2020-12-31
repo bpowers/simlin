@@ -9,37 +9,21 @@ use float_cmp::approx_eq;
 
 use crate::ast::{self, AST};
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeContext, GraphicalFunctionId, ModuleDeclaration, ModuleId,
-    ModuleInputOffset, Opcode, Register, VariableOffset, FIRST_CALL_REG,
+    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, GraphicalFunctionId, ModuleDeclaration,
+    ModuleId, ModuleInputOffset, Opcode, Register, VariableOffset,
 };
 use crate::common::{Ident, Result};
-use crate::datamodel::{self, Dt, SimMethod};
+use crate::datamodel;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
+use crate::vm::{
+    CompiledSimulation, Results, Specs, StepPart, DT_OFF, FINAL_TIME_OFF, FIRST_CALL_REG,
+    IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+};
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
 use std::cmp::Reverse;
-
-const TIME_OFF: usize = 0;
-const DT_OFF: usize = 1;
-const INITIAL_TIME_OFF: usize = 2;
-const FINAL_TIME_OFF: usize = 3;
-const IMPLICIT_VAR_COUNT: usize = 4;
-
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
-pub enum Method {
-    Euler,
-}
-
-#[derive(Clone, Debug)]
-pub struct Specs {
-    pub start: f64,
-    pub stop: f64,
-    pub dt: f64,
-    pub save_step: f64,
-    pub method: Method,
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -55,39 +39,6 @@ impl Table {
         let data: Vec<(f64, f64)> = t.x.iter().copied().zip(t.y.iter().copied()).collect();
 
         Ok(Self { data })
-    }
-}
-
-impl Specs {
-    pub fn from(specs: &datamodel::SimSpecs) -> Self {
-        let dt: f64 = match &specs.dt {
-            Dt::Dt(value) => *value,
-            Dt::Reciprocal(value) => 1.0 / *value,
-        };
-
-        let save_step: f64 = match &specs.save_step {
-            None => dt,
-            Some(save_step) => match save_step {
-                Dt::Dt(value) => *value,
-                Dt::Reciprocal(value) => 1.0 / *value,
-            },
-        };
-
-        let method = match specs.sim_method {
-            SimMethod::Euler => Method::Euler,
-            SimMethod::RungeKutta4 => {
-                eprintln!("warning, simulation requested 'rk4', but only support Euler");
-                Method::Euler
-            }
-        };
-
-        Specs {
-            start: specs.start,
-            stop: specs.stop,
-            dt,
-            save_step,
-            method,
-        }
     }
 }
 
@@ -886,13 +837,6 @@ impl Var {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StepPart {
-    Initials,
-    Flows,
-    Stocks,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
     ident: Ident,
@@ -1661,16 +1605,6 @@ impl<'module> ByteCodeBuilder<'module> {
     }
 }
 
-#[allow(dead_code)]
-pub struct CompiledModule {
-    ident: Ident,
-    n_slots: usize,
-    context: ByteCodeContext,
-    compiled_initials: ByteCode,
-    compiled_flows: ByteCode,
-    compiled_stocks: ByteCode,
-}
-
 fn is_truthy(n: f64) -> bool {
     let is_false = approx_eq!(f64, n, 0.0);
     !is_false
@@ -1977,63 +1911,6 @@ pub fn pretty(expr: &Expr) -> String {
 }
 
 #[derive(Debug)]
-pub struct Results {
-    pub offsets: HashMap<String, usize>,
-    // one large allocation
-    pub data: Box<[f64]>,
-    pub step_size: usize,
-    pub step_count: usize,
-    pub specs: Specs,
-}
-
-impl Results {
-    pub fn print_tsv(&self) {
-        let var_names = {
-            let offset_name_map: HashMap<usize, &str> =
-                self.offsets.iter().map(|(k, v)| (*v, k.as_str())).collect();
-            let mut var_names: Vec<&str> = Vec::with_capacity(self.step_size);
-            for i in 0..(self.step_size) {
-                let name = if offset_name_map.contains_key(&i) {
-                    offset_name_map[&i]
-                } else {
-                    "UNKNOWN"
-                };
-                var_names.push(name);
-            }
-            var_names
-        };
-
-        // print header
-        for (i, id) in var_names.iter().enumerate() {
-            print!("{}", id);
-            if i == var_names.len() - 1 {
-                println!();
-            } else {
-                print!("\t");
-            }
-        }
-
-        for curr in self.iter() {
-            if curr[TIME_OFF] > self.specs.stop {
-                break;
-            }
-            for (i, val) in curr.iter().enumerate() {
-                print!("{}", val);
-                if i == var_names.len() - 1 {
-                    println!();
-                } else {
-                    print!("\t");
-                }
-            }
-        }
-    }
-
-    pub fn iter(&self) -> std::iter::Take<std::slice::Chunks<f64>> {
-        self.data.chunks(self.step_size).take(self.step_count)
-    }
-}
-
-#[derive(Debug)]
 pub struct Simulation {
     modules: HashMap<Ident, Module>,
     specs: Specs,
@@ -2116,6 +1993,21 @@ impl Simulation {
             specs,
             root: main_model_name.to_string(),
             offsets,
+        })
+    }
+
+    pub fn compile(&self) -> Result<CompiledSimulation> {
+        let modules: Result<HashMap<String, CompiledModule>> = self
+            .modules
+            .iter()
+            .map(|(name, module)| module.compile().map(|module| (name.clone(), module)))
+            .collect();
+
+        Ok(CompiledSimulation {
+            modules: modules?,
+            specs: self.specs.clone(),
+            root: self.root.clone(),
+            offsets: self.offsets.clone(),
         })
     }
 

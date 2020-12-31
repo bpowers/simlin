@@ -32,12 +32,14 @@ mod stdlib {
 
 mod bytecode;
 mod interpreter;
+mod vm;
 
 pub use self::common::{canonicalize, Error, Ident, Result};
-pub use self::sim::Method;
-pub use self::sim::Results;
 pub use self::sim::Simulation;
-pub use self::sim::Specs as SimSpecs;
+pub use self::vm::Method;
+pub use self::vm::Results;
+pub use self::vm::Specs as SimSpecs;
+pub use self::vm::VM;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {

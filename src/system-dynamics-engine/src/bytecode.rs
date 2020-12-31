@@ -11,13 +11,8 @@ pub type VariableOffset = u16;
 pub type ModuleInputOffset = u16;
 pub type GraphicalFunctionId = u8;
 
-// reserve the last 16 registers as inputs for modules and builtin functions.
-// none of our builtins are reentrant, and we copy inputs into the module_args
-// slice in the VM, and this avoids having to think about spilling variables.
-pub const FIRST_CALL_REG: u8 = 240u8;
-
 #[derive(Clone, Debug)]
-pub enum BuiltinId {
+pub(crate) enum BuiltinId {
     Abs,
     Arccos,
     Arcsin,
@@ -39,7 +34,7 @@ pub enum BuiltinId {
 }
 
 #[derive(Clone, Debug)]
-pub enum Opcode {
+pub(crate) enum Opcode {
     Mov {
         dst: Register,
         src: Register,
@@ -157,37 +152,32 @@ pub enum Opcode {
     },
 }
 
-pub struct VM {
-    registers: [f64; 256],
-    module_inputs: [f64; 16],
-    cond: bool,
-    subscript_index: usize,
-}
-
+#[derive(Clone, Debug)]
 pub struct ModuleDeclaration {
-    pub model_name: String,
-    pub off: usize, // offset within the parent module
+    pub(crate) model_name: String,
+    pub(crate) off: usize, // offset within the parent module
 }
 
 // these are things that will be shared across bytecode runlists
+#[derive(Clone, Debug)]
 pub struct ByteCodeContext {
-    pub graphical_functions: Vec<Vec<(f64, f64)>>,
-    pub modules: Vec<ModuleDeclaration>,
+    pub(crate) graphical_functions: Vec<Vec<(f64, f64)>>,
+    pub(crate) modules: Vec<ModuleDeclaration>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ByteCode {
-    literals: Vec<f64>,
-    code: Vec<Opcode>,
+    pub(crate) literals: Vec<f64>,
+    pub(crate) code: Vec<Opcode>,
 }
 
 impl ByteCode {
-    pub fn intern_literal(&mut self, lit: f64) -> LiteralId {
+    pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
         self.literals.push(lit);
         (self.literals.len() - 1) as u16
     }
 
-    pub fn push_opcode(&mut self, op: Opcode) {
+    pub(crate) fn push_opcode(&mut self, op: Opcode) {
         self.code.push(op)
     }
 }
@@ -196,4 +186,14 @@ impl ByteCode {
 fn test_opcode_size() {
     use std::mem::size_of;
     assert_eq!(4, size_of::<Opcode>());
+}
+
+#[derive(Debug)]
+pub struct CompiledModule {
+    pub(crate) ident: String,
+    pub(crate) n_slots: usize,
+    pub(crate) context: ByteCodeContext,
+    pub(crate) compiled_initials: ByteCode,
+    pub(crate) compiled_flows: ByteCode,
+    pub(crate) compiled_stocks: ByteCode,
 }

@@ -1,4 +1,4 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2020 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -13,6 +13,7 @@ use csv;
 use float_cmp::approx_eq;
 
 use system_dynamics_compat::xmile;
+use system_dynamics_engine::VM;
 use system_dynamics_engine::{canonicalize, Method, Project, Results, SimSpecs, Simulation};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
@@ -219,6 +220,17 @@ fn simulate_path(xmile_path: &str) {
 
     let expected = load_expected_results(xmile_path);
     ensure_results(&expected, &results);
+
+    let compiled = sim.compile();
+    assert!(compiled.is_ok());
+    let compiled_sim = compiled.unwrap();
+
+    let mut vm = VM::new(&compiled_sim).unwrap();
+    let results2 = vm.run_to_end();
+    assert!(results2.is_ok());
+    let results2 = results2.unwrap();
+
+    ensure_results(&expected, &results2);
 }
 
 #[test]
