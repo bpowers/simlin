@@ -84,11 +84,6 @@ pub(crate) enum Opcode {
         l: Register,
         r: Register,
     },
-    Neq {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
     And {
         dest: Register,
         l: Register,
@@ -143,6 +138,7 @@ pub(crate) enum Opcode {
         value: Register,
     },
     Apply {
+        dest: Register,
         func: BuiltinId,
     },
     Lookup {

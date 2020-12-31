@@ -4,8 +4,11 @@
 
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 
-use crate::bytecode::CompiledModule;
+use float_cmp::approx_eq;
+
+use crate::bytecode::{BuiltinId, CompiledModule, Opcode};
 use crate::common::{Ident, Result};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 use crate::sim_err;
@@ -20,6 +23,11 @@ pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
 // none of our builtins are reentrant, and we copy inputs into the module_args
 // slice in the VM, and this avoids having to think about spilling variables.
 pub(crate) const FIRST_CALL_REG: u8 = 240u8;
+
+pub(crate) fn is_truthy(n: f64) -> bool {
+    let is_false = approx_eq!(f64, n, 0.0);
+    !is_false
+}
 
 #[derive(Debug)]
 pub struct CompiledSimulation {
@@ -235,14 +243,236 @@ impl<'sim> VM<'sim> {
         curr: &mut [f64],
         next: &mut [f64],
     ) {
-        let _bytecode = match step_part {
+        let bytecode = match step_part {
             StepPart::Initials => &module.compiled_initials,
             StepPart::Flows => &module.compiled_flows,
             StepPart::Stocks => &module.compiled_stocks,
         };
 
-        let mut registers: [f64; 256] = [0.0; 256];
-        let mut cond = false;
-        let mut subscript_index: usize = 0;
+        let mut reg: [f64; 256] = [0.0; 256];
+        let mut condition = false;
+        let mut subscript_index: Option<usize> = None;
+
+        for op in bytecode.code.iter() {
+            match op.clone() {
+                Opcode::Mov { dst, src } => reg[dst as usize] = reg[src as usize],
+                Opcode::Add { dest, l, r } => {
+                    reg[dest as usize] = reg[l as usize] + reg[r as usize]
+                }
+                Opcode::Sub { dest, l, r } => {
+                    reg[dest as usize] = reg[l as usize] - reg[r as usize]
+                }
+                Opcode::Exp { dest, l, r } => {
+                    reg[dest as usize] = reg[l as usize].powf(reg[r as usize])
+                }
+                Opcode::Mul { dest, l, r } => {
+                    reg[dest as usize] = reg[l as usize] * reg[r as usize]
+                }
+                Opcode::Div { dest, l, r } => {
+                    reg[dest as usize] = reg[l as usize] / reg[r as usize]
+                }
+                Opcode::Mod { dest, l, r } => {
+                    reg[dest as usize] = reg[l as usize].rem_euclid(reg[r as usize])
+                }
+                Opcode::Gt { dest, l, r } => {
+                    reg[dest as usize] = (reg[l as usize] > reg[r as usize]) as i8 as f64
+                }
+                Opcode::Gte { dest, l, r } => {
+                    reg[dest as usize] = (reg[l as usize] >= reg[r as usize]) as i8 as f64
+                }
+                Opcode::Eq { dest, l, r } => {
+                    reg[dest as usize] = {
+                        let l = reg[l as usize];
+                        let r = reg[r as usize];
+                        approx_eq!(f64, l, r) as i8 as f64
+                    }
+                }
+                Opcode::And { dest, l, r } => {
+                    reg[dest as usize] =
+                        (is_truthy(reg[l as usize]) && is_truthy(reg[r as usize])) as i8 as f64
+                }
+                Opcode::Or { dest, l, r } => {
+                    reg[dest as usize] =
+                        (is_truthy(reg[l as usize]) || is_truthy(reg[r as usize])) as i8 as f64
+                }
+                Opcode::Not { dest, r } => {
+                    reg[dest as usize] = !is_truthy(reg[r as usize]) as i8 as f64
+                }
+                Opcode::LoadConstant { dest, id } => {
+                    reg[dest as usize] = bytecode.literals[id as usize];
+                }
+                Opcode::LoadVar { dest, off } => {
+                    reg[dest as usize] = curr[off as usize];
+                }
+                Opcode::SetSubscriptIndex { index, bounds } => {
+                    let index = reg[index as usize].floor() as usize;
+                    subscript_index = if index == 0 || index > bounds as usize {
+                        None
+                    } else {
+                        Some(index)
+                    };
+                }
+                Opcode::LoadSubscript { dest, off } => {
+                    reg[dest as usize] = match subscript_index {
+                        Some(subscript_index) => curr[off as usize + subscript_index],
+                        None => f64::NAN,
+                    };
+                }
+                Opcode::SetCond { cond } => {
+                    condition = is_truthy(reg[cond as usize]);
+                }
+                Opcode::If { dest, t, f } => {
+                    reg[dest as usize] = if condition {
+                        reg[t as usize]
+                    } else {
+                        reg[f as usize]
+                    };
+                }
+                Opcode::LoadModuleInput { dest, input } => {
+                    reg[dest as usize] = module_inputs[input as usize];
+                }
+                Opcode::EvalModule { id } => {
+                    let new_module_decl = &module.context.modules[id as usize];
+                    let module = &self.compiled_sim.modules[&new_module_decl.model_name];
+
+                    let mut module_inputs = [0.0; 16];
+                    std::mem::swap(
+                        &mut module_inputs,
+                        <&mut [f64; 16]>::try_from(&mut reg[FIRST_CALL_REG as usize..]).unwrap(),
+                    );
+
+                    let module_off = module_off + new_module_decl.off;
+                    self.eval(step_part, module, module_off, &module_inputs, curr, next);
+                }
+                Opcode::AssignCurr { off, value } => {
+                    curr[module_off + off as usize] = reg[value as usize];
+                }
+                Opcode::AssignNext { off, value } => {
+                    next[module_off + off as usize] = reg[value as usize];
+                }
+                Opcode::Apply { dest, func } => {
+                    let a = reg[FIRST_CALL_REG as usize];
+                    let b = reg[(FIRST_CALL_REG + 1) as usize];
+                    let c = reg[(FIRST_CALL_REG + 2) as usize];
+                    reg[dest as usize] = match func {
+                        BuiltinId::Abs => a.abs(),
+                        BuiltinId::Arccos => a.cos(),
+                        BuiltinId::Arcsin => a.acos(),
+                        BuiltinId::Arctan => a.atan(),
+                        BuiltinId::Cos => a.cos(),
+                        BuiltinId::Exp => a.exp(),
+                        BuiltinId::Inf => std::f64::INFINITY,
+                        BuiltinId::Int => a.floor(),
+                        BuiltinId::Ln => a.ln(),
+                        BuiltinId::Log10 => a.log10(),
+                        BuiltinId::Max => {
+                            if a > b {
+                                a
+                            } else {
+                                b
+                            }
+                        }
+                        BuiltinId::Min => {
+                            if a < b {
+                                a
+                            } else {
+                                b
+                            }
+                        }
+                        BuiltinId::Pi => std::f64::consts::PI,
+                        BuiltinId::Pulse => {
+                            let time = curr[TIME_OFF];
+                            let dt = curr[DT_OFF];
+                            let volume = a;
+                            let first_pulse = b;
+                            let interval = c;
+                            pulse(time, dt, volume, first_pulse, interval)
+                        }
+                        BuiltinId::SafeDiv => {
+                            if b != 0.0 {
+                                a / b
+                            } else {
+                                c
+                            }
+                        }
+                        BuiltinId::Sin => a.sin(),
+                        BuiltinId::Sqrt => a.sqrt(),
+                        BuiltinId::Tan => a.tan(),
+                    }
+                }
+                Opcode::Lookup { dest, gf, value } => {
+                    let index = reg[value as usize];
+                    let gf = &module.context.graphical_functions[gf as usize];
+                    reg[dest as usize] = lookup(gf, index);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
+    if time < first_pulse {
+        return 0.0;
+    }
+
+    let mut next_pulse = first_pulse;
+    while time >= next_pulse {
+        if time < next_pulse + dt {
+            return volume / dt;
+        } else if interval <= 0.0 {
+            break;
+        } else {
+            next_pulse += interval;
+        }
+    }
+
+    0.0
+}
+
+fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
+    if table.is_empty() {
+        return f64::NAN;
+    }
+
+    if index.is_nan() {
+        // things get wonky below if we try to binary search for NaN
+        return f64::NAN;
+    }
+
+    // check if index is below the start of the table
+    {
+        let (x, y) = table[0];
+        if index < x {
+            return y;
+        }
+    }
+
+    let size = table.len();
+    {
+        let (x, y) = table[size - 1];
+        if index > x {
+            return y;
+        }
+    }
+    // binary search seems to be the most appropriate choice here.
+    let mut low = 0;
+    let mut high = size;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if table[mid].0 < index {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    let i = low;
+    if approx_eq!(f64, table[i].0, index) {
+        table[i].1
+    } else {
+        // slope = deltaY/deltaX
+        let slope = (table[i].1 - table[i - 1].1) / (table[i].0 - table[i - 1].0);
+        // y = m*x + b
+        (index - table[i - 1].0) * slope + table[i - 1].1
     }
 }

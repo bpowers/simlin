@@ -18,8 +18,8 @@ use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
 use crate::vm::{
-    CompiledSimulation, Results, Specs, StepPart, DT_OFF, FINAL_TIME_OFF, FIRST_CALL_REG,
-    IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+    is_truthy, pulse, CompiledSimulation, Results, Specs, StepPart, DT_OFF, FINAL_TIME_OFF,
+    FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
@@ -1469,7 +1469,7 @@ impl<'module> ByteCodeBuilder<'module> {
                     BuiltinFn::Tan(_) => BuiltinId::Tan,
                 };
 
-                self.push(Opcode::Apply { func });
+                self.push(Opcode::Apply { dest, func });
                 Some(dest)
             }
             Expr::EvalModule(ident, model_name, args) => {
@@ -1518,7 +1518,10 @@ impl<'module> ByteCodeBuilder<'module> {
                     BinaryOp::Lt => Opcode::Gte { dest, r, l },
                     BinaryOp::Lte => Opcode::Gt { dest, r, l },
                     BinaryOp::Eq => Opcode::Eq { dest, l, r },
-                    BinaryOp::Neq => Opcode::Neq { dest, l, r },
+                    BinaryOp::Neq => {
+                        self.push(Opcode::Eq { dest, l, r });
+                        Opcode::Not { dest, r: dest }
+                    }
                     BinaryOp::And => Opcode::And { dest, l, r },
                     BinaryOp::Or => Opcode::Or { dest, l, r },
                 };
@@ -1603,11 +1606,6 @@ impl<'module> ByteCodeBuilder<'module> {
             compiled_stocks: self.stocks_code,
         })
     }
-}
-
-fn is_truthy(n: f64) -> bool {
-    let is_false = approx_eq!(f64, n, 0.0);
-    !is_false
 }
 
 pub struct ModuleEvaluator<'a> {
@@ -1803,27 +1801,12 @@ impl<'a> ModuleEvaluator<'a> {
                     }
                     BuiltinFn::Pulse(a, b, c) => {
                         let time = self.curr[TIME_OFF];
+                        let dt = self.curr[DT_OFF];
                         let volume = self.eval(a);
                         let first_pulse = self.eval(b);
                         let interval = self.eval(c);
 
-                        if time < first_pulse {
-                            return 0.0;
-                        }
-
-                        let dt = self.curr[DT_OFF];
-                        let mut next_pulse = first_pulse;
-                        while time >= next_pulse {
-                            if time < next_pulse + dt {
-                                return volume / dt;
-                            } else if interval <= 0.0 {
-                                break;
-                            } else {
-                                next_pulse += interval;
-                            }
-                        }
-
-                        0.0
+                        pulse(time, dt, volume, first_pulse, interval)
                     }
                 }
             }

@@ -225,7 +225,7 @@ fn simulate_path(xmile_path: &str) {
     assert!(compiled.is_ok());
     let compiled_sim = compiled.unwrap();
 
-    let mut vm = VM::new(&compiled_sim).unwrap();
+    let vm = VM::new(&compiled_sim).unwrap();
     let results2 = vm.run_to_end();
     assert!(results2.is_ok());
     let results2 = results2.unwrap();
