@@ -156,6 +156,7 @@ pub(crate) enum Opcode {
         gf: GraphicalFunctionId,
         value: Register,
     },
+    Ret,
 }
 
 #[derive(Clone, Debug)]

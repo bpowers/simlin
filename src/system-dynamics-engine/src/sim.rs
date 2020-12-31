@@ -1299,6 +1299,7 @@ impl<'module> ByteCodeBuilder<'module> {
         for expr in exprs.iter() {
             self.walk_expr(expr)?;
         }
+        self.push(Opcode::Ret);
 
         Ok(std::mem::take(&mut self.curr_code))
     }

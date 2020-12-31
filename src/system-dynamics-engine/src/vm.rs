@@ -237,6 +237,7 @@ impl<'sim> VM<'sim> {
         })
     }
 
+    #[inline(always)]
     fn get_register_file(&mut self) -> Box<[f64; 256]> {
         if self.cached_register_files.is_empty() {
             return Box::new([0.0; 256]);
@@ -249,7 +250,6 @@ impl<'sim> VM<'sim> {
         self.cached_register_files.push(reg);
     }
 
-    #[inline(always)]
     fn eval(
         &mut self,
         step_part: StepPart,
@@ -270,8 +270,11 @@ impl<'sim> VM<'sim> {
         let mut condition = false;
         let mut subscript_index: Option<usize> = None;
 
-        for op in bytecode.code.iter() {
-            match op.clone() {
+        let mut i = 0;
+        let code = &bytecode.code;
+        loop {
+            let op = code[i].clone();
+            match op {
                 Opcode::Mov { dst, src } => reg[dst as usize] = reg[src as usize],
                 Opcode::Add { dest, l, r } => {
                     reg[dest as usize] = reg[l as usize] + reg[r as usize]
@@ -387,7 +390,11 @@ impl<'sim> VM<'sim> {
                     let gf = &module.context.graphical_functions[gf as usize];
                     reg[dest as usize] = lookup(gf, index);
                 }
+                Opcode::Ret => {
+                    break;
+                }
             }
+            i += 1;
         }
         self.put_register_file(file);
     }
