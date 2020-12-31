@@ -1337,7 +1337,7 @@ impl<'module> ByteCodeBuilder<'module> {
             }
             Expr::Dt => {
                 let dest = self.alloc_register();
-                self.push(Opcode::LoadVar {
+                self.push(Opcode::LoadGlobalVar {
                     dest,
                     off: DT_OFF as VariableOffset,
                 });

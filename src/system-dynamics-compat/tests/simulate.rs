@@ -44,14 +44,14 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
     // "test/test-models/tests/subscript_selection/subscript_selection.xmile",
     //
-    "test/test-models/samples/SIR/SIR.xmile",
-    "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
-    // "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+    "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+    "test/test-models/samples/SIR/SIR.xmile",
     "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
     "test/test-models/samples/teacup/teacup_w_diagram.xmile",
     "test/test-models/samples/teacup/teacup.xmile",
+    "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/tests/builtin_max/builtin_max.xmile",
     "test/test-models/tests/builtin_min/builtin_min.xmile",
     "test/test-models/tests/chained_initialization/test_chained_initialization.xmile",
@@ -212,7 +212,7 @@ fn simulate_path(xmile_path: &str) {
 
     let project = Rc::new(project);
     let sim = Simulation::new(&project, "main").unwrap();
-    sim.debug_print_runlists("main");
+    // sim.debug_print_runlists("main");
     let results = sim.run_to_end();
     assert!(results.is_ok());
 
@@ -226,7 +226,7 @@ fn simulate_path(xmile_path: &str) {
     let compiled_sim = compiled.unwrap();
 
     let mut vm = VM::new(&compiled_sim).unwrap();
-    vm.debug_print_bytecode("main");
+    // vm.debug_print_bytecode("main");
     let results2 = vm.run_to_end();
     assert!(results2.is_ok());
     let results2 = results2.unwrap();

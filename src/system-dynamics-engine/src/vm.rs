@@ -152,6 +152,7 @@ impl Results {
 pub struct VM<'sim> {
     compiled_sim: &'sim CompiledSimulation,
     n_slots: usize,
+    #[allow(clippy::vec_box)]
     cached_register_files: Vec<Box<[f64; 256]>>,
 }
 
@@ -240,7 +241,7 @@ impl<'sim> VM<'sim> {
     #[inline(always)]
     fn get_register_file(&mut self) -> Box<[f64; 256]> {
         if self.cached_register_files.is_empty() {
-            return Box::new([0.0; 256]);
+            Box::new([0.0; 256])
         } else {
             self.cached_register_files.pop().unwrap()
         }
@@ -327,8 +328,11 @@ impl<'sim> VM<'sim> {
                 Opcode::LoadConstant { dest, id } => {
                     reg[dest as usize] = bytecode.literals[id as usize];
                 }
-                Opcode::LoadVar { dest, off } => {
+                Opcode::LoadGlobalVar { dest, off } => {
                     reg[dest as usize] = curr[off as usize];
+                }
+                Opcode::LoadVar { dest, off } => {
+                    reg[dest as usize] = curr[module_off + off as usize];
                 }
                 Opcode::SetSubscriptIndex { index, bounds } => {
                     let index = reg[index as usize].floor() as usize;
@@ -341,7 +345,9 @@ impl<'sim> VM<'sim> {
                 Opcode::LoadSubscript { dest, off } => {
                     reg[dest as usize] = match subscript_index {
                         // the subscript index is 1-based, but curr is 0-based.
-                        Some(subscript_index) => curr[off as usize + subscript_index - 1],
+                        Some(subscript_index) => {
+                            curr[module_off + off as usize + subscript_index - 1]
+                        }
                         None => f64::NAN,
                     };
                 }
@@ -399,6 +405,7 @@ impl<'sim> VM<'sim> {
         self.put_register_file(file);
     }
 
+    /*
     pub fn debug_print_bytecode(&self, _model_name: &str) {
         let modules = &self.compiled_sim.modules;
         let mut model_names: Vec<_> = modules.keys().collect();
@@ -438,14 +445,15 @@ impl<'sim> VM<'sim> {
             }
         }
     }
+     */
 }
 
-#[inline(never)]
+#[inline(always)]
 fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
     match func {
         BuiltinId::Abs => a.abs(),
-        BuiltinId::Arccos => a.cos(),
-        BuiltinId::Arcsin => a.acos(),
+        BuiltinId::Arccos => a.acos(),
+        BuiltinId::Arcsin => a.asin(),
         BuiltinId::Arctan => a.atan(),
         BuiltinId::Cos => a.cos(),
         BuiltinId::Exp => a.exp(),

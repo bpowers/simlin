@@ -116,6 +116,10 @@ pub(crate) enum Opcode {
         dest: Register,
         off: VariableOffset,
     },
+    LoadGlobalVar {
+        dest: Register,
+        off: VariableOffset,
+    },
     SetSubscriptIndex {
         index: Register,
         bounds: VariableOffset,
