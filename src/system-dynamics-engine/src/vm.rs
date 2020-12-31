@@ -8,10 +8,11 @@ use std::convert::TryFrom;
 
 use float_cmp::approx_eq;
 
-use crate::bytecode::{BuiltinId, CompiledModule, Opcode};
+use crate::bytecode::{BuiltinId, ByteCode, ByteCodeContext, CompiledModule, Opcode};
 use crate::common::{Ident, Result};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 use crate::sim_err;
+use wasm_bindgen::__rt::core::cell::RefCell;
 
 pub(crate) const TIME_OFF: usize = 0;
 pub(crate) const DT_OFF: usize = 1;
@@ -35,6 +36,16 @@ pub struct CompiledSimulation {
     pub(crate) specs: Specs,
     pub(crate) root: String,
     pub(crate) offsets: HashMap<Ident, usize>,
+}
+
+#[derive(Clone, Debug)]
+struct CompiledSlicedSimulation<'sim> {
+    initial_modules: HashMap<&'sim str, CompiledModuleSlice<'sim>>,
+    flow_modules: HashMap<&'sim str, CompiledModuleSlice<'sim>>,
+    stock_modules: HashMap<&'sim str, CompiledModuleSlice<'sim>>,
+    specs: Specs,
+    root: &'sim str,
+    offsets: &'sim HashMap<Ident, usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,9 +162,33 @@ impl Results {
 #[derive(Clone, Debug)]
 pub struct VM<'sim> {
     compiled_sim: &'sim CompiledSimulation,
+    sliced_sim: CompiledSlicedSimulation<'sim>,
     n_slots: usize,
     #[allow(clippy::vec_box)]
-    cached_register_files: Vec<Box<[f64; 256]>>,
+    cached_register_files: RefCell<Vec<Box<[f64; 256]>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CompiledModuleSlice<'sim> {
+    ident: &'sim str,
+    context: &'sim ByteCodeContext,
+    bytecode: &'sim ByteCode,
+    part: StepPart,
+}
+
+impl<'sim> CompiledModuleSlice<'sim> {
+    fn new(module: &'sim CompiledModule, part: StepPart) -> Self {
+        CompiledModuleSlice {
+            ident: module.ident.as_str(),
+            context: &module.context,
+            bytecode: match part {
+                StepPart::Initials => &module.compiled_initials,
+                StepPart::Flows => &module.compiled_flows,
+                StepPart::Stocks => &module.compiled_stocks,
+            },
+            part,
+        }
+    }
 }
 
 impl<'sim> VM<'sim> {
@@ -163,15 +198,38 @@ impl<'sim> VM<'sim> {
 
         Ok(VM {
             compiled_sim: sim,
+            sliced_sim: CompiledSlicedSimulation {
+                initial_modules: sim
+                    .modules
+                    .iter()
+                    .map(|(id, m)| (id.as_str(), CompiledModuleSlice::new(m, StepPart::Initials)))
+                    .collect(),
+                flow_modules: sim
+                    .modules
+                    .iter()
+                    .map(|(id, m)| (id.as_str(), CompiledModuleSlice::new(m, StepPart::Flows)))
+                    .collect(),
+                stock_modules: sim
+                    .modules
+                    .iter()
+                    .map(|(id, m)| (id.as_str(), CompiledModuleSlice::new(m, StepPart::Stocks)))
+                    .collect(),
+                specs: sim.specs.clone(),
+                root: sim.root.as_str(),
+                offsets: &sim.offsets,
+            },
             n_slots,
-            cached_register_files: vec![],
+            cached_register_files: RefCell::new(vec![]),
         })
     }
 
     #[inline(never)]
-    pub fn run_to_end(&mut self) -> Result<Results> {
+    pub fn run_to_end(&self) -> Result<Results> {
         let spec = &self.compiled_sim.specs;
-        let module = &self.compiled_sim.modules[&self.compiled_sim.root];
+
+        let module_initials = &self.sliced_sim.initial_modules[self.compiled_sim.root.as_str()];
+        let module_flows = &self.sliced_sim.flow_modules[self.compiled_sim.root.as_str()];
+        let module_stocks = &self.sliced_sim.stock_modules[self.compiled_sim.root.as_str()];
 
         if spec.stop < spec.start {
             return sim_err!(BadSimSpecs, "".to_string());
@@ -200,12 +258,12 @@ impl<'sim> VM<'sim> {
             curr[DT_OFF] = dt;
             curr[INITIAL_TIME_OFF] = spec.start;
             curr[FINAL_TIME_OFF] = spec.stop;
-            self.eval(StepPart::Initials, module, 0, module_inputs, curr, next);
+            self.eval(module_initials, 0, module_inputs, curr, next);
             let mut is_initial_timestep = true;
             let mut step = 0;
             loop {
-                self.eval(StepPart::Flows, module, 0, module_inputs, curr, next);
-                self.eval(StepPart::Stocks, module, 0, module_inputs, curr, next);
+                self.eval(module_flows, 0, module_inputs, curr, next);
+                self.eval(module_stocks, 0, module_inputs, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 next[DT_OFF] = curr[DT_OFF];
                 next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
@@ -239,32 +297,28 @@ impl<'sim> VM<'sim> {
     }
 
     #[inline(always)]
-    fn get_register_file(&mut self) -> Box<[f64; 256]> {
-        if self.cached_register_files.is_empty() {
+    fn get_register_file(&self) -> Box<[f64; 256]> {
+        let mut cache = self.cached_register_files.borrow_mut();
+        if cache.is_empty() {
             Box::new([0.0; 256])
         } else {
-            self.cached_register_files.pop().unwrap()
+            cache.pop().unwrap()
         }
     }
 
-    fn put_register_file(&mut self, reg: Box<[f64; 256]>) {
-        self.cached_register_files.push(reg);
+    fn put_register_file(&self, reg: Box<[f64; 256]>) {
+        self.cached_register_files.borrow_mut().push(reg);
     }
 
     fn eval(
-        &mut self,
-        step_part: StepPart,
-        module: &CompiledModule,
+        &self,
+        module: &CompiledModuleSlice,
         module_off: usize,
         module_inputs: &[f64; 16],
         curr: &mut [f64],
         next: &mut [f64],
     ) {
-        let bytecode = match step_part {
-            StepPart::Initials => &module.compiled_initials,
-            StepPart::Flows => &module.compiled_flows,
-            StepPart::Stocks => &module.compiled_stocks,
-        };
+        let bytecode = module.bytecode;
 
         let mut file = self.get_register_file();
         let reg = &mut *file;
@@ -366,7 +420,12 @@ impl<'sim> VM<'sim> {
                 }
                 Opcode::EvalModule { id } => {
                     let new_module_decl = &module.context.modules[id as usize];
-                    let module = &self.compiled_sim.modules[&new_module_decl.model_name];
+                    let model_name = new_module_decl.model_name.as_str();
+                    let module = match module.part {
+                        StepPart::Initials => &self.sliced_sim.initial_modules[model_name],
+                        StepPart::Flows => &self.sliced_sim.flow_modules[model_name],
+                        StepPart::Stocks => &self.sliced_sim.stock_modules[model_name],
+                    };
 
                     let mut module_inputs = [0.0; 16];
                     std::mem::swap(
@@ -375,7 +434,7 @@ impl<'sim> VM<'sim> {
                     );
 
                     let module_off = module_off + new_module_decl.off;
-                    self.eval(step_part, module, module_off, &module_inputs, curr, next);
+                    self.eval(module, module_off, &module_inputs, curr, next);
                 }
                 Opcode::AssignCurr { off, value } => {
                     curr[module_off + off as usize] = reg[value as usize];
