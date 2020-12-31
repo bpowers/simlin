@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use pico_args::Arguments;
 
-use system_dynamics_compat::engine::{eprintln, serde, Project, Simulation};
+use system_dynamics_compat::engine::{eprintln, serde, Project, Simulation, VM};
 use system_dynamics_compat::prost::Message;
 use system_dynamics_compat::{open_vensim, open_xmile};
 
@@ -146,7 +146,9 @@ fn main() {
     } else {
         let project = Rc::new(Project::from(project));
         let sim = Simulation::new(&project, "main").unwrap();
-        let results = sim.run_to_end();
+        let compiled = sim.compile().unwrap();
+        let mut vm = VM::new(&compiled).unwrap();
+        let results = vm.run_to_end();
         let results = results.unwrap();
         results.print_tsv();
     }
