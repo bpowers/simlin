@@ -152,6 +152,7 @@ impl Results {
 pub struct VM<'sim> {
     compiled_sim: &'sim CompiledSimulation,
     n_slots: usize,
+    cached_register_files: Vec<Box<[f64; 256]>>,
 }
 
 impl<'sim> VM<'sim> {
@@ -162,10 +163,12 @@ impl<'sim> VM<'sim> {
         Ok(VM {
             compiled_sim: sim,
             n_slots,
+            cached_register_files: vec![],
         })
     }
 
-    pub fn run_to_end(&self) -> Result<Results> {
+    #[inline(never)]
+    pub fn run_to_end(&mut self) -> Result<Results> {
         let spec = &self.compiled_sim.specs;
         let module = &self.compiled_sim.modules[&self.compiled_sim.root];
 
@@ -203,9 +206,9 @@ impl<'sim> VM<'sim> {
                 self.eval(StepPart::Flows, module, 0, module_inputs, curr, next);
                 self.eval(StepPart::Stocks, module, 0, module_inputs, curr, next);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
-                next[DT_OFF] = dt;
-                curr[INITIAL_TIME_OFF] = spec.start;
-                curr[FINAL_TIME_OFF] = spec.stop;
+                next[DT_OFF] = curr[DT_OFF];
+                next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
+                next[FINAL_TIME_OFF] = curr[FINAL_TIME_OFF];
                 step += 1;
                 if step != save_every && !is_initial_timestep {
                     let curr = curr.borrow_mut();
@@ -234,8 +237,21 @@ impl<'sim> VM<'sim> {
         })
     }
 
+    fn get_register_file(&mut self) -> Box<[f64; 256]> {
+        if self.cached_register_files.is_empty() {
+            return Box::new([0.0; 256]);
+        } else {
+            self.cached_register_files.pop().unwrap()
+        }
+    }
+
+    fn put_register_file(&mut self, reg: Box<[f64; 256]>) {
+        self.cached_register_files.push(reg);
+    }
+
+    #[inline(always)]
     fn eval(
-        &self,
+        &mut self,
         step_part: StepPart,
         module: &CompiledModule,
         module_off: usize,
@@ -249,7 +265,8 @@ impl<'sim> VM<'sim> {
             StepPart::Stocks => &module.compiled_stocks,
         };
 
-        let mut reg: [f64; 256] = [0.0; 256];
+        let mut file = self.get_register_file();
+        let reg = &mut *file;
         let mut condition = false;
         let mut subscript_index: Option<usize> = None;
 
@@ -279,6 +296,12 @@ impl<'sim> VM<'sim> {
                 }
                 Opcode::Gte { dest, l, r } => {
                     reg[dest as usize] = (reg[l as usize] >= reg[r as usize]) as i8 as f64
+                }
+                Opcode::Lt { dest, l, r } => {
+                    reg[dest as usize] = (reg[l as usize] < reg[r as usize]) as i8 as f64
+                }
+                Opcode::Lte { dest, l, r } => {
+                    reg[dest as usize] = (reg[l as usize] <= reg[r as usize]) as i8 as f64
                 }
                 Opcode::Eq { dest, l, r } => {
                     reg[dest as usize] = {
@@ -314,7 +337,8 @@ impl<'sim> VM<'sim> {
                 }
                 Opcode::LoadSubscript { dest, off } => {
                     reg[dest as usize] = match subscript_index {
-                        Some(subscript_index) => curr[off as usize + subscript_index],
+                        // the subscript index is 1-based, but curr is 0-based.
+                        Some(subscript_index) => curr[off as usize + subscript_index - 1],
                         None => f64::NAN,
                     };
                 }
@@ -351,54 +375,12 @@ impl<'sim> VM<'sim> {
                     next[module_off + off as usize] = reg[value as usize];
                 }
                 Opcode::Apply { dest, func } => {
+                    let time = curr[TIME_OFF];
+                    let dt = curr[DT_OFF];
                     let a = reg[FIRST_CALL_REG as usize];
                     let b = reg[(FIRST_CALL_REG + 1) as usize];
                     let c = reg[(FIRST_CALL_REG + 2) as usize];
-                    reg[dest as usize] = match func {
-                        BuiltinId::Abs => a.abs(),
-                        BuiltinId::Arccos => a.cos(),
-                        BuiltinId::Arcsin => a.acos(),
-                        BuiltinId::Arctan => a.atan(),
-                        BuiltinId::Cos => a.cos(),
-                        BuiltinId::Exp => a.exp(),
-                        BuiltinId::Inf => std::f64::INFINITY,
-                        BuiltinId::Int => a.floor(),
-                        BuiltinId::Ln => a.ln(),
-                        BuiltinId::Log10 => a.log10(),
-                        BuiltinId::Max => {
-                            if a > b {
-                                a
-                            } else {
-                                b
-                            }
-                        }
-                        BuiltinId::Min => {
-                            if a < b {
-                                a
-                            } else {
-                                b
-                            }
-                        }
-                        BuiltinId::Pi => std::f64::consts::PI,
-                        BuiltinId::Pulse => {
-                            let time = curr[TIME_OFF];
-                            let dt = curr[DT_OFF];
-                            let volume = a;
-                            let first_pulse = b;
-                            let interval = c;
-                            pulse(time, dt, volume, first_pulse, interval)
-                        }
-                        BuiltinId::SafeDiv => {
-                            if b != 0.0 {
-                                a / b
-                            } else {
-                                c
-                            }
-                        }
-                        BuiltinId::Sin => a.sin(),
-                        BuiltinId::Sqrt => a.sqrt(),
-                        BuiltinId::Tan => a.tan(),
-                    }
+                    reg[dest as usize] = apply(func, time, dt, a, b, c);
                 }
                 Opcode::Lookup { dest, gf, value } => {
                     let index = reg[value as usize];
@@ -407,6 +389,94 @@ impl<'sim> VM<'sim> {
                 }
             }
         }
+        self.put_register_file(file);
+    }
+
+    pub fn debug_print_bytecode(&self, _model_name: &str) {
+        let modules = &self.compiled_sim.modules;
+        let mut model_names: Vec<_> = modules.keys().collect();
+        model_names.sort_unstable();
+        for model_name in model_names {
+            eprintln!("\n\nCOMPILED MODEL: {}", model_name);
+            let module = &modules[model_name];
+
+            eprintln!("\ninitial literals:");
+            for (i, lit) in module.compiled_initials.literals.iter().enumerate() {
+                eprintln!("\t{}: {}", i, lit);
+            }
+
+            eprintln!("\ninital bytecode:");
+            for op in module.compiled_initials.code.iter() {
+                eprintln!("\t{:?}", op);
+            }
+
+            eprintln!("\nflows literals:");
+            for (i, lit) in module.compiled_flows.literals.iter().enumerate() {
+                eprintln!("\t{}: {}", i, lit);
+            }
+
+            eprintln!("\nflows bytecode:");
+            for op in module.compiled_flows.code.iter() {
+                eprintln!("\t{:?}", op);
+            }
+
+            eprintln!("\nstocks literals:");
+            for (i, lit) in module.compiled_stocks.literals.iter().enumerate() {
+                eprintln!("\t{}: {}", i, lit);
+            }
+
+            eprintln!("\nstocks bytecode:");
+            for op in module.compiled_stocks.code.iter() {
+                eprintln!("\t{:?}", op);
+            }
+        }
+    }
+}
+
+#[inline(never)]
+fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
+    match func {
+        BuiltinId::Abs => a.abs(),
+        BuiltinId::Arccos => a.cos(),
+        BuiltinId::Arcsin => a.acos(),
+        BuiltinId::Arctan => a.atan(),
+        BuiltinId::Cos => a.cos(),
+        BuiltinId::Exp => a.exp(),
+        BuiltinId::Inf => std::f64::INFINITY,
+        BuiltinId::Int => a.floor(),
+        BuiltinId::Ln => a.ln(),
+        BuiltinId::Log10 => a.log10(),
+        BuiltinId::Max => {
+            if a > b {
+                a
+            } else {
+                b
+            }
+        }
+        BuiltinId::Min => {
+            if a < b {
+                a
+            } else {
+                b
+            }
+        }
+        BuiltinId::Pi => std::f64::consts::PI,
+        BuiltinId::Pulse => {
+            let volume = a;
+            let first_pulse = b;
+            let interval = c;
+            pulse(time, dt, volume, first_pulse, interval)
+        }
+        BuiltinId::SafeDiv => {
+            if b != 0.0 {
+                a / b
+            } else {
+                c
+            }
+        }
+        BuiltinId::Sin => a.sin(),
+        BuiltinId::Sqrt => a.sqrt(),
+        BuiltinId::Tan => a.tan(),
     }
 }
 

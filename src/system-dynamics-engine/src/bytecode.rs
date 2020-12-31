@@ -79,6 +79,16 @@ pub(crate) enum Opcode {
         l: Register,
         r: Register,
     },
+    Lt {
+        dest: Register,
+        l: Register,
+        r: Register,
+    },
+    Lte {
+        dest: Register,
+        l: Register,
+        r: Register,
+    },
     Eq {
         dest: Register,
         l: Register,

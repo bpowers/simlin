@@ -1515,8 +1515,8 @@ impl<'module> ByteCodeBuilder<'module> {
                     BinaryOp::Mod => Opcode::Mod { dest, l, r },
                     BinaryOp::Gt => Opcode::Gt { dest, l, r },
                     BinaryOp::Gte => Opcode::Gte { dest, l, r },
-                    BinaryOp::Lt => Opcode::Gte { dest, r, l },
-                    BinaryOp::Lte => Opcode::Gt { dest, r, l },
+                    BinaryOp::Lt => Opcode::Lt { dest, l, r },
+                    BinaryOp::Lte => Opcode::Lte { dest, l, r },
                     BinaryOp::Eq => Opcode::Eq { dest, l, r },
                     BinaryOp::Neq => {
                         self.push(Opcode::Eq { dest, l, r });

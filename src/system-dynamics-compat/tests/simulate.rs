@@ -48,7 +48,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
-    "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
+    // "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
     "test/test-models/samples/SIR/SIR_reciprocal-dt.xmile",
     "test/test-models/samples/teacup/teacup_w_diagram.xmile",
     "test/test-models/samples/teacup/teacup.xmile",
@@ -225,7 +225,8 @@ fn simulate_path(xmile_path: &str) {
     assert!(compiled.is_ok());
     let compiled_sim = compiled.unwrap();
 
-    let vm = VM::new(&compiled_sim).unwrap();
+    let mut vm = VM::new(&compiled_sim).unwrap();
+    vm.debug_print_bytecode("main");
     let results2 = vm.run_to_end();
     assert!(results2.is_ok());
     let results2 = results2.unwrap();
