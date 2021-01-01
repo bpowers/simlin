@@ -1,15 +1,15 @@
 {
   "name": "@system-dynamics/engine",
   "version": "1.0.0",
-  "description": "Common system dynamics functionality",
+  "description": "an engine for constructing and checking SD models",
   "repository": "http://github.com/bpowers/model-app",
-  "author": "Bobby Powers <bobbypowers@gmail.com>",
-  "license": "Apache-2.0",
-  "main": "lib",
-  "browser": "lib.browser",
-  "dependencies": {
-    "google-protobuf": "^3.14.0"
+  "author": {
+    "name": "Bobby Powers",
+    "email": "bobbypowers@gmail.com"
   },
+  "license": "MIT",
+  "browser": "lib.browser",
+  "dependencies": {},
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^4.11.0",
     "@typescript-eslint/parser": "^4.11.0",
@@ -25,6 +25,6 @@
     "format": "prettier --write 'src/**/*.ts'",
     "lint": "eslint 'src/**/*.ts'",
     "prepublishOnly": "yarn build && yarn format",
-    "build": "tsc && tsc -p tsconfig.browser.json"
+    "build": "tsc && tsc -p tsconfig.browser.json && cp src/xmutil.wasm* lib/ && cp src/xmutil.wasm* lib.browser/"
   }
 }

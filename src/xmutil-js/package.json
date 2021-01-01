@@ -1,15 +1,16 @@
 {
   "name": "@system-dynamics/xmutil",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Convert Vensim mdl files to XMILE",
   "repository": "http://github.com/bpowers/model-app",
-  "author": "Bobby Powers <bobbypowers@gmail.com>",
+  "author": {
+    "name": "Bobby Powers",
+    "email": "bobbypowers@gmail.com"
+  },
   "license": "MIT",
-  "main": "lib",
   "browser": "lib.browser",
   "dependencies": {},
   "devDependencies": {
-    "@types/node": "^14.14.19",
     "@typescript-eslint/eslint-plugin": "^4.11.0",
     "@typescript-eslint/parser": "^4.11.0",
     "eslint": "^7.0.0",
@@ -23,7 +24,7 @@
     "needs-format": "prettier -l 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
     "lint": "eslint 'src/**/*.ts'",
-    "prepublishOnly": "yarn build && yarn format",
-    "build": "tsc && tsc -p tsconfig.browser.json && cp src/xmutil.wasm* lib/ && cp src/xmutil.wasm* lib.browser/"
+    "prepublishOnly": "yarn build",
+    "build": "tsc -p tsconfig.browser.json && cp src/xmutil.wasm* lib.browser/"
   }
 }
