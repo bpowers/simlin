@@ -12,8 +12,8 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import { Engine as IEngine, errorCodeDescription } from '../../engine-v2/engine-interface';
-import { open } from '../../engine-v2';
+import type { Engine as IEngine } from '@system-dynamics/engine';
+import { open, errorCodeDescription } from '@system-dynamics/engine';
 
 import {
   Project,
