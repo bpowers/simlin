@@ -10,7 +10,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { brewer } from 'chroma-js';
 
-import { defined, Series } from '../../../core/src/common';
+import { defined, Series } from '@system-dynamics/core/common';
 
 const styles = createStyles({
   sparkline: {

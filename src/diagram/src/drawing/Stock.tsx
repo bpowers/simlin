@@ -8,13 +8,13 @@ import { List } from 'immutable';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { StockViewElement, ViewElement } from '../../../core/src/datamodel';
+import { StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
 import { displayName, mergeBounds, Point, Rect } from './common';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
-import { defined, Series } from '../../../core/src/common';
+import { defined, Series } from '@system-dynamics/core/common';
 
 const styles = createStyles({
   stock: {

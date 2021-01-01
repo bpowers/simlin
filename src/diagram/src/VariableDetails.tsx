@@ -24,9 +24,9 @@ import {
   GraphicalFunctionScale,
   ApplyToAllEquation,
   ScalarEquation,
-} from '../../core/src/datamodel';
+} from '@system-dynamics/core/datamodel';
 
-import { defined, Series } from '../../core/src/common';
+import { defined, Series } from '@system-dynamics/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { LookupEditor } from './LookupEditor';
 

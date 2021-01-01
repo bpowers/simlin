@@ -8,7 +8,7 @@ import { List } from 'immutable';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { Point, FlowViewElement, ViewElement, StockViewElement, CloudViewElement } from '../../../core/src/datamodel';
+import { Point, FlowViewElement, ViewElement, StockViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
 
 import { Arrowhead } from './Arrowhead';
 import { displayName, Point as IPoint } from './common';
@@ -17,7 +17,7 @@ import { Label } from './Label';
 import { Sparkline } from './Sparkline';
 import { StockHeight, StockWidth } from './Stock';
 
-import { defined, Series } from '../../../core/src/common';
+import { defined, Series } from '@system-dynamics/core/common';
 
 const styles = createStyles({
   flowOuter: {

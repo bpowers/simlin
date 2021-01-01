@@ -8,14 +8,14 @@ import { List } from 'immutable';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { AuxViewElement, ViewElement } from '../../../core/src/datamodel';
+import { AuxViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
 import { displayName, mergeBounds, Point, Rect, square } from './common';
 import { AuxRadius } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
-import { defined, Series } from '../../../core/src/common';
+import { defined, Series } from '@system-dynamics/core/common';
 
 const styles = createStyles({
   aux: {

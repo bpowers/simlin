@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { LinkViewElement, ModuleViewElement, StockViewElement, ViewElement } from '../../../core/src/datamodel';
+import { LinkViewElement, ModuleViewElement, StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';

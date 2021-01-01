@@ -6,12 +6,12 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ViewElement, CloudViewElement } from '../../../core/src/datamodel';
+import { ViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
 
 import { Point, Rect, square } from './common';
 import { CloudRadius, CloudWidth } from './default';
 
-import { defined } from '../../../core/src/common';
+import { defined } from '@system-dynamics/core/common';
 
 const styles = createStyles({
   cloud: {

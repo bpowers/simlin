@@ -4,14 +4,15 @@
 
 import * as React from 'react';
 
+import { List } from 'immutable';
+
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { defined } from '../../core/src/common';
+import { defined } from '@system-dynamics/core/common';
 import { isEqual } from './drawing/common';
-import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '../../core/src/datamodel';
-import { List } from 'immutable';
+import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '@system-dynamics/core/datamodel';
 
 const styles = createStyles({
   yAxisMax: {
@@ -159,7 +160,7 @@ function getAnyElementOfObject(obj: any): any | undefined {
 
 export const LookupEditor = withStyles(styles)(
   class InnerLookupEditor extends React.PureComponent<LookupEditorPropsFull, LookupEditorState> {
-    readonly lookupRef: React.RefObject<typeof LineChart>;
+    readonly lookupRef: React.RefObject<InstanceType<typeof LineChart>>;
 
     constructor(props: LookupEditorPropsFull) {
       super(props);
