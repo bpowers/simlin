@@ -1,0 +1,11 @@
+{
+  "name": "@system-dynamics/core",
+  "version": "1.0.0",
+  "description": "Common system dynamics functionality",
+  "repository": "http://github.com/bpowers/model-app",
+  "author": "Bobby Powers <bobbypowers@gmail.com>",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "google-protobuf": "^3.14.0"
+  }
+}

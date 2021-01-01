@@ -5,7 +5,7 @@
   "homepage": "https://systemdynamics.net",
   "main": "src",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "Apache-2.0",
   "keywords": [],
   "author": {
     "name": "Bobby Powers",
@@ -40,7 +40,7 @@
     "build:wasm-importer": "./src/importer/build.sh",
     "build:wasm": "npm-run-all build:wasm-importer build:wasm-engine format",
     "build:webcomponent": "node scripts/build-component.js",
-    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src -name '*.proto') && sed -i 's/goog.object.extend(exports, proto);/goog.object.extend(exports, proto.project_io);/g' src/system-dynamics-engine/src/project_io_pb.js && yarn format",
+    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src -name '*.proto') && sed -i 's/goog.object.extend(exports, proto);/goog.object.extend(exports, proto.project_io);/g' src/system-dynamics-engine/src/project_io_pb.js && mv src/system-dynamics-engine/src/*.[jt]s src/core/src/pb/ && yarn format",
     "rebuild-stdlib": "cargo build && for input in stdlib/*.stmx; do model=\"$(basename $input | cut -d '.' -f 1)\"; target/debug/mdl convert --model-only \"$input\" --output src/system-dynamics-engine/src/stdlib/\"$model\".pb; done",
     "test": "jest",
     "rtest": "yarn run build:backend && ./test/test-models/regression-test.py -x '(subscript|macro|xscale|initial_function|stocks_with_expressions|active_initial|smooth_and_stock|euler_step_vs_saveper|special_characters)' ./bin/mdl.js test/test-models",
@@ -49,7 +49,7 @@
     "start:mongo": "exec docker run -it --rm -v mongo_data:/data/db -e MONGO_INITDB_ROOT_USERNAME=model -e MONGO_INITDB_ROOT_PASSWORD=wKarPlhiHdlazqx5BUCA46dl -e MONGO_INITDB_DATABASE=model -p 27017:27017 mongo:4.2",
     "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092",
     "start:testing": "npm-run-all -p start:backend start:frontend",
-    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; exec node_modules/.bin/ts-node-dev --no-notify --respawn src/index.ts",
+    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; exec node_modules/.bin/ts-node-dev --no-notify --respawn src/server/index.ts",
     "start:frontend": "node scripts/start.js",
     "test:backend": "yarn run test",
     "test:frontend": "node scripts/test.js"

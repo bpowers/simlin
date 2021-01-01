@@ -17,7 +17,7 @@ import { seshcookie } from 'seshcookie';
 import * as logger from 'winston';
 
 import { apiRouter } from './api';
-import { defined } from './app/common';
+import { defined } from '../core/src/common';
 import { Application } from './application';
 import { authn } from './authn';
 import { authz } from './authz';

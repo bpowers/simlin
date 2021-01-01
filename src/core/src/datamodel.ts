@@ -17,8 +17,8 @@ import {
   SimSpecs as PbSimSpecs,
   SimMethodMap as PbSimMethodMap,
   Dimension as PbDimension,
-} from '../system-dynamics-engine/src/project_io_pb';
-import { canonicalize } from '../canonicalize';
+} from './pb/project_io_pb';
+import { canonicalize } from './canonicalize';
 
 export type UID = number;
 

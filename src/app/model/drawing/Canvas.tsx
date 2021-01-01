@@ -10,7 +10,7 @@ import { Node } from 'slate';
 
 import { List, Map, Set } from 'immutable';
 
-import { defined, Series } from '../../common';
+import { defined, Series } from '../../../core/src/common';
 
 import {
   ViewElement,
@@ -26,9 +26,9 @@ import {
   UID,
   LabelSide,
   StockFlowView,
-} from '../../datamodel';
+} from '../../../core/src/datamodel';
 
-import { Project, Model, Stock as StockVar } from '../../datamodel';
+import { Project, Model, Stock as StockVar } from '../../../core/src/datamodel';
 
 import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';

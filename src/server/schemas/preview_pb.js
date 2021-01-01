@@ -1,4 +1,4 @@
-// source: src/schemas/preview.proto
+// source: src/server/schemas/preview.proto
 /**
  * @fileoverview
  * @enhanceable

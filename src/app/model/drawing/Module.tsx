@@ -6,13 +6,13 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ModuleViewElement } from '../../datamodel';
+import { ModuleViewElement } from '../../../core/src/datamodel';
 
 import { displayName, Rect } from './common';
 import { ModuleRadius } from './default';
 import { Label } from './Label';
 
-import { defined } from '../../common';
+import { defined } from '../../../core/src/common';
 
 export const ModuleWidth = 55;
 export const ModuleHeight = 45;

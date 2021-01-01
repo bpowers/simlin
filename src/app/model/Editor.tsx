@@ -12,7 +12,7 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import { Engine as IEngine, errorCodeDescription } from '../../engine-interface';
+import { Engine as IEngine, errorCodeDescription } from '../../engine-v2/engine-interface';
 import { open } from '../../engine-v2';
 
 import {
@@ -31,16 +31,14 @@ import {
   StockViewElement,
   CloudViewElement,
   viewElementType,
-} from '../datamodel';
+} from '../../core/src/datamodel';
 
-import { toInt, uint8ArraysEqual } from '../common';
+import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '../../core/src/common';
 
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
-
-import { baseURL, defined, exists, Series } from '../common';
 
 import IconButton from '@material-ui/core/IconButton';
 import Input from '@material-ui/core/Input';
@@ -69,13 +67,13 @@ import { VariableDetails } from './VariableDetails';
 
 import { createStyles, Theme } from '@material-ui/core/styles';
 import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
-import { renderSvgToString } from '../../render-common';
+import { renderSvgToString } from '../render-common';
 
 import { Card } from '@material-ui/core';
 import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
-import { canonicalize } from '../../canonicalize';
+import { canonicalize } from '../../core/src/canonicalize';
 
 const MaxUndoSize = 5;
 

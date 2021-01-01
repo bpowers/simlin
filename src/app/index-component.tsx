@@ -9,7 +9,7 @@ import { jssPreset, StylesProvider } from '@material-ui/styles';
 
 import { create } from 'jss';
 
-import { baseURL } from './common';
+import { baseURL } from '../core/src/common';
 import { Editor } from './model/Editor';
 
 // try to get the base URL from the src attribute of the current script

@@ -21,7 +21,7 @@ import ExpandMoreIcon from '@material-ui/icons/ExpandMore';
 
 import { Project } from './Project';
 import { User } from './User';
-import { Project as ProjectDM } from './datamodel';
+import { Project as ProjectDM } from '../core/src/datamodel';
 import { convertMdlToXmile } from '../xmutil-js';
 import { fromXmile } from '../importer';
 

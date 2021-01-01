@@ -8,9 +8,9 @@ import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts'
 import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { defined } from '../common';
+import { defined } from '../../core/src/common';
 import { isEqual } from './drawing/common';
-import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '../datamodel';
+import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '../../core/src/datamodel';
 import { List } from 'immutable';
 
 const styles = createStyles({

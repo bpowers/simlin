@@ -9,14 +9,14 @@ import * as React from 'react';
 import { Map, Set } from 'immutable';
 import { renderToString } from 'react-dom/server';
 
-import { UID, ViewElement, Project } from './app/datamodel';
+import { UID, ViewElement, Project } from '../core/src/datamodel';
 
 import { createMuiTheme } from '@material-ui/core/styles';
 import { ServerStyleSheets, ThemeProvider } from '@material-ui/styles';
 
-import { defined, Series } from './app/common';
-import { Canvas } from './app/model/drawing/Canvas';
-import { Box, Point } from './app/model/drawing/common';
+import { defined, Series } from '../core/src/common';
+import { Canvas } from '../app/model/drawing/Canvas';
+import { Box, Point } from '../app/model/drawing/common';
 
 const theme = createMuiTheme({
   palette: {},

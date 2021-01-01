@@ -23,10 +23,10 @@ import {
   GraphicalFunction,
   GraphicalFunctionScale,
   ApplyToAllEquation,
-} from '../datamodel';
+  ScalarEquation,
+} from '../../core/src/datamodel';
 
-import { defined, Series } from '../common';
-import { ScalarEquation } from '../datamodel';
+import { defined, Series } from '../../core/src/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { LookupEditor } from './LookupEditor';
 

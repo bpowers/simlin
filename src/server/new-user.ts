@@ -11,10 +11,10 @@ import { Table } from './models/table';
 import { createFile, createProject } from './project-creation';
 import { File } from './schemas/file_pb';
 import { User } from './schemas/user_pb';
-import { from_xmile } from './importer/pkg';
+import { fromXmile } from '../importer';
 
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
-  const sdPB: Uint8Array = from_xmile(xmile);
+  const sdPB: Uint8Array = await fromXmile(xmile);
 
   const file = createFile(projectId, userId, undefined, sdPB);
   await files.create(file.getId(), file);

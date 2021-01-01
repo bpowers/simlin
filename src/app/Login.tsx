@@ -9,7 +9,7 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { ModelIcon } from './ModelIcon';
 
-import { exists } from './common';
+import { exists } from '../core/src/common';
 
 const styles = createStyles({
   loginOuter: {

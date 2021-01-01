@@ -6,7 +6,7 @@ import { Binary } from 'bson';
 import { Message } from 'google-protobuf';
 import { Collection, Db } from 'mongodb';
 
-import { defined } from '../app/common';
+import { defined } from '../../core/src/common';
 import { SerializableClass, Table } from './table';
 
 interface MongoTableOptions {

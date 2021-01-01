@@ -12,7 +12,7 @@ import { createMuiTheme, createStyles, MuiThemeProvider, withStyles, WithStyles 
 
 import CssBaseline from '@material-ui/core/CssBaseline';
 
-import { defined } from './common';
+import { defined } from '../core/src/common';
 import Home from './Home';
 import { Login } from './Login';
 import { Editor } from './model/Editor';
