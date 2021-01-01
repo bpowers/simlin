@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/core",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Common system dynamics functionality",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
@@ -10,6 +10,7 @@
   "license": "Apache-2.0",
   "main": "lib",
   "module": "lib.module",
+  "sideEffects": false,
   "dependencies": {
     "immutable": "^4.0.0-rc.12",
     "google-protobuf": "^3.14.0"

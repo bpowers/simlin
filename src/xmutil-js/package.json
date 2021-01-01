@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/xmutil",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Convert Vensim mdl files to XMILE",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
@@ -9,6 +9,7 @@
   },
   "license": "MIT",
   "browser": "lib.browser",
+  "sideEffects": false,
   "dependencies": {},
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^4.11.0",

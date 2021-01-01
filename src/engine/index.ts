@@ -2,17 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import type { Engine } from './pkg';
+import type { Engine } from './core/engine';
 
-let cachedWasmModule: typeof import('./pkg') | undefined;
-function getWasmModule(): Promise<typeof import('./pkg')> {
+let cachedWasmModule: typeof import('./core/engine') | undefined;
+function getWasmModule(): Promise<typeof import('./core/engine')> {
   return new Promise((resolve, reject) => {
     if (cachedWasmModule) {
       resolve(cachedWasmModule);
       return;
     }
 
-    import('./pkg')
+    import('./core/engine')
       .then((module) => {
         cachedWasmModule = module;
         resolve(module);

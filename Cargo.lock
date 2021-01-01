@@ -221,7 +221,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine-v2"
+name = "engine"
 version = "0.1.0"
 dependencies = [
  "js-sys",

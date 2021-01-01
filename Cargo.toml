@@ -1,7 +1,7 @@
 [workspace]
 
 members = [
-    "src/engine-v2",
+    "src/engine",
     "src/importer",
     "src/mdl",
     "src/system-dynamics-compat",
