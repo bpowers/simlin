@@ -1,5 +1,5 @@
 {
-  "extends": "../core/tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "lib",
@@ -7,8 +7,7 @@
     "lib": [
       "es2020",
       "dom"
-    ],
-    "jsx": "preserve"
+    ]
   },
   "exclude": [
     "lib",

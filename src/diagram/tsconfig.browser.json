@@ -1,7 +1,6 @@
 {
-  "extends": "../core/tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "baseUrl": ".",
     "outDir": "lib.browser",
     "module": "esnext",
     "lib": [
@@ -14,5 +13,5 @@
   "exclude": [
     "lib",
     "lib.browser"
-  ]
+  ],
 }

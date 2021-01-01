@@ -13,7 +13,7 @@ import TextField from '@material-ui/core/TextField';
 import ArrowBackIcon from '@material-ui/icons/ArrowBack';
 import ClearIcon from '@material-ui/icons/Clear';
 
-import { ModelIcon } from '../ModelIcon';
+import { ModelIcon } from './ModelIcon';
 
 const iOS = typeof navigator !== undefined && /iPad|iPhone|iPod/.test(navigator.userAgent);
 

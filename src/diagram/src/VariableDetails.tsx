@@ -98,7 +98,7 @@ function scalarEquationFor(variable: Variable): string {
 
 export const VariableDetails = withStyles(styles)(
   class InnerVariableDetails extends React.PureComponent<VariableDetailsPropsFull, VariableDetailsState> {
-    readonly lookupRef: React.RefObject<LineChart>;
+    readonly lookupRef: React.RefObject<typeof LineChart>;
 
     constructor(props: VariableDetailsPropsFull) {
       super(props);

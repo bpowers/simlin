@@ -159,7 +159,7 @@ function getAnyElementOfObject(obj: any): any | undefined {
 
 export const LookupEditor = withStyles(styles)(
   class InnerLookupEditor extends React.PureComponent<LookupEditorPropsFull, LookupEditorState> {
-    readonly lookupRef: React.RefObject<LineChart>;
+    readonly lookupRef: React.RefObject<typeof LineChart>;
 
     constructor(props: LookupEditorPropsFull) {
       super(props);
@@ -321,7 +321,7 @@ export const LookupEditor = withStyles(styles)(
       this.updatePoint(details);
     };
 
-    handleMouseMove = (details: any, event: React.MouseEvent<LineChart>) => {
+    handleMouseMove = (details: any, event: React.MouseEvent<typeof LineChart>) => {
       if (!this.state.inDrag) {
         return;
       }
