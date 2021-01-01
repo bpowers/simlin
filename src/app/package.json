@@ -1,15 +1,12 @@
 {
-  "name": "@system-dynamics/core",
+  "name": "@system-dynamics/app",
   "version": "1.0.0",
   "description": "Common system dynamics functionality",
   "repository": "http://github.com/bpowers/model-app",
-  "author": {
-    "name": "Bobby Powers",
-    "email": "bobbypowers@gmail.com"
-  },
+  "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
   "main": "lib",
-  "module": "lib.module",
+  "browser": "lib.browser",
   "dependencies": {
     "google-protobuf": "^3.14.0"
   },
@@ -28,6 +25,6 @@
     "format": "prettier --write 'src/**/*.ts'",
     "lint": "eslint 'src/**/*.ts'",
     "prepublishOnly": "yarn build && yarn format",
-    "build": "tsc && tsc -p tsconfig.module.json"
+    "build": "tsc && tsc -p tsconfig.browser.json"
   }
 }

@@ -14,9 +14,7 @@ perf.data.old
 /lib
 
 # dependencies
-/node_modules
-/app/node_modules
-/app/build
+node_modules
 
 # testing
 /coverage

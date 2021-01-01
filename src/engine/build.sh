@@ -23,6 +23,8 @@ fi
 CC=emcc CXX=em++ wasm-pack build --release -t nodejs -d pkg-node
 CC=emcc CXX=em++ wasm-pack build --release -t browser -d pkg
 
+rm pkg/package.json
+
 #wasm-opt pkg/engine_v2_bg.wasm -o pkg/engine_v2_bg.wasm-opt.wasm -O2 --enable-mutable-globals
 #wasm-opt pkg-node/engine_v2_bg.wasm -o pkg-node/engine_v2_bg.wasm-opt.wasm -O2 --enable-mutable-globals
 #
