@@ -7,9 +7,9 @@ import * as React from 'react';
 import Button from '@material-ui/core/Button';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { ModelIcon } from './ModelIcon';
+import { ModelIcon } from '@system-dynamics/diagram/ModelIcon';
 
-import { exists } from '../core/src/common';
+import { exists } from '@system-dynamics/core/common';
 
 const styles = createStyles({
   loginOuter: {

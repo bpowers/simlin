@@ -29,5 +29,8 @@ module.exports = {
   },
   "ignorePatterns": [
     "src/pb/",
+    "lib/",
+    "lib.browser/",
+    "lib.module/"
   ],
 };

@@ -9,8 +9,8 @@ import { jssPreset, StylesProvider } from '@material-ui/styles';
 
 import { create } from 'jss';
 
-import { baseURL } from '../core/src/common';
-import { Editor } from './model/Editor';
+import { baseURL } from '@system-dynamics/core/common';
+import { Editor } from '@system-dynamics/diagram/Editor';
 
 // try to get the base URL from the src attribute of the current script
 // (so that e.g. localhost:3000 works for testing), but fall back to baseURL

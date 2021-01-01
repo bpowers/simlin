@@ -21,9 +21,9 @@ import ExpandMoreIcon from '@material-ui/icons/ExpandMore';
 
 import { Project } from './Project';
 import { User } from './User';
-import { Project as ProjectDM } from '../core/src/datamodel';
-import { convertMdlToXmile } from '../xmutil-js';
-import { fromXmile } from '../importer';
+import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
+import { convertMdlToXmile } from '@system-dynamics/xmutil';
+import { fromXmile } from '@system-dynamics/importer';
 
 const styles = createStyles({
   newSubtitle: {
