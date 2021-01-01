@@ -23,6 +23,7 @@ import { Project } from './Project';
 import { User } from './User';
 import { Project as ProjectDM } from './datamodel';
 import { convertMdlToXmile } from '../xmutil-js';
+import { fromXmile } from '../importer';
 
 const styles = createStyles({
   newSubtitle: {
@@ -160,8 +161,7 @@ export const NewProject = withStyles(styles)(
       }
 
       try {
-        const { from_xmile } = await import('../importer/pkg');
-        const projectPB: Uint8Array = from_xmile(contents);
+        const projectPB: Uint8Array = await fromXmile(contents);
         const activeProject = ProjectDM.deserializeBinary(projectPB);
         const views = activeProject.models.get('main')?.views;
         if (!views || views.isEmpty()) {

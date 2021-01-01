@@ -13,6 +13,7 @@ import { History } from 'history';
 import { Canvg } from 'canvg';
 
 import { Engine as IEngine, errorCodeDescription } from '../../engine-interface';
+import { open } from '../../engine-v2';
 
 import {
   Project,
@@ -1353,9 +1354,7 @@ export const Editor = withStyles(styles)(
       this.activeEngine?.free();
       this.activeEngine = undefined;
 
-      const { open } = await import('../../engine-v2/pkg');
-
-      const engine: IEngine | undefined = open(serializedProject as Uint8Array);
+      const engine: IEngine | undefined = await open(serializedProject as Uint8Array);
       if (!engine) {
         this.appendModelError(`opening the project in the engine failed`);
         return;
