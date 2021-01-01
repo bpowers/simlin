@@ -1,10 +1,11 @@
 {
   "name": "@system-dynamics/xmutil",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Convert Vensim mdl files to XMILE",
   "repository": "http://github.com/bpowers/model-app",
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "MIT",
+  "main": "lib",
   "browser": "lib.browser",
   "dependencies": {},
   "devDependencies": {
