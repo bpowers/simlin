@@ -147,7 +147,7 @@ fn main() {
         let project = Rc::new(Project::from(project));
         let sim = Simulation::new(&project, "main").unwrap();
         let compiled = sim.compile().unwrap();
-        let mut vm = VM::new(&compiled).unwrap();
+        let vm = VM::new(&compiled).unwrap();
         let results = vm.run_to_end();
         let results = results.unwrap();
         results.print_tsv();
