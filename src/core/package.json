@@ -11,6 +11,7 @@
   "main": "lib",
   "module": "lib.module",
   "dependencies": {
+    "immutable": "^4.0.0-rc.12",
     "google-protobuf": "^3.14.0"
   },
   "devDependencies": {
