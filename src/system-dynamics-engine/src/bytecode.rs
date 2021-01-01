@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-#![allow(dead_code)]
-
 pub type LiteralId = u16;
 pub type ModuleId = u16;
 pub type Register = u8;

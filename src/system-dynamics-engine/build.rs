@@ -2,10 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// because of our creative use of modules below, rustc wants to
-// warn about unused code in common.  Ignore those warnings here.
-#![allow(dead_code, unused_macros)]
-
 use std::env;
 use std::fs;
 use std::io::{self, Write};

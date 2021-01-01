@@ -580,7 +580,6 @@ pub struct Views {
 }
 
 impl Model {
-    #[allow(dead_code)] // TODO: false positive
     pub fn get_name(&self) -> &str {
         &self.name.as_deref().unwrap_or("main")
     }
@@ -2107,7 +2106,6 @@ pub enum Var {
 }
 
 impl Var {
-    #[allow(dead_code)] // this is a false-positive lint
     pub fn get_noncanonical_name(&self) -> &str {
         match self {
             Var::Stock(stock) => stock.name.as_str(),

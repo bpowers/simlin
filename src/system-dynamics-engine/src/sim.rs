@@ -70,7 +70,6 @@ struct VariableMetadata {
 
 #[derive(Clone, Debug)]
 struct Context<'a> {
-    #[allow(dead_code)]
     dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
     ident: &'a str,
@@ -90,16 +89,6 @@ impl<'a> Context<'a> {
     /// get_base_offset ignores arrays and should only be used from Var::new and Expr::Subscript
     fn get_base_offset(&self, ident: &str) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, true)
-    }
-
-    #[allow(dead_code)]
-    fn get_dimension(&self, name: &str) -> Result<&datamodel::Dimension> {
-        for dim in self.dimensions {
-            if dim.name == name {
-                return Ok(dim);
-            }
-        }
-        return sim_err!(BadDimensionName, name.to_owned());
     }
 
     fn get_metadata(&self, ident: &str) -> Result<&VariableMetadata> {
@@ -1255,7 +1244,6 @@ impl Module {
         })
     }
 
-    #[allow(dead_code)]
     pub fn compile(&self) -> Result<CompiledModule> {
         let builder = ByteCodeBuilder::new(&self)?;
 
@@ -1263,7 +1251,6 @@ impl Module {
     }
 }
 
-#[allow(dead_code)]
 struct ByteCodeBuilder<'module> {
     module: &'module Module,
     module_decls: Vec<ModuleDeclaration>,
@@ -1276,7 +1263,6 @@ struct ByteCodeBuilder<'module> {
 }
 
 impl<'module> ByteCodeBuilder<'module> {
-    #[allow(dead_code)]
     fn new(module: &'module Module) -> Result<ByteCodeBuilder> {
         let mut free_registers = BinaryHeap::new();
         for n in 0u8..(FIRST_CALL_REG - 1) {
@@ -1294,7 +1280,6 @@ impl<'module> ByteCodeBuilder<'module> {
         })
     }
 
-    #[allow(dead_code)]
     fn walk(&mut self, exprs: &[Expr]) -> Result<ByteCode> {
         for expr in exprs.iter() {
             self.walk_expr(expr)?;
@@ -1304,7 +1289,6 @@ impl<'module> ByteCodeBuilder<'module> {
         Ok(std::mem::take(&mut self.curr_code))
     }
 
-    #[allow(dead_code)]
     fn walk_expr(&mut self, expr: &Expr) -> Result<Option<Register>> {
         let result = match expr {
             Expr::Const(value) => {
@@ -1574,22 +1558,18 @@ impl<'module> ByteCodeBuilder<'module> {
         Ok(result)
     }
 
-    #[allow(dead_code)]
     fn push(&mut self, op: Opcode) {
         self.curr_code.push_opcode(op)
     }
 
-    #[allow(dead_code)]
     fn alloc_register(&mut self) -> Register {
         self.free_registers.pop().unwrap().0
     }
 
-    #[allow(dead_code)]
     fn free_register(&mut self, reg: Register) {
         self.free_registers.push(Reverse(reg));
     }
 
-    #[allow(dead_code)]
     fn compile(mut self) -> Result<CompiledModule> {
         self.initials_code = self.walk(&self.module.runlist_initials)?;
         self.flows_code = self.walk(&self.module.runlist_flows)?;

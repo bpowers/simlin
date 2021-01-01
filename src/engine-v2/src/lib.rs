@@ -16,7 +16,6 @@ use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, 
 
 #[wasm_bindgen]
 pub struct Engine {
-    #[allow(dead_code)]
     project: engine::Project,
     sim: Option<engine::Simulation>,
     results: Option<engine::Results>,

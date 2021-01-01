@@ -92,7 +92,6 @@ pub enum Variable {
 }
 
 impl Variable {
-    #[allow(dead_code)] // this is a false-positive lint
     pub fn get_ident(&self) -> &str {
         match self {
             Variable::Stock(stock) => stock.ident.as_str(),

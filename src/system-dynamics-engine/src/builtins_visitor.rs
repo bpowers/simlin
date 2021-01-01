@@ -22,15 +22,12 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
 }
 
 pub struct BuiltinVisitor<'a> {
-    #[allow(dead_code)]
     variable_name: &'a str,
     vars: HashMap<Ident, datamodel::Variable>,
     n: usize,
 }
 
 impl<'a> BuiltinVisitor<'a> {
-    // FIXME: remove when done here
-    #[allow(dead_code)]
     pub fn new(variable_name: &'a str) -> Self {
         Self {
             variable_name,
