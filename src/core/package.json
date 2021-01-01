@@ -29,7 +29,7 @@
     "needs-format": "prettier -l 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
     "lint": "eslint 'src/**/*.ts'",
-    "prepublishOnly": "yarn build && yarn format",
+    "prepublishOnly": "yarn build",
     "build": "tsc && tsc -p tsconfig.browser.json"
   }
 }
