@@ -7,7 +7,8 @@
     "lib": [
       "es2020",
       "dom"
-    ]
+    ],
+    "jsx": "preserve"
   },
   "exclude": [
     "lib",

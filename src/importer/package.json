@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/importer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "convert XMILE models to model-app protobufs",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
@@ -24,7 +24,7 @@
   "scripts": {
     "needs-format": "prettier -l '*.ts'",
     "format": "prettier --write '*.ts'",
-    "lint": "eslint 'src/**/*.ts'",
+    "lint": "eslint '*.ts'",
     "prepublishOnly": "yarn build",
     "build": "./build.sh && tsc -p tsconfig.browser.json && cp -r core lib.browser/"
   }

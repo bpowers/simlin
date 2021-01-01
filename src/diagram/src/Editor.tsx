@@ -31,9 +31,9 @@ import {
   StockViewElement,
   CloudViewElement,
   viewElementType,
-} from '../../core/src/datamodel';
+} from '@system-dynamics/core/datamodel';
 
-import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '../../core/src/common';
+import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
 
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
@@ -67,13 +67,13 @@ import { VariableDetails } from './VariableDetails';
 
 import { createStyles, Theme } from '@material-ui/core/styles';
 import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
-import { renderSvgToString } from '../render-common';
+import { renderSvgToString } from './render-common';
 
 import { Card } from '@material-ui/core';
 import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
-import { canonicalize } from '../../core/src/canonicalize';
+import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 const MaxUndoSize = 5;
 

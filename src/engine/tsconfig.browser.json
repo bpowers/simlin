@@ -1,13 +1,11 @@
 {
-  "extends": "../core/tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "lib.browser",
     "module": "esnext",
     "lib": [
       "es2020",
-      "dom",
-      "dom.iterable",
-      "scripthost"
+      "dom"
     ]
   },
   "exclude": [
