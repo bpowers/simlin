@@ -1,0 +1,31 @@
+{
+  "name": "@system-dynamics/importer",
+  "version": "1.0.0",
+  "description": "convert XMILE models to model-app protobufs",
+  "repository": "http://github.com/bpowers/model-app",
+  "author": {
+    "name": "Bobby Powers",
+    "email": "bobbypowers@gmail.com"
+  },
+  "license": "MIT",
+  "browser": "lib.browser",
+  "sideEffects": false,
+  "dependencies": {},
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^4.11.0",
+    "@typescript-eslint/parser": "^4.11.0",
+    "eslint": "^7.0.0",
+    "eslint-config-prettier": "^7.0.0",
+    "eslint-plugin-import": "^2.20.1",
+    "eslint-plugin-prettier": "^3.1.3",
+    "prettier": "^2.0.1",
+    "typescript": "^4.1.3"
+  },
+  "scripts": {
+    "needs-format": "prettier -l '*.ts'",
+    "format": "prettier --write '*.ts'",
+    "lint": "eslint 'src/**/*.ts'",
+    "prepublishOnly": "yarn build",
+    "build": "./build.sh && tsc -p tsconfig.browser.json && cp -r core lib.browser/"
+  }
+}
