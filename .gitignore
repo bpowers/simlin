@@ -11,7 +11,9 @@ perf.data.old
 
 *~
 
-/lib
+lib
+lib.browser
+lib.module
 
 # dependencies
 node_modules
