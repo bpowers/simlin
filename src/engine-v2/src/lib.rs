@@ -12,7 +12,7 @@ use prost::Message;
 use system_dynamics_engine as engine;
 use system_dynamics_engine::common::{ErrorCode, ErrorKind};
 use system_dynamics_engine::datamodel::GraphicalFunction;
-use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error};
+use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error, VM};
 
 #[wasm_bindgen]
 pub struct Engine {
@@ -421,8 +421,10 @@ impl Engine {
             return;
         }
         let sim = self.sim.as_ref().unwrap();
-
-        self.results = sim.run_to_end().ok();
+        let compiled = sim.compile().unwrap();
+        let vm = VM::new(&compiled).unwrap();
+        let results = vm.run_to_end();
+        self.results = results.ok();
     }
 
     #[wasm_bindgen(js_name = simVarNames, typescript_type = "Array<string>")]
