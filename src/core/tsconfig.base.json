@@ -38,7 +38,4 @@
     "config",
     "support"
   ],
-  "include": [
-    "src"
-  ]
 }

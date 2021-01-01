@@ -28,6 +28,6 @@
     "format": "prettier --write 'src/**/*.ts'",
     "lint": "eslint 'src/**/*.ts'",
     "prepublishOnly": "yarn build && yarn format",
-    "build": "tsc && tsc -p tsconfig.module.json"
+    "build": "tsc && tsc -p tsconfig.browser.json"
   }
 }

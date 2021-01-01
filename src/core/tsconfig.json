@@ -4,4 +4,7 @@
     "outDir": "lib",
     "module": "commonjs",
   },
+  "include": [
+    "src"
+  ]
 }

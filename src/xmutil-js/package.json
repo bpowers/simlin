@@ -8,6 +8,7 @@
   "main": "lib",
   "browser": "lib.browser",
   "dependencies": {
+    "immutable": "^4.0.0-rc.12",
     "google-protobuf": "^3.14.0"
   },
   "devDependencies": {
