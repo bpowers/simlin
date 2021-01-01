@@ -22,6 +22,7 @@ import ExpandMoreIcon from '@material-ui/icons/ExpandMore';
 import { Project } from './Project';
 import { User } from './User';
 import { Project as ProjectDM } from './datamodel';
+import { convertMdlToXmile } from '../xmutil-js';
 
 const styles = createStyles({
   newSubtitle: {
@@ -155,8 +156,7 @@ export const NewProject = withStyles(styles)(
 
       // convert vensim files to xmile
       if (file.name.endsWith('.mdl')) {
-        const { convertMdlToXmile } = await import('../xmutil-js');
-        contents = convertMdlToXmile(contents, false);
+        contents = await convertMdlToXmile(contents, false);
       }
 
       try {

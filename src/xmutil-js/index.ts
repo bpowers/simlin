@@ -2,13 +2,43 @@
 // Use of this source code is governed by the MIT License
 // that can be found in the LICENSE file.
 
-import * as wasm from './xmutil.wasm';
+export function defined<T>(object: T | undefined): T {
+  if (object === undefined) {
+    throw new Error('expected non-undefined object');
+  }
+  return object;
+}
+
+interface WasmModule {
+  memory: WebAssembly.Memory;
+  free(ptr: number): void;
+  malloc(size: number): number;
+  _convert_mdl_to_xmile(ptr: number, len: number, isCompact: boolean): number;
+}
+
+let cachedWasmModule: WasmModule | undefined;
+function getWasmModule(): Promise<WasmModule> {
+  return new Promise<WasmModule>((resolve, reject) => {
+    if (cachedWasmModule) {
+      resolve(cachedWasmModule);
+      return;
+    }
+
+    import('./xmutil.wasm')
+      .then((module) => {
+        cachedWasmModule = module;
+        resolve(module);
+      })
+      .catch(reject);
+  });
+}
 
 const cachedTextEncoder = new TextEncoder();
 const cachedTextDecoder = new TextDecoder();
 
 let cachegetUint8Memory0: Uint8Array | null = null;
 function getUint8Memory0() {
+  const wasm = defined(cachedWasmModule);
   if (cachegetUint8Memory0 === null || cachegetUint8Memory0.buffer !== wasm.memory.buffer) {
     cachegetUint8Memory0 = new Uint8Array(wasm.memory.buffer);
   }
@@ -24,10 +54,12 @@ function getStringFromWasm(ptr: number) {
   return getUint8Memory0().subarray(ptr / 1, ptr / 1 + off);
 }
 
-export function convertMdlToXmile(mdlSource: string | Readonly<Uint8Array>, pretty = true): string {
+export async function convertMdlToXmile(mdlSource: string | Readonly<Uint8Array>, pretty = true): Promise<string> {
   if (typeof mdlSource === 'string') {
     mdlSource = cachedTextEncoder.encode(mdlSource);
   }
+
+  const wasm = await getWasmModule();
 
   const mdlSourcePtr = wasm.malloc(mdlSource.length);
   getUint8Memory0()
