@@ -2,3 +2,4 @@
 /.npmignore
 /tsconfig*
 /README*
+/.eslint*

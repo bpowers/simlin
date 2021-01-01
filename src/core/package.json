@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Common system dynamics functionality",
   "repository": "http://github.com/bpowers/model-app",
+  "private": false,
   "author": {
     "name": "Bobby Powers",
     "email": "bobbypowers@gmail.com"
