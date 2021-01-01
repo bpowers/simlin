@@ -9,16 +9,9 @@ export function defined<T>(object: T | undefined): T {
   return object;
 }
 
-interface WasmModule {
-  memory: WebAssembly.Memory;
-  free(ptr: number): void;
-  malloc(size: number): number;
-  _convert_mdl_to_xmile(ptr: number, len: number, isCompact: boolean): number;
-}
-
-let cachedWasmModule: WasmModule | undefined;
-function getWasmModule(): Promise<WasmModule> {
-  return new Promise<WasmModule>((resolve, reject) => {
+let cachedWasmModule: typeof import('./xmutil.wasm') | undefined;
+function getWasmModule(): Promise<typeof import('./xmutil.wasm')> {
+  return new Promise((resolve, reject) => {
     if (cachedWasmModule) {
       resolve(cachedWasmModule);
       return;
