@@ -1,9 +1,6 @@
 {
-  "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "baseUrl": ".",
-    "outDir": "lib",
-    "module": "commonjs",
     "target": "es2017",
     "lib": ["es2018"],
     "esModuleInterop": true,
@@ -40,5 +37,8 @@
     "test",
     "config",
     "support"
+  ],
+  "include": [
+    "src"
   ]
 }

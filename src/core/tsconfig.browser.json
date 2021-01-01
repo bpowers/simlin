@@ -2,7 +2,7 @@
   "extends": "./tsconfig.base.json",
 
   "compilerOptions": {
-    "outDir": "browser",
+    "outDir": "lib.browser",
     "module": "esnext",
     "lib": [
       "es2018",
