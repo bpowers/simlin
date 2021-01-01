@@ -503,11 +503,10 @@ fn test_module_parse() {
     assert_eq!(expected, actual);
 }
 
-#[allow(dead_code)] // false positive
-pub fn build_xvars_map<'a>(
+pub fn build_xvars_map(
     name: Ident,
-    m: &'a datamodel::Model,
-) -> (Ident, HashMap<Ident, &'a datamodel::Variable>) {
+    m: &datamodel::Model,
+) -> (Ident, HashMap<Ident, &datamodel::Variable>) {
     (
         name,
         m.variables

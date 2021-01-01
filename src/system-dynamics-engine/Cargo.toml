@@ -17,7 +17,7 @@ lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
 lalrpop-util = "0.19"
-prost = { version = "0.6", git = "https://github.com/danburkert/prost", rev = "423f5ec5bd165a7007a388edfb2b485d5bbf40c7"}
+prost = "0.7"
 float-cmp = "0.8"
 wasm-bindgen = { version = "0.2", optional = true }
 
@@ -26,4 +26,4 @@ rand = "0.7"
 
 [build-dependencies]
 lalrpop = "0.19"
-prost-build = { version = "0.6", git = "https://github.com/danburkert/prost", rev = "423f5ec5bd165a7007a388edfb2b485d5bbf40c7"}
+prost-build = "0.7"

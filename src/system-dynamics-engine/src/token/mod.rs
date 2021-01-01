@@ -273,7 +273,7 @@ fn is_number_start(c: char) -> bool {
 }
 
 fn is_digit(c: char) -> bool {
-    '9' >= c && c >= '0'
+    ('0'..='9').contains(&c)
 }
 
 fn is_identifier_start(c: char) -> bool {

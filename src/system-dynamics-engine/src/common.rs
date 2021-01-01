@@ -211,11 +211,10 @@ impl fmt::Display for Error {
             ErrorKind::Simulation => "SimulationError",
             ErrorKind::Variable => "VariableError",
         };
-        let details: &str = match self.details {
-            Some(ref details) => details,
-            None => "",
-        };
-        write!(f, "{}{{{}: {}}}", kind, self.code, details)
+        match self.details {
+            Some(ref details) => write!(f, "{}{{{}: {}}}", kind, self.code, details),
+            None => write!(f, "{}{{{}}}", kind, self.code),
+        }
     }
 }
 
