@@ -5,13 +5,10 @@
   "repository": "http://github.com/bpowers/model-app",
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "MIT",
-  "main": "lib",
   "browser": "lib.browser",
-  "dependencies": {
-    "immutable": "^4.0.0-rc.12",
-    "google-protobuf": "^3.14.0"
-  },
+  "dependencies": {},
   "devDependencies": {
+    "@types/node": "^14.14.19",
     "@typescript-eslint/eslint-plugin": "^4.11.0",
     "@typescript-eslint/parser": "^4.11.0",
     "eslint": "^7.0.0",
@@ -26,6 +23,6 @@
     "format": "prettier --write 'src/**/*.ts'",
     "lint": "eslint 'src/**/*.ts'",
     "prepublishOnly": "yarn build && yarn format",
-    "build": "tsc && tsc -p tsconfig.browser.json"
+    "build": "tsc && tsc -p tsconfig.browser.json && cp src/xmutil.wasm* lib/ && cp src/xmutil.wasm* lib.browser/"
   }
 }

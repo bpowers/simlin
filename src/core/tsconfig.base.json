@@ -1,14 +1,12 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
-    "target": "es2017",
-    "lib": ["es2018"],
+    "target": "es2020",
+    "lib": ["es2020"],
     "esModuleInterop": true,
     "allowJs": true,
     "sourceMap": true,
     "jsx": "react",
     "moduleResolution": "node",
-    "rootDir": "src",
     "declaration": true,
     "removeComments": true,
     "isolatedModules": true,
@@ -22,20 +20,4 @@
     "suppressImplicitAnyIndexErrors": true,
     "noUnusedLocals": true
   },
-  "exclude": [
-    "public",
-    "node_modules",
-    "lib",
-    "lib.browser",
-    "build",
-    "build-component",
-    "scripts",
-    "acceptance-tests",
-    "webpack",
-    "jest",
-    "bin",
-    "test",
-    "config",
-    "support"
-  ],
 }

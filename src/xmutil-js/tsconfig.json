@@ -1,7 +1,16 @@
 {
   "extends": "../core/tsconfig.base.json",
   "compilerOptions": {
+    "rootDir": "src",
     "outDir": "lib",
     "module": "commonjs",
+    "lib": [
+      "es2020",
+      "dom"
+    ]
   },
+  "exclude": [
+    "lib",
+    "lib.browser"
+  ]
 }

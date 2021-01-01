@@ -2,14 +2,14 @@ xmutil.js - convert [Vensim](https://vensim.com/vensim-software/) mdl files to [
 =============================================
 
 This is Bob Eberlein's [xmutil](https://github.com/bobeberlein/xmutil)
-project compiled to Web Assembly and wrapped in the simplest possible
-TypeScript wrapper.
+project compiled to WebAssembly and wrapped in the simplest possible
+TypeScript wrapper (and also usable from plain JavaScript).
 
 Usage
 -----
 
 ```js
-import { convertMdlToXmile } from 'xmutil';
+import { convertMdlToXmile } from '@system-dynamics/xmutil';
 
 const args = process.argv.slice(2);
 const mdlFile = fs.readFileSync(args[0], 'utf-8');
