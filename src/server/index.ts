@@ -7,10 +7,8 @@ if (process.env.NODE_ENV === 'production') {
   require('@google-cloud/trace-agent').start();
 }
 
-// eslint-disable-next-line import/first
 import * as logger from 'winston';
 
-// eslint-disable-next-line import/first
 import { createApp } from './app';
 
 process.on('unhandledRejection', (reason, p) => {

@@ -9,7 +9,7 @@ import { File as DbFilePb } from './schemas/file_pb';
 import { Project as DbProjectPb } from './schemas/project_pb';
 import { User as UserPb } from './schemas/user_pb';
 
-import { Model, Dt, SimSpecs, Project, View } from '../core/src/pb/project_io_pb';
+import { Model, Dt, SimSpecs, Project, View } from '@system-dynamics/core/pb/project_io_pb';
 
 export function emptyProject(name: string, _userName: string): Project {
   const model = new Model();

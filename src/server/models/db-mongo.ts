@@ -14,14 +14,12 @@ import { MongoTable } from './table-mongo';
 import { Table } from './table';
 
 export class MongoDatabase implements Database {
-  private readonly client: MongoClient;
   readonly file: Table<File>;
   readonly project: Table<Project>;
   readonly preview: Table<Preview>;
   readonly user: Table<User>;
 
   constructor(client: MongoClient) {
-    this.client = client;
     const db = client.db();
 
     this.file = new MongoTable(File, { db, name: 'files2' });

@@ -10,10 +10,11 @@
   },
   "workspaces": [
     "src/app",
-    "src/diagram",
     "src/core",
+    "src/diagram",
     "src/engine",
     "src/importer",
+    "src/server",
     "src/xmutil-js"
   ]
 }

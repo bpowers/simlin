@@ -10,9 +10,9 @@ import { Canvg, presets } from 'canvg';
 import fetch from 'node-fetch';
 import { DOMParser } from 'xmldom';
 
-import { exists } from '../core/src/common';
-import { Project as DmProject } from '../core/src/datamodel';
-import { renderSvgToString } from '../app/render-common';
+import { exists } from '@system-dynamics/core/common';
+import { Project as DmProject } from '@system-dynamics/core/datamodel';
+import { renderSvgToString } from '@system-dynamics/diagram/render-common';
 import { File } from './schemas/file_pb';
 
 const preset = presets.node({
