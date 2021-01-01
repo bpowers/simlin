@@ -1,4 +1,5 @@
-/src
+/pb
 /.npmignore
 /tsconfig*
 /.eslint*
+/*.ts
