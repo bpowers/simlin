@@ -3,6 +3,7 @@
 // that can be found in the LICENSE file.
 
 import { promises as fs } from 'fs';
+import { join } from 'path';
 
 export function defined<T>(object: T | undefined): T {
   if (object === undefined) {
@@ -19,7 +20,7 @@ function getWasmModule(): Promise<typeof import('./xmutil.wasm')> {
       return;
     }
 
-    fs.readFile('./xmutil.wasm').then((contents) => {
+    fs.readFile(join(__dirname, 'xmutil.wasm')).then((contents) => {
       WebAssembly.instantiate(contents).then((source) => {
         cachedWasmModule = source.instance.exports as unknown as typeof import('./xmutil.wasm');
         resolve(cachedWasmModule);
