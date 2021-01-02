@@ -1,9 +1,1 @@
-/src
-/.npmignore
-/tsconfig*
-/core
-/tests
-/build.sh
-/Cargo.toml
-/index.ts
-/index_main.ts
+../../.npmignore

@@ -1,5 +1,1 @@
-/src
-/.npmignore
-/tsconfig*
-/*.ts
-/*.wasm
+../../.npmignore
