@@ -18,6 +18,7 @@
     "src/xmutil-js"
   ],
   "scripts": {
-    "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092"
+    "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092",
+    "precommit": "true"
   }
 }
