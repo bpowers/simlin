@@ -58,6 +58,8 @@
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
     "lint": "eslint '**/*.ts' '**/*.tsx'",
     "prepublishOnly": "yarn build",
+    "deploy": "cp -r build/* public && cp -r build-component/static/js/* ./public/static/js/ && cp -r build-component/static/wasm/* ./public/static/wasm/",
+    "deploy-clean": "git checkout HEAD -- ./public/index.html && rm -r public/asset-manifest.json public/static/js public/static/wasm build build-component lib",
     "build": "tsc -p tsconfig.browser.json",
     "build:webcomponent": "node scripts/build-component.js",
     "build:frontend": "node scripts/build.js",

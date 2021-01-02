@@ -9,13 +9,13 @@
     "email": "bobbypowers@gmail.com"
   },
   "workspaces": [
-    "src/app",
-    "src/core",
-    "src/diagram",
+    "src/xmutil-js",
     "src/engine",
     "src/importer",
-    "src/server",
-    "src/xmutil-js"
+    "src/core",
+    "src/diagram",
+    "src/app",
+    "src/server"
   ],
   "scripts": {
     "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092",
