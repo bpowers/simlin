@@ -1,4 +1,4 @@
-/node_modules/
+node_modules
 /.app.prod.yaml
 *~
 /.gcloudignore
@@ -12,3 +12,4 @@
 /test/
 /target/
 /build*
+/src/app/build*

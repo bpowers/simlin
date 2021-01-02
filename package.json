@@ -8,6 +8,7 @@
     "name": "Bobby Powers",
     "email": "bobbypowers@gmail.com"
   },
+  "main": "src/server/lib",
   "workspaces": [
     "src/xmutil-js",
     "src/engine",
