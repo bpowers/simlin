@@ -1,6 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "rootDir": ".",
     "outDir": "lib.browser",
     "module": "esnext",
     "lib": [
@@ -14,4 +15,10 @@
     "lib",
     "lib.browser"
   ],
+  "references": [
+    { "path": "../core/tsconfig.browser.json" },
+    { "path": "../diagram/tsconfig.browser.json" },
+    { "path": "../importer/tsconfig.browser.json" },
+    { "path": "../xmutil-js/tsconfig.browser.json" }
+  ]
 }

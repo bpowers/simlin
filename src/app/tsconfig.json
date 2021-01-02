@@ -1,15 +1,1 @@
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "lib",
-    "module": "commonjs",
-    "lib": [
-      "es2020",
-      "dom"
-    ]
-  },
-  "exclude": [
-    "lib",
-    "lib.browser"
-  ]
-}
+tsconfig.browser.json

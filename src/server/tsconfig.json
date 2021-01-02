@@ -3,9 +3,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "lib",
-    "module": "commonjs",
-    "target": "ES2020",
-    "skipLibCheck": false
+    "module": "commonjs"
   },
   "exclude": [
     "lib",
