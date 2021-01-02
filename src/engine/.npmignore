@@ -6,4 +6,4 @@
 /build.sh
 /Cargo.toml
 /index.ts
-/engine-interface.ts
+/index_main.ts
