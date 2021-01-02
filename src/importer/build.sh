@@ -45,3 +45,19 @@ cp "pkg-node/${PKG_NAME}.js" "pkg/${PKG_NAME}_main.js"
 rm -rf pkg-node
 
 mv pkg core
+
+yarn run tsc
+yarn run tsc -p tsconfig.browser.json
+
+mv lib/importer/index* lib/
+mv lib.browser/importer/index* lib.browser/
+
+rm -r lib/importer
+rm -r lib.browser/importer
+
+cp -r core lib/
+cp -r core lib.browser/
+mv lib/index_main.js lib/index.js
+mv lib/index_main.js.map lib/index.js.map
+mv lib/index_main.d.ts lib/index.d.ts
+rm lib.browser/index_main*
