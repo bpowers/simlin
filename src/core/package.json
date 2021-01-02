@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/core",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "System dynamics data model and utilities",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
@@ -8,8 +8,18 @@
     "email": "bobbypowers@gmail.com"
   },
   "license": "Apache-2.0",
-  "main": "lib",
   "module": "lib.module",
+  "exports": {
+    "./pb": {
+      "node": "./lib/pb/index.js"
+    },
+    "./pb/*": {
+      "node": "./lib/pb/*.js"
+    },
+    "./*": {
+      "node": "./lib/*.js"
+    }
+  },
   "sideEffects": false,
   "dependencies": {
     "immutable": "^4.0.0-rc.12",

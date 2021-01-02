@@ -11,7 +11,7 @@ import { Table } from './models/table';
 import { createFile, createProject } from './project-creation';
 import { File } from './schemas/file_pb';
 import { User } from './schemas/user_pb';
-import { fromXmile } from '../importer';
+import { fromXmile } from '@system-dynamics/importer';
 
 async function fileFromXmile(files: Table<File>, projectId: string, userId: string, xmile: string): Promise<File> {
   const sdPB: Uint8Array = await fromXmile(xmile);

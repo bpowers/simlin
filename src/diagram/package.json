@@ -1,19 +1,23 @@
 {
   "name": "@system-dynamics/diagram",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "System Dynamics stock and flow diagram display (and editing)",
   "repository": "http://github.com/bpowers/model-app",
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
-  "main": "lib",
   "browser": "lib.browser",
+  "exports": {
+    "./*": {
+      "node": "./lib/*.js"
+    }
+  },
   "dependencies": {
     "@emotion/core": "^11.0.0",
     "@emotion/react": "^11.0.0",
     "@emotion/styled": "^11.0.0",
     "@material-ui/core": "5.0.0-alpha.20",
     "@material-ui/icons": "5.0.0-alpha.20",
-    "@system-dynamics/core": "^1.1.1",
+    "@system-dynamics/core": "^1.1.2",
     "canvg": "^3.0.0-beta.2",
     "chroma-js": "^2.1.0",
     "immutable": "^4.0.0-rc.12",
