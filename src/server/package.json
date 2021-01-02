@@ -6,7 +6,7 @@
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
   "private": true,
-  "browser": "lib.browser",
+  "main": "lib",
   "dependencies": {
     "@google-cloud/firestore": "^4.1.1",
     "@google-cloud/trace-agent": "^5.0.0",
