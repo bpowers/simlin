@@ -37,7 +37,7 @@ rm pkg/.gitignore
 #mv pkg-node/engine_v2_bg.{wasm-opt.,}wasm
 
 # Get the package name
-PKG_NAME=importer
+PKG_NAME=${PWD##*/}
 
 # Merge nodejs & browser packages
 cp "pkg-node/${PKG_NAME}.js" "pkg/${PKG_NAME}_main.js"
@@ -49,15 +49,15 @@ mv pkg core
 yarn run tsc
 yarn run tsc -p tsconfig.browser.json
 
-mv lib/importer/index* lib/
-mv lib.browser/importer/index* lib.browser/
+mv lib/${PKG_NAME}/index* lib/
+mv lib.browser/${PKG_NAME}/index* lib.browser/
 
-rm -r lib/importer
-rm -r lib.browser/importer
+rm -r lib/${PKG_NAME}
+rm -r lib.browser/${PKG_NAME}
 
 cp -r core lib/
 cp -r core lib.browser/
-mv lib/index_main.js lib/index.js
-mv lib/index_main.js.map lib/index.js.map
-mv lib/index_main.d.ts lib/index.d.ts
+mv lib/index{_main,}.js
+mv lib/index{_main,}.js.map
+mv lib/index{_main,}.d.ts
 rm lib.browser/index_main*
