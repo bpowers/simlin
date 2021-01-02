@@ -5,5 +5,4 @@
 /tests
 /build.sh
 /Cargo.toml
-/index.ts
-/index_main.ts
+/*.ts

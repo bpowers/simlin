@@ -4,9 +4,9 @@
 
 import type { Engine, Error, ErrorKind } from './core/engine';
 
-import { ErrorCode } from './core/engine';
+export { ErrorCode, errorCodeDescription } from './error_codes';
 
-export { Engine, Error, ErrorCode, ErrorKind };
+export { Engine, Error, ErrorKind };
 
 let cachedWasmModule: typeof import('./core/engine') | undefined;
 function getWasmModule(): Promise<typeof import('./core/engine')> {

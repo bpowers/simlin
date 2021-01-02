@@ -46,11 +46,8 @@ mv pkg core
 yarn run tsc
 yarn run tsc -p tsconfig.browser.json
 
-mv lib/${PKG_NAME}/index* lib/
-mv lib.browser/${PKG_NAME}/index* lib.browser/
-
-rm -r lib/${PKG_NAME}
-rm -r lib.browser/${PKG_NAME}
+rm -r lib/core lib/pkg-node
+rm -r lib.browser/core lib.browser/pkg-node
 
 cp -r pkg-node lib/core
 cp -r core lib.browser/
