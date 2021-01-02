@@ -23,6 +23,8 @@ if [ -d "core" ]; then
     rm -rf core
 fi
 
+rm -rf lib lib.browser
+
 # Build for both targets
 CC=emcc CXX=em++ wasm-pack build --release -t nodejs -d pkg-node
 CC=emcc CXX=em++ wasm-pack build --release -t browser -d pkg
@@ -39,11 +41,6 @@ rm pkg/.gitignore
 # Get the package name
 PKG_NAME=${PWD##*/}
 
-# Merge nodejs & browser packages
-cp "pkg-node/${PKG_NAME}.js" "pkg/${PKG_NAME}_main.js"
-
-rm -rf pkg-node
-
 mv pkg core
 
 yarn run tsc
@@ -55,8 +52,11 @@ mv lib.browser/${PKG_NAME}/index* lib.browser/
 rm -r lib/${PKG_NAME}
 rm -r lib.browser/${PKG_NAME}
 
-cp -r core lib/
+cp -r pkg-node lib/core
 cp -r core lib.browser/
+
+rm -r pkg-node
+
 mv lib/index{_main,}.js
 mv lib/index{_main,}.js.map
 mv lib/index{_main,}.d.ts
