@@ -26,7 +26,7 @@
     "needs-format": "prettier -l '*.ts'",
     "format": "prettier --write '*.ts'",
     "lint": "eslint '*.ts'",
-    "prepublishOnly": "rm -rf ./lib ./lib.browser && yarn build",
-    "build": "tsc && tsc -p tsconfig.browser.json && cp xmutil.wasm* lib/ && cp xmutil.wasm* lib.browser/ && mv lib/index_main.js lib/index.js && mv lib/index_main.js.map lib/index.js.map && mv lib/index_main.d.ts lib/index.d.ts && rm lib.browser/index_main*"
+    "prepublishOnly": "yarn build",
+    "build": "rm -rf ./lib ./lib.browser && tsc && tsc -p tsconfig.browser.json && cp xmutil.wasm* lib/ && cp xmutil.wasm* lib.browser/ && mv lib/index_main.js lib/index.js && mv lib/index_main.js.map lib/index.js.map && mv lib/index_main.d.ts lib/index.d.ts && rm lib.browser/index_main*"
   }
 }
