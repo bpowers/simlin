@@ -56,10 +56,10 @@ module.exports = {
   componentBuild: resolveApp('build-component'),
   appPublic: resolveApp('public'),
   appHtml: resolveApp('public/index.html'),
-  appIndexJs: resolveModule(resolveApp, 'src/app/index'),
-  componentIndexJs: resolveModule(resolveApp, 'src/app/index-component'),
+  appIndexJs: resolveModule(resolveApp, 'index'),
+  componentIndexJs: resolveModule(resolveApp, 'index-component'),
   appPackageJson: resolveApp('package.json'),
-  appSrc: resolveApp('src'),
+  appSrc: resolveApp('.'),
   appTsConfig: resolveApp('tsconfig.browser.json'),
   appJsConfig: resolveApp('jsconfig.json'),
   yarnLockFile: resolveApp('yarn.lock'),
@@ -67,6 +67,7 @@ module.exports = {
   proxySetup: resolveApp('src/setupProxy.js'),
   appNodeModules: resolveApp('node_modules'),
   publicUrlOrPath,
+  packagesSrc: resolveApp('..'),
 };
 
 

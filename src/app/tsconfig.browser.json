@@ -1,7 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": ".",
+    "rootDir": "..",
     "outDir": "lib.browser",
     "module": "esnext",
     "lib": [
@@ -9,7 +9,8 @@
       "dom",
       "dom.iterable",
       "scripthost"
-    ]
+    ],
+    "noEmit": true
   },
   "exclude": [
     "lib",

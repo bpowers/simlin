@@ -282,28 +282,37 @@ module.exports = function (webpackEnv) {
             // The preset includes JSX, Flow, TypeScript, and some ESnext features.
             {
               test: /\.(js|mjs|jsx|ts|tsx)$/,
-              include: paths.appSrc,
+              include: [paths.appSrc, paths.packagesSrc],
               loader: require.resolve('babel-loader'),
               options: {
                 customize: require.resolve(
                   'babel-preset-react-app/webpack-overrides'
                 ),
-
+                presets: [
+                  "@babel/env",
+                  "@babel/react",
+                  "@babel/typescript",
+                  {
+                    "exclude": [
+                      "transform-runtime",
+                      "transform-regenerator"
+                    ]
+                  }
+                ],
                 plugins: [
-                  [
-                    require.resolve('babel-plugin-named-asset-import'),
-                    {
-                      loaderMap: {
-                        svg: {
-                          ReactComponent:
-                            '@svgr/webpack?-svgo,+titleProp,+ref![path]',
-                        },
-                      },
-                    },
-                  ],
                   isEnvDevelopment &&
                     shouldUseReactRefresh &&
                     require.resolve('react-refresh/babel'),
+                  [
+                    "@babel/plugin-proposal-class-properties",
+                    {
+                      "loose": true
+                    }
+                  ],
+                  [
+                    "@babel/plugin-proposal-optional-chaining",
+                    {}
+                  ]
                 ].filter(Boolean),
                 // This is a feature of `babel-loader` for webpack (not Babel itself).
                 // It enables caching results in ./node_modules/.cache/babel-loader/

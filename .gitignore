@@ -24,6 +24,8 @@ node_modules
 # production
 /build
 /build-component
+/src/app/build
+/src/app/build-component
 
 # misc
 .DS_Store

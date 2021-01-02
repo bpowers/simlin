@@ -2,11 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-import type { Engine, Error, ErrorKind } from './core/engine';
+import type { Engine, Error } from './iengine';
+export type { Engine, Error };
 
 export { ErrorCode, errorCodeDescription } from './error_codes';
-
-export { Engine, Error, ErrorKind };
+export { ErrorKind } from './iengine';
 
 let cachedWasmModule: typeof import('./core/engine') | undefined;
 function getWasmModule(): Promise<typeof import('./core/engine')> {
