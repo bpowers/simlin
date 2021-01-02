@@ -21,6 +21,7 @@
   "scripts": {
     "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092",
     "precommit": "true",
-    "deploy": "export NODE_ENV=production && yarn workspaces run build && yarn workspace @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && yarn workspace @system-dynamics/app deploy-clean"
+    "deploy": "export NODE_ENV=production && yarn workspaces run build && yarn workspace @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && yarn workspace @system-dynamics/app deploy-clean",
+    "start": "node src/server/lib"
   }
 }
