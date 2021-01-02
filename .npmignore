@@ -9,3 +9,5 @@ tsconfig*
 Cargo.*
 build.sh
 /pb
+/*.tsx
+/drawing

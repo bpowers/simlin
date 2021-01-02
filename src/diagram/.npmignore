@@ -1,7 +1,1 @@
-/pb
-/.npmignore
-/tsconfig*
-/.eslint*
-/*.ts
-/*.tsx
-/drawing
+../../.npmignore
