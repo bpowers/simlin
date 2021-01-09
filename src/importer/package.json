@@ -27,6 +27,7 @@
     "format": "prettier --write '*.ts'",
     "lint": "eslint '*.ts'",
     "prepublishOnly": "yarn build",
+    "clean": "rm -rf ./lib ./lib.browser",
     "build": "./build.sh"
   }
 }

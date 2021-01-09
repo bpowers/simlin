@@ -60,6 +60,7 @@
     "prepublishOnly": "yarn build",
     "deploy": "cp -r build/* public && cp -r build-component/static/js/* ./public/static/js/ && cp -r build-component/static/wasm/* ./public/static/wasm/",
     "deploy-clean": "git checkout HEAD -- ./public/index.html && rm -r public/asset-manifest.json public/static/js public/static/wasm build build-component",
+    "clean": "rm -rf ./lib.browser ./build ./build-component",
     "build": "yarn build:frontend && yarn build:webcomponent",
     "build:tsc": "tsc -p tsconfig.browser.json",
     "build:webcomponent": "node scripts/build-component.js",

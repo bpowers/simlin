@@ -1,6 +1,8 @@
 [package]
 name = "importer"
 version = "0.1.0"
+description = "JavaScript interface to convert Vensim and Stella models to protobuf"
+repository = "https://github.com/bpowers/model-app"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
 edition = "2018"
@@ -16,7 +18,4 @@ system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat" }
 wasm-bindgen-test = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = false
-
-[package.metadata.wasm-pack.development.release]
 wasm-opt = false

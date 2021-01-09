@@ -59,6 +59,7 @@
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
     "lint": "eslint '**/*.ts'",
     "prepublishOnly": "yarn build",
+    "clean": "rm -rf ./lib",
     "build": "tsc -p tsconfig.json",
     "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; exec node_modules/.bin/ts-node-dev --no-notify --respawn ./index.ts"
   }
