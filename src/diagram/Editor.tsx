@@ -1333,8 +1333,10 @@ export const Editor = withStyles(styles)(
       }
 
       const modelName = this.state.modelName;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const varErrors = engine.getModelVariableErrors(modelName);
       if (varErrors.size > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         for (const ident of varErrors.keys()) {
           project = project.updateIn(
             ['models', modelName, 'variables', ident],

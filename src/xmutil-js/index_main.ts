@@ -20,12 +20,16 @@ function getWasmModule(): Promise<typeof import('./xmutil.wasm')> {
       return;
     }
 
-    fs.readFile(join(__dirname, 'xmutil.wasm')).then((contents) => {
-      WebAssembly.instantiate(contents).then((source) => {
-        cachedWasmModule = source.instance.exports as unknown as typeof import('./xmutil.wasm');
-        resolve(cachedWasmModule);
-      }).catch(reject);
-    }).catch(reject);
+    fs.readFile(join(__dirname, 'xmutil.wasm'))
+      .then((contents) => {
+        WebAssembly.instantiate(contents)
+          .then((source) => {
+            cachedWasmModule = (source.instance.exports as unknown) as typeof import('./xmutil.wasm');
+            resolve(cachedWasmModule);
+          })
+          .catch(reject);
+      })
+      .catch(reject);
   });
 }
 

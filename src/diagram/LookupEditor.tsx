@@ -12,7 +12,12 @@ import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { defined } from '@system-dynamics/core/common';
 import { isEqual } from './drawing/common';
-import { Variable, GraphicalFunction, GraphicalFunctionScale, GraphicalFunctionKind } from '@system-dynamics/core/datamodel';
+import {
+  Variable,
+  GraphicalFunction,
+  GraphicalFunctionScale,
+  GraphicalFunctionKind,
+} from '@system-dynamics/core/datamodel';
 
 const styles = createStyles({
   yAxisMax: {

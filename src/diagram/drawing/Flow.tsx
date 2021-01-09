@@ -8,7 +8,13 @@ import { List } from 'immutable';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { Point, FlowViewElement, ViewElement, StockViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
+import {
+  Point,
+  FlowViewElement,
+  ViewElement,
+  StockViewElement,
+  CloudViewElement,
+} from '@system-dynamics/core/datamodel';
 
 import { Arrowhead } from './Arrowhead';
 import { displayName, Point as IPoint } from './common';

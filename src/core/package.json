@@ -36,9 +36,9 @@
     "typescript": "^4.1.3"
   },
   "scripts": {
-    "needs-format": "prettier -l 'src/**/*.ts'",
-    "format": "prettier --write 'src/**/*.ts'",
-    "lint": "eslint 'src/**/*.ts'",
+    "needs-format": "prettier -l '*.ts' 'pb/*.ts'",
+    "format": "prettier --write '*.ts' 'pb/*.ts'",
+    "lint": "eslint '*.ts' 'pb/*.ts'",
     "prepublishOnly": "yarn build",
     "build": "tsc && tsc -p tsconfig.browser.json"
   }

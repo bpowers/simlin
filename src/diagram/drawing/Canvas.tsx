@@ -28,7 +28,7 @@ import {
   StockFlowView,
   Project,
   Model,
-  Stock as StockVar
+  Stock as StockVar,
 } from '@system-dynamics/core/datamodel';
 
 import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
