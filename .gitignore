@@ -10,6 +10,7 @@ perf.data.old
 # See https://help.github.com/ignore-files/ for more about ignoring files.
 
 *~
+.~*
 
 lib
 lib.browser
