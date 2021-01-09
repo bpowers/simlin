@@ -613,9 +613,9 @@ pub(crate) fn ramp(time: f64, slope: f64, start_time: f64, end_time: Option<f64>
 }
 
 pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
-    if time + dt/2.0 > step_time {
+    if time + dt / 2.0 > step_time {
         height
-    }  else {
+    } else {
         0.0
     }
 }

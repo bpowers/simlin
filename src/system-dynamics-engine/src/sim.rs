@@ -17,7 +17,10 @@ use crate::datamodel;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
-use crate::vm::{is_truthy, pulse, CompiledSimulation, Results, Specs, StepPart, DT_OFF, FINAL_TIME_OFF, FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF, ramp, step};
+use crate::vm::{
+    is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, DT_OFF,
+    FINAL_TIME_OFF, FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+};
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
 use std::cmp::Reverse;
@@ -1412,7 +1415,10 @@ impl<'module> ByteCodeBuilder<'module> {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
                             let c = self.alloc_register();
-                            self.push(Opcode::LoadVar { dest: c, off: FINAL_TIME_OFF as u16 });
+                            self.push(Opcode::LoadVar {
+                                dest: c,
+                                off: FINAL_TIME_OFF as u16,
+                            });
                             c
                         };
                         self.push(Opcode::Mov {
