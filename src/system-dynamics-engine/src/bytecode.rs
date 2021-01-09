@@ -25,9 +25,11 @@ pub(crate) enum BuiltinId {
     Min,
     Pi,
     Pulse,
+    Ramp,
     SafeDiv,
     Sin,
     Sqrt,
+    Step,
     Tan,
 }
 

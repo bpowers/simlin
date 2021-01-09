@@ -575,6 +575,12 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
             let interval = c;
             pulse(time, dt, volume, first_pulse, interval)
         }
+        BuiltinId::Ramp => {
+            let slope = a;
+            let start_time = b;
+            let end_time = c;
+            ramp(time, slope, start_time, Some(end_time))
+        }
         BuiltinId::SafeDiv => {
             if b != 0.0 {
                 a / b
@@ -584,7 +590,33 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
         }
         BuiltinId::Sin => a.sin(),
         BuiltinId::Sqrt => a.sqrt(),
+        BuiltinId::Step => {
+            let height = a;
+            let step_time = b;
+            step(time, dt, height, step_time)
+        }
         BuiltinId::Tan => a.tan(),
+    }
+}
+
+pub(crate) fn ramp(time: f64, slope: f64, start_time: f64, end_time: Option<f64>) -> f64 {
+    if time > start_time {
+        let done_ramping = end_time.is_some() && time >= end_time.unwrap();
+        if done_ramping {
+            slope * (end_time.unwrap() - start_time)
+        } else {
+            slope * (time - start_time)
+        }
+    } else {
+        0.0
+    }
+}
+
+pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
+    if time + dt/2.0 > step_time {
+        height
+    }  else {
+        0.0
     }
 }
 

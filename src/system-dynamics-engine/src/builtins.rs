@@ -18,10 +18,12 @@ pub enum BuiltinFn<Expr> {
     Max(Box<Expr>, Box<Expr>),
     Min(Box<Expr>, Box<Expr>),
     Pi,
-    Pulse(Box<Expr>, Box<Expr>, Box<Expr>),
+    Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Sin(Box<Expr>),
     Sqrt(Box<Expr>),
+    Step(Box<Expr>, Box<Expr>),
     Tan(Box<Expr>),
 }
 
@@ -47,9 +49,11 @@ pub fn is_builtin_fn(name: &str) -> bool {
             | "min"
             | "pi"
             | "pulse"
+            | "ramp"
             | "safediv"
             | "sin"
             | "sqrt"
+            | "step"
             | "tan"
     )
 }

@@ -17,10 +17,7 @@ use crate::datamodel;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
-use crate::vm::{
-    is_truthy, pulse, CompiledSimulation, Results, Specs, StepPart, DT_OFF, FINAL_TIME_OFF,
-    FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
-};
+use crate::vm::{is_truthy, pulse, CompiledSimulation, Results, Specs, StepPart, DT_OFF, FINAL_TIME_OFF, FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF, ramp, step};
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
 use std::cmp::Reverse;
@@ -236,10 +233,12 @@ impl<'a> Context<'a> {
                     "max" => check_arity!(Max, 2),
                     "min" => check_arity!(Min, 2),
                     "pi" => check_arity!(Pi, 0),
-                    "pulse" => check_arity!(Pulse, 3),
+                    "pulse" => check_arity!(Pulse, 2, 3),
+                    "ramp" => check_arity!(Ramp, 2, 3),
                     "safediv" => check_arity!(SafeDiv, 2, 3),
                     "sin" => check_arity!(Sin, 1),
                     "sqrt" => check_arity!(Sqrt, 1),
+                    "step" => check_arity!(Step, 2),
                     "tan" => check_arity!(Tan, 1),
                     _ => {
                         return sim_err!(UnknownBuiltin, self.ident.to_string());
@@ -1365,7 +1364,7 @@ impl<'module> ByteCodeBuilder<'module> {
                         });
                         self.free_register(a);
                     }
-                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) | BuiltinFn::Step(a, b) => {
                         let a = self.walk_expr(a)?.unwrap();
                         let b = self.walk_expr(b)?.unwrap();
                         self.push(Opcode::Mov {
@@ -1382,7 +1381,40 @@ impl<'module> ByteCodeBuilder<'module> {
                     BuiltinFn::Pulse(a, b, c) => {
                         let a = self.walk_expr(a)?.unwrap();
                         let b = self.walk_expr(b)?.unwrap();
-                        let c = self.walk_expr(c)?.unwrap();
+                        let c = if c.is_some() {
+                            self.walk_expr(c.as_ref().unwrap())?.unwrap()
+                        } else {
+                            let c = self.alloc_register();
+                            let id = self.curr_code.intern_literal(0.0);
+                            self.push(Opcode::LoadConstant { dest: c, id });
+                            c
+                        };
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG,
+                            src: a,
+                        });
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG + 1,
+                            src: b,
+                        });
+                        self.push(Opcode::Mov {
+                            dst: FIRST_CALL_REG + 2,
+                            src: c,
+                        });
+                        self.free_register(a);
+                        self.free_register(b);
+                        self.free_register(c);
+                    }
+                    BuiltinFn::Ramp(a, b, c) => {
+                        let a = self.walk_expr(a)?.unwrap();
+                        let b = self.walk_expr(b)?.unwrap();
+                        let c = if c.is_some() {
+                            self.walk_expr(c.as_ref().unwrap())?.unwrap()
+                        } else {
+                            let c = self.alloc_register();
+                            self.push(Opcode::LoadVar { dest: c, off: FINAL_TIME_OFF as u16 });
+                            c
+                        };
                         self.push(Opcode::Mov {
                             dst: FIRST_CALL_REG,
                             src: a,
@@ -1448,9 +1480,11 @@ impl<'module> ByteCodeBuilder<'module> {
                     BuiltinFn::Min(_, _) => BuiltinId::Min,
                     BuiltinFn::Pi => BuiltinId::Pi,
                     BuiltinFn::Pulse(_, _, _) => BuiltinId::Pulse,
+                    BuiltinFn::Ramp(_, _, _) => BuiltinId::Ramp,
                     BuiltinFn::SafeDiv(_, _, _) => BuiltinId::SafeDiv,
                     BuiltinFn::Sin(_) => BuiltinId::Sin,
                     BuiltinFn::Sqrt(_) => BuiltinId::Sqrt,
+                    BuiltinFn::Step(_, _) => BuiltinId::Step,
                     BuiltinFn::Tan(_) => BuiltinId::Tan,
                 };
 
@@ -1785,9 +1819,28 @@ impl<'a> ModuleEvaluator<'a> {
                         let dt = self.curr[DT_OFF];
                         let volume = self.eval(a);
                         let first_pulse = self.eval(b);
-                        let interval = self.eval(c);
+                        let interval = match c.as_ref() {
+                            Some(c) => self.eval(c),
+                            None => 0.0,
+                        };
 
                         pulse(time, dt, volume, first_pulse, interval)
+                    }
+                    BuiltinFn::Ramp(a, b, c) => {
+                        let time = self.curr[TIME_OFF];
+                        let slope = self.eval(a);
+                        let start_time = self.eval(b);
+                        let end_time = c.as_ref().map(|c| self.eval(c));
+
+                        ramp(time, slope, start_time, end_time)
+                    }
+                    BuiltinFn::Step(a, b) => {
+                        let time = self.curr[TIME_OFF];
+                        let dt = self.curr[DT_OFF];
+                        let height = self.eval(a);
+                        let step_time = self.eval(b);
+
+                        step(time, dt, height, step_time)
                     }
                 }
             }
@@ -1820,7 +1873,18 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Min(l, r) => format!("min({}, {})", pretty(l), pretty(r)),
             BuiltinFn::Pi => "𝜋".to_string(),
             BuiltinFn::Pulse(a, b, c) => {
-                format!("pulse({}, {}, {})", pretty(a), pretty(b), pretty(c))
+                let c = match c.as_ref() {
+                    Some(c) => pretty(c),
+                    None => "0<default>".to_owned(),
+                };
+                format!("pulse({}, {}, {})", pretty(a), pretty(b), c)
+            }
+            BuiltinFn::Ramp(a, b, c) => {
+                let c = match c.as_ref() {
+                    Some(c) => pretty(c),
+                    None => "0<default>".to_owned(),
+                };
+                format!("ramp({}, {}, {})", pretty(a), pretty(b), c)
             }
             BuiltinFn::SafeDiv(a, b, c) => format!(
                 "safediv({}, {}, {})",
@@ -1832,6 +1896,9 @@ pub fn pretty(expr: &Expr) -> String {
             ),
             BuiltinFn::Sin(l) => format!("sin({})", pretty(l)),
             BuiltinFn::Sqrt(l) => format!("sqrt({})", pretty(l)),
+            BuiltinFn::Step(a, b) => {
+                format!("step({}, {})", pretty(a), pretty(b))
+            }
             BuiltinFn::Tan(l) => format!("tan({})", pretty(l)),
         },
         Expr::EvalModule(module, model_name, args) => {
