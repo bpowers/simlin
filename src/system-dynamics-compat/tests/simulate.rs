@@ -53,6 +53,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/tests/builtin_max/builtin_max.xmile",
     "test/test-models/tests/builtin_min/builtin_min.xmile",
+    "test/test-models/tests/builtin_int/builtin_int.xmile",
     "test/test-models/tests/chained_initialization/test_chained_initialization.xmile",
     "test/test-models/tests/comparisons/comparisons.xmile",
     "test/test-models/tests/constant_expressions/test_constant_expressions.xmile",
