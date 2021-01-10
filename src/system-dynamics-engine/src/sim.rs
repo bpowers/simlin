@@ -223,6 +223,7 @@ impl<'a> Context<'a> {
                             return sim_err!(BadTable, id.clone());
                         }
                     }
+                    "mean" => BuiltinFn::Mean(args),
                     "abs" => check_arity!(Abs, 1),
                     "arccos" => check_arity!(Arccos, 1),
                     "arcsin" => check_arity!(Arcsin, 1),
@@ -1467,6 +1468,29 @@ impl<'module> ByteCodeBuilder<'module> {
                         self.free_register(a);
                         self.free_register(b);
                     }
+                    BuiltinFn::Mean(args) => {
+                        let sum = self.alloc_register();
+                        let id = self.curr_code.intern_literal(0.0);
+                        self.push(Opcode::LoadConstant { dest: sum, id });
+
+                        for arg in args.iter() {
+                            let arg = self.walk_expr(arg)?.unwrap();
+                            self.push(Opcode::Add {
+                                dest: sum,
+                                l: sum,
+                                r: arg,
+                            });
+                            self.free_register(arg);
+                        }
+
+                        let n = self.alloc_register();
+                        let id = self.curr_code.intern_literal(args.len() as f64);
+                        self.push(Opcode::LoadConstant { dest: n, id });
+                        self.push(Opcode::Div { dest, l: sum, r: n });
+                        self.free_register(sum);
+                        self.free_register(n);
+                        return Ok(Some(dest));
+                    }
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _) => unreachable!(),
@@ -1481,6 +1505,7 @@ impl<'module> ByteCodeBuilder<'module> {
                     BuiltinFn::Ln(_) => BuiltinId::Ln,
                     BuiltinFn::Log10(_) => BuiltinId::Log10,
                     BuiltinFn::Max(_, _) => BuiltinId::Max,
+                    BuiltinFn::Mean(_) => unreachable!(),
                     BuiltinFn::Min(_, _) => BuiltinId::Min,
                     BuiltinFn::Pi => BuiltinId::Pi,
                     BuiltinFn::Pulse(_, _, _) => BuiltinId::Pulse,
@@ -1767,6 +1792,11 @@ impl<'a> ModuleEvaluator<'a> {
                             b
                         }
                     }
+                    BuiltinFn::Mean(args) => {
+                        let count = args.len() as f64;
+                        let sum: f64 = args.iter().map(|arg| self.eval(arg)).sum();
+                        sum / count
+                    }
                     BuiltinFn::Max(a, b) => {
                         let a = self.eval(a);
                         let b = self.eval(b);
@@ -1895,6 +1925,11 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
             BuiltinFn::Max(l, r) => format!("max({}, {})", pretty(l), pretty(r)),
+            BuiltinFn::Mean(args) => {
+                let args: Vec<_> = args.iter().map(|arg| pretty(arg)).collect();
+                let string_args = args.join(", ");
+                format!("mean({})", string_args)
+            }
             BuiltinFn::Min(l, r) => format!("min({}, {})", pretty(l), pretty(r)),
             BuiltinFn::Pi => "𝜋".to_string(),
             BuiltinFn::Pulse(a, b, c) => {

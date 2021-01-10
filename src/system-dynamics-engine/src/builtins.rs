@@ -16,6 +16,7 @@ pub enum BuiltinFn<Expr> {
     Ln(Box<Expr>),
     Log10(Box<Expr>),
     Max(Box<Expr>, Box<Expr>),
+    Mean(Vec<Expr>),
     Min(Box<Expr>, Box<Expr>),
     Pi,
     Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
@@ -46,6 +47,7 @@ pub fn is_builtin_fn(name: &str) -> bool {
             | "ln"
             | "log10"
             | "max"
+            | "mean"
             | "min"
             | "pi"
             | "pulse"
