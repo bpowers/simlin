@@ -44,7 +44,6 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/subscript_selection/subscript_selection.xmile",
     //
     // "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
-    "test/test-models/tests/builtin_mean/builtin_mean.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
@@ -54,6 +53,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/teacup/teacup.xmile",
     "test/test-models/tests/abs/test_abs.xmile",
     "test/test-models/tests/builtin_max/builtin_max.xmile",
+    "test/test-models/tests/builtin_mean/builtin_mean.xmile",
     "test/test-models/tests/builtin_min/builtin_min.xmile",
     "test/test-models/tests/builtin_int/builtin_int.xmile",
     "test/test-models/tests/chained_initialization/test_chained_initialization.xmile",

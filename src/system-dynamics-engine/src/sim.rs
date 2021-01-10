@@ -14,12 +14,13 @@ use crate::bytecode::{
 };
 use crate::common::{Ident, Result};
 use crate::datamodel;
+use crate::datamodel::Dimension;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
 use crate::vm::{
-    is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, DT_OFF,
-    FINAL_TIME_OFF, FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+    is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
+    DT_OFF, FINAL_TIME_OFF, FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
@@ -73,8 +74,8 @@ struct Context<'a> {
     dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
     ident: &'a str,
-    active_dimension: Option<datamodel::Dimension>,
-    active_subscript: Option<&'a str>,
+    active_dimension: Option<Vec<datamodel::Dimension>>,
+    active_subscript: Option<Vec<&'a str>>,
     metadata: &'a HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
     is_initial: bool,
@@ -93,6 +94,56 @@ impl<'a> Context<'a> {
 
     fn get_metadata(&self, ident: &str) -> Result<&VariableMetadata> {
         self.get_submodel_metadata(self.model_name, ident)
+    }
+
+    fn get_implicit_subscripts(&self, dims: &[Dimension], ident: &str) -> Result<Vec<&str>> {
+        if self.active_dimension.is_none() {
+            return sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident.to_owned());
+        }
+        let active_dims = self.active_dimension.as_ref().unwrap();
+        let active_subscripts = self.active_subscript.as_ref().unwrap();
+        assert_eq!(active_dims.len(), active_subscripts.len());
+
+        // if we need more dimensions than are implicit, that's an error
+        if dims.len() > active_dims.len() {
+            return sim_err!(MismatchedDimensions, ident.to_owned());
+        }
+
+        // goal: if this is a valid equation, dims will be a subset of active_dims (order preserving)
+
+        let mut subscripts: Vec<&str> = Vec::with_capacity(dims.len());
+
+        let mut active_off = 0;
+        for dim in dims.iter() {
+            while active_off < active_dims.len() {
+                let off = active_off;
+                active_off += 1;
+                let candidate = &active_dims[off];
+                if candidate.name == dim.name {
+                    subscripts.push(active_subscripts[off]);
+                    break;
+                }
+            }
+        }
+
+        if subscripts.len() != dims.len() {
+            return sim_err!(MismatchedDimensions, ident.to_owned());
+        }
+
+        Ok(subscripts)
+    }
+
+    fn get_implicit_subscript_off(&self, dims: &[Dimension], ident: &str) -> Result<usize> {
+        let subscripts = self.get_implicit_subscripts(dims, ident)?;
+
+        let off = dims
+            .iter()
+            .zip(subscripts)
+            .fold(0_usize, |acc, (dim, subscript)| {
+                acc * dim.elements.len() + dim.get_offset(subscript).unwrap()
+            });
+
+        Ok(off)
     }
 
     fn get_submodel_metadata(&self, model: &str, ident: &str) -> Result<&VariableMetadata> {
@@ -121,22 +172,8 @@ impl<'a> Context<'a> {
                 panic!("internal error: unknown var {}?", ident);
             }
             if let Some(dims) = metadata[ident].var.get_dimensions() {
-                if dims.len() != 1 {
-                    panic!("FIXME: only 1D arrays supported for now");
-                }
-                if self.active_dimension.is_none() {
-                    return sim_err!(ArrayReferenceNeedsExplicitSubscripts, ident.to_owned());
-                }
-                let var_dim = &dims[0];
-                let active_dim = self.active_dimension.as_ref().unwrap();
-                if active_dim.name != var_dim.name {
-                    return sim_err!(MismatchedDimensions, ident.to_owned());
-                }
-                if let Some(off) = var_dim.get_offset(self.active_subscript.unwrap()) {
-                    Ok(metadata[ident].offset + off)
-                } else {
-                    return sim_err!(MismatchedDimensions, ident.to_owned());
-                }
+                let off = self.get_implicit_subscript_off(dims, ident)?;
+                Ok(metadata[ident].offset + off)
             } else {
                 Ok(metadata[ident].offset)
             }
@@ -694,20 +731,12 @@ impl Var {
                                 vec![Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))]
                             }
                             AST::ApplyToAll(dims, ast) => {
-                                if dims.len() != 1 {
-                                    return sim_err!(
-                                        MultiDimensionalArraysNotImplemented,
-                                        var.ident().to_string()
-                                    );
-                                }
-                                let exprs: Result<Vec<Expr>> = dims[0]
-                                    .elements
-                                    .iter()
+                                let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
-                                    .map(|(i, subscript)| {
+                                    .map(|(i, subscripts)| {
                                         let mut ctx = ctx.clone();
-                                        ctx.active_dimension = Some(dims[0].clone());
-                                        ctx.active_subscript = Some(subscript);
+                                        ctx.active_dimension = Some(dims.clone());
+                                        ctx.active_subscript = Some(subscripts);
                                         ctx.lower(ast)
                                             .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                     })
@@ -715,18 +744,14 @@ impl Var {
                                 exprs?
                             }
                             AST::Arrayed(dims, elements) => {
-                                if dims.len() != 1 {
-                                    return sim_err!(
-                                        MultiDimensionalArraysNotImplemented,
-                                        var.ident().to_string()
-                                    );
-                                }
-                                let exprs: Result<Vec<Expr>> = dims[0]
-                                    .elements
-                                    .iter()
+                                let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
-                                    .map(|(i, subscript)| {
-                                        let ast = &elements[subscript];
+                                    .map(|(i, subscripts)| {
+                                        let subscript_str = subscripts.join(",");
+                                        let ast = &elements[&subscript_str];
+                                        let mut ctx = ctx.clone();
+                                        ctx.active_dimension = Some(dims.clone());
+                                        ctx.active_subscript = Some(subscripts);
                                         ctx.lower(ast)
                                             .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                     })
@@ -741,14 +766,12 @@ impl Var {
                                 Box::new(ctx.build_stock_update_expr(off, var)?),
                             )],
                             AST::ApplyToAll(dims, _) | AST::Arrayed(dims, _) => {
-                                let exprs: Result<Vec<Expr>> = dims[0]
-                                    .elements
-                                    .iter()
+                                let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
-                                    .map(|(i, subscript)| {
+                                    .map(|(i, subscripts)| {
                                         let mut ctx = ctx.clone();
-                                        ctx.active_dimension = Some(dims[0].clone());
-                                        ctx.active_subscript = Some(subscript);
+                                        ctx.active_dimension = Some(dims.clone());
+                                        ctx.active_subscript = Some(subscripts);
                                         // when building the stock update expression, we need
                                         // the specific index of this subscript, not the base offset
                                         let update_expr = ctx.build_stock_update_expr(
@@ -782,20 +805,12 @@ impl Var {
                             vec![Expr::AssignCurr(off, Box::new(expr))]
                         }
                         AST::ApplyToAll(dims, ast) => {
-                            if dims.len() != 1 {
-                                return sim_err!(
-                                    MultiDimensionalArraysNotImplemented,
-                                    var.ident().to_string()
-                                );
-                            }
-                            let exprs: Result<Vec<Expr>> = dims[0]
-                                .elements
-                                .iter()
+                            let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                 .enumerate()
-                                .map(|(i, subscript)| {
+                                .map(|(i, subscripts)| {
                                     let mut ctx = ctx.clone();
-                                    ctx.active_dimension = Some(dims[0].clone());
-                                    ctx.active_subscript = Some(subscript);
+                                    ctx.active_dimension = Some(dims.clone());
+                                    ctx.active_subscript = Some(subscripts);
                                     ctx.lower(ast)
                                         .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                 })
@@ -803,18 +818,14 @@ impl Var {
                             exprs?
                         }
                         AST::Arrayed(dims, elements) => {
-                            if dims.len() != 1 {
-                                return sim_err!(
-                                    MultiDimensionalArraysNotImplemented,
-                                    var.ident().to_string()
-                                );
-                            }
-                            let exprs: Result<Vec<Expr>> = dims[0]
-                                .elements
-                                .iter()
+                            let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                 .enumerate()
-                                .map(|(i, subscript)| {
-                                    let ast = &elements[subscript];
+                                .map(|(i, subscripts)| {
+                                    let subscript_str = subscripts.join(",");
+                                    let ast = &elements[&subscript_str];
+                                    let mut ctx = ctx.clone();
+                                    ctx.active_dimension = Some(dims.clone());
+                                    ctx.active_subscript = Some(subscripts);
                                     ctx.lower(ast)
                                         .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                 })
