@@ -120,7 +120,7 @@ pub(crate) enum Opcode {
         dest: Register,
         off: VariableOffset,
     },
-    SetSubscriptIndex {
+    PushSubscriptIndex {
         index: Register,
         bounds: VariableOffset,
     },

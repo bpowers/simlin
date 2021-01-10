@@ -362,7 +362,8 @@ impl<'sim> VM<'sim> {
         let mut file = reg_cache.get_register_file();
         let reg = &mut *file;
         let mut condition = false;
-        let mut subscript_index: Option<usize> = None;
+        let mut subscript_index: Vec<(u16, u16)> = vec![];
+        let mut subscript_index_valid = true;
 
         let mut i = 0;
         let code = &bytecode.code;
@@ -427,22 +428,29 @@ impl<'sim> VM<'sim> {
                 Opcode::LoadVar { dest, off } => {
                     reg[dest as usize] = curr[module_off + off as usize];
                 }
-                Opcode::SetSubscriptIndex { index, bounds } => {
-                    let index = reg[index as usize].floor() as usize;
-                    subscript_index = if index == 0 || index > bounds as usize {
-                        None
+                Opcode::PushSubscriptIndex { index, bounds } => {
+                    let index = reg[index as usize].floor() as u16;
+                    if index == 0 || index > bounds {
+                        subscript_index_valid = false;
                     } else {
-                        Some(index)
+                        subscript_index.push((index, bounds));
+                        subscript_index_valid &= true;
                     };
                 }
                 Opcode::LoadSubscript { dest, off } => {
-                    reg[dest as usize] = match subscript_index {
+                    reg[dest as usize] = if subscript_index_valid {
                         // the subscript index is 1-based, but curr is 0-based.
-                        Some(subscript_index) => {
-                            curr[module_off + off as usize + subscript_index - 1]
+                        let mut index = 0;
+                        for (i, bounds) in subscript_index.iter() {
+                            index *= *bounds as usize;
+                            index += *i as usize;
                         }
-                        None => f64::NAN,
+                        curr[module_off + off as usize + index - 1]
+                    } else {
+                        f64::NAN
                     };
+                    subscript_index.clear();
+                    subscript_index_valid = true;
                 }
                 Opcode::SetCond { cond } => {
                     condition = is_truthy(reg[cond as usize]);
