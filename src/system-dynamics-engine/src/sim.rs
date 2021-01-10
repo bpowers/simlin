@@ -47,8 +47,8 @@ type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(f64),
-    Var(usize),                         // offset
-    Subscript(usize, Vec<Expr>, usize), // offset, index expression, bounds
+    Var(usize),                              // offset
+    Subscript(usize, Vec<Expr>, Vec<usize>), // offset, index expression, bounds
     Dt,
     App(BuiltinFn),
     EvalModule(Ident, Ident, Vec<Expr>),
@@ -256,26 +256,26 @@ impl<'a> Context<'a> {
                 if args.len() != dims.len() {
                     return sim_err!(MismatchedDimensions, id.clone());
                 }
-                if dims.len() != 1 {
-                    return sim_err!(MultiDimensionalArraysNotImplemented, id.clone());
-                }
-                let dim = &dims[0];
-                let arg = &args[0];
-                if let ast::Expr::Var(ident) = arg {
-                    // we need to check to make sure that any explicit subscript names are
-                    // converted to offsets here and not passed to self.lower
-                    if let Some(subscript_off) = dim.get_offset(ident) {
-                        Expr::Subscript(
-                            off,
-                            vec![Expr::Const((subscript_off + 1) as f64)],
-                            dim.elements.len(),
-                        )
-                    } else {
-                        Expr::Subscript(off, vec![self.lower(&args[0])?], dim.elements.len())
-                    }
-                } else {
-                    Expr::Subscript(off, vec![self.lower(&args[0])?], dim.elements.len())
-                }
+                let args = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, arg)| {
+                        if let ast::Expr::Var(ident) = arg {
+                            let dim = &dims[i];
+                            // we need to check to make sure that any explicit subscript names are
+                            // converted to offsets here and not passed to self.lower
+                            if let Some(subscript_off) = dim.get_offset(ident) {
+                                Expr::Const((subscript_off + 1) as f64)
+                            } else {
+                                self.lower(&args[0]).unwrap()
+                            }
+                        } else {
+                            self.lower(&args[0]).unwrap()
+                        }
+                    })
+                    .collect();
+                let bounds = dims.iter().map(|dim| dim.elements.len()).collect();
+                Expr::Subscript(off, args, bounds)
             }
             ast::Expr::Op1(op, l) => {
                 let l = self.lower(l)?;
@@ -1011,15 +1011,9 @@ fn build_metadata(
             all_offsets.extend(all_sub_offsets);
             sub_size
         } else if let Some(AST::ApplyToAll(dims, _)) = model.variables[*ident].ast() {
-            if dims.len() != 1 {
-                panic!("multi-dimensional arrays aren't supported yet");
-            }
-            dims[0].elements.len()
+            dims.iter().map(|dim| dim.elements.len()).product()
         } else if let Some(AST::Arrayed(dims, _)) = model.variables[*ident].ast() {
-            if dims.len() != 1 {
-                panic!("multi-dimensional arrays aren't supported yet");
-            }
-            dims[0].elements.len()
+            dims.iter().map(|dim| dim.elements.len()).product()
         } else {
             1
         };
@@ -1313,11 +1307,10 @@ impl<'module> ByteCodeBuilder<'module> {
                     .iter()
                     .map(|expr| self.walk_expr(expr).unwrap().unwrap())
                     .collect();
-                for index in indices {
-                    self.push(Opcode::PushSubscriptIndex {
-                        index,
-                        bounds: *bounds as VariableOffset,
-                    });
+                assert!(indices.len() == bounds.len());
+                for (i, index) in indices.into_iter().enumerate() {
+                    let bounds = bounds[i] as VariableOffset;
+                    self.push(Opcode::PushSubscriptIndex { index, bounds });
                     self.free_register(index);
                 }
                 self.push(Opcode::LoadSubscript {
@@ -1664,15 +1657,28 @@ impl<'a> ModuleEvaluator<'a> {
             Expr::Var(off) => self.curr[self.off + *off],
             Expr::Subscript(off, r, bounds) => {
                 let indices: Vec<_> = r.iter().map(|r| self.eval(r)).collect();
-                let rhs = indices[0];
-                // we are 1 indexed here, because the spec sucks
-                if approx_eq!(f64, rhs, 0.0) || (rhs.floor() as usize) > *bounds {
+                let mut index = 0;
+                let max_bounds = bounds.iter().product();
+                let mut ok = true;
+                assert_eq!(indices.len(), bounds.len());
+                for (i, rhs) in indices.into_iter().enumerate() {
+                    let bounds = bounds[i];
+                    let one_index = rhs.floor() as usize;
+                    if one_index == 0 || one_index > bounds {
+                        ok = false;
+                        break;
+                    } else {
+                        index *= bounds;
+                        index += one_index - 1;
+                    }
+                }
+                if !ok || index > max_bounds {
                     // 3.7.1 Arrays: If a subscript expression results in an invalid subscript index (i.e., it is out of range), a zero (0) MUST be returned[10]
                     // note 10: Note this can be NaN if so specified in the <uses_arrays> tag of the header options block
                     // 0 makes less sense than NaN, so lets do that until real models force us to do otherwise
                     f64::NAN
                 } else {
-                    self.curr[self.off + *off + ((rhs - 1.0).floor() as usize)]
+                    self.curr[self.off + *off + index]
                 }
             }
             Expr::AssignCurr(off, r) => {
@@ -1868,9 +1874,11 @@ pub fn pretty(expr: &Expr) -> String {
         Expr::Subscript(off, args, bounds) => {
             let args: Vec<_> = args.iter().map(|arg| pretty(arg)).collect();
             let string_args = args.join(", ");
+            let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{}", bounds)).collect();
+            let string_bounds = bounds.join(", ");
             format!(
                 "curr[{} + (({}) - 1); bounds: {}]",
-                off, string_args, bounds
+                off, string_args, string_bounds
             )
         }
         Expr::Dt => "dt".to_string(),
@@ -2374,7 +2382,7 @@ fn test_arrays() {
     let expected = Var {
         ast: vec![Expr::AssignCurr(
             11,
-            Box::new(Expr::Subscript(4, vec![Expr::Const(2.0)], 3)),
+            Box::new(Expr::Subscript(4, vec![Expr::Const(2.0)], vec![3])),
         )],
     };
     assert_eq!(expected, parsed_var.unwrap());
@@ -2410,7 +2418,7 @@ fn test_arrays() {
                     ))))),
                     Box::new(Expr::Const(1.0)),
                 )],
-                3,
+                vec![3],
             )),
         )],
     };
