@@ -250,12 +250,12 @@ impl<'a> Context<'a> {
                 Expr::App(builtin)
             }
             ast::Expr::Subscript(id, args) => {
-                if args.len() != 1 {
-                    return sim_err!(MultiDimensionalArraysNotImplemented, id.clone());
-                }
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
+                if args.len() != dims.len() {
+                    return sim_err!(MultiDimensionalArraysNotImplemented, id.clone());
+                }
                 if dims.len() != 1 {
                     return sim_err!(MultiDimensionalArraysNotImplemented, id.clone());
                 }

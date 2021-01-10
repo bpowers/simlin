@@ -640,6 +640,89 @@ pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval:
     0.0
 }
 
+struct SubscriptIterator {
+    n: usize,
+    size: usize,
+    lengths: Vec<usize>,
+    next: Vec<usize>,
+}
+
+impl SubscriptIterator {
+    pub fn new<T>(arrays: &[Vec<T>]) -> Self {
+        SubscriptIterator {
+            n: 0,
+            size: arrays.iter().map(|v| v.len()).sum(),
+            lengths: arrays.iter().map(|v| v.len()).collect(),
+            next: vec![0; arrays.len()],
+        }
+    }
+}
+
+impl Iterator for SubscriptIterator {
+    type Item = Vec<usize>;
+
+    fn next(&mut self) -> Option<Vec<usize>> {
+        if self.n >= self.size {
+            return None;
+        }
+
+        let curr = self.next.clone();
+
+        assert_eq!(self.lengths.len(), self.next.len());
+
+        let mut carry = 1_usize;
+        for (i, n) in self.next.iter_mut().enumerate().rev() {
+            let orig_n = *n;
+            let orig_carry = carry;
+            *n = (*n + carry) % self.lengths[i];
+            carry = ((orig_n != 0 && *n == 0) || (orig_carry == 1 && self.lengths[i] < 2)) as usize;
+        }
+
+        self.n += 1;
+
+        Some(curr)
+    }
+}
+
+#[test]
+fn test_subscript_iter() {
+    let cases: &[(Vec<Vec<i32>>, Vec<Vec<usize>>)] = &[
+        (vec![vec![]], vec![]),
+        (vec![vec![], vec![]], vec![]),
+        (vec![vec![0, 1, 2]], vec![vec![0], vec![1], vec![2]]),
+        (
+            vec![vec![0, 1, 2], vec![0, 1]],
+            vec![
+                vec![0, 0],
+                vec![0, 1],
+                vec![1, 0],
+                vec![1, 1],
+                vec![2, 0],
+                vec![2, 1],
+            ],
+        ),
+        (
+            vec![vec![0, 1, 2], vec![0], vec![0, 1]],
+            vec![
+                vec![0, 0, 0],
+                vec![0, 0, 1],
+                vec![1, 0, 0],
+                vec![1, 0, 1],
+                vec![2, 0, 0],
+                vec![2, 0, 1],
+            ],
+        ),
+    ];
+
+    for (input, expected) in cases {
+        for (i, subscripts) in SubscriptIterator::new(input).enumerate() {
+            eprintln!("exp: {:?}", expected[i]);
+            eprintln!("got: {:?}", subscripts);
+            assert_eq!(expected[i], subscripts);
+        }
+    }
+}
+
 #[inline(never)]
 fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
