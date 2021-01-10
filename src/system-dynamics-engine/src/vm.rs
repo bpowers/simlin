@@ -9,7 +9,7 @@ use float_cmp::approx_eq;
 
 use crate::bytecode::{BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Opcode};
 use crate::common::{Ident, Result};
-use crate::datamodel::{Dt, SimMethod, SimSpecs};
+use crate::datamodel::{Dimension, Dt, SimMethod, SimSpecs};
 use crate::sim_err;
 
 pub(crate) const TIME_OFF: usize = 0;
@@ -648,25 +648,25 @@ pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval:
     0.0
 }
 
-struct SubscriptIterator {
+pub struct SubscriptOffsetIterator {
     n: usize,
     size: usize,
     lengths: Vec<usize>,
     next: Vec<usize>,
 }
 
-impl SubscriptIterator {
-    pub fn new<T>(arrays: &[Vec<T>]) -> Self {
-        SubscriptIterator {
+impl SubscriptOffsetIterator {
+    pub fn new(arrays: &[Dimension]) -> Self {
+        SubscriptOffsetIterator {
             n: 0,
-            size: arrays.iter().map(|v| v.len()).sum(),
-            lengths: arrays.iter().map(|v| v.len()).collect(),
+            size: arrays.iter().map(|v| v.elements.len()).sum(),
+            lengths: arrays.iter().map(|v| v.elements.len()).collect(),
             next: vec![0; arrays.len()],
         }
     }
 }
 
-impl Iterator for SubscriptIterator {
+impl Iterator for SubscriptOffsetIterator {
     type Item = Vec<usize>;
 
     fn next(&mut self) -> Option<Vec<usize>> {
@@ -693,13 +693,29 @@ impl Iterator for SubscriptIterator {
 }
 
 #[test]
-fn test_subscript_iter() {
-    let cases: &[(Vec<Vec<i32>>, Vec<Vec<usize>>)] = &[
-        (vec![vec![]], vec![]),
-        (vec![vec![], vec![]], vec![]),
-        (vec![vec![0, 1, 2]], vec![vec![0], vec![1], vec![2]]),
+fn test_subscript_offset_iter() {
+    let empty_dim = Dimension {
+        name: "".to_string(),
+        elements: vec![],
+    };
+    let one_dim = Dimension {
+        name: "".to_string(),
+        elements: vec!["0".to_owned()],
+    };
+    let two_dim = Dimension {
+        name: "".to_string(),
+        elements: vec!["0".to_owned(), "1".to_owned()],
+    };
+    let three_dim = Dimension {
+        name: "".to_string(),
+        elements: vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
+    };
+    let cases: &[(Vec<Dimension>, Vec<Vec<usize>>)] = &[
+        (vec![empty_dim.clone()], vec![]),
+        (vec![empty_dim.clone(), empty_dim.clone()], vec![]),
+        (vec![three_dim.clone()], vec![vec![0], vec![1], vec![2]]),
         (
-            vec![vec![0, 1, 2], vec![0, 1]],
+            vec![three_dim.clone(), two_dim.clone()],
             vec![
                 vec![0, 0],
                 vec![0, 1],
@@ -710,7 +726,7 @@ fn test_subscript_iter() {
             ],
         ),
         (
-            vec![vec![0, 1, 2], vec![0], vec![0, 1]],
+            vec![three_dim.clone(), one_dim.clone(), two_dim.clone()],
             vec![
                 vec![0, 0, 0],
                 vec![0, 0, 1],
@@ -718,6 +734,92 @@ fn test_subscript_iter() {
                 vec![1, 0, 1],
                 vec![2, 0, 0],
                 vec![2, 0, 1],
+            ],
+        ),
+    ];
+
+    for (input, expected) in cases {
+        for (i, subscripts) in SubscriptOffsetIterator::new(input).enumerate() {
+            eprintln!("exp: {:?}", expected[i]);
+            eprintln!("got: {:?}", subscripts);
+            assert_eq!(expected[i], subscripts);
+        }
+    }
+}
+
+pub struct SubscriptIterator<'a> {
+    dims: &'a [Dimension],
+    offsets: SubscriptOffsetIterator,
+}
+
+impl<'a> SubscriptIterator<'a> {
+    pub fn new(dims: &'a [Dimension]) -> Self {
+        SubscriptIterator {
+            dims,
+            offsets: SubscriptOffsetIterator::new(dims),
+        }
+    }
+}
+
+impl<'a> Iterator for SubscriptIterator<'a> {
+    type Item = Vec<&'a str>;
+
+    fn next(&mut self) -> Option<Vec<&'a str>> {
+        self.offsets.next().map(|subscripts| {
+            subscripts
+                .iter()
+                .enumerate()
+                .map(|(i, elem)| self.dims[i].elements[*elem].as_str())
+                .collect()
+        })
+    }
+}
+
+#[test]
+fn test_subscript_iter() {
+    let empty_dim = Dimension {
+        name: "".to_string(),
+        elements: vec![],
+    };
+    let one_dim = Dimension {
+        name: "".to_string(),
+        elements: vec!["0".to_owned()],
+    };
+    let two_dim = Dimension {
+        name: "".to_string(),
+        elements: vec!["0".to_owned(), "1".to_owned()],
+    };
+    let three_dim = Dimension {
+        name: "".to_string(),
+        elements: vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
+    };
+    let cases: &[(Vec<Dimension>, Vec<Vec<&str>>)] = &[
+        (vec![empty_dim.clone()], vec![]),
+        (vec![empty_dim.clone(), empty_dim.clone()], vec![]),
+        (
+            vec![three_dim.clone()],
+            vec![vec!["0"], vec!["1"], vec!["2"]],
+        ),
+        (
+            vec![three_dim.clone(), two_dim.clone()],
+            vec![
+                vec!["0", "0"],
+                vec!["0", "1"],
+                vec!["1", "0"],
+                vec!["1", "1"],
+                vec!["2", "0"],
+                vec!["2", "1"],
+            ],
+        ),
+        (
+            vec![three_dim.clone(), one_dim.clone(), two_dim.clone()],
+            vec![
+                vec!["0", "0", "0"],
+                vec!["0", "0", "1"],
+                vec!["1", "0", "0"],
+                vec!["1", "0", "1"],
+                vec!["2", "0", "0"],
+                vec!["2", "0", "1"],
             ],
         ),
     ];
