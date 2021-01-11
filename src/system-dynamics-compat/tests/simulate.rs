@@ -34,16 +34,8 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
 
     // failing testcases (arrays)
-    // "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
-    // "test/test-models/tests/subscript_3d_arrays/test_subscript_3d_arrays.xmile",
-    // "test/test-models/tests/subscript_docs/subscript_docs.xmile",
-    // "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays_from_floats/subscript_individually_defined_1_of_2d_arrays_from_floats.xmile",
-    // "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays/subscript_individually_defined_1_of_2d_arrays.xmile",
-    // "test/test-models/tests/subscript_mixed_assembly/test_subscript_mixed_assembly.xmile",
-    // "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
-    // "test/test-models/tests/subscript_selection/subscript_selection.xmile",
+    //"test/test-models/tests/subscript_mixed_assembly/test_subscript_mixed_assembly.xmile",
     //
-    // "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",
@@ -87,6 +79,13 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/sqrt/test_sqrt.xmile",
     "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
     "test/test-models/tests/subscript_1d_arrays/test_subscript_1d_arrays.xmile",
+    "test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
+    "test/test-models/tests/subscript_3d_arrays/test_subscript_3d_arrays.xmile",
+    "test/test-models/tests/subscript_docs/subscript_docs.xmile",
+    "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays_from_floats/subscript_individually_defined_1_of_2d_arrays_from_floats.xmile",
+    "test/test-models/tests/subscript_individually_defined_1_of_2d_arrays/subscript_individually_defined_1_of_2d_arrays.xmile",
+    "test/test-models/tests/subscript_multiples/test_multiple_subscripts.xmile",
+    "test/test-models/tests/subscript_selection/subscript_selection.xmile",
     "test/test-models/tests/trend/test_trend.xmile",
     "test/test-models/tests/trig/test_trig.xmile",
     "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
@@ -218,11 +217,7 @@ fn simulate_path(xmile_path: &str) {
     // sim.debug_print_runlists("main");
     let results = sim.run_to_end();
     assert!(results.is_ok());
-
     let results = results.unwrap();
-
-    let expected = load_expected_results(xmile_path);
-    ensure_results(&expected, &results);
 
     let compiled = sim.compile();
     assert!(compiled.is_ok());
@@ -233,6 +228,11 @@ fn simulate_path(xmile_path: &str) {
     let results2 = vm.run_to_end();
     assert!(results2.is_ok());
     let results2 = results2.unwrap();
+
+    ensure_results(&results, &results2);
+
+    let expected = load_expected_results(xmile_path);
+    ensure_results(&expected, &results);
 
     ensure_results(&expected, &results2);
 }

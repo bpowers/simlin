@@ -433,7 +433,8 @@ impl<'sim> VM<'sim> {
                     if index == 0 || index > bounds {
                         subscript_index_valid = false;
                     } else {
-                        subscript_index.push((index, bounds));
+                        // we convert from 1-based to 0-based here
+                        subscript_index.push((index - 1, bounds));
                         subscript_index_valid &= true;
                     };
                 }
@@ -445,7 +446,7 @@ impl<'sim> VM<'sim> {
                             index *= *bounds as usize;
                             index += *i as usize;
                         }
-                        curr[module_off + off as usize + index - 1]
+                        curr[module_off + off as usize + index]
                     } else {
                         f64::NAN
                     };
