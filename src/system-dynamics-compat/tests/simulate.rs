@@ -33,8 +33,8 @@ static TEST_MODELS: &[&str] = &[
     // "test/test-models/tests/special_characters/test_special_variable_names.xmile",
     // "test/test-models/tests/stocks_with_expressions/test_stock_with_expression.xmile",
 
-    // failing testcases (arrays)
-    //"test/test-models/tests/subscript_mixed_assembly/test_subscript_mixed_assembly.xmile",
+    // failing testcase: xmutil doesn't handle this correctly
+    // "test/test-models/tests/subscript_mixed_assembly/test_subscript_mixed_assembly.xmile",
     //
     "test/test-models/samples/arrays/a2a/a2a.stmx",
     "test/test-models/samples/arrays/non-a2a/non-a2a.stmx",
