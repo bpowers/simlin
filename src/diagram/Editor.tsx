@@ -507,6 +507,7 @@ export const Editor = withStyles(styles)(
       this.setState({
         selection: Set<number>(),
       });
+      this.scheduleSimRun();
     };
 
     handleMoveLabel = (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => {
@@ -1373,8 +1374,9 @@ export const Editor = withStyles(styles)(
       projectOffset = Math.min(projectOffset, this.state.projectHistory.size - 1);
       projectOffset = Math.max(projectOffset, 0);
       const serializedProject = defined(this.state.projectHistory.get(projectOffset));
+      const projectVersion = this.state.projectVersion + 0.01;
       const activeProject = Project.deserializeBinary(serializedProject);
-      this.setState({ activeProject, projectOffset });
+      this.setState({ activeProject, projectOffset, projectVersion });
 
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
