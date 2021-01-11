@@ -659,7 +659,7 @@ impl SubscriptOffsetIterator {
     pub fn new(arrays: &[Dimension]) -> Self {
         SubscriptOffsetIterator {
             n: 0,
-            size: arrays.iter().map(|v| v.elements.len()).sum(),
+            size: arrays.iter().map(|v| v.elements.len()).product(),
             lengths: arrays.iter().map(|v| v.elements.len()).collect(),
             next: vec![0; arrays.len()],
         }
@@ -739,11 +739,12 @@ fn test_subscript_offset_iter() {
     ];
 
     for (input, expected) in cases {
+        let mut n = 0;
         for (i, subscripts) in SubscriptOffsetIterator::new(input).enumerate() {
-            eprintln!("exp: {:?}", expected[i]);
-            eprintln!("got: {:?}", subscripts);
             assert_eq!(expected[i], subscripts);
+            n += 1;
         }
+        assert_eq!(expected.len(), n);
     }
 }
 

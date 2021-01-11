@@ -1798,7 +1798,10 @@ macro_rules! convert_equation(
                 Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name)).collect(),
                 None => vec![],
             };
-            let elements = elements.into_iter().map(|e| (canonicalize(&e.subscript), e.eqn)).collect();
+            let elements = elements.into_iter().map(|e| {
+                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim())).collect();
+                (canonical_subscripts.join(","), e.eqn)
+            }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
             let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name)).collect();

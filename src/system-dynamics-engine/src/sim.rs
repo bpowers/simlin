@@ -146,6 +146,19 @@ impl<'a> Context<'a> {
         Ok(off)
     }
 
+    fn get_dimension_name_subscript(&self, dim_name: &str) -> Option<usize> {
+        let active_dims = self.active_dimension.as_ref()?;
+        let active_subscripts = self.active_subscript.as_ref().unwrap();
+
+        for (dim, subscript) in active_dims.iter().zip(active_subscripts) {
+            if dim.name == dim_name {
+                return dim.get_offset(subscript);
+            }
+        }
+
+        None
+    }
+
     fn get_submodel_metadata(&self, model: &str, ident: &str) -> Result<&VariableMetadata> {
         let metadata = &self.metadata[model];
         if let Some(pos) = ident.find('.') {
@@ -303,6 +316,11 @@ impl<'a> Context<'a> {
                             // we need to check to make sure that any explicit subscript names are
                             // converted to offsets here and not passed to self.lower
                             if let Some(subscript_off) = dim.get_offset(ident) {
+                                Expr::Const((subscript_off + 1) as f64)
+                            } else if let Some(subscript_off) =
+                                self.get_dimension_name_subscript(ident)
+                            {
+                                // some modelers do `Variable[SubscriptName]` in their A2A equations
                                 Expr::Const((subscript_off + 1) as f64)
                             } else {
                                 self.lower(&args[0]).unwrap()
@@ -1081,21 +1099,19 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
         } else if let Some(AST::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
-            if dims.len() != 1 {
-                panic!("multi-dimensional arrays aren't supported yet");
+            for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
+                let subscript = subscripts.join(",");
+                let subscripted_ident = format!("{}[{}]", ident, subscript);
+                offsets.insert(subscripted_ident, (i + j, 1));
             }
-            for (j, subscript) in dims[0].elements.iter().enumerate() {
-                offsets.insert(format!("{}[{}]", ident, subscript), (i + j, 1));
-            }
-            dims[0].elements.len()
+            dims.iter().map(|dim| dim.elements.len()).product()
         } else if let Some(AST::Arrayed(dims, _)) = &model.variables[*ident].ast() {
-            if dims.len() != 1 {
-                panic!("multi-dimensional arrays aren't supported yet");
+            for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
+                let subscript = subscripts.join(",");
+                let subscripted_ident = format!("{}[{}]", ident, subscript);
+                offsets.insert(subscripted_ident, (i + j, 1));
             }
-            for (j, subscript) in dims[0].elements.iter().enumerate() {
-                offsets.insert(format!("{}[{}]", ident, subscript), (i + j, 1));
-            }
-            dims[0].elements.len()
+            dims.iter().map(|dim| dim.elements.len()).product()
         } else {
             offsets.insert(ident.to_string(), (i, 1));
             1
