@@ -19,6 +19,7 @@ unicode-xid = "0.2"
 lalrpop-util = "0.19"
 prost = "0.7"
 float-cmp = "0.8"
+ordered-float = "2"
 wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]

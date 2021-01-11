@@ -2,6 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::HashMap;
+
+use ordered_float::OrderedFloat;
+
 pub type LiteralId = u16;
 pub type ModuleId = u16;
 pub type Register = u8;
@@ -182,35 +186,51 @@ pub struct ByteCode {
     pub(crate) code: Vec<Opcode>,
 }
 
-impl ByteCode {
+#[derive(Clone, Debug, Default)]
+pub struct ByteCodeBuilder {
+    bytecode: ByteCode,
+    interned_literals: HashMap<OrderedFloat<f64>, LiteralId>,
+}
+
+impl ByteCodeBuilder {
     pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
-        for (i, existing_lit) in self.literals.iter().enumerate() {
-            // we want strict, unflinching f64 comparison here
-            #[allow(clippy::float_cmp)]
-            if *existing_lit == lit {
-                return i as u16;
-            }
+        let key: OrderedFloat<f64> = lit.into();
+        if self.interned_literals.contains_key(&key) {
+            return self.interned_literals[&key];
         }
-        self.literals.push(lit);
-        (self.literals.len() - 1) as u16
+        self.bytecode.literals.push(lit);
+        let literal_id = (self.bytecode.literals.len() - 1) as u16;
+        self.interned_literals.insert(key, literal_id);
+        literal_id
     }
 
     pub(crate) fn push_opcode(&mut self, op: Opcode) {
-        self.code.push(op)
+        self.bytecode.code.push(op)
+    }
+
+    pub(crate) fn finish(self) -> ByteCode {
+        self.bytecode
     }
 }
 
 #[test]
 fn test_memoizing_interning() {
-    let mut bytecode = ByteCode::default();
+    let mut bytecode = ByteCodeBuilder::default();
     let a1 = bytecode.intern_literal(1.0);
     let b1 = bytecode.intern_literal(1.01);
     let b2 = bytecode.intern_literal(1.01);
+    let b3 = bytecode.intern_literal(1.01);
     let a2 = bytecode.intern_literal(1.0);
+    let b4 = bytecode.intern_literal(1.01);
 
     assert_eq!(a1, a2);
     assert_eq!(b1, b2);
+    assert_eq!(b1, b3);
+    assert_eq!(b1, b4);
     assert_ne!(a1, b1);
+
+    let bytecode = bytecode.finish();
+    assert_eq!(2, bytecode.literals.len());
 }
 
 #[test]

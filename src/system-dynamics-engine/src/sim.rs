@@ -9,8 +9,8 @@ use float_cmp::approx_eq;
 
 use crate::ast::{self, AST};
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, GraphicalFunctionId, ModuleDeclaration,
-    ModuleId, ModuleInputOffset, Opcode, Register, VariableOffset,
+    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
+    ModuleDeclaration, ModuleId, ModuleInputOffset, Opcode, Register, VariableOffset,
 };
 use crate::common::{Ident, Result};
 use crate::datamodel;
@@ -1269,37 +1269,31 @@ impl Module {
     }
 
     pub fn compile(&self) -> Result<CompiledModule> {
-        let builder = ByteCodeBuilder::new(&self)?;
+        let builder = Compiler::new(&self)?;
 
         builder.compile()
     }
 }
 
-struct ByteCodeBuilder<'module> {
+struct Compiler<'module> {
     module: &'module Module,
     module_decls: Vec<ModuleDeclaration>,
     graphical_functions: Vec<Vec<(f64, f64)>>,
-    initials_code: ByteCode,
-    flows_code: ByteCode,
-    stocks_code: ByteCode,
-    curr_code: ByteCode,
+    curr_code: ByteCodeBuilder,
     free_registers: BinaryHeap<Reverse<Register>>,
 }
 
-impl<'module> ByteCodeBuilder<'module> {
-    fn new(module: &'module Module) -> Result<ByteCodeBuilder> {
+impl<'module> Compiler<'module> {
+    fn new(module: &'module Module) -> Result<Compiler> {
         let mut free_registers = BinaryHeap::new();
         for n in 0u8..(FIRST_CALL_REG - 1) {
             free_registers.push(Reverse(n));
         }
-        Ok(ByteCodeBuilder {
+        Ok(Compiler {
             module,
             module_decls: vec![],
             graphical_functions: vec![],
-            initials_code: ByteCode::default(),
-            flows_code: ByteCode::default(),
-            stocks_code: ByteCode::default(),
-            curr_code: ByteCode::default(),
+            curr_code: ByteCodeBuilder::default(),
             free_registers,
         })
     }
@@ -1310,7 +1304,9 @@ impl<'module> ByteCodeBuilder<'module> {
         }
         self.push(Opcode::Ret);
 
-        Ok(std::mem::take(&mut self.curr_code))
+        let curr = std::mem::take(&mut self.curr_code);
+
+        Ok(curr.finish())
     }
 
     fn walk_expr(&mut self, expr: &Expr) -> Result<Option<Register>> {
@@ -1661,9 +1657,9 @@ impl<'module> ByteCodeBuilder<'module> {
     }
 
     fn compile(mut self) -> Result<CompiledModule> {
-        self.initials_code = self.walk(&self.module.runlist_initials)?;
-        self.flows_code = self.walk(&self.module.runlist_flows)?;
-        self.stocks_code = self.walk(&self.module.runlist_stocks)?;
+        let compiled_initials = self.walk(&self.module.runlist_initials)?;
+        let compiled_flows = self.walk(&self.module.runlist_flows)?;
+        let compiled_stocks = self.walk(&self.module.runlist_stocks)?;
 
         Ok(CompiledModule {
             ident: self.module.ident.clone(),
@@ -1672,9 +1668,9 @@ impl<'module> ByteCodeBuilder<'module> {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
             },
-            compiled_initials: self.initials_code,
-            compiled_flows: self.flows_code,
-            compiled_stocks: self.stocks_code,
+            compiled_initials,
+            compiled_flows,
+            compiled_stocks,
         })
     }
 }
