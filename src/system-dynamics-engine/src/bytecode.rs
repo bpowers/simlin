@@ -184,6 +184,13 @@ pub struct ByteCode {
 
 impl ByteCode {
     pub(crate) fn intern_literal(&mut self, lit: f64) -> LiteralId {
+        for (i, existing_lit) in self.literals.iter().enumerate() {
+            // we want strict, unflinching f64 comparison here
+            #[allow(clippy::float_cmp)]
+            if *existing_lit == lit {
+                return i as u16;
+            }
+        }
         self.literals.push(lit);
         (self.literals.len() - 1) as u16
     }
@@ -191,6 +198,19 @@ impl ByteCode {
     pub(crate) fn push_opcode(&mut self, op: Opcode) {
         self.code.push(op)
     }
+}
+
+#[test]
+fn test_memoizing_interning() {
+    let mut bytecode = ByteCode::default();
+    let a1 = bytecode.intern_literal(1.0);
+    let b1 = bytecode.intern_literal(1.01);
+    let b2 = bytecode.intern_literal(1.01);
+    let a2 = bytecode.intern_literal(1.0);
+
+    assert_eq!(a1, a2);
+    assert_eq!(b1, b2);
+    assert_ne!(a1, b1);
 }
 
 #[test]
