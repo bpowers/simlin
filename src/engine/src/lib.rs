@@ -11,7 +11,7 @@ use prost::Message;
 
 use system_dynamics_engine as engine;
 use system_dynamics_engine::common::{ErrorCode, ErrorKind};
-use system_dynamics_engine::datamodel::GraphicalFunction;
+use system_dynamics_engine::datamodel::{GraphicalFunction, Variable};
 use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error, VM};
 
 #[wasm_bindgen]
@@ -207,7 +207,20 @@ impl Engine {
             .iter()
             .position(|v| v.get_ident() == ident)
             .unwrap();
-        model.variables.remove(off);
+        let removed = model.variables.remove(off);
+        if let Variable::Flow(flow) = removed {
+            for var in model.variables.iter_mut() {
+                if let Variable::Stock(stock) = var {
+                    if let Some(off) = stock.inflows.iter().position(|ident| ident == &flow.ident) {
+                        let _ = stock.inflows.remove(off);
+                    }
+                    if let Some(off) = stock.outflows.iter().position(|ident| ident == &flow.ident)
+                    {
+                        let _ = stock.outflows.remove(off);
+                    }
+                }
+            }
+        }
 
         self.project = project.into();
         self.instantiate_sim();
@@ -227,8 +240,14 @@ impl Engine {
         let model = project.get_model_mut(model_name).unwrap();
         match model.get_variable_mut(stock) {
             Some(datamodel::Variable::Stock(stock)) => match dir {
-                "in" => stock.inflows.push(flow.to_owned()),
-                "out" => stock.outflows.push(flow.to_owned()),
+                "in" => {
+                    stock.inflows.push(flow.to_owned());
+                    stock.inflows.sort_unstable();
+                }
+                "out" => {
+                    stock.outflows.push(flow.to_owned());
+                    stock.outflows.sort_unstable();
+                }
                 _ => {
                     return None;
                 }
