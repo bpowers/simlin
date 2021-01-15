@@ -34,7 +34,7 @@ mod bytecode;
 mod interpreter;
 mod vm;
 
-pub use self::common::{canonicalize, Error, Ident, Result};
+pub use self::common::{canonicalize, Error, ErrorCode, Ident, Result};
 pub use self::sim::Simulation;
 pub use self::vm::Method;
 pub use self::vm::Results;

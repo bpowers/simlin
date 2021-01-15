@@ -33,8 +33,10 @@ fn test_err(input: &str, expected: (&str, ErrorCode)) {
     let token = tokenizer.into_iter().last().unwrap();
     let (expected_span, expected_code) = expected;
     let expected_start = expected_span.find("~").unwrap();
+    let expected_end = expected_span.rfind("~").unwrap() + 1;
     let expected_err = EquationError {
-        location: expected_start,
+        start: expected_start as u16,
+        end: expected_end as u16,
         code: expected_code,
     };
     assert_eq!(Err(expected_err), token);
@@ -144,7 +146,7 @@ fn subscripts() {
 
 #[test]
 fn unclosed_comment() {
-    test_err("{comment", ("~", UnclosedComment));
+    test_err("{comment", ("~~~~~~~~", UnclosedComment));
 }
 
 #[test]
@@ -159,5 +161,5 @@ fn unrecognized_token() {
 
 #[test]
 fn unclosed_quoted_ident() {
-    test_err("\"ohno", ("~", UnclosedQuotedIdent));
+    test_err("\"ohno", ("~~~~~", UnclosedQuotedIdent));
 }

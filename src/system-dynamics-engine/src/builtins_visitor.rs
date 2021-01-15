@@ -52,7 +52,7 @@ impl<'a> BuiltinVisitor<'a> {
 
                 // TODO: make this a function call/hash lookup
                 if !crate::stdlib::MODEL_NAMES.contains(&func.as_str()) {
-                    return eqn_err!(UnknownBuiltin, 0);
+                    return eqn_err!(UnknownBuiltin, loc.start, loc.end);
                 }
 
                 let stdlib_model_inputs = stdlib_args(&func).unwrap();

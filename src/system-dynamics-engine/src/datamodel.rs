@@ -101,6 +101,15 @@ impl Variable {
         }
     }
 
+    pub fn get_equation(&self) -> Option<&Equation> {
+        match self {
+            Variable::Stock(stock) => Some(&stock.equation),
+            Variable::Flow(flow) => Some(&flow.equation),
+            Variable::Aux(aux) => Some(&aux.equation),
+            Variable::Module(_module) => None,
+        }
+    }
+
     pub fn set_ident(&mut self, ident: String) {
         match self {
             Variable::Stock(stock) => stock.ident = ident,
@@ -253,6 +262,15 @@ pub struct Model {
 }
 
 impl Model {
+    pub fn get_variable(&self, ident: &str) -> Option<&Variable> {
+        for var in self.variables.iter() {
+            if var.get_ident() == ident {
+                return Some(var);
+            }
+        }
+        None
+    }
+
     pub fn get_variable_mut(&mut self, ident: &str) -> Option<&mut Variable> {
         for var in self.variables.iter_mut() {
             if var.get_ident() == ident {
@@ -322,7 +340,9 @@ pub struct Project {
 
 impl Project {
     pub fn get_model(&self, model_name: &str) -> Option<&Model> {
-        self.models.iter().find(|m| m.name == model_name)
+        self.models
+            .iter()
+            .find(|m| m.name == model_name || (model_name == "main" && m.name.is_empty()))
     }
     pub fn get_model_mut(&mut self, model_name: &str) -> Option<&mut Model> {
         self.models.iter_mut().find(|m| m.name == model_name)

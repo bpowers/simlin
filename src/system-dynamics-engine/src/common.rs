@@ -97,13 +97,14 @@ impl fmt::Display for ErrorCode {
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EquationError {
-    pub location: usize,
+    pub start: u16,
+    pub end: u16,
     pub code: ErrorCode,
 }
 
 impl fmt::Display for EquationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}:{}", self.location, self.code)
+        write!(f, "{}:{}:{}", self.start, self.end, self.code)
     }
 }
 
@@ -119,9 +120,9 @@ macro_rules! eprintln(
 
 #[macro_export]
 macro_rules! eqn_err(
-    ($code:tt, $off:expr) => {{
-        use crate::common::ErrorCode;
-        Err(EquationError{ location: $off, code: ErrorCode::$code})
+    ($code:tt, $start:expr, $end:expr) => {{
+        use crate::common::{EquationError, ErrorCode};
+        Err(EquationError{ start: $start, end: $end, code: ErrorCode::$code})
     }}
 );
 
@@ -133,17 +134,6 @@ macro_rules! model_err(
             kind: ErrorKind::Model,
             code: ErrorCode::$code,
             details: Some($str),
-        })
-    }}
-);
-
-#[macro_export]
-macro_rules! var_err(
-    ($code:tt, $str:expr) => {{
-        use crate::common::{EquationError, ErrorCode};
-        Err(EquationError{
-            code: ErrorCode::$code,
-            location: 0,
         })
     }}
 );

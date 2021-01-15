@@ -2,14 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::error::Error;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::rc::Rc;
 
 use pico_args::Arguments;
 
-use system_dynamics_compat::engine::{eprintln, serde, Project, Simulation, VM};
+use system_dynamics_compat::engine::datamodel::Equation;
+use system_dynamics_compat::engine::{eprintln, serde, ErrorCode, Project, Simulation, VM};
 use system_dynamics_compat::prost::Message;
 use system_dynamics_compat::{open_vensim, open_xmile};
 
@@ -60,7 +60,7 @@ struct Args {
     is_model_only: bool,
 }
 
-fn parse_args() -> Result<Args, Box<dyn Error>> {
+fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     let mut parsed = Arguments::from_env();
     if parsed.contains(["-h", "--help"]) {
         usage();
@@ -144,8 +144,57 @@ fn main() {
         output_file.write_all(&buf).unwrap();
     // eprintln!("{:?}", project);
     } else {
+        let project_datamodel = project.clone();
         let project = Rc::new(Project::from(project));
-        let sim = Simulation::new(&project, "main").unwrap();
+        let mut found_model_error = false;
+        for (model_name, model) in project.models.iter() {
+            let model_datamodel = project_datamodel.get_model(model_name);
+            if model_datamodel.is_none() {
+                continue;
+            }
+            let model_datamodel = model_datamodel.unwrap();
+            let mut found_var_error = false;
+            for (ident, errors) in model.get_variable_errors() {
+                assert!(!errors.is_empty());
+                let var = model_datamodel.get_variable(&ident).unwrap();
+                found_var_error = true;
+                for error in errors {
+                    eprintln!("");
+                    if let Some(Equation::Scalar(eqn)) = var.get_equation() {
+                        eprintln!("    {}", eqn);
+                        let space = std::iter::repeat(" ")
+                            .take(error.start as usize)
+                            .collect::<String>();
+                        let underline = std::iter::repeat("~")
+                            .take((error.end - error.start) as usize)
+                            .collect::<String>();
+                        eprintln!("    {}{}", space, underline);
+                    }
+                    eprintln!(
+                        "error in model '{}' variable '{}': {}",
+                        model_name, ident, error.code
+                    );
+                }
+            }
+            if let Some(errors) = &model.errors {
+                for error in errors.iter() {
+                    if error.code == ErrorCode::VariablesHaveErrors && found_var_error {
+                        continue;
+                    }
+                    eprintln!("error in model {}: {}", model_name, error);
+                    found_model_error = true;
+                }
+            }
+        }
+        let sim = match Simulation::new(&project, "main") {
+            Ok(sim) => sim,
+            Err(err) => {
+                if !(err.code == ErrorCode::NotSimulatable && found_model_error) {
+                    eprintln!("error: {}", err);
+                }
+                std::process::exit(1);
+            }
+        };
         let compiled = sim.compile().unwrap();
         let vm = VM::new(&compiled).unwrap();
         let results = vm.run_to_end();

@@ -47,10 +47,11 @@ pub enum Token<'input> {
     Num(&'input str),
 }
 
-fn error<T>(c: ErrorCode, l: usize) -> Result<T, EquationError> {
+fn error<T>(code: ErrorCode, start: usize, end: usize) -> Result<T, EquationError> {
     Err(EquationError {
-        location: l,
-        code: c,
+        start: start as u16,
+        end: end as u16,
+        code,
     })
 }
 
@@ -176,7 +177,7 @@ impl<'input> Lexer<'input> {
                 self.bump();
                 Ok((idx0, Ident(&self.text[idx0 + 1..idx1]), idx1 + 1))
             }
-            None => error(UnclosedQuotedIdent, idx0),
+            None => error(UnclosedQuotedIdent, idx0, self.text.len()),
         }
     }
 
@@ -187,7 +188,7 @@ impl<'input> Lexer<'input> {
                 self.bump(); // consume
                 Ok(())
             }
-            None => error(UnclosedComment, idx0),
+            None => error(UnclosedComment, idx0, self.text.len()),
         }
     }
 
@@ -230,14 +231,14 @@ impl<'input> Iterator for Lexer<'input> {
                     match self.bump() {
                         Some((_, '&')) => self.consume(i, And, 2),
                         // we've already bumped, don't consume
-                        _ => Some(error(UnrecognizedToken, i)),
+                        _ => Some(error(UnrecognizedToken, i, i + 2)),
                     }
                 }
                 Some((i, '|')) => {
                     match self.bump() {
                         Some((_, '|')) => self.consume(i, Or, 2),
                         // we've already bumped, don't consume
-                        _ => Some(error(UnrecognizedToken, i)),
+                        _ => Some(error(UnrecognizedToken, i, i + 2)),
                     }
                 }
                 Some((i, '-')) => self.consume(i, Minus, 1),
@@ -245,7 +246,7 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, '*')) => self.consume(i, Mul, 1),
                 Some((i, '{')) => match self.comment_end() {
                     Ok(()) => self.next(),
-                    Err(_) => Some(error(UnclosedComment, i)),
+                    Err(_) => Some(error(UnclosedComment, i, self.text.len())),
                 },
                 Some((i, '(')) => self.consume(i, LParen, 1),
                 Some((i, ')')) => self.consume(i, RParen, 1),
@@ -261,7 +262,11 @@ impl<'input> Iterator for Lexer<'input> {
                 }
                 Some((i, _)) => {
                     self.bump(); // eat whatever is killing us
-                    Some(error(UnrecognizedToken, i))
+                    let end = match self.lookahead {
+                        Some((end, _)) => end,
+                        None => self.text.len(),
+                    };
+                    Some(error(UnrecognizedToken, i, end))
                 }
                 None => None,
             };

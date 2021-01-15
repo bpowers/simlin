@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::variable::{parse_var, ModuleInput, Variable};
-use crate::{datamodel, model_err, var_err};
+use crate::{datamodel, eqn_err, model_err};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
@@ -162,7 +162,7 @@ pub fn resolve_module_input<'a>(
 
     let dst = dst.strip_prefix(&input_prefix);
     if dst.is_none() {
-        return var_err!(BadModuleInputDst, 0);
+        return eqn_err!(BadModuleInputDst, 0, 0);
     }
     let dst = dst.unwrap().to_string();
 
@@ -174,7 +174,7 @@ pub fn resolve_module_input<'a>(
 
     match resolve_relative(models, model_name, &src) {
         Some(_) => Ok(ModuleInput { src, dst }),
-        None => var_err!(BadModuleInputSrc, orig_src.to_string()),
+        None => eqn_err!(BadModuleInputSrc, 0, 0),
     }
 }
 
@@ -233,7 +233,7 @@ impl Model {
 
         let mut variables_have_errors = false;
         for (_ident, var) in variables.iter_mut() {
-            let mut missing_dep = false;
+            let mut missing_deps = vec![];
             for dep in var.direct_deps().iter() {
                 let dep = if let Some(dot_off) = dep.find('.') {
                     &dep[..dot_off]
@@ -241,13 +241,14 @@ impl Model {
                     dep.as_str()
                 };
                 if !variable_names.contains(dep) {
-                    missing_dep = true;
+                    missing_deps.push(dep.to_owned());
                 }
             }
-            if missing_dep {
-                // TODO: this should tie in to the location of the ident
+            for dep in missing_deps.into_iter() {
+                let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
                 var.push_error(EquationError {
-                    location: 0,
+                    start: loc.start,
+                    end: loc.end,
                     code: ErrorCode::UnknownDependency,
                 });
                 variables_have_errors = true;
@@ -540,7 +541,8 @@ fn test_errors() {
     let err = &var_errors["aux_3"][0];
     assert_eq!(
         &EquationError {
-            location: 0,
+            start: 0,
+            end: 16,
             code: ErrorCode::UnknownDependency
         },
         err

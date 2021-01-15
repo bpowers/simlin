@@ -11,8 +11,8 @@ use crate::datamodel::Dimension;
 // variable -- u16 is long enough
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct Loc {
-    start: u16,
-    end: u16,
+    pub start: u16,
+    pub end: u16,
 }
 
 impl Loc {
@@ -76,6 +76,40 @@ impl Expr {
             ),
         }
     }
+
+    pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
+        match self {
+            Expr::Const(_s, _n, _loc) => None,
+            Expr::Var(v, loc) if v == ident => Some(*loc),
+            Expr::Var(_v, _loc) => None,
+            Expr::App(_builtin, args, _loc) => {
+                for arg in args.iter() {
+                    if let Some(loc) = arg.get_var_loc(ident) {
+                        return Some(loc);
+                    }
+                }
+                None
+            }
+            Expr::Subscript(id, subscripts, loc) => {
+                if id == ident {
+                    let start = loc.start as usize;
+                    return Some(Loc::new(start, start + id.len()));
+                }
+                for arg in subscripts.iter() {
+                    if let Some(loc) = arg.get_var_loc(ident) {
+                        return Some(loc);
+                    }
+                }
+                None
+            }
+            Expr::Op1(_op, r, _loc) => r.get_var_loc(ident),
+            Expr::Op2(_op, l, r, _loc) => l.get_var_loc(ident).or_else(|| r.get_var_loc(ident)),
+            Expr::If(cond, t, f, _loc) => cond
+                .get_var_loc(ident)
+                .or_else(|| t.get_var_loc(ident))
+                .or_else(|| f.get_var_loc(ident)),
+        }
+    }
 }
 
 impl Default for Expr {
@@ -89,6 +123,23 @@ pub enum AST {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),
     Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
+}
+
+impl AST {
+    pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
+        match self {
+            AST::Scalar(expr) => expr.get_var_loc(ident),
+            AST::ApplyToAll(_, expr) => expr.get_var_loc(ident),
+            AST::Arrayed(_, subscripts) => {
+                for (_, expr) in subscripts.iter() {
+                    if let Some(loc) = expr.get_var_loc(ident) {
+                        return Some(loc);
+                    }
+                }
+                None
+            }
+        }
+    }
 }
 
 pub trait Visitor<T> {

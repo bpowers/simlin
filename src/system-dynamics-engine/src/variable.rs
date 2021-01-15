@@ -208,7 +208,7 @@ fn get_dimensions(
                     return Ok(dim.clone());
                 }
             }
-            eqn_err!(BadDimensionName, 0)
+            eqn_err!(BadDimensionName, 0, 0)
         })
         .collect()
 }
@@ -269,7 +269,8 @@ fn parse_single_equation(eqn: &str) -> (Option<ast::Expr>, Vec<EquationError>) {
             use crate::common::ErrorCode::*;
             let err = match err {
                 ParseError::InvalidToken { location: l } => EquationError {
-                    location: l,
+                    start: l as u16,
+                    end: (l + 1) as u16,
                     code: InvalidToken,
                 },
                 ParseError::UnrecognizedEOF {
@@ -284,18 +285,23 @@ fn parse_single_equation(eqn: &str) -> (Option<ast::Expr>, Vec<EquationError>) {
                     // TODO: we can give a more precise error message here, including what
                     //   types of tokens would be ok
                     EquationError {
-                        location: l,
+                        start: l as u16,
+                        end: (l + 1) as u16,
                         code: UnrecognizedEOF,
                     }
                 }
                 ParseError::UnrecognizedToken {
-                    token: (l, _t, _r), ..
+                    token: (l, _t, r), ..
                 } => EquationError {
-                    location: l,
+                    start: l as u16,
+                    end: r as u16,
                     code: UnrecognizedToken,
                 },
-                ParseError::ExtraToken { .. } => EquationError {
-                    location: eqn.len(),
+                ParseError::ExtraToken {
+                    token: (l, _t, r), ..
+                } => EquationError {
+                    start: l as u16,
+                    end: r as u16,
                     code: ExtraToken,
                 },
                 ParseError::User { error: e } => e,
