@@ -2,9 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use crate::ast::{Expr, Loc};
 use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
-use crate::ast::Expr;
 use crate::ast::Expr::*;
 use crate::common::{self, canonicalize, EquationError};
 use crate::token::Token;
@@ -16,75 +16,74 @@ pub Equation: Expr = {
 };
 
 Expr: Expr = {
-    "if" <c:Expr> "then" <t:Expr> "else" <f:Expr> => If(Box::new(c), Box::new(t), Box::new(f)),
+    <lpos:@L> "if" <c:Expr> "then" <t:Expr> "else" <f:Expr> <rpos:@R> => If(Box::new(c), Box::new(t), Box::new(f), Loc::new(lpos, rpos)),
     LCmp,
 };
 
 LCmp: Expr = {
-    <l:LCmp> "&&" <r:ACmp> => Op2(And, Box::new(l), Box::new(r)),
-    <l:LCmp> "||" <r:ACmp> => Op2(Or, Box::new(l), Box::new(r)),
+    <lpos:@L> <l:LCmp> "&&" <r:ACmp> <rpos:@R> => Op2(And, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:LCmp> "||" <r:ACmp> <rpos:@R> => Op2(Or, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     ACmp,
 };
 
 ACmp: Expr = {
-    <l:ACmp> "=" <r:Eq>  => Op2(Eq, Box::new(l), Box::new(r)),
-    <l:ACmp> "<>" <r:Eq> => Op2(Neq, Box::new(l), Box::new(r)),
-    <l:ACmp> "!=" <r:Eq> => Op2(Neq, Box::new(l), Box::new(r)),
+    <lpos:@L> <l:ACmp> "=" <r:Eq> <rpos:@R>  => Op2(Eq, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:ACmp> "<>" <r:Eq> <rpos:@R> => Op2(Neq, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:ACmp> "!=" <r:Eq> <rpos:@R> => Op2(Neq, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     Eq,
 };
 
 Eq: Expr = {
-    <l:Eq> "<" <r:Add>  => Op2(Lt, Box::new(l), Box::new(r)),
-    <l:Eq> "<=" <r:Add> => Op2(Lte, Box::new(l), Box::new(r)),
-    <l:Eq> ">" <r:Add>  => Op2(Gt, Box::new(l), Box::new(r)),
-    <l:Eq> ">=" <r:Add> => Op2(Gte, Box::new(l), Box::new(r)),
+    <lpos:@L> <l:Eq> "<"  <r:Add> <rpos:@R> => Op2(Lt, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Eq> "<=" <r:Add> <rpos:@R> => Op2(Lte, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Eq> ">"  <r:Add> <rpos:@R> => Op2(Gt, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Eq> ">=" <r:Add> <rpos:@R> => Op2(Gte, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     Add,
 };
 
 Add: Expr = {
-    <l:Add> "-" <r:Mul> => Op2(Sub, Box::new(l), Box::new(r)),
-    <l:Add> "+" <r:Mul> => Op2(Add, Box::new(l), Box::new(r)),
+    <lpos:@L> <l:Add> "-" <r:Mul> <rpos:@R> => Op2(Sub, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Add> "+" <r:Mul> <rpos:@R> => Op2(Add, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     Mul,
 };
 
 Mul: Expr = {
-    <l:Mul> "*" <r:Unary> => Op2(Mul, Box::new(l), Box::new(r)),
-    <l:Mul> "/" <r:Unary> => Op2(Div, Box::new(l), Box::new(r)),
-    <l:Mul> "%" <r:Unary> => Op2(Mod, Box::new(l), Box::new(r)),
+    <lpos:@L> <l:Mul> "*" <r:Unary> <rpos:@R> => Op2(Mul, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Mul> "/" <r:Unary> <rpos:@R> => Op2(Div, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Mul> "%" <r:Unary> <rpos:@R> => Op2(Mod, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     Unary,
 };
 
 Unary: Expr = {
-    "+" <e:Exp> => Op1(Positive, Box::new(e)),
-    "-" <e:Exp> => Op1(Negative, Box::new(e)),
-    "!" <e:Exp> => Op1(Not, Box::new(e)),
+    <lpos:@L> "+" <e:Exp> <rpos:@R> => Op1(Positive, Box::new(e), Loc::new(lpos, rpos)),
+    <lpos:@L> "-" <e:Exp> <rpos:@R> => Op1(Negative, Box::new(e), Loc::new(lpos, rpos)),
+    <lpos:@L> "!" <e:Exp> <rpos:@R> => Op1(Not, Box::new(e), Loc::new(lpos, rpos)),
     Exp,
 };
 
 Exp: Expr = {
-    <l:Exp> "^" <r:App> => Op2(Exp, Box::new(l), Box::new(r)),
+    <lpos:@L> <l:Exp> "^" <r:App> <rpos:@R> => Op2(Exp, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     App,
 };
 
 App: Expr = {
-    <id:Ident> "(" <args:Exprs> ")" => App(id, args),
+    <lpos:@L> <id:Ident> "(" <args:Exprs> ")" <rpos:@R> => App(id, args, Loc::new(lpos, rpos)),
     Subscript,
 };
 
 Subscript: Expr = {
-    <id:Ident> "[" <args:Exprs> "]" => Subscript(id, args),
+    <lpos:@L> <id:Ident> "[" <args:Exprs> "]" <rpos:@R> => Subscript(id, args, Loc::new(lpos, rpos)),
     Atom,
 };
 
 Atom: Expr = {
-    <id:Ident> => Var(id),
+    <lpos:@L> <id:Ident> <rpos:@R> => Var(id, Loc::new(lpos, rpos)),
     "(" <Expr> ")",
-    "Num" => {
+    <lpos:@L> <s:"Num"> <rpos:@R> => {
         use std::str::FromStr;
-        let s = <>;
-        Const(s.to_string(), f64::from_str(s).unwrap())
+        Const(s.to_string(), f64::from_str(s).unwrap(), Loc::new(lpos, rpos))
     },
-    "Nan" => Const("NaN".to_string(), f64::NAN),
+    <lpos:@L> <s:"Nan"> <rpos:@R> => Const("NaN".to_string(), f64::NAN, Loc::new(lpos, rpos)),
 };
 
 Comma<T>: Vec<T> = {

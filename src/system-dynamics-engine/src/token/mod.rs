@@ -201,6 +201,7 @@ impl<'input> Lexer<'input> {
         Some(Ok((i, tok, i + len)))
     }
 }
+
 impl<'input> Iterator for Lexer<'input> {
     type Item = Result<Spanned<Token<'input>>, EquationError>;
 

@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::ast::{self, AST};
+use crate::ast::{self, Loc, AST};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Opcode, Register, VariableOffset,
@@ -47,18 +47,117 @@ type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
-    Const(f64),
-    Var(usize),                              // offset
-    Subscript(usize, Vec<Expr>, Vec<usize>), // offset, index expression, bounds
-    Dt,
-    App(BuiltinFn),
+    Const(f64, Loc),
+    Var(usize, Loc),                              // offset
+    Subscript(usize, Vec<Expr>, Vec<usize>, Loc), // offset, index expression, bounds
+    Dt(Loc),
+    App(BuiltinFn, Loc),
     EvalModule(Ident, Ident, Vec<Expr>),
-    ModuleInput(usize),
-    Op2(BinaryOp, Box<Expr>, Box<Expr>),
-    Op1(UnaryOp, Box<Expr>),
-    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    ModuleInput(usize, Loc),
+    Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
+    Op1(UnaryOp, Box<Expr>, Loc),
+    If(Box<Expr>, Box<Expr>, Box<Expr>, Loc),
     AssignCurr(usize, Box<Expr>),
     AssignNext(usize, Box<Expr>),
+}
+
+impl Expr {
+    fn get_loc(&self) -> Loc {
+        match self {
+            Expr::Const(_, loc) => *loc,
+            Expr::Var(_, loc) => *loc,
+            Expr::Subscript(_, _, _, loc) => *loc,
+            Expr::Dt(loc) => *loc,
+            Expr::App(_, loc) => *loc,
+            Expr::EvalModule(_, _, _) => Loc::default(),
+            Expr::ModuleInput(_, loc) => *loc,
+            Expr::Op2(_, _, _, loc) => *loc,
+            Expr::Op1(_, _, loc) => *loc,
+            Expr::If(_, _, _, loc) => *loc,
+            Expr::AssignCurr(_, _) => Loc::default(),
+            Expr::AssignNext(_, _) => Loc::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn strip_loc(self) -> Self {
+        let loc = Loc::default();
+        match self {
+            Expr::Const(c, _loc) => Expr::Const(c, loc),
+            Expr::Var(v, _loc) => Expr::Var(v, loc),
+            Expr::Subscript(off, subscripts, bounds, _) => {
+                let subscripts = subscripts
+                    .into_iter()
+                    .map(|expr| expr.strip_loc())
+                    .collect();
+                Expr::Subscript(off, subscripts, bounds, loc)
+            }
+            Expr::Dt(_) => Expr::Dt(loc),
+            Expr::App(builtin, _loc) => {
+                let builtin = match builtin {
+                    BuiltinFn::Lookup(id, a) => BuiltinFn::Lookup(id, Box::new(a.strip_loc())),
+                    BuiltinFn::Inf | BuiltinFn::Pi => builtin,
+                    BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.strip_loc())),
+                    BuiltinFn::Arccos(a) => BuiltinFn::Arccos(Box::new(a.strip_loc())),
+                    BuiltinFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(a.strip_loc())),
+                    BuiltinFn::Arctan(a) => BuiltinFn::Arctan(Box::new(a.strip_loc())),
+                    BuiltinFn::Cos(a) => BuiltinFn::Cos(Box::new(a.strip_loc())),
+                    BuiltinFn::Exp(a) => BuiltinFn::Exp(Box::new(a.strip_loc())),
+                    BuiltinFn::Int(a) => BuiltinFn::Int(Box::new(a.strip_loc())),
+                    BuiltinFn::Ln(a) => BuiltinFn::Ln(Box::new(a.strip_loc())),
+                    BuiltinFn::Log10(a) => BuiltinFn::Log10(Box::new(a.strip_loc())),
+                    BuiltinFn::Mean(args) => {
+                        BuiltinFn::Mean(args.into_iter().map(|arg| arg.strip_loc()).collect())
+                    }
+                    BuiltinFn::Sin(a) => BuiltinFn::Sin(Box::new(a.strip_loc())),
+                    BuiltinFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(a.strip_loc())),
+                    BuiltinFn::Tan(a) => BuiltinFn::Tan(Box::new(a.strip_loc())),
+                    BuiltinFn::Max(a, b) => {
+                        BuiltinFn::Max(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
+                    BuiltinFn::Min(a, b) => {
+                        BuiltinFn::Min(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
+                    BuiltinFn::Step(a, b) => {
+                        BuiltinFn::Step(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                    }
+                    BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        c.map(|expr| Box::new(expr.strip_loc())),
+                    ),
+                    BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        c.map(|expr| Box::new(expr.strip_loc())),
+                    ),
+                    BuiltinFn::SafeDiv(a, b, c) => BuiltinFn::SafeDiv(
+                        Box::new(a.strip_loc()),
+                        Box::new(b.strip_loc()),
+                        c.map(|expr| Box::new(expr.strip_loc())),
+                    ),
+                };
+                Expr::App(builtin, loc)
+            }
+            Expr::EvalModule(id1, id2, args) => {
+                let args = args.into_iter().map(|expr| expr.strip_loc()).collect();
+                Expr::EvalModule(id1, id2, args)
+            }
+            Expr::ModuleInput(mi, _loc) => Expr::ModuleInput(mi, loc),
+            Expr::Op2(op, l, r, _loc) => {
+                Expr::Op2(op, Box::new(l.strip_loc()), Box::new(r.strip_loc()), loc)
+            }
+            Expr::Op1(op, r, _loc) => Expr::Op1(op, Box::new(r.strip_loc()), loc),
+            Expr::If(cond, t, f, _loc) => Expr::If(
+                Box::new(cond.strip_loc()),
+                Box::new(t.strip_loc()),
+                Box::new(f.strip_loc()),
+                loc,
+            ),
+            Expr::AssignCurr(off, rhs) => Expr::AssignCurr(off, Box::new(rhs.strip_loc())),
+            Expr::AssignNext(off, rhs) => Expr::AssignNext(off, Box::new(rhs.strip_loc())),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -197,20 +296,20 @@ impl<'a> Context<'a> {
 
     fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
         let expr = match expr {
-            ast::Expr::Const(_, n) => Expr::Const(*n),
-            ast::Expr::Var(id) => {
+            ast::Expr::Const(_, n, loc) => Expr::Const(*n, *loc),
+            ast::Expr::Var(id, loc) => {
                 if let Some((off, _)) = self
                     .inputs
                     .iter()
                     .enumerate()
                     .find(|(_, input)| id == *input)
                 {
-                    Expr::ModuleInput(off)
+                    Expr::ModuleInput(off, *loc)
                 } else {
-                    Expr::Var(self.get_offset(id)?)
+                    Expr::Var(self.get_offset(id)?, *loc)
                 }
             }
-            ast::Expr::App(id, orig_args) => {
+            ast::Expr::App(id, orig_args, loc) => {
                 let args: Result<Vec<Expr>> = orig_args.iter().map(|e| self.lower(e)).collect();
                 let mut args = args?;
 
@@ -267,7 +366,7 @@ impl<'a> Context<'a> {
 
                 let builtin = match id.as_str() {
                     "lookup" => {
-                        if let ast::Expr::Var(ident) = &orig_args[0] {
+                        if let ast::Expr::Var(ident, _loc) = &orig_args[0] {
                             BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()))
                         } else {
                             return sim_err!(BadTable, id.clone());
@@ -298,9 +397,9 @@ impl<'a> Context<'a> {
                         return sim_err!(UnknownBuiltin, self.ident.to_string());
                     }
                 };
-                Expr::App(builtin)
+                Expr::App(builtin, *loc)
             }
-            ast::Expr::Subscript(id, args) => {
+            ast::Expr::Subscript(id, args, loc) => {
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
@@ -311,17 +410,17 @@ impl<'a> Context<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, arg)| {
-                        if let ast::Expr::Var(ident) = arg {
+                        if let ast::Expr::Var(ident, loc) = arg {
                             let dim = &dims[i];
                             // we need to check to make sure that any explicit subscript names are
                             // converted to offsets here and not passed to self.lower
                             if let Some(subscript_off) = dim.get_offset(ident) {
-                                Expr::Const((subscript_off + 1) as f64)
+                                Expr::Const((subscript_off + 1) as f64, *loc)
                             } else if let Some(subscript_off) =
                                 self.get_dimension_name_subscript(ident)
                             {
                                 // some modelers do `Variable[SubscriptName]` in their A2A equations
-                                Expr::Const((subscript_off + 1) as f64)
+                                Expr::Const((subscript_off + 1) as f64, *loc)
                             } else {
                                 self.lower(&args[0]).unwrap()
                             }
@@ -331,43 +430,47 @@ impl<'a> Context<'a> {
                     })
                     .collect();
                 let bounds = dims.iter().map(|dim| dim.elements.len()).collect();
-                Expr::Subscript(off, args, bounds)
+                Expr::Subscript(off, args, bounds, *loc)
             }
-            ast::Expr::Op1(op, l) => {
+            ast::Expr::Op1(op, l, loc) => {
                 let l = self.lower(l)?;
                 match op {
-                    ast::UnaryOp::Negative => {
-                        Expr::Op2(BinaryOp::Sub, Box::new(Expr::Const(0.0)), Box::new(l))
-                    }
+                    ast::UnaryOp::Negative => Expr::Op2(
+                        BinaryOp::Sub,
+                        Box::new(Expr::Const(0.0, *loc)),
+                        Box::new(l),
+                        *loc,
+                    ),
                     ast::UnaryOp::Positive => l,
-                    ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l)),
+                    ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
                 }
             }
-            ast::Expr::Op2(op, l, r) => {
+            ast::Expr::Op2(op, l, r, loc) => {
                 let l = self.lower(l)?;
                 let r = self.lower(r)?;
-                match op {
-                    ast::BinaryOp::Add => Expr::Op2(BinaryOp::Add, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Sub => Expr::Op2(BinaryOp::Sub, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Exp => Expr::Op2(BinaryOp::Exp, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Mul => Expr::Op2(BinaryOp::Mul, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Div => Expr::Op2(BinaryOp::Div, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Mod => Expr::Op2(BinaryOp::Mod, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Gt => Expr::Op2(BinaryOp::Gt, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Gte => Expr::Op2(BinaryOp::Gte, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Lt => Expr::Op2(BinaryOp::Lt, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Lte => Expr::Op2(BinaryOp::Lte, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Eq => Expr::Op2(BinaryOp::Eq, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Neq => Expr::Op2(BinaryOp::Neq, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::And => Expr::Op2(BinaryOp::And, Box::new(l), Box::new(r)),
-                    ast::BinaryOp::Or => Expr::Op2(BinaryOp::Or, Box::new(l), Box::new(r)),
-                }
+                let op = match op {
+                    ast::BinaryOp::Add => BinaryOp::Add,
+                    ast::BinaryOp::Sub => BinaryOp::Sub,
+                    ast::BinaryOp::Exp => BinaryOp::Exp,
+                    ast::BinaryOp::Mul => BinaryOp::Mul,
+                    ast::BinaryOp::Div => BinaryOp::Div,
+                    ast::BinaryOp::Mod => BinaryOp::Mod,
+                    ast::BinaryOp::Gt => BinaryOp::Gt,
+                    ast::BinaryOp::Gte => BinaryOp::Gte,
+                    ast::BinaryOp::Lt => BinaryOp::Lt,
+                    ast::BinaryOp::Lte => BinaryOp::Lte,
+                    ast::BinaryOp::Eq => BinaryOp::Eq,
+                    ast::BinaryOp::Neq => BinaryOp::Neq,
+                    ast::BinaryOp::And => BinaryOp::And,
+                    ast::BinaryOp::Or => BinaryOp::Or,
+                };
+                Expr::Op2(op, Box::new(l), Box::new(r), *loc)
             }
-            ast::Expr::If(cond, t, f) => {
+            ast::Expr::If(cond, t, f, loc) => {
                 let cond = self.lower(cond)?;
                 let t = self.lower(t)?;
                 let f = self.lower(f)?;
-                Expr::If(Box::new(cond), Box::new(t), Box::new(f))
+                Expr::If(Box::new(cond), Box::new(t), Box::new(f), *loc)
             }
         };
 
@@ -381,11 +484,11 @@ impl<'a> Context<'a> {
 
         let mut loads = flows
             .iter()
-            .map(|flow| Expr::Var(self.get_offset(flow).unwrap()));
+            .map(|flow| Expr::Var(self.get_offset(flow).unwrap(), Loc::default()));
 
         let first = loads.next().unwrap();
         Some(loads.fold(first, |acc, flow| {
-            Expr::Op2(BinaryOp::Add, Box::new(acc), Box::new(flow))
+            Expr::Op2(BinaryOp::Add, Box::new(acc), Box::new(flow), Loc::default())
         }))
     }
 
@@ -396,11 +499,11 @@ impl<'a> Context<'a> {
         {
             // TODO: simplify the expressions we generate
             let inflows = match self.fold_flows(inflows) {
-                None => Expr::Const(0.0),
+                None => Expr::Const(0.0, Loc::default()),
                 Some(flows) => flows,
             };
             let outflows = match self.fold_flows(outflows) {
-                None => Expr::Const(0.0),
+                None => Expr::Const(0.0, Loc::default()),
                 Some(flows) => flows,
             };
 
@@ -410,14 +513,17 @@ impl<'a> Context<'a> {
                     BinaryOp::Sub,
                     Box::new(inflows),
                     Box::new(outflows),
+                    Loc::default(),
                 )),
-                Box::new(Expr::Dt),
+                Box::new(Expr::Dt(Loc::default())),
+                Loc::default(),
             );
 
             Ok(Expr::Op2(
                 BinaryOp::Add,
-                Box::new(Expr::Var(stock_off)),
+                Box::new(Expr::Var(stock_off, Loc::default())),
                 Box::new(dt_update),
+                Loc::default(),
             ))
         } else {
             panic!(
@@ -436,11 +542,13 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 And,
-                Box::new(Var("true_input".to_string())),
-                Box::new(Var("false_input".to_string())),
+                Box::new(Var("true_input".to_string(), Loc::default())),
+                Box::new(Var("false_input".to_string(), Loc::default())),
+                Loc::default(),
             )),
-            Box::new(Const("1".to_string(), 1.0)),
-            Box::new(Const("0".to_string(), 0.0)),
+            Box::new(Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Const("0".to_string(), 0.0, Loc::default())),
+            Loc::default(),
         ))
     };
 
@@ -502,11 +610,13 @@ fn test_lower() {
     let expected = Expr::If(
         Box::new(Expr::Op2(
             BinaryOp::And,
-            Box::new(Expr::Var(7)),
-            Box::new(Expr::Var(8)),
+            Box::new(Expr::Var(7, Loc::default())),
+            Box::new(Expr::Var(8, Loc::default())),
+            Loc::default(),
         )),
-        Box::new(Expr::Const(1.0)),
-        Box::new(Expr::Const(0.0)),
+        Box::new(Expr::Const(1.0, Loc::default())),
+        Box::new(Expr::Const(0.0, Loc::default())),
+        Loc::default(),
     );
 
     let output = context.lower(&input);
@@ -519,11 +629,13 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 Or,
-                Box::new(Var("true_input".to_string())),
-                Box::new(Var("false_input".to_string())),
+                Box::new(Var("true_input".to_string(), Loc::default())),
+                Box::new(Var("false_input".to_string(), Loc::default())),
+                Loc::default(),
             )),
-            Box::new(Const("1".to_string(), 1.0)),
-            Box::new(Const("0".to_string(), 0.0)),
+            Box::new(Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Const("0".to_string(), 0.0, Loc::default())),
+            Loc::default(),
         ))
     };
 
@@ -584,11 +696,13 @@ fn test_lower() {
     let expected = Expr::If(
         Box::new(Expr::Op2(
             BinaryOp::Or,
-            Box::new(Expr::Var(7)),
-            Box::new(Expr::Var(8)),
+            Box::new(Expr::Var(7, Loc::default())),
+            Box::new(Expr::Var(8, Loc::default())),
+            Loc::default(),
         )),
-        Box::new(Expr::Const(1.0)),
-        Box::new(Expr::Const(0.0)),
+        Box::new(Expr::Const(1.0, Loc::default())),
+        Box::new(Expr::Const(0.0, Loc::default())),
+        Loc::default(),
     );
 
     let output = context.lower(&input);
@@ -698,12 +812,16 @@ fn test_fold_flows() {
     };
 
     assert_eq!(None, ctx.fold_flows(&[]));
-    assert_eq!(Some(Expr::Var(1)), ctx.fold_flows(&["a".to_string()]));
+    assert_eq!(
+        Some(Expr::Var(1, Loc::default())),
+        ctx.fold_flows(&["a".to_string()])
+    );
     assert_eq!(
         Some(Expr::Op2(
             BinaryOp::Add,
-            Box::new(Expr::Var(1)),
-            Box::new(Expr::Var(4))
+            Box::new(Expr::Var(1, Loc::default())),
+            Box::new(Expr::Var(4, Loc::default())),
+            Loc::default(),
         )),
         ctx.fold_flows(&["a".to_string(), "d".to_string()])
     );
@@ -720,7 +838,7 @@ impl Var {
         {
             vec![Expr::AssignCurr(
                 ctx.get_offset(ident)?,
-                Box::new(Expr::ModuleInput(off)),
+                Box::new(Expr::ModuleInput(off, Loc::default())),
             )]
         } else {
             match var {
@@ -734,7 +852,7 @@ impl Var {
                     inputs.sort_unstable_by(|a, b| a.dst.partial_cmp(&b.dst).unwrap());
                     let inputs: Vec<Expr> = inputs
                         .into_iter()
-                        .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap()))
+                        .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap(), Loc::default()))
                         .collect();
                     vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
                 }
@@ -816,7 +934,8 @@ impl Var {
                         AST::Scalar(ast) => {
                             let expr = ctx.lower(ast)?;
                             let expr = if table.is_some() {
-                                Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)))
+                                let loc = expr.get_loc();
+                                Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)), loc)
                             } else {
                                 expr
                             };
@@ -1311,13 +1430,13 @@ impl<'module> Compiler<'module> {
 
     fn walk_expr(&mut self, expr: &Expr) -> Result<Option<Register>> {
         let result = match expr {
-            Expr::Const(value) => {
+            Expr::Const(value, _) => {
                 let id = self.curr_code.intern_literal(*value);
                 let dest = self.alloc_register();
                 self.push(Opcode::LoadConstant { dest, id });
                 Some(dest)
             }
-            Expr::Var(off) => {
+            Expr::Var(off, _) => {
                 let dest = self.alloc_register();
                 self.push(Opcode::LoadVar {
                     dest,
@@ -1325,7 +1444,7 @@ impl<'module> Compiler<'module> {
                 });
                 Some(dest)
             }
-            Expr::Subscript(off, indices, bounds) => {
+            Expr::Subscript(off, indices, bounds, _) => {
                 let dest = self.alloc_register();
                 let indices: Vec<_> = indices
                     .iter()
@@ -1343,7 +1462,7 @@ impl<'module> Compiler<'module> {
                 });
                 Some(dest)
             }
-            Expr::Dt => {
+            Expr::Dt(_) => {
                 let dest = self.alloc_register();
                 self.push(Opcode::LoadGlobalVar {
                     dest,
@@ -1351,7 +1470,7 @@ impl<'module> Compiler<'module> {
                 });
                 Some(dest)
             }
-            Expr::App(builtin) => {
+            Expr::App(builtin, _) => {
                 let dest = self.alloc_register();
                 // lookups are special
                 if let BuiltinFn::Lookup(ident, index) = builtin {
@@ -1565,7 +1684,7 @@ impl<'module> Compiler<'module> {
                 self.push(Opcode::EvalModule { id });
                 None
             }
-            Expr::ModuleInput(off) => {
+            Expr::ModuleInput(off, _) => {
                 let dest = self.alloc_register();
                 self.push(Opcode::LoadModuleInput {
                     dest,
@@ -1573,7 +1692,7 @@ impl<'module> Compiler<'module> {
                 });
                 Some(dest)
             }
-            Expr::Op2(op, lhs, rhs) => {
+            Expr::Op2(op, lhs, rhs, _) => {
                 let dest = self.alloc_register();
                 let l = self.walk_expr(lhs)?.unwrap();
                 let r = self.walk_expr(rhs)?.unwrap();
@@ -1601,7 +1720,7 @@ impl<'module> Compiler<'module> {
                 self.free_register(r);
                 Some(dest)
             }
-            Expr::Op1(op, rhs) => {
+            Expr::Op1(op, rhs, _) => {
                 let dest = self.alloc_register();
                 let r = self.walk_expr(rhs)?.unwrap();
                 match op {
@@ -1610,7 +1729,7 @@ impl<'module> Compiler<'module> {
                 self.free_register(r);
                 Some(dest)
             }
-            Expr::If(cond, t, f) => {
+            Expr::If(cond, t, f, _) => {
                 let dest = self.alloc_register();
                 let t = self.walk_expr(t)?.unwrap();
                 let f = self.walk_expr(f)?.unwrap();
@@ -1688,9 +1807,9 @@ pub struct ModuleEvaluator<'a> {
 impl<'a> ModuleEvaluator<'a> {
     fn eval(&mut self, expr: &Expr) -> f64 {
         match expr {
-            Expr::Const(n) => *n,
-            Expr::Dt => self.curr[DT_OFF],
-            Expr::ModuleInput(off) => self.inputs[*off],
+            Expr::Const(n, _) => *n,
+            Expr::Dt(_) => self.curr[DT_OFF],
+            Expr::ModuleInput(off, _) => self.inputs[*off],
             Expr::EvalModule(ident, model_name, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
                 let module_offsets = &self.module.offsets[&self.module.ident];
@@ -1702,8 +1821,8 @@ impl<'a> ModuleEvaluator<'a> {
 
                 0.0
             }
-            Expr::Var(off) => self.curr[self.off + *off],
-            Expr::Subscript(off, r, bounds) => {
+            Expr::Var(off, _) => self.curr[self.off + *off],
+            Expr::Subscript(off, r, bounds, _) => {
                 let indices: Vec<_> = r.iter().map(|r| self.eval(r)).collect();
                 let mut index = 0;
                 let max_bounds = bounds.iter().product();
@@ -1742,7 +1861,7 @@ impl<'a> ModuleEvaluator<'a> {
                 self.next[self.off + *off] = rhs;
                 0.0
             }
-            Expr::If(cond, t, f) => {
+            Expr::If(cond, t, f, _) => {
                 let cond: f64 = self.eval(cond);
                 if is_truthy(cond) {
                     self.eval(t)
@@ -1750,13 +1869,13 @@ impl<'a> ModuleEvaluator<'a> {
                     self.eval(f)
                 }
             }
-            Expr::Op1(op, l) => {
+            Expr::Op1(op, l, _) => {
                 let l = self.eval(l);
                 match op {
                     UnaryOp::Not => (!is_truthy(l)) as i8 as f64,
                 }
             }
-            Expr::Op2(op, l, r) => {
+            Expr::Op2(op, l, r, _) => {
                 let l = self.eval(l);
                 let r = self.eval(r);
                 match op {
@@ -1776,7 +1895,7 @@ impl<'a> ModuleEvaluator<'a> {
                     BinaryOp::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
                 }
             }
-            Expr::App(builtin) => {
+            Expr::App(builtin, _) => {
                 match builtin {
                     BuiltinFn::Abs(a) => self.eval(a).abs(),
                     BuiltinFn::Cos(a) => self.eval(a).cos(),
@@ -1922,9 +2041,9 @@ impl<'a> ModuleEvaluator<'a> {
 #[allow(dead_code)]
 pub fn pretty(expr: &Expr) -> String {
     match expr {
-        Expr::Const(n) => format!("{}", n),
-        Expr::Var(off) => format!("curr[{}]", off),
-        Expr::Subscript(off, args, bounds) => {
+        Expr::Const(n, _) => format!("{}", n),
+        Expr::Var(off, _) => format!("curr[{}]", off),
+        Expr::Subscript(off, args, bounds, _) => {
             let args: Vec<_> = args.iter().map(|arg| pretty(arg)).collect();
             let string_args = args.join(", ");
             let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{}", bounds)).collect();
@@ -1934,8 +2053,8 @@ pub fn pretty(expr: &Expr) -> String {
                 off, string_args, string_bounds
             )
         }
-        Expr::Dt => "dt".to_string(),
-        Expr::App(builtin) => match builtin {
+        Expr::Dt(_) => "dt".to_string(),
+        Expr::App(builtin, _) => match builtin {
             BuiltinFn::Lookup(table, idx) => format!("lookup({}, {})", table, pretty(idx)),
             BuiltinFn::Abs(l) => format!("abs({})", pretty(l)),
             BuiltinFn::Arccos(l) => format!("arccos({})", pretty(l)),
@@ -1989,8 +2108,8 @@ pub fn pretty(expr: &Expr) -> String {
             let string_args = args.join(", ");
             format!("eval<{}::{}>({})", module, model_name, string_args)
         }
-        Expr::ModuleInput(a) => format!("mi<{}>", a),
-        Expr::Op2(op, l, r) => {
+        Expr::ModuleInput(a, _) => format!("mi<{}>", a),
+        Expr::Op2(op, l, r, _) => {
             let op: &str = match op {
                 BinaryOp::Add => "+",
                 BinaryOp::Sub => "-",
@@ -2010,13 +2129,13 @@ pub fn pretty(expr: &Expr) -> String {
 
             format!("({}{}{})", pretty(l), op, pretty(r))
         }
-        Expr::Op1(op, l) => {
+        Expr::Op1(op, l, _) => {
             let op: &str = match op {
                 UnaryOp::Not => "!",
             };
             format!("{}{}", op, pretty(l))
         }
-        Expr::If(cond, l, r) => {
+        Expr::If(cond, l, r, _) => {
             format!("if {} then {} else {}", pretty(cond), pretty(l), pretty(r))
         }
         Expr::AssignCurr(off, rhs) => format!("curr[{}] := {}", off, pretty(rhs)),
@@ -2387,12 +2506,16 @@ fn test_arrays() {
 
     let expected = Var {
         ast: vec![
-            Expr::AssignCurr(7, Box::new(Expr::Const(9.0))),
-            Expr::AssignCurr(8, Box::new(Expr::Const(7.0))),
-            Expr::AssignCurr(9, Box::new(Expr::Const(5.0))),
+            Expr::AssignCurr(7, Box::new(Expr::Const(9.0, Loc::default()))),
+            Expr::AssignCurr(8, Box::new(Expr::Const(7.0, Loc::default()))),
+            Expr::AssignCurr(9, Box::new(Expr::Const(5.0, Loc::default()))),
         ],
     };
-    assert_eq!(expected, parsed_var.unwrap());
+    let mut parsed_var = parsed_var.unwrap();
+    for expr in parsed_var.ast.iter_mut() {
+        *expr = expr.clone().strip_loc();
+    }
+    assert_eq!(expected, parsed_var);
 
     let arrayed_aux_var = &parsed_project.models["main"].variables["aux"];
     let parsed_var = Var::new(
@@ -2413,12 +2536,16 @@ fn test_arrays() {
     assert!(parsed_var.is_ok());
     let expected = Var {
         ast: vec![
-            Expr::AssignCurr(4, Box::new(Expr::Var(7))),
-            Expr::AssignCurr(5, Box::new(Expr::Var(8))),
-            Expr::AssignCurr(6, Box::new(Expr::Var(9))),
+            Expr::AssignCurr(4, Box::new(Expr::Var(7, Loc::default()))),
+            Expr::AssignCurr(5, Box::new(Expr::Var(8, Loc::default()))),
+            Expr::AssignCurr(6, Box::new(Expr::Var(9, Loc::default()))),
         ],
     };
-    assert_eq!(expected, parsed_var.unwrap());
+    let mut parsed_var = parsed_var.unwrap();
+    for expr in parsed_var.ast.iter_mut() {
+        *expr = expr.clone().strip_loc();
+    }
+    assert_eq!(expected, parsed_var);
 
     let var = &parsed_project.models["main"].variables["picked2"];
     let parsed_var = Var::new(
@@ -2440,10 +2567,20 @@ fn test_arrays() {
     let expected = Var {
         ast: vec![Expr::AssignCurr(
             11,
-            Box::new(Expr::Subscript(4, vec![Expr::Const(2.0)], vec![3])),
+            Box::new(Expr::Subscript(
+                4,
+                vec![Expr::Const(2.0, Loc::default())],
+                vec![3],
+                Loc::default(),
+            )),
         )],
     };
-    assert_eq!(expected, parsed_var.unwrap());
+
+    let mut parsed_var = parsed_var.unwrap();
+    for expr in parsed_var.ast.iter_mut() {
+        *expr = expr.clone().strip_loc();
+    }
+    assert_eq!(expected, parsed_var);
 
     let var = &parsed_project.models["main"].variables["picked"];
     let parsed_var = Var::new(
@@ -2469,18 +2606,29 @@ fn test_arrays() {
                 4,
                 vec![Expr::Op2(
                     BinaryOp::Add,
-                    Box::new(Expr::App(BuiltinFn::Int(Box::new(Expr::Op2(
-                        BinaryOp::Mod,
-                        Box::new(Expr::Var(0)), // TIME
-                        Box::new(Expr::Const(5.0)),
-                    ))))),
-                    Box::new(Expr::Const(1.0)),
+                    Box::new(Expr::App(
+                        BuiltinFn::Int(Box::new(Expr::Op2(
+                            BinaryOp::Mod,
+                            Box::new(Expr::Var(0, Loc::default())), // TIME
+                            Box::new(Expr::Const(5.0, Loc::default())),
+                            Loc::default(),
+                        ))),
+                        Loc::default(),
+                    )),
+                    Box::new(Expr::Const(1.0, Loc::default())),
+                    Loc::default(),
                 )],
                 vec![3],
+                Loc::default(),
             )),
         )],
     };
-    assert_eq!(expected, parsed_var.unwrap());
+
+    let mut parsed_var = parsed_var.unwrap();
+    for expr in parsed_var.ast.iter_mut() {
+        *expr = expr.clone().strip_loc();
+    }
+    assert_eq!(expected, parsed_var);
 
     let sim = Simulation::new(&parsed_project, "main");
     assert!(sim.is_ok());

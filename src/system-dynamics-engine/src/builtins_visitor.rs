@@ -40,14 +40,14 @@ impl<'a> BuiltinVisitor<'a> {
         use crate::ast::Expr::*;
         use std::mem;
         let result: Expr = match expr {
-            Const(_, _) => expr,
-            Var(_) => expr,
-            App(func, args) => {
+            Const(_, _, _) => expr,
+            Var(_, _) => expr,
+            App(func, args, loc) => {
                 let args: std::result::Result<Vec<Expr>, EquationError> =
                     args.into_iter().map(|e| self.walk(e)).collect();
                 let args = args?;
                 if is_builtin_fn(&func) {
-                    return Ok(App(func, args));
+                    return Ok(App(func, args, loc));
                 }
 
                 // TODO: make this a function call/hash lookup
@@ -61,7 +61,7 @@ impl<'a> BuiltinVisitor<'a> {
                     .into_iter()
                     .enumerate()
                     .map(|(i, arg)| {
-                        if let Expr::Var(id) = arg {
+                        if let Expr::Var(id, _loc) = arg {
                             id
                         } else {
                             let id = format!("$·{}·{}·arg{}", self.variable_name, self.n, i);
@@ -99,28 +99,28 @@ impl<'a> BuiltinVisitor<'a> {
                 self.vars.insert(module_name, x_module);
 
                 self.n += 1;
-                Var(module_output_name)
+                Var(module_output_name, loc)
             }
-            Subscript(id, args) => {
+            Subscript(id, args, loc) => {
                 let args: std::result::Result<Vec<Expr>, EquationError> =
                     args.into_iter().map(|e| self.walk(e)).collect();
                 let args = args?;
-                Subscript(id, args)
+                Subscript(id, args, loc)
             }
-            Op1(op, mut r) => {
+            Op1(op, mut r, loc) => {
                 *r = self.walk(mem::take(&mut *r))?;
-                Op1(op, r)
+                Op1(op, r, loc)
             }
-            Op2(op, mut l, mut r) => {
+            Op2(op, mut l, mut r, loc) => {
                 *l = self.walk(mem::take(&mut *l))?;
                 *r = self.walk(mem::take(&mut *r))?;
-                Op2(op, l, r)
+                Op2(op, l, r, loc)
             }
-            If(mut cond, mut t, mut f) => {
+            If(mut cond, mut t, mut f, loc) => {
                 *cond = self.walk(mem::take(&mut *cond))?;
                 *t = self.walk(mem::take(&mut *t))?;
                 *f = self.walk(mem::take(&mut *f))?;
-                If(cond, t, f)
+                If(cond, t, f, loc)
             }
         };
 

@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use lalrpop_util::ParseError;
 
+#[cfg(test)]
+use crate::ast::Loc;
 use crate::ast::{self, Expr, Visitor, AST};
 use crate::builtins::{is_builtin_fn, is_builtin_fn_or_time};
 use crate::builtins_visitor::instantiate_implicit_modules;
@@ -461,13 +463,13 @@ struct IdentifierSetVisitor<'a> {
 impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
     fn walk(&mut self, e: &Expr) {
         match e {
-            Expr::Const(_, _) => (),
-            Expr::Var(id) => {
+            Expr::Const(_, _, _) => (),
+            Expr::Var(id, _) => {
                 if !is_builtin_fn_or_time(id) {
                     self.identifiers.insert(id.clone());
                 }
             }
-            Expr::App(func, args) => {
+            Expr::App(func, args, _) => {
                 if !is_builtin_fn(func) {
                     self.identifiers.insert(func.clone());
                 }
@@ -475,12 +477,12 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     self.walk(arg);
                 }
             }
-            Expr::Subscript(id, args) => {
+            Expr::Subscript(id, args, _) => {
                 if !is_builtin_fn_or_time(id) {
                     self.identifiers.insert(id.clone());
                 }
                 for arg in args.iter() {
-                    if let Expr::Var(arg_ident) = arg {
+                    if let Expr::Var(arg_ident, _) = arg {
                         let mut is_subscript_or_dimension = false;
                         // TODO: this should be optimized
                         for dim in self.dimensions.iter() {
@@ -502,14 +504,14 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     }
                 }
             }
-            Expr::Op2(_, l, r) => {
+            Expr::Op2(_, l, r, _) => {
                 self.walk(l);
                 self.walk(r);
             }
-            Expr::Op1(_, l) => {
+            Expr::Op1(_, l, _) => {
                 self.walk(l);
             }
-            Expr::If(cond, t, f) => {
+            Expr::If(cond, t, f, _) => {
                 self.walk(cond);
                 self.walk(t);
                 self.walk(f);
@@ -568,54 +570,71 @@ fn test_parse() {
     use crate::ast::Expr::*;
 
     let if1 = Box::new(If(
-        Box::new(Const("1".to_string(), 1.0)),
-        Box::new(Const("2".to_string(), 2.0)),
-        Box::new(Const("3".to_string(), 3.0)),
+        Box::new(Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Const("2".to_string(), 2.0, Loc::default())),
+        Box::new(Const("3".to_string(), 3.0, Loc::default())),
+        Loc::default(),
     ));
 
     let if2 = Box::new(If(
         Box::new(Op2(
             Eq,
-            Box::new(Var("blerg".to_string())),
-            Box::new(Var("foo".to_string())),
+            Box::new(Var("blerg".to_string(), Loc::default())),
+            Box::new(Var("foo".to_string(), Loc::default())),
+            Loc::default(),
         )),
-        Box::new(Const("2".to_string(), 2.0)),
-        Box::new(Const("3".to_string(), 3.0)),
+        Box::new(Const("2".to_string(), 2.0, Loc::default())),
+        Box::new(Const("3".to_string(), 3.0, Loc::default())),
+        Loc::default(),
     ));
 
     let if3 = Box::new(If(
         Box::new(Op2(
             Eq,
-            Box::new(Var("quotient".to_string())),
-            Box::new(Var("quotient_target".to_string())),
+            Box::new(Var("quotient".to_string(), Loc::default())),
+            Box::new(Var("quotient_target".to_string(), Loc::default())),
+            Loc::default(),
         )),
-        Box::new(Const("1".to_string(), 1.0)),
-        Box::new(Const("0".to_string(), 0.0)),
+        Box::new(Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Const("0".to_string(), 0.0, Loc::default())),
+        Loc::default(),
     ));
 
     let if4 = Box::new(If(
         Box::new(Op2(
             And,
-            Box::new(Var("true_input".to_string())),
-            Box::new(Var("false_input".to_string())),
+            Box::new(Var("true_input".to_string(), Loc::default())),
+            Box::new(Var("false_input".to_string(), Loc::default())),
+            Loc::default(),
         )),
-        Box::new(Const("1".to_string(), 1.0)),
-        Box::new(Const("0".to_string(), 0.0)),
+        Box::new(Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Const("0".to_string(), 0.0, Loc::default())),
+        Loc::default(),
     ));
 
     let quoting_eq = Box::new(Op2(
         Eq,
-        Box::new(Var("oh_dear".to_string())),
-        Box::new(Var("oh_dear".to_string())),
+        Box::new(Var("oh_dear".to_string(), Loc::default())),
+        Box::new(Var("oh_dear".to_string(), Loc::default())),
+        Loc::default(),
     ));
 
-    let subscript1 = Box::new(Subscript("a".to_owned(), vec![Const("1".to_owned(), 1.0)]));
+    let subscript1 = Box::new(Subscript(
+        "a".to_owned(),
+        vec![Const("1".to_owned(), 1.0, Loc::default())],
+        Loc::default(),
+    ));
     let subscript2 = Box::new(Subscript(
         "a".to_owned(),
         vec![
-            Const("2".to_owned(), 2.0),
-            App("int".to_owned(), vec![Var("b".to_owned())]),
+            Const("2".to_owned(), 2.0, Loc::default()),
+            App(
+                "int".to_owned(),
+                vec![Var("b".to_owned(), Loc::default())],
+                Loc::default(),
+            ),
         ],
+        Loc::default(),
     ));
 
     use crate::ast::print_eqn;
@@ -661,7 +680,7 @@ fn test_parse() {
         let (ast, err) = parse_single_equation(eqn);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
-        let ast = ast.unwrap();
+        let ast = ast.unwrap().strip_loc();
         assert_eq!(&*case.1, &ast);
         let printed = print_eqn(&ast);
         assert_eq!(case.2, &printed);
@@ -671,8 +690,8 @@ fn test_parse() {
     assert_eq!(err.len(), 0);
     assert!(ast.is_some());
     let ast = ast.unwrap();
-    assert!(matches!(&ast, Expr::Const(_, _)));
-    if let Expr::Const(id, n) = &ast {
+    assert!(matches!(&ast, Expr::Const(_, _, _)));
+    if let Expr::Const(id, n, _) = &ast {
         assert_eq!("NaN", id);
         assert!(n.is_nan());
     }
@@ -728,7 +747,11 @@ fn test_tables() {
 
     let expected = Variable::Var {
         ident: "lookup_function_table".to_string(),
-        ast: Some(AST::Scalar(Expr::Const("0".to_string(), 0.0))),
+        ast: Some(AST::Scalar(Expr::Const(
+            "0".to_string(),
+            0.0,
+            Loc::new(0, 1),
+        ))),
         eqn: Some(datamodel::Equation::Scalar("0".to_string())),
         units: None,
         table: Some(Table {
