@@ -12,7 +12,7 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import type { Engine as IEngine } from '@system-dynamics/engine';
+import type { Engine as IEngine, EquationError as EngineEquationError } from '@system-dynamics/engine';
 import { open, errorCodeDescription } from '@system-dynamics/engine';
 
 import {
@@ -31,6 +31,7 @@ import {
   StockViewElement,
   CloudViewElement,
   viewElementType,
+  EquationError,
 } from '@system-dynamics/core/datamodel';
 
 import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
@@ -1334,17 +1335,31 @@ export const Editor = withStyles(styles)(
       }
 
       const modelName = this.state.modelName;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const varErrors = engine.getModelVariableErrors(modelName);
+      const varErrors = engine.getModelVariableErrors(modelName) as globalThis.Map<string, Array<EngineEquationError>>;
       if (varErrors.size > 0) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         for (const ident of varErrors.keys()) {
+          const errors = defined(varErrors.get(ident));
+
           project = project.updateIn(
             ['models', modelName, 'variables', ident],
             (v: Variable): Variable => {
-              return v.set('hasError', true);
+              return v.set(
+                'errors',
+                List(
+                  errors.map((err) => {
+                    return new EquationError({
+                      start: err.start,
+                      end: err.end,
+                      code: err.code,
+                    });
+                  }),
+                ),
+              );
             },
           );
+
+          // these things point back into the wasm heap, so ensure we call free on them
+          errors.forEach((err) => err.free());
         }
       }
 

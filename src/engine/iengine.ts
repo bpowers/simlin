@@ -147,7 +147,11 @@ export interface EquationError {
   /**
    * @returns {number}
    */
-  location: number;
+  start: number;
+  /**
+   * @returns {number}
+   */
+  end: number;
 }
 /**
  */

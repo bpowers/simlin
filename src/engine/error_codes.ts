@@ -21,7 +21,7 @@ export function errorCodeDescription(code: ErrorCode): string {
     case ErrorCode.InvalidToken:
       return 'Invalid input in equation';
     case ErrorCode.UnrecognizedEOF:
-      return 'Unexpectedly reached the end of the equation (mismatched parens?)';
+      return 'Unexpectedly reached the end of the equation';
     case ErrorCode.UnrecognizedToken:
       return 'Unrecognized input in equation';
     case ErrorCode.ExtraToken:

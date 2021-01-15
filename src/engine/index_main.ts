@@ -2,11 +2,11 @@
 // Use of this source code is governed by the MIT License
 // that can be found in the LICENSE file.
 
-import type { Engine, Error, ErrorKind } from './core/engine';
+import type { Engine, Error, ErrorKind, EquationError } from './core/engine';
 
 export { ErrorCode, errorCodeDescription } from './error_codes';
 
-export { Engine, Error, ErrorKind };
+export { Engine, Error, ErrorKind, EquationError };
 
 let cachedWasmModule: typeof import('./core/engine') | undefined;
 function getWasmModule(): Promise<typeof import('./core/engine')> {

@@ -7,11 +7,11 @@ import * as React from 'react';
 import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 
-import { createEditor, Node } from 'slate';
+import { createEditor, Node, Text } from 'slate';
 import { withHistory } from 'slate-history';
-import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
+import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 
-import { Button, Card, CardActions, CardContent, Tab, Tabs } from '@material-ui/core';
+import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { brewer } from 'chroma-js';
@@ -29,6 +29,7 @@ import {
 import { defined, Series } from '@system-dynamics/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
 import { LookupEditor } from './LookupEditor';
+import { errorCodeDescription } from '@system-dynamics/engine';
 
 const styles = createStyles({
   card: {
@@ -46,6 +47,9 @@ const styles = createStyles({
     height: 80,
     fontFamily: "'Roboto Mono', monospace",
   },
+  eqnError: {
+    textDecoration: 'underline wavy red',
+  },
   buttonLeft: {
     float: 'left',
     marginRight: 'auto',
@@ -57,6 +61,9 @@ const styles = createStyles({
     display: 'block',
     marginLeft: 'auto',
     marginRight: 'auto',
+  },
+  errorList: {
+    color: '#cc0000',
   },
 });
 
@@ -106,9 +113,27 @@ export const VariableDetails = withStyles(styles)(
       const { variable } = props;
       this.lookupRef = React.createRef();
 
+      const equation = valueFromEquation(scalarEquationFor(variable));
+      const errors = props.variable.errors;
+      if (errors) {
+        // TODO: multiple errors
+        const err = defined(errors.get(0));
+        // if the end is 0 it means this is a problem we don't have position information for
+        if (err.end > 0) {
+          const children = defined(equation[0]).children as Array<Text>;
+          const textChild: string = defined(children[0]).text;
+
+          const beforeText = textChild.substring(0, err.start);
+          const errText = textChild.substring(err.start, err.end);
+          const afterText = textChild.substring(err.end);
+
+          defined(equation[0]).children = [{ text: beforeText }, { text: errText, error: true }, { text: afterText }];
+        }
+      }
+
       this.state = {
         editor: withHistory(withReact(createEditor())),
-        equation: valueFromEquation(scalarEquationFor(variable)),
+        equation,
       };
     }
 
@@ -157,6 +182,17 @@ export const VariableDetails = withStyles(styles)(
         yPoints: List([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
       });
       this.props.onTableChange(ident, gf);
+    };
+
+    renderLeaf = (props: RenderLeafProps) => {
+      const style: React.CSSProperties | undefined = ((props.leaf as unknown) as any).error
+        ? (styles.eqnError as React.CSSProperties)
+        : undefined;
+      return (
+        <span {...props.attributes} style={style}>
+          {props.children}
+        </span>
+      );
     };
 
     renderEquation() {
@@ -217,6 +253,34 @@ export const VariableDetails = withStyles(styles)(
         right: 'dataMax',
       };
 
+      let chartOrErrors;
+      const errors = this.props.variable.errors;
+      if (errors) {
+        const error = defined(errors.get(0));
+        chartOrErrors = (
+          <Typography style={styles.errorList as React.CSSProperties}>
+            error: {errorCodeDescription(error.code)}
+          </Typography>
+        );
+      } else {
+        chartOrErrors = (
+          <LineChart width={327} height={300} data={series}>
+            <CartesianGrid horizontal={true} vertical={false} />
+            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+            <YAxis
+              width={yAxisWidth}
+              allowDataOverflow={true}
+              domain={[yMin, yMax]}
+              type="number"
+              dataKey="y"
+              yAxisId="1"
+            />
+            <Tooltip formatter={this.formatValue} />
+            {lines}
+          </LineChart>
+        );
+      }
+
       return (
         <CardContent>
           <Slate
@@ -225,7 +289,12 @@ export const VariableDetails = withStyles(styles)(
             onChange={this.handleEquationChange}
             onBlur={this.handleEquationSave}
           >
-            <Editable className={classes.eqnEditor} placeholder="Enter an equation..." />
+            <Editable
+              className={classes.eqnEditor}
+              renderLeaf={this.renderLeaf}
+              placeholder="Enter an equation..."
+              spellCheck={false}
+            />
           </Slate>
 
           <CardActions className={classes.editorActions}>
@@ -271,20 +340,7 @@ export const VariableDetails = withStyles(styles)(
           {/*<br />*/}
           <hr />
           <br />
-          <LineChart width={327} height={300} data={series}>
-            <CartesianGrid horizontal={true} vertical={false} />
-            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-            <YAxis
-              width={yAxisWidth}
-              allowDataOverflow={true}
-              domain={[yMin, yMax]}
-              type="number"
-              dataKey="y"
-              yAxisId="1"
-            />
-            <Tooltip formatter={this.formatValue} />
-            {lines}
-          </LineChart>
+          {chartOrErrors}
         </CardContent>
       );
     }

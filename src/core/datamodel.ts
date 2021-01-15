@@ -22,6 +22,54 @@ import { canonicalize } from './canonicalize';
 
 export type UID = number;
 
+export enum ErrorCode {
+  NoError,
+  DoesNotExist,
+  XmlDeserialization,
+  VensimConversion,
+  ProtobufDecode,
+  InvalidToken,
+  UnrecognizedEOF,
+  UnrecognizedToken,
+  ExtraToken,
+  UnclosedComment,
+  UnclosedQuotedIdent,
+  ExpectedNumber,
+  UnknownBuiltin,
+  BadBuiltinArgs,
+  EmptyEquation,
+  BadModuleInputDst,
+  BadModuleInputSrc,
+  NotSimulatable,
+  BadTable,
+  BadSimSpecs,
+  NoAbsoluteReferences,
+  CircularDependency,
+  ArraysNotImplemented,
+  MultiDimensionalArraysNotImplemented,
+  BadDimensionName,
+  BadModelName,
+  MismatchedDimensions,
+  ArrayReferenceNeedsExplicitSubscripts,
+  DuplicateVariable,
+  UnknownDependency,
+  VariablesHaveErrors,
+  Generic,
+}
+
+const equationErrorDefaults = {
+  code: ErrorCode.NoError,
+  start: 0.0,
+  end: 0.0,
+};
+export class EquationError extends Record(equationErrorDefaults) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof equationErrorDefaults) {
+    super(props);
+  }
+}
+
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
 
 function getGraphicalFunctionKind(
@@ -224,7 +272,8 @@ export interface Variable {
   readonly gf: GraphicalFunction | undefined;
   readonly isArrayed: boolean;
   readonly hasError: boolean;
-  set(prop: 'hasError', hasError: boolean): Variable;
+  readonly errors: List<EquationError> | undefined;
+  set(prop: 'errors', errors: List<EquationError> | undefined): Variable;
 }
 
 const stockDefaults = {
@@ -235,7 +284,7 @@ const stockDefaults = {
   inflows: List<string>(),
   outflows: List<string>(),
   nonNegative: false,
-  hasError: false,
+  errors: undefined as (List<EquationError> | undefined),
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -252,7 +301,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
       inflows: List(stock.getInflowsList()),
       outflows: List(stock.getOutflowsList()),
       nonNegative: stock.getNonNegative(),
-      hasError: false,
+      errors: undefined as (List<EquationError> | undefined),
     });
   }
   get gf(): undefined {
@@ -260,6 +309,9 @@ export class Stock extends Record(stockDefaults) implements Variable {
   }
   get isArrayed(): boolean {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
+  }
+  get hasError(): boolean {
+    return this.errors !== undefined;
   }
 }
 
@@ -270,7 +322,7 @@ const flowDefaults = {
   units: '',
   gf: undefined as GraphicalFunction | undefined,
   nonNegative: false,
-  hasError: false,
+  errors: undefined as (List<EquationError> | undefined),
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -287,11 +339,14 @@ export class Flow extends Record(flowDefaults) implements Variable {
       units: flow.getUnits(),
       gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
       nonNegative: flow.getNonNegative(),
-      hasError: false,
+      errors: undefined,
     });
   }
   get isArrayed(): boolean {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
+  }
+  get hasError(): boolean {
+    return this.errors !== undefined;
   }
 }
 
@@ -301,7 +356,7 @@ const auxDefaults = {
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
-  hasError: false,
+  errors: undefined as (List<EquationError> | undefined),
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -317,11 +372,14 @@ export class Aux extends Record(auxDefaults) implements Variable {
       documentation: aux.getDocumentation(),
       units: aux.getUnits(),
       gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
-      hasError: false,
+      errors: undefined,
     });
   }
   get isArrayed(): boolean {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
+  }
+  get hasError(): boolean {
+    return this.errors !== undefined;
   }
 }
 
@@ -344,7 +402,7 @@ const moduleDefaults = {
   documentation: '',
   units: '',
   references: List<ModuleReference>(),
-  hasError: false,
+  errors: undefined as (List<EquationError> | undefined),
 };
 export class Module extends Record(moduleDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -359,7 +417,7 @@ export class Module extends Record(moduleDefaults) implements Variable {
       documentation: module.getDocumentation(),
       units: module.getUnits(),
       references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
-      hasError: false,
+      errors: undefined,
     });
   }
   get equation(): undefined {
@@ -370,6 +428,9 @@ export class Module extends Record(moduleDefaults) implements Variable {
   }
   get isArrayed(): boolean {
     return false;
+  }
+  get hasError(): boolean {
+    return this.errors !== undefined;
   }
 }
 
