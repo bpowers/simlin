@@ -33,7 +33,7 @@ const styles = createStyles({
 interface EditingLabelPropsFull extends CommonLabelProps, WithStyles<typeof styles> {
   value: Node[];
   onChange: (value: Node[]) => void;
-  onDone: (isCancel: true) => void;
+  onDone: (isCancel: boolean) => void;
 }
 
 interface EditingLabelState {
@@ -58,6 +58,13 @@ export const EditableLabel = withStyles(styles)(
 
     handlePointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
       e.stopPropagation();
+    };
+
+    handleKeyPress = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+      if (e.code === 'Enter' && (e.ctrlKey || e.shiftKey || e.altKey)) {
+        e.stopPropagation();
+        this.props.onDone(false);
+      }
     };
 
     render() {
@@ -132,7 +139,7 @@ export const EditableLabel = withStyles(styles)(
       return (
         <div className={classes.editor} style={style} onPointerDown={this.handlePointerDown}>
           <Slate editor={this.state.editor} value={this.props.value} onChange={this.handleChange}>
-            <Editable autoFocus={true} />
+            <Editable autoFocus={true} onKeyPress={this.handleKeyPress} />
           </Slate>
         </div>
       );

@@ -993,7 +993,7 @@ export const Canvas = withStyles(styles)(
       }
 
       let isEditingName = !!isText;
-      let editingName: Node[] = [];
+      let editingName: Array<Node> = [];
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
@@ -1002,7 +1002,7 @@ export const Canvas = withStyles(styles)(
         y: e.clientY,
       };
 
-      if (!isText) {
+      if (!isEditingName) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         (e.target as any).setPointerCapture(e.pointerId);
       }
@@ -1046,7 +1046,7 @@ export const Canvas = withStyles(styles)(
         });
         element = inCreation;
       } else {
-        // not an action we recognize, deselect th tool and continue on
+        // not an action we recognize, deselect the tool and continue on
         this.props.onClearSelectedTool();
 
         // single-element selection only for now
