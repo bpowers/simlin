@@ -42,14 +42,14 @@ import { takeoffθ } from './drawing/Connector';
 import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 
 import IconButton from '@material-ui/core/IconButton';
-import Input from '@material-ui/core/Input';
+import TextField from '@material-ui/core/TextField';
+import Autocomplete from '@material-ui/core/Autocomplete';
 import Paper from '@material-ui/core/Paper';
 import Snackbar from '@material-ui/core/Snackbar';
 
 import ClearIcon from '@material-ui/icons/Clear';
 import EditIcon from '@material-ui/icons/Edit';
 import MenuIcon from '@material-ui/icons/Menu';
-import SearchIcon from '@material-ui/icons/Search';
 
 import SpeedDial, { CloseReason } from '@material-ui/core/SpeedDial';
 import SpeedDialAction from '@material-ui/core/SpeedDialAction';
@@ -111,13 +111,10 @@ const styles = ({ spacing, palette }: Theme) =>
     searchbox: {
       position: 'relative',
       top: 0,
-      left: 0,
-      paddingLeft: 64,
-      paddingTop: 12,
-      paddingBottom: 12,
-      paddingRight: 70,
-      height: '100%',
-      width: '100%',
+      left: 52,
+      width: 359 - 52 - 64,
+      paddingTop: 8,
+      border: 0,
     },
     menuButton: {
       marginLeft: 4,
@@ -142,6 +139,10 @@ const styles = ({ spacing, palette }: Theme) =>
     },
     searchButton: {
       color: '#aaa',
+    },
+    clearSearchButton: {
+      color: '#aaa',
+      cursor: 'pointer',
     },
     divider: {
       position: 'absolute',
@@ -1182,10 +1183,34 @@ export const Editor = withStyles(styles)(
       return;
     }
 
+    getNamedElement(ident: string): ViewElement | undefined {
+      const view = this.getView();
+      if (!view) {
+        return;
+      }
+
+      for (const e of view.elements) {
+        if (e.isNamed() && e.ident() === ident) {
+          return e;
+        }
+      }
+
+      return;
+    }
+
     handleShowDrawer = () => {
       this.setState({
         drawerOpen: true,
       });
+    };
+
+    handleSearchChange = (_event: any, newValue: string | null) => {
+      if (!newValue) {
+        this.handleSelection(Set());
+        return;
+      }
+      const element = this.getNamedElement(canonicalize(newValue));
+      this.handleSelection(element ? Set([element.uid]) : Set());
     };
 
     getSearchBar() {
@@ -1194,6 +1219,15 @@ export const Editor = withStyles(styles)(
 
       if (embedded) {
         return undefined;
+      }
+
+      let autocompleteOptions: Array<string> = [];
+      const elements = this.getView()?.elements;
+      if (elements) {
+        autocompleteOptions = elements
+          .filter((e) => e.isNamed())
+          .map((e) => (e as NamedViewElement).name.replace('\\n', ' '))
+          .toArray();
       }
 
       const namedElement = this.getNamedSelectedElement();
@@ -1212,22 +1246,31 @@ export const Editor = withStyles(styles)(
           <IconButton className={classes.menuButton} color="inherit" aria-label="Menu" onClick={this.handleShowDrawer}>
             <MenuIcon />
           </IconButton>
-          <Input
+          <Autocomplete
             key={name}
-            className={classes.searchbox}
-            disableUnderline={true}
-            placeholder={placeholder}
-            inputProps={{
-              'aria-label': 'Description',
-            }}
+            value={name}
+            onChange={this.handleSearchChange}
+            classes={{ inputRoot: classes.searchbox }}
+            clearOnEscape={true}
             defaultValue={name}
-            endAdornment={name ? undefined : <SearchIcon className={classes.searchButton} />}
+            options={autocompleteOptions}
+            renderInput={(params: any) => {
+              if (params.InputProps) {
+                params.InputProps.disableUnderline = true;
+              }
+              return <TextField {...params} variant="standard" placeholder={placeholder} />;
+            }}
           />
           <div className={classes.divider} />
           <Status status={status} />
         </Paper>
       );
     }
+
+    handleClearSelected = (e: React.MouseEvent<SVGSVGElement>) => {
+      e.preventDefault();
+      this.handleSelection(Set());
+    };
 
     handleEquationChange = (ident: string, newEquation: string) => {
       const engine = this.engine();
