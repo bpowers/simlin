@@ -229,7 +229,7 @@ pub fn canonicalize(name: &str) -> String {
 
     lazy_static! {
         // TODO: \x{C2AO} ?
-        static ref UNDERSCORE_RE: Regex = Regex::new(r"\\n|\\r|\n|\r| |\x{00A0}").unwrap();
+        static ref UNDERSCORE_RE: Regex = Regex::new(r"(\\n|\\r|\n|\r| |\x{00A0})+").unwrap();
     }
     let name = name.replace("\\\\", "\\");
     let name = UNDERSCORE_RE.replace_all(&name, "_");
@@ -239,7 +239,8 @@ pub fn canonicalize(name: &str) -> String {
 
 #[test]
 fn test_canonicalize() {
-    assert!(canonicalize("\"quoted\"") == "quoted");
-    assert!(canonicalize("   a b") == "a_b");
-    assert!(canonicalize("Å\nb") == "å_b");
+    assert_eq!("quoted", canonicalize("\"quoted\""));
+    assert_eq!("a_b", canonicalize("   a b"));
+    assert_eq!("å_b", canonicalize("Å\nb"));
+    assert_eq!("a_b", canonicalize("a \n b"));
 }
