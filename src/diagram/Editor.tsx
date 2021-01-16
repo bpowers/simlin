@@ -99,10 +99,10 @@ const styles = ({ spacing, palette }: Theme) =>
     snapshotCard: {
       position: 'absolute',
       top: 0,
-      right: 0,
+      left: 0,
       width: 240,
       marginTop: 12,
-      marginRight: 12,
+      marginLeft: 12,
     },
     snapshotImg: {
       width: '100%',
