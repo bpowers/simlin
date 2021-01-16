@@ -131,14 +131,14 @@ const styles = ({ spacing, palette }: Theme) =>
     paper: {
       position: 'absolute',
       top: 8,
-      left: 8,
+      right: 8,
       height: 48,
       width: 359, // 392
     },
     varDetails: {
       position: 'absolute',
       top: 8,
-      left: 8,
+      right: 8,
     },
     searchButton: {
       color: '#aaa',
@@ -1410,8 +1410,8 @@ export const Editor = withStyles(styles)(
 
       const [svg, viewbox] = renderSvgToString(project, modelName, data);
       const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
-      const ctx = osCanvas.getContext('2d');
-      const canvas = Canvg.fromString(exists(ctx), svg, {
+      const ctx = exists(osCanvas.getContext('2d'));
+      const canvas = Canvg.fromString(ctx, svg, {
         ignoreMouse: true,
         ignoreAnimation: true,
         // ignoreDimensions: false,
