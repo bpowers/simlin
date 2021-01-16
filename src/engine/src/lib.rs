@@ -202,11 +202,12 @@ impl Engine {
         let model = project.get_model_mut(model_name).unwrap();
 
         // this is O(n), but variables is usually pretty short
+        // if the UI borks up, it may try to remove a variable we don't know about.
+        // try not to die if that happens.
         let off = model
             .variables
             .iter()
-            .position(|v| v.get_ident() == ident)
-            .unwrap();
+            .position(|v| v.get_ident() == ident)?;
         let removed = model.variables.remove(off);
         if let Variable::Flow(flow) = removed {
             for var in model.variables.iter_mut() {
@@ -385,10 +386,31 @@ impl Engine {
             ));
         }
 
+        let is_flow;
         match model.get_variable_mut(&old_ident) {
-            Some(var) => var.set_ident(new_ident),
+            Some(var) => {
+                is_flow = matches!(var, Variable::Flow(_));
+                var.set_ident(new_ident);
+            }
             _ => {
                 return None;
+            }
+        }
+
+        if is_flow {
+            for var in model.variables.iter_mut() {
+                if let Variable::Stock(stock) = var {
+                    for inflow in stock.inflows.iter_mut() {
+                        if inflow == old_name {
+                            *inflow = new_name.to_owned();
+                        }
+                    }
+                    for outflow in stock.outflows.iter_mut() {
+                        if outflow == old_name {
+                            *outflow = new_name.to_owned();
+                        }
+                    }
+                }
             }
         }
 
