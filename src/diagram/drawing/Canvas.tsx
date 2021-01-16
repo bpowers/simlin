@@ -134,7 +134,8 @@ interface CanvasState {
   isMovingArrow: boolean;
   isMovingLabel: boolean;
   labelSide: 'right' | 'bottom' | 'left' | 'top' | undefined;
-  editingName: Node[];
+  editingName: Array<Node>;
+  editNameOnPointerUp: boolean;
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
   canvasOffset: Point;
@@ -214,6 +215,7 @@ export const Canvas = withStyles(styles)(
         isMovingLabel: false,
         labelSide: undefined,
         editingName: [],
+        editNameOnPointerUp: false,
         dragSelectionPoint: undefined,
         moveDelta: undefined,
         canvasOffset: { x: 0, y: 0 },
@@ -584,11 +586,17 @@ export const Canvas = withStyles(styles)(
       stockEl: StockViewElement,
       moveDelta: Point,
     ): [StockViewElement, List<FlowViewElement>] {
-      const stock = defined(this.props.model.variables.get(stockEl.ident())) as StockVar;
-      const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-      const flows: List<FlowViewElement> = flowNames.map(
-        (ident) => defined(this.getNamedElement(ident)) as FlowViewElement,
-      );
+      const stock = this.props.model.variables.get(stockEl.ident()) as StockVar | undefined;
+      let flows: List<FlowViewElement>;
+      if (stock) {
+        const flowNames: List<string> = stock.inflows.concat(stock.outflows);
+        flows = flowNames.map(
+          (ident) => defined(this.getNamedElement(ident)) as FlowViewElement,
+        );
+      } else {
+        // this will happen if we are moving an in-creation stock
+        flows = List<FlowViewElement>();
+      }
 
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
@@ -692,7 +700,29 @@ export const Canvas = withStyles(styles)(
           const arcPoint = this.getArcPoint();
           const delta = this.state.moveDelta;
 
-          if (!this.state.isMovingArrow) {
+          if (this.state.editNameOnPointerUp) {
+            let inCreation = this.state.inCreation;
+            if (inCreation instanceof StockViewElement || inCreation instanceof AuxViewElement) {
+              inCreation = inCreation.merge({
+                x: inCreation.x - delta.x,
+                y: inCreation.y - delta.y,
+              });
+            } else {
+              throw new Error('invariant broken');
+            }
+
+            const editingName = plainDeserialize(displayName(defined((inCreation as NamedViewElement).name)));
+            this.setState({
+              isEditingName: true,
+              editNameOnPointerUp: false,
+              editingName,
+              inCreation,
+              moveDelta: undefined,
+            });
+            this.selectionCenterOffset = undefined;
+            // we do weird one off things in this codepath, so exit early
+            return;
+          } else if (!this.state.isMovingArrow) {
             this.props.onMoveSelection(delta, arcPoint);
           } else {
             const element = this.getElementByUid(defined(this.props.selection.first()));
@@ -896,11 +926,24 @@ export const Canvas = withStyles(styles)(
             isZeroRadius: false,
           });
         }
-        const editingName = plainDeserialize(displayName(defined(inCreation.name)));
+
+        this.pointerId = e.pointerId;
+        this.selectionCenterOffset = {
+          x: e.clientX,
+          y: e.clientY,
+        };
+
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+        (e.target as any).setPointerCapture(e.pointerId);
+
         this.setState({
-          isEditingName: true,
-          editingName,
+          isEditingName: false,
+          editNameOnPointerUp: true,
           inCreation,
+          moveDelta: {
+            x: 0,
+            y: 0,
+          },
         });
         this.props.onSetSelection(Set([inCreation.uid]));
         return;
