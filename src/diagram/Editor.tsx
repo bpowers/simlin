@@ -169,6 +169,12 @@ const styles = ({ spacing, palette }: Theme) =>
     selectedTool: {
       backgroundColor: palette.secondary.main,
     },
+    // https://github.com/mui-org/material-ui/issues/19692
+    '@global': {
+      '.MuiAutocomplete-option[data-focus="true"]': {
+        background: '#ADD8E6',
+      },
+    },
   });
 
 class ModelError implements Error {
@@ -1264,7 +1270,9 @@ export const Editor = withStyles(styles)(
             key={name}
             value={name}
             onChange={this.handleSearchChange}
-            classes={{ inputRoot: classes.searchbox }}
+            classes={{
+              inputRoot: classes.searchbox,
+            }}
             clearOnEscape={true}
             defaultValue={name}
             options={autocompleteOptions}
