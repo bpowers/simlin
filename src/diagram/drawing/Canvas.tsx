@@ -168,6 +168,7 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   onCreateVariable: (element: ViewElement) => void;
   onClearSelectedTool: () => void;
   onDeleteSelection: () => void;
+  onShowVariableDetails: () => void;
 }
 
 export type CanvasProps = Pick<
@@ -691,6 +692,8 @@ export const Canvas = withStyles(styles)(
       }
       e.preventDefault();
       e.stopPropagation();
+
+      this.props.onShowVariableDetails();
 
       this.pointerId = undefined;
 

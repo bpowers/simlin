@@ -190,6 +190,7 @@ interface EditorState {
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   data: Map<string, Series>;
   selection: Set<UID>;
+  showVariableDetails: boolean;
   flowStillBeingCreated: boolean;
   drawerOpen: boolean;
   projectVersion: number;
@@ -222,6 +223,7 @@ export const Editor = withStyles(styles)(
         selectedTool: undefined,
         data: Map(),
         selection: Set<number>(),
+        showVariableDetails: false,
         flowStillBeingCreated: false,
         drawerOpen: false,
         projectVersion: -1,
@@ -460,6 +462,13 @@ export const Editor = withStyles(styles)(
         flowStillBeingCreated: false,
         variableDetailsActiveTab: 0,
       });
+      if (selection.isEmpty()) {
+        this.setState({ showVariableDetails: false });
+      }
+    };
+
+    handleShowVariableDetails = () => {
+      this.setState({ showVariableDetails: true });
     };
 
     handleSelectionDelete = () => {
@@ -1089,6 +1098,7 @@ export const Editor = withStyles(styles)(
       const onCreateVariable = !embedded ? this.handleCreateVariable : (_element: ViewElement): void => {};
       const onClearSelectedTool = !embedded ? this.handleClearSelectedTool : () => {};
       const onDeleteSelection = !embedded ? this.handleSelectionDelete : () => {};
+      const onShowVariableDetails = !embedded ? this.handleShowVariableDetails : () => {};
 
       return (
         <Canvas
@@ -1109,6 +1119,7 @@ export const Editor = withStyles(styles)(
           onCreateVariable={onCreateVariable}
           onClearSelectedTool={onClearSelectedTool}
           onDeleteSelection={onDeleteSelection}
+          onShowVariableDetails={onShowVariableDetails}
         />
       );
     }
@@ -1211,6 +1222,9 @@ export const Editor = withStyles(styles)(
       }
       const element = this.getNamedElement(canonicalize(newValue));
       this.handleSelection(element ? Set([element.uid]) : Set());
+      this.setState({
+        showVariableDetails: true,
+      });
     };
 
     getSearchBar() {
@@ -1307,7 +1321,7 @@ export const Editor = withStyles(styles)(
       }
 
       const namedElement = this.getNamedSelectedElement();
-      if (!namedElement) {
+      if (!namedElement || !this.state.showVariableDetails) {
         return;
       }
 
