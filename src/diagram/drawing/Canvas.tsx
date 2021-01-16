@@ -338,7 +338,7 @@ export const Canvas = withStyles(styles)(
       // dont allow duplicate links between the same two elements
       if (arrow instanceof LinkViewElement) {
         const { view } = this.props;
-        for (const e of view) {
+        for (const e of view.elements) {
           // skip if its not a connector, or if it is the currently selected connector
           if (!(e instanceof LinkViewElement) || e.uid === arrow.uid) {
             continue;
