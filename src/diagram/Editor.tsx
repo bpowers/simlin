@@ -189,6 +189,7 @@ interface EditorState {
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   data: Map<string, Series>;
   selection: Set<UID>;
+  flowStillBeingCreated: boolean;
   drawerOpen: boolean;
   projectVersion: number;
   snapshotBlob: Blob | undefined;
@@ -220,6 +221,7 @@ export const Editor = withStyles(styles)(
         selectedTool: undefined,
         data: Map(),
         selection: Set<number>(),
+        flowStillBeingCreated: false,
         drawerOpen: false,
         projectVersion: -1,
         snapshotBlob: undefined,
@@ -444,6 +446,9 @@ export const Editor = withStyles(styles)(
         return;
       }
 
+      this.setState({
+        flowStillBeingCreated: false,
+      });
       this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };
@@ -451,6 +456,7 @@ export const Editor = withStyles(styles)(
     handleSelection = (selection: Set<UID>) => {
       this.setState({
         selection,
+        flowStillBeingCreated: false,
         variableDetailsActiveTab: 0,
       });
     };
@@ -524,7 +530,13 @@ export const Editor = withStyles(styles)(
       this.updateView(view.set('elements', elements));
     };
 
-    handleFlowAttach = (flow: FlowViewElement, targetUid: number, cursorMoveDelta: Point) => {
+    handleFlowAttach = (
+      flow: FlowViewElement,
+      targetUid: number,
+      cursorMoveDelta: Point,
+      fauxTargetCenter: Point | undefined,
+      inCreation: boolean,
+    ) => {
       let { selection } = this.state;
       const view = defined(this.getView());
 
@@ -669,8 +681,8 @@ export const Editor = withStyles(styles)(
           } else {
             to = new CloudViewElement({
               uid: nextUid++,
-              x: lastPt.x,
-              y: lastPt.y,
+              x: defined(fauxTargetCenter).x,
+              y: defined(fauxTargetCenter).y,
               flowUid: flow.uid,
               isZeroRadius: false,
             });
@@ -710,7 +722,10 @@ export const Editor = withStyles(styles)(
         engine.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident(), 'in');
       }
       this.updateView(view.merge({ nextUid, elements }));
-      this.setState({ selection });
+      this.setState({
+        selection,
+        flowStillBeingCreated: inCreation,
+      });
       this.scheduleSimRun();
     };
 
@@ -1241,6 +1256,10 @@ export const Editor = withStyles(styles)(
       const classes = this.props.classes;
 
       if (embedded) {
+        return;
+      }
+
+      if (this.state.flowStillBeingCreated) {
         return;
       }
 

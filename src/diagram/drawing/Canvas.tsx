@@ -136,6 +136,7 @@ interface CanvasState {
   labelSide: 'right' | 'bottom' | 'left' | 'top' | undefined;
   editingName: Array<Node>;
   editNameOnPointerUp: boolean;
+  flowStillBeingCreated: boolean;
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
   canvasOffset: Point;
@@ -155,7 +156,13 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   onRenameVariable: (oldName: string, newName: string) => void;
   onSetSelection: (selected: Set<UID>) => void;
   onMoveSelection: (position: Point, arcPoint?: Point) => void;
-  onMoveFlow: (flow: FlowViewElement, targetUid: number, moveDelta: Point) => void;
+  onMoveFlow: (
+    flow: FlowViewElement,
+    targetUid: number,
+    moveDelta: Point,
+    fauxTargetCenter: Point | undefined,
+    inCreation: boolean,
+  ) => void;
   onMoveLabel: (uid: UID, side: 'top' | 'left' | 'bottom' | 'right') => void;
   onAttachLink: (link: LinkViewElement, newTarget: string) => void;
   onCreateVariable: (element: ViewElement) => void;
@@ -216,6 +223,7 @@ export const Canvas = withStyles(styles)(
         labelSide: undefined,
         editingName: [],
         editNameOnPointerUp: false,
+        flowStillBeingCreated: false,
         dragSelectionPoint: undefined,
         moveDelta: undefined,
         canvasOffset: { x: 0, y: 0 },
@@ -590,9 +598,7 @@ export const Canvas = withStyles(styles)(
       let flows: List<FlowViewElement>;
       if (stock) {
         const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-        flows = flowNames.map(
-          (ident) => defined(this.getNamedElement(ident)) as FlowViewElement,
-        );
+        flows = flowNames.map((ident) => defined(this.getNamedElement(ident)) as FlowViewElement);
       } else {
         // this will happen if we are moving an in-creation stock
         flows = List<FlowViewElement>();
@@ -740,11 +746,20 @@ export const Canvas = withStyles(styles)(
                 this.clearPointerState();
                 return;
               }
-              this.props.onMoveFlow(element, validTarget ? validTarget.uid : 0, delta);
-              if (this.state.inCreation) {
+              const inCreation = !!this.state.inCreation;
+              let fauxTargetCenter: Point | undefined;
+              if (element.points.get(1)?.attachedToUid === fauxCloudTargetUid) {
+                fauxTargetCenter = {
+                  x: this.selectionCenterOffset.x - this.state.canvasOffset.x,
+                  y: this.selectionCenterOffset.y - this.state.canvasOffset.y,
+                };
+              }
+              this.props.onMoveFlow(element, validTarget ? validTarget.uid : 0, delta, fauxTargetCenter, inCreation);
+              if (inCreation) {
                 this.setState({
                   isEditingName: true,
                   editingName: plainDeserialize(displayName(defined(element.name))),
+                  flowStillBeingCreated: true,
                 });
               }
             } else if (!foundInvalidTarget || this.state.inCreation) {
@@ -1138,6 +1153,12 @@ export const Canvas = withStyles(styles)(
       }
 
       if (isCancel) {
+        if (this.state.flowStillBeingCreated) {
+          this.setState({
+            flowStillBeingCreated: true,
+          });
+          this.props.onDeleteSelection();
+        }
         this.clearPointerState();
         return;
       }
