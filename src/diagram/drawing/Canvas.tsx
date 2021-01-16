@@ -40,6 +40,7 @@ import { EditableLabel } from './EditableLabel';
 import { Flow, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
+import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;
@@ -845,6 +846,21 @@ export const Canvas = withStyles(styles)(
       }
     };
 
+    getNewVariableName(base: string): string {
+      const variables = this.props.model.variables;
+      if (!variables.has(canonicalize(base))) {
+        return base;
+      }
+      for (let i = 1; i < 1024; i++) {
+        const newName = `${base} ${i}`;
+        if (!variables.has(canonicalize(newName))) {
+          return newName;
+        }
+      }
+      // give up
+      return base;
+    }
+
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       if (this.props.embedded) {
         return;
@@ -865,7 +881,7 @@ export const Canvas = withStyles(styles)(
             var: undefined,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
-            name: 'New Variable',
+            name: this.getNewVariableName('New Variable'),
             labelSide: 'right',
             isZeroRadius: false,
           });
@@ -875,7 +891,7 @@ export const Canvas = withStyles(styles)(
             var: undefined,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
-            name: 'New Stock',
+            name: this.getNewVariableName('New Stock'),
             labelSide: 'bottom',
             isZeroRadius: false,
           });
@@ -907,7 +923,7 @@ export const Canvas = withStyles(styles)(
         const inCreation = new FlowViewElement({
           uid: inCreationUid,
           var: undefined,
-          name: 'New Flow',
+          name: this.getNewVariableName('New Flow'),
           x,
           y,
           labelSide: 'bottom',
