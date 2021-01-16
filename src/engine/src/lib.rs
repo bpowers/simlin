@@ -390,7 +390,7 @@ impl Engine {
         match model.get_variable_mut(&old_ident) {
             Some(var) => {
                 is_flow = matches!(var, Variable::Flow(_));
-                var.set_ident(new_ident);
+                var.set_ident(new_ident.clone());
             }
             _ => {
                 return None;
@@ -401,13 +401,13 @@ impl Engine {
             for var in model.variables.iter_mut() {
                 if let Variable::Stock(stock) = var {
                     for inflow in stock.inflows.iter_mut() {
-                        if inflow == old_name {
-                            *inflow = new_name.to_owned();
+                        if inflow == &old_ident {
+                            *inflow = new_ident.clone();
                         }
                     }
                     for outflow in stock.outflows.iter_mut() {
-                        if outflow == old_name {
-                            *outflow = new_name.to_owned();
+                        if outflow == &old_ident {
+                            *outflow = new_ident.clone();
                         }
                     }
                 }
