@@ -56,7 +56,7 @@ export const EditableLabel = withStyles(styles)(
       this.props.onChange(value);
     };
 
-    handlePointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+    handlePointerUpDown = (e: React.PointerEvent<HTMLDivElement>): void => {
       e.stopPropagation();
     };
 
@@ -64,6 +64,9 @@ export const EditableLabel = withStyles(styles)(
       if (e.code === 'Enter' && (e.ctrlKey || e.shiftKey || e.altKey)) {
         e.stopPropagation();
         this.props.onDone(false);
+      } else if (e.code === 'Escape') {
+        e.stopPropagation();
+        this.props.onDone(true);
       }
     };
 
@@ -137,9 +140,14 @@ export const EditableLabel = withStyles(styles)(
       const { classes } = this.props;
 
       return (
-        <div className={classes.editor} style={style} onPointerDown={this.handlePointerDown}>
+        <div
+          className={classes.editor}
+          style={style}
+          onPointerDown={this.handlePointerUpDown}
+          onPointerUp={this.handlePointerUpDown}
+        >
           <Slate editor={this.state.editor} value={this.props.value} onChange={this.handleChange}>
-            <Editable autoFocus={true} onKeyPress={this.handleKeyPress} />
+            <Editable autoFocus={true} onKeyUp={this.handleKeyPress} />
           </Slate>
         </div>
       );

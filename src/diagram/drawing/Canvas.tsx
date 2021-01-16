@@ -375,10 +375,6 @@ export const Canvas = withStyles(styles)(
     };
 
     private stock = (element: StockViewElement): React.ReactElement => {
-      const modelVar = this.props.model.variables.get(element.ident());
-      if (!(modelVar instanceof StockVar)) {
-        throw new Error(`invariant broken: expected Stock for ${element.ident()}`);
-      }
       const hasWarning = this.props.model.variables.get(element.ident())?.hasError || false;
       const isSelected = this.isSelected(element);
       const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
