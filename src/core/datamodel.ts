@@ -473,8 +473,8 @@ export interface ViewElement {
   readonly uid: number;
   readonly cx: number;
   readonly cy: number;
+  readonly ident: string | undefined;
   isNamed(): boolean;
-  ident(): string | undefined;
   set(prop: 'uid', uid: number): ViewElement;
   set(prop: 'x', x: number): ViewElement;
   set(prop: 'y', x: number): ViewElement;
@@ -483,7 +483,7 @@ export interface ViewElement {
 const auxViewElementDefaults = {
   uid: -1,
   name: '',
-  identy: '',
+  ident: '',
   var: undefined as Aux | undefined,
   x: -1,
   y: -1,
@@ -496,11 +496,11 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
   constructor(props: typeof auxViewElementDefaults) {
     super(props);
   }
-  static fromPb(aux: PbViewElement.Aux, identy: string, auxVar?: Variable | undefined): AuxViewElement {
+  static fromPb(aux: PbViewElement.Aux, ident: string, auxVar?: Variable | undefined): AuxViewElement {
     return new AuxViewElement({
       uid: aux.getUid(),
       name: aux.getName(),
-      identy,
+      ident,
       var: auxVar instanceof Aux ? auxVar : undefined,
       x: aux.getX(),
       y: aux.getY(),
@@ -526,15 +526,12 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
   isNamed(): boolean {
     return true;
   }
-  ident(): string {
-    return this.identy;
-  }
 }
 
 const stockViewElementDefaults = {
   uid: -1,
   name: '',
-  identy: '',
+  ident: '',
   var: undefined as Stock | undefined,
   x: -1,
   y: -1,
@@ -549,11 +546,11 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
   constructor(props: typeof stockViewElementDefaults) {
     super(props);
   }
-  static fromPb(stock: PbViewElement.Stock, identy: string, stockVar: Variable | undefined): StockViewElement {
+  static fromPb(stock: PbViewElement.Stock, ident: string, stockVar: Variable | undefined): StockViewElement {
     return new StockViewElement({
       uid: stock.getUid(),
       name: stock.getName(),
-      identy,
+      ident,
       var: stockVar instanceof Stock ? stockVar : undefined,
       x: stock.getX(),
       y: stock.getY(),
@@ -580,9 +577,6 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
   }
   isNamed(): boolean {
     return true;
-  }
-  ident(): string {
-    return this.identy;
   }
 }
 
@@ -619,7 +613,7 @@ export class Point extends Record(pointDefaults) {
 const flowViewElementDefaults = {
   uid: -1,
   name: '',
-  identy: '',
+  ident: '',
   var: undefined as Flow | undefined,
   x: -1,
   y: -1,
@@ -632,11 +626,11 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   constructor(props: typeof flowViewElementDefaults) {
     super(props);
   }
-  static fromPb(flow: PbViewElement.Flow, identy: string, flowVar?: Variable): FlowViewElement {
+  static fromPb(flow: PbViewElement.Flow, ident: string, flowVar?: Variable): FlowViewElement {
     return new FlowViewElement({
       uid: flow.getUid(),
       name: flow.getName(),
-      identy,
+      ident,
       var: flowVar instanceof Flow ? flowVar : undefined,
       x: flow.getX(),
       y: flow.getY(),
@@ -662,9 +656,6 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   }
   isNamed(): boolean {
     return true;
-  }
-  ident(): string {
-    return this.identy;
   }
   get isZeroRadius(): boolean {
     return false;
@@ -744,7 +735,7 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
   isNamed(): boolean {
     return false;
   }
-  ident(): undefined {
+  get ident(): undefined {
     return undefined;
   }
   get isZeroRadius(): boolean {
@@ -755,7 +746,7 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
 const moduleViewElementDefaults = {
   uid: -1,
   name: '',
-  identy: '',
+  ident: '',
   var: undefined as Module | undefined,
   x: -1,
   y: -1,
@@ -768,11 +759,11 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
   constructor(props: typeof moduleViewElementDefaults) {
     super(props);
   }
-  static fromPb(module: PbViewElement.Module, identy: string, moduleVar?: Variable): ModuleViewElement {
+  static fromPb(module: PbViewElement.Module, ident: string, moduleVar?: Variable): ModuleViewElement {
     return new ModuleViewElement({
       uid: module.getUid(),
       name: module.getName(),
-      identy,
+      ident,
       var: moduleVar instanceof Module ? moduleVar : undefined,
       x: module.getX(),
       y: module.getY(),
@@ -797,9 +788,6 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
   }
   isNamed(): boolean {
     return true;
-  }
-  ident(): string {
-    return this.identy;
   }
 }
 
@@ -845,7 +833,7 @@ export class AliasViewElement extends Record(aliasViewElementDefaults) implement
   isNamed(): boolean {
     return false;
   }
-  ident(): undefined {
+  get ident(): undefined {
     return undefined;
   }
 }
@@ -889,8 +877,7 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
   isNamed(): boolean {
     return false;
   }
-
-  ident(): undefined {
+  get ident(): undefined {
     return undefined;
   }
 }

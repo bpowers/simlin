@@ -113,7 +113,7 @@ function isAdjacent(
 
 function getComparePoint(flow: FlowViewElement, _stock: ViewElement): IPoint {
   if (flow.points.size !== 2) {
-    console.log(`TODO: multipoint flows for ${flow.ident()}`);
+    console.log(`TODO: multipoint flows for ${flow.ident}`);
   }
   return {
     x: flow.cx,

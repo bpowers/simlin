@@ -155,7 +155,7 @@ export const VariableDetails = withStyles(styles)(
     };
 
     handleVariableDelete = (): void => {
-      this.props.onDelete(defined(this.props.viewElement.ident()));
+      this.props.onDelete(defined(this.props.viewElement.ident));
     };
 
     handleNotesChange = (_event: React.ChangeEvent<HTMLInputElement>): void => {};
@@ -172,7 +172,7 @@ export const VariableDetails = withStyles(styles)(
 
       const newEquation = equationFromValue(equation);
       if (initialEquation !== newEquation) {
-        this.props.onEquationChange(defined(this.props.viewElement.ident()), newEquation);
+        this.props.onEquationChange(defined(this.props.viewElement.ident), newEquation);
       }
     };
 
@@ -186,7 +186,7 @@ export const VariableDetails = withStyles(styles)(
     };
 
     handleAddLookupTable = (): void => {
-      const ident = defined(this.props.viewElement.ident());
+      const ident = defined(this.props.viewElement.ident);
       const gf = new GraphicalFunction({
         kind: 'continuous',
         xScale: new GraphicalFunctionScale({ min: 0, max: 1 }),

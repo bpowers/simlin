@@ -49,6 +49,7 @@ export const fauxCloudTargetUid = -5;
 
 const fauxTarget = new AuxViewElement({
   name: '$·model-internal-faux-target',
+  ident: '$·model-internal-faux-target',
   uid: fauxTargetUid,
   var: undefined,
   x: 0,
@@ -367,9 +368,9 @@ export const Canvas = withStyles(styles)(
     }
 
     private aux = (element: AuxViewElement, _isGhost = false): React.ReactElement => {
-      const hasWarning = this.props.model.variables.get(element.ident())?.hasError || false;
+      const hasWarning = this.props.model.variables.get(element.ident)?.hasError || false;
       const isSelected = this.isSelected(element);
-      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
+      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident);
       const props: AuxProps = {
         element,
         series,
@@ -383,13 +384,13 @@ export const Canvas = withStyles(styles)(
 
       this.elementBounds = this.elementBounds.push(auxBounds(element));
 
-      return <Aux key={element.ident()} {...props} />;
+      return <Aux key={element.ident} {...props} />;
     };
 
     private stock = (element: StockViewElement): React.ReactElement => {
-      const hasWarning = this.props.model.variables.get(element.ident())?.hasError || false;
+      const hasWarning = this.props.model.variables.get(element.ident)?.hasError || false;
       const isSelected = this.isSelected(element);
-      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
+      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident);
       const props: StockProps = {
         element,
         series,
@@ -401,7 +402,7 @@ export const Canvas = withStyles(styles)(
         hasWarning,
       };
       this.elementBounds = this.elementBounds.push(stockBounds(element));
-      return <Stock key={element.ident()} {...props} />;
+      return <Stock key={element.ident} {...props} />;
     };
 
     private module = (element: ModuleViewElement) => {
@@ -411,7 +412,7 @@ export const Canvas = withStyles(styles)(
         isSelected,
       };
       this.elementBounds = this.elementBounds.push(moduleBounds(props));
-      return <Module key={element.ident()} {...props} />;
+      return <Module key={element.ident} {...props} />;
     };
 
     private connector = (element: LinkViewElement) => {
@@ -480,10 +481,10 @@ export const Canvas = withStyles(styles)(
     }
 
     private flow = (element: FlowViewElement) => {
-      const hasWarning = this.props.model.variables.get(element.ident())?.hasError || false;
+      const hasWarning = this.props.model.variables.get(element.ident)?.hasError || false;
       const { isMovingArrow } = this.state;
       const isSelected = this.isSelected(element);
-      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident());
+      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident);
 
       if (element.points.size < 2) {
         return;
@@ -595,7 +596,7 @@ export const Canvas = withStyles(styles)(
       stockEl: StockViewElement,
       moveDelta: Point,
     ): [StockViewElement, List<FlowViewElement>] {
-      const stock = this.props.model.variables.get(stockEl.ident()) as StockVar | undefined;
+      const stock = this.props.model.variables.get(stockEl.ident) as StockVar | undefined;
       let flows: List<FlowViewElement>;
       if (stock) {
         const flowNames: List<string> = stock.inflows.concat(stock.outflows);
@@ -610,7 +611,7 @@ export const Canvas = withStyles(styles)(
 
     private populateNamedElements(displayElements: List<ViewElement>): void {
       if (this.props.version !== this.cachedVersion) {
-        this.nameMap = Map(displayElements.filter((el) => el.isNamed()).map((el) => [defined(el.ident()), el.uid]));
+        this.nameMap = Map(displayElements.filter((el) => el.isNamed()).map((el) => [defined(el.ident), el.uid]));
         this.elements = Map(displayElements.map((el) => [el.uid, el]))
           .set(fauxTarget.uid, fauxTarget)
           .set(fauxCloudTarget.uid, fauxCloudTarget);
@@ -742,7 +743,7 @@ export const Canvas = withStyles(styles)(
               return isValid || false;
             });
             if (element instanceof LinkViewElement && validTarget) {
-              this.props.onAttachLink(element, defined(validTarget.ident()));
+              this.props.onAttachLink(element, defined(validTarget.ident));
             } else if (element instanceof FlowViewElement) {
               // don't create a flow stacked on top of 2 clouds due to a misclick
               if (this.state.moveDelta.x === 0 && this.state.moveDelta.y === 0 && this.state.inCreation) {
@@ -924,24 +925,30 @@ export const Canvas = withStyles(styles)(
       if (selectedTool === 'aux' || selectedTool === 'stock') {
         let inCreation: AuxViewElement | StockViewElement;
         if (selectedTool === 'aux') {
+          const name = this.getNewVariableName('New Variable');
           inCreation = new AuxViewElement({
             uid: inCreationUid,
             var: undefined,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
-            name: this.getNewVariableName('New Variable'),
+            name,
+            ident: canonicalize(name),
             labelSide: 'right',
             isZeroRadius: false,
           });
         } else {
+          const name = this.getNewVariableName('New Stock');
           inCreation = new StockViewElement({
             uid: inCreationUid,
             var: undefined,
             x: e.clientX - this.state.canvasOffset.x,
             y: e.clientY - this.state.canvasOffset.y,
-            name: this.getNewVariableName('New Stock'),
+            name,
+            ident: canonicalize(name),
             labelSide: 'bottom',
             isZeroRadius: false,
+            inflows: List<UID>(),
+            outflows: List<UID>(),
           });
         }
 
@@ -981,10 +988,12 @@ export const Canvas = withStyles(styles)(
           isZeroRadius: false,
         });
 
+        const name = this.getNewVariableName('New Flow');
         const inCreation = new FlowViewElement({
           uid: inCreationUid,
           var: undefined,
-          name: this.getNewVariableName('New Flow'),
+          name,
+          ident: canonicalize(name),
           x,
           y,
           labelSide: 'bottom',
@@ -1108,10 +1117,12 @@ export const Canvas = withStyles(styles)(
           y: element.cy,
           attachedToUid: fauxCloudTarget.uid,
         });
+        const name = this.getNewVariableName('New Flow');
         inCreation = new FlowViewElement({
           uid: inCreationUid,
           var: undefined,
-          name: 'New Flow',
+          name: name,
+          ident: canonicalize(name),
           x: element.cx,
           y: element.cy,
           labelSide: 'bottom',

@@ -457,7 +457,7 @@ export const Editor = withStyles(styles)(
           return element;
         }
         const namedElement = element as AuxViewElement;
-        if (namedElement.ident() !== oldIdent) {
+        if (namedElement.ident !== oldIdent) {
           return element;
         }
 
@@ -633,10 +633,10 @@ export const Editor = withStyles(styles)(
 
         if (oldTo.uid !== to.uid) {
           if (oldTo instanceof StockViewElement) {
-            stockDetachingIdent = oldTo.ident();
+            stockDetachingIdent = oldTo.ident;
           }
           if (to instanceof StockViewElement) {
-            stockAttachingIdent = to.ident();
+            stockAttachingIdent = to.ident;
           }
         }
 
@@ -700,7 +700,7 @@ export const Editor = withStyles(styles)(
           );
         } else if (sourceUid) {
           const sourceStock = getUid(sourceUid);
-          sourceStockIdent = defined(sourceStock.ident());
+          sourceStockIdent = defined(sourceStock.ident);
         }
         const lastPt = defined(flow.points.last());
         if (lastPt.attachedToUid === fauxCloudTargetUid) {
@@ -708,7 +708,7 @@ export const Editor = withStyles(styles)(
           let to: StockViewElement | CloudViewElement;
           if (targetUid) {
             to = getUid(targetUid) as StockViewElement | CloudViewElement;
-            stockAttachingIdent = defined(to.ident());
+            stockAttachingIdent = defined(to.ident);
             cursorMoveDelta = {
               x: 0,
               y: 0,
@@ -747,14 +747,14 @@ export const Editor = withStyles(styles)(
       if (isCreatingNew) {
         engine.addNewVariable(this.state.modelName, 'flow', (flow as NamedViewElement).name);
         if (sourceStockIdent) {
-          engine.addStocksFlow(this.state.modelName, sourceStockIdent, flow.ident(), 'out');
+          engine.addStocksFlow(this.state.modelName, sourceStockIdent, flow.ident, 'out');
         }
       }
       if (stockAttachingIdent) {
-        engine.addStocksFlow(this.state.modelName, stockAttachingIdent, flow.ident(), 'in');
+        engine.addStocksFlow(this.state.modelName, stockAttachingIdent, flow.ident, 'in');
       }
       if (stockDetachingIdent) {
-        engine.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident(), 'in');
+        engine.removeStocksFlow(this.state.modelName, stockDetachingIdent, flow.ident, 'in');
       }
       this.updateView(view.merge({ nextUid, elements }));
       this.setState({
@@ -779,7 +779,7 @@ export const Editor = withStyles(styles)(
 
       const getName = (ident: string) => {
         for (const e of view.elements) {
-          if (e.isNamed() && e.ident() === ident) {
+          if (e.isNamed() && e.ident === ident) {
             return e;
           }
         }
@@ -866,13 +866,13 @@ export const Editor = withStyles(styles)(
       const view = defined(this.getView());
       const origElements = view.elements;
       const origNamedElements = Map<string, ViewElement>(
-        origElements.filter((e) => e.isNamed()).map((e) => [defined(e.ident()), e]),
+        origElements.filter((e) => e.isNamed()).map((e) => [defined(e.ident), e]),
       );
       const selection = this.state.selection;
 
       const getName = (ident: string) => {
         for (const e of view.elements) {
-          if (e.isNamed() && e.ident() === ident) {
+          if (e.isNamed() && e.ident === ident) {
             return e;
           }
         }
@@ -912,7 +912,7 @@ export const Editor = withStyles(styles)(
           element = newCloud;
           updatedElements = updatedElements.push(newUpdatedFlow);
         } else if (selection.size === 1 && element instanceof StockViewElement) {
-          const stock = defined(defined(this.getModel()).variables.get(element.ident())) as StockVar;
+          const stock = defined(defined(this.getModel()).variables.get(element.ident)) as StockVar;
           const flowNames: List<string> = stock.inflows.concat(stock.outflows);
           const flows: List<ViewElement> = flowNames.map(getName);
           const [newElement, newUpdatedFlows] = UpdateStockAndFlows(element, flows as List<FlowViewElement>, delta);
@@ -951,7 +951,7 @@ export const Editor = withStyles(styles)(
         if (!e.isNamed()) {
           continue;
         }
-        const ident = defined(e.ident());
+        const ident = defined(e.ident);
         if (selection.has(e.uid)) {
           selectedElements = selectedElements.set(ident, e);
         }
@@ -960,10 +960,10 @@ export const Editor = withStyles(styles)(
 
       elements = elements.map((element: ViewElement) => {
         if (!(element instanceof LinkViewElement)) {
-          return element.isNamed() ? defined(namedElements.get(defined(element.ident()))) : element;
+          return element.isNamed() ? defined(namedElements.get(defined(element.ident))) : element;
         }
-        const fromName = defined(getUid(element.fromUid).ident());
-        const toName = defined(getUid(element.toUid).ident());
+        const fromName = defined(getUid(element.fromUid).ident);
+        const toName = defined(getUid(element.toUid).ident);
         // if it hasn't been updated, nothing to do
         if (!(selectedElements.has(fromName) || selectedElements.has(toName))) {
           return element;
@@ -1190,7 +1190,7 @@ export const Editor = withStyles(styles)(
 
       for (const e of view.elements) {
         if (selection.contains(e.uid) && e.isNamed()) {
-          names.push(defined(e.ident()));
+          names.push(defined(e.ident));
         }
       }
 
@@ -1226,7 +1226,7 @@ export const Editor = withStyles(styles)(
       }
 
       for (const e of view.elements) {
-        if (e.isNamed() && e.ident() === ident) {
+        if (e.isNamed() && e.ident === ident) {
           return e;
         }
       }
@@ -1354,7 +1354,7 @@ export const Editor = withStyles(styles)(
       const project = defined(this.project());
       const model = defined(this.getModel());
 
-      const ident = defined(namedElement.ident());
+      const ident = defined(namedElement.ident);
       const variable = defined(model.variables.get(ident));
       const series = project.getSeries(this.state.data, this.state.modelName, variable.ident);
 
@@ -1387,7 +1387,7 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      if (namedElement.ident() !== ident) {
+      if (namedElement.ident !== ident) {
         return;
       }
 
