@@ -28,7 +28,6 @@ import {
   StockFlowView,
   Project,
   Model,
-  Stock as StockVar,
 } from '@system-dynamics/core/datamodel';
 
 import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
@@ -210,7 +209,6 @@ export const Canvas = withStyles(styles)(
     private cachedVersion = -Infinity;
     private cachedElements = List<ViewElement>();
     private elements = Map<UID, ViewElement>();
-    private nameMap = Map<string, UID>();
     private selectionUpdates = Map<UID, ViewElement>();
 
     constructor(props: CanvasPropsFull) {
@@ -263,14 +261,6 @@ export const Canvas = withStyles(styles)(
         }
       }
       return selection;
-    }
-
-    private getNamedElement(name: string): ViewElement | undefined {
-      const uid = this.nameMap.get(name);
-      if (!uid) {
-        return undefined;
-      }
-      return this.selectionUpdates.get(uid) || this.elements.get(uid);
     }
 
     private isSelected(element: ViewElement): boolean {
@@ -596,22 +586,19 @@ export const Canvas = withStyles(styles)(
       stockEl: StockViewElement,
       moveDelta: Point,
     ): [StockViewElement, List<FlowViewElement>] {
-      const stock = this.props.model.variables.get(stockEl.ident) as StockVar | undefined;
-      let flows: List<FlowViewElement>;
-      if (stock) {
-        const flowNames: List<string> = stock.inflows.concat(stock.outflows);
-        flows = flowNames.map((ident) => defined(this.getNamedElement(ident)) as FlowViewElement);
-      } else {
-        // this will happen if we are moving an in-creation stock
-        flows = List<FlowViewElement>();
-      }
+      let flows = List<FlowViewElement>(
+        stockEl.inflows
+          .concat(stockEl.outflows)
+          .map((uid) => (this.selectionUpdates.get(uid) || this.getElementByUid(uid)) as (FlowViewElement | undefined))
+          .filter((element) => element !== undefined)
+          .map((element) => defined(element))
+      );
 
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
 
     private populateNamedElements(displayElements: List<ViewElement>): void {
       if (this.props.version !== this.cachedVersion) {
-        this.nameMap = Map(displayElements.filter((el) => el.isNamed()).map((el) => [defined(el.ident), el.uid]));
         this.elements = Map(displayElements.map((el) => [el.uid, el]))
           .set(fauxTarget.uid, fauxTarget)
           .set(fauxCloudTarget.uid, fauxCloudTarget);
@@ -1336,7 +1323,7 @@ export const Canvas = withStyles(styles)(
       // we don't need these things anymore
       this.elementBounds = List<Rect | undefined>();
       this.selectionUpdates = Map<UID, ViewElement>();
-      // n.b. we don't want to clear this.elements or this.nameMap, as thats used when handling callbacks
+      // n.b. we don't want to clear this.elements as thats used when handling callbacks
 
       return (
         <div className={classes.container}>
