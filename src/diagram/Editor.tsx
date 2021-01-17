@@ -111,8 +111,9 @@ const styles = ({ spacing, palette }: Theme) =>
     searchbox: {
       position: 'relative',
       top: 0,
-      left: 52,
-      width: 359 - 52 - 64,
+      left: 0,
+      paddingLeft: 52,
+      paddingRight: 64,
       paddingTop: 8,
       border: 0,
     },
@@ -1266,23 +1267,22 @@ export const Editor = withStyles(styles)(
           <IconButton className={classes.menuButton} color="inherit" aria-label="Menu" onClick={this.handleShowDrawer}>
             <MenuIcon />
           </IconButton>
-          <Autocomplete
-            key={name}
-            value={name}
-            onChange={this.handleSearchChange}
-            classes={{
-              inputRoot: classes.searchbox,
-            }}
-            clearOnEscape={true}
-            defaultValue={name}
-            options={autocompleteOptions}
-            renderInput={(params: any) => {
-              if (params.InputProps) {
-                params.InputProps.disableUnderline = true;
-              }
-              return <TextField {...params} variant="standard" placeholder={placeholder} />;
-            }}
-          />
+          <div className={classes.searchbox}>
+            <Autocomplete
+              key={name}
+              value={name}
+              onChange={this.handleSearchChange}
+              clearOnEscape={true}
+              defaultValue={name}
+              options={autocompleteOptions}
+              renderInput={(params: any) => {
+                if (params.InputProps) {
+                  params.InputProps.disableUnderline = true;
+                }
+                return <TextField {...params} variant="standard" placeholder={placeholder} />;
+              }}
+            />
+          </div>
           <div className={classes.divider} />
           <Status status={status} />
         </Paper>
