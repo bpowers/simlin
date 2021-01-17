@@ -94,43 +94,63 @@ function isAdjacent(
   side: 'left' | 'right' | 'top' | 'bottom',
 ): boolean {
   // want to look at first point and last point.
-  const points = List([defined(flow.points.first()), defined(flow.points.last())]);
+  const point = defined(flow.points.filter((point) => point.attachedToUid === stockEl.uid).first());
 
-  for (const point of points) {
-    if (side === 'left' && eq(point.x, stockEl.cx - StockWidth / 2)) {
-      return true;
-    } else if (side === 'right' && eq(point.x, stockEl.cx + StockWidth / 2)) {
-      return true;
-    } else if (side === 'top' && eq(point.y, stockEl.cy - StockHeight / 2)) {
-      return true;
-    } else if (side === 'bottom' && eq(point.y, stockEl.cy + StockHeight / 2)) {
-      return true;
-    }
+  if (side === 'left' && eq(point.x, stockEl.cx - StockWidth / 2)) {
+    return true;
+  } else if (side === 'right' && eq(point.x, stockEl.cx + StockWidth / 2)) {
+    return true;
+  } else if (side === 'top' && eq(point.y, stockEl.cy - StockHeight / 2)) {
+    return true;
+  } else if (side === 'bottom' && eq(point.y, stockEl.cy + StockHeight / 2)) {
+    return true;
+  }
+
+  const compare = getComparePoint(flow, stockEl);
+  const d = {
+    x: stockEl.cx - compare.x,
+    y: stockEl.cy - compare.y,
+  };
+  const horizontal = isHorizontal(flow);
+  const vertical = isVertical(flow);
+  if (horizontal && vertical) {
+    // nothing we can do
+    return false;
+  }
+
+  if (horizontal && d.x < 0 && side === 'right') {
+    return true;
+  } else if (horizontal && d.x > 0 && side === 'left') {
+    return true;
+  } else if (!horizontal && d.y < 0 && side === 'bottom') {
+    return true;
+  } else if (!horizontal && d.y > 0 && side === 'top') {
+    return true;
   }
 
   return false;
 }
 
-// function getComparePoint(flow: FlowViewElement, stock: ViewElement): IPoint {
-//   if (flow.points.size !== 2) {
-//     console.log(`TODO: multipoint flows for ${flow.ident}`);
-//   }
-//
-//   let i = 0;
-//   for (const point of flow.points) {
-//     if (point.attachedToUid === stock.uid) {
-//       if (i === 0) {
-//         return defined(flow.points.last());
-//       } else {
-//         return defined(flow.points.first());
-//       }
-//     }
-//
-//     i++;
-//   }
-//
-//   throw new Error('unreachable');
-// }
+function getComparePoint(flow: FlowViewElement, stock: ViewElement): IPoint {
+  if (flow.points.size !== 2) {
+    console.log(`TODO: multipoint flows for ${flow.ident}`);
+  }
+
+  let i = 0;
+  for (const point of flow.points) {
+    if (point.attachedToUid === stock.uid) {
+      if (i === 0) {
+        return defined(flow.points.last());
+      } else {
+        return defined(flow.points.first());
+      }
+    }
+
+    i++;
+  }
+
+  throw new Error('unreachable');
+}
 
 function adjustFlows(
   origStock: StockViewElement | CloudViewElement,
@@ -245,6 +265,9 @@ export function UpdateStockAndFlows(
   const right = flows.filter((e) => isAdjacent(stockEl, e, 'right'));
   const top = flows.filter((e) => isAdjacent(stockEl, e, 'top'));
   const bottom = flows.filter((e) => isAdjacent(stockEl, e, 'bottom'));
+  if (flows.size !== left.size + right.size + top.size + bottom.size) {
+    console.log(`isAdjacent is acting up ${flows.size} !== ${left.size + right.size + top.size + bottom.size}`);
+  }
 
   let proposed = new Point({
     x: stockEl.cx - moveDelta.x,

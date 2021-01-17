@@ -132,7 +132,6 @@ export function circleFromPoints(p1: Point, p2: Point, p3: Point): Circle {
   const cd = (off - square(p3.x) - square(p3.y)) / 2;
   const det = (p1.x - p2.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p2.y);
   if (isZero(det)) {
-    console.log('blerg');
     throw new Error('zero determinant');
   }
   const idet = 1 / det;

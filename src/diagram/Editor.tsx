@@ -699,7 +699,7 @@ export const Editor = withStyles(styles)(
             }),
           );
         } else if (sourceUid) {
-          const sourceStock = getUid(sourceUid);
+          const sourceStock = getUid(sourceUid) as StockViewElement;
           sourceStockIdent = defined(sourceStock.ident);
         }
         const lastPt = defined(flow.points.last());
