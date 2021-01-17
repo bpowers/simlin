@@ -483,6 +483,7 @@ export interface ViewElement {
 const auxViewElementDefaults = {
   uid: -1,
   name: '',
+  identy: '',
   var: undefined as Aux | undefined,
   x: -1,
   y: -1,
@@ -495,10 +496,11 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
   constructor(props: typeof auxViewElementDefaults) {
     super(props);
   }
-  static fromPb(aux: PbViewElement.Aux, auxVar?: Variable | undefined): AuxViewElement {
+  static fromPb(aux: PbViewElement.Aux, identy: string, auxVar?: Variable | undefined): AuxViewElement {
     return new AuxViewElement({
       uid: aux.getUid(),
       name: aux.getName(),
+      identy,
       var: auxVar instanceof Aux ? auxVar : undefined,
       x: aux.getX(),
       y: aux.getY(),
@@ -525,18 +527,21 @@ export class AuxViewElement extends Record(auxViewElementDefaults) implements Vi
     return true;
   }
   ident(): string {
-    return canonicalize(this.name);
+    return this.identy;
   }
 }
 
 const stockViewElementDefaults = {
   uid: -1,
   name: '',
+  identy: '',
   var: undefined as Stock | undefined,
   x: -1,
   y: -1,
   labelSide: 'center' as LabelSide,
   isZeroRadius: false,
+  inflows: List<UID>(),
+  outflows: List<UID>(),
 };
 export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
@@ -544,15 +549,18 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
   constructor(props: typeof stockViewElementDefaults) {
     super(props);
   }
-  static fromPb(stock: PbViewElement.Stock, stockVar?: Variable): StockViewElement {
+  static fromPb(stock: PbViewElement.Stock, identy: string, stockVar: Variable | undefined): StockViewElement {
     return new StockViewElement({
       uid: stock.getUid(),
       name: stock.getName(),
+      identy,
       var: stockVar instanceof Stock ? stockVar : undefined,
       x: stock.getX(),
       y: stock.getY(),
       labelSide: getLabelSide(stock.getLabelSide()),
       isZeroRadius: false,
+      inflows: List<UID>(),
+      outflows: List<UID>(),
     });
   }
   toPb(): PbViewElement.Stock {
@@ -574,7 +582,7 @@ export class StockViewElement extends Record(stockViewElementDefaults) implement
     return true;
   }
   ident(): string {
-    return canonicalize(this.name);
+    return this.identy;
   }
 }
 
@@ -611,6 +619,7 @@ export class Point extends Record(pointDefaults) {
 const flowViewElementDefaults = {
   uid: -1,
   name: '',
+  identy: '',
   var: undefined as Flow | undefined,
   x: -1,
   y: -1,
@@ -623,10 +632,11 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   constructor(props: typeof flowViewElementDefaults) {
     super(props);
   }
-  static fromPb(flow: PbViewElement.Flow, flowVar?: Variable): FlowViewElement {
+  static fromPb(flow: PbViewElement.Flow, identy: string, flowVar?: Variable): FlowViewElement {
     return new FlowViewElement({
       uid: flow.getUid(),
       name: flow.getName(),
+      identy,
       var: flowVar instanceof Flow ? flowVar : undefined,
       x: flow.getX(),
       y: flow.getY(),
@@ -654,7 +664,7 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
     return true;
   }
   ident(): string {
-    return canonicalize(this.name);
+    return this.identy;
   }
   get isZeroRadius(): boolean {
     return false;
@@ -745,6 +755,7 @@ export class LinkViewElement extends Record(linkViewElementDefaults) implements 
 const moduleViewElementDefaults = {
   uid: -1,
   name: '',
+  identy: '',
   var: undefined as Module | undefined,
   x: -1,
   y: -1,
@@ -757,10 +768,11 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
   constructor(props: typeof moduleViewElementDefaults) {
     super(props);
   }
-  static fromPb(module: PbViewElement.Module, moduleVar?: Variable): ModuleViewElement {
+  static fromPb(module: PbViewElement.Module, identy: string, moduleVar?: Variable): ModuleViewElement {
     return new ModuleViewElement({
       uid: module.getUid(),
       name: module.getName(),
+      identy,
       var: moduleVar instanceof Module ? moduleVar : undefined,
       x: module.getX(),
       y: module.getY(),
@@ -787,7 +799,7 @@ export class ModuleViewElement extends Record(moduleViewElementDefaults) impleme
     return true;
   }
   ident(): string {
-    return canonicalize(this.name);
+    return this.identy;
   }
 }
 
@@ -897,47 +909,76 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
   }
   static fromPb(view: PbView, variables: Map<string, Variable>): StockFlowView {
     let maxUid = -1;
+    let namedElements = Map<string, UID>();
     const elements = List(
       view.getElementsList().map((element) => {
         let e: ViewElement;
         switch (element.getElementCase()) {
-          case PbViewElement.ElementCase.AUX:
+          case PbViewElement.ElementCase.AUX: {
             const aux = defined(element.getAux());
-            e = AuxViewElement.fromPb(aux, variables.get(canonicalize(aux.getName())));
+            const ident = canonicalize(aux.getName());
+            e = AuxViewElement.fromPb(aux, ident, variables.get(ident));
+            namedElements = namedElements.set(ident, e.uid);
             break;
-          case PbViewElement.ElementCase.STOCK:
+          }
+          case PbViewElement.ElementCase.STOCK: {
             const stock = defined(element.getStock());
-            e = StockViewElement.fromPb(stock, variables.get(canonicalize(stock.getName())));
+            const ident = canonicalize(stock.getName());
+            e = StockViewElement.fromPb(stock, ident, variables.get(ident));
+            namedElements = namedElements.set(ident, e.uid);
             break;
-          case PbViewElement.ElementCase.FLOW:
+          }
+          case PbViewElement.ElementCase.FLOW: {
             const flow = defined(element.getFlow());
-            e = FlowViewElement.fromPb(flow, variables.get(canonicalize(flow.getName())));
+            const ident = canonicalize(flow.getName());
+            e = FlowViewElement.fromPb(flow, ident, variables.get(ident));
+            namedElements = namedElements.set(ident, e.uid);
             break;
-          case PbViewElement.ElementCase.LINK:
+          }
+          case PbViewElement.ElementCase.LINK: {
             e = LinkViewElement.fromPb(defined(element.getLink()));
             break;
-          case PbViewElement.ElementCase.MODULE:
+          }
+          case PbViewElement.ElementCase.MODULE: {
             const module = defined(element.getModule());
-            e = ModuleViewElement.fromPb(module, variables.get(canonicalize(module.getName())));
+            const ident = canonicalize(module.getName());
+            e = ModuleViewElement.fromPb(module, ident, variables.get(ident));
+            namedElements = namedElements.set(ident, e.uid);
             break;
-          case PbViewElement.ElementCase.ALIAS:
+          }
+          case PbViewElement.ElementCase.ALIAS: {
             e = AliasViewElement.fromPb(defined(element.getAlias()));
             break;
-          case PbViewElement.ElementCase.CLOUD:
+          }
+          case PbViewElement.ElementCase.CLOUD: {
             e = CloudViewElement.fromPb(defined(element.getCloud()));
             break;
-          default:
+          }
+          default: {
             throw new Error('invariant broken: protobuf variable with empty oneof');
+          }
         }
         maxUid = Math.max(e.uid, maxUid);
         return e;
       }),
-    );
+    ).map((element: ViewElement) => {
+      if (element instanceof StockViewElement && element.var) {
+        const stock = element.var;
+        const inflows = List<UID>(stock.inflows.filter((ident) => namedElements.has(ident)).map((ident) => defined(namedElements.get(ident))));
+        const outflows = List<UID>(stock.outflows.filter((ident) => namedElements.has(ident)).map((ident) => defined(namedElements.get(ident))));
+        return element.merge({
+          inflows,
+          outflows,
+        });
+      }
+      return element;
+    });
     let nextUid = maxUid + 1;
     // if this is an empty view, start the numbering at 1
     if (nextUid === 0) {
       nextUid = 1;
     }
+
     return new StockFlowView({
       elements,
       nextUid,
