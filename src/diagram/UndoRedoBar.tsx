@@ -1,4 +1,4 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -6,35 +6,37 @@ import * as React from 'react';
 
 import IconButton from '@material-ui/core/IconButton';
 import Paper from '@material-ui/core/Paper';
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
 import RedoIcon from '@material-ui/icons/Redo';
 import UndoIcon from '@material-ui/icons/Undo';
 
-const styles = createStyles({
-  card: {
-    height: 36,
-  },
-  divider: {
-    display: 'inline-block',
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    marginRight: 44,
-    marginTop: 10,
-    height: 16,
-    borderLeftWidth: 1,
-    borderLeftStyle: 'solid',
-    borderColor: '#ddd',
-  },
-  undoButton: {
-    paddingTop: 6,
-    paddingRight: 9,
-  },
-  redoButton: {
-    paddingTop: 6,
-    paddingLeft: 9,
-  },
-});
+const styles = ({ spacing }: Theme) =>
+  createStyles({
+    card: {
+      height: 36,
+      marginRight: spacing(1),
+    },
+    divider: {
+      display: 'inline-block',
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      marginLeft: 44,
+      marginTop: 10,
+      height: 16,
+      borderLeftWidth: 1,
+      borderLeftStyle: 'solid',
+      borderColor: '#ddd',
+    },
+    undoButton: {
+      paddingTop: 6,
+      paddingRight: 9,
+    },
+    redoButton: {
+      paddingTop: 6,
+      paddingLeft: 9,
+    },
+  });
 
 interface UndoRedoBarPropsFull extends WithStyles<typeof styles> {
   undoEnabled: boolean;

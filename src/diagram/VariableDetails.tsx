@@ -1,18 +1,18 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
 
 import { List } from 'immutable';
-import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
+import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 import { createEditor, Node, Text } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 
 import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@material-ui/core';
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
 
 import { brewer } from 'chroma-js';
 
@@ -31,41 +31,54 @@ import { plainDeserialize, plainSerialize } from './drawing/common';
 import { LookupEditor } from './LookupEditor';
 import { errorCodeDescription } from '@system-dynamics/engine';
 
-const styles = createStyles({
-  card: {
-    width: 359,
-  },
-  cardInner: {
-    paddingTop: 52,
-  },
-  editorActions: {},
-  eqnEditor: {
-    backgroundColor: 'rgba(245, 245, 245)',
-    borderRadius: 4,
-    marginTop: 4,
-    padding: 4,
-    height: 80,
-    fontFamily: "'Roboto Mono', monospace",
-  },
-  eqnError: {
-    textDecoration: 'underline wavy red',
-  },
-  buttonLeft: {
-    float: 'left',
-    marginRight: 'auto',
-  },
-  buttonRight: {
-    float: 'right',
-  },
-  addLookupButton: {
-    display: 'block',
-    marginLeft: 'auto',
-    marginRight: 'auto',
-  },
-  errorList: {
-    color: '#cc0000',
-  },
-});
+const SearchbarWidthSm = 359;
+const SearchbarWidthMd = 420;
+const SearchbarWidthLg = 480;
+
+const styles = ({ breakpoints }: Theme) =>
+  createStyles({
+    card: {
+      [breakpoints.up('lg')]: {
+        width: SearchbarWidthLg,
+      },
+      [breakpoints.between('md', 'lg')]: {
+        width: SearchbarWidthMd,
+      },
+      [breakpoints.down('md')]: {
+        width: SearchbarWidthSm,
+      },
+    },
+    cardInner: {
+      paddingTop: 52,
+    },
+    editorActions: {},
+    eqnEditor: {
+      backgroundColor: 'rgba(245, 245, 245)',
+      borderRadius: 4,
+      marginTop: 4,
+      padding: 4,
+      height: 80,
+      fontFamily: "'Roboto Mono', monospace",
+    },
+    eqnError: {
+      textDecoration: 'underline wavy red',
+    },
+    buttonLeft: {
+      float: 'left',
+      marginRight: 'auto',
+    },
+    buttonRight: {
+      float: 'right',
+    },
+    addLookupButton: {
+      display: 'block',
+      marginLeft: 'auto',
+      marginRight: 'auto',
+    },
+    errorList: {
+      color: '#cc0000',
+    },
+  });
 
 interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   variable: Variable;
@@ -185,11 +198,10 @@ export const VariableDetails = withStyles(styles)(
     };
 
     renderLeaf = (props: RenderLeafProps) => {
-      const style: React.CSSProperties | undefined = ((props.leaf as unknown) as any).error
-        ? (styles.eqnError as React.CSSProperties)
-        : undefined;
+      const isError = !!((props.leaf as unknown) as any).error;
+      const errorClass = this.props.classes.eqnError;
       return (
-        <span {...props.attributes} style={style}>
+        <span {...props.attributes} className={isError ? errorClass : undefined}>
           {props.children}
         </span>
       );
@@ -258,26 +270,26 @@ export const VariableDetails = withStyles(styles)(
       if (errors) {
         const error = defined(errors.get(0));
         chartOrErrors = (
-          <Typography style={styles.errorList as React.CSSProperties}>
-            error: {errorCodeDescription(error.code)}
-          </Typography>
+          <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>
         );
       } else {
         chartOrErrors = (
-          <LineChart width={327} height={300} data={series}>
-            <CartesianGrid horizontal={true} vertical={false} />
-            <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-            <YAxis
-              width={yAxisWidth}
-              allowDataOverflow={true}
-              domain={[yMin, yMax]}
-              type="number"
-              dataKey="y"
-              yAxisId="1"
-            />
-            <Tooltip formatter={this.formatValue} />
-            {lines}
-          </LineChart>
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={series}>
+              <CartesianGrid horizontal={true} vertical={false} />
+              <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+              <YAxis
+                width={yAxisWidth}
+                allowDataOverflow={true}
+                domain={[yMin, yMax]}
+                type="number"
+                dataKey="y"
+                yAxisId="1"
+              />
+              <Tooltip formatter={this.formatValue} />
+              {lines}
+            </LineChart>
+          </ResponsiveContainer>
         );
       }
 

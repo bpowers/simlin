@@ -77,24 +77,27 @@ import CardContent from '@material-ui/core/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 const MaxUndoSize = 5;
+const SearchbarWidthSm = 359;
+const SearchbarWidthMd = 420;
+const SearchbarWidthLg = 480;
 
 function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
 }
 
-const styles = ({ spacing, palette }: Theme) =>
+const styles = ({ spacing, palette, breakpoints }: Theme) =>
   createStyles({
     root: {},
     undoRedoBar: {
       display: 'flex',
       position: 'absolute',
       bottom: spacing(3.5),
-      right: spacing(12),
+      left: spacing(12),
     },
     speedDial: {
       position: 'absolute',
       bottom: spacing(2),
-      right: spacing(3),
+      left: spacing(3),
     },
     snapshotCard: {
       position: 'absolute',
@@ -126,12 +129,27 @@ const styles = ({ spacing, palette }: Theme) =>
       display: 'block',
       color: '#666',
     },
-    paper: {
+    searchbar: {
       position: 'absolute',
       top: 8,
       right: 8,
       height: 48,
-      width: 359, // 392
+      [breakpoints.up('lg')]: {
+        width: SearchbarWidthLg,
+      },
+      [breakpoints.between('md', 'lg')]: {
+        width: SearchbarWidthMd,
+      },
+      [breakpoints.down('md')]: {
+        width: SearchbarWidthSm,
+      },
+    },
+    searchbarMd: {
+      position: 'absolute',
+      top: 8,
+      right: 8,
+      height: 48,
+      width: SearchbarWidthSm,
     },
     varDetails: {
       position: 'absolute',
@@ -1148,7 +1166,7 @@ export const Editor = withStyles(styles)(
         <Snackbar
           anchorOrigin={{
             vertical: 'bottom',
-            horizontal: 'left',
+            horizontal: 'center',
           }}
           open={this.state.modelErrors.size > 0}
           autoHideDuration={6000}
@@ -1263,7 +1281,7 @@ export const Editor = withStyles(styles)(
       const status = !engine || engine.isSimulatable() ? 'ok' : 'error';
 
       return (
-        <Paper className={classes.paper} elevation={2}>
+        <Paper className={classes.searchbar} elevation={2}>
           <IconButton className={classes.menuButton} color="inherit" aria-label="Menu" onClick={this.handleShowDrawer}>
             <MenuIcon />
           </IconButton>
@@ -1529,8 +1547,8 @@ export const Editor = withStyles(styles)(
 
       return (
         <div className={classes.undoRedoBar}>
-          <Snapshotter onSnapshot={this.handleSnapshot} />
           <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
+          <Snapshotter onSnapshot={this.handleSnapshot} />
         </div>
       );
     }

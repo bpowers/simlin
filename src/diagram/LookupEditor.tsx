@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 
-import { CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
+import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
@@ -550,29 +550,29 @@ export const LookupEditor = withStyles(styles)(
               onPointerUp={this.handleContainerTouchEnd}
               onPointerMove={this.handleContainerTouchMove}
             >
-              <LineChart
-                width={327}
-                height={300}
-                data={series}
-                onMouseDown={this.handleMouseDown}
-                onMouseMove={this.handleMouseMove}
-                onMouseUp={this.handleMouseUp}
-                ref={this.lookupRef}
-                layout={'horizontal'}
-              >
-                <CartesianGrid horizontal={true} vertical={false} />
-                <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
-                <YAxis
-                  width={yAxisWidth}
-                  allowDataOverflow={true}
-                  domain={[yMinChart, yMaxChart]}
-                  type="number"
-                  dataKey="y"
-                  yAxisId="1"
-                />
-                <Tooltip formatter={this.formatValue} />
-                <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" isAnimationActive={false} dot={false} />
-              </LineChart>
+              <ResponsiveContainer width="100%" height={300}>
+                <LineChart
+                  data={series}
+                  onMouseDown={this.handleMouseDown}
+                  onMouseMove={this.handleMouseMove}
+                  onMouseUp={this.handleMouseUp}
+                  ref={this.lookupRef}
+                  layout={'horizontal'}
+                >
+                  <CartesianGrid horizontal={true} vertical={false} />
+                  <XAxis allowDataOverflow={true} dataKey="x" domain={[left, right]} type="number" />
+                  <YAxis
+                    width={yAxisWidth}
+                    allowDataOverflow={true}
+                    domain={[yMinChart, yMaxChart]}
+                    type="number"
+                    dataKey="y"
+                    yAxisId="1"
+                  />
+                  <Tooltip formatter={this.formatValue} />
+                  <Line yAxisId="1" type="linear" dataKey="y" stroke="#8884d8" isAnimationActive={false} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
             <TextField
               className={classes.yAxisMin}
