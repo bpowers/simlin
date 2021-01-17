@@ -111,15 +111,26 @@ function isAdjacent(
   return false;
 }
 
-function getComparePoint(flow: FlowViewElement, _stock: ViewElement): IPoint {
-  if (flow.points.size !== 2) {
-    console.log(`TODO: multipoint flows for ${flow.ident}`);
-  }
-  return {
-    x: flow.cx,
-    y: flow.cy,
-  };
-}
+// function getComparePoint(flow: FlowViewElement, stock: ViewElement): IPoint {
+//   if (flow.points.size !== 2) {
+//     console.log(`TODO: multipoint flows for ${flow.ident}`);
+//   }
+//
+//   let i = 0;
+//   for (const point of flow.points) {
+//     if (point.attachedToUid === stock.uid) {
+//       if (i === 0) {
+//         return defined(flow.points.last());
+//       } else {
+//         return defined(flow.points.first());
+//       }
+//     }
+//
+//     i++;
+//   }
+//
+//   throw new Error('unreachable');
+// }
 
 function adjustFlows(
   origStock: StockViewElement | CloudViewElement,
@@ -127,8 +138,12 @@ function adjustFlows(
   flows: List<FlowViewElement>,
   isCloud?: boolean,
 ): List<FlowViewElement> {
-  let otherEnd: IPoint | undefined;
   return flows.map((flow: FlowViewElement) => {
+    let horizontal = isHorizontal(flow);
+    const vertical = isVertical(flow);
+    const inCreation = horizontal && vertical;
+
+    let otherEnd: IPoint | undefined;
     const points = flow.points.map((point, i) => {
       // if its not the start or end point, don't change it.
       if (!(i === 0 || i === flow.points.size - 1)) {
@@ -140,13 +155,21 @@ function adjustFlows(
         return point;
       }
 
-      const compare = getComparePoint(flow, stock);
+      let compare: IPoint;
+      if (i === 0) {
+        compare = flow.points.last();
+      } else {
+        compare = flow.points.first();
+      }
+
       const d = {
         x: stock.cx - compare.x,
         y: stock.cy - compare.y,
       };
 
-      const θ = (Math.atan2(d.x, d.y) * 180) / Math.PI;
+      if (inCreation) {
+        horizontal = d.x > d.y;
+      }
 
       const adjust = {
         x: StockWidth / 2,
@@ -157,27 +180,27 @@ function adjustFlows(
         adjust.y = 0;
       }
 
-      if (-45 <= θ && θ < 45) {
-        // top
-        point = point.set('y', stock.cy - adjust.y);
-      } else if (45 <= θ && θ < 135) {
-        // left
-        point = point.set('x', stock.cx - adjust.x);
-      } else if (135 <= θ || θ < -135) {
-        // bottom
-        point = point.set('y', stock.cy + adjust.y);
-      } else if (-135 <= θ && θ < -45) {
+      if (horizontal && d.x < 0) {
         // right
         point = point.set('x', stock.cx + adjust.x);
+      } else if (horizontal) {
+        // left
+        point = point.set('x', stock.cx - adjust.x);
+      } else if (!horizontal && d.y < 0) {
+        // bottom
+        point = point.set('y', stock.cy + adjust.y);
       } else {
-        throw new Error(`unreachable, θ=${θ}`);
+        // top
+        point = point.set('y', stock.cy - adjust.y);
       }
 
       return point;
     });
 
+    otherEnd = defined(otherEnd);
+
     // FIXME: reduce this duplication
-    if (otherEnd && isCloud) {
+    if (isCloud) {
       const fraction = {
         x: flow.cx === otherEnd.x ? 0.5 : (stock.cx - otherEnd.x) / (origStock.cx - otherEnd.x),
         y: flow.cy === otherEnd.y ? 0.5 : (stock.cy - otherEnd.y) / (origStock.cy - otherEnd.y),
@@ -194,7 +217,7 @@ function adjustFlows(
         x: base.x + Math.abs(fraction.x * d.x),
         y: base.y + Math.abs(fraction.y * d.y),
       });
-    } else if (otherEnd) {
+    } else {
       const fraction = {
         x: (stock.cx - otherEnd.x) / (origStock.cx - otherEnd.x || 1),
         y: (stock.cy - otherEnd.y) / (origStock.cy - otherEnd.y || 1),

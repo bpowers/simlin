@@ -586,12 +586,12 @@ export const Canvas = withStyles(styles)(
       stockEl: StockViewElement,
       moveDelta: Point,
     ): [StockViewElement, List<FlowViewElement>] {
-      let flows = List<FlowViewElement>(
+      const flows = List<FlowViewElement>(
         stockEl.inflows
           .concat(stockEl.outflows)
-          .map((uid) => (this.selectionUpdates.get(uid) || this.getElementByUid(uid)) as (FlowViewElement | undefined))
+          .map((uid) => (this.selectionUpdates.get(uid) || this.getElementByUid(uid)) as FlowViewElement | undefined)
           .filter((element) => element !== undefined)
-          .map((element) => defined(element))
+          .map((element) => defined(element)),
       );
 
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
