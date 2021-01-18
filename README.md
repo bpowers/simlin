@@ -21,8 +21,6 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 
 ## Known issues
 
-* Equations error details aren't surfaced.
-* The search box doesn't actually search/work yet.
 * If you select a variable that is under the "search" box, the sheet showing variable details will cover that part of the model (you can manually shift-click the background and reposition the diagram to get out of/around this).
 * Drag selection isn't implemented yet.
 * You can only detach the arrowhead of a flow, not the origin/source end.
@@ -37,8 +35,8 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 ```bash
 # dependencies; ignore warnings
 $ yarn install
-# start a local MongoDB instance using Docker
-$ ./start-mongo
+# start a local Firestore instance using the Google Cloud SDK
+$ yarn start:firestore
 # in another tab:
 $ . ~/model-oauth # (sets some environmental variables; get out of band)
 $ yarn start:backend
