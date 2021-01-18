@@ -1632,7 +1632,6 @@ impl View {
             }
             next_uid += 1;
         }
-        eprintln!("orig uid map:\n{:?}\n", orig_uid_map);
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
                 link.from_uid = match &link.from.end {
