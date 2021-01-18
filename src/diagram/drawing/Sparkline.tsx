@@ -69,7 +69,11 @@ interface SparklineProps extends WithStyles<typeof styles> {
 
 export const Sparkline = withStyles(styles)(
   class Sparkline extends React.PureComponent<SparklineProps> {
-    render() {
+    private pAxis = '';
+    private sparklines: Array<React.SVGProps<SVGPathElement>> = [];
+    private cachedSeries: List<Series> | unknown;
+
+    recache() {
       const { classes } = this.props;
       const time = defined(this.props.series.get(0)).time;
       const x = 0;
@@ -110,12 +114,21 @@ export const Sparkline = withStyles(styles)(
         i++;
       }
 
-      const pAxis = `M${x},${y + h - (h * (0 - yMin)) / ySpan}L${x + w},${y + h - (h * (0 - yMin)) / ySpan}`;
+      this.pAxis = `M${x},${y + h - (h * (0 - yMin)) / ySpan}L${x + w},${y + h - (h * (0 - yMin)) / ySpan}`;
+      this.sparklines = sparklines;
+      this.cachedSeries = this.props.series;
+    }
 
+    render() {
+      if (this.props.series.equals(this.cachedSeries)) {
+        this.recache();
+      }
+
+      const { classes } = this.props;
       return (
         <g>
-          <path key="$axis" d={pAxis} className={classes.axis} />
-          {sparklines}
+          <path key="$axis" d={this.pAxis} className={classes.axis} />
+          {this.sparklines}
         </g>
       );
     }
