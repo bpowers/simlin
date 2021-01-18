@@ -34,6 +34,7 @@
     "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092",
     "start:backend": "yarn workspace @system-dynamics/server start:backend",
     "start:frontend": "yarn workspace @system-dynamics/app start:frontend",
+    "rebuild-stdlib": "cargo build && for input in stdlib/*.stmx; do model=\"$(basename $input | cut -d '.' -f 1)\"; target/debug/mdl convert --model-only \"$input\" --output src/system-dynamics-engine/src/stdlib/\"$model\".pb; done",
     "build": "yarn workspaces run build",
     "clean": "yarn workspaces run clean",
     "deploy": "export NODE_ENV=production && yarn clean && yarn build && yarn workspace @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && yarn workspace @system-dynamics/app deploy-clean",
