@@ -421,7 +421,7 @@
 				<units>dmnl</units>
 			</aux>
 			<aux name="average training expenditure">
-				<eqn>DELAYN(real_training_expenditure,training_expenditure_implementation_time,1,INITIAL_TRAINING_EXPENDITURE)</eqn>
+				<eqn>DELAY1(real_training_expenditure,training_expenditure_implementation_time,INITIAL_TRAINING_EXPENDITURE)</eqn>
 				<units>zq87/year</units>
 			</aux>
 			<stock name="waste land">
@@ -685,7 +685,7 @@
 				<units>kg/year</units>
 			</aux>
 			<aux name="effect of oil price on tfp">
-				<eqn>DELAYN(relative_oil_price^elasticity_of_tfp_to_oil_price,time_for_changes_in_energy_prices_to_effect_tfp,1,1)</eqn>
+				<eqn>DELAY1(relative_oil_price^elasticity_of_tfp_to_oil_price,time_for_changes_in_energy_prices_to_effect_tfp,1)</eqn>
 				<units>dmnl</units>
 			</aux>
 			<aux name="labor force">
