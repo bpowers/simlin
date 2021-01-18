@@ -251,14 +251,19 @@ fn simulates_aliases() {
 }
 
 #[test]
+fn simulates_init_builtin() {
+    simulate_path("../../test/builtin_init/builtin_init.stmx");
+}
+
+#[test]
 fn simulates_arrays() {
     simulate_path("../../test/arrays1/arrays.stmx");
 }
 
-#[test]
-fn simulates_land_model() {
-    simulate_path("../../test/land_model/land_model.stmx");
-}
+// #[test]
+// fn simulates_land_model() {
+//     simulate_path("../../test/land_model/land_model.stmx");
+// }
 
 #[test]
 fn bad_model_name() {
