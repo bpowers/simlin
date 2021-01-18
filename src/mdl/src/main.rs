@@ -159,7 +159,7 @@ fn main() {
                 let var = model_datamodel.get_variable(&ident).unwrap();
                 found_var_error = true;
                 for error in errors {
-                    eprintln!("");
+                    eprintln!();
                     if let Some(Equation::Scalar(eqn)) = var.get_equation() {
                         eprintln!("    {}", eqn);
                         let space = std::iter::repeat(" ")

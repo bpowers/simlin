@@ -93,7 +93,7 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
         all_var_deps.insert(id, Some(all_deps));
 
         Ok(())
-    };
+    }
 
     for var in vars.iter() {
         all_deps_inner(

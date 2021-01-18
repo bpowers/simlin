@@ -6,6 +6,7 @@ use std::io::BufRead;
 
 use serde::{Deserialize, Serialize};
 
+use crate::xmile::view_element::LinkEnd;
 use std::collections::HashMap;
 use system_dynamics_engine::common::{canonicalize, Result};
 use system_dynamics_engine::datamodel;
@@ -612,7 +613,7 @@ pub enum ViewType {
 pub mod view_element {
     use super::datamodel;
     use crate::xmile::{STOCK_HEIGHT, STOCK_WIDTH};
-    use serde::{Deserialize, Serialize};
+    use serde::{de, Deserialize, Deserializer, Serialize};
     use system_dynamics_engine::datamodel::view_element::LinkShape;
 
     // converts an angle associated with a connector (in degrees) into an
@@ -1088,11 +1089,141 @@ pub mod view_element {
     }
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct AliasLinkEnd {
+        pub uid: i32,
+    }
+
+    #[derive(Clone, PartialEq, Debug, Serialize)]
+    pub enum LinkEnd {
+        #[serde(rename = "$value")]
+        Named(String),
+        #[serde(rename = "alias")]
+        Alias(AliasLinkEnd),
+    }
+
+    // this is hacked up from the derived Deserialize method, but now works with the
+    // bad way 'from' tags are done for Connectors that start on an alias.
+    impl<'de> Deserialize<'de> for LinkEnd {
+        fn deserialize<V>(__deserializer: V) -> std::result::Result<Self, V::Error>
+        where
+            V: Deserializer<'de>,
+        {
+            enum Field {
+                Field0,
+                Field1,
+            }
+            struct __FieldVisitor;
+            impl<'de> de::Visitor<'de> for __FieldVisitor {
+                type Value = Field;
+                fn expecting(&self, __formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    __formatter.write_str("variant identifier")
+                }
+
+                fn visit_u64<U>(self, __value: u64) -> std::result::Result<Self::Value, U>
+                where
+                    U: de::Error,
+                {
+                    match __value {
+                        0u64 => Ok(Field::Field0),
+                        1u64 => Ok(Field::Field1),
+                        _ => Err(de::Error::invalid_value(
+                            de::Unexpected::Unsigned(__value),
+                            &"variant index 0 <= i < 2",
+                        )),
+                    }
+                }
+                fn visit_str<U>(self, __value: &str) -> std::result::Result<Self::Value, U>
+                where
+                    U: de::Error,
+                {
+                    match __value {
+                        "alias" => Ok(Field::Field1),
+                        _ => Ok(Field::Field0),
+                    }
+                }
+
+                fn visit_bytes<U>(self, __value: &[u8]) -> std::result::Result<Self::Value, U>
+                where
+                    U: de::Error,
+                {
+                    match __value {
+                        b"$value" => Ok(Field::Field0),
+                        b"alias" => Ok(Field::Field1),
+                        _ => {
+                            let __value = &std::string::String::from_utf8_lossy(__value);
+                            Err(de::Error::unknown_variant(__value, VARIANTS))
+                        }
+                    }
+                }
+            }
+
+            impl<'de> Deserialize<'de> for Field {
+                #[inline]
+                fn deserialize<V>(__deserializer: V) -> std::result::Result<Self, V::Error>
+                where
+                    V: Deserializer<'de>,
+                {
+                    Deserializer::deserialize_identifier(__deserializer, __FieldVisitor)
+                }
+            }
+            struct __Visitor<'de> {
+                marker: std::marker::PhantomData<LinkEnd>,
+                lifetime: std::marker::PhantomData<&'de ()>,
+            }
+            impl<'de> de::Visitor<'de> for __Visitor<'de> {
+                type Value = LinkEnd;
+                fn expecting(&self, __formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    __formatter.write_str("enum LinkEnd")
+                }
+                fn visit_enum<__A>(
+                    self,
+                    __data: __A,
+                ) -> std::result::Result<Self::Value, __A::Error>
+                where
+                    __A: de::EnumAccess<'de>,
+                {
+                    match match de::EnumAccess::variant(__data) {
+                        Ok(__val) => __val,
+                        Err(__err) => {
+                            return Err(__err);
+                        }
+                    } {
+                        (Field::Field0, __variant) => std::result::Result::map(
+                            de::VariantAccess::newtype_variant::<String>(__variant),
+                            LinkEnd::Named,
+                        ),
+                        (Field::Field1, __variant) => std::result::Result::map(
+                            de::VariantAccess::newtype_variant::<AliasLinkEnd>(__variant),
+                            LinkEnd::Alias,
+                        ),
+                    }
+                }
+            }
+            const VARIANTS: &[&str] = &["$value", "alias"];
+            __deserializer.deserialize_enum(
+                "LinkEnd",
+                VARIANTS,
+                __Visitor {
+                    marker: std::marker::PhantomData::<LinkEnd>,
+                    lifetime: std::marker::PhantomData,
+                },
+            )
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct LinkEndContainer {
+        #[serde(rename = "$value")]
+        pub end: LinkEnd,
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Link {
         pub uid: Option<i32>,
-        pub from: String,
+        pub from: LinkEndContainer,
         pub from_uid: Option<i32>,
-        pub to: String,
+        #[serde(rename = "to")]
+        pub to: LinkEndContainer,
         pub to_uid: Option<i32>,
         pub angle: Option<f64>,
         pub is_straight: Option<bool>,
@@ -1144,9 +1275,13 @@ pub mod view_element {
             };
             Link {
                 uid: Some(v.uid),
-                from: "".to_string(),
+                from: LinkEndContainer {
+                    end: LinkEnd::Named("".to_owned()),
+                },
                 from_uid: Some(v.from_uid),
-                to: "".to_string(),
+                to: LinkEndContainer {
+                    end: LinkEnd::Named("".to_owned()),
+                },
                 to_uid: Some(v.to_uid),
                 angle,
                 is_straight,
@@ -1425,8 +1560,12 @@ fn cloud_for(flow: &ViewObject, pos: CloudPosition, uid: i32) -> ViewObject {
 impl View {
     fn assign_uids(&mut self) -> HashMap<String, i32> {
         let mut uid_map: HashMap<String, i32> = HashMap::new();
+        let mut orig_uid_map: HashMap<i32, i32> = HashMap::new();
         let mut next_uid = 1;
         for o in self.objects.iter_mut() {
+            if let Some(orig_uid) = o.uid() {
+                orig_uid_map.insert(orig_uid, next_uid);
+            }
             o.set_uid(next_uid);
             if let Some(ident) = o.ident() {
                 uid_map.insert(ident, next_uid);
@@ -1435,8 +1574,14 @@ impl View {
         }
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
-                link.from_uid = uid_map.get(&canonicalize(&link.from)).cloned();
-                link.to_uid = uid_map.get(&canonicalize(&link.to)).cloned();
+                link.from_uid = match &link.from.end {
+                    LinkEnd::Named(name) => uid_map.get(&canonicalize(name)).cloned(),
+                    LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
+                };
+                link.to_uid = match &link.to.end {
+                    LinkEnd::Named(name) => uid_map.get(&canonicalize(name)).cloned(),
+                    LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
+                };
             }
         }
 
