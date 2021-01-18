@@ -212,6 +212,8 @@ export const Canvas = withStyles(styles)(
     private elements = Map<UID, ViewElement>();
     private selectionUpdates = Map<UID, ViewElement>();
 
+    private computeBounds = false;
+
     constructor(props: CanvasPropsFull) {
       super(props);
 
@@ -306,7 +308,9 @@ export const Canvas = withStyles(styles)(
         onSelection: this.handleSetSelection,
       };
 
-      this.elementBounds = this.elementBounds.push(cloudBounds(element));
+      if (this.computeBounds) {
+        this.elementBounds = this.elementBounds.push(cloudBounds(element));
+      }
 
       return <Cloud key={element.uid} {...props} />;
     };
@@ -390,7 +394,9 @@ export const Canvas = withStyles(styles)(
         hasWarning,
       };
 
-      this.elementBounds = this.elementBounds.push(auxBounds(element));
+      if (this.computeBounds) {
+        this.elementBounds = this.elementBounds.push(auxBounds(element));
+      }
 
       return <Aux key={element.ident} {...props} />;
     };
@@ -409,7 +415,10 @@ export const Canvas = withStyles(styles)(
         onLabelDrag: this.handleLabelDrag,
         hasWarning,
       };
-      this.elementBounds = this.elementBounds.push(stockBounds(element));
+
+      if (this.computeBounds) {
+        this.elementBounds = this.elementBounds.push(stockBounds(element));
+      }
       return <Stock key={element.ident} {...props} />;
     };
 
@@ -419,7 +428,10 @@ export const Canvas = withStyles(styles)(
         element,
         isSelected,
       };
-      this.elementBounds = this.elementBounds.push(moduleBounds(props));
+
+      if (this.computeBounds) {
+        this.elementBounds = this.elementBounds.push(moduleBounds(props));
+      }
       return <Module key={element.ident} {...props} />;
     };
 
@@ -1234,7 +1246,11 @@ export const Canvas = withStyles(styles)(
       this.populateNamedElements(displayElements);
 
       // FIXME: this is so gross
-      this.elementBounds = List<Rect | undefined>();
+      // we only need to compute bounds when we are embedded
+      this.computeBounds = embedded;
+      if (this.computeBounds) {
+        this.elementBounds = List<Rect | undefined>();
+      }
 
       // phase 3: create React components and add them to the appropriate layer
       for (let element of displayElements) {
@@ -1339,7 +1355,10 @@ export const Canvas = withStyles(styles)(
       );
 
       // we don't need these things anymore
-      this.elementBounds = List<Rect | undefined>();
+
+      if (this.computeBounds) {
+        this.elementBounds = List<Rect | undefined>();
+      }
       this.selectionUpdates = Map<UID, ViewElement>();
       // n.b. we don't want to clear this.elements as thats used when handling callbacks
 
