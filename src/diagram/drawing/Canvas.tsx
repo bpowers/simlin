@@ -40,6 +40,7 @@ import { Flow, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flo
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
+import { Alias, AliasProps } from '@system-dynamics/diagram/drawing/Alias';
 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;
@@ -267,8 +268,16 @@ export const Canvas = withStyles(styles)(
       return this.props.selection.has(element.uid);
     }
 
-    private alias = (_element: AliasViewElement): React.ReactElement => {
-      throw new Error('FIXME: aliases not supported yet');
+    private alias = (element: AliasViewElement): React.ReactElement => {
+      const props: AliasProps = {
+        isSelected: false,
+        isValidTarget: undefined,
+        series: undefined,
+        onSelection: () => {},
+        onLabelDrag: () => {},
+        element,
+      };
+      return <Alias key={element.uid} {...props} />;
     };
 
     private cloud = (element: CloudViewElement): React.ReactElement | undefined => {
