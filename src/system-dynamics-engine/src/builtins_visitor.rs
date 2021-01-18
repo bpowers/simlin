@@ -10,10 +10,11 @@ use crate::common::{EquationError, Ident};
 use crate::{datamodel, eqn_err};
 
 fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
-    let args = match name {
+    let args: &'static [&'static str] = match name {
         "smth1" | "smth3" | "delay1" | "delay3" | "trend" => {
             &["input", "delay_time", "initial_value"]
         }
+        "init" => &["input"],
         _ => {
             return None;
         }
