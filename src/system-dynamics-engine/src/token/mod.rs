@@ -155,7 +155,7 @@ impl<'input> Lexer<'input> {
 
         lazy_static! {
             static ref NUMBER_RE: Regex =
-                Regex::new(r"\d*(\.\d*)?([eE]-?(\d?(\.\d*)?)?)?").unwrap();
+                Regex::new(r"\d*(\.\d*)?([eE][-+]?(\d*(\.\d*)?)?)?").unwrap();
         }
 
         let m: Match = NUMBER_RE.find(&self.text[idx0..]).unwrap();

@@ -145,6 +145,14 @@ fn subscripts() {
 }
 
 #[test]
+fn floats() {
+    #[rustfmt::skip]
+    test("2.06101e+06", vec![
+        ("~~~~~~~~~~~", Num("2.06101e+06")),
+    ]);
+}
+
+#[test]
 fn unclosed_comment() {
     test_err("{comment", ("~~~~~~~~", UnclosedComment));
 }
