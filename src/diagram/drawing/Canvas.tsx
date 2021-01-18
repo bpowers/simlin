@@ -269,13 +269,22 @@ export const Canvas = withStyles(styles)(
     }
 
     private alias = (element: AliasViewElement): React.ReactElement => {
+      const aliasOf = this.elements.get(element.aliasOfUid) as NamedViewElement | undefined;
+      let series;
+      let isValidTarget: boolean | undefined;
+      if (aliasOf) {
+        series = this.props.project.getSeries(this.props.data, this.props.model.name, aliasOf.ident);
+        isValidTarget = this.isValidTarget(aliasOf);
+      }
+      const isSelected = this.isSelected(element);
       const props: AliasProps = {
-        isSelected: false,
-        isValidTarget: undefined,
-        series: undefined,
-        onSelection: () => {},
-        onLabelDrag: () => {},
+        isSelected,
+        isValidTarget,
+        series,
+        onSelection: this.handleSetSelection,
+        onLabelDrag: this.handleLabelDrag,
         element,
+        aliasOf,
       };
       return <Alias key={element.uid} {...props} />;
     };
@@ -366,7 +375,7 @@ export const Canvas = withStyles(styles)(
       return element instanceof FlowViewElement || element instanceof AuxViewElement;
     }
 
-    private aux = (element: AuxViewElement, _isGhost = false): React.ReactElement => {
+    private aux = (element: AuxViewElement): React.ReactElement => {
       const hasWarning = this.props.model.variables.get(element.ident)?.hasError || false;
       const isSelected = this.isSelected(element);
       const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident);

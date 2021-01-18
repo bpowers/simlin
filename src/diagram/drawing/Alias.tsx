@@ -8,9 +8,9 @@ import { List } from 'immutable';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { AliasViewElement, ViewElement } from '@system-dynamics/core/datamodel';
+import { AliasViewElement, NamedViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
-import { mergeBounds, Point, Rect, square } from './common';
+import { displayName, mergeBounds, Point, Rect, square } from './common';
 import { AuxRadius } from './default';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
@@ -57,14 +57,15 @@ export interface AliasPropsFull extends WithStyles<typeof styles> {
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: AliasViewElement;
+  aliasOf: NamedViewElement | undefined;
 }
 
 export type AliasProps = Pick<
   AliasPropsFull,
-  'isSelected' | 'isValidTarget' | 'series' | 'onSelection' | 'onLabelDrag' | 'element'
+  'isSelected' | 'isValidTarget' | 'series' | 'onSelection' | 'onLabelDrag' | 'element' | 'aliasOf'
 >;
 
-export function auxContains(element: ViewElement, point: Point): boolean {
+export function aliasContains(element: ViewElement, point: Point): boolean {
   const cx = element.cx;
   const cy = element.cy;
 
@@ -72,7 +73,7 @@ export function auxContains(element: ViewElement, point: Point): boolean {
   return distance <= AuxRadius;
 }
 
-export function auxBounds(element: AliasViewElement): Rect {
+export function aliasBounds(element: AliasViewElement, aliasOf: NamedViewElement | undefined): Rect {
   const { cx, cy } = element;
   const r = AuxRadius;
 
@@ -88,7 +89,7 @@ export function auxBounds(element: AliasViewElement): Rect {
     cx,
     cy,
     side,
-    text: 'TODO ALIAS', // displayName(defined(element.name))
+    text: displayName(aliasOf?.name || 'unknown alias'),
   };
 
   return mergeBounds(bounds, labelBounds(labelProps));
@@ -131,7 +132,7 @@ export const Alias = withStyles(styles)(
     }
 
     render() {
-      const { classes, element, isSelected, isValidTarget, series } = this.props;
+      const { classes, element, isSelected, isValidTarget, series, aliasOf } = this.props;
       const cx = element.cx;
       const cy = element.cy;
       const r = this.radius();
@@ -148,7 +149,7 @@ export const Alias = withStyles(styles)(
           side={side}
           rw={r + arrayedOffset}
           rh={r + arrayedOffset}
-          text={'TODO ALIAS'} // displayName(defined(element.name))
+          text={displayName(aliasOf?.name || 'unknown alias')}
           onSelection={this.handleLabelSelection}
           onLabelDrag={this.props.onLabelDrag}
         />
