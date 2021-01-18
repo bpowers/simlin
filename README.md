@@ -24,7 +24,6 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 * If you select a variable that is under the "search" box, the sheet showing variable details will cover that part of the model (you can manually shift-click the background and reposition the diagram to get out of/around this).
 * Drag selection isn't implemented yet.
 * You can only detach the arrowhead of a flow, not the origin/source end.
-* Moving flows can be somewhat funky.
 * Undo/redo only applies within a browser tab.  If you restart your browser (or reload the page), you will lose the ability to undo to before the reload.
 * Only straight-line flows are supported for now.
 * Units aren't implemented.
