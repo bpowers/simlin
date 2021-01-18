@@ -1375,6 +1375,59 @@ pub mod view_element {
     }
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    pub struct Alias {
+        pub of: String,
+        pub of_uid: Option<i32>,
+        pub uid: Option<i32>,
+        pub x: f64,
+        pub y: f64,
+        pub label_side: Option<LabelSide>,
+    }
+
+    impl From<Alias> for datamodel::view_element::Alias {
+        fn from(v: Alias) -> Self {
+            datamodel::view_element::Alias {
+                uid: v.uid.unwrap_or(-1),
+                alias_of_uid: v.of_uid.unwrap_or(-1),
+                x: v.x,
+                y: v.y,
+                label_side: datamodel::view_element::LabelSide::from(
+                    v.label_side.unwrap_or(LabelSide::Bottom),
+                ),
+            }
+        }
+    }
+
+    impl From<datamodel::view_element::Alias> for Alias {
+        fn from(v: datamodel::view_element::Alias) -> Self {
+            Alias {
+                uid: Some(v.uid),
+                of: "".to_owned(),
+                of_uid: Some(v.alias_of_uid),
+                x: v.x,
+                y: v.y,
+                label_side: Some(LabelSide::from(v.label_side)),
+            }
+        }
+    }
+
+    #[test]
+    fn test_alias_roundtrip() {
+        let cases: &[_] = &[datamodel::view_element::Alias {
+            uid: 33,
+            alias_of_uid: 2,
+            x: 74.0,
+            y: 31.0,
+            label_side: datamodel::view_element::LabelSide::Right,
+        }];
+        for expected in cases {
+            let expected = expected.clone();
+            let actual = datamodel::view_element::Alias::from(Alias::from(expected.clone()));
+            assert_eq!(expected, actual);
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Cloud {
         pub uid: i32,
         pub flow_uid: i32,
@@ -1430,6 +1483,7 @@ pub enum ViewObject {
     Link(view_element::Link),
     Module(view_element::Module),
     Cloud(view_element::Cloud),
+    Alias(view_element::Alias),
     // Style(Style),
     #[serde(other)]
     Unhandled,
@@ -1444,6 +1498,7 @@ impl ViewObject {
             ViewObject::Link(link) => link.uid = Some(uid),
             ViewObject::Module(module) => module.uid = Some(uid),
             ViewObject::Cloud(cloud) => cloud.uid = uid,
+            ViewObject::Alias(alias) => alias.uid = Some(uid),
             ViewObject::Unhandled => {}
         }
     }
@@ -1456,6 +1511,7 @@ impl ViewObject {
             ViewObject::Link(link) => link.uid,
             ViewObject::Module(module) => module.uid,
             ViewObject::Cloud(cloud) => Some(cloud.uid),
+            ViewObject::Alias(alias) => alias.uid,
             ViewObject::Unhandled => None,
         }
     }
@@ -1468,6 +1524,7 @@ impl ViewObject {
             ViewObject::Link(_link) => None,
             ViewObject::Module(module) => Some(canonicalize(&module.name)),
             ViewObject::Cloud(_cloud) => None,
+            ViewObject::Alias(_alias) => None,
             ViewObject::Unhandled => None,
         }
     }
@@ -1494,6 +1551,9 @@ impl From<ViewObject> for datamodel::ViewElement {
             ViewObject::Cloud(v) => {
                 datamodel::ViewElement::Cloud(datamodel::view_element::Cloud::from(v))
             }
+            ViewObject::Alias(v) => {
+                datamodel::ViewElement::Alias(datamodel::view_element::Alias::from(v))
+            }
             ViewObject::Unhandled => unreachable!("must filter out unhandled"),
         }
     }
@@ -1508,7 +1568,7 @@ impl From<datamodel::ViewElement> for ViewObject {
             ViewElement::Flow(v) => ViewObject::Flow(view_element::Flow::from(v)),
             ViewElement::Link(v) => ViewObject::Link(view_element::Link::from(v)),
             ViewElement::Module(v) => ViewObject::Module(view_element::Module::from(v)),
-            ViewElement::Alias(_v) => ViewObject::Unhandled, // TODO
+            ViewElement::Alias(v) => ViewObject::Alias(view_element::Alias::from(v)),
             ViewElement::Cloud(_v) => ViewObject::Unhandled,
         }
     }
@@ -1572,6 +1632,7 @@ impl View {
             }
             next_uid += 1;
         }
+        eprintln!("orig uid map:\n{:?}\n", orig_uid_map);
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
                 link.from_uid = match &link.from.end {
@@ -1581,6 +1642,13 @@ impl View {
                 link.to_uid = match &link.to.end {
                     LinkEnd::Named(name) => uid_map.get(&canonicalize(name)).cloned(),
                     LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
+                };
+            } else if let ViewObject::Alias(alias) = o {
+                let of_ident = canonicalize(&alias.of);
+                alias.of_uid = if !of_ident.is_empty() {
+                    uid_map.get(&of_ident).cloned()
+                } else {
+                    None
                 };
             }
         }
