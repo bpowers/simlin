@@ -4,8 +4,6 @@
 
 import * as React from 'react';
 
-import { List } from 'immutable';
-
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { AuxViewElement, ViewElement } from '@system-dynamics/core/datamodel';
@@ -54,7 +52,7 @@ export interface AuxPropsFull extends WithStyles<typeof styles> {
   isEditingName: boolean;
   isValidTarget?: boolean;
   hasWarning?: boolean;
-  series: List<Series> | undefined;
+  series: Readonly<Array<Series>> | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: AuxViewElement;
@@ -128,8 +126,8 @@ export const Aux = withStyles(styles)(
       return <circle className={classes.indicator} cx={cx} cy={cy} r={3} />;
     }
 
-    sparkline(series: List<Series> | undefined) {
-      if (!series || series.isEmpty()) {
+    sparkline(series: Readonly<Array<Series>> | undefined) {
+      if (!series || series.length === 0) {
         return undefined;
       }
       const { element } = this.props;

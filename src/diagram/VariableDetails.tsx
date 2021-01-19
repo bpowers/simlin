@@ -86,7 +86,6 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   onDelete: (ident: string) => void;
   onEquationChange: (ident: string, newEquation: string) => void;
   onTableChange: (ident: string, newTable: GraphicalFunction | null) => void;
-  data: List<Series> | undefined;
   activeTab: number;
   onActiveTabChange: (newActiveTab: number) => void;
 }
@@ -208,9 +207,11 @@ export const VariableDetails = withStyles(styles)(
     };
 
     renderEquation() {
-      const { data, classes } = this.props;
+      const { classes } = this.props;
       const { equation } = this.state;
       const initialEquation = scalarEquationFor(this.props.variable);
+
+      const data: Readonly<Array<Series>> | undefined = this.props.variable.data;
 
       const lines = [];
 
@@ -221,7 +222,7 @@ export const VariableDetails = withStyles(styles)(
         let i = 0;
         const colors = brewer.Dark2;
         for (const dataset of data) {
-          const name = data.size === 1 ? 'y' : dataset.name;
+          const name = data.length === 1 ? 'y' : dataset.name;
           for (let i = 0; data && i < dataset.time.length; i++) {
             const x = dataset.time[i];
             const y = dataset.values[i];

@@ -299,7 +299,11 @@ export const Editor = withStyles(styles)(
         setTimeout(() => {
           engine.simClose();
         });
-        this.setState({ data });
+        const project = defined(this.project());
+        this.setState({
+          activeProject: project.attachData(data, this.state.modelName),
+          data,
+        });
       } catch (e) {
         this.setState({
           modelErrors: this.state.modelErrors.push(e),
@@ -315,7 +319,10 @@ export const Editor = withStyles(styles)(
         }
       }
 
-      const activeProject = this.updateVariableErrors(Project.deserializeBinary(serializedProject));
+      let activeProject = this.updateVariableErrors(Project.deserializeBinary(serializedProject));
+      if (this.state.data) {
+        activeProject = activeProject.attachData(this.state.data, this.state.modelName);
+      }
 
       const priorHistory = this.state.projectHistory.slice();
 
@@ -1132,7 +1139,6 @@ export const Editor = withStyles(styles)(
           model={model}
           view={view}
           version={this.state.projectVersion}
-          data={this.state.data}
           selectedTool={this.state.selectedTool}
           selection={this.state.selection}
           onRenameVariable={onRenameVariable}
@@ -1351,12 +1357,10 @@ export const Editor = withStyles(styles)(
         return;
       }
 
-      const project = defined(this.project());
       const model = defined(this.getModel());
 
       const ident = defined(namedElement.ident);
       const variable = defined(model.variables.get(ident));
-      const series = project.getSeries(this.state.data, this.state.modelName, variable.ident);
 
       const activeTab = this.state.variableDetailsActiveTab;
 
@@ -1366,7 +1370,6 @@ export const Editor = withStyles(styles)(
             key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
             variable={variable}
             viewElement={namedElement}
-            data={series}
             activeTab={activeTab}
             onActiveTabChange={this.handleVariableDetailsActiveTabChange}
             onDelete={this.handleVariableDelete}
@@ -1508,9 +1511,9 @@ export const Editor = withStyles(styles)(
       if (!project || !this.state.modelName) {
         return;
       }
-      const { data, modelName } = this.state;
+      const { modelName } = this.state;
 
-      const [svg, viewbox] = renderSvgToString(project, modelName, data);
+      const [svg, viewbox] = renderSvgToString(project, modelName);
       const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
       const ctx = exists(osCanvas.getContext('2d'));
       const canvas = Canvg.fromString(ctx, svg, {

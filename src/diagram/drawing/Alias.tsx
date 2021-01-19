@@ -4,8 +4,6 @@
 
 import * as React from 'react';
 
-import { List } from 'immutable';
-
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { AliasViewElement, NamedViewElement, ViewElement } from '@system-dynamics/core/datamodel';
@@ -53,7 +51,7 @@ const styles = createStyles({
 export interface AliasPropsFull extends WithStyles<typeof styles> {
   isSelected: boolean;
   isValidTarget?: boolean;
-  series: List<Series> | undefined;
+  series: Readonly<Array<Series>> | undefined;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: AliasViewElement;
@@ -113,8 +111,8 @@ export const Alias = withStyles(styles)(
       return AuxRadius;
     }
 
-    sparkline(series: List<Series> | undefined) {
-      if (!series || series.isEmpty()) {
+    sparkline(series: Readonly<Array<Series>> | undefined) {
+      if (!series || series.length === 0) {
         return undefined;
       }
       const { element } = this.props;

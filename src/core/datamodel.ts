@@ -273,7 +273,9 @@ export interface Variable {
   readonly isArrayed: boolean;
   readonly hasError: boolean;
   readonly errors: List<EquationError> | undefined;
+  readonly data: Readonly<Array<Series>> | undefined;
   set(prop: 'errors', errors: List<EquationError> | undefined): Variable;
+  set(prop: 'data', data: Readonly<Array<Series>> | undefined): Variable;
 }
 
 const stockDefaults = {
@@ -284,6 +286,7 @@ const stockDefaults = {
   inflows: List<string>(),
   outflows: List<string>(),
   nonNegative: false,
+  data: undefined as (Readonly<Array<Series>> | undefined),
   errors: undefined as (List<EquationError> | undefined),
 };
 export class Stock extends Record(stockDefaults) implements Variable {
@@ -301,6 +304,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
       inflows: List(stock.getInflowsList()),
       outflows: List(stock.getOutflowsList()),
       nonNegative: stock.getNonNegative(),
+      data: undefined,
       errors: undefined as (List<EquationError> | undefined),
     });
   }
@@ -322,6 +326,7 @@ const flowDefaults = {
   units: '',
   gf: undefined as GraphicalFunction | undefined,
   nonNegative: false,
+  data: undefined as (Readonly<Array<Series>> | undefined),
   errors: undefined as (List<EquationError> | undefined),
 };
 export class Flow extends Record(flowDefaults) implements Variable {
@@ -339,6 +344,7 @@ export class Flow extends Record(flowDefaults) implements Variable {
       units: flow.getUnits(),
       gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
       nonNegative: flow.getNonNegative(),
+      data: undefined,
       errors: undefined,
     });
   }
@@ -356,6 +362,7 @@ const auxDefaults = {
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
+  data: undefined as (Readonly<Array<Series>> | undefined),
   errors: undefined as (List<EquationError> | undefined),
 };
 export class Aux extends Record(auxDefaults) implements Variable {
@@ -372,6 +379,7 @@ export class Aux extends Record(auxDefaults) implements Variable {
       documentation: aux.getDocumentation(),
       units: aux.getUnits(),
       gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
+      data: undefined,
       errors: undefined,
     });
   }
@@ -402,6 +410,7 @@ const moduleDefaults = {
   documentation: '',
   units: '',
   references: List<ModuleReference>(),
+  data: undefined as (Readonly<Array<Series>> | undefined),
   errors: undefined as (List<EquationError> | undefined),
 };
 export class Module extends Record(moduleDefaults) implements Variable {
@@ -417,6 +426,7 @@ export class Module extends Record(moduleDefaults) implements Variable {
       documentation: module.getDocumentation(),
       units: module.getUnits(),
       references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
+      data: undefined,
       errors: undefined,
     });
   }
@@ -1192,29 +1202,35 @@ export class Project extends Record(projectDefaults) {
     const project = PbProject.deserializeBinary(serializedPb as Uint8Array);
     return Project.fromPb(project);
   }
-  getSeries(data: Map<string, Series>, modelName: string, ident: string): List<Series> | undefined {
-    const v = this.models.get(modelName)?.variables?.get(ident);
-    if (!v) {
-      return;
-    }
-    if (data.has(v.ident)) {
-      return List([defined(data.get(v.ident))]);
-    }
-    if (!v.isArrayed) {
-      return;
-    }
-    const eqn = defined(v.equation);
-    if (!(eqn instanceof ApplyToAllEquation || eqn instanceof ArrayedEquation)) {
-      return;
-    }
-    const dimNames = eqn.dimensionNames;
-    if (dimNames.size !== 1) {
-      return;
-    }
-    const dim = defined(this.dimensions.get(defined(dimNames.get(0))));
-    return dim.subscripts
-      .map((element) => data.get(`${ident}[${element}]`))
-      .filter((data) => data !== undefined)
-      .map((data) => defined(data));
+  attachData(data: Map<string, Series>, modelName: string): Project {
+    let model = defined(this.models.get(modelName));
+    const variables = model.variables.map((v: Variable) => {
+      if (data.has(v.ident)) {
+        return v.set('data', [defined(data.get(v.ident))]);
+      }
+      if (!v.isArrayed) {
+        return v;
+      }
+      const eqn = defined(v.equation);
+      if (!(eqn instanceof ApplyToAllEquation || eqn instanceof ArrayedEquation)) {
+        return v;
+      }
+      const dimNames = eqn.dimensionNames;
+      if (dimNames.size !== 1) {
+        return v;
+      }
+      const ident = v.ident;
+      const dim = defined(this.dimensions.get(defined(dimNames.get(0))));
+      const series = dim.subscripts
+        .map((element) => data.get(`${ident}[${element}]`))
+        .filter((data) => data !== undefined)
+        .map((data) => defined(data))
+        .toArray();
+
+      return v.set('data', series);
+    });
+    model = model.set('variables', variables);
+
+    return this.set('models', this.models.set(modelName, model));
   }
 }

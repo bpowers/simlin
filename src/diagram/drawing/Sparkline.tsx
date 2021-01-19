@@ -62,7 +62,7 @@ function max(arr: Readonly<Float64Array>): number {
 }
 
 interface SparklineProps extends WithStyles<typeof styles> {
-  series: List<Series>;
+  series: Readonly<Array<Series>>;
   width: number;
   height: number;
 }
@@ -75,7 +75,7 @@ export const Sparkline = withStyles(styles)(
 
     recache() {
       const { classes } = this.props;
-      const time = defined(this.props.series.get(0)).time;
+      const time = defined(this.props.series[0]).time;
       const x = 0;
       const y = 0;
       const w = this.props.width;
@@ -109,7 +109,7 @@ export const Sparkline = withStyles(styles)(
           const prefix = i === 0 ? 'M' : 'L';
           p += `${prefix}${x + (w * (time[i] - xMin)) / xSpan},${y + h - (h * (values[i] - yMin)) / ySpan}`;
         }
-        const style = this.props.series.size === 1 ? undefined : { stroke: colors[i % colors.length] };
+        const style = this.props.series.length === 1 ? undefined : { stroke: colors[i % colors.length] };
         sparklines.push(<path key={dataset.name} d={p} className={classes.sparkline} style={style} />);
         i++;
       }
@@ -120,7 +120,7 @@ export const Sparkline = withStyles(styles)(
     }
 
     render() {
-      if (!this.props.series.equals(this.cachedSeries)) {
+      if (this.props.series !== this.cachedSeries) {
         this.recache();
       }
 

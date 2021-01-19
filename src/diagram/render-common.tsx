@@ -6,7 +6,7 @@
 
 import * as React from 'react';
 
-import { Map, Set } from 'immutable';
+import { Set } from 'immutable';
 import { renderToString } from 'react-dom/server';
 
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
@@ -14,7 +14,7 @@ import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 import { createMuiTheme } from '@material-ui/core/styles';
 import { ServerStyleSheets, ThemeProvider } from '@material-ui/styles';
 
-import { defined, Series } from '@system-dynamics/core/common';
+import { defined } from '@system-dynamics/core/common';
 import { Canvas } from './drawing/Canvas';
 import { Box, Point } from './drawing/common';
 
@@ -22,12 +22,8 @@ const theme = createMuiTheme({
   palette: {},
 });
 
-export function renderSvgToString(project: Project, modelName: string, data?: Map<string, Series>): [string, Box] {
+export function renderSvgToString(project: Project, modelName: string): [string, Box] {
   const model = defined(project.models.get(modelName));
-
-  if (!data) {
-    data = Map<string, Series>();
-  }
 
   const renameVariable = (_oldName: string, _newName: string): void => {};
   const onSelection = (_selected: Set<UID>): void => {};
@@ -47,7 +43,6 @@ export function renderSvgToString(project: Project, modelName: string, data?: Ma
       model={model}
       view={defined(model.views.get(0))}
       version={1}
-      data={data}
       selectedTool={undefined}
       selection={Set()}
       onRenameVariable={renameVariable}

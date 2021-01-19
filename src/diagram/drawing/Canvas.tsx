@@ -10,7 +10,7 @@ import { Node } from 'slate';
 
 import { List, Map, Set } from 'immutable';
 
-import { defined, Series } from '@system-dynamics/core/common';
+import { defined } from '@system-dynamics/core/common';
 
 import {
   ViewElement,
@@ -139,7 +139,6 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   model: Model;
   view: StockFlowView;
   version: number;
-  data: Map<string, Series>;
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   selection: Set<UID>;
   onRenameVariable: (oldName: string, newName: string) => void;
@@ -167,7 +166,6 @@ export type CanvasProps = Pick<
   | 'model'
   | 'view'
   | 'version'
-  | 'data'
   | 'selectedTool'
   | 'selection'
   | 'onRenameVariable'
@@ -262,7 +260,7 @@ export const Canvas = withStyles(styles)(
       let series;
       let isValidTarget: boolean | undefined;
       if (aliasOf) {
-        series = this.props.project.getSeries(this.props.data, this.props.model.name, aliasOf.ident);
+        series = this.props.model.variables.get(defined(aliasOf.ident))?.data;
         isValidTarget = this.isValidTarget(aliasOf);
       }
       const isSelected = this.isSelected(element);
@@ -367,9 +365,10 @@ export const Canvas = withStyles(styles)(
     }
 
     private aux = (element: AuxViewElement): React.ReactElement => {
-      const hasWarning = this.props.model.variables.get(element.ident)?.hasError || false;
+      const variable = this.props.model.variables.get(element.ident);
+      const hasWarning = variable?.hasError || false;
       const isSelected = this.isSelected(element);
-      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident);
+      const series = variable?.data;
       const props: AuxProps = {
         element,
         series,
@@ -389,9 +388,10 @@ export const Canvas = withStyles(styles)(
     };
 
     private stock = (element: StockViewElement): React.ReactElement => {
-      const hasWarning = this.props.model.variables.get(element.ident)?.hasError || false;
+      const variable = this.props.model.variables.get(element.ident);
+      const hasWarning = variable?.hasError || false;
       const isSelected = this.isSelected(element);
-      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident);
+      const series = variable?.data;
       const props: StockProps = {
         element,
         series,
@@ -488,10 +488,11 @@ export const Canvas = withStyles(styles)(
     }
 
     private flow = (element: FlowViewElement) => {
-      const hasWarning = this.props.model.variables.get(element.ident)?.hasError || false;
+      const variable = this.props.model.variables.get(element.ident);
+      const hasWarning = variable?.hasError || false;
       const { isMovingArrow } = this.state;
       const isSelected = this.isSelected(element);
-      const series = this.props.project.getSeries(this.props.data, this.props.model.name, element.ident);
+      const series = variable?.data;
 
       if (element.points.size < 2) {
         return;

@@ -448,7 +448,7 @@ export interface FlowPropsFull extends WithStyles<typeof styles> {
   isValidTarget?: boolean;
   isMovingArrow: boolean;
   hasWarning?: boolean;
-  series: List<Series> | undefined;
+  series: Readonly<Array<Series>> | undefined;
   onSelection: (el: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean, isArrowhead?: boolean) => void;
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   source: StockViewElement | CloudViewElement;
@@ -515,8 +515,8 @@ export const Flow = withStyles(styles)(
       return <circle className={classes.indicator} cx={cx} cy={cy} r={3} />;
     }
 
-    sparkline(series: List<Series> | undefined) {
-      if (!series || series.isEmpty()) {
+    sparkline(series: Readonly<Array<Series>> | undefined) {
+      if (!series || series.length === 0) {
         return undefined;
       }
       const { element } = this.props;
