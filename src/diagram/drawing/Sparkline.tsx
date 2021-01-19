@@ -120,7 +120,7 @@ export const Sparkline = withStyles(styles)(
     }
 
     render() {
-      if (this.props.series.equals(this.cachedSeries)) {
+      if (!this.props.series.equals(this.cachedSeries)) {
         this.recache();
       }
 
