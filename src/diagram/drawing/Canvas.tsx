@@ -114,18 +114,6 @@ function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
 }
 
-const ZOrder = Map<'flow' | 'module' | 'stock' | 'aux' | 'link' | 'style' | 'reference' | 'cloud' | 'alias', number>([
-  ['style', 0],
-  ['module', 1],
-  ['link', 2],
-  ['flow', 3],
-  ['cloud', 4],
-  ['stock', 4],
-  ['aux', 5],
-  ['reference', 5],
-  ['alias', 5],
-]);
-
 const ZMax = 6;
 
 interface CanvasState {
@@ -236,16 +224,15 @@ export const Canvas = withStyles(styles)(
     }
 
     getElementByUid(uid: UID): ViewElement {
+      let element: ViewElement | undefined;
       if (uid === inCreationUid) {
-        return defined(this.state.inCreation);
-      } else if (uid === fauxTargetUid) {
-        return fauxTarget;
-      } else if (uid === fauxCloudTargetUid) {
-        return fauxCloudTarget;
+        element = this.state.inCreation;
       } else if (uid === inCreationCloudUid) {
-        return defined(this.state.inCreationCloud);
+        element = this.state.inCreationCloud;
+      } else {
+        element = this.elements.get(uid);
       }
-      return defined(this.elements.get(uid));
+      return defined(element);
     }
 
     // for resolving connector ends
@@ -1228,7 +1215,6 @@ export const Canvas = withStyles(styles)(
       }
 
       let displayElements = view.elements;
-
       if (this.state.inCreation) {
         displayElements = displayElements.push(this.state.inCreation);
       }
@@ -1258,29 +1244,41 @@ export const Canvas = withStyles(styles)(
           element = defined(this.selectionUpdates.get(element.uid));
         }
 
+        // const ZOrder = Map<'flow' | 'module' | 'stock' | 'aux' | 'link' | 'style' | 'reference' | 'cloud' | 'alias', number>([
+        //   ['style', 0],
+        //   ['module', 1],
+        //   ['link', 2],
+        //   ['flow', 3],
+        //   ['cloud', 4],
+        //   ['stock', 4],
+        //   ['aux', 5],
+        //   ['reference', 5],
+        //   ['alias', 5],
+        // ]);
+
         let zOrder = 0;
         let component: React.ReactElement | undefined;
-        if (element instanceof AliasViewElement) {
-          component = this.alias(element);
-          zOrder = defined(ZOrder.get('alias'));
-        } else if (element instanceof AuxViewElement) {
+        if (element instanceof AuxViewElement) {
           component = this.aux(element);
-          zOrder = defined(ZOrder.get('aux'));
-        } else if (element instanceof CloudViewElement) {
-          component = this.cloud(element);
-          zOrder = defined(ZOrder.get('cloud'));
-        } else if (element instanceof FlowViewElement) {
-          component = this.flow(element);
-          zOrder = defined(ZOrder.get('flow'));
+          zOrder = 5;
         } else if (element instanceof LinkViewElement) {
           component = this.connector(element);
-          zOrder = defined(ZOrder.get('link'));
-        } else if (element instanceof ModuleViewElement) {
-          component = this.module(element);
-          zOrder = defined(ZOrder.get('module'));
+          zOrder = 2;
         } else if (element instanceof StockViewElement) {
           component = this.stock(element);
-          zOrder = defined(ZOrder.get('stock'));
+          zOrder = 4;
+        } else if (element instanceof FlowViewElement) {
+          component = this.flow(element);
+          zOrder = 3;
+        } else if (element instanceof CloudViewElement) {
+          component = this.cloud(element);
+          zOrder = 4;
+        } else if (element instanceof AliasViewElement) {
+          component = this.alias(element);
+          zOrder = 5;
+        } else if (element instanceof ModuleViewElement) {
+          component = this.module(element);
+          zOrder = 1;
         }
 
         if (!component) {
