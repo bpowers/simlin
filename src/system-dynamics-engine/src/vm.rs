@@ -252,7 +252,13 @@ impl<'sim> VM<'sim> {
         let module_stocks = &self.sliced_sim.stock_modules[self.compiled_sim.root.as_str()];
 
         if spec.stop < spec.start {
-            return sim_err!(BadSimSpecs, "".to_string());
+            return sim_err!(
+                BadSimSpecs,
+                "end time has to be after start time".to_string()
+            );
+        }
+        if approx_eq!(f64, spec.dt, 0.0) {
+            return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
         }
         let save_step = if spec.save_step > spec.dt {
             spec.save_step
