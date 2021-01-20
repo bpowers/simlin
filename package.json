@@ -19,12 +19,13 @@
     "src/server"
   ],
   "devDependencies": {
-    "npm-run-all": "^4.1.5"
+    "npm-run-all": "^4.1.5",
+    "ts-protoc-gen": "^0.14.0"
   },
   "scripts": {
     "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier -l",
     "rust-needs-format": "cargo fmt -- --check",
-    "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier --write",
+    "js-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|importer/core|engine/core)/' | xargs prettier --write",
     "rust-format": "cargo fmt",
     "format": "npm-run-all -p js-format rust-format",
     "precommit": "npm-run-all -p js-needs-format rust-needs-format lint",
@@ -34,6 +35,7 @@
     "start:firestore": "gcloud beta emulators firestore start --host-port=127.0.0.1:8092",
     "start:backend": "yarn workspace @system-dynamics/server start:backend",
     "start:frontend": "yarn workspace @system-dynamics/app start:frontend",
+    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src -name '*.proto') && sed -i 's/goog.object.extend(exports, proto);/goog.object.extend(exports, proto.project_io);/g' src/system-dynamics-engine/src/project_io_pb.js && mv src/system-dynamics-engine/src/*.[jt]s src/core/pb/ && yarn format",
     "rebuild-stdlib": "cargo build && for input in stdlib/*.stmx; do model=\"$(basename $input | cut -d '.' -f 1)\"; target/debug/mdl convert --model-only \"$input\" --output src/system-dynamics-engine/src/stdlib/\"$model\".pb; done",
     "build": "yarn workspaces run build",
     "clean": "yarn workspaces run clean",

@@ -244,9 +244,17 @@ pub enum ViewElement {
     Cloud(view_element::Cloud),
 }
 
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Offset {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct StockFlow {
     pub elements: Vec<ViewElement>,
+    pub offset: Offset,
+    pub zoom: f64,
 }
 
 #[derive(Clone, PartialEq, Debug)]

@@ -200,9 +200,16 @@ message View {
     // VENDOR_SPECIFIC = 3;
   };
 
+  message Offset {
+    double x = 1;
+    double y = 2;
+  };
+
   ViewType kind = 1;
   // background
   repeated ViewElement elements = 3;
+  Offset offset = 4;
+  double zoom = 5;
 };
 
 message Model {

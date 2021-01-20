@@ -875,6 +875,14 @@ export class View extends jspb.Message {
   setElementsList(value: Array<ViewElement>): void;
   addElements(value?: ViewElement, index?: number): ViewElement;
 
+  hasOffset(): boolean;
+  clearOffset(): void;
+  getOffset(): View.Offset | undefined;
+  setOffset(value?: View.Offset): void;
+
+  getZoom(): number;
+  setZoom(value: number): void;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): View.AsObject;
   static toObject(includeInstance: boolean, msg: View): View.AsObject;
@@ -889,7 +897,33 @@ export namespace View {
   export type AsObject = {
     kind: View.ViewTypeMap[keyof View.ViewTypeMap];
     elementsList: Array<ViewElement.AsObject>;
+    offset?: View.Offset.AsObject;
+    zoom: number;
   };
+
+  export class Offset extends jspb.Message {
+    getX(): number;
+    setX(value: number): void;
+
+    getY(): number;
+    setY(value: number): void;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): Offset.AsObject;
+    static toObject(includeInstance: boolean, msg: Offset): Offset.AsObject;
+    static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+    static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+    static serializeBinaryToWriter(message: Offset, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): Offset;
+    static deserializeBinaryFromReader(message: Offset, reader: jspb.BinaryReader): Offset;
+  }
+
+  export namespace Offset {
+    export type AsObject = {
+      x: number;
+      y: number;
+    };
+  }
 
   export interface ViewTypeMap {
     STOCK_FLOW: 0;

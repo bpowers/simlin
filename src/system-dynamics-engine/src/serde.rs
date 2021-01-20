@@ -2,10 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use float_cmp::approx_eq;
+
 use crate::datamodel::{
     view_element, Aux, Dimension, Dt, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, Module, ModuleReference, Project, SimMethod, SimSpecs, Stock,
-    StockFlow, Variable, View, ViewElement,
+    GraphicalFunctionScale, Model, Module, ModuleReference, Offset, Project, SimMethod, SimSpecs,
+    Stock, StockFlow, Variable, View, ViewElement,
 };
 use crate::project_io;
 
@@ -921,6 +923,28 @@ fn test_view_element_flow_point_roundtrip() {
     }
 }
 
+impl From<project_io::view::Offset> for Offset {
+    fn from(v: project_io::view::Offset) -> Self {
+        Offset { x: v.x, y: v.y }
+    }
+}
+
+impl From<Offset> for project_io::view::Offset {
+    fn from(v: Offset) -> Self {
+        project_io::view::Offset { x: v.x, y: v.y }
+    }
+}
+
+#[test]
+fn test_offset_roundtrip() {
+    let cases: &[_] = &[Offset { x: 7.2, y: 8.1 }, Offset { x: 4.5, y: 5.6 }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Offset::from(project_io::view::Offset::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+}
+
 impl From<project_io::view_element::Flow> for view_element::Flow {
     fn from(v: project_io::view_element::Flow) -> Self {
         view_element::Flow {
@@ -1292,6 +1316,8 @@ impl From<View> for project_io::View {
                     .into_iter()
                     .map(project_io::ViewElement::from)
                     .collect(),
+                offset: Some(view.offset.into()),
+                zoom: view.zoom,
             },
         }
     }
@@ -1301,6 +1327,12 @@ impl From<project_io::View> for View {
     fn from(view: project_io::View) -> Self {
         View::StockFlow(StockFlow {
             elements: view.elements.into_iter().map(ViewElement::from).collect(),
+            offset: view.offset.map(Offset::from).unwrap_or_default(),
+            zoom: if approx_eq!(f64, view.zoom, 0.0) {
+                1.0
+            } else {
+                view.zoom
+            },
         })
     }
 }

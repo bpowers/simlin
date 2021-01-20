@@ -10,7 +10,7 @@ use crate::xmile::view_element::LinkEnd;
 use std::collections::HashMap;
 use system_dynamics_engine::common::{canonicalize, Result};
 use system_dynamics_engine::datamodel;
-use system_dynamics_engine::datamodel::{Equation, ViewElement};
+use system_dynamics_engine::datamodel::{Equation, Offset, ViewElement};
 
 const STOCK_WIDTH: f64 = 45.0;
 const STOCK_HEIGHT: f64 = 35.0;
@@ -1585,6 +1585,9 @@ pub struct View {
     pub show_pages: Option<bool>,
     #[serde(rename = "$value", default)]
     pub objects: Vec<ViewObject>,
+    pub zoom: Option<f64>,
+    pub offset_x: Option<f64>,
+    pub offset_y: Option<f64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1837,6 +1840,15 @@ impl View {
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
         if v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow {
+            let offset = if v.offset_x.is_some() && v.offset_y.is_some() {
+                Offset {
+                    x: v.offset_x.unwrap(),
+                    y: v.offset_y.unwrap(),
+                }
+            } else {
+                Default::default()
+            };
+
             datamodel::View::StockFlow(datamodel::StockFlow {
                 elements: v
                     .objects
@@ -1844,6 +1856,8 @@ impl From<View> for datamodel::View {
                     .filter(|v| !matches!(v, ViewObject::Unhandled))
                     .map(datamodel::ViewElement::from)
                     .collect(),
+                offset,
+                zoom: v.zoom.unwrap_or(1.0),
             })
         } else {
             unreachable!("only stock_flow supported for now -- should be filtered out before here")
@@ -1862,6 +1876,9 @@ impl From<datamodel::View> for View {
                 page_height: None,
                 show_pages: None,
                 objects: v.elements.into_iter().map(ViewObject::from).collect(),
+                zoom: Some(v.zoom),
+                offset_x: Some(v.offset.x),
+                offset_y: Some(v.offset.y),
             },
         }
     }
@@ -1869,6 +1886,7 @@ impl From<datamodel::View> for View {
 
 #[test]
 fn test_view_roundtrip() {
+    use system_dynamics_engine::datamodel::Offset;
     let cases: &[_] = &[datamodel::View::StockFlow(datamodel::StockFlow {
         elements: vec![datamodel::ViewElement::Stock(
             datamodel::view_element::Stock {
@@ -1879,6 +1897,8 @@ fn test_view_roundtrip() {
                 label_side: datamodel::view_element::LabelSide::Center,
             },
         )],
+        offset: Offset { x: 2.4, y: 9.5 },
+        zoom: 1.6,
     })];
     for expected in cases {
         let expected = expected.clone();

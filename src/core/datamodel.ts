@@ -72,17 +72,15 @@ export class EquationError extends Record(equationErrorDefaults) {
 
 const simErrorDefaults = {
   code: ErrorCode.NoError,
-  details: undefined as (string | undefined),
+  details: undefined as string | undefined,
 };
-export class SimError extends Record(simErrorDefaults) {
-}
+export class SimError extends Record(simErrorDefaults) {}
 
 const modelErrorDefaults = {
   code: ErrorCode.NoError,
-  details: undefined as (string | undefined),
+  details: undefined as string | undefined,
 };
-export class ModelError extends Record(modelErrorDefaults) {
-}
+export class ModelError extends Record(modelErrorDefaults) {}
 
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
 
@@ -300,8 +298,8 @@ const stockDefaults = {
   inflows: List<string>(),
   outflows: List<string>(),
   nonNegative: false,
-  data: undefined as (Readonly<Array<Series>> | undefined),
-  errors: undefined as (List<EquationError> | undefined),
+  data: undefined as Readonly<Array<Series>> | undefined,
+  errors: undefined as List<EquationError> | undefined,
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -319,7 +317,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
       outflows: List(stock.getOutflowsList()),
       nonNegative: stock.getNonNegative(),
       data: undefined,
-      errors: undefined as (List<EquationError> | undefined),
+      errors: undefined as List<EquationError> | undefined,
     });
   }
   get gf(): undefined {
@@ -340,8 +338,8 @@ const flowDefaults = {
   units: '',
   gf: undefined as GraphicalFunction | undefined,
   nonNegative: false,
-  data: undefined as (Readonly<Array<Series>> | undefined),
-  errors: undefined as (List<EquationError> | undefined),
+  data: undefined as Readonly<Array<Series>> | undefined,
+  errors: undefined as List<EquationError> | undefined,
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -376,8 +374,8 @@ const auxDefaults = {
   documentation: '',
   units: '',
   gf: undefined as GraphicalFunction | undefined,
-  data: undefined as (Readonly<Array<Series>> | undefined),
-  errors: undefined as (List<EquationError> | undefined),
+  data: undefined as Readonly<Array<Series>> | undefined,
+  errors: undefined as List<EquationError> | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -424,8 +422,8 @@ const moduleDefaults = {
   documentation: '',
   units: '',
   references: List<ModuleReference>(),
-  data: undefined as (Readonly<Array<Series>> | undefined),
-  errors: undefined as (List<EquationError> | undefined),
+  data: undefined as Readonly<Array<Series>> | undefined,
+  errors: undefined as List<EquationError> | undefined,
 };
 export class Module extends Record(moduleDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -975,8 +973,12 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
     ).map((element: ViewElement) => {
       if (element instanceof StockViewElement && element.var) {
         const stock = element.var;
-        const inflows = List<UID>(stock.inflows.filter((ident) => namedElements.has(ident)).map((ident) => defined(namedElements.get(ident))));
-        const outflows = List<UID>(stock.outflows.filter((ident) => namedElements.has(ident)).map((ident) => defined(namedElements.get(ident))));
+        const inflows = List<UID>(
+          stock.inflows.filter((ident) => namedElements.has(ident)).map((ident) => defined(namedElements.get(ident))),
+        );
+        const outflows = List<UID>(
+          stock.outflows.filter((ident) => namedElements.has(ident)).map((ident) => defined(namedElements.get(ident))),
+        );
         return element.merge({
           inflows,
           outflows,
