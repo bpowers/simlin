@@ -14,7 +14,7 @@ use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;
 use crate::model::resolve_relative;
-use crate::{datamodel, eqn_err};
+use crate::{datamodel, eqn_err, ErrorCode};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
@@ -336,7 +336,16 @@ pub fn parse_var(
                     None
                 }
             },
-            None => None,
+            None => {
+                if errors.is_empty() {
+                    errors.push(EquationError {
+                        start: 0,
+                        end: 0,
+                        code: ErrorCode::EmptyEquation,
+                    })
+                }
+                None
+            }
         };
         let direct_deps = match &ast {
             Some(ast) => identifier_set(ast, dimensions),
