@@ -38,6 +38,7 @@ import {
   EquationError,
   SimError,
   ModelError,
+  ErrorCode,
 } from '@system-dynamics/core/datamodel';
 
 import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
@@ -222,7 +223,7 @@ interface EditorState {
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   data: Map<string, Series>;
   selection: Set<UID>;
-  status: 'ok' | 'error';
+  status: 'ok' | 'error' | 'disabled';
   showDetails: 'variable' | 'errors' | undefined;
   flowStillBeingCreated: boolean;
   drawerOpen: boolean;
@@ -256,7 +257,7 @@ export const Editor = withStyles(styles)(
         selectedTool: undefined,
         data: Map(),
         selection: Set<number>(),
-        status: 'ok',
+        status: 'disabled',
         showDetails: undefined,
         flowStillBeingCreated: false,
         drawerOpen: false,
@@ -295,9 +296,8 @@ export const Editor = withStyles(styles)(
     }
 
     private loadSim(engine: IEngine) {
-      this.setState({
-        status: engine.isSimulatable() ? 'ok' : 'error',
-      });
+      this.recalculateStatus();
+
       if (!engine.isSimulatable()) {
         return;
       }
@@ -1401,7 +1401,12 @@ export const Editor = withStyles(styles)(
 
         return (
           <div className={classes.varDetails}>
-            <ErrorDetails simError={simError} modelErrors={modelErrors} varErrors={varErrors} />
+            <ErrorDetails
+              status={this.state.status}
+              simError={simError}
+              modelErrors={modelErrors}
+              varErrors={varErrors}
+            />
           </div>
         );
       }
@@ -1523,6 +1528,25 @@ export const Editor = withStyles(styles)(
       const modelName = this.state.modelName;
       const varErrors = this.getVariableErrors(engine, modelName);
       if (varErrors.size > 0) {
+        const model = defined(project.models.get(modelName));
+
+        // if all the errors are 'just' that we have no equations,
+        // don't scream "error" at the user -- they are starting from
+        // scratch on a new model and don't expect it to be running yet.
+        if (varErrors.size === model.variables.size && Set(varErrors.keys()).equals(Set(model.variables.keys()))) {
+          let foundOtherError = false;
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          for (const [_ident, errors] of varErrors) {
+            if (errors.size !== 1 || defined(errors.first()).code !== ErrorCode.EmptyEquation) {
+              foundOtherError = true;
+              break;
+            }
+          }
+          if (!foundOtherError) {
+            return project.set('hasNoEquations', true);
+          }
+        }
+
         for (const [ident, errors] of varErrors) {
           project = project.updateIn(
             ['models', modelName, 'variables', ident],
@@ -1547,10 +1571,27 @@ export const Editor = withStyles(styles)(
 
       this.setState({
         activeProject: this.updateVariableErrors(project),
-        status: engine.isSimulatable() ? 'ok' : 'error',
       });
 
       return engine;
+    }
+
+    recalculateStatus() {
+      const project = this.project();
+      const engine = this.engine();
+
+      let status: 'ok' | 'error' | 'disabled';
+      if (!engine || !project || project.hasNoEquations) {
+        status = 'disabled';
+      } else if (!engine.isSimulatable()) {
+        status = 'error';
+      } else {
+        status = 'ok';
+      }
+
+      this.setState({
+        status,
+      });
     }
 
     handleUndoRedo = (kind: 'undo' | 'redo') => {

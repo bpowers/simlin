@@ -19,7 +19,7 @@ const styles = createStyles({
 });
 
 interface StatusPropsFull extends WithStyles<typeof styles> {
-  status: 'ok' | 'error';
+  status: 'ok' | 'error' | 'disabled';
   onClick: () => void;
 }
 
@@ -33,7 +33,7 @@ export const Status = withStyles(styles)(
 
     render() {
       const { classes, status } = this.props;
-      const fill = status === 'ok' ? '#81c784' : 'rgb(255, 152, 0)';
+      const fill = status === 'ok' ? '#81c784' : status === 'error' ? 'rgb(255, 152, 0)' : '#DCDCDC';
       return (
         <svg className={classes.status}>
           <circle cx={12} cy={12} r={12} fill={fill} onClick={this.handleClick} />

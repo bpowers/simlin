@@ -1197,6 +1197,7 @@ const projectDefaults = {
   simSpecs: SimSpecs.default(),
   models: Map<string, Model>(),
   dimensions: Map<string, Dimension>(),
+  hasNoEquations: false,
 };
 export class Project extends Record(projectDefaults) {
   // this isn't useless, as it ensures we specify the full object
@@ -1210,6 +1211,7 @@ export class Project extends Record(projectDefaults) {
       simSpecs: SimSpecs.fromPb(defined(project.getSimSpecs())),
       models: Map(project.getModelsList().map((model) => [model.getName(), Model.fromPb(model)])),
       dimensions: Map(project.getDimensionsList().map((dim) => [dim.getName(), Dimension.fromPb(dim)])),
+      hasNoEquations: false,
     });
   }
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {

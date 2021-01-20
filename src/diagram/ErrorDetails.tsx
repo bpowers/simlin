@@ -33,30 +33,6 @@ const styles = ({ breakpoints }: Theme) =>
     cardInner: {
       paddingTop: 72,
     },
-    editorActions: {},
-    eqnEditor: {
-      backgroundColor: 'rgba(245, 245, 245)',
-      borderRadius: 4,
-      marginTop: 4,
-      padding: 4,
-      height: 80,
-      fontFamily: "'Roboto Mono', monospace",
-    },
-    eqnError: {
-      textDecoration: 'underline wavy red',
-    },
-    buttonLeft: {
-      float: 'left',
-      marginRight: 'auto',
-    },
-    buttonRight: {
-      float: 'right',
-    },
-    addLookupButton: {
-      display: 'block',
-      marginLeft: 'auto',
-      marginRight: 'auto',
-    },
     errorList: {
       color: '#cc0000',
     },
@@ -69,6 +45,7 @@ interface ErrorDetailsPropsFull extends WithStyles<typeof styles> {
   simError: SimError | undefined;
   modelErrors: List<ModelError>;
   varErrors: Map<string, List<EquationError>>;
+  status: 'ok' | 'error' | 'disabled';
 }
 
 // export type ErrorDetailsProps = Pick<ErrorDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
