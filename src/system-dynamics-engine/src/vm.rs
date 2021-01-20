@@ -4,6 +4,7 @@
 
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
@@ -28,7 +29,7 @@ pub(crate) fn is_truthy(n: f64) -> bool {
     !is_false
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CompiledSimulation {
     pub(crate) modules: HashMap<Ident, CompiledModule>,
     pub(crate) specs: Specs,
@@ -37,13 +38,10 @@ pub struct CompiledSimulation {
 }
 
 #[derive(Clone, Debug)]
-struct CompiledSlicedSimulation<'sim> {
-    initial_modules: HashMap<&'sim str, CompiledModuleSlice<'sim>>,
-    flow_modules: HashMap<&'sim str, CompiledModuleSlice<'sim>>,
-    stock_modules: HashMap<&'sim str, CompiledModuleSlice<'sim>>,
-    specs: Specs,
-    root: &'sim str,
-    offsets: &'sim HashMap<Ident, usize>,
+struct CompiledSlicedSimulation {
+    initial_modules: HashMap<Ident, CompiledModuleSlice>,
+    flow_modules: HashMap<Ident, CompiledModuleSlice>,
+    stock_modules: HashMap<Ident, CompiledModuleSlice>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,9 +156,11 @@ impl Results {
 }
 
 #[derive(Clone, Debug)]
-pub struct VM<'sim> {
-    compiled_sim: &'sim CompiledSimulation,
-    sliced_sim: CompiledSlicedSimulation<'sim>,
+pub struct VM {
+    specs: Specs,
+    root: Ident,
+    offsets: HashMap<Ident, usize>,
+    sliced_sim: CompiledSlicedSimulation,
     n_slots: usize,
 }
 
@@ -190,54 +190,61 @@ impl RegisterCache {
 }
 
 #[derive(Clone, Debug)]
-struct CompiledModuleSlice<'sim> {
-    ident: &'sim str,
-    context: &'sim ByteCodeContext,
-    bytecode: &'sim ByteCode,
+struct CompiledModuleSlice {
+    ident: Ident,
+    context: Rc<ByteCodeContext>,
+    bytecode: Rc<ByteCode>,
     part: StepPart,
 }
 
-impl<'sim> CompiledModuleSlice<'sim> {
-    fn new(module: &'sim CompiledModule, part: StepPart) -> Self {
+impl CompiledModuleSlice {
+    fn new(module: &CompiledModule, part: StepPart) -> Self {
         CompiledModuleSlice {
-            ident: module.ident.as_str(),
-            context: &module.context,
+            ident: module.ident.clone(),
+            context: module.context.clone(),
             bytecode: match part {
-                StepPart::Initials => &module.compiled_initials,
-                StepPart::Flows => &module.compiled_flows,
-                StepPart::Stocks => &module.compiled_stocks,
+                StepPart::Initials => module.compiled_initials.clone(),
+                StepPart::Flows => module.compiled_flows.clone(),
+                StepPart::Stocks => module.compiled_stocks.clone(),
             },
             part,
         }
     }
 }
 
-impl<'sim> VM<'sim> {
-    pub fn new(sim: &'sim CompiledSimulation) -> Result<VM> {
-        let module = &sim.modules[&sim.root];
-        let n_slots = module.n_slots;
+impl VM {
+    pub fn new(sim: CompiledSimulation) -> Result<VM> {
+        if sim.specs.stop < sim.specs.start {
+            return sim_err!(
+                BadSimSpecs,
+                "end time has to be after start time".to_string()
+            );
+        }
+        if approx_eq!(f64, sim.specs.dt, 0.0) {
+            return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
+        }
 
+        let n_slots = sim.modules[&sim.root].n_slots;
         Ok(VM {
-            compiled_sim: sim,
+            specs: sim.specs,
+            root: sim.root,
+            offsets: sim.offsets,
             sliced_sim: CompiledSlicedSimulation {
                 initial_modules: sim
                     .modules
                     .iter()
-                    .map(|(id, m)| (id.as_str(), CompiledModuleSlice::new(m, StepPart::Initials)))
+                    .map(|(id, m)| (id.clone(), CompiledModuleSlice::new(m, StepPart::Initials)))
                     .collect(),
                 flow_modules: sim
                     .modules
                     .iter()
-                    .map(|(id, m)| (id.as_str(), CompiledModuleSlice::new(m, StepPart::Flows)))
+                    .map(|(id, m)| (id.clone(), CompiledModuleSlice::new(m, StepPart::Flows)))
                     .collect(),
                 stock_modules: sim
                     .modules
                     .iter()
-                    .map(|(id, m)| (id.as_str(), CompiledModuleSlice::new(m, StepPart::Stocks)))
+                    .map(|(id, m)| (id.clone(), CompiledModuleSlice::new(m, StepPart::Stocks)))
                     .collect(),
-                specs: sim.specs.clone(),
-                root: sim.root.as_str(),
-                offsets: &sim.offsets,
             },
             n_slots,
         })
@@ -245,21 +252,13 @@ impl<'sim> VM<'sim> {
 
     #[inline(never)]
     pub fn run_to_end(&self) -> Result<Results> {
-        let spec = &self.compiled_sim.specs;
+        let spec = &self.specs;
 
-        let module_initials = &self.sliced_sim.initial_modules[self.compiled_sim.root.as_str()];
-        let module_flows = &self.sliced_sim.flow_modules[self.compiled_sim.root.as_str()];
-        let module_stocks = &self.sliced_sim.stock_modules[self.compiled_sim.root.as_str()];
+        let sliced_sim = &self.sliced_sim;
+        let module_initials = &sliced_sim.initial_modules[&self.root];
+        let module_flows = &sliced_sim.flow_modules[&self.root];
+        let module_stocks = &sliced_sim.stock_modules[&self.root];
 
-        if spec.stop < spec.start {
-            return sim_err!(
-                BadSimSpecs,
-                "end time has to be after start time".to_string()
-            );
-        }
-        if approx_eq!(f64, spec.dt, 0.0) {
-            return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
-        }
         let save_step = if spec.save_step > spec.dt {
             spec.save_step
         } else {
@@ -322,7 +321,7 @@ impl<'sim> VM<'sim> {
         }
 
         Ok(Results {
-            offsets: self.compiled_sim.offsets.clone(),
+            offsets: self.offsets.clone(),
             data,
             step_size: self.n_slots,
             step_count: n_chunks,
@@ -344,10 +343,11 @@ impl<'sim> VM<'sim> {
     ) {
         let new_module_decl = &parent_module.context.modules[id as usize];
         let model_name = new_module_decl.model_name.as_str();
+        let sliced_sim = &self.sliced_sim;
         let module = match parent_module.part {
-            StepPart::Initials => &self.sliced_sim.initial_modules[model_name],
-            StepPart::Flows => &self.sliced_sim.flow_modules[model_name],
-            StepPart::Stocks => &self.sliced_sim.stock_modules[model_name],
+            StepPart::Initials => &sliced_sim.initial_modules[model_name],
+            StepPart::Flows => &sliced_sim.flow_modules[model_name],
+            StepPart::Stocks => &sliced_sim.stock_modules[model_name],
         };
 
         let module_off = parent_module_off + new_module_decl.off;
@@ -363,7 +363,7 @@ impl<'sim> VM<'sim> {
         next: &mut [f64],
         reg_cache: &mut RegisterCache,
     ) {
-        let bytecode = module.bytecode;
+        let bytecode = &module.bytecode;
 
         let mut file = reg_cache.get_register_file();
         let reg = &mut *file;

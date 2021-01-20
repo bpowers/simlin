@@ -1776,17 +1776,17 @@ impl<'module> Compiler<'module> {
     }
 
     fn compile(mut self) -> Result<CompiledModule> {
-        let compiled_initials = self.walk(&self.module.runlist_initials)?;
-        let compiled_flows = self.walk(&self.module.runlist_flows)?;
-        let compiled_stocks = self.walk(&self.module.runlist_stocks)?;
+        let compiled_initials = Rc::new(self.walk(&self.module.runlist_initials)?);
+        let compiled_flows = Rc::new(self.walk(&self.module.runlist_flows)?);
+        let compiled_stocks = Rc::new(self.walk(&self.module.runlist_stocks)?);
 
         Ok(CompiledModule {
             ident: self.module.ident.clone(),
             n_slots: self.module.n_slots,
-            context: ByteCodeContext {
+            context: Rc::new(ByteCodeContext {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
-            },
+            }),
             compiled_initials,
             compiled_flows,
             compiled_stocks,

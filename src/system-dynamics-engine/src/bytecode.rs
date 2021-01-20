@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use ordered_float::OrderedFloat;
 
@@ -239,12 +240,12 @@ fn test_opcode_size() {
     assert_eq!(4, size_of::<Opcode>());
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CompiledModule {
     pub(crate) ident: String,
     pub(crate) n_slots: usize,
-    pub(crate) context: ByteCodeContext,
-    pub(crate) compiled_initials: ByteCode,
-    pub(crate) compiled_flows: ByteCode,
-    pub(crate) compiled_stocks: ByteCode,
+    pub(crate) context: Rc<ByteCodeContext>,
+    pub(crate) compiled_initials: Rc<ByteCode>,
+    pub(crate) compiled_flows: Rc<ByteCode>,
+    pub(crate) compiled_stocks: Rc<ByteCode>,
 }

@@ -17,7 +17,7 @@ use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, 
 #[wasm_bindgen]
 pub struct Engine {
     project: engine::Project,
-    sim: Option<engine::Simulation>,
+    sim_vm: Result<engine::VM, engine::Error>,
     results: Option<engine::Results>,
 }
 
@@ -25,7 +25,10 @@ pub struct Engine {
 impl Engine {
     fn instantiate_sim(&mut self) {
         // TODO: expose the simulation error message here
-        self.sim = engine::Simulation::new(&self.project, "main").ok();
+        let compiler = engine::Simulation::new(&self.project, "main");
+        self.sim_vm = compiler
+            .and_then(|compiler| compiler.compile())
+            .and_then(VM::new);
     }
 
     #[wasm_bindgen(js_name = serializeToProtobuf)]
@@ -112,7 +115,7 @@ impl Engine {
 
     #[wasm_bindgen(js_name = isSimulatable)]
     pub fn is_simulatable(&self) -> bool {
-        self.sim.is_some()
+        self.sim_vm.is_ok()
     }
 
     #[wasm_bindgen(js_name = getModelVariableErrors, typescript_type = "Map<string, EquationError>")]
@@ -458,12 +461,10 @@ impl Engine {
 
     #[wasm_bindgen(js_name = simRunToEnd)]
     pub fn sim_run_to_end(&mut self) {
-        if self.sim.is_none() {
+        if self.sim_vm.is_err() {
             return;
         }
-        let sim = self.sim.as_ref().unwrap();
-        let compiled = sim.compile().unwrap();
-        let vm = VM::new(&compiled).unwrap();
+        let vm = self.sim_vm.as_ref().unwrap();
         let results = vm.run_to_end();
         self.results = results.ok();
     }
@@ -514,7 +515,11 @@ pub fn open(project_pb: &[u8]) -> Option<Engine> {
 
     let mut project = Engine {
         project: project.into(),
-        sim: None,
+        sim_vm: Err(Error::new(
+            ErrorKind::Simulation,
+            ErrorCode::DoesNotExist,
+            None,
+        )),
         results: None,
     };
     project.instantiate_sim();
