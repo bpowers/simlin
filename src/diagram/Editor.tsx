@@ -222,6 +222,7 @@ interface EditorState {
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   data: Map<string, Series>;
   selection: Set<UID>;
+  status: 'ok' | 'error';
   showDetails: 'variable' | 'errors' | undefined;
   flowStillBeingCreated: boolean;
   drawerOpen: boolean;
@@ -255,6 +256,7 @@ export const Editor = withStyles(styles)(
         selectedTool: undefined,
         data: Map(),
         selection: Set<number>(),
+        status: 'ok',
         showDetails: undefined,
         flowStillBeingCreated: false,
         drawerOpen: false,
@@ -293,6 +295,9 @@ export const Editor = withStyles(styles)(
     }
 
     private loadSim(engine: IEngine) {
+      this.setState({
+        status: engine.isSimulatable() ? 'ok' : 'error',
+      });
       if (!engine.isSimulatable()) {
         return;
       }
@@ -1296,8 +1301,7 @@ export const Editor = withStyles(styles)(
         placeholder = undefined;
       }
 
-      const engine = this.engine();
-      const status = !engine || engine.isSimulatable() ? 'ok' : 'error';
+      const status = this.state.status;
 
       return (
         <Paper className={classes.searchbar} elevation={2}>
@@ -1541,7 +1545,10 @@ export const Editor = withStyles(styles)(
       }
       this.activeEngine = engine;
 
-      this.setState({ activeProject: this.updateVariableErrors(project) });
+      this.setState({
+        activeProject: this.updateVariableErrors(project),
+        status: engine.isSimulatable() ? 'ok' : 'error',
+      });
 
       return engine;
     }
