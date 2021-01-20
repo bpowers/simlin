@@ -1,0 +1,126 @@
+// Copyright 2021 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+import * as React from 'react';
+
+import { List, Map } from 'immutable';
+
+import { Card, CardContent, Typography } from '@material-ui/core';
+import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
+
+import { SimError, ModelError, EquationError, ErrorCode } from '@system-dynamics/core/datamodel';
+
+import { errorCodeDescription } from '@system-dynamics/engine';
+
+const SearchbarWidthSm = 359;
+const SearchbarWidthMd = 420;
+const SearchbarWidthLg = 480;
+
+const styles = ({ breakpoints }: Theme) =>
+  createStyles({
+    card: {
+      [breakpoints.up('lg')]: {
+        width: SearchbarWidthLg,
+      },
+      [breakpoints.between('md', 'lg')]: {
+        width: SearchbarWidthMd,
+      },
+      [breakpoints.down('md')]: {
+        width: SearchbarWidthSm,
+      },
+    },
+    cardInner: {
+      paddingTop: 72,
+    },
+    editorActions: {},
+    eqnEditor: {
+      backgroundColor: 'rgba(245, 245, 245)',
+      borderRadius: 4,
+      marginTop: 4,
+      padding: 4,
+      height: 80,
+      fontFamily: "'Roboto Mono', monospace",
+    },
+    eqnError: {
+      textDecoration: 'underline wavy red',
+    },
+    buttonLeft: {
+      float: 'left',
+      marginRight: 'auto',
+    },
+    buttonRight: {
+      float: 'right',
+    },
+    addLookupButton: {
+      display: 'block',
+      marginLeft: 'auto',
+      marginRight: 'auto',
+    },
+    errorList: {
+      color: '#cc0000',
+    },
+    yay: {
+      textAlign: 'center',
+    },
+  });
+
+interface ErrorDetailsPropsFull extends WithStyles<typeof styles> {
+  simError: SimError | undefined;
+  modelErrors: List<ModelError>;
+  varErrors: Map<string, List<EquationError>>;
+}
+
+// export type ErrorDetailsProps = Pick<ErrorDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
+
+export const ErrorDetails = withStyles(styles)(
+  class InnerErrorDetails extends React.PureComponent<ErrorDetailsPropsFull> {
+    render() {
+      const { classes, simError, modelErrors, varErrors } = this.props;
+      const errors = [];
+      if (simError && !(simError.code === ErrorCode.NotSimulatable && !modelErrors.isEmpty())) {
+        errors.push(
+          <Typography className={classes.errorList}>
+            simulation error: {errorCodeDescription(simError.code)}
+          </Typography>,
+        );
+      }
+      if (!modelErrors.isEmpty()) {
+        for (const err of modelErrors) {
+          // don't yell multiple times about the same thing
+          if (err.code === ErrorCode.VariablesHaveErrors && !varErrors.isEmpty()) {
+            continue;
+          }
+          const details = err.details;
+          errors.push(
+            <Typography className={classes.errorList}>
+              model error: {errorCodeDescription(err.code)}
+              {details ? `: ${details}` : undefined}
+            </Typography>,
+          );
+        }
+      }
+      for (const [ident, errs] of varErrors) {
+        for (const err of errs) {
+          errors.push(
+            <Typography className={classes.errorList}>
+              variable "{ident}" error: {errorCodeDescription(err.code)}
+            </Typography>,
+          );
+        }
+      }
+
+      return (
+        <Card className={classes.card} elevation={1}>
+          <CardContent className={classes.cardInner}>
+            {errors.length > 0 ? (
+              errors
+            ) : (
+              <Typography className={classes.yay}>"Your model is error free! 🎉"</Typography>
+            )}
+          </CardContent>
+        </Card>
+      );
+    }
+  },
+);

@@ -70,6 +70,20 @@ export class EquationError extends Record(equationErrorDefaults) {
   }
 }
 
+const simErrorDefaults = {
+  code: ErrorCode.NoError,
+  details: undefined as (string | undefined),
+};
+export class SimError extends Record(simErrorDefaults) {
+}
+
+const modelErrorDefaults = {
+  code: ErrorCode.NoError,
+  details: undefined as (string | undefined),
+};
+export class ModelError extends Record(modelErrorDefaults) {
+}
+
 export type GraphicalFunctionKind = 'continuous' | 'extrapolate' | 'discrete';
 
 function getGraphicalFunctionKind(

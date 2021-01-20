@@ -20,18 +20,23 @@ const styles = createStyles({
 
 interface StatusPropsFull extends WithStyles<typeof styles> {
   status: 'ok' | 'error';
+  onClick: () => void;
 }
 
 export type StatusProps = Pick<StatusPropsFull, 'status'>;
 
 export const Status = withStyles(styles)(
   class Status extends React.PureComponent<StatusPropsFull> {
+    handleClick = () => {
+      this.props.onClick();
+    };
+
     render() {
       const { classes, status } = this.props;
       const fill = status === 'ok' ? '#81c784' : 'rgb(255, 152, 0)';
       return (
         <svg className={classes.status}>
-          <circle cx={12} cy={12} r={12} fill={fill} />
+          <circle cx={12} cy={12} r={12} fill={fill} onClick={this.handleClick} />
         </svg>
       );
     }

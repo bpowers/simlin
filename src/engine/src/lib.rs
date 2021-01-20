@@ -148,6 +148,11 @@ impl Engine {
             .collect()
     }
 
+    #[wasm_bindgen(js_name = getSimError)]
+    pub fn get_sim_error(&self) -> Option<Error> {
+        self.sim_vm.as_ref().err().cloned()
+    }
+
     // model control
 
     #[wasm_bindgen(js_name = addNewVariable)]

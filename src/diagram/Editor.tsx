@@ -12,7 +12,11 @@ import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
-import type { Engine as IEngine, EquationError as EngineEquationError } from '@system-dynamics/engine';
+import type {
+  Engine as IEngine,
+  Error as EngineError,
+  EquationError as EngineEquationError,
+} from '@system-dynamics/engine';
 import { open, errorCodeDescription } from '@system-dynamics/engine';
 
 import {
@@ -32,6 +36,8 @@ import {
   CloudViewElement,
   viewElementType,
   EquationError,
+  SimError,
+  ModelError,
 } from '@system-dynamics/core/datamodel';
 
 import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
@@ -75,6 +81,7 @@ import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
+import { ErrorDetails } from '@system-dynamics/diagram/ErrorDetails';
 
 const MaxUndoSize = 5;
 const SearchbarWidthSm = 359;
@@ -196,8 +203,8 @@ const styles = ({ spacing, palette, breakpoints }: Theme) =>
     },
   });
 
-class ModelError implements Error {
-  name = 'ModelError';
+class EditorError implements Error {
+  name = 'EditorError';
   message: string;
   constructor(msg: string) {
     this.message = msg;
@@ -215,7 +222,7 @@ interface EditorState {
   selectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
   data: Map<string, Series>;
   selection: Set<UID>;
-  showVariableDetails: boolean;
+  showDetails: 'variable' | 'errors' | undefined;
   flowStillBeingCreated: boolean;
   drawerOpen: boolean;
   projectVersion: number;
@@ -248,7 +255,7 @@ export const Editor = withStyles(styles)(
         selectedTool: undefined,
         data: Map(),
         selection: Set<number>(),
-        showVariableDetails: false,
+        showDetails: undefined,
         flowStillBeingCreated: false,
         drawerOpen: false,
         projectVersion: -1,
@@ -390,7 +397,7 @@ export const Editor = withStyles(styles)(
 
     private appendModelError(msg: string) {
       this.setState((prevState: EditorState) => ({
-        modelErrors: prevState.modelErrors.push(new ModelError(msg)),
+        modelErrors: prevState.modelErrors.push(new EditorError(msg)),
       }));
     }
 
@@ -495,12 +502,12 @@ export const Editor = withStyles(styles)(
         variableDetailsActiveTab: 0,
       });
       if (selection.isEmpty()) {
-        this.setState({ showVariableDetails: false });
+        this.setState({ showDetails: undefined });
       }
     };
 
     handleShowVariableDetails = () => {
-      this.setState({ showVariableDetails: true });
+      this.setState({ showDetails: 'variable' });
     };
 
     handleSelectionDelete = () => {
@@ -1254,7 +1261,13 @@ export const Editor = withStyles(styles)(
       const element = this.getNamedElement(canonicalize(newValue));
       this.handleSelection(element ? Set([element.uid]) : Set());
       this.setState({
-        showVariableDetails: true,
+        showDetails: 'variable',
+      });
+    };
+
+    handleStatusClick = () => {
+      this.setState({
+        showDetails: this.state.showDetails === 'errors' ? undefined : 'errors',
       });
     };
 
@@ -1308,7 +1321,7 @@ export const Editor = withStyles(styles)(
             />
           </div>
           <div className={classes.divider} />
-          <Status status={status} />
+          <Status status={status} onClick={this.handleStatusClick} />
         </Paper>
       );
     }
@@ -1340,7 +1353,7 @@ export const Editor = withStyles(styles)(
       this.scheduleSimRun();
     };
 
-    getVariableDetails() {
+    getDetails() {
       const { embedded } = this.props;
       const classes = this.props.classes;
 
@@ -1352,8 +1365,45 @@ export const Editor = withStyles(styles)(
         return;
       }
 
+      if (this.state.showDetails === 'errors') {
+        let simError: SimError | undefined;
+        let modelErrors = List<ModelError>();
+        let varErrors = Map<string, List<EquationError>>();
+        const engine = this.engine();
+        if (engine) {
+          const rawSimError = engine.getSimError();
+          if (rawSimError) {
+            simError = new SimError({
+              code: rawSimError.code,
+              details: rawSimError.getDetails(),
+            });
+            rawSimError.free();
+          }
+
+          const modelName = this.state.modelName;
+          const rawModelErrors = engine.getModelErrors(modelName) as EngineError[];
+          for (let i = 0; i < rawModelErrors.length; i++) {
+            const rawError = rawModelErrors[i];
+            const error = new ModelError({
+              code: rawError.code,
+              details: rawError.getDetails(),
+            });
+            rawError.free();
+            modelErrors = modelErrors.push(error);
+          }
+
+          varErrors = this.getVariableErrors(engine, modelName);
+        }
+
+        return (
+          <div className={classes.varDetails}>
+            <ErrorDetails simError={simError} modelErrors={modelErrors} varErrors={varErrors} />
+          </div>
+        );
+      }
+
       const namedElement = this.getNamedSelectedElement();
-      if (!namedElement || !this.state.showVariableDetails) {
+      if (!namedElement || this.state.showDetails !== 'variable') {
         return;
       }
 
@@ -1433,6 +1483,33 @@ export const Editor = withStyles(styles)(
       });
     };
 
+    getVariableErrors(engine: IEngine, modelName: string): Map<string, List<EquationError>> {
+      let result = Map<string, List<EquationError>>();
+
+      const varErrors = engine.getModelVariableErrors(modelName) as globalThis.Map<string, Array<EngineEquationError>>;
+      if (varErrors.size > 0) {
+        for (const ident of varErrors.keys()) {
+          const rawErrors = defined(varErrors.get(ident));
+          const errors = List(
+            rawErrors.map((err) => {
+              return new EquationError({
+                start: err.start,
+                end: err.end,
+                code: err.code,
+              });
+            }),
+          );
+
+          result = result.set(ident, errors);
+
+          // these things point back into the wasm heap, so ensure we call free on them
+          rawErrors.forEach((err) => err.free());
+        }
+      }
+
+      return result;
+    }
+
     updateVariableErrors(project: Project): Project {
       const engine = this.engine();
       if (!engine) {
@@ -1440,31 +1517,13 @@ export const Editor = withStyles(styles)(
       }
 
       const modelName = this.state.modelName;
-      const varErrors = engine.getModelVariableErrors(modelName) as globalThis.Map<string, Array<EngineEquationError>>;
+      const varErrors = this.getVariableErrors(engine, modelName);
       if (varErrors.size > 0) {
-        for (const ident of varErrors.keys()) {
-          const errors = defined(varErrors.get(ident));
-
+        for (const [ident, errors] of varErrors) {
           project = project.updateIn(
             ['models', modelName, 'variables', ident],
-            (v: Variable): Variable => {
-              return v.set(
-                'errors',
-                List(
-                  errors.map((err) => {
-                    return new EquationError({
-                      start: err.start,
-                      end: err.end,
-                      code: err.code,
-                    });
-                  }),
-                ),
-              );
-            },
+            (v: Variable): Variable => v.set('errors', errors),
           );
-
-          // these things point back into the wasm heap, so ensure we call free on them
-          errors.forEach((err) => err.free());
         }
       }
 
@@ -1638,7 +1697,7 @@ export const Editor = withStyles(styles)(
       return (
         <div className={classNames}>
           {this.getDrawer()}
-          {this.getVariableDetails()}
+          {this.getDetails()}
           {this.getSearchBar()}
           {this.getCanvas()}
           {this.getSnackbar()}
