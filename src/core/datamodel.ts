@@ -17,6 +17,7 @@ import {
   SimSpecs as PbSimSpecs,
   SimMethodMap as PbSimMethodMap,
   Dimension as PbDimension,
+  Rect as PbRect,
 } from './pb/project_io_pb';
 import { canonicalize } from './canonicalize';
 
@@ -906,9 +907,50 @@ export class CloudViewElement extends Record(cloudViewElementDefaults) implement
 
 export type NamedViewElement = StockViewElement | AuxViewElement | ModuleViewElement | FlowViewElement;
 
+const rectDefaults = {
+  x: -1,
+  y: -1,
+  width: -1,
+  height: -1,
+};
+export class Rect extends Record(rectDefaults) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof rectDefaults) {
+    super(props);
+  }
+  static fromPb(rect: PbRect): Rect {
+    return new Rect({
+      x: rect.getX(),
+      y: rect.getY(),
+      width: rect.getWidth(),
+      height: rect.getHeight(),
+    });
+  }
+  toPb(): PbRect {
+    const rect = new PbRect();
+    rect.setX(this.x);
+    rect.setY(this.y);
+    rect.setWidth(this.width);
+    rect.setHeight(this.height);
+    return rect;
+  }
+
+  static default(): Rect {
+    return new Rect({
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    });
+  }
+}
+
 const stockFlowViewDefaults = {
   nextUid: -1,
   elements: List<ViewElement>(),
+  viewBox: Rect.default(),
+  zoom: -1,
 };
 export class StockFlowView extends Record(stockFlowViewDefaults) {
   // this isn't useless, as it ensures we specify the full object
@@ -992,9 +1034,14 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
       nextUid = 1;
     }
 
+    const pbViewBox = view.getViewbox();
+    const viewBox = pbViewBox ? Rect.fromPb(pbViewBox) : Rect.default();
+
     return new StockFlowView({
       elements,
       nextUid,
+      viewBox,
+      zoom: view.getZoom(),
     });
   }
   toPb(): PbView {
