@@ -10,7 +10,7 @@ use crate::xmile::view_element::LinkEnd;
 use std::collections::HashMap;
 use system_dynamics_engine::common::{canonicalize, Result};
 use system_dynamics_engine::datamodel;
-use system_dynamics_engine::datamodel::{Equation, Offset, ViewElement};
+use system_dynamics_engine::datamodel::{Equation, Rect, ViewElement};
 
 const STOCK_WIDTH: f64 = 45.0;
 const STOCK_HEIGHT: f64 = 35.0;
@@ -1588,6 +1588,8 @@ pub struct View {
     pub zoom: Option<f64>,
     pub offset_x: Option<f64>,
     pub offset_y: Option<f64>,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1840,10 +1842,16 @@ impl View {
 impl From<View> for datamodel::View {
     fn from(v: View) -> Self {
         if v.kind.unwrap_or(ViewType::StockFlow) == ViewType::StockFlow {
-            let offset = if v.offset_x.is_some() && v.offset_y.is_some() {
-                Offset {
+            let view_box = if v.offset_x.is_some()
+                && v.offset_y.is_some()
+                && v.width.is_some()
+                && v.height.is_some()
+            {
+                Rect {
                     x: v.offset_x.unwrap(),
                     y: v.offset_y.unwrap(),
+                    width: v.width.unwrap(),
+                    height: v.height.unwrap(),
                 }
             } else {
                 Default::default()
@@ -1856,7 +1864,7 @@ impl From<View> for datamodel::View {
                     .filter(|v| !matches!(v, ViewObject::Unhandled))
                     .map(datamodel::ViewElement::from)
                     .collect(),
-                offset,
+                view_box,
                 zoom: v.zoom.unwrap_or(1.0),
             })
         } else {
@@ -1877,8 +1885,10 @@ impl From<datamodel::View> for View {
                 show_pages: None,
                 objects: v.elements.into_iter().map(ViewObject::from).collect(),
                 zoom: Some(v.zoom),
-                offset_x: Some(v.offset.x),
-                offset_y: Some(v.offset.y),
+                offset_x: Some(v.view_box.x),
+                offset_y: Some(v.view_box.y),
+                width: Some(v.view_box.width),
+                height: Some(v.view_box.height),
             },
         }
     }
@@ -1886,7 +1896,7 @@ impl From<datamodel::View> for View {
 
 #[test]
 fn test_view_roundtrip() {
-    use system_dynamics_engine::datamodel::Offset;
+    use system_dynamics_engine::datamodel::Rect;
     let cases: &[_] = &[datamodel::View::StockFlow(datamodel::StockFlow {
         elements: vec![datamodel::ViewElement::Stock(
             datamodel::view_element::Stock {
@@ -1897,7 +1907,12 @@ fn test_view_roundtrip() {
                 label_side: datamodel::view_element::LabelSide::Center,
             },
         )],
-        offset: Offset { x: 2.4, y: 9.5 },
+        view_box: Rect {
+            x: 2.4,
+            y: 9.5,
+            width: 102.3,
+            height: 555.3,
+        },
         zoom: 1.6,
     })];
     for expected in cases {

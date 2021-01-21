@@ -6,7 +6,7 @@ use float_cmp::approx_eq;
 
 use crate::datamodel::{
     view_element, Aux, Dimension, Dt, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, Module, ModuleReference, Offset, Project, SimMethod, SimSpecs,
+    GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect, SimMethod, SimSpecs,
     Stock, StockFlow, Variable, View, ViewElement,
 };
 use crate::project_io;
@@ -923,24 +923,39 @@ fn test_view_element_flow_point_roundtrip() {
     }
 }
 
-impl From<project_io::view::Offset> for Offset {
-    fn from(v: project_io::view::Offset) -> Self {
-        Offset { x: v.x, y: v.y }
+impl From<project_io::Rect> for Rect {
+    fn from(v: project_io::Rect) -> Self {
+        Rect {
+            x: v.x,
+            y: v.y,
+            width: v.width,
+            height: v.height,
+        }
     }
 }
 
-impl From<Offset> for project_io::view::Offset {
-    fn from(v: Offset) -> Self {
-        project_io::view::Offset { x: v.x, y: v.y }
+impl From<Rect> for project_io::Rect {
+    fn from(v: Rect) -> Self {
+        project_io::Rect {
+            x: v.x,
+            y: v.y,
+            width: v.width,
+            height: v.height,
+        }
     }
 }
 
 #[test]
 fn test_offset_roundtrip() {
-    let cases: &[_] = &[Offset { x: 7.2, y: 8.1 }, Offset { x: 4.5, y: 5.6 }];
+    let cases: &[_] = &[Rect {
+        x: 7.2,
+        y: 8.1,
+        width: 12.3,
+        height: 34.5,
+    }];
     for expected in cases {
         let expected = expected.clone();
-        let actual = Offset::from(project_io::view::Offset::from(expected.clone()));
+        let actual = Rect::from(project_io::Rect::from(expected.clone()));
         assert_eq!(expected, actual);
     }
 }
@@ -1316,7 +1331,7 @@ impl From<View> for project_io::View {
                     .into_iter()
                     .map(project_io::ViewElement::from)
                     .collect(),
-                offset: Some(view.offset.into()),
+                view_box: Some(view.view_box.into()),
                 zoom: view.zoom,
             },
         }
@@ -1327,7 +1342,7 @@ impl From<project_io::View> for View {
     fn from(view: project_io::View) -> Self {
         View::StockFlow(StockFlow {
             elements: view.elements.into_iter().map(ViewElement::from).collect(),
-            offset: view.offset.map(Offset::from).unwrap_or_default(),
+            view_box: view.view_box.map(Rect::from).unwrap_or_default(),
             zoom: if approx_eq!(f64, view.zoom, 0.0) {
                 1.0
             } else {

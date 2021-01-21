@@ -192,6 +192,13 @@ message ViewElement {
   }
 }
 
+message Rect {
+  double x = 1;
+  double y = 2;
+  double width = 3;
+  double height = 4;
+};
+
 message View {
   enum ViewType {
     STOCK_FLOW = 0;
@@ -200,15 +207,10 @@ message View {
     // VENDOR_SPECIFIC = 3;
   };
 
-  message Offset {
-    double x = 1;
-    double y = 2;
-  };
-
   ViewType kind = 1;
   // background
   repeated ViewElement elements = 3;
-  Offset offset = 4;
+  Rect viewBox = 4;
   double zoom = 5;
 };
 

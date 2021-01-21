@@ -245,15 +245,17 @@ pub enum ViewElement {
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
-pub struct Offset {
+pub struct Rect {
     pub x: f64,
     pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct StockFlow {
     pub elements: Vec<ViewElement>,
-    pub offset: Offset,
+    pub view_box: Rect,
     pub zoom: f64,
 }
 
