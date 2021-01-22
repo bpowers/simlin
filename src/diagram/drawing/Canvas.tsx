@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+/// <reference types="resize-observer-browser" />
+
 import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
@@ -107,7 +109,7 @@ const styles = createStyles({
     transform: 'translateZ(1)',
   },
   gLayer: {
-    // transform: 'translateZ(-1)',
+    willUpdate: 'translate',
   },
 });
 
@@ -131,6 +133,7 @@ interface CanvasState {
   moveDelta: Point | undefined;
   canvasOffset: Point;
   initialBounds: ViewRect;
+  svgSize: Readonly<{ width: number; height: number }> | undefined;
   inCreation: ViewElement | undefined;
   inCreationCloud: CloudViewElement | undefined;
 }
@@ -185,6 +188,7 @@ export const Canvas = withStyles(styles)(
     state: CanvasState;
 
     readonly svgRef: React.RefObject<InstanceType<typeof SVGSVGElement>>;
+    private svgObserver: ResizeObserver | undefined;
 
     private mouseDownPoint: Point | undefined;
     private selectionCenterOffset: Point | undefined;
@@ -223,6 +227,7 @@ export const Canvas = withStyles(styles)(
         moveDelta: undefined,
         canvasOffset: { x: 0, y: 0 },
         initialBounds: ViewRect.default(),
+        svgSize: undefined,
         inCreation: undefined,
         inCreationCloud: undefined,
       };
@@ -802,6 +807,22 @@ export const Canvas = withStyles(styles)(
       this.clearPointerState(clearSelection);
     };
 
+    handleSvgResize(contentRect: { width: number; height: number }) {
+      this.setState({
+        svgSize: {
+          width: contentRect.width,
+          height: contentRect.height,
+        },
+      });
+    }
+
+    componentWillUnmount() {
+      if (this.svgObserver) {
+        this.svgObserver.disconnect();
+        this.svgObserver = undefined;
+      }
+    }
+
     handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>) => {
       this.pointerId = e.pointerId;
 
@@ -812,9 +833,10 @@ export const Canvas = withStyles(styles)(
 
       const element = this.getElementByUid(uid);
       const delta = this.state.canvasOffset || { x: 0, y: 0 };
+      const client = this.getSvgPoint(e);
       const pointer = {
-        x: e.clientX - delta.x,
-        y: e.clientY - delta.y,
+        x: client.x - delta.x,
+        y: client.y - delta.y,
       };
 
       const cx = element.cx;
@@ -1025,6 +1047,7 @@ export const Canvas = withStyles(styles)(
             new FlowPoint({ x, y, attachedToUid: inCreationCloud.uid }),
             new FlowPoint({ x, y, attachedToUid: fauxCloudTarget.uid }),
           ]),
+          isZeroRadius: false,
         });
 
         this.selectionCenterOffset = this.getSvgPoint(e);
@@ -1142,6 +1165,7 @@ export const Canvas = withStyles(styles)(
           y: element.cy,
           labelSide: 'bottom',
           points: List([startPoint, endPoint]),
+          isZeroRadius: false,
         });
         element = inCreation;
       } else {
@@ -1355,11 +1379,6 @@ export const Canvas = withStyles(styles)(
           viewBox = `${left} ${top} ${width} ${height}`;
         }
       } else {
-        if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
-          const offset = this.state.canvasOffset;
-          transform = `translate(${offset.x} ${offset.y})`;
-        }
-
         if (initialRender) {
           zLayers = new Array(ZMax) as React.ReactElement[][];
 
@@ -1383,18 +1402,67 @@ export const Canvas = withStyles(styles)(
           const { initialBounds } = this.state;
           const svgElement = exists(this.svgRef.current);
 
-          const zoom = 3;
+          if (!this.svgObserver) {
+            this.svgObserver = new ResizeObserver((entries: ResizeObserverEntry[]) => {
+              const entry = defined(entries[0]);
+              const target = entry.target as SVGSVGElement;
+              this.handleSvgResize({
+                width: target.width.baseVal.value,
+                height: target.height.baseVal.value,
+              });
+            });
 
-          const width = svgElement.width.baseVal.value / zoom;
-          const height = svgElement.height.baseVal.value / zoom;
+            this.svgObserver.observe(svgElement);
+          }
 
-          const viewCx = width / 2;
-          const viewCy = height / 2;
+          if (ViewRect.default().equals(this.props.view.viewBox)) {
+            // console.log('we the default!');
+          }
 
-          const diagramCx = initialBounds.x + initialBounds.width / 2;
-          const diagramCy = initialBounds.y + initialBounds.height / 2;
+          const zoom = 2; //this.props.view.zoom;
 
-          viewBox = `${diagramCx - viewCx} ${diagramCy - viewCy} ${width} ${height}`;
+          let svgWidth: number;
+          let svgHeight: number;
+          if (!this.state.svgSize) {
+            svgWidth = svgElement.width.baseVal.value;
+            svgHeight = svgElement.height.baseVal.value;
+            setTimeout(() => {
+              this.setState({
+                svgSize: {
+                  width: svgWidth,
+                  height: svgHeight,
+                },
+              });
+            });
+          } else {
+            svgWidth = this.state.svgSize.width;
+            svgHeight = this.state.svgSize.height;
+          }
+
+          const width = svgWidth / zoom;
+          const height = svgHeight / zoom;
+
+          viewBox = `0 0 ${width} ${height}`;
+
+          if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
+            const offset = this.state.canvasOffset;
+            transform = `translate(${offset.x} ${offset.y})`;
+          } else {
+            const viewCx = width / 2;
+            const viewCy = height / 2;
+
+            const diagramCx = initialBounds.x + initialBounds.width / 2;
+            const diagramCy = initialBounds.y + initialBounds.height / 2;
+
+            const x = -(diagramCx - viewCx);
+            const y = -(diagramCy - viewCy);
+
+            transform = `translate(${x} ${y})`;
+
+            setTimeout(() => {
+              this.setState({ canvasOffset: { x, y } });
+            });
+          }
         }
       }
 
