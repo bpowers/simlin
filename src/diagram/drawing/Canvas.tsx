@@ -10,7 +10,7 @@ import { Node } from 'slate';
 
 import { List, Map, Set } from 'immutable';
 
-import { defined } from '@system-dynamics/core/common';
+import { defined, exists } from '@system-dynamics/core/common';
 
 import {
   ViewElement,
@@ -28,6 +28,7 @@ import {
   StockFlowView,
   Project,
   Model,
+  Rect as ViewRect,
 } from '@system-dynamics/core/datamodel';
 
 import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
@@ -129,6 +130,7 @@ interface CanvasState {
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
   canvasOffset: Point;
+  initialBounds: ViewRect;
   inCreation: ViewElement | undefined;
   inCreationCloud: CloudViewElement | undefined;
 }
@@ -182,6 +184,8 @@ export const Canvas = withStyles(styles)(
   class InnerCanvas extends React.PureComponent<CanvasPropsFull, CanvasState> {
     state: CanvasState;
 
+    readonly svgRef: React.RefObject<InstanceType<typeof SVGSVGElement>>;
+
     private mouseDownPoint: Point | undefined;
     private selectionCenterOffset: Point | undefined;
     private prevCanvasOffset: Point | undefined;
@@ -203,6 +207,8 @@ export const Canvas = withStyles(styles)(
     constructor(props: CanvasPropsFull) {
       super(props);
 
+      this.svgRef = React.createRef();
+
       this.state = {
         isMovingArrow: false,
         isMovingCanvas: false,
@@ -216,6 +222,7 @@ export const Canvas = withStyles(styles)(
         dragSelectionPoint: undefined,
         moveDelta: undefined,
         canvasOffset: { x: 0, y: 0 },
+        initialBounds: ViewRect.default(),
         inCreation: undefined,
         inCreationCloud: undefined,
       };
@@ -837,8 +844,10 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
-      const dx = this.selectionCenterOffset.x - e.clientX;
-      const dy = this.selectionCenterOffset.y - e.clientY;
+      const currPt = this.getSvgPoint(e);
+
+      const dx = this.selectionCenterOffset.x - currPt.x;
+      const dy = this.selectionCenterOffset.y - currPt.y;
 
       this.setState({
         moveDelta: {
@@ -854,12 +863,13 @@ export const Canvas = withStyles(styles)(
       }
 
       const prev = this.prevCanvasOffset || { x: 0, y: 0 };
+      const curr = this.getSvgPoint(e);
 
       this.setState({
         isMovingCanvas: true,
         canvasOffset: {
-          x: prev.x + e.clientX - this.mouseDownPoint.x,
-          y: prev.y + e.clientY - this.mouseDownPoint.y,
+          x: prev.x + curr.x - this.mouseDownPoint.x,
+          y: prev.y + curr.y - this.mouseDownPoint.y,
         },
       });
     }
@@ -869,12 +879,11 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
+      const dragSelectionPoint = this.getSvgPoint(e);
+
       this.setState({
         isDragSelecting: true,
-        dragSelectionPoint: {
-          x: e.clientX,
-          y: e.clientY,
-        },
+        dragSelectionPoint,
       });
     }
 
@@ -913,6 +922,19 @@ export const Canvas = withStyles(styles)(
       }
       // give up
       return base;
+    }
+
+    getSvgPoint(e: React.PointerEvent<SVGElement>): Point {
+      const svg = exists(this.svgRef.current);
+      const svgPt = svg.createSVGPoint();
+      svgPt.x = e.clientX;
+      svgPt.y = e.clientY;
+      const realPt = svgPt.matrixTransform(exists(svg.getScreenCTM()).inverse());
+
+      return {
+        x: realPt.x,
+        y: realPt.y,
+      };
     }
 
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
@@ -958,10 +980,7 @@ export const Canvas = withStyles(styles)(
         }
 
         this.pointerId = e.pointerId;
-        this.selectionCenterOffset = {
-          x: e.clientX,
-          y: e.clientY,
-        };
+        this.selectionCenterOffset = this.getSvgPoint(e);
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         (e.target as any).setPointerCapture(e.pointerId);
@@ -1008,10 +1027,7 @@ export const Canvas = withStyles(styles)(
           ]),
         });
 
-        this.selectionCenterOffset = {
-          x: e.clientX,
-          y: e.clientY,
-        };
+        this.selectionCenterOffset = this.getSvgPoint(e);
 
         this.setState({
           isEditingName: false,
@@ -1031,10 +1047,7 @@ export const Canvas = withStyles(styles)(
       // off the circle, and mouse-up on the canvas, the canvas gets an
       // onclick.  Instead, capture where we mouse-down'd, and on mouse up
       // check if its the same.
-      this.mouseDownPoint = {
-        x: e.clientX,
-        y: e.clientY,
-      };
+      this.mouseDownPoint = this.getSvgPoint(e);
       if (this.state.canvasOffset) {
         this.prevCanvasOffset = this.state.canvasOffset;
       }
@@ -1084,10 +1097,7 @@ export const Canvas = withStyles(styles)(
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
-      this.selectionCenterOffset = {
-        x: e.clientX,
-        y: e.clientY,
-      };
+      this.selectionCenterOffset = this.getSvgPoint(e);
 
       if (!isEditingName) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
@@ -1211,6 +1221,8 @@ export const Canvas = withStyles(styles)(
     render() {
       const { view, embedded, classes } = this.props;
 
+      const initialRender = this.svgRef.current === undefined || ViewRect.default().equals(this.state.initialBounds);
+
       if (!this.props.selection.equals(this.selection)) {
         this.selection = this.props.selection;
       }
@@ -1224,7 +1236,7 @@ export const Canvas = withStyles(styles)(
       }
 
       // create different layers for each of the display types so that views compose together nicely
-      const zLayers = new Array(ZMax) as React.ReactElement[][];
+      let zLayers = new Array(ZMax) as React.ReactElement[][];
       for (let i = 0; i < ZMax; i++) {
         zLayers[i] = [];
       }
@@ -1234,7 +1246,7 @@ export const Canvas = withStyles(styles)(
 
       // FIXME: this is so gross
       // we only need to compute bounds when we are embedded
-      this.computeBounds = embedded;
+      this.computeBounds = embedded || initialRender;
       if (this.computeBounds) {
         this.elementBounds = List<Rect | undefined>();
       }
@@ -1342,9 +1354,48 @@ export const Canvas = withStyles(styles)(
           const height = Math.ceil(bounds.bottom - top) + 10;
           viewBox = `${left} ${top} ${width} ${height}`;
         }
-      } else if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
-        const offset = this.state.canvasOffset;
-        transform = `translate(${offset.x} ${offset.y})`;
+      } else {
+        if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
+          const offset = this.state.canvasOffset;
+          transform = `translate(${offset.x} ${offset.y})`;
+        }
+
+        if (initialRender) {
+          zLayers = new Array(ZMax) as React.ReactElement[][];
+
+          const bounds = calcViewBox(this.elementBounds);
+          if (bounds) {
+            const left = Math.floor(bounds.left) - 10;
+            const top = Math.floor(bounds.top) - 10;
+            const width = Math.ceil(bounds.right - left) + 10;
+            const height = Math.ceil(bounds.bottom - top) + 10;
+            const initialBounds = new ViewRect({
+              x: left,
+              y: top,
+              width,
+              height,
+            });
+            setTimeout(() => {
+              this.setState({ initialBounds });
+            });
+          }
+        } else {
+          const { initialBounds } = this.state;
+          const svgElement = exists(this.svgRef.current);
+
+          const zoom = 3;
+
+          const width = svgElement.width.baseVal.value / zoom;
+          const height = svgElement.height.baseVal.value / zoom;
+
+          const viewCx = width / 2;
+          const viewCy = height / 2;
+
+          const diagramCx = initialBounds.x + initialBounds.width / 2;
+          const diagramCy = initialBounds.y + initialBounds.height / 2;
+
+          viewBox = `${diagramCx - viewCx} ${diagramCy - viewCy} ${width} ${height}`;
+        }
       }
 
       const overlay = embedded ? undefined : (
@@ -1364,6 +1415,7 @@ export const Canvas = withStyles(styles)(
       return (
         <div className={classes.container}>
           <svg
+            ref={this.svgRef}
             viewBox={viewBox}
             preserveAspectRatio="xMinYMin"
             className={classes.canvas}

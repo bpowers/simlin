@@ -231,7 +231,7 @@ export const LookupEditor = withStyles(styles)(
     };
 
     handleContainerTouchStart = (e: React.PointerEvent<HTMLDivElement>) => {
-      const chart: any = this.lookupRef.current;
+      const chart = this.lookupRef.current;
       if (!chart) {
         return;
       }
@@ -270,7 +270,7 @@ export const LookupEditor = withStyles(styles)(
         return;
       }
 
-      const chart: any = this.lookupRef.current;
+      const chart = this.lookupRef.current;
       if (chart === null || !chart.state.yAxisMap) {
         return;
       }

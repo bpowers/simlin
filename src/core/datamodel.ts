@@ -642,6 +642,7 @@ const flowViewElementDefaults = {
   y: -1,
   labelSide: 'center' as LabelSide,
   points: List<Point>(),
+  isZeroRadius: false,
 };
 export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
@@ -659,6 +660,7 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
       y: flow.getY(),
       labelSide: getLabelSide(flow.getLabelSide()),
       points: List(flow.getPointsList().map((point) => Point.fromPb(point))),
+      isZeroRadius: false,
     });
   }
   toPb(): PbViewElement.Flow {
@@ -679,9 +681,6 @@ export class FlowViewElement extends Record(flowViewElementDefaults) implements 
   }
   isNamed(): boolean {
     return true;
-  }
-  get isZeroRadius(): boolean {
-    return false;
   }
 }
 
