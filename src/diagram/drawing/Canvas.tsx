@@ -187,7 +187,7 @@ export const Canvas = withStyles(styles)(
   class InnerCanvas extends React.PureComponent<CanvasPropsFull, CanvasState> {
     state: CanvasState;
 
-    readonly svgRef: React.RefObject<InstanceType<typeof SVGSVGElement>>;
+    readonly svgRef: React.RefObject<InstanceType<typeof HTMLDivElement>>;
     private svgObserver: ResizeObserver | undefined;
 
     private mouseDownPoint: Point | undefined;
@@ -808,12 +808,24 @@ export const Canvas = withStyles(styles)(
     };
 
     handleSvgResize(contentRect: { width: number; height: number }) {
-      this.setState({
+      const updates = {
         svgSize: {
           width: contentRect.width,
           height: contentRect.height,
         },
-      });
+        canvasOffset: this.state.canvasOffset,
+      };
+      const oldSize = this.state.svgSize;
+      if (oldSize) {
+        const dWidth = contentRect.width - oldSize.width;
+        const dHeight = contentRect.height - oldSize.height;
+        updates.canvasOffset = {
+          x: this.state.canvasOffset.x + dWidth / 4,
+          y: this.state.canvasOffset.y + dHeight / 4,
+        };
+      }
+
+      this.setState(updates);
     }
 
     componentWillUnmount() {
@@ -947,11 +959,17 @@ export const Canvas = withStyles(styles)(
     }
 
     getSvgPoint(e: React.PointerEvent<SVGElement>): Point {
-      const svg = exists(this.svgRef.current);
-      const svgPt = svg.createSVGPoint();
-      svgPt.x = e.clientX;
-      svgPt.y = e.clientY;
-      const realPt = svgPt.matrixTransform(exists(svg.getScreenCTM()).inverse());
+      const svgPt = new DOMPoint(e.clientX, e.clientY);
+      const transform = new DOMMatrix([
+        2,
+        0,
+        0,
+        2,
+        0, // dx
+        0, // dy
+      ]);
+
+      const realPt = svgPt.matrixTransform(transform.inverse());
 
       return {
         x: realPt.x,
@@ -1405,10 +1423,10 @@ export const Canvas = withStyles(styles)(
           if (!this.svgObserver) {
             this.svgObserver = new ResizeObserver((entries: ResizeObserverEntry[]) => {
               const entry = defined(entries[0]);
-              const target = entry.target as SVGSVGElement;
+              const target = entry.target as HTMLDivElement;
               this.handleSvgResize({
-                width: target.width.baseVal.value,
-                height: target.height.baseVal.value,
+                width: target.clientWidth,
+                height: target.clientHeight,
               });
             });
 
@@ -1424,8 +1442,8 @@ export const Canvas = withStyles(styles)(
           let svgWidth: number;
           let svgHeight: number;
           if (!this.state.svgSize) {
-            svgWidth = svgElement.width.baseVal.value;
-            svgHeight = svgElement.height.baseVal.value;
+            svgWidth = svgElement.clientWidth;
+            svgHeight = svgElement.clientHeight;
             setTimeout(() => {
               this.setState({
                 svgSize: {
@@ -1442,11 +1460,12 @@ export const Canvas = withStyles(styles)(
           const width = svgWidth / zoom;
           const height = svgHeight / zoom;
 
-          viewBox = `0 0 ${width} ${height}`;
+          // viewBox = `0 0 ${width} ${height}`;
+          transform = `scale(${zoom}, ${zoom})`;
 
           if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
             const offset = this.state.canvasOffset;
-            transform = `translate(${offset.x} ${offset.y})`;
+            transform += ` translate(${offset.x} ${offset.y})`;
           } else {
             const viewCx = width / 2;
             const viewCy = height / 2;
@@ -1481,9 +1500,8 @@ export const Canvas = withStyles(styles)(
       // n.b. we don't want to clear this.elements as thats used when handling callbacks
 
       return (
-        <div className={classes.container}>
+        <div className={classes.container} ref={this.svgRef}>
           <svg
-            ref={this.svgRef}
             viewBox={viewBox}
             preserveAspectRatio="xMinYMin"
             className={classes.canvas}
