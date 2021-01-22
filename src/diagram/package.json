@@ -33,7 +33,8 @@
     "slate-react": "^0.59.0"
   },
   "resolutions": {
-    "@types/slate*/**/immutable": "4.0.0-rc.12"
+    "@types/slate*/**/immutable": "4.0.0-rc.12",
+    "immer": "^8.0.0"
   },
   "devDependencies": {
     "@types/chroma-js": "^2.1.3",

@@ -53,6 +53,9 @@
     "webpack-dev-server": "^3.11.1",
     "webpack-manifest-plugin": "^3.0.0"
   },
+  "resolutions": {
+    "immer": "^8.0.0"
+  },
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
