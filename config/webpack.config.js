@@ -314,7 +314,7 @@ module.exports = function (webpackEnv) {
                     {}
                   ],
                   [
-                    "@babel/plugin-syntax-nullish-coalescing-operator",
+                    "@babel/plugin-proposal-nullish-coalescing-operator",
                     {}
                   ],
                 ].filter(Boolean),
