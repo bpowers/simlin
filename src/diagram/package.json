@@ -34,6 +34,7 @@
   },
   "resolutions": {
     "@types/slate*/**/immutable": "4.0.0-rc.12",
+    "acorn": "^8.0.4",
     "immer": "^8.0.0"
   },
   "devDependencies": {

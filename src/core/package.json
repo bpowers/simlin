@@ -35,6 +35,9 @@
     "prettier": "^2.0.1",
     "typescript": "^4.1.3"
   },
+  "resolutions": {
+    "acorn": "^8.0.4"
+  },
   "scripts": {
     "needs-format": "prettier -l '*.ts' 'pb/*.ts'",
     "format": "prettier --write '*.ts' 'pb/*.ts'",

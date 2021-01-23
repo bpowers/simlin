@@ -35,7 +35,7 @@ import {
 
 import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
-import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect } from './common';
+import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
 import { Connector, ConnectorProps } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
@@ -131,7 +131,7 @@ interface CanvasState {
   flowStillBeingCreated: boolean;
   dragSelectionPoint: Point | undefined;
   moveDelta: Point | undefined;
-  canvasOffset: Point;
+  movingCanvasOffset: Point | undefined;
   initialBounds: ViewRect;
   svgSize: Readonly<{ width: number; height: number }> | undefined;
   inCreation: ViewElement | undefined;
@@ -192,7 +192,6 @@ export const Canvas = withStyles(styles)(
 
     private mouseDownPoint: Point | undefined;
     private selectionCenterOffset: Point | undefined;
-    private prevCanvasOffset: Point | undefined;
 
     private pointerId: number | undefined;
 
@@ -225,12 +224,16 @@ export const Canvas = withStyles(styles)(
         flowStillBeingCreated: false,
         dragSelectionPoint: undefined,
         moveDelta: undefined,
-        canvasOffset: { x: 0, y: 0 },
+        movingCanvasOffset: undefined,
         initialBounds: ViewRect.default(),
         svgSize: undefined,
         inCreation: undefined,
         inCreationCloud: undefined,
       };
+    }
+
+    getCanvasOffset(): Readonly<Point> {
+      return this.state.movingCanvasOffset ?? this.props.view.viewBox;
     }
 
     getElementByUid(uid: UID): ViewElement {
@@ -322,9 +325,10 @@ export const Canvas = withStyles(styles)(
 
       const off = this.selectionCenterOffset;
       const delta = this.state.moveDelta || { x: 0, y: 0 };
+      const canvasOffset = this.getCanvasOffset();
       const pointer = {
-        x: off.x - delta.x - this.state.canvasOffset.x,
-        y: off.y - delta.y - this.state.canvasOffset.y,
+        x: off.x - delta.x - canvasOffset.x,
+        y: off.y - delta.y - canvasOffset.y,
       };
 
       let isTarget = false;
@@ -454,11 +458,12 @@ export const Canvas = withStyles(styles)(
           to = validTarget;
         } else {
           const off = this.selectionCenterOffset;
-          const delta = this.state.moveDelta || { x: 0, y: 0 };
+          const delta = this.state.moveDelta ?? { x: 0, y: 0 };
+          const canvasOffset = this.getCanvasOffset();
           // if to isn't a valid target, that means it is the fauxTarget
           to = (to as AuxViewElement).merge({
-            x: off.x - delta.x - this.state.canvasOffset.x,
-            y: off.y - delta.y - this.state.canvasOffset.y,
+            x: off.x - delta.x - canvasOffset.x,
+            y: off.y - delta.y - canvasOffset.y,
             isZeroRadius: true,
           }) as ViewElement;
         }
@@ -491,10 +496,11 @@ export const Canvas = withStyles(styles)(
         return undefined;
       }
       const off = defined(this.selectionCenterOffset);
-      const delta = this.state.moveDelta || { x: 0, y: 0 };
+      const delta = this.state.moveDelta ?? { x: 0, y: 0 };
+      const canvasOffset = this.getCanvasOffset();
       return new FlowPoint({
-        x: off.x - delta.x - this.state.canvasOffset.x,
-        y: off.y - delta.y - this.state.canvasOffset.y,
+        x: off.x - delta.x - canvasOffset.x,
+        y: off.y - delta.y - canvasOffset.y,
         attachedToUid: undefined,
       });
     }
@@ -588,10 +594,11 @@ export const Canvas = withStyles(styles)(
           });
         } else {
           const off = this.selectionCenterOffset;
+          const canvasOffset = this.getCanvasOffset();
           // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-assignment
           sink = ((sink as unknown) as any).merge({
-            x: off.x - this.state.canvasOffset.x,
-            y: off.y - this.state.canvasOffset.y,
+            x: off.x - canvasOffset.x,
+            y: off.y - canvasOffset.y,
             isZeroRadius: true,
           });
         }
@@ -680,7 +687,6 @@ export const Canvas = withStyles(styles)(
       this.pointerId = undefined;
       this.mouseDownPoint = undefined;
       this.selectionCenterOffset = undefined;
-      this.prevCanvasOffset = undefined;
 
       this.setState({
         isMovingCanvas: false,
@@ -770,9 +776,10 @@ export const Canvas = withStyles(styles)(
               const inCreation = !!this.state.inCreation;
               let fauxTargetCenter: Point | undefined;
               if (element.points.get(1)?.attachedToUid === fauxCloudTargetUid) {
+                const canvasOffset = this.getCanvasOffset();
                 fauxTargetCenter = {
-                  x: this.selectionCenterOffset.x - this.state.canvasOffset.x,
-                  y: this.selectionCenterOffset.y - this.state.canvasOffset.y,
+                  x: this.selectionCenterOffset.x - canvasOffset.x,
+                  y: this.selectionCenterOffset.y - canvasOffset.y,
                 };
               }
               this.props.onMoveFlow(element, validTarget ? validTarget.uid : 0, delta, fauxTargetCenter, inCreation);
@@ -813,17 +820,20 @@ export const Canvas = withStyles(styles)(
           width: contentRect.width,
           height: contentRect.height,
         },
-        canvasOffset: this.state.canvasOffset,
+        movingCanvasOffset: this.state.movingCanvasOffset,
       };
       const oldSize = this.state.svgSize;
       if (oldSize) {
         const dWidth = contentRect.width - oldSize.width;
         const dHeight = contentRect.height - oldSize.height;
-        updates.canvasOffset = {
-          x: this.state.canvasOffset.x + dWidth / 4,
-          y: this.state.canvasOffset.y + dHeight / 4,
+        const canvasOffset = this.getCanvasOffset();
+        updates.movingCanvasOffset = {
+          x: canvasOffset.x + dWidth / 4,
+          y: canvasOffset.y + dHeight / 4,
         };
       }
+
+      // TODO: should we notify the Editor of the change here rather than change our state?
 
       this.setState(updates);
     }
@@ -844,8 +854,8 @@ export const Canvas = withStyles(styles)(
       }
 
       const element = this.getElementByUid(uid);
-      const delta = this.state.canvasOffset || { x: 0, y: 0 };
-      const client = this.getSvgPoint(e);
+      const delta = this.state.movingCanvasOffset || { x: 0, y: 0 };
+      const client = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
       const pointer = {
         x: client.x - delta.x,
         y: client.y - delta.y,
@@ -878,7 +888,7 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
-      const currPt = this.getSvgPoint(e);
+      const currPt = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
       const dx = this.selectionCenterOffset.x - currPt.x;
       const dy = this.selectionCenterOffset.y - currPt.y;
@@ -896,12 +906,12 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
-      const prev = this.prevCanvasOffset || { x: 0, y: 0 };
-      const curr = this.getSvgPoint(e);
+      const prev = this.props.view.viewBox;
+      const curr = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
       this.setState({
         isMovingCanvas: true,
-        canvasOffset: {
+        movingCanvasOffset: {
           x: prev.x + curr.x - this.mouseDownPoint.x,
           y: prev.y + curr.y - this.mouseDownPoint.y,
         },
@@ -913,7 +923,7 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
-      const dragSelectionPoint = this.getSvgPoint(e);
+      const dragSelectionPoint = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
       this.setState({
         isDragSelecting: true,
@@ -958,25 +968,6 @@ export const Canvas = withStyles(styles)(
       return base;
     }
 
-    getSvgPoint(e: React.PointerEvent<SVGElement>): Point {
-      const svgPt = new DOMPoint(e.clientX, e.clientY);
-      const transform = new DOMMatrix([
-        2,
-        0,
-        0,
-        2,
-        0, // dx
-        0, // dy
-      ]);
-
-      const realPt = svgPt.matrixTransform(transform.inverse());
-
-      return {
-        x: realPt.x,
-        y: realPt.y,
-      };
-    }
-
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       if (this.props.embedded) {
         return;
@@ -988,6 +979,7 @@ export const Canvas = withStyles(styles)(
       e.preventDefault();
       e.stopPropagation();
 
+      const canvasOffset = this.getCanvasOffset();
       const { selectedTool } = this.props;
       if (selectedTool === 'aux' || selectedTool === 'stock') {
         let inCreation: AuxViewElement | StockViewElement;
@@ -996,8 +988,8 @@ export const Canvas = withStyles(styles)(
           inCreation = new AuxViewElement({
             uid: inCreationUid,
             var: undefined,
-            x: e.clientX - this.state.canvasOffset.x,
-            y: e.clientY - this.state.canvasOffset.y,
+            x: e.clientX - canvasOffset.x,
+            y: e.clientY - canvasOffset.y,
             name,
             ident: canonicalize(name),
             labelSide: 'right',
@@ -1008,8 +1000,8 @@ export const Canvas = withStyles(styles)(
           inCreation = new StockViewElement({
             uid: inCreationUid,
             var: undefined,
-            x: e.clientX - this.state.canvasOffset.x,
-            y: e.clientY - this.state.canvasOffset.y,
+            x: e.clientX - canvasOffset.x,
+            y: e.clientY - canvasOffset.y,
             name,
             ident: canonicalize(name),
             labelSide: 'bottom',
@@ -1020,7 +1012,7 @@ export const Canvas = withStyles(styles)(
         }
 
         this.pointerId = e.pointerId;
-        this.selectionCenterOffset = this.getSvgPoint(e);
+        this.selectionCenterOffset = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         (e.target as any).setPointerCapture(e.pointerId);
@@ -1040,7 +1032,7 @@ export const Canvas = withStyles(styles)(
       this.pointerId = e.pointerId;
 
       if (selectedTool === 'flow') {
-        const { canvasOffset } = this.state;
+        const canvasOffset = this.getCanvasOffset();
         const x = e.clientX - canvasOffset.x;
         const y = e.clientY - canvasOffset.y;
 
@@ -1068,7 +1060,7 @@ export const Canvas = withStyles(styles)(
           isZeroRadius: false,
         });
 
-        this.selectionCenterOffset = this.getSvgPoint(e);
+        this.selectionCenterOffset = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
         this.setState({
           isEditingName: false,
@@ -1088,10 +1080,7 @@ export const Canvas = withStyles(styles)(
       // off the circle, and mouse-up on the canvas, the canvas gets an
       // onclick.  Instead, capture where we mouse-down'd, and on mouse up
       // check if its the same.
-      this.mouseDownPoint = this.getSvgPoint(e);
-      if (this.state.canvasOffset) {
-        this.prevCanvasOffset = this.state.canvasOffset;
-      }
+      this.mouseDownPoint = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
       if (e.pointerType === 'touch' || e.shiftKey) {
         this.setState({
@@ -1138,7 +1127,7 @@ export const Canvas = withStyles(styles)(
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
-      this.selectionCenterOffset = this.getSvgPoint(e);
+      this.selectionCenterOffset = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
       if (!isEditingName) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
@@ -1351,7 +1340,7 @@ export const Canvas = withStyles(styles)(
       if (this.state.isDragSelecting && this.mouseDownPoint && this.state.dragSelectionPoint) {
         const pointA = this.mouseDownPoint;
         const pointB = this.state.dragSelectionPoint;
-        const offset = this.state.canvasOffset;
+        const offset = this.getCanvasOffset();
 
         const x = Math.min(pointA.x, pointB.x) - offset.x;
         const y = Math.min(pointA.y, pointB.y) - offset.y;
@@ -1369,7 +1358,7 @@ export const Canvas = withStyles(styles)(
         const rw = editingElement instanceof StockViewElement ? StockWidth / 2 : AuxRadius;
         const rh = editingElement instanceof StockViewElement ? StockHeight / 2 : AuxRadius;
         const side = editingElement.labelSide;
-        const offset = this.state.canvasOffset;
+        const offset = this.getCanvasOffset();
         nameEditor = (
           <EditableLabel
             uid={editingUid}
@@ -1417,7 +1406,7 @@ export const Canvas = withStyles(styles)(
             });
           }
         } else {
-          const { initialBounds } = this.state;
+          // const { initialBounds } = this.state;
           const svgElement = exists(this.svgRef.current);
 
           if (!this.svgObserver) {
@@ -1437,7 +1426,7 @@ export const Canvas = withStyles(styles)(
             // console.log('we the default!');
           }
 
-          const zoom = 2; //this.props.view.zoom;
+          const zoom = this.props.view.zoom;
 
           let svgWidth: number;
           let svgHeight: number;
@@ -1457,31 +1446,33 @@ export const Canvas = withStyles(styles)(
             svgHeight = this.state.svgSize.height;
           }
 
-          const width = svgWidth / zoom;
-          const height = svgHeight / zoom;
+          // const width = svgWidth / zoom;
+          // const height = svgHeight / zoom;
+
+          const offset = this.getCanvasOffset();
 
           // viewBox = `0 0 ${width} ${height}`;
-          transform = `scale(${zoom}, ${zoom})`;
+          transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x} ${offset.y})`;
 
-          if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
-            const offset = this.state.canvasOffset;
-            transform += ` translate(${offset.x} ${offset.y})`;
-          } else {
-            const viewCx = width / 2;
-            const viewCy = height / 2;
-
-            const diagramCx = initialBounds.x + initialBounds.width / 2;
-            const diagramCy = initialBounds.y + initialBounds.height / 2;
-
-            const x = -(diagramCx - viewCx);
-            const y = -(diagramCy - viewCy);
-
-            transform = `translate(${x} ${y})`;
-
-            setTimeout(() => {
-              this.setState({ canvasOffset: { x, y } });
-            });
-          }
+          // if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
+          //   const offset = this.state.canvasOffset;
+          //   transform += ` translate(${offset.x} ${offset.y})`;
+          // } else {
+          //   const viewCx = width / 2;
+          //   const viewCy = height / 2;
+          //
+          //   const diagramCx = initialBounds.x + initialBounds.width / 2;
+          //   const diagramCy = initialBounds.y + initialBounds.height / 2;
+          //
+          //   const x = -(diagramCx - viewCx);
+          //   const y = -(diagramCy - viewCy);
+          //
+          //   transform = `translate(${x} ${y})`;
+          //
+          //   setTimeout(() => {
+          //     this.setState({ canvasOffset: { x, y } });
+          //   });
+          // }
         }
       }
 

@@ -306,13 +306,17 @@ module.exports = function (webpackEnv) {
                   [
                     "@babel/plugin-proposal-class-properties",
                     {
-                      "loose": true
+                      "loose": true,
                     }
                   ],
                   [
                     "@babel/plugin-proposal-optional-chaining",
                     {}
-                  ]
+                  ],
+                  [
+                    "@babel/plugin-syntax-nullish-coalescing-operator",
+                    {}
+                  ],
                 ].filter(Boolean),
                 // This is a feature of `babel-loader` for webpack (not Babel itself).
                 // It enables caching results in ./node_modules/.cache/babel-loader/

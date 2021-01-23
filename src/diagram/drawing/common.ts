@@ -100,3 +100,21 @@ export const distance = (a: Point, b: Point): number => {
   const dy = a.y - b.y;
   return Math.sqrt(square(dx) + square(dy));
 };
+
+export function screenToCanvasPoint(x: number, y: number, zoom: number): Point {
+  const canvas = new DOMPoint(x, y).matrixTransform(
+    new DOMMatrix([
+      zoom,
+      0,
+      0,
+      zoom,
+      0, // dx
+      0, // dy
+    ]).inverse(),
+  );
+
+  return {
+    x: canvas.x,
+    y: canvas.y,
+  };
+}
