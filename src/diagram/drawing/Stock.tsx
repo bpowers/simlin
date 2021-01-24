@@ -194,42 +194,15 @@ export const Stock = withStyles(styles)(
         groupClassName = isValidTarget ? classes.targetGood : classes.targetBad;
       }
 
-      let rects = [
-        <rect
-          key="1"
-          className={classes.stock}
-          x={Math.ceil(cx - w / 2)}
-          y={Math.ceil(cy - h / 2)}
-          width={w}
-          height={h}
-        />,
-      ];
+      const x = cx - w / 2;
+      const y = cy - h / 2;
+
+      let rects = [<rect key="1" className={classes.stock} x={x} y={y} width={w} height={h} />];
       if (isArrayed) {
         rects = [
-          <rect
-            key="0"
-            className={classes.stock}
-            x={Math.ceil(cx - w / 2) + arrayedOffset}
-            y={Math.ceil(cy - h / 2) + arrayedOffset}
-            width={w}
-            height={h}
-          />,
-          <rect
-            key="1"
-            className={classes.stock}
-            x={Math.ceil(cx - w / 2)}
-            y={Math.ceil(cy - h / 2)}
-            width={w}
-            height={h}
-          />,
-          <rect
-            key="2"
-            className={classes.stock}
-            x={Math.ceil(cx - w / 2) - arrayedOffset}
-            y={Math.ceil(cy - h / 2) - arrayedOffset}
-            width={w}
-            height={h}
-          />,
+          <rect key="0" className={classes.stock} x={x + arrayedOffset} y={y + arrayedOffset} width={w} height={h} />,
+          <rect key="1" className={classes.stock} x={x} y={y} width={w} height={h} />,
+          <rect key="2" className={classes.stock} x={x - arrayedOffset} y={y - arrayedOffset} width={w} height={h} />,
         ];
       }
 
