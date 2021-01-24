@@ -1071,6 +1071,8 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
       .toArray();
 
     view.setElementsList(elements);
+    view.setViewbox(this.viewBox.toPb());
+    view.setZoom(this.zoom);
 
     return view;
   }
