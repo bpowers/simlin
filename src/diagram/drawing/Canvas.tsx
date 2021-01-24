@@ -934,14 +934,14 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
-      const prev = this.props.view.viewBox;
+      const base = this.props.view.viewBox;
       const curr = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
 
       this.setState({
         isMovingCanvas: true,
         movingCanvasOffset: {
-          x: prev.x + curr.x - this.mouseDownPoint.x,
-          y: prev.y + curr.y - this.mouseDownPoint.y,
+          x: base.x + (curr.x - this.mouseDownPoint.x),
+          y: base.y + (curr.y - this.mouseDownPoint.y),
         },
       });
     }
@@ -1513,7 +1513,7 @@ export const Canvas = withStyles(styles)(
         const zoom = this.props.view.zoom >= 0.2 ? this.props.view.zoom : 1;
         const offset = this.getCanvasOffset();
 
-        transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x} ${offset.y})`;
+        transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x * zoom} ${offset.y * zoom})`;
       }
 
       const overlay = embedded ? undefined : (

@@ -84,6 +84,7 @@ import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 import { ErrorDetails } from '@system-dynamics/diagram/ErrorDetails';
+import { ZoomBar } from '@system-dynamics/diagram/ZoomBar';
 
 const MaxUndoSize = 5;
 const SearchbarWidthSm = 359;
@@ -1154,12 +1155,13 @@ export const Editor = withStyles(styles)(
 
     centerVariable(element: ViewElement): void {
       const view = defined(this.getView());
+      const zoom = view.zoom;
 
       const cx = element.cx;
       const cy = element.cy;
 
-      const viewCy = view.viewBox.height / 2 / view.zoom;
-      const viewCx = (view.viewBox.width - SearchbarWidthSm) / 2 / view.zoom;
+      const viewCy = view.viewBox.height / 2 / zoom;
+      const viewCx = (view.viewBox.width - SearchbarWidthSm) / 2 / zoom;
 
       const viewBox = view.viewBox.merge({
         x: viewCx - cx,
@@ -1682,6 +1684,28 @@ export const Editor = withStyles(styles)(
       });
     };
 
+    handleZoomChange = (newZoom: number) => {
+      const view = defined(this.getView());
+      const oldViewBox = view.viewBox;
+
+      const widthAdjust = this.state.showDetails ? SearchbarWidthLg : 0;
+
+      const oldViewWidth = (oldViewBox.width - widthAdjust) / view.zoom;
+      const oldViewHeight = oldViewBox.height / view.zoom;
+
+      const newViewWidth = (oldViewBox.width - widthAdjust) / newZoom;
+      const newViewHeight = oldViewBox.height / newZoom;
+
+      const diffX = (newViewWidth - oldViewWidth) / 2;
+      const diffY = (newViewHeight - oldViewHeight) / 2;
+
+      const newViewBox = oldViewBox.merge({
+        x: oldViewBox.x + diffX,
+        y: oldViewBox.y + diffY,
+      });
+      this.handleViewBoxChange(newViewBox, newZoom);
+    };
+
     async takeSnapshot() {
       const project = this.project();
       if (!project || !this.state.modelName) {
@@ -1713,12 +1737,14 @@ export const Editor = withStyles(styles)(
       }
     };
 
-    getUndoRedoBar() {
+    getMetaActionsBar() {
       const { embedded } = this.props;
       const classes = this.props.classes;
       if (embedded) {
         return undefined;
       }
+
+      const zoom = this.getView()?.zoom || 1;
 
       const undoEnabled =
         this.state.projectHistory.size > 1 && this.state.projectOffset < this.state.projectHistory.size - 1;
@@ -1728,6 +1754,7 @@ export const Editor = withStyles(styles)(
         <div className={classes.undoRedoBar}>
           <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
           <Snapshotter onSnapshot={this.handleSnapshot} />
+          <ZoomBar zoom={zoom} onChangeZoom={this.handleZoomChange} />
         </div>
       );
     }
@@ -1819,7 +1846,7 @@ export const Editor = withStyles(styles)(
           {this.getCanvas()}
           {this.getSnackbar()}
           {this.getEditorControls()}
-          {this.getUndoRedoBar()}
+          {this.getMetaActionsBar()}
           {this.getSnapshot()}
         </div>
       );
