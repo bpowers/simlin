@@ -1123,10 +1123,9 @@ export const Editor = withStyles(styles)(
     }
 
     private queueViewUpdate(view: StockFlowView): void {
-      const viewPb = view.toPb();
-
       const engine = this.engine();
       if (engine) {
+        const viewPb = view.toPb();
         const err = engine.setView(this.state.modelName, 0, viewPb.serializeBinary());
         if (err) {
           const details = err.getDetails();
