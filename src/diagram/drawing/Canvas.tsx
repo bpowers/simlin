@@ -636,7 +636,19 @@ export const Canvas = withStyles(styles)(
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
 
-    private populateNamedElements(displayElements: List<ViewElement>): void {
+    private renderInitAndCache(): List<ViewElement> {
+      if (!this.props.selection.equals(this.selection)) {
+        this.selection = this.props.selection;
+      }
+
+      let displayElements = this.props.view.elements;
+      if (this.state.inCreation) {
+        displayElements = displayElements.push(this.state.inCreation);
+      }
+      if (this.state.inCreationCloud) {
+        displayElements = displayElements.push(this.state.inCreationCloud);
+      }
+
       if (this.props.version !== this.cachedVersion) {
         this.elements = Map(displayElements.map((el) => [el.uid, el]))
           .set(fauxTarget.uid, fauxTarget)
@@ -683,6 +695,8 @@ export const Canvas = withStyles(styles)(
         const namedUpdates: Map<UID, ViewElement> = otherUpdates.toMap().mapKeys((_, el) => el.uid);
         this.selectionUpdates = this.selectionUpdates.concat(namedUpdates);
       }
+
+      return displayElements;
     }
 
     clearPointerState(clearSelection = true): void {
@@ -1263,40 +1277,13 @@ export const Canvas = withStyles(styles)(
       }
     }
 
-    render() {
-      const { view, embedded, classes } = this.props;
-
-      const initialRender = this.svgRef.current === undefined || ViewRect.default().equals(this.state.initialBounds);
-
-      if (!this.props.selection.equals(this.selection)) {
-        this.selection = this.props.selection;
-      }
-
-      let displayElements = view.elements;
-      if (this.state.inCreation) {
-        displayElements = displayElements.push(this.state.inCreation);
-      }
-      if (this.state.inCreationCloud) {
-        displayElements = displayElements.push(this.state.inCreationCloud);
-      }
-
+    buildLayers(displayElements: List<ViewElement>): React.ReactElement[][] {
       // create different layers for each of the display types so that views compose together nicely
-      let zLayers = new Array(ZMax) as React.ReactElement[][];
+      const zLayers = new Array(ZMax) as React.ReactElement[][];
       for (let i = 0; i < ZMax; i++) {
         zLayers[i] = [];
       }
 
-      // phase 1: build up a map of ident -> ViewElement
-      this.populateNamedElements(displayElements);
-
-      // FIXME: this is so gross
-      // we only need to compute bounds when we are embedded
-      this.computeBounds = embedded || initialRender;
-      if (this.computeBounds) {
-        this.elementBounds = List<Rect | undefined>();
-      }
-
-      // phase 3: create React components and add them to the appropriate layer
       for (let element of displayElements) {
         if (this.selectionUpdates.has(element.uid)) {
           element = defined(this.selectionUpdates.get(element.uid));
@@ -1346,6 +1333,104 @@ export const Canvas = withStyles(styles)(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         zLayers[zOrder].push(component);
       }
+
+      return zLayers;
+    }
+
+    componentDidMount() {
+      const displayElements = this.renderInitAndCache();
+
+      this.computeBounds = true;
+      if (this.computeBounds) {
+        this.elementBounds = List<Rect | undefined>();
+      }
+
+      // we are ignoring the result here, because we're calling it for
+      // the side effect of computing individual bounds
+      this.buildLayers(displayElements);
+
+      let initialBounds;
+      const bounds = calcViewBox(this.elementBounds);
+      if (bounds) {
+        const left = Math.floor(bounds.left) - 10;
+        const top = Math.floor(bounds.top) - 10;
+        const width = Math.ceil(bounds.right - left) + 10;
+        const height = Math.ceil(bounds.bottom - top) + 10;
+        initialBounds = new ViewRect({
+          x: left,
+          y: top,
+          width,
+          height,
+        });
+        this.setState({ initialBounds });
+      }
+
+      const svgElement = exists(this.svgRef.current);
+      this.svgObserver?.disconnect();
+      this.svgObserver = new ResizeObserver((entries: ResizeObserverEntry[]) => {
+        const entry = defined(entries[0]);
+        const target = entry.target as HTMLDivElement;
+        this.handleSvgResize({
+          width: target.clientWidth,
+          height: target.clientHeight,
+        });
+      });
+
+      this.svgObserver.observe(svgElement);
+
+      const svgWidth = svgElement.clientWidth;
+      const svgHeight = svgElement.clientHeight;
+
+      const { viewBox, zoom } = this.props.view;
+
+      if (viewBox.width === 0 || viewBox.height === 0) {
+        const width = svgWidth / zoom;
+        const height = svgHeight / zoom;
+        const viewCx = width / 2;
+        const viewCy = height / 2;
+
+        if (initialBounds) {
+          const diagramCx = initialBounds.x + initialBounds.width / 2;
+          const diagramCy = initialBounds.y + initialBounds.height / 2;
+
+          const x = -(diagramCx - viewCx);
+          const y = -(diagramCy - viewCy);
+
+          const newViewBox = new ViewRect({
+            x,
+            y,
+            width: svgWidth,
+            height: svgHeight,
+          });
+
+          this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
+        }
+
+        this.setState({
+          svgSize: {
+            width: svgWidth,
+            height: svgHeight,
+          },
+        });
+      }
+
+      this.computeBounds = false;
+      this.elementBounds = List<Rect | undefined>();
+    }
+
+    render() {
+      const { embedded, classes } = this.props;
+
+      // phase 1: initialize some data structures we need and potentially
+      // invalidate cached data structures we have
+      const displayElements = this.renderInitAndCache();
+
+      if (embedded) {
+        this.computeBounds = true;
+      }
+
+      // phase 2: create React components and add them to the appropriate layer
+      const zLayers = this.buildLayers(displayElements);
 
       let overlayClass = classes.overlay;
       let nameEditor;
@@ -1400,94 +1485,11 @@ export const Canvas = withStyles(styles)(
           viewBox = `${left} ${top} ${width} ${height}`;
         }
       } else {
-        if (initialRender) {
-          zLayers = new Array(ZMax) as React.ReactElement[][];
+        const zoom = this.props.view.zoom;
+        const offset = this.getCanvasOffset();
 
-          const bounds = calcViewBox(this.elementBounds);
-          if (bounds) {
-            const left = Math.floor(bounds.left) - 10;
-            const top = Math.floor(bounds.top) - 10;
-            const width = Math.ceil(bounds.right - left) + 10;
-            const height = Math.ceil(bounds.bottom - top) + 10;
-            const initialBounds = new ViewRect({
-              x: left,
-              y: top,
-              width,
-              height,
-            });
-            setTimeout(() => {
-              this.setState({ initialBounds });
-            });
-          }
-        } else {
-          // const { initialBounds } = this.state;
-          const svgElement = exists(this.svgRef.current);
-
-          if (!this.svgObserver) {
-            this.svgObserver = new ResizeObserver((entries: ResizeObserverEntry[]) => {
-              const entry = defined(entries[0]);
-              const target = entry.target as HTMLDivElement;
-              this.handleSvgResize({
-                width: target.clientWidth,
-                height: target.clientHeight,
-              });
-            });
-
-            this.svgObserver.observe(svgElement);
-          }
-
-          const zoom = this.props.view.zoom;
-
-          let svgWidth: number;
-          let svgHeight: number;
-          if (!this.state.svgSize) {
-            svgWidth = svgElement.clientWidth;
-            svgHeight = svgElement.clientHeight;
-            setTimeout(() => {
-              this.setState({
-                svgSize: {
-                  width: svgWidth,
-                  height: svgHeight,
-                },
-              });
-            });
-          } else {
-            svgWidth = this.state.svgSize.width;
-            svgHeight = this.state.svgSize.height;
-          }
-
-          const offset = { ...this.getCanvasOffset() };
-
-          const { viewBox } = this.props.view;
-
-          if (viewBox.width === 0 || viewBox.height === 0) {
-            const width = svgWidth / zoom;
-            const height = svgHeight / zoom;
-            const viewCx = width / 2;
-            const viewCy = height / 2;
-
-            const bounds = this.state.initialBounds;
-            const diagramCx = bounds.width / 2;
-            const diagramCy = bounds.height / 2;
-
-            offset.x = -(diagramCx - viewCx);
-            offset.y = -(diagramCy - viewCy);
-
-            const newViewBox = new ViewRect({
-              x: offset.x,
-              y: offset.y,
-              width: svgWidth,
-              height: svgHeight,
-            });
-
-            setTimeout(() => {
-              this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
-            });
-          }
-
-          // viewBox = `0 0 ${width} ${height}`;
-          transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x} ${offset.y})`;
-        }
+        transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x} ${offset.y})`;
+        console.log(transform);
       }
 
       const overlay = embedded ? undefined : (
@@ -1498,7 +1500,7 @@ export const Canvas = withStyles(styles)(
 
       // we don't need these things anymore
 
-      if (this.computeBounds) {
+      if (this.elementBounds) {
         this.elementBounds = List<Rect | undefined>();
       }
       this.selectionUpdates = Map<UID, ViewElement>();

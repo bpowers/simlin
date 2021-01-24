@@ -1118,7 +1118,7 @@ export const Editor = withStyles(styles)(
 
     setView(view: StockFlowView): void {
       const project = defined(this.project());
-      const activeProject = project.setIn([this.state.modelName, 'views', 0], view);
+      const activeProject = project.setIn(['models', this.state.modelName, 'views', 0], view);
       this.setState({ activeProject });
     }
 
@@ -1150,7 +1150,6 @@ export const Editor = withStyles(styles)(
 
     handleViewBoxChange = (viewBox: Rect, zoom: number) => {
       const view = defined(this.getView());
-
       this.queueViewUpdate(view.merge({ viewBox, zoom }));
     };
 
@@ -1612,16 +1611,17 @@ export const Editor = withStyles(styles)(
       }
       this.activeEngine = engine;
 
-      this.setState({
-        activeProject: this.updateVariableErrors(project),
-      });
-
       if (this.newEngineShouldPullView) {
         const queuedView = defined(this.newEngineQueuedView);
         this.newEngineShouldPullView = false;
         this.newEngineQueuedView = undefined;
+        project = project.setIn(['models', this.state.modelName, 'views', 0], queuedView);
         this.queueViewUpdate(queuedView);
       }
+
+      this.setState({
+        activeProject: this.updateVariableErrors(project),
+      });
 
       return engine;
     }
