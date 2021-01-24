@@ -4,6 +4,7 @@
 
 export const canonicalize = (id: string): string => {
   let quoted = false;
+  id = id.trim();
   if (id.length > 1) {
     const f = id.slice(0, 1);
     const l = id.slice(id.length - 1);
