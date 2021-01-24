@@ -1349,7 +1349,7 @@ export const Canvas = withStyles(styles)(
       // the side effect of computing individual bounds
       this.buildLayers(displayElements);
 
-      let initialBounds;
+      let initialBounds: ViewRect | undefined;
       const bounds = calcViewBox(this.elementBounds);
       if (bounds) {
         const left = Math.floor(bounds.left) - 10;
@@ -1383,28 +1383,53 @@ export const Canvas = withStyles(styles)(
 
       const { viewBox, zoom } = this.props.view;
 
+      let shouldUpdate = false;
+      const prevBounds = viewBox;
       if (viewBox.width === 0 || viewBox.height === 0) {
-        const width = svgWidth / zoom;
-        const height = svgHeight / zoom;
-        const viewCx = width / 2;
-        const viewCy = height / 2;
+        shouldUpdate = true;
+      } else if (viewBox.width !== svgWidth || viewBox.height !== svgHeight) {
+        shouldUpdate = true;
+      }
 
+      if (shouldUpdate) {
+        let x = 0;
+        let y = 0;
+
+        // on a new diagram we won't have an initial bounds, but we should
+        // still set the width/height
         if (initialBounds) {
+          const currWidth = svgWidth / zoom;
+          const currHeight = svgHeight / zoom;
+
+          initialBounds = defined(initialBounds);
           const diagramCx = initialBounds.x + initialBounds.width / 2;
           const diagramCy = initialBounds.y + initialBounds.height / 2;
 
-          const x = -(diagramCx - viewCx);
-          const y = -(diagramCy - viewCy);
+          if (prevBounds.width && prevBounds.height) {
+            const prevWidth = prevBounds.width / zoom;
+            const prevHeight = prevBounds.height / zoom;
+            const fractionX = (prevBounds.x + initialBounds.width / 2) / prevWidth;
+            const fractionY = (prevBounds.y + initialBounds.height / 2) / prevHeight;
 
-          const newViewBox = new ViewRect({
-            x,
-            y,
-            width: svgWidth,
-            height: svgHeight,
-          });
+            x = fractionX * currWidth - initialBounds.width / 2;
+            y = fractionY * currHeight - initialBounds.height / 2;
+          } else {
+            const viewCx = currWidth / 2;
+            const viewCy = currHeight / 2;
 
-          this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
+            x = viewCx - diagramCx;
+            y = viewCy - diagramCy;
+          }
         }
+
+        const newViewBox = new ViewRect({
+          x,
+          y,
+          width: svgWidth,
+          height: svgHeight,
+        });
+
+        this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
 
         this.setState({
           svgSize: {
@@ -1485,11 +1510,10 @@ export const Canvas = withStyles(styles)(
           viewBox = `${left} ${top} ${width} ${height}`;
         }
       } else {
-        const zoom = this.props.view.zoom;
+        const zoom = this.props.view.zoom >= 0.2 ? this.props.view.zoom : 1;
         const offset = this.getCanvasOffset();
 
         transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x} ${offset.y})`;
-        console.log(transform);
       }
 
       const overlay = embedded ? undefined : (
