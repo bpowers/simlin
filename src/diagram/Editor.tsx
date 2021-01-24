@@ -39,6 +39,7 @@ import {
   SimError,
   ModelError,
   ErrorCode,
+  Rect,
 } from '@system-dynamics/core/datamodel';
 
 import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
@@ -243,6 +244,8 @@ interface EditorProps extends WithStyles<typeof styles> {
 export const Editor = withStyles(styles)(
   class InnerEditor extends React.PureComponent<EditorProps, EditorState> {
     private activeEngine?: IEngine;
+    private newEngineShouldPullView = false;
+    private newEngineQueuedView?: StockFlowView;
 
     constructor(props: EditorProps) {
       super(props);
@@ -1113,6 +1116,44 @@ export const Editor = withStyles(styles)(
       return model.views.first();
     }
 
+    setView(view: StockFlowView): void {
+      const project = defined(this.project());
+      const activeProject = project.setIn([this.state.modelName, 'views', 0], view);
+      this.setState({ activeProject });
+    }
+
+    private queueViewUpdate(view: StockFlowView): void {
+      const viewPb = view.toPb();
+
+      const engine = this.engine();
+      if (engine) {
+        const err = engine.setView(this.state.modelName, 0, viewPb.serializeBinary());
+        if (err) {
+          const details = err.getDetails();
+          const msg = `${errorCodeDescription(err.code)}` + (details ? `: ${details}` : '');
+          this.appendModelError(msg);
+          return;
+        }
+
+        this.updateProject(engine.serializeToProtobuf(), false);
+      } else {
+        // there exists a race where we need to center/update the viewBox when
+        // displaying a newly imported model, but the async wasm stuff doesn't
+        // complete before we want to save the viewBox change.  In this case update
+        // the view in place, and set a flag we check when finalizing installation
+        // of the new engine.
+        this.newEngineShouldPullView = true;
+        this.newEngineQueuedView = view;
+        this.setView(view);
+      }
+    }
+
+    handleViewBoxChange = (viewBox: Rect, zoom: number) => {
+      const view = defined(this.getView());
+
+      this.queueViewUpdate(view.merge({ viewBox, zoom }));
+    };
+
     getCanvas() {
       const project = this.project();
       if (!project) {
@@ -1143,6 +1184,7 @@ export const Editor = withStyles(styles)(
       const onClearSelectedTool = !embedded ? this.handleClearSelectedTool : () => {};
       const onDeleteSelection = !embedded ? this.handleSelectionDelete : () => {};
       const onShowVariableDetails = !embedded ? this.handleShowVariableDetails : () => {};
+      const onViewBoxChange = !embedded ? this.handleViewBoxChange : () => {};
 
       return (
         <Canvas
@@ -1163,6 +1205,7 @@ export const Editor = withStyles(styles)(
           onClearSelectedTool={onClearSelectedTool}
           onDeleteSelection={onDeleteSelection}
           onShowVariableDetails={onShowVariableDetails}
+          onViewBoxChange={onViewBoxChange}
         />
       );
     }
@@ -1572,6 +1615,13 @@ export const Editor = withStyles(styles)(
       this.setState({
         activeProject: this.updateVariableErrors(project),
       });
+
+      if (this.newEngineShouldPullView) {
+        const queuedView = defined(this.newEngineQueuedView);
+        this.newEngineShouldPullView = false;
+        this.newEngineQueuedView = undefined;
+        this.queueViewUpdate(queuedView);
+      }
 
       return engine;
     }

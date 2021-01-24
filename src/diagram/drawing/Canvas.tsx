@@ -162,6 +162,7 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   onClearSelectedTool: () => void;
   onDeleteSelection: () => void;
   onShowVariableDetails: () => void;
+  onViewBoxChange: (viewBox: ViewRect, zoom: number) => void;
 }
 
 export type CanvasProps = Pick<
@@ -181,6 +182,7 @@ export type CanvasProps = Pick<
   | 'onCreateVariable'
   | 'onClearSelectedTool'
   | 'onDeleteSelection'
+  | 'onViewBoxChange'
 >;
 
 export const Canvas = withStyles(styles)(
@@ -270,7 +272,7 @@ export const Canvas = withStyles(styles)(
       return this.props.selection.has(element.uid);
     }
 
-    private alias = (element: AliasViewElement): React.ReactElement => {
+    private alias(element: AliasViewElement): React.ReactElement {
       const aliasOf = this.elements.get(element.aliasOfUid) as NamedViewElement | undefined;
       let series;
       let isValidTarget: boolean | undefined;
@@ -289,9 +291,9 @@ export const Canvas = withStyles(styles)(
         aliasOf,
       };
       return <Alias key={element.uid} {...props} />;
-    };
+    }
 
-    private cloud = (element: CloudViewElement): React.ReactElement | undefined => {
+    private cloud(element: CloudViewElement): React.ReactElement | undefined {
       const isSelected = this.isSelected(element);
 
       const flow = this.getElementByUid(defined(element.flowUid)) as FlowViewElement;
@@ -313,7 +315,7 @@ export const Canvas = withStyles(styles)(
       }
 
       return <Cloud key={element.uid} {...props} />;
-    };
+    }
 
     private isValidTarget(element: ViewElement): boolean | undefined {
       if (!this.state.isMovingArrow || !this.selectionCenterOffset) {
@@ -380,7 +382,7 @@ export const Canvas = withStyles(styles)(
       return element instanceof FlowViewElement || element instanceof AuxViewElement;
     }
 
-    private aux = (element: AuxViewElement): React.ReactElement => {
+    private aux(element: AuxViewElement): React.ReactElement {
       const variable = this.props.model.variables.get(element.ident);
       const hasWarning = variable?.hasError || false;
       const isSelected = this.isSelected(element);
@@ -401,9 +403,9 @@ export const Canvas = withStyles(styles)(
       }
 
       return <Aux key={element.ident} {...props} />;
-    };
+    }
 
-    private stock = (element: StockViewElement): React.ReactElement => {
+    private stock(element: StockViewElement): React.ReactElement {
       const variable = this.props.model.variables.get(element.ident);
       const hasWarning = variable?.hasError || false;
       const isSelected = this.isSelected(element);
@@ -423,9 +425,9 @@ export const Canvas = withStyles(styles)(
         this.elementBounds = this.elementBounds.push(stockBounds(element));
       }
       return <Stock key={element.ident} {...props} />;
-    };
+    }
 
-    private module = (element: ModuleViewElement) => {
+    private module(element: ModuleViewElement) {
       const isSelected = this.isSelected(element);
       const props: ModuleProps = {
         element,
@@ -436,9 +438,9 @@ export const Canvas = withStyles(styles)(
         this.elementBounds = this.elementBounds.push(moduleBounds(props));
       }
       return <Module key={element.ident} {...props} />;
-    };
+    }
 
-    private connector = (element: LinkViewElement) => {
+    private connector(element: LinkViewElement) {
       const { isMovingArrow } = this.state;
       const isSelected = this.props.selection.has(element.uid);
 
@@ -489,7 +491,7 @@ export const Canvas = withStyles(styles)(
       }
       // this.elementBounds = this.elementBounds.push(Connector.bounds(props));
       return <Connector key={element.uid} {...props} />;
-    };
+    }
 
     private getArcPoint(): FlowPoint | undefined {
       if (!this.selectionCenterOffset) {
@@ -505,7 +507,7 @@ export const Canvas = withStyles(styles)(
       });
     }
 
-    private flow = (element: FlowViewElement) => {
+    private flow(element: FlowViewElement) {
       const variable = this.props.model.variables.get(element.ident);
       const hasWarning = variable?.hasError || false;
       const { isMovingArrow } = this.state;
@@ -550,7 +552,7 @@ export const Canvas = withStyles(styles)(
           onLabelDrag={this.handleLabelDrag}
         />
       );
-    };
+    }
 
     private constrainFlowMovement(
       flow: FlowViewElement,
@@ -806,6 +808,16 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
+      if (this.state.isMovingCanvas && this.state.movingCanvasOffset) {
+        const newViewBox = this.props.view.viewBox.merge({
+          x: this.state.movingCanvasOffset.x,
+          y: this.state.movingCanvasOffset.y,
+        });
+
+        this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
+        this.setState({ movingCanvasOffset: undefined });
+      }
+
       if (!this.mouseDownPoint) {
         return;
       }
@@ -820,20 +832,22 @@ export const Canvas = withStyles(styles)(
           width: contentRect.width,
           height: contentRect.height,
         },
-        movingCanvasOffset: this.state.movingCanvasOffset,
       };
       const oldSize = this.state.svgSize;
       if (oldSize) {
         const dWidth = contentRect.width - oldSize.width;
         const dHeight = contentRect.height - oldSize.height;
         const canvasOffset = this.getCanvasOffset();
-        updates.movingCanvasOffset = {
+
+        const newViewBox = new ViewRect({
           x: canvasOffset.x + dWidth / 4,
           y: canvasOffset.y + dHeight / 4,
-        };
-      }
+          width: contentRect.width,
+          height: contentRect.height,
+        });
 
-      // TODO: should we notify the Editor of the change here rather than change our state?
+        this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
+      }
 
       this.setState(updates);
     }
@@ -1422,10 +1436,6 @@ export const Canvas = withStyles(styles)(
             this.svgObserver.observe(svgElement);
           }
 
-          if (ViewRect.default().equals(this.props.view.viewBox)) {
-            // console.log('we the default!');
-          }
-
           const zoom = this.props.view.zoom;
 
           let svgWidth: number;
@@ -1446,33 +1456,37 @@ export const Canvas = withStyles(styles)(
             svgHeight = this.state.svgSize.height;
           }
 
-          // const width = svgWidth / zoom;
-          // const height = svgHeight / zoom;
+          const offset = { ...this.getCanvasOffset() };
 
-          const offset = this.getCanvasOffset();
+          const { viewBox } = this.props.view;
+
+          if (viewBox.width === 0 || viewBox.height === 0) {
+            const width = svgWidth / zoom;
+            const height = svgHeight / zoom;
+            const viewCx = width / 2;
+            const viewCy = height / 2;
+
+            const bounds = this.state.initialBounds;
+            const diagramCx = bounds.width / 2;
+            const diagramCy = bounds.height / 2;
+
+            offset.x = -(diagramCx - viewCx);
+            offset.y = -(diagramCy - viewCy);
+
+            const newViewBox = new ViewRect({
+              x: offset.x,
+              y: offset.y,
+              width: svgWidth,
+              height: svgHeight,
+            });
+
+            setTimeout(() => {
+              this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
+            });
+          }
 
           // viewBox = `0 0 ${width} ${height}`;
           transform = `matrix(${zoom} 0 0 ${zoom} ${offset.x} ${offset.y})`;
-
-          // if (this.state.canvasOffset.x !== 0 || this.state.canvasOffset.y !== 0) {
-          //   const offset = this.state.canvasOffset;
-          //   transform += ` translate(${offset.x} ${offset.y})`;
-          // } else {
-          //   const viewCx = width / 2;
-          //   const viewCy = height / 2;
-          //
-          //   const diagramCx = initialBounds.x + initialBounds.width / 2;
-          //   const diagramCy = initialBounds.y + initialBounds.height / 2;
-          //
-          //   const x = -(diagramCx - viewCx);
-          //   const y = -(diagramCy - viewCy);
-          //
-          //   transform = `translate(${x} ${y})`;
-          //
-          //   setTimeout(() => {
-          //     this.setState({ canvasOffset: { x, y } });
-          //   });
-          // }
         }
       }
 

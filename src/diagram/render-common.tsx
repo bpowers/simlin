@@ -55,6 +55,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
       onClearSelectedTool={nullCb}
       onDeleteSelection={nullCb}
       onShowVariableDetails={nullCb}
+      onViewBoxChange={nullCb}
     />
   );
 
