@@ -884,7 +884,7 @@ export const Canvas = withStyles(styles)(
       }
 
       const element = this.getElementByUid(uid);
-      const delta = this.state.movingCanvasOffset || { x: 0, y: 0 };
+      const delta = this.getCanvasOffset();
       const client = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
       const pointer = {
         x: client.x - delta.x,
