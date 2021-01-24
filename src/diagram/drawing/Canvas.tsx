@@ -199,6 +199,8 @@ export const Canvas = withStyles(styles)(
 
     private elementBounds = List<Rect | undefined>();
 
+    private prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
+
     // we have to regenerate selectionUpdates when selection !== props.selection
     private selection = Set<UID>();
 
@@ -402,7 +404,7 @@ export const Canvas = withStyles(styles)(
         this.elementBounds = this.elementBounds.push(auxBounds(element));
       }
 
-      return <Aux key={element.ident} {...props} />;
+      return <Aux key={element.uid} {...props} />;
     }
 
     private stock(element: StockViewElement): React.ReactElement {
@@ -424,7 +426,7 @@ export const Canvas = withStyles(styles)(
       if (this.computeBounds) {
         this.elementBounds = this.elementBounds.push(stockBounds(element));
       }
-      return <Stock key={element.ident} {...props} />;
+      return <Stock key={element.uid} {...props} />;
     }
 
     private module(element: ModuleViewElement) {
@@ -437,7 +439,7 @@ export const Canvas = withStyles(styles)(
       if (this.computeBounds) {
         this.elementBounds = this.elementBounds.push(moduleBounds(props));
       }
-      return <Module key={element.ident} {...props} />;
+      return <Module key={element.uid} {...props} />;
     }
 
     private connector(element: LinkViewElement) {
@@ -1007,6 +1009,8 @@ export const Canvas = withStyles(styles)(
       e.preventDefault();
       e.stopPropagation();
 
+      const client = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+
       const canvasOffset = this.getCanvasOffset();
       const { selectedTool } = this.props;
       if (selectedTool === 'aux' || selectedTool === 'stock') {
@@ -1016,8 +1020,8 @@ export const Canvas = withStyles(styles)(
           inCreation = new AuxViewElement({
             uid: inCreationUid,
             var: undefined,
-            x: e.clientX - canvasOffset.x,
-            y: e.clientY - canvasOffset.y,
+            x: client.x - canvasOffset.x,
+            y: client.y - canvasOffset.y,
             name,
             ident: canonicalize(name),
             labelSide: 'right',
@@ -1028,8 +1032,8 @@ export const Canvas = withStyles(styles)(
           inCreation = new StockViewElement({
             uid: inCreationUid,
             var: undefined,
-            x: e.clientX - canvasOffset.x,
-            y: e.clientY - canvasOffset.y,
+            x: client.x - canvasOffset.x,
+            y: client.y - canvasOffset.y,
             name,
             ident: canonicalize(name),
             labelSide: 'bottom',
@@ -1040,7 +1044,7 @@ export const Canvas = withStyles(styles)(
         }
 
         this.pointerId = e.pointerId;
-        this.selectionCenterOffset = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+        this.selectionCenterOffset = client;
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         (e.target as any).setPointerCapture(e.pointerId);
@@ -1061,8 +1065,8 @@ export const Canvas = withStyles(styles)(
 
       if (selectedTool === 'flow') {
         const canvasOffset = this.getCanvasOffset();
-        const x = e.clientX - canvasOffset.x;
-        const y = e.clientY - canvasOffset.y;
+        const x = client.x - canvasOffset.x;
+        const y = client.y - canvasOffset.y;
 
         const inCreationCloud = new CloudViewElement({
           uid: inCreationCloudUid,
@@ -1088,7 +1092,7 @@ export const Canvas = withStyles(styles)(
           isZeroRadius: false,
         });
 
-        this.selectionCenterOffset = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+        this.selectionCenterOffset = client;
 
         this.setState({
           isEditingName: false,
@@ -1444,7 +1448,16 @@ export const Canvas = withStyles(styles)(
     }
 
     render() {
-      const { embedded, classes } = this.props;
+      const { selectedTool, embedded, classes } = this.props;
+
+      let isEditingName = this.state.isEditingName;
+      if (isEditingName && selectedTool !== this.prevSelectedTool) {
+        setTimeout(() => {
+          this.handleEditingNameDone(false);
+        });
+        isEditingName = false;
+      }
+      this.prevSelectedTool = selectedTool;
 
       // phase 1: initialize some data structures we need and potentially
       // invalidate cached data structures we have
@@ -1474,9 +1487,10 @@ export const Canvas = withStyles(styles)(
         dragRect = <rect className={classes.selectionOverlay} x={x} y={y} width={w} height={h} />;
       }
 
-      if (!this.state.isEditingName) {
+      if (!isEditingName || this.props.selection.isEmpty()) {
         overlayClass += ' ' + classes.noPointerEvents;
       } else {
+        const zoom = this.props.view.zoom;
         const editingUid = defined(this.props.selection.first());
         const editingElement = this.getElementByUid(editingUid) as NamedViewElement;
         const rw = editingElement instanceof StockViewElement ? StockWidth / 2 : AuxRadius;
@@ -1486,8 +1500,8 @@ export const Canvas = withStyles(styles)(
         nameEditor = (
           <EditableLabel
             uid={editingUid}
-            cx={editingElement.cx + offset.x}
-            cy={editingElement.cy + offset.y}
+            cx={(editingElement.cx + offset.x) * zoom}
+            cy={(editingElement.cy + offset.y) * zoom}
             side={side}
             rw={rw}
             rh={rh}
