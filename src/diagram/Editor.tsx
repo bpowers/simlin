@@ -1152,6 +1152,23 @@ export const Editor = withStyles(styles)(
       this.queueViewUpdate(view.merge({ viewBox, zoom }));
     };
 
+    centerVariable(element: ViewElement): void {
+      const view = defined(this.getView());
+
+      const cx = element.cx;
+      const cy = element.cy;
+
+      const viewCy = view.viewBox.height / 2 / view.zoom;
+      const viewCx = (view.viewBox.width - SearchbarWidthSm) / 2 / view.zoom;
+
+      const viewBox = view.viewBox.merge({
+        x: viewCx - cx,
+        y: viewCy - cy,
+      });
+
+      this.queueViewUpdate(view.merge({ viewBox }));
+    }
+
     getCanvas() {
       const project = this.project();
       if (!project) {
@@ -1309,6 +1326,9 @@ export const Editor = withStyles(styles)(
       this.setState({
         showDetails: 'variable',
       });
+      if (element) {
+        this.centerVariable(element);
+      }
     };
 
     handleStatusClick = () => {
