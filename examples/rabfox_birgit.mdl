@@ -1,0 +1,150 @@
+{UTF-8}
+fox death rate=
+	0.2
+	~	1/year
+	~		|
+
+foxes= INTEG (
+	net change in fox population,
+		initial fox population)
+	~	foxes
+	~		|
+
+initial fox population=
+	30
+	~	foxes
+	~		|
+
+initial rabbit population=
+	500
+	~	rabbits
+	~		|
+
+net change in fox population=
+	(rabbits*rate at which foxes increase through eating rabbits)-(foxes*fox death rate)
+	~	foxes/year
+	~		|
+
+net change in rabbit population=
+	(rabbit birth rate*rabbits)-(foxes*rabbits*rate at which foxes eat rabbits)
+	~	rabbits/year
+	~		|
+
+rabbit birth rate=
+	2
+	~	1/year
+	~		|
+
+rabbits= INTEG (
+	net change in rabbit population,
+		initial rabbit population)
+	~	rabbits
+	~		|
+
+rate at which foxes eat rabbits=
+	0.004
+	~	1/(foxes*year)
+	~		|
+
+rate at which foxes increase through eating rabbits=
+	0.004
+	~	foxes/(rabbits*year)
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 50
+	~	year
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	year
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP 
+	~	year [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.125
+	~	year [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Trebuchet MS|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+10,1,rabbits,300,145,40,20,3,3,0,0,0,0,0,0
+10,2,foxes,222,383,40,20,3,3,0,0,0,0,0,0
+12,3,48,138,141,10,8,0,3,0,0,-1,0,0,0
+1,4,6,1,4,0,0,22,0,0,0,-1--1--1,,1|(235,141)|
+1,5,6,3,100,0,0,22,0,0,0,-1--1--1,,1|(173,141)|
+11,6,48,204,141,6,8,34,3,0,0,1,0,0,0
+10,7,net change in rabbit population,204,171,69,22,40,3,0,0,-1,0,0,0
+12,8,48,478,384,10,8,0,3,0,0,-1,0,0,0
+1,9,11,2,4,0,0,22,0,0,0,-1--1--1,,1|(327,384)|
+1,10,11,8,100,0,0,22,0,0,0,-1--1--1,,1|(436,384)|
+11,11,48,399,384,6,8,34,3,0,0,1,0,0,0
+10,12,net change in fox population,399,414,69,22,40,3,0,0,-1,0,0,0
+10,13,rate at which foxes eat rabbits,97,69,74,22,8,3,0,0,0,0,0,0
+10,14,rabbit birth rate,338,53,53,22,8,3,0,0,0,0,0,0
+10,15,initial rabbit population,493,169,56,22,8,3,0,0,0,0,0,0
+10,16,rate at which foxes increase through eating rabbits,551,527,106,33,8,3,0,0,0,0,0,0
+10,17,fox death rate,249,518,43,22,8,3,0,0,0,0,0,0
+10,18,initial fox population,72,434,49,22,8,3,0,0,0,0,0,0
+1,19,18,2,1,0,0,0,0,64,1,-1--1--1,,1|(139,404)|
+1,20,15,1,1,0,0,0,0,64,1,-1--1--1,,1|(390,148)|
+1,21,14,6,1,0,0,0,0,64,0,-1--1--1,,1|(243,86)|
+1,22,13,7,1,0,0,0,0,64,0,-1--1--1,,1|(109,122)|
+1,23,2,7,1,0,0,0,0,64,0,-1--1--1,,1|(147,288)|
+1,24,1,11,1,0,0,0,0,64,0,-1--1--1,,1|(404,265)|
+1,25,17,12,1,0,0,0,0,64,0,-1--1--1,,1|(344,492)|
+1,26,16,12,1,0,0,0,0,64,0,-1--1--1,,1|(457,482)|
+1,27,1,7,1,0,0,0,0,64,0,-1--1--1,,1|(282,190)|
+1,28,2,12,1,0,0,0,0,64,0,-1--1--1,,1|(257,436)|
+12,29,0,965,247,393,216,3,188,0,0,1,0,0,0
+Population_Dynamics
+///---\\\
+:GRAPH Population_Dynamics
+:TITLE Population Dynamics
+:SCALE
+:VAR Foxes
+:DATASET Euler
+:SCALE
+:VAR Rabbits
+:DATASET Euler
+:SCALE
+:VAR Foxes
+:DATASET RK4
+:SCALE
+:VAR Foxes
+:DATASET RK4
+:L<%^E!@
+1:RK4.vdf
+9:RK4
+22:$,Dollar,Dollars,$s
+22:Day,Days
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:rabbit,rabbits
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+15:0,0,0,5,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:rate at which foxes eat rabbits
+24:0
+25:50
+26:50
