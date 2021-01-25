@@ -76,10 +76,6 @@ const styles = createStyles({
     width: '100%',
     userSelect: 'none',
     '-webkit-touch-callout': 'none',
-  },
-  container: {
-    height: '100%',
-    width: '100%',
     '& text': {
       fontSize: '12px',
       fontFamily: '"Roboto", "Open Sans", "Arial", sans-serif',
@@ -88,6 +84,10 @@ const styles = createStyles({
       whiteSpace: 'nowrap',
       verticalAlign: 'middle',
     },
+  },
+  container: {
+    height: '100%',
+    width: '100%',
   },
   overlay: {
     position: 'absolute',
