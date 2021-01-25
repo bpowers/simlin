@@ -1385,19 +1385,31 @@ export const Canvas = withStyles(styles)(
       const svgWidth = svgElement.clientWidth;
       const svgHeight = svgElement.clientHeight;
 
-      const { viewBox, zoom } = this.props.view;
+      const viewBox = this.props.view.viewBox;
+      let zoom = this.props.view.zoom;
 
       let shouldUpdate = false;
       const prevBounds = viewBox;
       if (viewBox.width === 0 || viewBox.height === 0) {
         shouldUpdate = true;
-      } else if (viewBox.width !== svgWidth || viewBox.height !== svgHeight) {
+      } else if (
+        viewBox.width !== svgWidth ||
+        viewBox.height !== svgHeight ||
+        !isFinite(viewBox.x) ||
+        !isFinite(viewBox.y) ||
+        !isFinite(zoom) ||
+        zoom < 0.2
+      ) {
         shouldUpdate = true;
       }
 
       if (shouldUpdate) {
         let x = 0;
         let y = 0;
+
+        if (!isFinite(zoom) || zoom < 0.2) {
+          zoom = 1;
+        }
 
         // on a new diagram we won't have an initial bounds, but we should
         // still set the width/height
@@ -1412,8 +1424,10 @@ export const Canvas = withStyles(styles)(
           if (prevBounds.width && prevBounds.height) {
             const prevWidth = prevBounds.width / zoom;
             const prevHeight = prevBounds.height / zoom;
-            const fractionX = (prevBounds.x + initialBounds.width / 2) / prevWidth;
-            const fractionY = (prevBounds.y + initialBounds.height / 2) / prevHeight;
+            const prevX = isFinite(prevBounds.x) ? prevBounds.x : 0;
+            const prevY = isFinite(prevBounds.y) ? prevBounds.x : 0;
+            const fractionX = (prevX + initialBounds.width / 2) / prevWidth;
+            const fractionY = (prevY + initialBounds.height / 2) / prevHeight;
 
             x = fractionX * currWidth - initialBounds.width / 2;
             y = fractionY * currHeight - initialBounds.height / 2;
@@ -1433,7 +1447,7 @@ export const Canvas = withStyles(styles)(
           height: svgHeight,
         });
 
-        this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
+        this.props.onViewBoxChange(newViewBox, zoom);
 
         this.setState({
           svgSize: {

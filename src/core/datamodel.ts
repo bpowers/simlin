@@ -1040,7 +1040,7 @@ export class StockFlowView extends Record(stockFlowViewDefaults) {
       elements,
       nextUid,
       viewBox,
-      zoom: view.getZoom(),
+      zoom: view.getZoom() || 1,
     });
   }
   toPb(): PbView {
