@@ -16,3 +16,4 @@ node_modules
 /.github/
 /src/app/public
 /src/app/build*
+/examples

@@ -74,7 +74,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
 
   const styles = `<style>\n${sheets.toString()}\n</style>\n<defs>\n`;
 
-  svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" `);
+  svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" xmlns="http://www.w3.org/2000/svg" `);
   svg = svg.replace(/<defs[^>]*>/, styles);
   svg = svg.replace(/^<div[^>]*>/, '');
   svg = svg.replace(/<\/div>$/, '');
