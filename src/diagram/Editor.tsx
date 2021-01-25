@@ -248,6 +248,9 @@ export const Editor = withStyles(styles)(
     private newEngineShouldPullView = false;
     private newEngineQueuedView?: StockFlowView;
 
+    private inSave = false;
+    private queuedModelToSave?: Readonly<Uint8Array>;
+
     constructor(props: EditorProps) {
       super(props);
 
@@ -366,6 +369,39 @@ export const Editor = withStyles(styles)(
     }
 
     private async save(project: Readonly<Uint8Array>, currVersion: number): Promise<void> {
+      if (this.inSave) {
+        this.queuedModelToSave = project;
+        return;
+      }
+
+      this.inSave = true;
+
+      let version: number | undefined;
+      try {
+        version = await this.saveInner(project, currVersion);
+      } catch (err) {
+        this.setState({
+          modelErrors: this.state.modelErrors.push(err),
+        });
+        return;
+      }
+
+      this.inSave = false;
+
+      if (this.queuedModelToSave) {
+        const project = this.queuedModelToSave;
+        this.queuedModelToSave = undefined;
+        if (version) {
+          await this.save(project, version);
+        } else {
+          this.setState({
+            modelErrors: this.state.modelErrors.push(new Error('last save failed, please reload')),
+          });
+        }
+      }
+    }
+
+    private async saveInner(project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> {
       const bodyContents = {
         currVersion,
         projectPB: fromUint8Array(project as Uint8Array),
@@ -390,7 +426,7 @@ export const Editor = withStyles(styles)(
         const errorMsg =
           body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
         this.appendModelError(errorMsg);
-        return;
+        return undefined;
       }
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
@@ -398,6 +434,8 @@ export const Editor = withStyles(styles)(
       const projectVersion = defined(projectResponse.version) as number;
 
       this.setState({ projectVersion });
+
+      return projectVersion;
     }
 
     private getBaseURL(): string {
