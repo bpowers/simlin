@@ -28,8 +28,13 @@ export async function renderToPNG(fileDoc: File): Promise<Buffer> {
 
   canvas.registerFont('fonts/Roboto-Light.ttf', { family: 'Roboto' });
 
-  const scale = Math.ceil((2 * 800) / viewbox.width);
-  // logger.error(`scale ${scale} (w:${viewbox.width * scale})`);
+  const retina = 2; // double the pixels for the same unit of measurement
+  const maxPreviewWidth = 400;
+  let scale = (maxPreviewWidth * retina) / viewbox.width;
+  if (scale > 1) {
+    scale = Math.ceil(scale);
+  }
+  // console.log(`scale ${scale} (w:${viewbox.width * scale})`);
   const c = canvas.createCanvas(viewbox.width * scale, viewbox.height * scale);
   const ctx = c.getContext('2d');
   // const ctx = c.getContext('2d');
