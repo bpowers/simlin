@@ -1,4 +1,4 @@
-// Copyright 2020 The Model Authors. All rights reserved.
+// Copyright 2021 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::bytecode::{BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Opcode};
+use crate::bytecode_stack::{
+    BuiltinId, ByteCode, ByteCodeContext, CompiledStackModule, ModuleId, StackOpcode,
+};
 use crate::common::{Ident, Result};
 use crate::datamodel::{Dimension, Dt, SimMethod, SimSpecs};
 use crate::sim_err;
@@ -19,11 +21,6 @@ pub(crate) const INITIAL_TIME_OFF: usize = 2;
 pub(crate) const FINAL_TIME_OFF: usize = 3;
 pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
 
-// reserve the last 16 registers as inputs for modules and builtin functions.
-// none of our builtins are reentrant, and we copy inputs into the module_args
-// slice in the VM, and this avoids having to think about spilling variables.
-pub(crate) const FIRST_CALL_REG: u8 = 240u8;
-
 pub(crate) fn is_truthy(n: f64) -> bool {
     let is_false = approx_eq!(f64, n, 0.0);
     !is_false
@@ -31,7 +28,7 @@ pub(crate) fn is_truthy(n: f64) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct CompiledSimulation {
-    pub(crate) modules: HashMap<Ident, CompiledModule>,
+    pub(crate) modules: HashMap<Ident, CompiledStackModule>,
     pub(crate) specs: Specs,
     pub(crate) root: String,
     pub(crate) offsets: HashMap<Ident, usize>,
@@ -165,27 +162,30 @@ pub struct VM {
 }
 
 #[derive(Default, Debug)]
-struct RegisterCache {
-    #[allow(clippy::vec_box)]
-    cached_register_files: Vec<Box<[f64; 256]>>,
+struct Stack {
+    stack: Vec<f64>,
 }
 
-impl RegisterCache {
-    #[inline(always)]
-    fn get_register_file(&mut self) -> Box<[f64; 256]> {
-        self.cached_register_files
-            .pop()
-            .unwrap_or_else(|| self.new_register_file())
+impl Stack {
+    fn new() -> Self {
+        Stack {
+            stack: Vec::with_capacity(32),
+        }
     }
 
     #[inline(always)]
-    fn put_register_file(&mut self, reg: Box<[f64; 256]>) {
-        self.cached_register_files.push(reg);
+    fn push(&mut self, value: f64) {
+        self.stack.push(value)
     }
 
-    #[inline(never)]
-    fn new_register_file(&self) -> Box<[f64; 256]> {
-        Box::new([0.0; 256])
+    #[inline(always)]
+    fn pop(&mut self) -> f64 {
+        self.stack.pop().unwrap()
+    }
+
+    #[inline(always)]
+    fn maybe_pop(&mut self) -> Option<f64> {
+        self.stack.pop()
     }
 }
 
@@ -198,7 +198,7 @@ struct CompiledModuleSlice {
 }
 
 impl CompiledModuleSlice {
-    fn new(module: &CompiledModule, part: StepPart) -> Self {
+    fn new(module: &CompiledStackModule, part: StepPart) -> Self {
         CompiledModuleSlice {
             ident: module.ident.clone(),
             context: module.context.clone(),
@@ -274,7 +274,7 @@ impl VM {
         let stop = spec.stop;
 
         {
-            let mut reg_cache = RegisterCache::default();
+            let mut stack = Stack::default();
             let mut slabs = data.chunks_mut(self.n_slots);
             let module_inputs: &[f64; 16] = &[0.0; 16];
 
@@ -284,19 +284,12 @@ impl VM {
             curr[DT_OFF] = dt;
             curr[INITIAL_TIME_OFF] = spec.start;
             curr[FINAL_TIME_OFF] = spec.stop;
-            self.eval(
-                module_initials,
-                0,
-                module_inputs,
-                curr,
-                next,
-                &mut reg_cache,
-            );
+            self.eval(module_initials, 0, module_inputs, curr, next, &mut stack);
             let mut is_initial_timestep = true;
             let mut step = 0;
             loop {
-                self.eval(module_flows, 0, module_inputs, curr, next, &mut reg_cache);
-                self.eval(module_stocks, 0, module_inputs, curr, next, &mut reg_cache);
+                self.eval(module_flows, 0, module_inputs, curr, next, &mut stack);
+                self.eval(module_stocks, 0, module_inputs, curr, next, &mut stack);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
                 next[DT_OFF] = curr[DT_OFF];
                 next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
@@ -338,7 +331,7 @@ impl VM {
         module_inputs: &[f64; 16],
         curr: &mut [f64],
         next: &mut [f64],
-        reg_cache: &mut RegisterCache,
+        stack: &mut Stack,
         id: ModuleId,
     ) {
         let new_module_decl = &parent_module.context.modules[id as usize];
@@ -351,7 +344,7 @@ impl VM {
         };
 
         let module_off = parent_module_off + new_module_decl.off;
-        self.eval(module, module_off, &module_inputs, curr, next, reg_cache);
+        self.eval(module, module_off, &module_inputs, curr, next, stack);
     }
 
     fn eval(
@@ -361,12 +354,10 @@ impl VM {
         module_inputs: &[f64; 16],
         curr: &mut [f64],
         next: &mut [f64],
-        reg_cache: &mut RegisterCache,
+        stack: &mut Stack,
     ) {
         let bytecode = &module.bytecode;
 
-        let mut file = reg_cache.get_register_file();
-        let reg = &mut *file;
         let mut condition = false;
         let mut subscript_index: Vec<(u16, u16)> = vec![];
         let mut subscript_index_valid = true;
@@ -377,66 +368,86 @@ impl VM {
             let op = code[i].clone();
             i += 1;
             match op {
-                Opcode::Mov { dst, src } => reg[dst as usize] = reg[src as usize],
-                Opcode::Add { dest, l, r } => {
-                    reg[dest as usize] = reg[l as usize] + reg[r as usize]
+                StackOpcode::Add {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push(l + r);
                 }
-                Opcode::Sub { dest, l, r } => {
-                    reg[dest as usize] = reg[l as usize] - reg[r as usize]
+                StackOpcode::Sub {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push(l - r);
                 }
-                Opcode::Exp { dest, l, r } => {
-                    reg[dest as usize] = reg[l as usize].powf(reg[r as usize])
+                StackOpcode::Exp {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push(l.powf(r));
                 }
-                Opcode::Mul { dest, l, r } => {
-                    reg[dest as usize] = reg[l as usize] * reg[r as usize]
+                StackOpcode::Mul {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push(l * r);
                 }
-                Opcode::Div { dest, l, r } => {
-                    reg[dest as usize] = reg[l as usize] / reg[r as usize]
+                StackOpcode::Div {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push(l / r);
                 }
-                Opcode::Mod { dest, l, r } => {
-                    reg[dest as usize] = reg[l as usize].rem_euclid(reg[r as usize])
+                StackOpcode::Mod {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push(l.rem_euclid(r));
                 }
-                Opcode::Gt { dest, l, r } => {
-                    reg[dest as usize] = (reg[l as usize] > reg[r as usize]) as i8 as f64
+                StackOpcode::Gt {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push((l > r) as i8 as f64);
                 }
-                Opcode::Gte { dest, l, r } => {
-                    reg[dest as usize] = (reg[l as usize] >= reg[r as usize]) as i8 as f64
+                StackOpcode::Gte {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push((l >= r) as i8 as f64);
                 }
-                Opcode::Lt { dest, l, r } => {
-                    reg[dest as usize] = (reg[l as usize] < reg[r as usize]) as i8 as f64
+                StackOpcode::Lt {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push((l < r) as i8 as f64);
                 }
-                Opcode::Lte { dest, l, r } => {
-                    reg[dest as usize] = (reg[l as usize] <= reg[r as usize]) as i8 as f64
+                StackOpcode::Lte {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push((l <= r) as i8 as f64);
                 }
-                Opcode::Eq { dest, l, r } => {
-                    reg[dest as usize] = {
-                        let l = reg[l as usize];
-                        let r = reg[r as usize];
-                        approx_eq!(f64, l, r) as i8 as f64
-                    }
+                StackOpcode::Eq {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push(approx_eq!(f64, l, r) as i8 as f64);
                 }
-                Opcode::And { dest, l, r } => {
-                    reg[dest as usize] =
-                        (is_truthy(reg[l as usize]) && is_truthy(reg[r as usize])) as i8 as f64
+                StackOpcode::And {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push((is_truthy(l) && is_truthy(r)) as i8 as f64);
                 }
-                Opcode::Or { dest, l, r } => {
-                    reg[dest as usize] =
-                        (is_truthy(reg[l as usize]) || is_truthy(reg[r as usize])) as i8 as f64
+                StackOpcode::Or {} => {
+                    let r = stack.pop();
+                    let l = stack.pop();
+                    stack.push((is_truthy(l) || is_truthy(r)) as i8 as f64);
                 }
-                Opcode::Not { dest, r } => {
-                    reg[dest as usize] = !is_truthy(reg[r as usize]) as i8 as f64
+                StackOpcode::Not {} => {
+                    let r = stack.pop();
+                    stack.push((!is_truthy(r)) as i8 as f64);
                 }
-                Opcode::LoadConstant { dest, id } => {
-                    reg[dest as usize] = bytecode.literals[id as usize];
+                StackOpcode::LoadConstant { id } => {
+                    stack.push(bytecode.literals[id as usize]);
                 }
-                Opcode::LoadGlobalVar { dest, off } => {
-                    reg[dest as usize] = curr[off as usize];
+                StackOpcode::LoadGlobalVar { off } => {
+                    stack.push(curr[off as usize]);
                 }
-                Opcode::LoadVar { dest, off } => {
-                    reg[dest as usize] = curr[module_off + off as usize];
+                StackOpcode::LoadVar { off } => {
+                    stack.push(curr[module_off + off as usize]);
                 }
-                Opcode::PushSubscriptIndex { index, bounds } => {
-                    let index = reg[index as usize].floor() as u16;
+                StackOpcode::PushSubscriptIndex { bounds } => {
+                    let index = stack.pop().floor() as u16;
                     if index == 0 || index > bounds {
                         subscript_index_valid = false;
                     } else {
@@ -445,8 +456,8 @@ impl VM {
                         subscript_index_valid &= true;
                     };
                 }
-                Opcode::LoadSubscript { dest, off } => {
-                    reg[dest as usize] = if subscript_index_valid {
+                StackOpcode::LoadSubscript { off } => {
+                    let result = if subscript_index_valid {
                         // the subscript index is 1-based, but curr is 0-based.
                         let mut index = 0;
                         for (i, bounds) in subscript_index.iter() {
@@ -457,60 +468,54 @@ impl VM {
                     } else {
                         f64::NAN
                     };
+                    stack.push(result);
                     subscript_index.clear();
                     subscript_index_valid = true;
                 }
-                Opcode::SetCond { cond } => {
-                    condition = is_truthy(reg[cond as usize]);
+                StackOpcode::SetCond {} => {
+                    condition = is_truthy(stack.pop());
                 }
-                Opcode::If { dest, t, f } => {
-                    reg[dest as usize] = if condition {
-                        reg[t as usize]
-                    } else {
-                        reg[f as usize]
-                    };
+                StackOpcode::If {} => {
+                    let f = stack.pop();
+                    let t = stack.pop();
+                    let result = if condition { t } else { f };
+                    stack.push(result);
                 }
-                Opcode::LoadModuleInput { dest, input } => {
-                    reg[dest as usize] = module_inputs[input as usize];
+                StackOpcode::LoadModuleInput { input } => {
+                    stack.push(module_inputs[input as usize]);
                 }
-                Opcode::EvalModule { id } => {
+                StackOpcode::EvalModule { id, n_inputs } => {
                     let mut module_inputs = [0.0; 16];
-                    module_inputs.copy_from_slice(&reg[FIRST_CALL_REG as usize..]);
-                    self.eval_module(
-                        module,
-                        module_off,
-                        &module_inputs,
-                        curr,
-                        next,
-                        reg_cache,
-                        id,
-                    );
+                    for j in (0..(n_inputs as usize)).rev() {
+                        module_inputs[j] = stack.pop();
+                    }
+                    self.eval_module(module, module_off, &module_inputs, curr, next, stack, id);
                 }
-                Opcode::AssignCurr { off, value } => {
-                    curr[module_off + off as usize] = reg[value as usize];
+                StackOpcode::AssignCurr { off } => {
+                    curr[module_off + off as usize] = stack.pop();
                 }
-                Opcode::AssignNext { off, value } => {
-                    next[module_off + off as usize] = reg[value as usize];
+                StackOpcode::AssignNext { off } => {
+                    next[module_off + off as usize] = stack.pop();
                 }
-                Opcode::Apply { dest, func } => {
+                StackOpcode::Apply { func } => {
                     let time = curr[TIME_OFF];
                     let dt = curr[DT_OFF];
-                    let a = reg[FIRST_CALL_REG as usize];
-                    let b = reg[(FIRST_CALL_REG + 1) as usize];
-                    let c = reg[(FIRST_CALL_REG + 2) as usize];
-                    reg[dest as usize] = apply(func, time, dt, a, b, c);
+                    let c = stack.pop();
+                    let b = stack.pop();
+                    let a = stack.pop();
+
+                    stack.push(apply(func, time, dt, a, b, c));
                 }
-                Opcode::Lookup { dest, gf, value } => {
-                    let index = reg[value as usize];
+                StackOpcode::Lookup { gf } => {
+                    let index = stack.pop();
                     let gf = &module.context.graphical_functions[gf as usize];
-                    reg[dest as usize] = lookup(gf, index);
+                    stack.push(lookup(gf, index));
                 }
-                Opcode::Ret => {
+                StackOpcode::Ret => {
                     break;
                 }
             }
         }
-        reg_cache.put_register_file(file);
     }
 
     /*

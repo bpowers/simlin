@@ -31,8 +31,10 @@ mod stdlib {
 }
 
 mod bytecode;
+mod bytecode_stack;
 mod interpreter;
 mod vm;
+mod vm_stack;
 
 pub use self::common::{canonicalize, Error, ErrorCode, Ident, Result};
 pub use self::sim::Simulation;

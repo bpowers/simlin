@@ -26,25 +26,3 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Not,
 }
-
-/*
-#[derive(PartialEq, Clone, Debug)]
-pub enum Builtin1Fn {}
-
-#[derive(PartialEq, Clone, Debug)]
-pub enum Builtin2Fn {}
-
-#[derive(PartialEq, Clone, Debug)]
-pub enum Builtin3Fn {}
-
-#[derive(PartialEq, Clone, Debug)]
-pub enum Bytecode {
-    LoadConst(f64),
-    LoadVar(usize),
-    Builtin1(Builtin1Fn),
-    Builtin2(Builtin2Fn),
-    Builtin3(Builtin3Fn),
-    Op2(BinaryOp),
-    Op1(BinaryOp),
-}
-*/
