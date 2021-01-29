@@ -2,16 +2,15 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
 use crate::ast::{self, Loc, AST};
-use crate::bytecode_stack::{
-    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledStackModule,
-    GraphicalFunctionId, ModuleDeclaration, ModuleId, ModuleInputOffset, StackOpcode as Opcode,
-    VariableOffset,
+use crate::bytecode::{
+    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
+    ModuleDeclaration, ModuleId, ModuleInputOffset, Opcode, VariableOffset,
 };
 use crate::common::{Ident, Result};
 use crate::datamodel;
@@ -19,13 +18,12 @@ use crate::datamodel::Dimension;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
 use crate::variable::Variable;
-use crate::vm_stack::{
+use crate::vm::{
     is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
-use std::cmp::Reverse;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -1388,7 +1386,7 @@ impl Module {
         })
     }
 
-    pub fn compile(&self) -> Result<CompiledStackModule> {
+    pub fn compile(&self) -> Result<CompiledModule> {
         let builder = Compiler::new(&self)?;
 
         builder.compile()
@@ -1509,9 +1507,9 @@ impl<'module> Compiler<'module> {
                         };
                     }
                     BuiltinFn::Ramp(a, b, c) => {
-                        let a = self.walk_expr(a)?.unwrap();
-                        let b = self.walk_expr(b)?.unwrap();
-                        let c = if c.is_some() {
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
+                        if c.is_some() {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
                             self.push(Opcode::LoadVar {
@@ -1520,15 +1518,12 @@ impl<'module> Compiler<'module> {
                         };
                     }
                     BuiltinFn::SafeDiv(a, b, c) => {
-                        let a = self.walk_expr(a)?.unwrap();
-                        let b = self.walk_expr(b)?.unwrap();
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
                         let c = c.as_ref().map(|c| self.walk_expr(c).unwrap().unwrap());
-                        match c {
-                            Some(c) => {}
-                            None => {
-                                let id = self.curr_code.intern_literal(0.0);
-                                self.push(Opcode::LoadConstant { id });
-                            }
+                        if c.is_none() {
+                            let id = self.curr_code.intern_literal(0.0);
+                            self.push(Opcode::LoadConstant { id });
                         }
                     }
                     BuiltinFn::Mean(args) => {
@@ -1536,7 +1531,7 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::LoadConstant { id });
 
                         for arg in args.iter() {
-                            let arg = self.walk_expr(arg)?.unwrap();
+                            self.walk_expr(arg)?.unwrap();
                             self.push(Opcode::Add {});
                         }
 
@@ -1599,8 +1594,8 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::Op2(op, lhs, rhs, _) => {
-                let l = self.walk_expr(lhs)?.unwrap();
-                let r = self.walk_expr(rhs)?.unwrap();
+                self.walk_expr(lhs)?.unwrap();
+                self.walk_expr(rhs)?.unwrap();
                 let opcode = match op {
                     BinaryOp::Add => Opcode::Add {},
                     BinaryOp::Sub => Opcode::Sub {},
@@ -1624,7 +1619,7 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::Op1(op, rhs, _) => {
-                let r = self.walk_expr(rhs)?.unwrap();
+                self.walk_expr(rhs)?.unwrap();
                 match op {
                     UnaryOp::Not => self.push(Opcode::Not {}),
                 };
@@ -1660,12 +1655,12 @@ impl<'module> Compiler<'module> {
         self.curr_code.push_opcode(op)
     }
 
-    fn compile(mut self) -> Result<CompiledStackModule> {
+    fn compile(mut self) -> Result<CompiledModule> {
         let compiled_initials = Rc::new(self.walk(&self.module.runlist_initials)?);
         let compiled_flows = Rc::new(self.walk(&self.module.runlist_flows)?);
         let compiled_stocks = Rc::new(self.walk(&self.module.runlist_stocks)?);
 
-        Ok(CompiledStackModule {
+        Ok(CompiledModule {
             ident: self.module.ident.clone(),
             n_slots: self.module.n_slots,
             context: Rc::new(ByteCodeContext {
@@ -2115,7 +2110,7 @@ impl Simulation {
     }
 
     pub fn compile(&self) -> Result<CompiledSimulation> {
-        let modules: Result<HashMap<String, CompiledStackModule>> = self
+        let modules: Result<HashMap<String, CompiledModule>> = self
             .modules
             .iter()
             .map(|(name, module)| module.compile().map(|module| (name.clone(), module)))

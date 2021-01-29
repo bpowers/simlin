@@ -9,7 +9,6 @@ use ordered_float::OrderedFloat;
 
 pub type LiteralId = u16;
 pub type ModuleId = u16;
-pub type Register = u8;
 pub type VariableOffset = u16;
 pub type ModuleInputOffset = u16;
 pub type GraphicalFunctionId = u8;
@@ -40,131 +39,33 @@ pub(crate) enum BuiltinId {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Opcode {
-    Mov {
-        dst: Register,
-        src: Register,
-    },
-    Add {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Sub {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Exp {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Mul {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Div {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Mod {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Gt {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Gte {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Lt {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Lte {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Eq {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    And {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Or {
-        dest: Register,
-        l: Register,
-        r: Register,
-    },
-    Not {
-        dest: Register,
-        r: Register,
-    },
-    LoadConstant {
-        dest: Register,
-        id: LiteralId,
-    },
-    LoadVar {
-        dest: Register,
-        off: VariableOffset,
-    },
-    LoadGlobalVar {
-        dest: Register,
-        off: VariableOffset,
-    },
-    PushSubscriptIndex {
-        index: Register,
-        bounds: VariableOffset,
-    },
-    LoadSubscript {
-        dest: Register,
-        off: VariableOffset,
-    },
-    SetCond {
-        cond: Register,
-    },
-    If {
-        dest: Register,
-        t: Register,
-        f: Register,
-    },
-    LoadModuleInput {
-        dest: Register,
-        input: ModuleInputOffset,
-    },
-    EvalModule {
-        id: ModuleId,
-    },
-    AssignCurr {
-        off: VariableOffset,
-        value: Register,
-    },
-    AssignNext {
-        off: VariableOffset,
-        value: Register,
-    },
-    Apply {
-        dest: Register,
-        func: BuiltinId,
-    },
-    Lookup {
-        dest: Register,
-        gf: GraphicalFunctionId,
-        value: Register,
-    },
+    Add {},
+    Sub {},
+    Exp {},
+    Mul {},
+    Div {},
+    Mod {},
+    Gt {},
+    Gte {},
+    Lt {},
+    Lte {},
+    Eq {},
+    And {},
+    Or {},
+    Not {},
+    LoadConstant { id: LiteralId },
+    LoadVar { off: VariableOffset },
+    LoadGlobalVar { off: VariableOffset },
+    PushSubscriptIndex { bounds: VariableOffset },
+    LoadSubscript { off: VariableOffset },
+    SetCond {},
+    If {},
+    LoadModuleInput { input: ModuleInputOffset },
+    EvalModule { id: ModuleId, n_inputs: u8 },
+    AssignCurr { off: VariableOffset },
+    AssignNext { off: VariableOffset },
+    Apply { func: BuiltinId },
+    Lookup { gf: GraphicalFunctionId },
     Ret,
 }
 
