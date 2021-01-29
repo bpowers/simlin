@@ -200,8 +200,8 @@ fn main() {
         };
         let compiled = sim.compile().unwrap();
         let mut vm = VM::new(compiled).unwrap();
-        let results = vm.run_to_end();
-        let results = results.unwrap();
+        vm.run_to_end().unwrap();
+        let results = vm.into_results();
         if !args.is_no_output {
             results.print_tsv();
         }

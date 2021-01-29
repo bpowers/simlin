@@ -17,18 +17,22 @@ use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, 
 #[wasm_bindgen]
 pub struct Engine {
     project: engine::Project,
-    sim_vm: Result<engine::VM, engine::Error>,
+    sim_vm: Option<engine::VM>,
+    sim_error: Option<engine::Error>,
     results: Option<engine::Results>,
 }
 
 #[wasm_bindgen]
 impl Engine {
     fn instantiate_sim(&mut self) {
-        // TODO: expose the simulation error message here
         let compiler = engine::Simulation::new(&self.project, "main");
-        self.sim_vm = compiler
+        let sim_result = compiler
             .and_then(|compiler| compiler.compile())
             .and_then(VM::new);
+        if sim_result.is_err() {
+            self.sim_error = sim_result.as_ref().err().cloned();
+        }
+        self.sim_vm = sim_result.ok();
     }
 
     #[wasm_bindgen(js_name = serializeToProtobuf)]
@@ -115,7 +119,7 @@ impl Engine {
 
     #[wasm_bindgen(js_name = isSimulatable)]
     pub fn is_simulatable(&self) -> bool {
-        self.sim_vm.is_ok()
+        self.sim_error.is_none()
     }
 
     #[wasm_bindgen(js_name = getModelVariableErrors, typescript_type = "Map<string, EquationError>")]
@@ -150,7 +154,7 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getSimError)]
     pub fn get_sim_error(&self) -> Option<Error> {
-        self.sim_vm.as_ref().err().cloned()
+        self.sim_error.clone()
     }
 
     // model control
@@ -466,12 +470,16 @@ impl Engine {
 
     #[wasm_bindgen(js_name = simRunToEnd)]
     pub fn sim_run_to_end(&mut self) {
-        if self.sim_vm.is_err() {
+        if self.sim_vm.is_none() {
             return;
         }
-        let vm = self.sim_vm.as_mut().unwrap();
-        let results = vm.run_to_end();
-        self.results = results.ok();
+        let mut vm = None;
+        std::mem::swap(&mut vm, &mut self.sim_vm);
+        let mut vm = vm.unwrap();
+
+        if vm.run_to_end().is_ok() {
+            self.results = Some(vm.into_results());
+        }
     }
 
     #[wasm_bindgen(js_name = simVarNames, typescript_type = "Array<string>")]
@@ -520,11 +528,8 @@ pub fn open(project_pb: &[u8]) -> Option<Engine> {
 
     let mut project = Engine {
         project: project.into(),
-        sim_vm: Err(Error::new(
-            ErrorKind::Simulation,
-            ErrorCode::DoesNotExist,
-            None,
-        )),
+        sim_vm: None,
+        sim_error: None,
         results: None,
     };
     project.instantiate_sim();

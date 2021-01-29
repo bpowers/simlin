@@ -256,13 +256,13 @@ impl VM {
         })
     }
 
-    pub fn run_to_end(&mut self) -> Result<Results> {
+    pub fn run_to_end(&mut self) -> Result<()> {
         let end = self.specs.stop;
         self.run_to(end)
     }
 
     #[inline(never)]
-    pub fn run_to(&mut self, end: f64) -> Result<Results> {
+    pub fn run_to(&mut self, end: f64) -> Result<()> {
         let spec = &self.specs;
 
         let sliced_sim = &self.sliced_sim;
@@ -321,13 +321,17 @@ impl VM {
         let mut data = Some(data);
         std::mem::swap(&mut data, &mut self.data);
 
-        Ok(Results {
+        Ok(())
+    }
+
+    pub fn into_results(self) -> Results {
+        Results {
             offsets: self.offsets.clone(),
-            data: self.data.as_ref().unwrap().clone(),
+            data: self.data.unwrap(),
             step_size: self.n_slots,
             step_count: self.n_chunks,
-            specs: spec.clone(),
-        })
+            specs: self.specs,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
