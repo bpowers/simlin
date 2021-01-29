@@ -102,12 +102,12 @@ const styles = ({ spacing, palette, breakpoints }: Theme) =>
       display: 'flex',
       position: 'absolute',
       bottom: spacing(3.5),
-      left: spacing(12),
+      left: spacing(10),
     },
     speedDial: {
       position: 'absolute',
       bottom: spacing(2),
-      left: spacing(3),
+      left: spacing(1.5),
     },
     snapshotCard: {
       position: 'absolute',
