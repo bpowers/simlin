@@ -41,6 +41,7 @@ fn usage() -> ! {
             "    --vensim      model is a Vensim .mdl file\n",
             "    --model-only  for conversion, only output model instead of project\n",
             "    --output FILE path to write output file\n",
+            "    --no-output   don't print the output (for benchmarking)",
             "\n\
          SUBCOMMANDS:\n",
             "    simulate      Simulate a model and display output\n",
@@ -58,6 +59,7 @@ struct Args {
     is_vensim: bool,
     is_convert: bool,
     is_model_only: bool,
+    is_no_output: bool,
 }
 
 fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
@@ -84,6 +86,7 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     }
 
     args.output = parsed.value_from_str("--output").ok();
+    args.is_no_output = parsed.contains("--no-output");
     args.is_model_only = parsed.contains("--model-only");
     args.is_vensim = parsed.contains("--vensim");
 
@@ -196,9 +199,11 @@ fn main() {
             }
         };
         let compiled = sim.compile().unwrap();
-        let vm = VM::new(compiled).unwrap();
+        let mut vm = VM::new(compiled).unwrap();
         let results = vm.run_to_end();
         let results = results.unwrap();
-        results.print_tsv();
+        if !args.is_no_output {
+            results.print_tsv();
+        }
     }
 }
