@@ -469,7 +469,7 @@ impl Engine {
         if self.sim_vm.is_err() {
             return;
         }
-        let vm = self.sim_vm.as_ref().unwrap();
+        let vm = self.sim_vm.as_mut().unwrap();
         let results = vm.run_to_end();
         self.results = results.ok();
     }

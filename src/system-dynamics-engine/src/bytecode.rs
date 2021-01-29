@@ -13,7 +13,7 @@ pub type VariableOffset = u16;
 pub type ModuleInputOffset = u16;
 pub type GraphicalFunctionId = u8;
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum BuiltinId {
     Abs,
     Arccos,
@@ -37,7 +37,7 @@ pub(crate) enum BuiltinId {
     Tan,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum Op2 {
     Add,
     Sub,
@@ -54,7 +54,7 @@ pub(crate) enum Op2 {
     Or,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum Opcode {
     Op2 { op: Op2 },
     Not {},

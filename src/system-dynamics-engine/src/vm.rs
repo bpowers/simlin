@@ -159,6 +159,8 @@ pub struct VM {
     offsets: HashMap<Ident, usize>,
     sliced_sim: CompiledSlicedSimulation,
     n_slots: usize,
+    n_chunks: usize,
+    data: Option<Box<[f64]>>,
 }
 
 #[derive(Debug)]
@@ -219,7 +221,14 @@ impl VM {
             return sim_err!(BadSimSpecs, "dt must be greater than 0".to_string());
         }
 
+        let save_step = if sim.specs.save_step > sim.specs.dt {
+            sim.specs.save_step
+        } else {
+            sim.specs.dt
+        };
         let n_slots = sim.modules[&sim.root].n_slots;
+        let n_chunks: usize = ((sim.specs.stop - sim.specs.start) / save_step + 1.0) as usize;
+        let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 1)].into_boxed_slice();
         Ok(VM {
             specs: sim.specs,
             root: sim.root,
@@ -242,11 +251,18 @@ impl VM {
                     .collect(),
             },
             n_slots,
+            n_chunks,
+            data: Some(data),
         })
     }
 
+    pub fn run_to_end(&mut self) -> Result<Results> {
+        let end = self.specs.stop;
+        self.run_to(end)
+    }
+
     #[inline(never)]
-    pub fn run_to_end(&self) -> Result<Results> {
+    pub fn run_to(&mut self, end: f64) -> Result<Results> {
         let spec = &self.specs;
 
         let sliced_sim = &self.sliced_sim;
@@ -254,25 +270,19 @@ impl VM {
         let module_flows = &sliced_sim.flow_modules[&self.root];
         let module_stocks = &sliced_sim.stock_modules[&self.root];
 
-        let save_step = if spec.save_step > spec.dt {
-            spec.save_step
-        } else {
-            spec.dt
-        };
-        let n_chunks: usize = ((spec.stop - spec.start) / save_step + 1.0) as usize;
-        let slab: Vec<f64> = vec![0.0; self.n_slots * (n_chunks + 1)];
-        let mut data = slab.into_boxed_slice();
-
         let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5).floor() as usize);
 
         let dt = spec.dt;
-        let stop = spec.stop;
+
+        let mut data = None;
+        std::mem::swap(&mut data, &mut self.data);
+        let mut data = data.unwrap();
 
         {
             let mut stack = Stack::new();
-            let mut slabs = data.chunks_mut(self.n_slots);
             let module_inputs: &[f64; 16] = &[0.0; 16];
 
+            let mut slabs = data.chunks_mut(self.n_slots);
             let mut curr = slabs.next().unwrap();
             let mut next = slabs.next().unwrap();
             curr[TIME_OFF] = spec.start;
@@ -282,7 +292,7 @@ impl VM {
             self.eval(module_initials, 0, module_inputs, curr, next, &mut stack);
             let mut is_initial_timestep = true;
             let mut step = 0;
-            loop {
+            while curr[TIME_OFF] <= end {
                 self.eval(module_flows, 0, module_inputs, curr, next, &mut stack);
                 self.eval(module_stocks, 0, module_inputs, curr, next, &mut stack);
                 next[TIME_OFF] = curr[TIME_OFF] + dt;
@@ -305,14 +315,17 @@ impl VM {
                 }
             }
             // ensure we've calculated stock + flow values for the dt <= end_time
-            assert!(curr[TIME_OFF] > stop);
+            assert!(curr[TIME_OFF] > end);
         }
+
+        let mut data = Some(data);
+        std::mem::swap(&mut data, &mut self.data);
 
         Ok(Results {
             offsets: self.offsets.clone(),
-            data,
+            data: self.data.as_ref().unwrap().clone(),
             step_size: self.n_slots,
-            step_count: n_chunks,
+            step_count: self.n_chunks,
             specs: spec.clone(),
         })
     }
@@ -357,12 +370,9 @@ impl VM {
         let mut subscript_index: Vec<(u16, u16)> = vec![];
         let mut subscript_index_valid = true;
 
-        let mut i = 0;
         let code = &bytecode.code;
-        loop {
-            let op = code[i].clone();
-            i += 1;
-            match op {
+        for op in code.iter() {
+            match *op {
                 Opcode::Op2 { op } => {
                     let r = stack.pop();
                     let l = stack.pop();
