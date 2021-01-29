@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
@@ -10,7 +10,7 @@ use float_cmp::approx_eq;
 use crate::ast::{self, Loc, AST};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
-    ModuleDeclaration, ModuleId, ModuleInputOffset, Opcode, Register, VariableOffset,
+    ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{Ident, Result};
 use crate::datamodel;
@@ -20,11 +20,10 @@ use crate::model::Model;
 use crate::variable::Variable;
 use crate::vm::{
     is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
-    DT_OFF, FINAL_TIME_OFF, FIRST_CALL_REG, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
 use crate::{sim_err, Error, Project};
 use std::borrow::BorrowMut;
-use std::cmp::Reverse;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -1399,21 +1398,15 @@ struct Compiler<'module> {
     module_decls: Vec<ModuleDeclaration>,
     graphical_functions: Vec<Vec<(f64, f64)>>,
     curr_code: ByteCodeBuilder,
-    free_registers: BinaryHeap<Reverse<Register>>,
 }
 
 impl<'module> Compiler<'module> {
     fn new(module: &'module Module) -> Result<Compiler> {
-        let mut free_registers = BinaryHeap::new();
-        for n in 0u8..(FIRST_CALL_REG - 1) {
-            free_registers.push(Reverse(n));
-        }
         Ok(Compiler {
             module,
             module_decls: vec![],
             graphical_functions: vec![],
             curr_code: ByteCodeBuilder::default(),
-            free_registers,
         })
     }
 
@@ -1428,59 +1421,50 @@ impl<'module> Compiler<'module> {
         Ok(curr.finish())
     }
 
-    fn walk_expr(&mut self, expr: &Expr) -> Result<Option<Register>> {
+    fn walk_expr(&mut self, expr: &Expr) -> Result<Option<()>> {
         let result = match expr {
             Expr::Const(value, _) => {
                 let id = self.curr_code.intern_literal(*value);
-                let dest = self.alloc_register();
-                self.push(Opcode::LoadConstant { dest, id });
-                Some(dest)
+                self.push(Opcode::LoadConstant { id });
+                Some(())
             }
             Expr::Var(off, _) => {
-                let dest = self.alloc_register();
                 self.push(Opcode::LoadVar {
-                    dest,
                     off: *off as VariableOffset,
                 });
-                Some(dest)
+                Some(())
             }
             Expr::Subscript(off, indices, bounds, _) => {
-                let dest = self.alloc_register();
                 let indices: Vec<_> = indices
                     .iter()
-                    .map(|expr| self.walk_expr(expr).unwrap().unwrap())
+                    .enumerate()
+                    .map(|(i, expr)| {
+                        self.walk_expr(expr).unwrap().unwrap();
+                        let bounds = bounds[i] as VariableOffset;
+                        self.push(Opcode::PushSubscriptIndex { bounds });
+                    })
                     .collect();
                 assert!(indices.len() == bounds.len());
-                for (i, index) in indices.into_iter().enumerate() {
-                    let bounds = bounds[i] as VariableOffset;
-                    self.push(Opcode::PushSubscriptIndex { index, bounds });
-                    self.free_register(index);
-                }
                 self.push(Opcode::LoadSubscript {
-                    dest,
                     off: *off as VariableOffset,
                 });
-                Some(dest)
+                Some(())
             }
             Expr::Dt(_) => {
-                let dest = self.alloc_register();
                 self.push(Opcode::LoadGlobalVar {
-                    dest,
                     off: DT_OFF as VariableOffset,
                 });
-                Some(dest)
+                Some(())
             }
             Expr::App(builtin, _) => {
-                let dest = self.alloc_register();
                 // lookups are special
                 if let BuiltinFn::Lookup(ident, index) = builtin {
                     let table = &self.module.tables[ident];
                     self.graphical_functions.push(table.data.clone());
                     let gf = (self.graphical_functions.len() - 1) as GraphicalFunctionId;
-                    let value = self.walk_expr(index)?.unwrap();
-                    self.push(Opcode::Lookup { dest, gf, value });
-                    self.free_register(value);
-                    return Ok(Some(dest));
+                    self.walk_expr(index)?.unwrap();
+                    self.push(Opcode::Lookup { gf });
+                    return Ok(Some(()));
                 };
 
                 match builtin {
@@ -1501,137 +1485,60 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Sin(a)
                     | BuiltinFn::Sqrt(a)
                     | BuiltinFn::Tan(a) => {
-                        let a = self.walk_expr(a)?.unwrap();
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG,
-                            src: a,
-                        });
-                        self.free_register(a);
+                        self.walk_expr(a)?.unwrap();
+                        let id = self.curr_code.intern_literal(0.0);
+                        self.push(Opcode::LoadConstant { id });
+                        self.push(Opcode::LoadConstant { id });
                     }
                     BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) | BuiltinFn::Step(a, b) => {
-                        let a = self.walk_expr(a)?.unwrap();
-                        let b = self.walk_expr(b)?.unwrap();
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG,
-                            src: a,
-                        });
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG + 1u8,
-                            src: b,
-                        });
-                        self.free_register(a);
-                        self.free_register(b);
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
+                        let id = self.curr_code.intern_literal(0.0);
+                        self.push(Opcode::LoadConstant { id });
                     }
                     BuiltinFn::Pulse(a, b, c) => {
-                        let a = self.walk_expr(a)?.unwrap();
-                        let b = self.walk_expr(b)?.unwrap();
-                        let c = if c.is_some() {
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
+                        if c.is_some() {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
-                            let c = self.alloc_register();
                             let id = self.curr_code.intern_literal(0.0);
-                            self.push(Opcode::LoadConstant { dest: c, id });
-                            c
+                            self.push(Opcode::LoadConstant { id });
                         };
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG,
-                            src: a,
-                        });
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG + 1,
-                            src: b,
-                        });
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG + 2,
-                            src: c,
-                        });
-                        self.free_register(a);
-                        self.free_register(b);
-                        self.free_register(c);
                     }
                     BuiltinFn::Ramp(a, b, c) => {
-                        let a = self.walk_expr(a)?.unwrap();
-                        let b = self.walk_expr(b)?.unwrap();
-                        let c = if c.is_some() {
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
+                        if c.is_some() {
                             self.walk_expr(c.as_ref().unwrap())?.unwrap()
                         } else {
-                            let c = self.alloc_register();
                             self.push(Opcode::LoadVar {
-                                dest: c,
                                 off: FINAL_TIME_OFF as u16,
                             });
-                            c
                         };
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG,
-                            src: a,
-                        });
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG + 1,
-                            src: b,
-                        });
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG + 2,
-                            src: c,
-                        });
-                        self.free_register(a);
-                        self.free_register(b);
-                        self.free_register(c);
                     }
                     BuiltinFn::SafeDiv(a, b, c) => {
-                        let a = self.walk_expr(a)?.unwrap();
-                        let b = self.walk_expr(b)?.unwrap();
+                        self.walk_expr(a)?.unwrap();
+                        self.walk_expr(b)?.unwrap();
                         let c = c.as_ref().map(|c| self.walk_expr(c).unwrap().unwrap());
-
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG,
-                            src: a,
-                        });
-                        self.push(Opcode::Mov {
-                            dst: FIRST_CALL_REG + 1,
-                            src: b,
-                        });
-                        match c {
-                            Some(c) => {
-                                self.push(Opcode::Mov {
-                                    dst: FIRST_CALL_REG + 2,
-                                    src: c,
-                                });
-                                self.free_register(c);
-                            }
-                            None => {
-                                let id = self.curr_code.intern_literal(0.0);
-                                self.push(Opcode::LoadConstant {
-                                    dest: FIRST_CALL_REG + 2,
-                                    id,
-                                });
-                            }
+                        if c.is_none() {
+                            let id = self.curr_code.intern_literal(0.0);
+                            self.push(Opcode::LoadConstant { id });
                         }
-                        self.free_register(a);
-                        self.free_register(b);
                     }
                     BuiltinFn::Mean(args) => {
-                        let sum = self.alloc_register();
                         let id = self.curr_code.intern_literal(0.0);
-                        self.push(Opcode::LoadConstant { dest: sum, id });
+                        self.push(Opcode::LoadConstant { id });
 
                         for arg in args.iter() {
-                            let arg = self.walk_expr(arg)?.unwrap();
-                            self.push(Opcode::Add {
-                                dest: sum,
-                                l: sum,
-                                r: arg,
-                            });
-                            self.free_register(arg);
+                            self.walk_expr(arg)?.unwrap();
+                            self.push(Opcode::Op2 { op: Op2::Add });
                         }
 
-                        let n = self.alloc_register();
                         let id = self.curr_code.intern_literal(args.len() as f64);
-                        self.push(Opcode::LoadConstant { dest: n, id });
-                        self.push(Opcode::Div { dest, l: sum, r: n });
-                        self.free_register(sum);
-                        self.free_register(n);
-                        return Ok(Some(dest));
+                        self.push(Opcode::LoadConstant { id });
+                        self.push(Opcode::Op2 { op: Op2::Div });
+                        return Ok(Some(()));
                     }
                 };
                 let func = match builtin {
@@ -1659,21 +1566,14 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Tan(_) => BuiltinId::Tan,
                 };
 
-                self.push(Opcode::Apply { dest, func });
-                Some(dest)
+                self.push(Opcode::Apply { func });
+                Some(())
             }
             Expr::EvalModule(ident, model_name, args) => {
-                let args: Vec<Register> = args
+                let args: Vec<_> = args
                     .iter()
                     .map(|arg| self.walk_expr(arg).unwrap().unwrap())
                     .collect();
-                for (i, reg) in args.iter().enumerate() {
-                    self.push(Opcode::Mov {
-                        dst: FIRST_CALL_REG + i as Register,
-                        src: *reg,
-                    });
-                    self.free_register(*reg)
-                }
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 self.module_decls.push(ModuleDeclaration {
                     model_name: model_name.clone(),
@@ -1681,82 +1581,70 @@ impl<'module> Compiler<'module> {
                 });
                 let id = (self.module_decls.len() - 1) as ModuleId;
 
-                self.push(Opcode::EvalModule { id });
+                self.push(Opcode::EvalModule {
+                    id,
+                    n_inputs: args.len() as u8,
+                });
                 None
             }
             Expr::ModuleInput(off, _) => {
-                let dest = self.alloc_register();
                 self.push(Opcode::LoadModuleInput {
-                    dest,
                     input: *off as ModuleInputOffset,
                 });
-                Some(dest)
+                Some(())
             }
             Expr::Op2(op, lhs, rhs, _) => {
-                let dest = self.alloc_register();
-                let l = self.walk_expr(lhs)?.unwrap();
-                let r = self.walk_expr(rhs)?.unwrap();
+                self.walk_expr(lhs)?.unwrap();
+                self.walk_expr(rhs)?.unwrap();
                 let opcode = match op {
-                    BinaryOp::Add => Opcode::Add { dest, l, r },
-                    BinaryOp::Sub => Opcode::Sub { dest, l, r },
-                    BinaryOp::Exp => Opcode::Exp { dest, l, r },
-                    BinaryOp::Mul => Opcode::Mul { dest, l, r },
-                    BinaryOp::Div => Opcode::Div { dest, l, r },
-                    BinaryOp::Mod => Opcode::Mod { dest, l, r },
-                    BinaryOp::Gt => Opcode::Gt { dest, l, r },
-                    BinaryOp::Gte => Opcode::Gte { dest, l, r },
-                    BinaryOp::Lt => Opcode::Lt { dest, l, r },
-                    BinaryOp::Lte => Opcode::Lte { dest, l, r },
-                    BinaryOp::Eq => Opcode::Eq { dest, l, r },
+                    BinaryOp::Add => Opcode::Op2 { op: Op2::Add },
+                    BinaryOp::Sub => Opcode::Op2 { op: Op2::Sub },
+                    BinaryOp::Exp => Opcode::Op2 { op: Op2::Exp },
+                    BinaryOp::Mul => Opcode::Op2 { op: Op2::Mul },
+                    BinaryOp::Div => Opcode::Op2 { op: Op2::Div },
+                    BinaryOp::Mod => Opcode::Op2 { op: Op2::Mod },
+                    BinaryOp::Gt => Opcode::Op2 { op: Op2::Gt },
+                    BinaryOp::Gte => Opcode::Op2 { op: Op2::Gte },
+                    BinaryOp::Lt => Opcode::Op2 { op: Op2::Lt },
+                    BinaryOp::Lte => Opcode::Op2 { op: Op2::Lte },
+                    BinaryOp::Eq => Opcode::Op2 { op: Op2::Eq },
                     BinaryOp::Neq => {
-                        self.push(Opcode::Eq { dest, l, r });
-                        Opcode::Not { dest, r: dest }
+                        self.push(Opcode::Op2 { op: Op2::Eq });
+                        Opcode::Not {}
                     }
-                    BinaryOp::And => Opcode::And { dest, l, r },
-                    BinaryOp::Or => Opcode::Or { dest, l, r },
+                    BinaryOp::And => Opcode::Op2 { op: Op2::And },
+                    BinaryOp::Or => Opcode::Op2 { op: Op2::Or },
                 };
                 self.push(opcode);
-                self.free_register(l);
-                self.free_register(r);
-                Some(dest)
+                Some(())
             }
             Expr::Op1(op, rhs, _) => {
-                let dest = self.alloc_register();
-                let r = self.walk_expr(rhs)?.unwrap();
+                self.walk_expr(rhs)?.unwrap();
                 match op {
-                    UnaryOp::Not => self.push(Opcode::Not { dest, r }),
+                    UnaryOp::Not => self.push(Opcode::Not {}),
                 };
-                self.free_register(r);
-                Some(dest)
+                Some(())
             }
             Expr::If(cond, t, f, _) => {
-                let dest = self.alloc_register();
-                let t = self.walk_expr(t)?.unwrap();
-                let f = self.walk_expr(f)?.unwrap();
-                let cond = self.walk_expr(cond)?.unwrap();
-                self.push(Opcode::SetCond { cond });
-                self.push(Opcode::If { dest, t, f });
-                self.free_register(cond);
-                self.free_register(t);
-                self.free_register(f);
-                Some(dest)
+                self.walk_expr(t)?.unwrap();
+                self.walk_expr(f)?.unwrap();
+                self.walk_expr(cond)?.unwrap();
+                self.push(Opcode::SetCond {});
+                self.push(Opcode::If {});
+                Some(())
             }
             Expr::AssignCurr(off, rhs) => {
-                let value = self.walk_expr(rhs)?.unwrap();
+                self.walk_expr(rhs)?.unwrap();
                 self.push(Opcode::AssignCurr {
                     off: *off as VariableOffset,
-                    value,
                 });
-                self.free_register(value);
                 None
             }
             Expr::AssignNext(off, rhs) => {
-                let value = self.walk_expr(rhs)?.unwrap();
+                self.walk_expr(rhs)?.unwrap();
                 self.push(Opcode::AssignNext {
                     off: *off as VariableOffset,
-                    value,
                 });
-                self.free_register(value);
                 None
             }
         };
@@ -1765,14 +1653,6 @@ impl<'module> Compiler<'module> {
 
     fn push(&mut self, op: Opcode) {
         self.curr_code.push_opcode(op)
-    }
-
-    fn alloc_register(&mut self) -> Register {
-        self.free_registers.pop().unwrap().0
-    }
-
-    fn free_register(&mut self, reg: Register) {
-        self.free_registers.push(Reverse(reg));
     }
 
     fn compile(mut self) -> Result<CompiledModule> {
