@@ -194,7 +194,7 @@ pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
     pub dt: Option<Dt>,
-    #[serde(rename = "save_interval")]
+    #[serde(rename = "isee:save_interval")]
     pub save_step: Option<f64>,
     pub method: Option<String>,
     pub time_units: Option<String>,
@@ -2626,10 +2626,9 @@ fn test_module_parsing() {
 
 #[test]
 fn test_sim_specs_parsing() {
-    let input = "<sim_specs method=\"euler\" time_units=\"Time\">
+    let input = "<sim_specs method=\"euler\" time_units=\"Time\" isee:save_interval=\"1\">
 		<start>0</start>
 		<stop>100</stop>
-		<isee:save_interval>1</isee:save_interval>
 		<dt>0.03125</dt>
 	</sim_specs>";
 

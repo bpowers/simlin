@@ -164,6 +164,7 @@ fn load_expected_results(xmile_path: &str) -> Results {
 
 fn ensure_results(expected: &Results, results: &Results) {
     assert_eq!(expected.step_count, results.step_count);
+    assert_eq!(expected.iter().len(), results.iter().len());
 
     let mut step = 0;
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {

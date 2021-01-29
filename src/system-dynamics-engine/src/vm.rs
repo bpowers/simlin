@@ -228,7 +228,7 @@ impl VM {
         };
         let n_slots = sim.modules[&sim.root].n_slots;
         let n_chunks: usize = ((sim.specs.stop - sim.specs.start) / save_step + 1.0) as usize;
-        let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 1)].into_boxed_slice();
+        let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 2)].into_boxed_slice();
         Ok(VM {
             specs: sim.specs,
             root: sim.root,
