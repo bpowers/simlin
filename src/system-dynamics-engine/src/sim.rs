@@ -10,7 +10,7 @@ use float_cmp::approx_eq;
 use crate::ast::{self, Loc, AST};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
-    ModuleDeclaration, ModuleId, ModuleInputOffset, Opcode, VariableOffset,
+    ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{Ident, Result};
 use crate::datamodel;
@@ -1532,12 +1532,12 @@ impl<'module> Compiler<'module> {
 
                         for arg in args.iter() {
                             self.walk_expr(arg)?.unwrap();
-                            self.push(Opcode::Add {});
+                            self.push(Opcode::Op2 { op: Op2::Add });
                         }
 
                         let id = self.curr_code.intern_literal(args.len() as f64);
                         self.push(Opcode::LoadConstant { id });
-                        self.push(Opcode::Div {});
+                        self.push(Opcode::Op2 { op: Op2::Div });
                         return Ok(Some(()));
                     }
                 };
@@ -1597,23 +1597,23 @@ impl<'module> Compiler<'module> {
                 self.walk_expr(lhs)?.unwrap();
                 self.walk_expr(rhs)?.unwrap();
                 let opcode = match op {
-                    BinaryOp::Add => Opcode::Add {},
-                    BinaryOp::Sub => Opcode::Sub {},
-                    BinaryOp::Exp => Opcode::Exp {},
-                    BinaryOp::Mul => Opcode::Mul {},
-                    BinaryOp::Div => Opcode::Div {},
-                    BinaryOp::Mod => Opcode::Mod {},
-                    BinaryOp::Gt => Opcode::Gt {},
-                    BinaryOp::Gte => Opcode::Gte {},
-                    BinaryOp::Lt => Opcode::Lt {},
-                    BinaryOp::Lte => Opcode::Lte {},
-                    BinaryOp::Eq => Opcode::Eq {},
+                    BinaryOp::Add => Opcode::Op2 { op: Op2::Add },
+                    BinaryOp::Sub => Opcode::Op2 { op: Op2::Sub },
+                    BinaryOp::Exp => Opcode::Op2 { op: Op2::Exp },
+                    BinaryOp::Mul => Opcode::Op2 { op: Op2::Mul },
+                    BinaryOp::Div => Opcode::Op2 { op: Op2::Div },
+                    BinaryOp::Mod => Opcode::Op2 { op: Op2::Mod },
+                    BinaryOp::Gt => Opcode::Op2 { op: Op2::Gt },
+                    BinaryOp::Gte => Opcode::Op2 { op: Op2::Gte },
+                    BinaryOp::Lt => Opcode::Op2 { op: Op2::Lt },
+                    BinaryOp::Lte => Opcode::Op2 { op: Op2::Lte },
+                    BinaryOp::Eq => Opcode::Op2 { op: Op2::Eq },
                     BinaryOp::Neq => {
-                        self.push(Opcode::Eq {});
+                        self.push(Opcode::Op2 { op: Op2::Eq });
                         Opcode::Not {}
                     }
-                    BinaryOp::And => Opcode::And {},
-                    BinaryOp::Or => Opcode::Or {},
+                    BinaryOp::And => Opcode::Op2 { op: Op2::And },
+                    BinaryOp::Or => Opcode::Op2 { op: Op2::Or },
                 };
                 self.push(opcode);
                 Some(())

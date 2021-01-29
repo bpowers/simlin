@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::bytecode::{BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Opcode};
+use crate::bytecode::{
+    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Op2, Opcode,
+};
 use crate::common::{Ident, Result};
 use crate::datamodel::{Dimension, Dt, SimMethod, SimSpecs};
 use crate::sim_err;
@@ -361,70 +363,25 @@ impl VM {
             let op = code[i].clone();
             i += 1;
             match op {
-                Opcode::Add {} => {
+                Opcode::Op2 { op } => {
                     let r = stack.pop();
                     let l = stack.pop();
-                    stack.push(l + r);
-                }
-                Opcode::Sub {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push(l - r);
-                }
-                Opcode::Exp {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push(l.powf(r));
-                }
-                Opcode::Mul {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push(l * r);
-                }
-                Opcode::Div {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push(l / r);
-                }
-                Opcode::Mod {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push(l.rem_euclid(r));
-                }
-                Opcode::Gt {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push((l > r) as i8 as f64);
-                }
-                Opcode::Gte {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push((l >= r) as i8 as f64);
-                }
-                Opcode::Lt {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push((l < r) as i8 as f64);
-                }
-                Opcode::Lte {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push((l <= r) as i8 as f64);
-                }
-                Opcode::Eq {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push(approx_eq!(f64, l, r) as i8 as f64);
-                }
-                Opcode::And {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push((is_truthy(l) && is_truthy(r)) as i8 as f64);
-                }
-                Opcode::Or {} => {
-                    let r = stack.pop();
-                    let l = stack.pop();
-                    stack.push((is_truthy(l) || is_truthy(r)) as i8 as f64);
+                    let result = match op {
+                        Op2::Add => l + r,
+                        Op2::Sub => l - r,
+                        Op2::Exp => l.powf(r),
+                        Op2::Mul => l * r,
+                        Op2::Div => l / r,
+                        Op2::Mod => l.rem_euclid(r),
+                        Op2::Gt => (l > r) as i8 as f64,
+                        Op2::Gte => (l >= r) as i8 as f64,
+                        Op2::Lt => (l < r) as i8 as f64,
+                        Op2::Lte => (l <= r) as i8 as f64,
+                        Op2::Eq => approx_eq!(f64, l, r) as i8 as f64,
+                        Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
+                        Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
+                    };
+                    stack.push(result);
                 }
                 Opcode::Not {} => {
                     let r = stack.pop();

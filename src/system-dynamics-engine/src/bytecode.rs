@@ -38,20 +38,25 @@ pub(crate) enum BuiltinId {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) enum Op2 {
+    Add,
+    Sub,
+    Exp,
+    Mul,
+    Div,
+    Mod,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    Eq,
+    And,
+    Or,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum Opcode {
-    Add {},
-    Sub {},
-    Exp {},
-    Mul {},
-    Div {},
-    Mod {},
-    Gt {},
-    Gte {},
-    Lt {},
-    Lte {},
-    Eq {},
-    And {},
-    Or {},
+    Op2 { op: Op2 },
     Not {},
     LoadConstant { id: LiteralId },
     LoadVar { off: VariableOffset },
