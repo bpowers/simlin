@@ -493,9 +493,11 @@ impl VM {
                 }
                 StackOpcode::AssignCurr { off } => {
                     curr[module_off + off as usize] = stack.pop();
+                    assert_eq!(0, stack.stack.len());
                 }
                 StackOpcode::AssignNext { off } => {
                     next[module_off + off as usize] = stack.pop();
+                    assert_eq!(0, stack.stack.len());
                 }
                 StackOpcode::Apply { func } => {
                     let time = curr[TIME_OFF];
@@ -518,47 +520,47 @@ impl VM {
         }
     }
 
-    /*
     pub fn debug_print_bytecode(&self, _model_name: &str) {
-        let modules = &self.compiled_sim.modules;
-        let mut model_names: Vec<_> = modules.keys().collect();
+        let mut model_names: Vec<_> = self.sliced_sim.initial_modules.keys().collect();
         model_names.sort_unstable();
         for model_name in model_names {
             eprintln!("\n\nCOMPILED MODEL: {}", model_name);
-            let module = &modules[model_name];
+
+            let initial_bc = &self.sliced_sim.initial_modules[model_name].bytecode;
+            let flows_bc = &self.sliced_sim.flow_modules[model_name].bytecode;
+            let stocks_bc = &self.sliced_sim.stock_modules[model_name].bytecode;
 
             eprintln!("\ninitial literals:");
-            for (i, lit) in module.compiled_initials.literals.iter().enumerate() {
+            for (i, lit) in initial_bc.literals.iter().enumerate() {
                 eprintln!("\t{}: {}", i, lit);
             }
 
             eprintln!("\ninital bytecode:");
-            for op in module.compiled_initials.code.iter() {
+            for op in initial_bc.code.iter() {
                 eprintln!("\t{:?}", op);
             }
 
             eprintln!("\nflows literals:");
-            for (i, lit) in module.compiled_flows.literals.iter().enumerate() {
+            for (i, lit) in flows_bc.literals.iter().enumerate() {
                 eprintln!("\t{}: {}", i, lit);
             }
 
             eprintln!("\nflows bytecode:");
-            for op in module.compiled_flows.code.iter() {
+            for op in flows_bc.code.iter() {
                 eprintln!("\t{:?}", op);
             }
 
             eprintln!("\nstocks literals:");
-            for (i, lit) in module.compiled_stocks.literals.iter().enumerate() {
+            for (i, lit) in stocks_bc.literals.iter().enumerate() {
                 eprintln!("\t{}: {}", i, lit);
             }
 
             eprintln!("\nstocks bytecode:");
-            for op in module.compiled_stocks.code.iter() {
+            for op in stocks_bc.code.iter() {
                 eprintln!("\t{:?}", op);
             }
         }
     }
-     */
 }
 
 #[inline(always)]

@@ -38,10 +38,10 @@ mod vm_stack;
 
 pub use self::common::{canonicalize, Error, ErrorCode, Ident, Result};
 pub use self::sim::Simulation;
-pub use self::vm::Method;
-pub use self::vm::Results;
-pub use self::vm::Specs as SimSpecs;
-pub use self::vm::VM;
+pub use self::vm_stack::Method;
+pub use self::vm_stack::Results;
+pub use self::vm_stack::Specs as SimSpecs;
+pub use self::vm_stack::VM;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
