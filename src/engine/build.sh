@@ -32,11 +32,11 @@ CC=emcc CXX=em++ wasm-pack build --release -t browser -d pkg
 rm pkg/package.json
 rm pkg/.gitignore
 
-#wasm-opt pkg/engine_v2_bg.wasm -o pkg/engine_v2_bg.wasm-opt.wasm -O2 --enable-mutable-globals
-#wasm-opt pkg-node/engine_v2_bg.wasm -o pkg-node/engine_v2_bg.wasm-opt.wasm -O2 --enable-mutable-globals
+wasm-opt pkg/engine_bg.wasm -o pkg/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
+wasm-opt pkg-node/engine_bg.wasm -o pkg-node/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
 #
-#mv pkg/engine_v2_bg.{wasm-opt.,}wasm
-#mv pkg-node/engine_v2_bg.{wasm-opt.,}wasm
+mv pkg/engine_bg.{wasm-opt.,}wasm
+mv pkg-node/engine_bg.{wasm-opt.,}wasm
 
 # Get the package name
 PKG_NAME=${PWD##*/}
