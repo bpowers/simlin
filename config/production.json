@@ -10,7 +10,8 @@
       "cookieName": "_Secure-model",
       "cookiePath": "/",
       "httpOnly": true,
-      "secure": true
+      "secure": true,
+      "maxAgeInSeconds": 50400
     },
     "google": {
       "successRedirect": "/",
