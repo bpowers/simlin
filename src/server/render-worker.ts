@@ -1,31 +1,32 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// import { isMainThread, parentPort, Worker, workerData } from 'worker_threads';
+import { parentPort, workerData } from 'worker_threads';
 
 import * as canvas from 'canvas';
 import { Canvg, presets } from 'canvg';
 
-import fetch from 'node-fetch';
 import { DOMParser } from 'xmldom';
 
 import { exists } from '@system-dynamics/core/common';
-import { Project as DmProject } from '@system-dynamics/core/datamodel';
-import { renderSvgToString } from '@system-dynamics/diagram/render-common';
-import { File } from './schemas/file_pb';
+
+function fakeFetch(_input: any, _config?: any): Promise<any> {
+  throw new Error('no fetching from SVGs');
+}
 
 const preset = presets.node({
   DOMParser,
   canvas,
-  fetch,
+  fetch: fakeFetch,
 });
 
-export async function renderToPNG(fileDoc: File): Promise<Buffer> {
-  const project = DmProject.deserializeBinary(fileDoc.getProjectContents_asU8());
+interface Box {
+  readonly width: number;
+  readonly height: number;
+}
 
-  const [svg, viewbox] = renderSvgToString(project, 'main');
-
+async function renderToPNG(svgString: string, viewbox: Box): Promise<Uint8Array> {
   canvas.registerFont('fonts/Roboto-Light.ttf', { family: 'Roboto' });
 
   const retina = 2; // double the pixels for the same unit of measurement
@@ -55,7 +56,7 @@ export async function renderToPNG(fileDoc: File): Promise<Buffer> {
   //
   const cvg = Canvg.fromString(
     exists(ctx),
-    svg,
+    svgString,
     Object.assign({}, preset, {
       window: undefined,
       ignoreMouse: true,
@@ -73,10 +74,8 @@ export async function renderToPNG(fileDoc: File): Promise<Buffer> {
   });
 }
 
-// TODO: revisit whe this works.
-// if (!isMainThread) {
-//   console.log('HELLO FROM WORKER');
-//   const fileDoc: FileDocument = workerData;
-//   const png = renderToPNGSync(fileDoc);
-//   exists(parentPort).postMessage(png);
-// }
+// eslint-disable-next-line @typescript-eslint/no-misused-promises
+setImmediate(async () => {
+  const result = await renderToPNG(workerData.svgString as string, workerData.viewbox as Box);
+  parentPort?.postMessage(result, [result.buffer]);
+});

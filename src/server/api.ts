@@ -23,7 +23,7 @@ export async function updatePreview(db: Database, project: ProjectPb): Promise<P
     throw new Error(`no File document found for project ${project.getId()}`);
   }
 
-  let png: Buffer;
+  let png: Uint8Array;
   try {
     png = await renderToPNG(fileDoc);
   } catch (err) {
