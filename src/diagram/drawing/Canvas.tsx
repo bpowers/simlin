@@ -1417,6 +1417,7 @@ export const Canvas = withStyles(styles)(
           const currWidth = svgWidth / zoom;
           const currHeight = svgHeight / zoom;
 
+          // convert diagram bounds to cx,cy
           initialBounds = defined(initialBounds);
           const diagramCx = initialBounds.x + initialBounds.width / 2;
           const diagramCy = initialBounds.y + initialBounds.height / 2;
@@ -1425,12 +1426,17 @@ export const Canvas = withStyles(styles)(
             const prevWidth = prevBounds.width / zoom;
             const prevHeight = prevBounds.height / zoom;
             const prevX = isFinite(prevBounds.x) ? prevBounds.x : 0;
-            const prevY = isFinite(prevBounds.y) ? prevBounds.x : 0;
-            const fractionX = (prevX + initialBounds.width / 2) / prevWidth;
-            const fractionY = (prevY + initialBounds.height / 2) / prevHeight;
+            const prevY = isFinite(prevBounds.y) ? prevBounds.y : 0;
+            // find where cx/cy was as % of prev viewport  (e.g. .2,.3)
+            const prevCx = prevX + diagramCx;
+            const prevCy = prevY + diagramCy;
+            // find proportional cx/cy on curr viewport  (.2 * curr.w...)
+            const fractionX = prevCx / prevWidth;
+            const fractionY = prevCy / prevHeight;
 
-            x = fractionX * currWidth - initialBounds.width / 2;
-            y = fractionY * currHeight - initialBounds.height / 2;
+            // go from cx/cy on current viewport to zoom-adjusted offset
+            x = fractionX * currWidth - diagramCx;
+            y = fractionY * currHeight - diagramCy;
           } else {
             const viewCx = currWidth / 2;
             const viewCy = currHeight / 2;
