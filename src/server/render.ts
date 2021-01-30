@@ -12,16 +12,20 @@ export function renderToPNG(fileDoc: File): Promise<Uint8Array> {
   const project = DmProject.deserializeBinary(fileDoc.getProjectContents_asU8());
   const [svgString, viewbox] = renderSvgToString(project, 'main');
 
-  return new Promise<Uint8Array>((ok) => {
-    const worker = new Worker(__dirname + '/render-worker.js', {
-      workerData: {
-        svgString,
-        viewbox,
-      },
-    });
+  return new Promise<Uint8Array>((ok, error) => {
+    try {
+      const worker = new Worker(__dirname + '/render-worker.js', {
+        workerData: {
+          svgString,
+          viewbox,
+        },
+      });
 
-    worker.on('message', (result: Uint8Array) => {
-      ok(result);
-    });
+      worker.on('message', (result: Uint8Array) => {
+        ok(result);
+      });
+    } catch (err) {
+      error(err);
+    }
   });
 }
