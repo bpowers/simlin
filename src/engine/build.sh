@@ -26,14 +26,15 @@ fi
 rm -rf lib lib.browser
 
 # Build for both targets
+export RUSTFLAGS='-C target-feature=+bulk-memory'
 CC=emcc CXX=em++ wasm-pack build --release -t nodejs -d pkg-node
 CC=emcc CXX=em++ wasm-pack build --release -t browser -d pkg
 
 rm pkg/package.json
 rm pkg/.gitignore
 
-wasm-opt pkg/engine_bg.wasm -o pkg/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
-wasm-opt pkg-node/engine_bg.wasm -o pkg-node/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
+wasm-opt pkg/engine_bg.wasm -o pkg/engine_bg.wasm-opt.wasm -O3 --detect-features
+wasm-opt pkg-node/engine_bg.wasm -o pkg-node/engine_bg.wasm-opt.wasm -O3 --detect-features
 #
 mv pkg/engine_bg.{wasm-opt.,}wasm
 mv pkg-node/engine_bg.{wasm-opt.,}wasm
