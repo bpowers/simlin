@@ -1,5 +1,4 @@
-const GithubStaticBase = 'https://github.com/bpowers/simlin-site';
-const GithubAppBase = 'https://github.com/bpowers/model-app';
+const GithubBase = 'https://github.com/bpowers/simlin';
 
 module.exports = {
   title: 'Simlin',
@@ -7,7 +6,7 @@ module.exports = {
   url: 'https://simlin.com',
   baseUrl: '/',
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  onBrokenMarkdownLinks: 'throw',
   favicon: 'img/favicon.ico',
   organizationName: 'bpowers', // Usually your GitHub org/user name.
   projectName: 'model-app', // Usually your repo name.
@@ -19,6 +18,7 @@ module.exports = {
         src: 'img/logo.svg',
       },
       items: [
+        {to: 'https://app.simlin.com', label: 'App', position: 'left'},
         {
           to: 'docs/',
           activeBasePath: 'docs',
@@ -26,46 +26,46 @@ module.exports = {
           position: 'left',
         },
         {to: 'blog', label: 'Blog', position: 'left'},
-        {
-          href: GithubAppBase,
-          label: 'GitHub',
-          position: 'right',
-        },
       ],
     },
     footer: {
       style: 'dark',
       links: [
         {
-          title: 'Docs',
+          title: 'Simlin',
           items: [
             {
-              label: 'Style Guide',
-              to: 'docs/',
-            },
-            {
-              label: 'Second Doc',
-              to: 'docs/doc2/',
+              label: 'App',
+              to: 'http://app.simlin.com',
             },
           ],
         },
         {
-          title: 'Community',
+          title: 'Docs',
           items: [
             {
-              label: 'Stack Overflow',
-              href: 'https://stackoverflow.com/questions/tagged/docusaurus',
-            },
-            {
-              label: 'Discord',
-              href: 'https://discordapp.com/invite/docusaurus',
-            },
-            {
-              label: 'Twitter',
-              href: 'https://twitter.com/docusaurus',
+              label: 'Getting Started',
+              to: 'docs/',
             },
           ],
         },
+        // {
+        //   title: 'Community',
+        //   items: [
+        //     {
+        //       label: 'Stack Overflow',
+        //       href: 'https://stackoverflow.com/questions/tagged/docusaurus',
+        //     },
+        //     {
+        //       label: 'Discord',
+        //       href: 'https://discordapp.com/invite/docusaurus',
+        //     },
+        //     {
+        //       label: 'Twitter',
+        //       href: 'https://twitter.com/docusaurus',
+        //     },
+        //   ],
+        // },
         {
           title: 'More',
           items: [
@@ -75,12 +75,12 @@ module.exports = {
             },
             {
               label: 'GitHub',
-              href: GithubAppBase,
+              href: GithubBase,
             },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Bobby Powers.`,
+      copyright: `© Bobby Powers`,
     },
   },
   presets: [
@@ -91,13 +91,13 @@ module.exports = {
           sidebarPath: require.resolve('./sidebars.js'),
           // Please change this to your repo.
           editUrl:
-            'https://github.com/bpowers/simlin/edit/main/website',
+            GithubBase + '/edit/main/website',
         },
         blog: {
-          showReadingTime: true,
+          showReadingTime: false,
           // Please change this to your repo.
           editUrl:
-            'https://github.com/bpowers/simlin/edit/main/website/blog/',
+            GithubBase + '/edit/main/website/blog/',
         },
         theme: {
           customCss: require.resolve('./src/css/custom.css'),

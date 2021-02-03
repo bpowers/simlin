@@ -12,28 +12,25 @@ const features = [
     imageUrl: 'img/undraw_docusaurus_mountain.svg',
     description: (
       <>
-        Docusaurus was designed from the ground up to be easily installed and
-        used to get your website up and running quickly.
+        Simlin was designed from the ground up to be easily to use for leaders, managers, and developers.  Models are created in a simple visual language that can be picked up in minutes, yet is rich enough to describe domains from the carbon cycle to business dynamics.
       </>
     ),
   },
   {
-    title: 'Focus on What Matters',
+    title: 'Easy to Share',
     imageUrl: 'img/undraw_docusaurus_tree.svg',
     description: (
       <>
-        Docusaurus lets you focus on your docs, and we&apos;ll do the chores. Go
-        ahead and move your docs into the <code>docs</code> directory.
+        Developing the right strategy is the first step; convincing others it is the right strategy is the next.  Simlin makes it easy to share models on the web, embed them in blog posts, and print them out.
       </>
     ),
   },
   {
-    title: 'Powered by React',
+    title: 'Easy to Go Deep',
     imageUrl: 'img/undraw_docusaurus_react.svg',
     description: (
       <>
-        Extend or customize your website layout by reusing React. Docusaurus can
-        be extended while reusing the same header and footer.
+        Simlin is designed to be simple, but interops with tools like <a href="https://pysd.readthedocs.io/en/master/index.html">PySD</a> if you have more advanced needs, like fitting model parameters, running a sensitivity analysis, or working with geographic data.
       </>
     ),
   },
@@ -65,10 +62,14 @@ function Home() {
         <div className="container">
           <h1 className="hero__title">{siteConfig.title}</h1>
           <p className="hero__subtitle">{siteConfig.tagline}</p>
+          <p>
+            Simlin is a tool for simulation modeling, leveling up your ability to learn.
+            With Simlin you can iterate on policy and strategy much faster (and with fewer costs and consequences) than you can in the real world.
+          </p>
           <div className={styles.buttons}>
             <Link
               className={clsx(
-                'button button--outline button--secondary button--lg',
+                'button button--outline button--lg',
                 styles.getStarted,
               )}
               to={useBaseUrl('docs/')}>
