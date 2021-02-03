@@ -9,15 +9,21 @@
     "email": "bobbypowers@gmail.com"
   },
   "main": "src/server/lib",
-  "workspaces": [
-    "src/xmutil-js",
-    "src/engine",
-    "src/importer",
-    "src/core",
-    "src/diagram",
-    "src/app",
-    "src/server"
-  ],
+  "workspaces": {
+    "packages": [
+      "src/xmutil-js",
+      "src/engine",
+      "src/importer",
+      "src/core",
+      "src/diagram",
+      "src/app",
+      "src/server",
+      "website"
+    ],
+    "nohoist": [
+      "**/html-minifier-terser"
+    ]
+  },
   "devDependencies": {
     "npm-run-all": "^4.1.5",
     "ts-protoc-gen": "^0.14.0"
