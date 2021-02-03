@@ -1,9 +1,9 @@
 {
-  "name": "model-app",
-  "description": "The web frontend and backend service for systemdynamics.net",
+  "name": "simlin",
+  "description": "The web frontend and backend service for simlin",
   "private": true,
   "license": "Apache-2.0",
-  "homepage": "https://systemdynamics.net",
+  "homepage": "https://simlin.com",
   "author": {
     "name": "Bobby Powers",
     "email": "bobbypowers@gmail.com"

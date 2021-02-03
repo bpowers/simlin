@@ -1,8 +1,8 @@
 {
   "name": "@system-dynamics/app",
   "version": "1.0.0",
-  "description": "systemdynamics.net web frontend",
-  "repository": "http://github.com/bpowers/model-app",
+  "description": "Simlin web frontend",
+  "repository": "http://github.com/bpowers/simlin",
   "author": "Bobby Powers <bobbypowers@gmail.com>",
   "license": "Apache-2.0",
   "browser": "lib.browser",

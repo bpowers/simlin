@@ -2,7 +2,7 @@
 name = "engine"
 version = "0.1.0"
 description = "JavaScript interface to the System Dynamics engine"
-repository = "https://github.com/bpowers/model-app"
+repository = "https://github.com/bpowers/simlin"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
 edition = "2018"

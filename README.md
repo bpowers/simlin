@@ -1,7 +1,7 @@
 # system dynamics Model editor
 
-[![Dependency Status](https://david-dm.org/bpowers/model-app/status.svg)](https://david-dm.org/bpowers/model-app)
-[![devDependency Status](https://david-dm.org/bpowers/model-app/dev-status.svg)](https://david-dm.org/bpowers/model-app?type=dev)
+[![Dependency Status](https://david-dm.org/bpowers/simlin/status.svg)](https://david-dm.org/bpowers/simlin)
+[![devDependency Status](https://david-dm.org/bpowers/simlin/dev-status.svg)](https://david-dm.org/bpowers/simlin?type=dev)
 
 Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/what-is-sd#overview).
 
@@ -27,7 +27,7 @@ Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/wh
 * Undo/redo only applies within a browser tab.  If you restart your browser (or reload the page), you will lose the ability to undo to before the reload.
 * Only straight-line flows are supported for now.
 * Units aren't implemented.
-* Maybe more!  See the [Issues page](https://github.com/bpowers/model-app/issues) for additional info (or to highlight new bugs and problems)
+* Maybe more!  See the [Issues page](https://github.com/bpowers/simlin/issues) for additional info (or to highlight new bugs and problems)
 
 ## Local development
 

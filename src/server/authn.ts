@@ -107,7 +107,7 @@ export const authn = (app: Application): void => {
   const addr = `${app.get('host')}:${app.get('port')}`;
   let callbackURL = `http://${addr}/auth/google/callback`;
   if (process.env.NODE_ENV === 'production') {
-    callbackURL = `https://systemdynamics.net/auth/google/callback`;
+    callbackURL = `https://app.simlin.com/auth/google/callback`;
   }
 
   passport.use(
