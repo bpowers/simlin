@@ -78,7 +78,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
   handleClose = (): void => {
     if (this.state.usernameField === '') {
       this.setState({
-        errorMsg: 'Model requires a non-empty username',
+        errorMsg: 'Simlin requires a non-empty username',
       });
     } else {
       // eslint-disable-next-line @typescript-eslint/no-misused-promises

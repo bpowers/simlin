@@ -1,7 +1,7 @@
 {
-  "name": "Model Editor",
-  "short_name": "Model",
-  "version": "0.1.0",
+  "name": "Simlin",
+  "short_name": "Simlin",
+  "version": "1.0.0",
   "description": "system dynamics modeling",
   "default_locale": "en",
   "icons": [{

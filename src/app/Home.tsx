@@ -228,7 +228,7 @@ const Home = withWidth()(
                 </IconButton>
                 <Typography variant="h6" color="inherit" className={classes.flex}>
                   <Link to="/" className={classes.modelLink}>
-                    Model
+                    Simlin
                   </Link>
                   {/*&nbsp;*/}
                   {/*<span className={classes.sdTitle}>*/}

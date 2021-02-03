@@ -110,7 +110,7 @@ export const ModelPropertiesDrawer = withStyles(styles)(
                 <div className={classes.imageWrap}>
                   <ModelIcon className={classes.modelIcon} />
                 </div>
-                <div className={classes.modelName}>Model</div>
+                <div className={classes.modelName}>Simlin</div>
               </div>
               <Link to="/" className={classes.exitLink}>
                 <IconButton className={classes.menuButton} color="inherit" aria-label="Exit">

@@ -9,7 +9,7 @@ module.exports = {
   onBrokenMarkdownLinks: 'throw',
   favicon: 'img/favicon.ico',
   organizationName: 'bpowers', // Usually your GitHub org/user name.
-  projectName: 'model-app', // Usually your repo name.
+  projectName: 'simlin', // Usually your repo name.
   themeConfig: {
     navbar: {
       title: 'Simlin',
