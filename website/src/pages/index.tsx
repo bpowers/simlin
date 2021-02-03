@@ -72,7 +72,7 @@ function Home() {
                 'button button--outline button--lg',
                 styles.getStarted,
               )}
-              to={useBaseUrl('docs/')}>
+              to={'https://app.simlin.com'}>
               Get Started
             </Link>
           </div>
