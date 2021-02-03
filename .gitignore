@@ -48,3 +48,6 @@ yarn-error.log*
 /test/*.js
 
 /tarpaulin*
+
+/website/.docusaurus
+/website/.cache-loader
