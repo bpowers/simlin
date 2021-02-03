@@ -30,7 +30,7 @@ const features = [
     imageUrl: 'img/undraw_docusaurus_react.svg',
     description: (
       <>
-        Simlin is designed to be simple, but interops with tools like <a href="https://pysd.readthedocs.io/en/master/index.html">PySD</a> if you have more advanced needs, like fitting model parameters, running a sensitivity analysis, or working with geographic data.
+        Simlin is designed to be simple, but interops with tools like <a href="https://pysd.readthedocs.io/en/master/index.html">PySD</a> for tasks like fitting model parameters, running sensitivity analyses, or working with geographic data.
       </>
     ),
   },
