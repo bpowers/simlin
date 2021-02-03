@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-export const baseURL = 'https://systemdynamics.net';
+export const baseURL = 'https://app.simlin.com';
 
 export function exists<T>(object: T | null): T {
   if (object === null) {

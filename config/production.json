@@ -1,6 +1,6 @@
 {
   "public": "./public/",
-  "host": "systemdynamics.net",
+  "host": "app.simlin.com",
   "port": "PORT",
   "trust proxy": true,
   "mongodb": "mongodb://model-db-mongodb.default.svc.cluster.local:27017/model",
