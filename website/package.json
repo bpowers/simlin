@@ -9,7 +9,7 @@
     "swizzle": "docusaurus swizzle",
     "deploy": "docusaurus deploy",
     "serve": "docusaurus serve",
-    "clear": "docusaurus clear",
+    "clean": "docusaurus clear",
     "lint": "true"
   },
   "devDependencies": {
