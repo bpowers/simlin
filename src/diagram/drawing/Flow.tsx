@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import {
   Point,
@@ -25,52 +25,53 @@ import { StockHeight, StockWidth } from './Stock';
 
 import { defined, Series } from '@system-dynamics/core/common';
 
-const styles = createStyles({
-  flowOuter: {
-    fill: 'none',
-    strokeWidth: 4,
-    stroke: 'black',
-  },
-  flowOuterSelected: {
-    fill: 'none',
-    strokeWidth: 4,
-    stroke: '#4444dd',
-  },
-  flowInner: {
-    fill: 'none',
-    strokeWidth: 2,
-    stroke: 'white',
-  },
-  aux: {
-    fill: 'white',
-    strokeWidth: 1,
-    stroke: 'black',
-  },
-  targetGood: {
-    '& circle': {
-      stroke: 'rgb(76, 175, 80)',
-      strokeWidth: 2,
+const styles = ({ palette }: Theme) =>
+  createStyles({
+    flowOuter: {
+      fill: 'none',
+      strokeWidth: 4,
+      stroke: palette.common.black,
     },
-  },
-  targetBad: {
-    '& circle': {
-      stroke: 'rgb(244, 67, 54)',
-      strokeWidth: 2,
-    },
-  },
-  selected: {
-    '& text': {
-      fill: '#4444dd',
-    },
-    '& circle': {
+    flowOuterSelected: {
+      fill: 'none',
+      strokeWidth: 4,
       stroke: '#4444dd',
     },
-  },
-  indicator: {
-    fill: 'rgb(255, 152, 0)',
-    strokeWidth: 0,
-  },
-});
+    flowInner: {
+      fill: 'none',
+      strokeWidth: 2,
+      stroke: palette.common.white,
+    },
+    aux: {
+      strokeWidth: 1,
+      fill: palette.common.white,
+      stroke: palette.common.black,
+    },
+    targetGood: {
+      '& circle': {
+        stroke: 'rgb(76, 175, 80)',
+        strokeWidth: 2,
+      },
+    },
+    targetBad: {
+      '& circle': {
+        stroke: 'rgb(244, 67, 54)',
+        strokeWidth: 2,
+      },
+    },
+    selected: {
+      '& text': {
+        fill: '#4444dd',
+      },
+      '& circle': {
+        stroke: '#4444dd',
+      },
+    },
+    indicator: {
+      fill: 'rgb(255, 152, 0)',
+      strokeWidth: 0,
+    },
+  });
 
 const atan2 = Math.atan2;
 const PI = Math.PI;

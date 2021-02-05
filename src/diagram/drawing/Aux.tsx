@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { AuxViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
@@ -15,37 +15,38 @@ import { Sparkline } from './Sparkline';
 
 import { defined, Series } from '@system-dynamics/core/common';
 
-const styles = createStyles({
-  aux: {
-    fill: 'white',
-    strokeWidth: 1,
-    stroke: 'black',
-  },
-  targetGood: {
-    '& circle': {
-      stroke: 'rgb(76, 175, 80)',
-      strokeWidth: 2,
+const styles = ({ palette }: Theme) =>
+  createStyles({
+    aux: {
+      strokeWidth: 1,
+      stroke: palette.common.black,
+      fill: palette.common.white,
     },
-  },
-  targetBad: {
-    '& circle': {
-      stroke: 'rgb(244, 67, 54)',
-      strokeWidth: 2,
+    targetGood: {
+      '& circle': {
+        stroke: 'rgb(76, 175, 80)',
+        strokeWidth: 2,
+      },
     },
-  },
-  selected: {
-    '& text': {
-      fill: '#4444dd',
+    targetBad: {
+      '& circle': {
+        stroke: 'rgb(244, 67, 54)',
+        strokeWidth: 2,
+      },
     },
-    '& circle': {
-      stroke: '#4444dd',
+    selected: {
+      '& text': {
+        fill: '#4444dd',
+      },
+      '& circle': {
+        stroke: '#4444dd',
+      },
     },
-  },
-  indicator: {
-    fill: 'rgb(255, 152, 0)',
-    strokeWidth: 0,
-  },
-});
+    indicator: {
+      fill: 'rgb(255, 152, 0)',
+      strokeWidth: 0,
+    },
+  });
 
 export interface AuxPropsFull extends WithStyles<typeof styles> {
   isSelected: boolean;

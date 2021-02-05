@@ -4,40 +4,41 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { Point } from './common';
 
-const styles = createStyles({
-  flowArrowhead: {
-    strokeWidth: 1,
-    strokeLinejoin: 'round',
-    stroke: 'black',
-    fill: 'white',
-  },
-  flowArrowheadSelected: {
-    strokeWidth: 1,
-    strokeLinejoin: 'round',
-    stroke: '#4444dd',
-    fill: 'white',
-  },
-  connArrowhead: {
-    strokeWidth: 1,
-    strokeLinejoin: 'round',
-    stroke: 'gray',
-    fill: 'gray',
-  },
-  connArrowheadSelected: {
-    strokeWidth: 1,
-    strokeLinejoin: 'round',
-    stroke: '#4444dd',
-    fill: '#4444dd',
-  },
-  arrowheadBg: {
-    fill: 'white',
-    opacity: 0,
-  },
-});
+const styles = ({ palette }: Theme) =>
+  createStyles({
+    flowArrowhead: {
+      strokeWidth: 1,
+      strokeLinejoin: 'round',
+      stroke: palette.common.black,
+      fill: palette.common.white,
+    },
+    flowArrowheadSelected: {
+      strokeWidth: 1,
+      strokeLinejoin: 'round',
+      stroke: '#4444dd',
+      fill: 'white',
+    },
+    connArrowhead: {
+      strokeWidth: 1,
+      strokeLinejoin: 'round',
+      stroke: palette.mode === 'dark' ? '#777777' : 'gray',
+      fill: palette.mode === 'dark' ? '#777777' : 'gray',
+    },
+    connArrowheadSelected: {
+      strokeWidth: 1,
+      strokeLinejoin: 'round',
+      stroke: '#4444dd',
+      fill: '#4444dd',
+    },
+    arrowheadBg: {
+      fill: 'white',
+      opacity: 0,
+    },
+  });
 
 interface ArrowheadProps extends WithStyles<typeof styles> {
   isSelected: boolean;

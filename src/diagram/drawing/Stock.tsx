@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
@@ -14,42 +14,43 @@ import { Sparkline } from './Sparkline';
 
 import { defined, Series } from '@system-dynamics/core/common';
 
-const styles = createStyles({
-  stock: {
-    strokeWidth: 1,
-    stroke: 'black',
-    fill: 'white',
-  },
-  stockSelected: {
-    strokeWidth: 1,
-    stroke: '#4444dd',
-    fill: 'white',
-  },
-  targetGood: {
-    '& rect': {
-      stroke: 'rgb(76, 175, 80)',
-      strokeWidth: 2,
+const styles = ({ palette }: Theme) =>
+  createStyles({
+    stock: {
+      strokeWidth: 1,
+      stroke: palette.common.black,
+      fill: palette.common.white,
     },
-  },
-  targetBad: {
-    '& rect': {
-      stroke: 'rgb(244, 67, 54)',
-      strokeWidth: 2,
-    },
-  },
-  selected: {
-    '& text': {
-      fill: '#4444dd',
-    },
-    '& rect': {
+    stockSelected: {
+      strokeWidth: 1,
       stroke: '#4444dd',
+      fill: 'white',
     },
-  },
-  indicator: {
-    fill: 'rgb(255, 152, 0)',
-    strokeWidth: 0,
-  },
-});
+    targetGood: {
+      '& rect': {
+        stroke: 'rgb(76, 175, 80)',
+        strokeWidth: 2,
+      },
+    },
+    targetBad: {
+      '& rect': {
+        stroke: 'rgb(244, 67, 54)',
+        strokeWidth: 2,
+      },
+    },
+    selected: {
+      '& text': {
+        fill: '#4444dd',
+      },
+      '& rect': {
+        stroke: '#4444dd',
+      },
+    },
+    indicator: {
+      fill: 'rgb(255, 152, 0)',
+      strokeWidth: 0,
+    },
+  });
 
 export const StockWidth = 45;
 export const StockHeight = 35;

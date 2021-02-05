@@ -10,7 +10,8 @@
     "deploy": "docusaurus deploy",
     "serve": "docusaurus serve",
     "clean": "docusaurus clear",
-    "lint": "true"
+    "lint": "true",
+    "format": "find . -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|importer/core|engine/core)/' | xargs prettier --write"
   },
   "devDependencies": {
     "@docusaurus/module-type-aliases": "^2.0.0-alpha.70",

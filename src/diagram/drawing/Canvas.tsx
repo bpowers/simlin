@@ -6,7 +6,7 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { Node } from 'slate';
 
@@ -69,49 +69,51 @@ const fauxCloudTarget = new CloudViewElement({
   isZeroRadius: true,
 });
 
-const styles = createStyles({
-  canvas: {
-    boxSizing: 'border-box',
-    height: '100%',
-    width: '100%',
-    userSelect: 'none',
-    '-webkit-touch-callout': 'none',
-    '& text': {
-      fontSize: '12px',
-      fontFamily: '"Roboto", "Open Sans", "Arial", sans-serif',
-      fontWeight: 300,
-      textAnchor: 'middle',
-      whiteSpace: 'nowrap',
-      verticalAlign: 'middle',
+const styles = ({ palette }: Theme) =>
+  createStyles({
+    canvas: {
+      boxSizing: 'border-box',
+      height: '100%',
+      width: '100%',
+      userSelect: 'none',
+      '-webkit-touch-callout': 'none',
+      '& text': {
+        fill: palette.common.black,
+        fontSize: '12px',
+        fontFamily: '"Roboto", "Open Sans", "Arial", sans-serif',
+        fontWeight: 300,
+        textAnchor: 'middle',
+        whiteSpace: 'nowrap',
+        verticalAlign: 'middle',
+      },
     },
-  },
-  container: {
-    height: '100%',
-    width: '100%',
-  },
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    height: '100%',
-    width: '100%',
-  },
-  noPointerEvents: {
-    pointerEvents: 'none',
-    touchAction: 'none',
-  },
-  selectionOverlay: {
-    stroke: '#4444dd',
-    strokeWidth: 1,
-    fill: '#6363ff',
-    opacity: 0.2,
-    zIndex: 10,
-    transform: 'translateZ(1)',
-  },
-  gLayer: {
-    willUpdate: 'translate',
-  },
-});
+    container: {
+      height: '100%',
+      width: '100%',
+    },
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      height: '100%',
+      width: '100%',
+    },
+    noPointerEvents: {
+      pointerEvents: 'none',
+      touchAction: 'none',
+    },
+    selectionOverlay: {
+      stroke: '#4444dd',
+      strokeWidth: 1,
+      fill: '#6363ff',
+      opacity: 0.2,
+      zIndex: 10,
+      transform: 'translateZ(1)',
+    },
+    gLayer: {
+      willUpdate: 'translate',
+    },
+  });
 
 function radToDeg(r: number): number {
   return (r * 180) / Math.PI;

@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { ViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
 
@@ -13,15 +13,16 @@ import { CloudRadius, CloudWidth } from './default';
 
 import { defined } from '@system-dynamics/core/common';
 
-const styles = createStyles({
-  cloud: {
-    strokeWidth: 2,
-    strokeLinejoin: 'round',
-    strokeMiterlimit: 4,
-    fill: 'white',
-    stroke: '#6388dc',
-  },
-});
+const styles = ({ palette }: Theme) =>
+  createStyles({
+    cloud: {
+      strokeWidth: 2,
+      strokeLinejoin: 'round',
+      strokeMiterlimit: 4,
+      fill: palette.common.white,
+      stroke: palette.mode === 'dark' ? '#2D498A' : '#6388dc',
+    },
+  });
 
 const CloudPath =
   'M 25.731189,3.8741489 C 21.525742,3.8741489 18.07553,7.4486396 17.497605,' +
