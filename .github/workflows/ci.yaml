@@ -3,12 +3,10 @@ name: CI
 "on":
   push:
     branches:
-      - master
+      - main
   pull_request:
     branches:
-      - master
-  schedule:
-    - cron: "0 0 * * FRI"
+      - main
 jobs:
   build:
     name: Build
