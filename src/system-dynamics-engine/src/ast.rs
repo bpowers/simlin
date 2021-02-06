@@ -140,6 +140,14 @@ impl AST {
             }
         }
     }
+
+    pub fn to_latex(&self) -> String {
+        match self {
+            AST::Scalar(expr) => latex_eqn(expr),
+            AST::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
+            AST::Arrayed(_, _) => "TODO(array)".to_owned(),
+        }
+    }
 }
 
 pub trait Visitor<T> {
@@ -273,6 +281,138 @@ fn test_print_eqn() {
     assert_eq!(
         "lookup(a, 1.0)",
         print_eqn(&Expr::App(
+            "lookup".to_string(),
+            vec![
+                Expr::Var("a".to_string(), Loc::new(7, 8)),
+                Expr::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
+            ],
+            Loc::new(0, 14),
+        ))
+    );
+}
+
+struct LatexVisitor {}
+
+impl Visitor<String> for LatexVisitor {
+    fn walk(&mut self, expr: &Expr) -> String {
+        match expr {
+            Expr::Const(s, n, _) => {
+                if n.is_nan() {
+                    "\\mathrm{{NaN}}".to_owned()
+                } else {
+                    s.clone()
+                }
+            }
+            Expr::Var(id, _) => {
+                let id = str::replace(id, "_", "\\_");
+                format!("\\mathrm{{{}}}", id)
+            }
+            Expr::App(func, args, _) => {
+                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+                format!("\\operatorname{{{}}}({})", func, args.join(", "))
+            }
+            Expr::Subscript(id, args, _) => {
+                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+                format!("{}[{}]", id, args.join(", "))
+            }
+            Expr::Op1(op, l, _) => {
+                let l = self.walk(l);
+                let op: &str = match op {
+                    UnaryOp::Positive => "+",
+                    UnaryOp::Negative => "-",
+                    UnaryOp::Not => "\\neg ",
+                };
+                format!("{}{}", op, l)
+            }
+            Expr::Op2(op, l, r, _) => {
+                let l = self.walk(l);
+                let r = self.walk(r);
+                let op: &str = match op {
+                    BinaryOp::Add => "+",
+                    BinaryOp::Sub => "-",
+                    BinaryOp::Exp => {
+                        return format!("{}^{{{}}}", l, r);
+                    }
+                    BinaryOp::Mul => " \\cdot ",
+                    BinaryOp::Div => {
+                        return format!("\\frac{{{}}}{{{}}}", l, r);
+                    }
+                    BinaryOp::Mod => "%",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::Gte => ">=",
+                    BinaryOp::Lte => "<=",
+                    BinaryOp::Eq => "=",
+                    BinaryOp::Neq => "!=",
+                    BinaryOp::And => "&&",
+                    BinaryOp::Or => "||",
+                };
+                format!("{} {} {}", l, op, r)
+            }
+            Expr::If(cond, t, f, _) => {
+                let cond = self.walk(cond);
+                let t = self.walk(t);
+                let f = self.walk(f);
+
+                format!(
+                    "\\begin{{cases}}
+                     {} & \\text{{if }} {} \\\\
+                     {} & \\text{{else}}
+                 \\end{{cases}}",
+                    t, cond, f
+                )
+            }
+        }
+    }
+}
+
+pub fn latex_eqn(expr: &Expr) -> String {
+    let mut visitor = LatexVisitor {};
+    visitor.walk(expr)
+}
+
+#[test]
+fn test_latex_eqn() {
+    assert_eq!(
+        "(\\mathrm{a\\_c} + \\mathrm{b})",
+        latex_eqn(&Expr::Op2(
+            BinaryOp::Add,
+            Box::new(Expr::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Loc::new(0, 7),
+        ))
+    );
+    assert_eq!(
+        "-\\mathrm{a}",
+        latex_eqn(&Expr::Op1(
+            UnaryOp::Negative,
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Loc::new(0, 2),
+        ))
+    );
+    assert_eq!(
+        "\\neg \\mathrm{a}",
+        latex_eqn(&Expr::Op1(
+            UnaryOp::Not,
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Loc::new(0, 2),
+        ))
+    );
+    assert_eq!(
+        "+\\mathrm{a}",
+        latex_eqn(&Expr::Op1(
+            UnaryOp::Positive,
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Loc::new(0, 2),
+        ))
+    );
+    assert_eq!(
+        "4.7",
+        latex_eqn(&Expr::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
+    );
+    assert_eq!(
+        "\\operatorname{lookup}(\\mathrm{a}, 1.0)",
+        latex_eqn(&Expr::App(
             "lookup".to_string(),
             vec![
                 Expr::Var("a".to_string(), Loc::new(7, 8)),

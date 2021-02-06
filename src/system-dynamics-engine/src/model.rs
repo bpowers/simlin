@@ -16,6 +16,9 @@ pub struct Model {
     pub errors: Option<Vec<Error>>,
     pub dt_deps: Option<HashMap<Ident, HashSet<Ident>>>,
     pub initial_deps: Option<HashMap<Ident, HashSet<Ident>>>,
+    /// implicit is true if this model was implicitly added to the project
+    /// by virtue of it being in the stdlib (or some similar reason)
+    pub implicit: bool,
 }
 
 // to ensure we sort the list of variables in O(n*log(n)) time, we
@@ -183,6 +186,7 @@ impl Model {
         models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
         x_model: &datamodel::Model,
         dimensions: &[Dimension],
+        implicit: bool,
     ) -> Self {
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
 
@@ -274,6 +278,7 @@ impl Model {
             errors: maybe_errors,
             dt_deps,
             initial_deps,
+            implicit,
         }
     }
 
@@ -526,7 +531,7 @@ fn test_errors() {
             .map(|(name, m)| build_xvars_map(name, m))
             .collect();
 
-    let model = Model::new(&models, &main_model, &[]);
+    let model = Model::new(&models, &main_model, &[], false);
 
     assert!(model.errors.is_some());
     assert_eq!(

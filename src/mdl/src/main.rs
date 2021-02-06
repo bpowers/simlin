@@ -9,7 +9,9 @@ use std::rc::Rc;
 use pico_args::Arguments;
 
 use system_dynamics_compat::engine::datamodel::Equation;
-use system_dynamics_compat::engine::{eprintln, serde, ErrorCode, Project, Simulation, VM};
+use system_dynamics_compat::engine::{
+    eprintln, serde, ErrorCode, Project, Simulation, Variable, VM,
+};
 use system_dynamics_compat::prost::Message;
 use system_dynamics_compat::{open_vensim, open_xmile};
 
@@ -41,11 +43,12 @@ fn usage() -> ! {
             "    --vensim      model is a Vensim .mdl file\n",
             "    --model-only  for conversion, only output model instead of project\n",
             "    --output FILE path to write output file\n",
-            "    --no-output   don't print the output (for benchmarking)",
+            "    --no-output   don't print the output (for benchmarking)\n",
             "\n\
          SUBCOMMANDS:\n",
             "    simulate      Simulate a model and display output\n",
-            "    convert       Convert an XMILE or Vensim model to protobuf\n"
+            "    convert       Convert an XMILE or Vensim model to protobuf\n",
+            "    equations     Print the equations out\n",
         ),
         VERSION,
         argv0
@@ -60,6 +63,7 @@ struct Args {
     is_convert: bool,
     is_model_only: bool,
     is_no_output: bool,
+    is_equations: bool,
 }
 
 fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
@@ -80,6 +84,8 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     if subcommand == "convert" {
         args.is_convert = true;
     } else if subcommand == "simulate" {
+    } else if subcommand == "equations" {
+        args.is_equations = true;
     } else {
         eprintln!("error: unknown subcommand {}", subcommand);
         usage();
@@ -126,7 +132,87 @@ fn main() {
 
     let project = project.unwrap();
 
-    if args.is_convert {
+    if args.is_equations {
+        let mut output_file =
+            File::create(&args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
+
+        let project = Rc::new(Project::from(project));
+        for (model_name, model) in project.models.iter().filter(|(_, model)| !model.implicit) {
+            output_file
+                .write_fmt(format_args!("% {}\n", model_name))
+                .unwrap();
+            output_file
+                .write_fmt(format_args!("\\begin{{align*}}\n"))
+                .unwrap();
+
+            let var_count = model.variables.len();
+            for (i, (var_name, var)) in model.variables.iter().enumerate() {
+                let subscript = if var.is_stock() { "(t_0)" } else { "" };
+                let var_name = str::replace(var_name, "_", "\\_");
+                let continuation = if !var.is_stock() && i == var_count - 1 {
+                    ""
+                } else {
+                    " \\\\"
+                };
+                let eqn = var
+                    .ast()
+                    .map(|ast| ast.to_latex())
+                    .unwrap_or_else(|| "\\varnothing".to_owned());
+                output_file
+                    .write_fmt(format_args!(
+                        "\\mathrm{{{}}}{} & = {}{}\n",
+                        var_name, subscript, eqn, continuation
+                    ))
+                    .unwrap();
+
+                if var.is_stock() {
+                    if let Variable::Stock {
+                        inflows, outflows, ..
+                    } = var
+                    {
+                        let continuation = if i == var_count - 1 { "" } else { " \\\\" };
+                        let use_parens = inflows.len() + outflows.len() > 1;
+                        let mut eqn = inflows
+                            .iter()
+                            .map(|inflow| {
+                                format!("\\mathrm{{{}}}", str::replace(inflow, "_", "\\_"))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" + ");
+                        if !outflows.is_empty() {
+                            eqn = format!(
+                                "{}-{}",
+                                eqn,
+                                outflows
+                                    .iter()
+                                    .map(|inflow| format!(
+                                        "\\mathrm{{{}}}",
+                                        str::replace(inflow, "_", "\\_")
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join(" - ")
+                            );
+                        }
+                        if use_parens {
+                            eqn = format!("({}) ", eqn);
+                        } else {
+                            eqn = format!("{} \\cdot ", eqn);
+                        }
+                        output_file
+                            .write_fmt(format_args!(
+                                "\\mathrm{{{}}}(t) & = \\mathrm{{{}}}(t - dt) + {} dt{}\n",
+                                var_name, var_name, eqn, continuation
+                            ))
+                            .unwrap();
+                    }
+                }
+            }
+
+            output_file
+                .write_fmt(format_args!("\\end{{align*}}\n"))
+                .unwrap();
+        }
+    } else if args.is_convert {
         let pb_project = serde::serialize(&project);
 
         let buf: Vec<u8> = if args.is_model_only {

@@ -36,6 +36,7 @@ mod vm;
 
 pub use self::common::{canonicalize, Error, ErrorCode, Ident, Result};
 pub use self::sim::Simulation;
+pub use self::variable::Variable;
 pub use self::vm::Method;
 pub use self::vm::Results;
 pub use self::vm::Specs as SimSpecs;
@@ -63,7 +64,7 @@ impl From<datamodel::Project> for Project {
         let mut models_list: Vec<Model> = self::stdlib::MODEL_NAMES
             .iter()
             .map(|name| self::stdlib::get(name).unwrap())
-            .map(|x_model| Model::new(&models, &x_model, &project_datamodel.dimensions))
+            .map(|x_model| Model::new(&models, &x_model, &project_datamodel.dimensions, true))
             .collect();
 
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = project_datamodel
@@ -76,7 +77,7 @@ impl From<datamodel::Project> for Project {
             project_datamodel
                 .models
                 .iter()
-                .map(|m| Model::new(&models, m, &project_datamodel.dimensions)),
+                .map(|m| Model::new(&models, m, &project_datamodel.dimensions, false)),
         );
 
         let models = models_list
