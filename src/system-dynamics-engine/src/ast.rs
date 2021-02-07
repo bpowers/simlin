@@ -172,6 +172,63 @@ pub enum BinaryOp {
     Or,
 }
 
+impl BinaryOp {
+    // higher the precedence, the tighter the binding.
+    // e.g. Mul.precedence() > Add.precedence()
+    fn precedence(&self) -> u8 {
+        // matches equation.lalrpop
+        match self {
+            BinaryOp::Add => 4,
+            BinaryOp::Sub => 4,
+            BinaryOp::Exp => 6,
+            BinaryOp::Mul => 5,
+            BinaryOp::Div => 5,
+            BinaryOp::Mod => 5,
+            BinaryOp::Gt => 3,
+            BinaryOp::Lt => 3,
+            BinaryOp::Gte => 3,
+            BinaryOp::Lte => 3,
+            BinaryOp::Eq => 2,
+            BinaryOp::Neq => 2,
+            BinaryOp::And => 1,
+            BinaryOp::Or => 1,
+        }
+    }
+}
+
+fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
+    match parent {
+        // no children so doesn't matter
+        Expr::Const(_, _, _) | Expr::Var(_, _) => false,
+        // children are comma separated, so no ambiguity possible
+        Expr::App(_, _, _) | Expr::Subscript(_, _, _) => false,
+        Expr::Op1(_, _, _) => matches!(child, Expr::Op2(_, _, _, _)),
+        Expr::Op2(parent_op, _, _, _) => match child {
+            Expr::Const(_, _, _)
+            | Expr::Var(_, _)
+            | Expr::App(_, _, _)
+            | Expr::Subscript(_, _, _)
+            | Expr::If(_, _, _, _)
+            | Expr::Op1(_, _, _) => false,
+            // 3 * 2 + 1
+            Expr::Op2(child_op, _, _, _) => {
+                // if we have `3 * (2 + 3)`, the parent's precedence
+                // is higher than the child and we need enclosing parens
+                parent_op.precedence() > child_op.precedence()
+            }
+        },
+        Expr::If(_, _, _, _) => false,
+    }
+}
+
+fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
+    if child_needs_parens(parent, child) {
+        format!("({})", eqn)
+    } else {
+        eqn
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum UnaryOp {
     Positive,
@@ -195,7 +252,7 @@ impl Visitor<String> for PrintVisitor {
                 format!("{}[{}]", id, args.join(", "))
             }
             Expr::Op1(op, l, _) => {
-                let l = self.walk(l);
+                let l = paren_if_necessary(expr, l, self.walk(l));
                 let op: &str = match op {
                     UnaryOp::Positive => "+",
                     UnaryOp::Negative => "-",
@@ -204,8 +261,8 @@ impl Visitor<String> for PrintVisitor {
                 format!("{}{}", op, l)
             }
             Expr::Op2(op, l, r, _) => {
-                let l = self.walk(l);
-                let r = self.walk(r);
+                let l = paren_if_necessary(expr, l, self.walk(l));
+                let r = paren_if_necessary(expr, r, self.walk(r));
                 let op: &str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -316,7 +373,7 @@ impl Visitor<String> for LatexVisitor {
                 format!("{}[{}]", id, args.join(", "))
             }
             Expr::Op1(op, l, _) => {
-                let l = self.walk(l);
+                let l = paren_if_necessary(expr, l, self.walk(l));
                 let op: &str = match op {
                     UnaryOp::Positive => "+",
                     UnaryOp::Negative => "-",
@@ -325,15 +382,15 @@ impl Visitor<String> for LatexVisitor {
                 format!("{}{}", op, l)
             }
             Expr::Op2(op, l, r, _) => {
-                let l = self.walk(l);
-                let r = self.walk(r);
+                let l = paren_if_necessary(expr, l, self.walk(l));
+                let r = paren_if_necessary(expr, r, self.walk(r));
                 let op: &str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
                     BinaryOp::Exp => {
                         return format!("{}^{{{}}}", l, r);
                     }
-                    BinaryOp::Mul => " \\cdot ",
+                    BinaryOp::Mul => "\\cdot",
                     BinaryOp::Div => {
                         return format!("\\frac{{{}}}{{{}}}", l, r);
                     }
@@ -374,11 +431,48 @@ pub fn latex_eqn(expr: &Expr) -> String {
 #[test]
 fn test_latex_eqn() {
     assert_eq!(
-        "(\\mathrm{a\\_c} + \\mathrm{b})",
+        "\\mathrm{a\\_c} + \\mathrm{b}",
         latex_eqn(&Expr::Op2(
             BinaryOp::Add,
             Box::new(Expr::Var("a_c".to_string(), Loc::new(1, 2))),
             Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Loc::new(0, 7),
+        ))
+    );
+    assert_eq!(
+        "\\mathrm{a\\_c} \\cdot \\mathrm{b}",
+        latex_eqn(&Expr::Op2(
+            BinaryOp::Mul,
+            Box::new(Expr::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Loc::new(0, 7),
+        ))
+    );
+    assert_eq!(
+        "(\\mathrm{a\\_c} - 1) \\cdot \\mathrm{b}",
+        latex_eqn(&Expr::Op2(
+            BinaryOp::Mul,
+            Box::new(Expr::Op2(
+                BinaryOp::Sub,
+                Box::new(Expr::Var("a_c".to_string(), Loc::new(0, 0))),
+                Box::new(Expr::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Loc::new(0, 0),
+            )),
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Loc::new(0, 7),
+        ))
+    );
+    assert_eq!(
+        "\\mathrm{b} \\cdot (\\mathrm{a\\_c} - 1)",
+        latex_eqn(&Expr::Op2(
+            BinaryOp::Mul,
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr::Op2(
+                BinaryOp::Sub,
+                Box::new(Expr::Var("a_c".to_string(), Loc::new(0, 0))),
+                Box::new(Expr::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Loc::new(0, 0),
+            )),
             Loc::new(0, 7),
         ))
     );
