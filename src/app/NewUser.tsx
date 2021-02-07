@@ -44,7 +44,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     });
   };
 
-  handleAgreedToTerms = (event: React.ChangeEvent<HTMLInputElement>): void => {
+  handleAgreedToTerms = (): void => {
     this.setState({
       agreedToTerms: !this.state.agreedToTerms,
     });
