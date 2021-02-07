@@ -11,6 +11,8 @@ import DialogContent from '@material-ui/core/DialogContent';
 import DialogContentText from '@material-ui/core/DialogContentText';
 import DialogTitle from '@material-ui/core/DialogTitle';
 import TextField from '@material-ui/core/TextField';
+import FormControlLabel from '@material-ui/core/FormControlLabel';
+import Checkbox from '@material-ui/core/Checkbox';
 
 import { User } from './User';
 
@@ -22,6 +24,7 @@ interface NewUserProps {
 interface NewUserState {
   usernameField: string;
   errorMsg?: string;
+  agreedToTerms: boolean;
 }
 
 export class NewUser extends React.Component<NewUserProps, NewUserState> {
@@ -31,12 +34,19 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     super(props);
     this.state = {
       usernameField: '',
+      agreedToTerms: false,
     };
   }
 
   handleUsernameChanged = (event: React.ChangeEvent<HTMLInputElement>): void => {
     this.setState({
       usernameField: event.target.value,
+    });
+  };
+
+  handleAgreedToTerms = (event: React.ChangeEvent<HTMLInputElement>): void => {
+    this.setState({
+      agreedToTerms: !this.state.agreedToTerms,
     });
   };
 
@@ -88,6 +98,20 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
 
   render(): JSX.Element {
     const warningText = this.state.errorMsg || '';
+
+    const termsLabel = (
+      <span>
+        I agree to the&nbsp;
+        <a href="/legal/" target="_blank">
+          Terms and Conditions
+        </a>
+        &nbsp; and{' '}
+        <a href="/privacy/" target="_blank">
+          Privacy Policy
+        </a>
+        .
+      </span>
+    );
     return (
       <div>
         <Dialog open={true} disableEscapeKeyDown={true} onClose={this.handleClose} aria-labelledby="form-dialog-title">
@@ -108,9 +132,20 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
             <DialogContentText>
               <b>&nbsp;{warningText}</b>
             </DialogContentText>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={this.state.agreedToTerms}
+                  onChange={this.handleAgreedToTerms}
+                  name="Agree to terms and conditions"
+                  color="primary"
+                />
+              }
+              label={termsLabel}
+            />
           </DialogContent>
           <DialogActions>
-            <Button onClick={this.handleClose} color="primary">
+            <Button onClick={this.handleClose} color="primary" disabled={!this.state.agreedToTerms}>
               Submit
             </Button>
           </DialogActions>
