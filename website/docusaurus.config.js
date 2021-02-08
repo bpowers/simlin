@@ -38,6 +38,14 @@ module.exports = {
               label: 'App',
               to: 'http://app.simlin.com',
             },
+            {
+              label: 'Terms and Conditions',
+              to: 'terms',
+            },
+            {
+              label: 'Privacy Policy',
+              to: 'privacy',
+            },
           ],
         },
         {
