@@ -60,6 +60,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
       },
       body: JSON.stringify({
         username: this.state.usernameField,
+        agreeToTermsAndPrivacyPolicy: this.state.agreedToTerms,
       }),
     });
 
@@ -105,7 +106,7 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
         <a href="/legal/" target="_blank">
           Terms and Conditions
         </a>
-        &nbsp; and{' '}
+        &nbsp;and&nbsp;
         <a href="/privacy/" target="_blank">
           Privacy Policy
         </a>

@@ -310,8 +310,13 @@ export const apiRouter = (app: Application): Router => {
     async (req: Request, res: Response): Promise<void> => {
       const userModel = getUser(req, res);
 
-      if (Object.keys(req.body).length !== 1 || !req.body.username) {
+      if (Object.keys(req.body).length !== 2 || !req.body.username) {
         res.status(400).json({ error: 'only username can be patched' });
+        return;
+      }
+
+      if (!req.body.agreeToTermsAndPrivacyPolicy) {
+        res.status(400).json({ error: 'must agree to Terms and Conditions and Privacy Policy' });
         return;
       }
 
