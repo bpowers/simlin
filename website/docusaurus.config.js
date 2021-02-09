@@ -11,6 +11,11 @@ module.exports = {
   organizationName: 'bpowers', // Usually your GitHub org/user name.
   projectName: 'simlin', // Usually your repo name.
   themeConfig: {
+    colorMode: {
+      defaultMode: 'light',
+      disableSwitch: true,
+      respectPrefersColorScheme: false,
+    },
     navbar: {
       title: 'Simlin',
       logo: {
