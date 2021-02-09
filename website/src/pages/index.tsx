@@ -1,4 +1,5 @@
 import React from 'react';
+import { renderToString } from 'react-dom/server';
 import clsx from 'clsx';
 import Layout from '@theme/Layout';
 import useThemeContext from '@theme/hooks/useThemeContext';
@@ -7,8 +8,8 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { toUint8Array } from 'js-base64';
 import { Set } from 'immutable';
-import { createMuiTheme, Theme } from '@material-ui/core/styles';
-import { ThemeProvider } from '@material-ui/styles';
+import { createMuiTheme } from '@material-ui/core/styles';
+import { ServerStyleSheets, ThemeProvider } from "@material-ui/styles";
 
 import { defined } from '@system-dynamics/core/common';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
@@ -16,6 +17,12 @@ import { Point } from '@system-dynamics/diagram/drawing/common';
 import { Canvas } from '@system-dynamics/diagram/drawing/Canvas';
 
 import styles from './styles.module.css';
+
+const canUseDOM = !!(
+  typeof window !== 'undefined' &&
+  window.document &&
+  window.document.createElement
+);
 
 function Diagram(props) {
   const { isDarkTheme } = useThemeContext();
@@ -68,7 +75,18 @@ function Diagram(props) {
     />
   );
 
-  return <ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>;
+  const themedCanvas = <ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>;
+
+  if (canUseDOM) {
+    return themedCanvas;
+  } else {
+    const sheets = new ServerStyleSheets();
+    renderToString(sheets.collect(themedCanvas));
+    return <>
+      {sheets.getStyleElement()}
+      {themedCanvas}
+    </>;
+  }
 }
 
 const features = [
