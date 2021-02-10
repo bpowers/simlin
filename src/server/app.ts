@@ -1,4 +1,4 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -20,7 +20,7 @@ import { apiRouter } from './api';
 import { defined } from '@system-dynamics/core/common';
 import { Application } from './application';
 import { authn } from './authn';
-import { authz } from './authz';
+import { authz, userAuthz } from './authz';
 import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
@@ -219,7 +219,7 @@ class App {
 
     this.app.get(
       '/:username/:projectName',
-      authz,
+      userAuthz,
       async (req: Request, res: Response, next: NextFunction): Promise<void> => {
         const email = req.session.passport.user.email as string;
         const user = (req.user as any) as UserPb | undefined;
