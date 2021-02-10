@@ -107,17 +107,6 @@ class App {
     }
   }
 
-  private mongoUrl(): string {
-    let url = this.app.get('mongodb') as string;
-    if (process.env.MODEL_MONGO_USERNAME && process.env.MODEL_MONGO_PASSWORD) {
-      const exploded = new URL(url);
-      exploded.username = process.env.MODEL_MONGO_USERNAME;
-      exploded.password = process.env.MODEL_MONGO_PASSWORD;
-      url = exploded.toString();
-    }
-    return url;
-  }
-
   async setup(): Promise<void> {
     const { combine, timestamp, json } = logger.format;
     logger.configure({
@@ -130,8 +119,7 @@ class App {
     this.loadConfig();
 
     this.app.db = await createDatabase({
-      url: this.mongoUrl(),
-      backend: this.app.get('database') === 'firestore' ? 'firestore' : 'mongo',
+      backend: 'firestore',
     });
 
     // put the redirect before the request logger to remove noise

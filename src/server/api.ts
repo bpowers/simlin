@@ -7,7 +7,6 @@ import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import * as logger from 'winston';
 
 import { Application } from './application';
-import { MongoDuplicateKeyCode } from './models/common';
 import { Database } from './models/db-interfaces';
 import { populateExamples } from './new-user';
 import { createFile, createProject, emptyProject } from './project-creation';
@@ -104,7 +103,7 @@ export const apiRouter = (app: Application): Router => {
 
         res.status(200).json(project.toObject());
       } catch (err) {
-        if (err.code === MongoDuplicateKeyCode) {
+        if (err.code === 'wut') {
           res.status(400).json({ error: 'project name already taken' });
           return;
         }
@@ -341,7 +340,7 @@ export const apiRouter = (app: Application): Router => {
         await app.db.user.create(userModel.getId(), userModel);
         await app.db.user.deleteOne(origUserId);
       } catch (err) {
-        if (err.code === MongoDuplicateKeyCode) {
+        if (err.code === 'wut') {
           res.status(400).json({ error: 'username already taken' });
           return;
         }

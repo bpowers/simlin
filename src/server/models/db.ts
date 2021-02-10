@@ -5,14 +5,11 @@
 import { Database, DatabaseOptions } from './db-interfaces';
 
 import { createFirestoreDatabase } from './db-firestore';
-import { createMongoDatabase } from './db-mongo';
 
 export async function createDatabase(opts: DatabaseOptions): Promise<Database> {
   switch (opts.backend) {
     case 'firestore':
       return createFirestoreDatabase(opts);
-    case 'mongo':
-      return createMongoDatabase(opts);
     default:
       throw new Error('not implemented yet');
   }

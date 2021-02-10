@@ -8,10 +8,9 @@ import { Project } from '../schemas/project_pb';
 import { User } from '../schemas/user_pb';
 import { Table } from './table';
 
-export type DatabaseBackend = 'mongo' | 'firestore';
+export type DatabaseBackend = 'firestore';
 
 export interface DatabaseOptions {
-  url: string; // includes DB name
   backend: DatabaseBackend;
 }
 
