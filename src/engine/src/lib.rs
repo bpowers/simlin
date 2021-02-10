@@ -29,9 +29,7 @@ impl Engine {
         let sim_result = compiler
             .and_then(|compiler| compiler.compile())
             .and_then(VM::new);
-        if sim_result.is_err() {
-            self.sim_error = sim_result.as_ref().err().cloned();
-        }
+        self.sim_error = sim_result.as_ref().err().cloned();
         self.sim_vm = sim_result.ok();
     }
 
