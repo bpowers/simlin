@@ -103,11 +103,11 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
     const termsLabel = (
       <span>
         I agree to the&nbsp;
-        <a href="https://simlin.com/terms" target="_blank">
+        <a href="https://simlin.com/terms" target="_blank" rel="noreferrer">
           Terms and Conditions
         </a>
         &nbsp;and&nbsp;
-        <a href="https://simlin.com/privacy" target="_blank">
+        <a href="https://simlin.com/privacy" target="_blank" rel="noreferrer">
           Privacy Policy
         </a>
         .
