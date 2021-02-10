@@ -9,7 +9,7 @@ function jsonError(res: Response): void {
 }
 
 function redirectError(res: Response): void {
-  res.redirect('/login');
+  res.redirect('/');
 }
 
 const doAuthz = (req: Request, res: Response, next: NextFunction, onFail: (res: Response) => void): void => {
