@@ -13,6 +13,15 @@ export function renderToPNG(fileDoc: File): Promise<Uint8Array> {
   const [svgString, viewbox] = renderSvgToString(project, 'main');
 
   return new Promise<Uint8Array>((ok, error) => {
+    // the Worker thing below only works when we deploy, not under
+    // ts-node-dev for development
+    if (process.env.NODE_ENV !== 'production') {
+      import("@system-dynamics/server/render-inner").then((renderer) => {
+        renderer.renderToPNG(svgString, viewbox).then(ok).catch(error);
+      }).catch(error);
+      return;
+    }
+
     try {
       const worker = new Worker(__dirname + '/render-worker.js', {
         workerData: {
