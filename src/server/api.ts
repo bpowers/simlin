@@ -168,7 +168,6 @@ export const apiRouter = (app: Application): Router => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const project: any = projectModel.toObject();
-      project.user = authorUser;
       project.file = file.getJsonContents();
       project.pb = file.getProjectContents_asB64();
 
