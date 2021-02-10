@@ -29,6 +29,42 @@ const styles = createStyles({
     opacity: 0,
     fill: 'none',
   },
+  connectorB: {
+    strokeWidth: 0.5,
+    stroke: 'green',
+    fill: 'none',
+  },
+  connectorC: {
+    strokeWidth: 0.5,
+    stroke: 'red',
+    fill: 'none',
+  },
+  connectorD: {
+    strokeWidth: 0.5,
+    stroke: 'blue',
+    fill: 'none',
+  },
+  connectorE: {
+    strokeWidth: 0.5,
+    stroke: 'purple',
+    fill: 'none',
+  },
+  dotA: {
+    strokeWidth: 0,
+    fill: 'red',
+  },
+  dotB: {
+    strokeWidth: 0,
+    fill: 'blue',
+  },
+  dotC: {
+    strokeWidth: 0,
+    fill: 'green',
+  },
+  dotD: {
+    strokeWidth: 0,
+    fill: 'yellow',
+  },
 });
 
 // math functions we care about
@@ -299,6 +335,8 @@ export const Connector = withStyles(styles)(
     renderArc() {
       const { from, to, classes, isSelected } = this.props;
 
+      const isDebug = isSelected && false;
+
       const takeoffAngle = takeoffθ(this.props);
       const circ = Conn.arcCircle(this.props);
       if (circ === undefined) {
@@ -327,14 +365,24 @@ export const Connector = withStyles(styles)(
       const side2 = (takeoffPoint.x - from.cx) * (to.cy - from.cy) - (takeoffPoint.y - from.cy) * (to.cx - from.cx);
       // eslint-disable-next-line no-mixed-operators
       const sweep = side1 < 0 === side2 < 0;
+      if (isDebug) {
+        console.log(`spanθ: ${radToDeg(spanθ).toFixed(2)}; (inv: ${inv})`);
+      }
 
       if (sweep) {
         inv = !inv;
       }
       const start = { x: from.cx, y: from.cy };
-      const end = intersectElementArc(to, circ, !inv);
+      const arcEnd = { x: to.cx, y: to.cy };
+      const end = intersectElementArc(to, circ, !inv)
 
-      const path = `M${start.x},${start.y}A${circ.r},${circ.r} 0 ${+sweep},${+inv} ${end.x},${end.y}`;
+      const nonSweepEnd = intersectElementArc(from, circ, inv);
+
+      const path = `M${start.x},${start.y}A${circ.r},${circ.r} 0 ${+sweep},${+inv} ${arcEnd.x},${arcEnd.y}`;
+      const pathB = `M${start.x},${start.y}A${circ.r},${circ.r} 0 ${+sweep},${+inv} ${nonSweepEnd.x},${nonSweepEnd.y}`;
+      const pathC = `M${start.x},${start.y}A${circ.r},${circ.r} 0 ${+!sweep},${+inv} ${end.x},${end.y}`;
+      const pathD = `M${start.x},${start.y}A${circ.r},${circ.r} 0 ${+sweep},${+!inv} ${end.x},${end.y}`;
+      const pathE = `M${start.x},${start.y}A${circ.r},${circ.r} 0 ${+!sweep},${+!inv} ${end.x},${end.y}`;
 
       let arrowθ = radToDeg(atan2(end.y - circ.y, end.x - circ.x)) - 90;
       if (inv) {
@@ -344,6 +392,15 @@ export const Connector = withStyles(styles)(
       return (
         <g>
           <path d={path} className={classes.connectorBg} onPointerDown={this.handlePointerDownArc} />
+          {isDebug ? <path d={pathB} className={classes.connectorB} /> : undefined}
+          {isDebug ? <path d={pathC} className={classes.connectorC} /> : undefined}
+          {isDebug ? <path d={pathD} className={classes.connectorD} /> : undefined}
+          {isDebug ? <path d={pathE} className={classes.connectorE} /> : undefined}
+          {isDebug ? <circle className={classes.dotA} cx={circ.x} cy={circ.y} r={3} /> : undefined}
+          {isDebug ? <circle className={classes.dotB} cx={from.cx} cy={from.cy} r={3} /> : undefined}
+          {isDebug ? <circle className={classes.dotD} cx={to.cx} cy={to.cy} r={3} /> : undefined}
+          {isDebug ? <circle className={classes.dotC} cx={takeoffPoint.x} cy={takeoffPoint.y} r={3} /> : undefined}
+
           <path
             d={path}
             className={isSelected ? classes.connectorSelected : classes.connector}
