@@ -491,7 +491,7 @@ impl<'a> Context<'a> {
         }))
     }
 
-    fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Result<Expr> {
+    fn build_stock_update_expr(&self, stock_off: usize, var: &Variable) -> Expr {
         if let Variable::Stock {
             inflows, outflows, ..
         } = var
@@ -518,12 +518,12 @@ impl<'a> Context<'a> {
                 Loc::default(),
             );
 
-            Ok(Expr::Op2(
+            Expr::Op2(
                 BinaryOp::Add,
                 Box::new(Expr::Var(stock_off, Loc::default())),
                 Box::new(dt_update),
                 Loc::default(),
-            ))
+            )
         } else {
             panic!(
                 "build_stock_update_expr called with non-stock {}",
@@ -898,7 +898,7 @@ impl Var {
                         match ast.as_ref().unwrap() {
                             AST::Scalar(_) => vec![Expr::AssignNext(
                                 off,
-                                Box::new(ctx.build_stock_update_expr(off, var)?),
+                                Box::new(ctx.build_stock_update_expr(off, var)),
                             )],
                             AST::ApplyToAll(dims, _) | AST::Arrayed(dims, _) => {
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
@@ -913,8 +913,7 @@ impl Var {
                                             ctx.get_offset(var.ident())?,
                                             var,
                                         );
-                                        update_expr
-                                            .map(|ast| Expr::AssignNext(off + i, Box::new(ast)))
+                                        Ok(Expr::AssignNext(off + i, Box::new(update_expr)))
                                     })
                                     .collect();
                                 exprs?
@@ -1387,9 +1386,7 @@ impl Module {
     }
 
     pub fn compile(&self) -> Result<CompiledModule> {
-        let builder = Compiler::new(&self)?;
-
-        builder.compile()
+        Compiler::new(&self).compile()
     }
 }
 
@@ -1401,13 +1398,13 @@ struct Compiler<'module> {
 }
 
 impl<'module> Compiler<'module> {
-    fn new(module: &'module Module) -> Result<Compiler> {
-        Ok(Compiler {
+    fn new(module: &'module Module) -> Compiler {
+        Compiler {
             module,
             module_decls: vec![],
             graphical_functions: vec![],
             curr_code: ByteCodeBuilder::default(),
-        })
+        }
     }
 
     fn walk(&mut self, exprs: &[Expr]) -> Result<ByteCode> {

@@ -133,7 +133,7 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    fn identifierish(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
+    fn identifierish(&mut self, idx0: usize) -> Spanned<Token<'input>> {
         let (start, word, end) = self.word(idx0);
         let lower_word = word.to_lowercase();
 
@@ -147,10 +147,10 @@ impl<'input> Lexer<'input> {
             .next()
             .unwrap_or(Ident(word));
 
-        Ok((start, tok, end))
+        (start, tok, end)
     }
 
-    fn number(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
+    fn number(&mut self, idx0: usize) -> Spanned<Token<'input>> {
         use regex::{Match, Regex};
 
         lazy_static! {
@@ -159,12 +159,11 @@ impl<'input> Lexer<'input> {
         }
 
         let m: Match = NUMBER_RE.find(&self.text[idx0..]).unwrap();
-        assert_eq!(m.start(), 0);
 
         self.bump_n(m.end());
 
         let end = idx0 + m.end();
-        Ok((idx0, Num(&self.text[idx0..end]), end))
+        (idx0, Num(&self.text[idx0..end]), end)
     }
 
     fn quoted_identifier(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
@@ -192,6 +191,7 @@ impl<'input> Lexer<'input> {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn consume(
         &mut self,
         i: usize,
@@ -254,8 +254,8 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, ']')) => self.consume(i, RBracket, 1),
                 Some((i, ',')) => self.consume(i, Comma, 1),
                 Some((i, '"')) => Some(self.quoted_identifier(i)),
-                Some((i, c)) if is_identifier_start(c) => Some(self.identifierish(i)),
-                Some((i, c)) if is_number_start(c) => Some(self.number(i)),
+                Some((i, c)) if is_identifier_start(c) => Some(Ok(self.identifierish(i))),
+                Some((i, c)) if is_number_start(c) => Some(Ok(self.number(i))),
                 Some((_, c)) if c.is_whitespace() => {
                     self.bump();
                     continue;

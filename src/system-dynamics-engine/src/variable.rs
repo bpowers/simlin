@@ -168,6 +168,7 @@ impl Variable {
     }
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Option<Table>> {
     if gf.is_none() {
         return Ok(None);
@@ -442,15 +443,11 @@ pub fn parse_var(
                     };
 
                     let src = resolve_relative(models, model_name, src);
-                    // will be none if this is a temporary we created
-                    if let Some(src) = src {
-                        if let datamodel::Variable::Stock(_) = src {
-                            // if our input is a stock, we don't have any flow dependencies to
-                            // order before us this dt
+                    // will be none if this is a temporary we created;
+                    // if our input is a stock, we don't have any flow
+                    // dependencies to order before us this dt
+                    if let Some(datamodel::Variable::Stock(_)) = src {
                             None
-                        } else {
-                            Some(direct_dep.to_string())
-                        }
                     } else {
                         Some(direct_dep.to_string())
                     }
