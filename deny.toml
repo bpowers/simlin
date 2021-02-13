@@ -31,7 +31,6 @@ version = "=0.1"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/tafia/quick-xml",
     "https://github.com/bpowers/ascii-canvas",
     "https://github.com/bpowers/lalrpop",
 ]
