@@ -6,6 +6,8 @@ import { defined, Series } from './common';
 
 import { List, Map, Record } from 'immutable';
 
+import { toUint8Array } from 'js-base64';
+
 import {
   GraphicalFunction as PbGraphicalFunction,
   Variable as PbVariable,
@@ -1267,6 +1269,9 @@ export class Project extends Record(projectDefaults) {
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {
     const project = PbProject.deserializeBinary(serializedPb as Uint8Array);
     return Project.fromPb(project);
+  }
+  static deserializeBase64(serializedPb: string): Project {
+    return Project.deserializeBinary(toUint8Array(serializedPb));
   }
   attachData(data: Map<string, Series>, modelName: string): Project {
     let model = defined(this.models.get(modelName));
