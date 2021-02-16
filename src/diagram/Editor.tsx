@@ -83,8 +83,9 @@ import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
-import { ErrorDetails } from '@system-dynamics/diagram/ErrorDetails';
-import { ZoomBar } from '@system-dynamics/diagram/ZoomBar';
+
+import { ErrorDetails } from './ErrorDetails';
+import { ZoomBar } from './ZoomBar';
 
 const MaxUndoSize = 5;
 const SearchbarWidthSm = 359;
