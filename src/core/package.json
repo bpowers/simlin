@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/core",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "System dynamics data model and utilities",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
@@ -12,13 +12,20 @@
   "main": "lib",
   "exports": {
     "./pb": {
+      "module": "./lib.module/pb/index.js",
       "node": "./lib/pb/index.js"
     },
     "./pb/*": {
+      "module": "./lib.module/pb/*.js",
       "node": "./lib/pb/*.js"
     },
     "./*": {
+      "module": "./lib.module/*.js",
       "node": "./lib/*.js"
+    },
+    ".": {
+      "module": "./lib.module/index.js",
+      "node": "./lib/index.js"
     }
   },
   "sideEffects": false,

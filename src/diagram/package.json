@@ -9,7 +9,12 @@
   "main": "lib",
   "exports": {
     "./*": {
+      "browser": "./lib.browser/*.js",
       "node": "./lib/*.js"
+    },
+    ".": {
+      "browser": "./lib.browser/index.js",
+      "node": "./lib/index.js"
     }
   },
   "dependencies": {
@@ -17,7 +22,7 @@
     "@emotion/react": "^11.0.0",
     "@emotion/styled": "^11.0.0",
     "@material-ui/core": "5.0.0-alpha.20",
-    "@system-dynamics/core": "^1.1.7",
+    "@system-dynamics/core": "^1.1.9",
     "canvg": "^3.0.0-beta.2",
     "chroma-js": "^2.1.0",
     "google-protobuf": "^3.14.0",
