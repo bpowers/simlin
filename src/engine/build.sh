@@ -58,5 +58,7 @@ mv lib/index{_main,}.js
 mv lib/index{_main,}.js.map
 mv lib/index{_main,}.d.ts
 rm lib.browser/index_main*
+rm lib/core/package.json
+rm lib/core/.gitignore
 
 yarn format
