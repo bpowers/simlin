@@ -16,9 +16,11 @@ export function renderToPNG(fileDoc: File): Promise<Uint8Array> {
     // the Worker thing below only works when we deploy, not under
     // ts-node-dev for development
     if (process.env.NODE_ENV !== 'production') {
-      import("./render-inner").then((renderer) => {
-        renderer.renderToPNG(svgString, viewbox).then(ok).catch(error);
-      }).catch(error);
+      import('./render-inner')
+        .then((renderer) => {
+          renderer.renderToPNG(svgString, viewbox).then(ok).catch(error);
+        })
+        .catch(error);
       return;
     }
 

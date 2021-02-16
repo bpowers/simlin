@@ -447,7 +447,7 @@ pub fn parse_var(
                     // if our input is a stock, we don't have any flow
                     // dependencies to order before us this dt
                     if let Some(datamodel::Variable::Stock(_)) = src {
-                            None
+                        None
                     } else {
                         Some(direct_dep.to_string())
                     }

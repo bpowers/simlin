@@ -4,9 +4,9 @@
 
 import { parentPort, workerData } from 'worker_threads';
 
-import { Box } from "@system-dynamics/diagram/drawing/common";
+import { Box } from '@system-dynamics/diagram/drawing/common';
 
-import { renderToPNG } from "./render-inner";
+import { renderToPNG } from './render-inner';
 
 // eslint-disable-next-line @typescript-eslint/no-misused-promises
 setImmediate(async () => {

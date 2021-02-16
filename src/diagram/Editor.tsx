@@ -44,6 +44,8 @@ import {
 
 import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
 
+import { ErrorDetails } from './ErrorDetails';
+import { ZoomBar } from './ZoomBar';
 import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
 import { Point } from './drawing/common';
 import { takeoffθ } from './drawing/Connector';
@@ -83,9 +85,6 @@ import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
 import CardContent from '@material-ui/core/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
-
-import { ErrorDetails } from './ErrorDetails';
-import { ZoomBar } from './ZoomBar';
 
 const MaxUndoSize = 5;
 const SearchbarWidthSm = 359;
