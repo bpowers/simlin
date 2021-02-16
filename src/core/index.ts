@@ -3,6 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 export * as canonicalize from './canonicalize';
-export * as common from './canonicalize';
-export * as datamodel from './canonicalize';
+export * as common from './common';
+export * as datamodel from './datamodel';
 export * as pb from './pb';
