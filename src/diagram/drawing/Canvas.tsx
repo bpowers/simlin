@@ -42,8 +42,9 @@ import { EditableLabel } from './EditableLabel';
 import { Flow, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
+import { Alias, AliasProps } from './Alias';
+
 import { canonicalize } from '@system-dynamics/core/canonicalize';
-import { Alias, AliasProps } from '@system-dynamics/diagram/drawing/Alias';
 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;

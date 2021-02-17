@@ -7,16 +7,6 @@
   "license": "Apache-2.0",
   "browser": "lib.browser",
   "main": "lib",
-  "exports": {
-    "./*": {
-      "browser": "./lib.browser/*.js",
-      "node": "./lib/*.js"
-    },
-    ".": {
-      "browser": "./lib.browser/index.js",
-      "node": "./lib/index.js"
-    }
-  },
   "dependencies": {
     "@emotion/core": "^11.0.0",
     "@emotion/react": "^11.0.0",

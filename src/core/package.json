@@ -23,6 +23,18 @@
       "module": "./lib.module/*.js",
       "node": "./lib/*.js"
     },
+    "./common": {
+      "module": "./lib.module/common.js",
+      "node": "./lib/common.js"
+    },
+    "./canonicalize": {
+      "module": "./lib.module/canonicalize.js",
+      "node": "./lib/canonicalize.js"
+    },
+    "./datamodel": {
+      "module": "./lib.module/datamodel.js",
+      "node": "./lib/datamodel.js"
+    },
     ".": {
       "module": "./lib.module/index.js",
       "node": "./lib/index.js"
