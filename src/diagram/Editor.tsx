@@ -4,11 +4,7 @@
 
 import * as React from 'react';
 
-import { toUint8Array, fromUint8Array } from 'js-base64';
-
 import { List, Map, Set, Stack } from 'immutable';
-
-import { History } from 'history';
 
 import { Canvg } from 'canvg';
 
@@ -42,7 +38,7 @@ import {
   Rect,
 } from '@system-dynamics/core/datamodel';
 
-import { baseURL, defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
+import { defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
 
 import { ErrorDetails } from './ErrorDetails';
 import { ZoomBar } from './ZoomBar';
@@ -216,7 +212,7 @@ class EditorError implements Error {
 
 interface EditorState {
   modelErrors: List<Error>;
-  activeProject?: Project;
+  activeProject: Project;
   projectHistory: Stack<Readonly<Uint8Array>>;
   projectOffset: number;
   modelName: string;
@@ -235,11 +231,10 @@ interface EditorState {
 }
 
 interface EditorProps extends WithStyles<typeof styles> {
-  username: string;
-  projectName: string;
+  initialProjectBinary: Readonly<Uint8Array>;
+  initialProjectVersion: number;
   embedded?: boolean;
-  baseURL?: string;
-  history?: History;
+  onSave: (project: Readonly<Uint8Array>, currVersion: number) => Promise<number | undefined>;
 }
 
 export const Editor = withStyles(styles)(
@@ -254,8 +249,11 @@ export const Editor = withStyles(styles)(
     constructor(props: EditorProps) {
       super(props);
 
+      const activeProject = Project.deserializeBinary(props.initialProjectBinary);
+
       this.state = {
-        projectHistory: Stack<Readonly<Uint8Array>>(),
+        activeProject,
+        projectHistory: Stack<Readonly<Uint8Array>>([props.initialProjectBinary]),
         projectOffset: 0,
         modelErrors: List<Error>(),
         modelName: 'main',
@@ -268,18 +266,14 @@ export const Editor = withStyles(styles)(
         showDetails: undefined,
         flowStillBeingCreated: false,
         drawerOpen: false,
-        projectVersion: -1,
+        projectVersion: props.initialProjectVersion,
         snapshotBlob: undefined,
         variableDetailsActiveTab: 0,
       };
 
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
-        const project = await this.loadModel();
-        if (!project) {
-          return;
-        }
-
+        await this.openEngine(props.initialProjectBinary, activeProject);
         this.scheduleSimRun();
       });
     }
@@ -378,7 +372,7 @@ export const Editor = withStyles(styles)(
 
       let version: number | undefined;
       try {
-        version = await this.saveInner(project, currVersion);
+        version = await this.props.onSave(project, currVersion);
       } catch (err) {
         this.setState({
           modelErrors: this.state.modelErrors.push(err),
@@ -401,80 +395,10 @@ export const Editor = withStyles(styles)(
       }
     }
 
-    private async saveInner(project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> {
-      const bodyContents = {
-        currVersion,
-        projectPB: fromUint8Array(project as Uint8Array),
-      };
-
-      const base = this.getBaseURL();
-      const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
-      const response = await fetch(apiPath, {
-        credentials: 'same-origin',
-        method: 'POST',
-        cache: 'no-cache',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(bodyContents),
-      });
-
-      const status = response.status;
-      if (!(status >= 200 && status < 400)) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        const body = await response.json();
-        const errorMsg =
-          body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
-        this.appendModelError(errorMsg);
-        return undefined;
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const projectResponse = await response.json();
-      const projectVersion = defined(projectResponse.version) as number;
-
-      this.setState({ projectVersion });
-
-      return projectVersion;
-    }
-
-    private getBaseURL(): string {
-      return this.props.baseURL !== undefined ? this.props.baseURL : baseURL;
-    }
-
     private appendModelError(msg: string) {
       this.setState((prevState: EditorState) => ({
         modelErrors: prevState.modelErrors.push(new EditorError(msg)),
       }));
-    }
-
-    private async loadModel(): Promise<Project | undefined> {
-      const base = this.getBaseURL();
-      const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
-      const response = await fetch(apiPath);
-      if (response.status >= 400) {
-        this.appendModelError(`unable to load ${apiPath}`);
-        return;
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const projectResponse = await response.json();
-
-      const projectBinary = toUint8Array(projectResponse.pb);
-      const project = Project.deserializeBinary(projectBinary);
-
-      // we don't call updateProject here because we don't want to
-      // POST a new version up when we've just downloaded it.
-      this.setState({
-        activeProject: project,
-        projectVersion: defined(projectResponse.version) as number,
-        projectHistory: Stack([projectBinary]),
-        projectOffset: 0,
-      });
-
-      await this.openEngine(projectBinary, project);
-
-      return project;
     }
 
     handleDialClick = (_event: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
@@ -1117,7 +1041,7 @@ export const Editor = withStyles(styles)(
 
       return (
         <ModelPropertiesDrawer
-          modelName={this.props.projectName}
+          modelName={project.name}
           open={this.state.drawerOpen}
           onDrawerToggle={this.handleDrawerToggle}
           startTime={simSpec.start}
@@ -1871,7 +1795,7 @@ export const Editor = withStyles(styles)(
       this.setState({ snapshotBlob: undefined });
     };
 
-    render() {
+    render(): React.ReactNode {
       const { embedded, classes } = this.props;
 
       const classNames = classes.editor + (embedded ? '' : ' ' + classes.editorBg);
