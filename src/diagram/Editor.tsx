@@ -373,6 +373,9 @@ export const Editor = withStyles(styles)(
       let version: number | undefined;
       try {
         version = await this.props.onSave(project, currVersion);
+        if (version) {
+          this.setState({ projectVersion: version });
+        }
       } catch (err) {
         this.setState({
           modelErrors: this.state.modelErrors.push(err),
@@ -1561,7 +1564,7 @@ export const Editor = withStyles(styles)(
         if (varErrors.size === model.variables.size && Set(varErrors.keys()).equals(Set(model.variables.keys()))) {
           let foundOtherError = false;
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          for (const [_ident, errors] of varErrors) {
+          for (const [, errors] of varErrors) {
             if (errors.size !== 1 || defined(errors.first()).code !== ErrorCode.EmptyEquation) {
               foundOtherError = true;
               break;

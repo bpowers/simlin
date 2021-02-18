@@ -6,6 +6,7 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 import { fromUint8Array, toUint8Array } from 'js-base64';
+import { History } from 'history';
 
 import { baseURL, defined } from '@system-dynamics/core/common';
 
@@ -119,7 +120,12 @@ export class HostedWebEditor extends React.PureComponent<HostedWebEditorProps, H
 
   render(): React.ReactNode {
     if (!this.state.projectBinary || !this.state.projectVersion) {
-      return <div />;
+      if (!this.state.serviceErrors.isEmpty()) {
+        // TODO: render this more nicely
+        return <div>{defined(this.state.serviceErrors.first()).message}</div>;
+      } else {
+        return <div />;
+      }
     }
 
     return (

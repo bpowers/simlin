@@ -15,7 +15,7 @@ import CssBaseline from '@material-ui/core/CssBaseline';
 import { defined } from '@system-dynamics/core/common';
 import Home from './Home';
 import { Login } from './Login';
-import { Editor } from '@system-dynamics/diagram/Editor';
+import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
 import { NewUser } from './NewUser';
 import { User } from './User';
 
@@ -133,7 +133,7 @@ const InnerApp = withStyles(styles)(
 
     editor = (props: RouteComponentProps<EditorMatchParams>) => {
       const { username, projectName } = props.match.params;
-      return <Editor username={username} projectName={projectName} baseURL="" history={props.history} />;
+      return <HostedWebEditor username={username} projectName={projectName} baseURL="" history={props.history} />;
     };
 
     home = (props: RouteComponentProps) => {
