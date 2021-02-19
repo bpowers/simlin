@@ -18,5 +18,6 @@ node_modules
 /src/app/build*
 /examples
 /website
+/src/jupyter
 /src/server/public
 /src/server/config
