@@ -47,7 +47,7 @@ function labelLayout(props: LabelPropsFull): LabelLayout {
   let className: 'end' | 'start' | 'middle' = 'middle';
   // for things on the top, we need to reverse the line-spacing we calculate
   let reverseBaseline = false;
-  const textX = Math.round(x);
+  const textX = x;
   let textY = y;
   switch (side) {
     case 'top':
@@ -98,7 +98,7 @@ export function labelBounds(props: LabelProps): Rect {
   const rh: number = props.rh || AuxRadius;
   let x = cx;
   let y = cy;
-  const textX = Math.round(x);
+  const textX = x;
   let textY = y;
   let left = 0;
   switch (side) {
@@ -221,7 +221,7 @@ export const Label = withStyles(styles)(
                 dy = `${-(lineSpacing * (linesCount - 1))}px`;
               }
               return (
-                <tspan key={l} x={Math.round(x)} dy={dy}>
+                <tspan key={l} x={x} dy={dy}>
                   {l}
                 </tspan>
               );
