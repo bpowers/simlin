@@ -87,3 +87,31 @@ jobs:
         uses: codecov/codecov-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  jupyter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Install node
+        uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+      - name: Install Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+          architecture: 'x64'
+      - name: Install dependencies
+        run: python -m pip install jupyterlab
+      - name: Build the extension
+        run: |
+          cd src/jupyter
+          jlpm
+          jlpm run eslint:check
+          python -m pip install .
+
+          jupyter serverextension list 2>&1 | grep -ie "simlin.*OK"
+
+          jupyter labextension list 2>&1 | grep -ie "simlin.*OK"
+          python -m jupyterlab.browser_check

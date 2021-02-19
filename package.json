@@ -18,9 +18,11 @@
       "src/diagram",
       "src/app",
       "src/server",
+      "src/jupyter",
       "website"
     ],
     "nohoist": [
+      "**/webpack",
       "**/html-minifier-terser"
     ]
   },
