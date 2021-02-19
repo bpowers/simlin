@@ -1,13 +1,13 @@
 import React from 'react';
 
-// import { Project } from '@system-dynamics/core/datamodel';
-// import { renderSvgToString } from '@system-dynamics/diagram';
-import { defined } from "@system-dynamics/core/common";
+import { Project } from '@system-dynamics/core/datamodel';
+import { renderSvgToString } from '@system-dynamics/diagram';
+import { defined } from '@system-dynamics/core/common';
 import { Editor } from '@system-dynamics/diagram';
 import { fromXmile } from '@system-dynamics/importer';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
 
-import { fromBase64, toUint8Array } from "js-base64";
+import { fromBase64, toUint8Array } from 'js-base64';
 
 import { ReactWidget } from '@jupyterlab/apputils';
 
@@ -15,9 +15,7 @@ import { IRenderMime } from '@jupyterlab/rendermime-interfaces';
 
 const CLASS_NAME = 'mimerenderer-simlin_jupyter_widget';
 
-export class WidgetRenderer
-  extends ReactWidget
-  implements IRenderMime.IRenderer {
+export class WidgetRenderer extends ReactWidget implements IRenderMime.IRenderer {
   constructor() {
     super();
     this.addClass(CLASS_NAME);
@@ -42,21 +40,23 @@ export class WidgetRenderer
     }
     this.update();
 
-    //
-    // const [svg] = await renderSvgToString(project, 'main');
-    //
-    // if (!mimeModel.data['image/svg+xml']) {
-    //   setTimeout(() => {
-    //     mimeModel.setData({
-    //       data: Object.assign({}, mimeModel.data, {
-    //         'image/svg+xml': svg,
-    //       }),
-    //       metadata: mimeModel.metadata,
-    //     });
-    //   });
-    // }
-    //
-    // return Promise.resolve();
+    const project = defined(Project.deserializeBinary(this.project));
+    try {
+      const [svg] = renderSvgToString(project, 'main');
+
+      if (!mimeModel.data['image/svg+xml']) {
+        setTimeout(() => {
+          mimeModel.setData({
+            data: Object.assign({}, mimeModel.data, {
+              'image/svg+xml': svg,
+            }),
+            metadata: mimeModel.metadata,
+          });
+        });
+      }
+    } catch (_err) {
+      // do nothing; this is broken in development (and if it fails, no big deal)
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
@@ -65,16 +65,20 @@ export class WidgetRenderer
   };
 
   render(): React.ReactElement {
-    console.log("render called");
+    console.log('render called');
     if (!this.project) {
-      return <div/>;
+      return <div />;
     }
-    return <Editor
-      initialProjectBinary={defined(this.project)}
-      initialProjectVersion={1}
-      embedded={false}
-      onSave={this.handleSave}
-    />;
+    return (
+      <div style={{ height: 625 }}>
+        <Editor
+          initialProjectBinary={defined(this.project)}
+          initialProjectVersion={1}
+          embedded={false}
+          onSave={this.handleSave}
+        />
+      </div>
+    );
   }
 
   /**

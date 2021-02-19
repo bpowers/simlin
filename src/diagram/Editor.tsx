@@ -185,11 +185,8 @@ const styles = ({ spacing, palette, breakpoints }: Theme) =>
       overflow: 'hidden',
     },
     editorBg: {
-      background: '#f2f2f2',
-      // background: '#fffff8',
       width: '100%',
       height: '100%',
-      position: 'fixed',
     },
     selectedTool: {
       backgroundColor: palette.secondary.main,

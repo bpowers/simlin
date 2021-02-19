@@ -1,7 +1,4 @@
-import {
-  JupyterFrontEnd,
-  JupyterFrontEndPlugin,
-} from '@jupyterlab/application';
+import { JupyterFrontEnd, JupyterFrontEndPlugin } from '@jupyterlab/application';
 
 import { IRenderMime } from '@jupyterlab/rendermime-interfaces';
 import { IRenderMimeRegistry } from '@jupyterlab/rendermime';
@@ -33,9 +30,7 @@ const extension: JupyterFrontEndPlugin<void> = {
         console.log(data);
       })
       .catch((reason) => {
-        console.error(
-          `:ohno: jupyter-simlin server extension appears to be missing.\n${reason}`,
-        );
+        console.error(`:ohno: jupyter-simlin server extension appears to be missing.\n${reason}`);
       });
 
     rendermime.addFactory(rendererFactory, 0);
