@@ -888,7 +888,7 @@ export const Canvas = withStyles(styles)(
 
       const element = this.getElementByUid(uid);
       const delta = this.getCanvasOffset();
-      const client = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+      const client = this.getCanvasPoint(e.clientX, e.clientY);
       const pointer = {
         x: client.x - delta.x,
         y: client.y - delta.y,
@@ -921,7 +921,7 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
-      const currPt = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+      const currPt = this.getCanvasPoint(e.clientX, e.clientY);
 
       const dx = this.selectionCenterOffset.x - currPt.x;
       const dy = this.selectionCenterOffset.y - currPt.y;
@@ -940,7 +940,7 @@ export const Canvas = withStyles(styles)(
       }
 
       const base = this.props.view.viewBox;
-      const curr = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+      const curr = this.getCanvasPoint(e.clientX, e.clientY);
 
       this.setState({
         isMovingCanvas: true,
@@ -956,7 +956,7 @@ export const Canvas = withStyles(styles)(
         return;
       }
 
-      const dragSelectionPoint = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+      const dragSelectionPoint = this.getCanvasPoint(e.clientX, e.clientY);
 
       this.setState({
         isDragSelecting: true,
@@ -1001,6 +1001,15 @@ export const Canvas = withStyles(styles)(
       return base;
     }
 
+    getCanvasPoint(x: number, y: number): Point {
+      if (this.svgRef.current) {
+        const bounds = this.svgRef.current.getBoundingClientRect();
+        x -= bounds.x;
+        y -= bounds.y;
+      }
+      return screenToCanvasPoint(x, y, this.props.view.zoom);
+    }
+
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       if (this.props.embedded) {
         return;
@@ -1012,7 +1021,7 @@ export const Canvas = withStyles(styles)(
       e.preventDefault();
       e.stopPropagation();
 
-      const client = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+      const client = this.getCanvasPoint(e.clientX, e.clientY);
 
       const canvasOffset = this.getCanvasOffset();
       const { selectedTool } = this.props;
@@ -1115,7 +1124,7 @@ export const Canvas = withStyles(styles)(
       // off the circle, and mouse-up on the canvas, the canvas gets an
       // onclick.  Instead, capture where we mouse-down'd, and on mouse up
       // check if its the same.
-      this.mouseDownPoint = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+      this.mouseDownPoint = this.getCanvasPoint(e.clientX, e.clientY);
 
       if (e.pointerType === 'touch' || e.shiftKey) {
         this.setState({
@@ -1162,7 +1171,7 @@ export const Canvas = withStyles(styles)(
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
-      this.selectionCenterOffset = screenToCanvasPoint(e.clientX, e.clientY, this.props.view.zoom);
+      this.selectionCenterOffset = this.getCanvasPoint(e.clientX, e.clientY);
 
       if (!isEditingName) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
