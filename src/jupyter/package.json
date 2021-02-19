@@ -41,16 +41,18 @@
     "watch:src": "tsc -w",
     "watch:labextension": "jupyter labextension watch ."
   },
+  "dependencies": {
+    "@system-dynamics/diagram": "^1.1.9",
+    "@system-dynamics/engine": "^1.1.5",
+    "@system-dynamics/importer": "^1.1.4",
+    "@system-dynamics/xmutil": "^1.1.1"
+  },
   "devDependencies": {
     "@jupyterlab/application": "^3.0.0",
     "@jupyterlab/builder": "^3.0.0",
     "@jupyterlab/coreutils": "^5.0.0",
     "@jupyterlab/services": "^6.0.0",
     "@material-ui/icons": "5.0.0-alpha.20",
-    "@system-dynamics/diagram": "^1.1.9",
-    "@system-dynamics/engine": "^1.1.5",
-    "@system-dynamics/importer": "^1.1.4",
-    "@system-dynamics/xmutil": "^1.1.1",
     "@typescript-eslint/eslint-plugin": "^4.15.1",
     "@typescript-eslint/parser": "^4.15.1",
     "eslint": "^7.5.0",

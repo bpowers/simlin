@@ -25,10 +25,12 @@ export async function requestAPI<T>(endPoint = ''): Promise<T> {
     throw new ServerConnection.NetworkError(error);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-assignment
   let data: any = await response.text();
 
   if (data.length > 0) {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       data = JSON.parse(data);
     } catch (error) {
       console.log('Not a JSON response body.', response);
@@ -39,5 +41,6 @@ export async function requestAPI<T>(endPoint = ''): Promise<T> {
     throw new ServerConnection.ResponseError(response, data.message || data);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   return data;
 }
