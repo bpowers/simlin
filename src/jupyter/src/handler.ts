@@ -6,10 +6,10 @@ import { ServerConnection } from '@jupyterlab/services';
  * Call the API extension
  *
  * @param endPoint API REST end point for the extension
- * @param init Initial values for the request
+ * @param body the body (if this is a POST)
  * @returns The response body interpreted as JSON
  */
-export async function requestAPI<T>(endPoint = ''): Promise<T> {
+export async function requestAPI<T>(endPoint = '', body: any = undefined): Promise<T> {
   // Make request to Jupyter API
   const settings = ServerConnection.makeSettings();
   const requestUrl = URLExt.join(
@@ -18,9 +18,20 @@ export async function requestAPI<T>(endPoint = ''): Promise<T> {
     endPoint,
   );
 
+  const init: RequestInit = {};
+  if (body !== undefined) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    init.body = typeof body === 'string' ? body : JSON.stringify(body);
+    init.method = 'POST';
+
+    const requestHeaders: HeadersInit = new Headers();
+    requestHeaders.set('Content-Type', 'application/json');
+    init.headers = requestHeaders;
+  }
+
   let response: any;
   try {
-    response = await ServerConnection.makeRequest(requestUrl, {}, settings);
+    response = await ServerConnection.makeRequest(requestUrl, init, settings);
   } catch (error) {
     throw new ServerConnection.NetworkError(error);
   }

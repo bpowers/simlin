@@ -5,8 +5,6 @@ import { IRenderMimeRegistry } from '@jupyterlab/rendermime';
 
 import { WidgetRenderer } from './WidgetRenderer';
 
-import { requestAPI } from './handler';
-
 /**
  * The mime type for a widget view.
  */
@@ -25,14 +23,6 @@ const extension: JupyterFrontEndPlugin<void> = {
   id: 'jupyter-simlin:plugin',
   autoStart: true,
   activate: (app: JupyterFrontEnd, rendermime: IRenderMimeRegistry) => {
-    requestAPI<any>('get_example')
-      .then((data) => {
-        console.log(data);
-      })
-      .catch((reason) => {
-        console.error(`:ohno: jupyter-simlin server extension appears to be missing.\n${reason}`);
-      });
-
     rendermime.addFactory(rendererFactory, 0);
   },
   requires: [IRenderMimeRegistry],

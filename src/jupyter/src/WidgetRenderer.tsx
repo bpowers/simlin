@@ -7,11 +7,13 @@ import { Editor } from '@system-dynamics/diagram';
 import { fromXmile } from '@system-dynamics/importer';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
 
-import { fromBase64, toUint8Array } from 'js-base64';
+import { fromBase64, fromUint8Array, toUint8Array } from 'js-base64';
 
 import { ReactWidget } from '@jupyterlab/apputils';
 
 import { IRenderMime } from '@jupyterlab/rendermime-interfaces';
+
+import { requestAPI } from './handler';
 
 const CLASS_NAME = 'mimerenderer-simlin_jupyter_widget';
 
@@ -21,19 +23,40 @@ export class WidgetRenderer extends ReactWidget implements IRenderMime.IRenderer
     this.addClass(CLASS_NAME);
   }
 
-  project?: Uint8Array;
+  private project?: Uint8Array;
+  private projectId = '';
+  private isEditable = false;
 
   async renderModel(mimeModel: IRenderMime.IMimeModel): Promise<void> {
     const source: any = mimeModel.data[this.mimeType];
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const projectId: string = source['project_id'];
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    let contents = source['project_source'];
-    if (projectId.endsWith('.mdl')) {
+    this.projectId = projectId;
+
+    let isSimlin = false;
+    let contents = '';
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const data = await requestAPI<any>('model/' + encodeURIComponent(projectId));
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      contents = data['contents'];
+      isSimlin = true;
+    } catch (_err) {
+      // FIXME
+    }
+
+    this.isEditable = !!source['project_is_editable'];
+
+    // if the request above 404'd, then start with the initial source
+    if (contents === '') {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      contents = source['project_initial_source'];
+    }
+    if (projectId.endsWith('.mdl.simlin') && !isSimlin) {
       contents = await convertMdlToXmile(fromBase64(contents), false);
       this.project = await fromXmile(contents);
-    } else if (projectId.endsWith('.stmx') || projectId.endsWith('.xmile')) {
+    } else if (!isSimlin && (projectId.endsWith('.stmx.simlin') || projectId.endsWith('.xmile.simlin'))) {
       this.project = await fromXmile(fromBase64(contents));
     } else {
       this.project = toUint8Array(contents);
@@ -60,21 +83,27 @@ export class WidgetRenderer extends ReactWidget implements IRenderMime.IRenderer
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
-  handleSave = async (_project: Readonly<Uint8Array>, _currVersion: number): Promise<number | undefined> => {
-    return undefined;
+  handleSave = async (project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> => {
+    const body = {
+      contents: fromUint8Array(project as Uint8Array),
+    };
+    await requestAPI<any>('model/' + encodeURIComponent(this.projectId), body);
+
+    // or whatever
+    return currVersion + 1;
   };
 
   render(): React.ReactElement {
-    console.log('render called');
     if (!this.project) {
       return <div />;
     }
+    const style = this.isEditable ? { height: 625 } : undefined;
     return (
-      <div style={{ height: 625 }}>
+      <div style={style}>
         <Editor
           initialProjectBinary={defined(this.project)}
           initialProjectVersion={1}
-          embedded={false}
+          embedded={!this.isEditable}
           onSave={this.handleSave}
         />
       </div>
