@@ -2,15 +2,23 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::io::BufRead;
+use std::collections::HashMap;
+use std::io::{BufRead, Cursor, Write};
 
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
 use crate::xmile::view_element::LinkEnd;
-use std::collections::HashMap;
 use system_dynamics_engine::common::{canonicalize, Result};
 use system_dynamics_engine::datamodel;
 use system_dynamics_engine::datamodel::{Equation, Rect, ViewElement};
+
+trait ToXML<W: Clone + Write> {
+    fn write_xml(&self, writer: &mut Writer<W>) -> Result<()>;
+}
+
+type XMLWriter = Cursor<Vec<u8>>;
 
 const STOCK_WIDTH: f64 = 45.0;
 const STOCK_HEIGHT: f64 = 35.0;
@@ -22,9 +30,14 @@ macro_rules! import_err(
     }}
 );
 
-// const VERSION: &str = "1.0";
+const XMILE_VERSION: &str = "1.0";
 // const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
-// const NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+const NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+const NS_ISEE_HTTP: &str = "http://iseesystems.com/XMILE";
+const VENDOR: &str = "Simlin";
+const PRODUCT_VERSION: &str = "0.1.0";
+const PRODUCT_NAME: &str = "Simlin";
+const PRODUCT_LANG: &str = "en";
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename = "xmile")]
@@ -47,10 +60,40 @@ pub struct File {
     pub macros: Vec<Macro>,
 }
 
+impl ToXML<XMLWriter> for File {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        // xmile tag
+        {
+            let mut elem = BytesStart::owned(b"xmile".to_vec(), b"xmile".len());
+            elem.push_attribute(("version".as_bytes(), self.version.as_bytes()));
+            elem.push_attribute(("xmlns".as_bytes(), self.namespace.as_bytes()));
+            elem.push_attribute(("xmlns:isee".as_bytes(), NS_ISEE_HTTP.as_bytes()));
+
+            writer.write_event(Event::Start(elem)).unwrap();
+        }
+
+        if let Some(ref header) = self.header {
+            header.write_xml(writer)?;
+        }
+
+        // TODO
+
+        writer
+            .write_event(Event::End(BytesEnd::borrowed(b"xmile")))
+            .unwrap();
+
+        Ok(())
+    }
+}
+
 impl From<File> for datamodel::Project {
     fn from(file: File) -> Self {
         datamodel::Project {
-            name: "".to_string(),
+            name: file
+                .header
+                .as_ref()
+                .map(|header| header.name.clone().unwrap_or_default())
+                .unwrap_or_default(),
             sim_specs: datamodel::SimSpecs::from(file.sim_specs.unwrap_or(SimSpecs {
                 start: 0.0,
                 stop: 10.0,
@@ -76,6 +119,60 @@ impl From<File> for datamodel::Project {
                 .into_iter()
                 .map(datamodel::Model::from)
                 .collect(),
+        }
+    }
+}
+
+impl From<datamodel::Project> for File {
+    fn from(project: datamodel::Project) -> Self {
+        File {
+            version: XMILE_VERSION.to_owned(),
+            namespace: NS_HTTP.to_owned(),
+            header: Some(Header {
+                vendor: VENDOR.to_owned(),
+                product: Product {
+                    name: Some(PRODUCT_NAME.to_owned()),
+                    language: Some(PRODUCT_LANG.to_owned()),
+                    version: Some(PRODUCT_VERSION.to_owned()),
+                },
+                options: None,
+                name: if project.name.is_empty() {
+                    None
+                } else {
+                    Some(project.name)
+                },
+                version: None,
+                caption: None,
+                image: None,
+                author: None,
+                affiliation: None,
+                client: None,
+                copyright: None,
+                created: None,
+                modified: None,
+                uuid: None,
+                includes: None,
+            }),
+            sim_specs: Some(project.sim_specs.into()),
+            units: None,
+            dimensions: if project.dimensions.is_empty() {
+                None
+            } else {
+                Some(Dimensions {
+                    dimensions: Some(
+                        project
+                            .dimensions
+                            .into_iter()
+                            .map(Dimension::from)
+                            .collect(),
+                    ),
+                })
+            },
+            behavior: None,
+            style: None,
+            data: None,
+            models: project.models.into_iter().map(Model::from).collect(),
+            macros: vec![],
         }
     }
 }
@@ -124,6 +221,66 @@ pub struct Header {
     pub modified: Option<String>, // ISO 8601 date format
     pub uuid: Option<String>,    // IETF RFC4122 format (84-4-4-12 hex digits with the dashes)
     pub includes: Option<Includes>,
+}
+
+impl ToXML<XMLWriter> for Header {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        // header tag
+        {
+            let elem = BytesStart::owned(b"header".to_vec(), b"header".len());
+            writer.write_event(Event::Start(elem)).unwrap();
+        }
+
+        // name tag
+        if let Some(ref name) = self.name {
+            let elem = BytesStart::owned(b"name".to_vec(), b"name".len());
+            writer.write_event(Event::Start(elem)).unwrap();
+            writer
+                .write_event(Event::Text(BytesText::from_plain_str(name)))
+                .unwrap();
+            writer
+                .write_event(Event::End(BytesEnd::borrowed(b"name")))
+                .unwrap();
+        }
+
+        // vendor
+        {
+            let elem = BytesStart::owned(b"vendor".to_vec(), b"vendor".len());
+            writer.write_event(Event::Start(elem)).unwrap();
+            writer
+                .write_event(Event::Text(BytesText::from_plain_str(self.vendor.as_str())))
+                .unwrap();
+            writer
+                .write_event(Event::End(BytesEnd::borrowed(b"vendor")))
+                .unwrap();
+        }
+
+        // product
+        {
+            let mut elem = BytesStart::owned(b"product".to_vec(), b"product".len());
+            if let Some(ref version) = self.product.version {
+                elem.push_attribute(("version", version.as_str()));
+            }
+            if let Some(ref language) = self.product.language {
+                elem.push_attribute(("lang", language.as_str()));
+            }
+            writer.write_event(Event::Start(elem)).unwrap();
+
+            let name: &str = self.product.name.as_deref().unwrap_or("Simlin");
+            writer
+                .write_event(Event::Text(BytesText::from_plain_str(name)))
+                .unwrap();
+            writer
+                .write_event(Event::End(BytesEnd::borrowed(b"product")))
+                .unwrap();
+        }
+
+        writer
+            .write_event(Event::End(BytesEnd::borrowed(b"header")))
+            .unwrap();
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -301,6 +458,22 @@ impl From<Dimension> for datamodel::Dimension {
                 .into_iter()
                 .map(|i| canonicalize(&i.name))
                 .collect(),
+        }
+    }
+}
+
+impl From<datamodel::Dimension> for Dimension {
+    fn from(dimension: datamodel::Dimension) -> Self {
+        Dimension {
+            name: dimension.name,
+            size: None,
+            elements: Some(
+                dimension
+                    .elements
+                    .into_iter()
+                    .map(|i| Index { name: i })
+                    .collect(),
+            ),
         }
     }
 }
@@ -2422,6 +2595,32 @@ fn test_canonicalize_stock_inflows() {
     let output = datamodel::Variable::from(input);
 
     assert_eq!(expected, output);
+}
+
+pub fn string_from_project(project: &datamodel::Project) -> Result<String> {
+    let file: File = project.clone().into();
+
+    let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);
+
+    writer
+        .write_event(Event::Decl(BytesDecl::new(
+            "1.0".as_bytes(),
+            Some("utf-8".as_bytes()),
+            None,
+        )))
+        .unwrap();
+    file.write_xml(&mut writer)?;
+
+    let result = writer.into_inner().into_inner();
+
+    use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+    String::from_utf8(result).map_err(|_err| {
+        Error::new(
+            ErrorKind::Import,
+            ErrorCode::XmlDeserialization,
+            Some("problem converting to UTF-8".to_owned()),
+        )
+    })
 }
 
 pub fn project_from_reader(reader: &mut dyn BufRead) -> Result<datamodel::Project> {

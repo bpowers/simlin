@@ -211,7 +211,7 @@ fn simulate_path(xmile_path: &str) {
     if let Err(ref err) = datamodel_project {
         eprintln!("model '{}' error: {}", xmile_path, err);
     }
-    let project = Project::from(datamodel_project.unwrap());
+    let project = Project::from(datamodel_project.as_ref().unwrap().clone());
 
     let project = Rc::new(project);
     let sim = Simulation::new(&project, "main").unwrap();
@@ -235,6 +235,13 @@ fn simulate_path(xmile_path: &str) {
     ensure_results(&expected, &results);
 
     ensure_results(&expected, &results2);
+
+    let orig_project = datamodel_project.unwrap();
+    let serialized_xmile = xmile::string_from_project(&orig_project);
+    assert!(serialized_xmile.is_ok());
+    let serialized_xmile = serialized_xmile.unwrap();
+    eprintln!("xmile:\n{}", serialized_xmile);
+    // assert!(false);
 }
 
 #[test]
