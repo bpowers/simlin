@@ -760,8 +760,11 @@ impl ToXML<XMLWriter> for Model {
 
         write_tag_start(writer, "variables")?;
 
-        if let Some(ref variables) = self.variables {
-            for var in variables.variables.iter() {
+        if let Some(Variables {
+            variables: Some(ref variables),
+        }) = self.variables
+        {
+            for var in variables.iter() {
                 var.write_xml(writer)?;
             }
         }
@@ -770,7 +773,11 @@ impl ToXML<XMLWriter> for Model {
 
         write_tag_start(writer, "views")?;
 
-        if let Some(Views { view: Some(ref views), .. }) = self.views {
+        if let Some(Views {
+            view: Some(ref views),
+            ..
+        }) = self.views
+        {
             for view in views.iter() {
                 view.write_xml(writer)?;
             }
@@ -801,13 +808,15 @@ impl From<Model> for datamodel::Model {
         datamodel::Model {
             name: model.name.unwrap_or_else(|| "main".to_string()),
             variables: match model.variables {
-                Some(vars) => vars
-                    .variables
+                Some(Variables {
+                    variables: Some(vars),
+                    ..
+                }) => vars
                     .into_iter()
                     .filter(|v| !matches!(v, Var::Unhandled))
                     .map(datamodel::Variable::from)
                     .collect(),
-                None => vec![],
+                _ => vec![],
             },
             views,
         }
@@ -824,7 +833,7 @@ impl From<datamodel::Model> for Model {
             variables: if model.variables.is_empty() {
                 None
             } else {
-                let variables = model.variables.into_iter().map(Var::from).collect();
+                let variables = Some(model.variables.into_iter().map(Var::from).collect());
                 Some(Variables { variables })
             },
             views: if model.views.is_empty() {
@@ -841,7 +850,7 @@ impl From<datamodel::Model> for Model {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
     #[serde(rename = "$value")]
-    pub variables: Vec<Var>,
+    pub variables: Option<Vec<Var>>,
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -859,7 +868,15 @@ impl Model {
     pub fn get_var(&self, ident: &str) -> Option<&Var> {
         self.variables.as_ref()?;
 
-        for var in self.variables.as_ref().unwrap().variables.iter() {
+        for var in self
+            .variables
+            .as_ref()
+            .unwrap()
+            .variables
+            .as_ref()
+            .unwrap()
+            .iter()
+        {
             let name = var.get_noncanonical_name();
             if ident == name || ident == canonicalize(name) {
                 return Some(var);
