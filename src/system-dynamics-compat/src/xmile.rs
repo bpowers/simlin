@@ -78,7 +78,12 @@ impl ToXML<XMLWriter> for File {
             sim_specs.write_xml(writer)?;
         }
 
-        // TODO
+        // TODO: units
+        // TODO: dimensions
+
+        for model in self.models.iter() {
+            model.write_xml(writer)?;
+        }
 
         write_tag_end(writer, "xmile")
     }
@@ -742,6 +747,39 @@ pub struct Model {
     pub sim_specs: Option<SimSpecs>,
     pub variables: Option<Variables>,
     pub views: Option<Views>,
+}
+
+impl ToXML<XMLWriter> for Model {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        if self.name.is_none() || self.name.as_ref().unwrap() == "main" {
+            write_tag_start(writer, "model")?;
+        } else {
+            let attrs = &[("name", self.name.as_deref().unwrap())];
+            write_tag_start_with_attrs(writer, "model", attrs)?;
+        }
+
+        write_tag_start(writer, "variables")?;
+
+        if let Some(ref variables) = self.variables {
+            for var in variables.variables.iter() {
+                var.write_xml(writer)?;
+            }
+        }
+
+        write_tag_end(writer, "variables")?;
+
+        write_tag_start(writer, "views")?;
+
+        if let Some(Views { view: Some(ref views), .. }) = self.views {
+            for view in views.iter() {
+                view.write_xml(writer)?;
+            }
+        }
+
+        write_tag_end(writer, "views")?;
+
+        write_tag_end(writer, "model")
+    }
 }
 
 impl From<Model> for datamodel::Model {
@@ -1823,6 +1861,12 @@ pub struct View {
     pub height: Option<f64>,
 }
 
+impl ToXML<XMLWriter> for View {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CloudPosition {
     Source,
@@ -2169,6 +2213,12 @@ pub struct Module {
     pub refs: Vec<Reference>,
 }
 
+impl ToXML<XMLWriter> for Module {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl From<Module> for datamodel::Module {
     fn from(module: Module) -> Self {
         let ident = canonicalize(&module.name);
@@ -2267,6 +2317,12 @@ pub struct Stock {
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
+}
+
+impl ToXML<XMLWriter> for Stock {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        Ok(())
+    }
 }
 
 macro_rules! convert_equation(
@@ -2402,6 +2458,12 @@ pub struct Flow {
     pub elements: Option<Vec<VarElement>>,
 }
 
+impl ToXML<XMLWriter> for Flow {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
         datamodel::Flow {
@@ -2512,6 +2574,12 @@ impl From<Aux> for datamodel::Aux {
     }
 }
 
+impl ToXML<XMLWriter> for Aux {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl From<datamodel::Aux> for Aux {
     fn from(aux: datamodel::Aux) -> Self {
         Aux {
@@ -2594,6 +2662,18 @@ impl Var {
             Var::Aux(aux) => aux.name.as_str(),
             Var::Module(module) => module.name.as_str(),
             Var::Unhandled => unreachable!(),
+        }
+    }
+}
+
+impl ToXML<XMLWriter> for Var {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        match self {
+            Var::Stock(stock) => stock.write_xml(writer),
+            Var::Flow(flow) => flow.write_xml(writer),
+            Var::Aux(aux) => aux.write_xml(writer),
+            Var::Module(module) => module.write_xml(writer),
+            Var::Unhandled => Ok(()),
         }
     }
 }
