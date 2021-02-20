@@ -7,7 +7,7 @@
 		<vendor>isee systems, inc.</vendor>
 		<product version="1.9.4" isee:build_number="1987" isee:saved_by_v1="true" lang="en">Stella Professional</product>
 	</header>
-	<sim_specs isee:sim_duration="0" isee:simulation_delay="0" isee:restore_on_start="false" method="Euler" time_units="Time" isee:instantaneous_flows="false">
+	<sim_specs isee:sim_duration="0" isee:simulation_delay="0" isee:restore_on_start="false" method="Euler" time_units="Time" isee:instantaneous_flows="false" isee:save_interval="0.25">
 		<start>0</start>
 		<stop>12</stop>
 		<dt>0.25</dt>

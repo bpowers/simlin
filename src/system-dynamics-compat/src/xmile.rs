@@ -63,26 +63,24 @@ pub struct File {
 impl ToXML<XMLWriter> for File {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
         // xmile tag
-        {
-            let mut elem = BytesStart::owned(b"xmile".to_vec(), b"xmile".len());
-            elem.push_attribute(("version".as_bytes(), self.version.as_bytes()));
-            elem.push_attribute(("xmlns".as_bytes(), self.namespace.as_bytes()));
-            elem.push_attribute(("xmlns:isee".as_bytes(), NS_ISEE_HTTP.as_bytes()));
-
-            writer.write_event(Event::Start(elem)).unwrap();
-        }
+        let attrs = &[
+            ("version", self.version.as_str()),
+            ("xmlns", self.namespace.as_str()),
+            ("xmlns:isee", NS_ISEE_HTTP),
+        ];
+        write_tag_start_with_attrs(writer, "xmile", attrs)?;
 
         if let Some(ref header) = self.header {
             header.write_xml(writer)?;
         }
 
+        if let Some(ref sim_specs) = self.sim_specs {
+            sim_specs.write_xml(writer)?;
+        }
+
         // TODO
 
-        writer
-            .write_event(Event::End(BytesEnd::borrowed(b"xmile")))
-            .unwrap();
-
-        Ok(())
+        write_tag_end(writer, "xmile")
     }
 }
 
@@ -223,63 +221,88 @@ pub struct Header {
     pub includes: Option<Includes>,
 }
 
+fn xml_error(err: quick_xml::Error) -> system_dynamics_engine::common::Error {
+    use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+
+    Error::new(
+        ErrorKind::Import,
+        ErrorCode::XmlDeserialization,
+        Some(err.to_string()),
+    )
+}
+
+fn write_tag_start(writer: &mut Writer<XMLWriter>, tag_name: &str) -> Result<()> {
+    write_tag_start_with_attrs(writer, tag_name, &[])
+}
+
+fn write_tag_start_with_attrs(
+    writer: &mut Writer<XMLWriter>,
+    tag_name: &str,
+    attrs: &[(&str, &str)],
+) -> Result<()> {
+    let mut elem = BytesStart::owned(tag_name.as_bytes().to_vec(), tag_name.len());
+    for attr in attrs.iter() {
+        elem.push_attribute(*attr);
+    }
+    writer.write_event(Event::Start(elem)).map_err(xml_error)
+}
+
+fn write_tag_end(writer: &mut Writer<XMLWriter>, tag_name: &str) -> Result<()> {
+    writer
+        .write_event(Event::End(BytesEnd::borrowed(tag_name.as_bytes())))
+        .map_err(xml_error)
+}
+
+fn write_tag_text(writer: &mut Writer<XMLWriter>, content: &str) -> Result<()> {
+    writer
+        .write_event(Event::Text(BytesText::from_plain_str(content)))
+        .map_err(xml_error)
+}
+
+fn write_tag(writer: &mut Writer<XMLWriter>, tag_name: &str, content: &str) -> Result<()> {
+    write_tag_with_attrs(writer, tag_name, content, &[])
+}
+
+fn write_tag_with_attrs(
+    writer: &mut Writer<XMLWriter>,
+    tag_name: &str,
+    content: &str,
+    attrs: &[(&str, &str)],
+) -> Result<()> {
+    write_tag_start_with_attrs(writer, tag_name, attrs)?;
+
+    write_tag_text(writer, content)?;
+
+    write_tag_end(writer, tag_name)
+}
+
 impl ToXML<XMLWriter> for Header {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
         // header tag
-        {
-            let elem = BytesStart::owned(b"header".to_vec(), b"header".len());
-            writer.write_event(Event::Start(elem)).unwrap();
-        }
+        write_tag_start(writer, "header")?;
 
         // name tag
         if let Some(ref name) = self.name {
-            let elem = BytesStart::owned(b"name".to_vec(), b"name".len());
-            writer.write_event(Event::Start(elem)).unwrap();
-            writer
-                .write_event(Event::Text(BytesText::from_plain_str(name)))
-                .unwrap();
-            writer
-                .write_event(Event::End(BytesEnd::borrowed(b"name")))
-                .unwrap();
+            write_tag(writer, "name", name)?;
         }
 
         // vendor
-        {
-            let elem = BytesStart::owned(b"vendor".to_vec(), b"vendor".len());
-            writer.write_event(Event::Start(elem)).unwrap();
-            writer
-                .write_event(Event::Text(BytesText::from_plain_str(self.vendor.as_str())))
-                .unwrap();
-            writer
-                .write_event(Event::End(BytesEnd::borrowed(b"vendor")))
-                .unwrap();
-        }
+        write_tag(writer, "vendor", self.vendor.as_str())?;
 
         // product
         {
-            let mut elem = BytesStart::owned(b"product".to_vec(), b"product".len());
+            let mut attrs = Vec::with_capacity(2);
             if let Some(ref version) = self.product.version {
-                elem.push_attribute(("version", version.as_str()));
+                attrs.push(("version", version.as_str()));
             }
             if let Some(ref language) = self.product.language {
-                elem.push_attribute(("lang", language.as_str()));
+                attrs.push(("lang", language.as_str()));
             }
-            writer.write_event(Event::Start(elem)).unwrap();
-
             let name: &str = self.product.name.as_deref().unwrap_or("Simlin");
-            writer
-                .write_event(Event::Text(BytesText::from_plain_str(name)))
-                .unwrap();
-            writer
-                .write_event(Event::End(BytesEnd::borrowed(b"product")))
-                .unwrap();
+            write_tag_with_attrs(writer, "product", name, &attrs)?;
         }
 
-        writer
-            .write_event(Event::End(BytesEnd::borrowed(b"header")))
-            .unwrap();
-
-        Ok(())
+        write_tag_end(writer, "header")
     }
 }
 
@@ -355,6 +378,41 @@ pub struct SimSpecs {
     pub save_step: Option<f64>,
     pub method: Option<String>,
     pub time_units: Option<String>,
+}
+
+impl ToXML<XMLWriter> for SimSpecs {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let mut elem = BytesStart::owned(b"sim_specs".to_vec(), b"sim_specs".len());
+        if let Some(ref method) = self.method {
+            elem.push_attribute(("method", method.as_str()));
+        }
+        if let Some(ref time_units) = self.time_units {
+            elem.push_attribute(("time_units", time_units.as_str()));
+        }
+        if let Some(ref save_step) = self.save_step {
+            let save_interval = format!("{}", save_step);
+            elem.push_attribute(("isee:save_interval", save_interval.as_str()));
+        }
+        writer.write_event(Event::Start(elem)).map_err(xml_error)?;
+
+        let start = format!("{}", self.start);
+        write_tag(writer, "start", &start)?;
+
+        let stop = format!("{}", self.stop);
+        write_tag(writer, "stop", &stop)?;
+
+        if let Some(ref dt) = self.dt {
+            let value = format!("{}", dt.value);
+            if dt.reciprocal.unwrap_or(false) {
+                let attrs = &[("reciprocal", "true")];
+                write_tag_with_attrs(writer, "dt", &value, attrs)?;
+            } else {
+                write_tag(writer, "dt", &value)?;
+            }
+        }
+
+        write_tag_end(writer, "sim_specs")
+    }
 }
 
 impl From<SimSpecs> for datamodel::SimSpecs {
