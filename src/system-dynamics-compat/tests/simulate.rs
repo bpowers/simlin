@@ -249,7 +249,6 @@ fn simulate_path(xmile_path: &str) {
     let project = Project::from(roundtripped_project.clone());
     let project = Rc::new(project);
     let sim = Simulation::new(&project, "main").unwrap();
-    // sim.debug_print_runlists("main");
     let results = sim.run_to_end();
     assert!(results.is_ok());
     let results = results.unwrap();

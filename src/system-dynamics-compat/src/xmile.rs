@@ -32,8 +32,9 @@ macro_rules! import_err(
 
 const XMILE_VERSION: &str = "1.0";
 // const NS_HTTPS: &str = "https://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
-const NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
-const NS_ISEE_HTTP: &str = "http://iseesystems.com/XMILE";
+const XML_NS_HTTP: &str = "http://docs.oasis-open.org/xmile/ns/XMILE/v1.0";
+const XML_NS_ISEE: &str = "http://iseesystems.com/XMILE";
+const XML_NS_SIMLIN: &str = "https://simlin.com/XMILE/v1.0";
 const VENDOR: &str = "Simlin";
 const PRODUCT_VERSION: &str = "0.1.0";
 const PRODUCT_NAME: &str = "Simlin";
@@ -66,7 +67,8 @@ impl ToXML<XMLWriter> for File {
         let attrs = &[
             ("version", self.version.as_str()),
             ("xmlns", self.namespace.as_str()),
-            ("xmlns:isee", NS_ISEE_HTTP),
+            ("xmlns:isee", XML_NS_ISEE),
+            ("xmlns:simlin", XML_NS_SIMLIN),
         ];
         write_tag_start_with_attrs(writer, "xmile", attrs)?;
 
@@ -79,7 +81,18 @@ impl ToXML<XMLWriter> for File {
         }
 
         // TODO: units
-        // TODO: dimensions
+
+        if let Some(Dimensions {
+            dimensions: Some(ref dimensions),
+            ..
+        }) = self.dimensions
+        {
+            write_tag_start(writer, "dimensions")?;
+            for dim in dimensions.iter() {
+                dim.write_xml(writer)?;
+            }
+            write_tag_end(writer, "dimensions")?;
+        }
 
         for model in self.models.iter() {
             model.write_xml(writer)?;
@@ -130,7 +143,7 @@ impl From<datamodel::Project> for File {
     fn from(project: datamodel::Project) -> Self {
         File {
             version: XMILE_VERSION.to_owned(),
-            namespace: NS_HTTP.to_owned(),
+            namespace: XML_NS_HTTP.to_owned(),
             header: Some(Header {
                 vendor: VENDOR.to_owned(),
                 product: Product {
@@ -199,6 +212,13 @@ pub struct VarDimensions {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct VarDimension {
     pub name: String,
+}
+
+impl ToXML<XMLWriter> for VarDimension {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let attrs = &[("name", self.name.as_ref())];
+        write_tag_with_attrs(writer, "dim", "", attrs)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -511,6 +531,29 @@ pub struct Dimension {
     pub elements: Option<Vec<Index>>,
 }
 
+impl ToXML<XMLWriter> for Dimension {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let attrs = vec![("name", self.name.as_ref())];
+        if self.size.is_some() {
+            let size = format!("{}", self.size.unwrap());
+            let mut attrs = attrs.clone();
+            attrs.push(("size", size.as_str()));
+            write_tag_start_with_attrs(writer, "dim", &attrs)?;
+        } else {
+            write_tag_start_with_attrs(writer, "dim", &attrs)?;
+        }
+
+        if let Some(ref elements) = self.elements {
+            for element in elements.iter() {
+                let attrs = &[("name", element.name.as_str())];
+                write_tag_with_attrs(writer, "elem", "", attrs)?;
+            }
+        }
+
+        write_tag_end(writer, "dim")
+    }
+}
+
 impl From<Dimension> for datamodel::Dimension {
     fn from(dimension: Dimension) -> Self {
         datamodel::Dimension {
@@ -611,6 +654,51 @@ pub struct GF {
     pub x_pts: Option<String>, // comma separated list of points
     #[serde(rename = "ypts")]
     pub y_pts: Option<String>, // comma separated list of points
+}
+
+impl ToXML<XMLWriter> for GF {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let mut elem = BytesStart::owned(b"gf".to_vec(), b"gf".len());
+        if let Some(ref name) = self.name {
+            elem.push_attribute(("name", name.as_str()));
+        }
+        if let Some(ref kind) = self.kind {
+            match kind {
+                GraphicalFunctionKind::Continuous => {
+                    // default, so don't write anything
+                }
+                GraphicalFunctionKind::Extrapolate => elem.push_attribute(("type", "extrapolate")),
+                GraphicalFunctionKind::Discrete => elem.push_attribute(("type", "discrete")),
+            }
+        }
+        writer.write_event(Event::Start(elem)).map_err(xml_error)?;
+
+        if let Some(ref x_scale) = self.x_scale {
+            let min = format!("{}", x_scale.min);
+            let max = format!("{}", x_scale.max);
+            let attrs = &[("min", min.as_str()), ("max", max.as_str())];
+            write_tag_start_with_attrs(writer, "xscale", attrs)?;
+            write_tag_end(writer, "xscale")?;
+        }
+
+        if let Some(ref y_scale) = self.y_scale {
+            let min = format!("{}", y_scale.min);
+            let max = format!("{}", y_scale.max);
+            let attrs = &[("min", min.as_str()), ("max", max.as_str())];
+            write_tag_start_with_attrs(writer, "yscale", attrs)?;
+            write_tag_end(writer, "yscale")?;
+        }
+
+        if let Some(ref x_pts) = self.x_pts {
+            write_tag(writer, "xpts", x_pts)?;
+        }
+
+        if let Some(ref y_pts) = self.y_pts {
+            write_tag(writer, "ypts", y_pts)?;
+        }
+
+        write_tag_end(writer, "gf")
+    }
 }
 
 impl From<GF> for datamodel::GraphicalFunction {
@@ -2223,6 +2311,7 @@ pub struct ArrayElement {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Module {
     pub name: String,
+    #[serde(rename = "simlin:model_name")]
     pub model_name: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
@@ -2234,10 +2323,29 @@ impl ToXML<XMLWriter> for Module {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
         let mut attrs = vec![("name", self.name.as_str())];
         if self.model_name.is_some() {
-            // TODO: should prefix with 'simlin:'
-            attrs.push(("model_name", self.name.as_str()));
+            attrs.push(("simlin:model_name", self.name.as_str()));
         }
         write_tag_start_with_attrs(writer, "module", &attrs)?;
+
+        if let Some(ref doc) = self.doc {
+            write_tag(writer, "doc", doc)?;
+        }
+        if let Some(ref units) = self.units {
+            write_tag(writer, "units", units)?;
+        }
+
+        for reference in self.refs.iter() {
+            match reference {
+                Reference::Connect(connect) => {
+                    let attrs = &[("to", connect.dst.as_str()), ("from", connect.src.as_str())];
+                    write_tag_start_with_attrs(writer, "connect", attrs)?;
+                    write_tag_end(writer, "connect")?;
+                }
+                Reference::Connect2(_) => {
+                    // explicitly ignore these for now
+                }
+            }
+        }
 
         write_tag_end(writer, "module")
     }
@@ -2327,6 +2435,15 @@ pub struct VarElement {
     pub eqn: String,
 }
 
+impl ToXML<XMLWriter> for VarElement {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let attrs = &[("subscript", self.subscript.as_str())];
+        write_tag_start_with_attrs(writer, "element", attrs)?;
+        write_tag(writer, "eqn", self.eqn.as_str())?;
+        write_tag_end(writer, "element")
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Stock {
     pub name: String,
@@ -2348,6 +2465,24 @@ impl ToXML<XMLWriter> for Stock {
         let attrs = vec![("name", self.name.as_str())];
         write_tag_start_with_attrs(writer, "stock", &attrs)?;
 
+        if let Some(VarDimensions {
+            dimensions: Some(ref dimensions),
+            ..
+        }) = self.dimensions
+        {
+            write_tag_start(writer, "dimensions")?;
+            for dim in dimensions.iter() {
+                dim.write_xml(writer)?;
+            }
+            write_tag_end(writer, "dimensions")?;
+        }
+
+        if let Some(ref elements) = self.elements {
+            for element in elements.iter() {
+                element.write_xml(writer)?;
+            }
+        }
+
         if let Some(ref eqn) = self.eqn {
             write_tag(writer, "eqn", eqn)?;
         }
@@ -2368,6 +2503,10 @@ impl ToXML<XMLWriter> for Stock {
             for outflow in outflows.iter() {
                 write_tag(writer, "outflow", outflow)?;
             }
+        }
+
+        if self.non_negative.is_some() {
+            write_tag(writer, "non_negative", "")?;
         }
 
         write_tag_end(writer, "stock")
@@ -2512,6 +2651,24 @@ impl ToXML<XMLWriter> for Flow {
         let attrs = vec![("name", self.name.as_str())];
         write_tag_start_with_attrs(writer, "flow", &attrs)?;
 
+        if let Some(VarDimensions {
+            dimensions: Some(ref dimensions),
+            ..
+        }) = self.dimensions
+        {
+            write_tag_start(writer, "dimensions")?;
+            for dim in dimensions.iter() {
+                dim.write_xml(writer)?;
+            }
+            write_tag_end(writer, "dimensions")?;
+        }
+
+        if let Some(ref elements) = self.elements {
+            for element in elements.iter() {
+                element.write_xml(writer)?;
+            }
+        }
+
         if let Some(ref eqn) = self.eqn {
             write_tag(writer, "eqn", eqn)?;
         }
@@ -2520,6 +2677,13 @@ impl ToXML<XMLWriter> for Flow {
         }
         if let Some(ref units) = self.units {
             write_tag(writer, "units", units)?;
+        }
+        if let Some(ref gf) = self.gf {
+            gf.write_xml(writer)?;
+        }
+
+        if self.non_negative.is_some() {
+            write_tag(writer, "non_negative", "")?;
         }
 
         write_tag_end(writer, "flow")
@@ -2626,6 +2790,24 @@ impl ToXML<XMLWriter> for Aux {
         let attrs = vec![("name", self.name.as_str())];
         write_tag_start_with_attrs(writer, "aux", &attrs)?;
 
+        if let Some(VarDimensions {
+            dimensions: Some(ref dimensions),
+            ..
+        }) = self.dimensions
+        {
+            write_tag_start(writer, "dimensions")?;
+            for dim in dimensions.iter() {
+                dim.write_xml(writer)?;
+            }
+            write_tag_end(writer, "dimensions")?;
+        }
+
+        if let Some(ref elements) = self.elements {
+            for element in elements.iter() {
+                element.write_xml(writer)?;
+            }
+        }
+
         if let Some(ref eqn) = self.eqn {
             write_tag(writer, "eqn", eqn)?;
         }
@@ -2634,6 +2816,10 @@ impl ToXML<XMLWriter> for Aux {
         }
         if let Some(ref units) = self.units {
             write_tag(writer, "units", units)?;
+        }
+
+        if let Some(ref gf) = self.gf {
+            gf.write_xml(writer)?;
         }
 
         write_tag_end(writer, "aux")
@@ -2965,7 +3151,7 @@ fn test_xml_gf_parsing() {
 
 #[test]
 fn test_module_parsing() {
-    let input = "<module name=\"hares\" isee:label=\"\">
+    let input = "<module name=\"hares\" simlin:model_name=\"hares3\">
 				<connect to=\"hares.area\" from=\".area\"/>
 				<connect2 to=\"hares.area\" from=\"area\"/>
 				<connect to=\"lynxes.hare_density\" from=\"hares.hare_density\"/>
@@ -2976,7 +3162,7 @@ fn test_module_parsing() {
 
     let expected = Module {
         name: "hares".to_string(),
-        model_name: None,
+        model_name: Some("hares3".to_owned()),
         doc: None,
         units: None,
         refs: vec![
@@ -3013,7 +3199,7 @@ fn test_module_parsing() {
 
     let expected_roundtripped = Module {
         name: "hares".to_string(),
-        model_name: Some("hares".to_string()),
+        model_name: Some("hares3".to_string()),
         doc: None,
         units: None,
         refs: vec![
