@@ -984,10 +984,26 @@ pub enum ViewType {
     VendorSpecific,
 }
 
+impl ViewType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ViewType::StockFlow => "stock_flow",
+            ViewType::Interface => "interface",
+            ViewType::Popup => "popup",
+            ViewType::VendorSpecific => "vendor_specific",
+        }
+    }
+}
+
 pub mod view_element {
     use super::datamodel;
-    use crate::xmile::{STOCK_HEIGHT, STOCK_WIDTH};
+    use crate::xmile::{
+        write_tag, write_tag_end, write_tag_start, write_tag_start_with_attrs, write_tag_text,
+        write_tag_with_attrs, ToXML, XMLWriter, STOCK_HEIGHT, STOCK_WIDTH,
+    };
+    use quick_xml::Writer;
     use serde::{de, Deserialize, Deserializer, Serialize};
+    use system_dynamics_engine::common::Result;
     use system_dynamics_engine::datamodel::view_element::LinkShape;
 
     // converts an angle associated with a connector (in degrees) into an
@@ -1034,6 +1050,18 @@ pub mod view_element {
         Center,
         Bottom,
         Right,
+    }
+
+    impl LabelSide {
+        fn as_str(&self) -> &'static str {
+            match self {
+                LabelSide::Top => "top",
+                LabelSide::Left => "left",
+                LabelSide::Center => "center",
+                LabelSide::Bottom => "bottom",
+                LabelSide::Right => "right",
+            }
+        }
     }
 
     impl From<LabelSide> for datamodel::view_element::LabelSide {
@@ -1087,6 +1115,28 @@ pub mod view_element {
         pub height: Option<f64>,
         pub label_side: Option<LabelSide>,
         pub label_angle: Option<f64>,
+    }
+
+    impl ToXML<XMLWriter> for Aux {
+        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+            let uid = self.uid.map(|uid| format!("{}", uid));
+            let x = format!("{}", self.x);
+            let y = format!("{}", self.y);
+            let label_side = self.label_side.map(|side| side.as_str());
+
+            let mut attrs = vec![
+                ("name", self.name.as_str()),
+                ("x", x.as_str()),
+                ("y", y.as_str()),
+            ];
+            if let Some(ref uid) = uid {
+                attrs.push(("uid", uid.as_str()));
+            }
+            if let Some(ref label_side) = label_side {
+                attrs.push(("label_side", label_side));
+            }
+            write_tag_with_attrs(writer, "aux", "", &attrs)
+        }
     }
 
     impl From<Aux> for datamodel::view_element::Aux {
@@ -1144,6 +1194,28 @@ pub mod view_element {
         pub height: Option<f64>,
         pub label_side: Option<LabelSide>,
         pub label_angle: Option<f64>,
+    }
+
+    impl ToXML<XMLWriter> for Stock {
+        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+            let uid = self.uid.map(|uid| format!("{}", uid));
+            let x = format!("{}", self.x);
+            let y = format!("{}", self.y);
+            let label_side = self.label_side.map(|side| side.as_str());
+
+            let mut attrs = vec![
+                ("name", self.name.as_str()),
+                ("x", x.as_str()),
+                ("y", y.as_str()),
+            ];
+            if let Some(ref uid) = uid {
+                attrs.push(("uid", uid.as_str()));
+            }
+            if let Some(ref label_side) = label_side {
+                attrs.push(("label_side", label_side));
+            }
+            write_tag_with_attrs(writer, "stock", "", &attrs)
+        }
     }
 
     impl Stock {
@@ -1281,6 +1353,41 @@ pub mod view_element {
         pub label_angle: Option<f64>,
         #[serde(rename = "pts")]
         pub points: Option<Points>,
+    }
+
+    impl ToXML<XMLWriter> for Flow {
+        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+            let uid = self.uid.map(|uid| format!("{}", uid));
+            let x = format!("{}", self.x);
+            let y = format!("{}", self.y);
+            let label_side = self.label_side.map(|side| side.as_str());
+
+            let mut attrs = vec![
+                ("name", self.name.as_str()),
+                ("x", x.as_str()),
+                ("y", y.as_str()),
+            ];
+            if let Some(ref uid) = uid {
+                attrs.push(("uid", uid.as_str()));
+            }
+            if let Some(ref label_side) = label_side {
+                attrs.push(("label_side", label_side));
+            }
+            write_tag_start_with_attrs(writer, "flow", &attrs)?;
+
+            if self.points.is_some() && self.points.as_ref().unwrap().points.len() > 0 {
+                write_tag_start(writer, "pts")?;
+                for point in self.points.as_ref().unwrap().points.iter() {
+                    let x = format!("{}", point.x);
+                    let y = format!("{}", point.y);
+                    let attrs = &[("x", x.as_str()), ("y", y.as_str())];
+                    write_tag_with_attrs(writer, "pt", "", attrs)?;
+                }
+                write_tag_end(writer, "pts")?;
+            }
+
+            write_tag_end(writer, "flow")
+        }
     }
 
     fn is_horizontal(points: &[datamodel::view_element::FlowPoint]) -> bool {
@@ -1605,6 +1712,69 @@ pub mod view_element {
         pub points: Option<Points>, // for multi-point connectors
     }
 
+    impl ToXML<XMLWriter> for Link {
+        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+            let uid = self.uid.map(|uid| format!("{}", uid));
+            let angle = self.angle.map(|angle| format!("{}", angle));
+
+            let mut attrs = Vec::with_capacity(2);
+            if let Some(ref uid) = uid {
+                attrs.push(("uid", uid.as_str()));
+            }
+            if let Some(ref angle) = angle {
+                attrs.push(("angle", angle.as_str()));
+            }
+            write_tag_start_with_attrs(writer, "connector", &attrs)?;
+
+            write_tag_start(writer, "from")?;
+            match self.from {
+                LinkEndContainer {
+                    end: LinkEnd::Named(ref name),
+                } => {
+                    write_tag_text(writer, name)?;
+                }
+                LinkEndContainer {
+                    end: LinkEnd::Alias(ref uid),
+                } => {
+                    let uid = format!("{}", uid.uid);
+                    let attrs = &[("uid", uid.as_str())];
+                    write_tag_with_attrs(writer, "alias", "", attrs)?;
+                }
+            }
+            write_tag_end(writer, "from")?;
+
+            write_tag_start(writer, "to")?;
+            match self.from {
+                LinkEndContainer {
+                    end: LinkEnd::Named(ref name),
+                } => {
+                    write_tag_text(writer, name)?;
+                }
+                LinkEndContainer {
+                    end: LinkEnd::Alias(ref uid),
+                } => {
+                    let uid = format!("{}", uid.uid);
+                    let attrs = &[("uid", uid.as_str())];
+                    write_tag_with_attrs(writer, "alias", "", attrs)?;
+                }
+            }
+            write_tag_end(writer, "to")?;
+
+            if self.points.is_some() && self.points.as_ref().unwrap().points.len() > 0 {
+                write_tag_start(writer, "pts")?;
+                for point in self.points.as_ref().unwrap().points.iter() {
+                    let x = format!("{}", point.x);
+                    let y = format!("{}", point.y);
+                    let attrs = &[("x", x.as_str()), ("y", y.as_str())];
+                    write_tag_with_attrs(writer, "pt", "", attrs)?;
+                }
+                write_tag_end(writer, "pts")?;
+            }
+
+            write_tag_end(writer, "connector")
+        }
+    }
+
     impl From<Link> for datamodel::view_element::Link {
         fn from(v: Link) -> Self {
             let shape = if v.is_straight.unwrap_or(false) {
@@ -1706,6 +1876,28 @@ pub mod view_element {
         pub label_side: Option<LabelSide>,
     }
 
+    impl ToXML<XMLWriter> for Module {
+        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+            let uid = self.uid.map(|uid| format!("{}", uid));
+            let x = format!("{}", self.x);
+            let y = format!("{}", self.y);
+            let label_side = self.label_side.map(|side| side.as_str());
+
+            let mut attrs = vec![
+                ("name", self.name.as_str()),
+                ("x", x.as_str()),
+                ("y", y.as_str()),
+            ];
+            if let Some(ref uid) = uid {
+                attrs.push(("uid", uid.as_str()));
+            }
+            if let Some(ref label_side) = label_side {
+                attrs.push(("label_side", label_side));
+            }
+            write_tag_with_attrs(writer, "module", "", &attrs)
+        }
+    }
+
     impl From<Module> for datamodel::view_element::Module {
         fn from(v: Module) -> Self {
             datamodel::view_element::Module {
@@ -1756,6 +1948,28 @@ pub mod view_element {
         pub x: f64,
         pub y: f64,
         pub label_side: Option<LabelSide>,
+    }
+
+    impl ToXML<XMLWriter> for Alias {
+        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+            let uid = self.uid.map(|uid| format!("{}", uid));
+            let x = format!("{}", self.x);
+            let y = format!("{}", self.y);
+            let label_side = self.label_side.map(|side| side.as_str());
+
+            let mut attrs = vec![("x", x.as_str()), ("y", y.as_str())];
+            if let Some(ref uid) = uid {
+                attrs.push(("uid", uid.as_str()));
+            }
+            if let Some(ref label_side) = label_side {
+                attrs.push(("label_side", label_side));
+            }
+            write_tag_start_with_attrs(writer, "alias", &attrs)?;
+
+            write_tag(writer, "of", self.of.as_str())?;
+
+            write_tag_end(writer, "alias")
+        }
     }
 
     impl From<Alias> for datamodel::view_element::Alias {
@@ -1863,6 +2077,27 @@ pub enum ViewObject {
     Unhandled,
 }
 
+impl ToXML<XMLWriter> for ViewObject {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        match self {
+            ViewObject::Aux(aux) => aux.write_xml(writer),
+            ViewObject::Stock(stock) => stock.write_xml(writer),
+            ViewObject::Flow(flow) => flow.write_xml(writer),
+            ViewObject::Link(link) => link.write_xml(writer),
+            ViewObject::Module(module) => module.write_xml(writer),
+            ViewObject::Cloud(_cloud) => {
+                // clouds aren't in the spec, so ignore them here for now
+                Ok(())
+            }
+            ViewObject::Alias(alias) => alias.write_xml(writer),
+            ViewObject::Unhandled => {
+                // explicitly ignore unhandled things
+                Ok(())
+            }
+        }
+    }
+}
+
 impl ViewObject {
     pub fn set_uid(&mut self, uid: i32) {
         match self {
@@ -1967,8 +2202,23 @@ pub struct View {
 }
 
 impl ToXML<XMLWriter> for View {
-    fn write_xml(&self, _writer: &mut Writer<XMLWriter>) -> Result<()> {
-        Ok(())
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let attrs = &[
+            ("isee:show_pages", "false"),
+            ("page_width", "800"),
+            ("page_height", "600"),
+            (
+                "view_type",
+                self.kind.unwrap_or(ViewType::StockFlow).as_str(),
+            ),
+        ];
+        write_tag_start_with_attrs(writer, "view", attrs)?;
+
+        for element in self.objects.iter() {
+            element.write_xml(writer)?;
+        }
+
+        write_tag_end(writer, "view")
     }
 }
 

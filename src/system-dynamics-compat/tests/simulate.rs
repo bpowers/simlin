@@ -254,7 +254,7 @@ fn simulate_path(xmile_path: &str) {
     let results = results.unwrap();
     ensure_results(&expected, &results);
 
-    // assert_eq!(&orig_project, &roundtripped_project);
+    assert_eq!(&orig_project, &roundtripped_project);
 }
 
 #[test]
