@@ -243,24 +243,25 @@ fn simulate_path(xmile_path: &str) {
     let serialized_xmile = serialized_xmile.unwrap();
 
     let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
-    eprintln!("xmile:\n{}", serialized_xmile);
+    // eprintln!("xmile:\n{}", serialized_xmile);
     let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
 
     let project = Project::from(roundtripped_project.clone());
     let project = Rc::new(project);
     let sim = Simulation::new(&project, "main").unwrap();
-    let results = sim.run_to_end();
-    assert!(results.is_ok());
-    let results = results.unwrap();
-    ensure_results(&expected, &results);
+    let compiled = sim.compile();
+    assert!(compiled.is_ok());
+    let compiled_sim = compiled.unwrap();
+    let mut vm = VM::new(compiled_sim).unwrap();
+    vm.run_to_end().unwrap();
+    let results3 = vm.into_results();
+    ensure_results(&expected, &results3);
 
     let serialized_xmile2 = xmile::string_from_project(&roundtripped_project);
     assert!(serialized_xmile2.is_ok());
-    let _serialized_xmile2 = serialized_xmile2.unwrap();
+    let serialized_xmile2 = serialized_xmile2.unwrap();
 
-    // assert_eq!(&serialized_xmile, &serialized_xmile2);
-
-    //assert_eq!(&orig_project, &roundtripped_project);
+    assert_eq!(&serialized_xmile, &serialized_xmile2);
 }
 
 #[test]

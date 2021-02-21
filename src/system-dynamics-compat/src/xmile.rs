@@ -1121,7 +1121,6 @@ pub mod view_element {
 
     impl ToXML<XMLWriter> for Aux {
         fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-            let uid = self.uid.map(|uid| format!("{}", uid));
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -1131,9 +1130,6 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref uid) = uid {
-                attrs.push(("uid", uid.as_str()));
-            }
             if let Some(ref label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
@@ -1200,7 +1196,6 @@ pub mod view_element {
 
     impl ToXML<XMLWriter> for Stock {
         fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-            let uid = self.uid.map(|uid| format!("{}", uid));
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -1210,9 +1205,6 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref uid) = uid {
-                attrs.push(("uid", uid.as_str()));
-            }
             if let Some(ref label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
@@ -1359,7 +1351,6 @@ pub mod view_element {
 
     impl ToXML<XMLWriter> for Flow {
         fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-            let uid = self.uid.map(|uid| format!("{}", uid));
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -1369,9 +1360,6 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref uid) = uid {
-                attrs.push(("uid", uid.as_str()));
-            }
             if let Some(ref label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
@@ -1716,13 +1704,9 @@ pub mod view_element {
 
     impl ToXML<XMLWriter> for Link {
         fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-            let uid = self.uid.map(|uid| format!("{}", uid));
             let angle = self.angle.map(|angle| format!("{}", angle));
 
-            let mut attrs = Vec::with_capacity(2);
-            if let Some(ref uid) = uid {
-                attrs.push(("uid", uid.as_str()));
-            }
+            let mut attrs = Vec::with_capacity(1);
             if let Some(ref angle) = angle {
                 attrs.push(("angle", angle.as_str()));
             }
@@ -1819,16 +1803,24 @@ pub mod view_element {
                     }),
                 ),
             };
+            let from_name = view.get_variable_name(v.from_uid).unwrap_or("");
+            let to_name = view.get_variable_name(v.to_uid).unwrap_or("");
             Link {
                 uid: Some(v.uid),
                 from: LinkEndContainer {
-                    end: LinkEnd::Named(
-                        view.get_variable_name(v.from_uid).unwrap_or("").to_owned(),
-                    ),
+                    end: if from_name.is_empty() {
+                        LinkEnd::Alias(AliasLinkEnd { uid: v.from_uid })
+                    } else {
+                        LinkEnd::Named(from_name.to_owned())
+                    },
                 },
                 from_uid: Some(v.from_uid),
                 to: LinkEndContainer {
-                    end: LinkEnd::Named(view.get_variable_name(v.to_uid).unwrap_or("").to_owned()),
+                    end: if to_name.is_empty() {
+                        LinkEnd::Alias(AliasLinkEnd { uid: v.to_uid })
+                    } else {
+                        LinkEnd::Named(to_name.to_owned())
+                    },
                 },
                 to_uid: Some(v.to_uid),
                 angle,
@@ -1887,7 +1879,6 @@ pub mod view_element {
 
     impl ToXML<XMLWriter> for Module {
         fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-            let uid = self.uid.map(|uid| format!("{}", uid));
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -1897,9 +1888,6 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref uid) = uid {
-                attrs.push(("uid", uid.as_str()));
-            }
             if let Some(ref label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
@@ -1999,7 +1987,10 @@ pub mod view_element {
         pub fn from(v: datamodel::view_element::Alias, view: &datamodel::StockFlow) -> Self {
             Alias {
                 uid: Some(v.uid),
-                of: view.get_variable_name(v.uid).unwrap_or("").to_owned(),
+                of: view
+                    .get_variable_name(v.alias_of_uid)
+                    .unwrap_or("")
+                    .to_owned(),
                 of_uid: Some(v.alias_of_uid),
                 x: v.x,
                 y: v.y,
@@ -2113,7 +2104,7 @@ impl ToXML<XMLWriter> for ViewObject {
 }
 
 impl ViewObject {
-    pub fn set_uid(&mut self, uid: i32) {
+    pub fn set_uid(&mut self, uid: i32) -> bool {
         match self {
             ViewObject::Aux(aux) => aux.uid = Some(uid),
             ViewObject::Stock(stock) => stock.uid = Some(uid),
@@ -2122,8 +2113,11 @@ impl ViewObject {
             ViewObject::Module(module) => module.uid = Some(uid),
             ViewObject::Cloud(cloud) => cloud.uid = uid,
             ViewObject::Alias(alias) => alias.uid = Some(uid),
-            ViewObject::Unhandled => {}
-        }
+            ViewObject::Unhandled => {
+                return false;
+            }
+        };
+        true
     }
 
     pub fn uid(&self) -> Option<i32> {
@@ -2275,11 +2269,13 @@ impl View {
             if let Some(orig_uid) = o.uid() {
                 orig_uid_map.insert(orig_uid, next_uid);
             }
-            o.set_uid(next_uid);
-            if let Some(ident) = o.ident() {
-                uid_map.insert(ident, next_uid);
+            // don't waste a UID on 'unhandled' objects
+            if o.set_uid(next_uid) {
+                if let Some(ident) = o.ident() {
+                    uid_map.insert(ident, next_uid);
+                }
+                next_uid += 1;
             }
-            next_uid += 1;
         }
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
