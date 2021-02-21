@@ -1879,7 +1879,7 @@ pub struct View {
 }
 
 impl ToXML<XMLWriter> for View {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+    fn write_xml(&self, _writer: &mut Writer<XMLWriter>) -> Result<()> {
         Ok(())
     }
 }
@@ -2232,7 +2232,14 @@ pub struct Module {
 
 impl ToXML<XMLWriter> for Module {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-        Ok(())
+        let mut attrs = vec![("name", self.name.as_str())];
+        if self.model_name.is_some() {
+            // TODO: should prefix with 'simlin:'
+            attrs.push(("model_name", self.name.as_str()));
+        }
+        write_tag_start_with_attrs(writer, "module", &attrs)?;
+
+        write_tag_end(writer, "module")
     }
 }
 
@@ -2338,7 +2345,32 @@ pub struct Stock {
 
 impl ToXML<XMLWriter> for Stock {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-        Ok(())
+        let attrs = vec![("name", self.name.as_str())];
+        write_tag_start_with_attrs(writer, "stock", &attrs)?;
+
+        if let Some(ref eqn) = self.eqn {
+            write_tag(writer, "eqn", eqn)?;
+        }
+        if let Some(ref doc) = self.doc {
+            write_tag(writer, "doc", doc)?;
+        }
+        if let Some(ref units) = self.units {
+            write_tag(writer, "units", units)?;
+        }
+
+        if let Some(ref inflows) = self.inflows {
+            for inflow in inflows.iter() {
+                write_tag(writer, "inflow", inflow)?;
+            }
+        }
+
+        if let Some(ref outflows) = self.outflows {
+            for outflow in outflows.iter() {
+                write_tag(writer, "outflow", outflow)?;
+            }
+        }
+
+        write_tag_end(writer, "stock")
     }
 }
 
@@ -2477,7 +2509,20 @@ pub struct Flow {
 
 impl ToXML<XMLWriter> for Flow {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-        Ok(())
+        let attrs = vec![("name", self.name.as_str())];
+        write_tag_start_with_attrs(writer, "flow", &attrs)?;
+
+        if let Some(ref eqn) = self.eqn {
+            write_tag(writer, "eqn", eqn)?;
+        }
+        if let Some(ref doc) = self.doc {
+            write_tag(writer, "doc", doc)?;
+        }
+        if let Some(ref units) = self.units {
+            write_tag(writer, "units", units)?;
+        }
+
+        write_tag_end(writer, "flow")
     }
 }
 
@@ -2576,6 +2621,25 @@ pub struct Aux {
     pub elements: Option<Vec<VarElement>>,
 }
 
+impl ToXML<XMLWriter> for Aux {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let attrs = vec![("name", self.name.as_str())];
+        write_tag_start_with_attrs(writer, "aux", &attrs)?;
+
+        if let Some(ref eqn) = self.eqn {
+            write_tag(writer, "eqn", eqn)?;
+        }
+        if let Some(ref doc) = self.doc {
+            write_tag(writer, "doc", doc)?;
+        }
+        if let Some(ref units) = self.units {
+            write_tag(writer, "units", units)?;
+        }
+
+        write_tag_end(writer, "aux")
+    }
+}
+
 impl From<Aux> for datamodel::Aux {
     fn from(aux: Aux) -> Self {
         datamodel::Aux {
@@ -2588,12 +2652,6 @@ impl From<Aux> for datamodel::Aux {
                 None => None,
             },
         }
-    }
-}
-
-impl ToXML<XMLWriter> for Aux {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-        Ok(())
     }
 }
 

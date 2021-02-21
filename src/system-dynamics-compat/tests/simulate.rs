@@ -244,10 +244,18 @@ fn simulate_path(xmile_path: &str) {
 
     let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
     eprintln!("xmile:\n{}", serialized_xmile);
-    let _roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
+    let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
+
+    let project = Project::from(roundtripped_project.clone());
+    let project = Rc::new(project);
+    let sim = Simulation::new(&project, "main").unwrap();
+    // sim.debug_print_runlists("main");
+    let results = sim.run_to_end();
+    assert!(results.is_ok());
+    let results = results.unwrap();
+    ensure_results(&expected, &results);
 
     // assert_eq!(&orig_project, &roundtripped_project);
-    // assert!(false);
 }
 
 #[test]
