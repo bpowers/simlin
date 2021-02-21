@@ -204,63 +204,73 @@ fn ensure_results(expected: &Results, results: &Results) {
 
 fn simulate_path(xmile_path: &str) {
     eprintln!("model: {}", xmile_path);
-    let f = File::open(xmile_path).unwrap();
-    let mut f = BufReader::new(f);
 
-    let datamodel_project = xmile::project_from_reader(&mut f);
-    if let Err(ref err) = datamodel_project {
-        eprintln!("model '{}' error: {}", xmile_path, err);
-    }
-    let datamodel_project = datamodel_project.unwrap();
-    let project = Project::from(datamodel_project.clone());
+    // first read-in the XMILE model, convert it to our own representation,
+    // and simulate it using our tree-walking interpreter
+    let (datamodel_project, sim, results1) = {
+        let f = File::open(xmile_path).unwrap();
+        let mut f = BufReader::new(f);
 
-    let project = Rc::new(project);
-    let sim = Simulation::new(&project, "main").unwrap();
-    // sim.debug_print_runlists("main");
-    let results = sim.run_to_end();
-    assert!(results.is_ok());
-    let results = results.unwrap();
+        let datamodel_project = xmile::project_from_reader(&mut f);
+        if let Err(ref err) = datamodel_project {
+            eprintln!("model '{}' error: {}", xmile_path, err);
+        }
+        let datamodel_project = datamodel_project.unwrap();
+        let project = Project::from(datamodel_project.clone());
 
-    let compiled = sim.compile();
-    assert!(compiled.is_ok());
-    let compiled_sim = compiled.unwrap();
+        let project = Rc::new(project);
+        let sim = Simulation::new(&project, "main").unwrap();
+        // sim.debug_print_runlists("main");
+        let results = sim.run_to_end();
+        assert!(results.is_ok());
+        (datamodel_project, sim, results.unwrap())
+    };
 
-    let mut vm = VM::new(compiled_sim).unwrap();
-    // vm.debug_print_bytecode("main");
-    vm.run_to_end().unwrap();
-    let results2 = vm.into_results();
+    // next simulate the model using our bytecode VM
+    let results2 = {
+        let compiled = sim.compile();
 
-    ensure_results(&results, &results2);
+        assert!(compiled.is_ok());
+        let compiled_sim = compiled.unwrap();
 
+        let mut vm = VM::new(compiled_sim).unwrap();
+        // vm.debug_print_bytecode("main");
+        vm.run_to_end().unwrap();
+        vm.into_results()
+    };
+
+    // ensure the two results match each other
+    ensure_results(&results1, &results2);
+
+    // also ensure they match our reference results
     let expected = load_expected_results(xmile_path);
-    ensure_results(&expected, &results);
-
+    ensure_results(&expected, &results1);
     ensure_results(&expected, &results2);
 
-    let orig_project = datamodel_project;
-    let serialized_xmile = xmile::string_from_project(&orig_project);
-    assert!(serialized_xmile.is_ok());
-    let serialized_xmile = serialized_xmile.unwrap();
+    // serialize our project back to XMILE
+    let serialized_xmile = xmile::string_from_project(&datamodel_project).unwrap();
 
-    let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
-    // eprintln!("xmile:\n{}", serialized_xmile);
-    let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
+    // and then read it back in from the XMILE string and simulate it
+    let (roundtripped_project, results3) = {
+        let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
+        // eprintln!("xmile:\n{}", serialized_xmile);
+        let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
 
-    let project = Project::from(roundtripped_project.clone());
-    let project = Rc::new(project);
-    let sim = Simulation::new(&project, "main").unwrap();
-    let compiled = sim.compile();
-    assert!(compiled.is_ok());
-    let compiled_sim = compiled.unwrap();
-    let mut vm = VM::new(compiled_sim).unwrap();
-    vm.run_to_end().unwrap();
-    let results3 = vm.into_results();
+        let project = Project::from(roundtripped_project.clone());
+        let project = Rc::new(project);
+        let sim = Simulation::new(&project, "main").unwrap();
+        let compiled = sim.compile();
+        assert!(compiled.is_ok());
+        let compiled_sim = compiled.unwrap();
+        let mut vm = VM::new(compiled_sim).unwrap();
+        vm.run_to_end().unwrap();
+        (roundtripped_project, vm.into_results())
+    };
     ensure_results(&expected, &results3);
 
-    let serialized_xmile2 = xmile::string_from_project(&roundtripped_project);
-    assert!(serialized_xmile2.is_ok());
-    let serialized_xmile2 = serialized_xmile2.unwrap();
-
+    // finally ensure that if we re-serialize to XMILE the results are
+    // byte-for-byte identical (we aren't losing any information)
+    let serialized_xmile2 = xmile::string_from_project(&roundtripped_project).unwrap();
     assert_eq!(&serialized_xmile, &serialized_xmile2);
 }
 
