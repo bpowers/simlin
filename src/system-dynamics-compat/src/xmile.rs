@@ -997,6 +997,8 @@ impl ViewType {
 
 pub mod view_element {
     use super::datamodel;
+    #[cfg(test)]
+    use crate::engine::datamodel::StockFlow;
     use crate::xmile::{
         write_tag, write_tag_end, write_tag_start, write_tag_start_with_attrs, write_tag_text,
         write_tag_with_attrs, ToXML, XMLWriter, STOCK_HEIGHT, STOCK_WIDTH,
@@ -1375,7 +1377,7 @@ pub mod view_element {
             }
             write_tag_start_with_attrs(writer, "flow", &attrs)?;
 
-            if self.points.is_some() && self.points.as_ref().unwrap().points.len() > 0 {
+            if self.points.is_some() && !self.points.as_ref().unwrap().points.is_empty() {
                 write_tag_start(writer, "pts")?;
                 for point in self.points.as_ref().unwrap().points.iter() {
                     let x = format!("{}", point.x);
@@ -1744,7 +1746,7 @@ pub mod view_element {
             write_tag_end(writer, "from")?;
 
             write_tag_start(writer, "to")?;
-            match self.from {
+            match self.to {
                 LinkEndContainer {
                     end: LinkEnd::Named(ref name),
                 } => {
@@ -1760,7 +1762,7 @@ pub mod view_element {
             }
             write_tag_end(writer, "to")?;
 
-            if self.points.is_some() && self.points.as_ref().unwrap().points.len() > 0 {
+            if self.points.is_some() && !self.points.as_ref().unwrap().points.is_empty() {
                 write_tag_start(writer, "pts")?;
                 for point in self.points.as_ref().unwrap().points.iter() {
                     let x = format!("{}", point.x);
@@ -1802,8 +1804,8 @@ pub mod view_element {
         }
     }
 
-    impl From<datamodel::view_element::Link> for Link {
-        fn from(v: datamodel::view_element::Link) -> Self {
+    impl Link {
+        pub fn from(v: datamodel::view_element::Link, view: &datamodel::StockFlow) -> Self {
             let (is_straight, angle, points) = match v.shape {
                 LinkShape::Straight => (Some(true), None, None),
                 LinkShape::Arc(angle) => {
@@ -1820,11 +1822,13 @@ pub mod view_element {
             Link {
                 uid: Some(v.uid),
                 from: LinkEndContainer {
-                    end: LinkEnd::Named("".to_owned()),
+                    end: LinkEnd::Named(
+                        view.get_variable_name(v.from_uid).unwrap_or("").to_owned(),
+                    ),
                 },
                 from_uid: Some(v.from_uid),
                 to: LinkEndContainer {
-                    end: LinkEnd::Named("".to_owned()),
+                    end: LinkEnd::Named(view.get_variable_name(v.to_uid).unwrap_or("").to_owned()),
                 },
                 to_uid: Some(v.to_uid),
                 angle,
@@ -1860,9 +1864,14 @@ pub mod view_element {
                 }]),
             },
         ];
+        let view = StockFlow {
+            elements: vec![],
+            view_box: Default::default(),
+            zoom: 0.0,
+        };
         for expected in cases {
             let expected = expected.clone();
-            let actual = datamodel::view_element::Link::from(Link::from(expected.clone()));
+            let actual = datamodel::view_element::Link::from(Link::from(expected.clone(), &view));
             assert_eq!(expected, actual);
         }
     }
@@ -1986,11 +1995,11 @@ pub mod view_element {
         }
     }
 
-    impl From<datamodel::view_element::Alias> for Alias {
-        fn from(v: datamodel::view_element::Alias) -> Self {
+    impl Alias {
+        pub fn from(v: datamodel::view_element::Alias, view: &datamodel::StockFlow) -> Self {
             Alias {
                 uid: Some(v.uid),
-                of: "".to_owned(),
+                of: view.get_variable_name(v.uid).unwrap_or("").to_owned(),
                 of_uid: Some(v.alias_of_uid),
                 x: v.x,
                 y: v.y,
@@ -2008,9 +2017,14 @@ pub mod view_element {
             y: 31.0,
             label_side: datamodel::view_element::LabelSide::Right,
         }];
+        let view = StockFlow {
+            elements: vec![],
+            view_box: Default::default(),
+            zoom: 0.0,
+        };
         for expected in cases {
             let expected = expected.clone();
-            let actual = datamodel::view_element::Alias::from(Alias::from(expected.clone()));
+            let actual = datamodel::view_element::Alias::from(Alias::from(expected.clone(), &view));
             assert_eq!(expected, actual);
         }
     }
@@ -2168,16 +2182,16 @@ impl From<ViewObject> for datamodel::ViewElement {
     }
 }
 
-impl From<datamodel::ViewElement> for ViewObject {
-    fn from(v: datamodel::ViewElement) -> Self {
+impl ViewObject {
+    fn from(v: datamodel::ViewElement, view: &datamodel::StockFlow) -> Self {
         match v {
             // TODO: rename ViewObject to ViewElement for consistency
             ViewElement::Aux(v) => ViewObject::Aux(view_element::Aux::from(v)),
             ViewElement::Stock(v) => ViewObject::Stock(view_element::Stock::from(v)),
             ViewElement::Flow(v) => ViewObject::Flow(view_element::Flow::from(v)),
-            ViewElement::Link(v) => ViewObject::Link(view_element::Link::from(v)),
+            ViewElement::Link(v) => ViewObject::Link(view_element::Link::from(v, view)),
             ViewElement::Module(v) => ViewObject::Module(view_element::Module::from(v)),
-            ViewElement::Alias(v) => ViewObject::Alias(view_element::Alias::from(v)),
+            ViewElement::Alias(v) => ViewObject::Alias(view_element::Alias::from(v, view)),
             ViewElement::Cloud(_v) => ViewObject::Unhandled,
         }
     }
@@ -2513,7 +2527,12 @@ impl From<datamodel::View> for View {
                 page_width: None,
                 page_height: None,
                 show_pages: None,
-                objects: v.elements.into_iter().map(ViewObject::from).collect(),
+                objects: v
+                    .elements
+                    .iter()
+                    .cloned()
+                    .map(|element| ViewObject::from(element, &v))
+                    .collect(),
                 zoom: Some(v.zoom),
                 offset_x: Some(v.view_box.x),
                 offset_y: Some(v.view_box.y),

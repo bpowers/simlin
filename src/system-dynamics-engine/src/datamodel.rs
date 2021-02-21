@@ -244,6 +244,32 @@ pub enum ViewElement {
     Cloud(view_element::Cloud),
 }
 
+impl ViewElement {
+    pub fn get_uid(&self) -> i32 {
+        match self {
+            ViewElement::Aux(var) => var.uid,
+            ViewElement::Stock(var) => var.uid,
+            ViewElement::Flow(var) => var.uid,
+            ViewElement::Link(var) => var.uid,
+            ViewElement::Module(var) => var.uid,
+            ViewElement::Alias(var) => var.uid,
+            ViewElement::Cloud(var) => var.uid,
+        }
+    }
+
+    pub fn get_name(&self) -> Option<&str> {
+        match self {
+            ViewElement::Aux(var) => Some(var.name.as_str()),
+            ViewElement::Stock(var) => Some(var.name.as_str()),
+            ViewElement::Flow(var) => Some(var.name.as_str()),
+            ViewElement::Link(_var) => None,
+            ViewElement::Module(var) => Some(var.name.as_str()),
+            ViewElement::Alias(_var) => None,
+            ViewElement::Cloud(_var) => None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Rect {
     pub x: f64,
@@ -257,6 +283,18 @@ pub struct StockFlow {
     pub elements: Vec<ViewElement>,
     pub view_box: Rect,
     pub zoom: f64,
+}
+
+impl StockFlow {
+    pub fn get_variable_name(&self, uid: i32) -> Option<&str> {
+        for element in self.elements.iter() {
+            if element.get_uid() == uid {
+                return element.get_name();
+            }
+        }
+
+        None
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
