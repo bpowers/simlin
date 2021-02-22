@@ -3261,7 +3261,7 @@ fn test_canonicalize_stock_inflows() {
     assert_eq!(expected, output);
 }
 
-pub fn string_from_project(project: &datamodel::Project) -> Result<String> {
+pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
     let file: File = project.clone().into();
 
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);

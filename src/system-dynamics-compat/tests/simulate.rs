@@ -248,7 +248,7 @@ fn simulate_path(xmile_path: &str) {
     ensure_results(&expected, &results2);
 
     // serialize our project back to XMILE
-    let serialized_xmile = xmile::string_from_project(&datamodel_project).unwrap();
+    let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
 
     // and then read it back in from the XMILE string and simulate it
     let (roundtripped_project, results3) = {
@@ -270,7 +270,7 @@ fn simulate_path(xmile_path: &str) {
 
     // finally ensure that if we re-serialize to XMILE the results are
     // byte-for-byte identical (we aren't losing any information)
-    let serialized_xmile2 = xmile::string_from_project(&roundtripped_project).unwrap();
+    let serialized_xmile2 = xmile::project_to_xmile(&roundtripped_project).unwrap();
     assert_eq!(&serialized_xmile, &serialized_xmile2);
 }
 

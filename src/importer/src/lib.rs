@@ -6,7 +6,8 @@ use wasm_bindgen::prelude::*;
 
 use std::io::BufReader;
 
-use system_dynamics_compat::{engine, open_xmile, prost};
+use system_dynamics_compat::engine::{self, project_io, serde};
+use system_dynamics_compat::{open_xmile, prost, to_xmile as compat_to_xmile};
 
 #[wasm_bindgen]
 pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
@@ -24,6 +25,20 @@ pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
     };
 
     buf.into_boxed_slice()
+}
+
+#[wasm_bindgen]
+pub fn to_xmile(project_pb: &[u8]) -> Option<String> {
+    use prost::Message;
+
+    let project = match project_io::Project::decode(project_pb) {
+        Ok(project) => serde::deserialize(project),
+        Err(_err) => {
+            return None;
+        }
+    };
+
+    compat_to_xmile(&project).ok()
 }
 
 // #[wasm_bindgen]

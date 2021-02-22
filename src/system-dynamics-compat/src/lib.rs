@@ -9,6 +9,10 @@ pub use system_dynamics_engine::{self as engine, prost, Result};
 
 pub mod xmile;
 
+pub fn to_xmile(project: &Project) -> Result<String> {
+    xmile::project_to_xmile(project)
+}
+
 #[cfg(feature = "vensim")]
 pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
     use std::io::BufReader;

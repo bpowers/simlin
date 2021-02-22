@@ -13,7 +13,7 @@ use system_dynamics_compat::engine::{
     eprintln, serde, ErrorCode, Project, Simulation, Variable, VM,
 };
 use system_dynamics_compat::prost::Message;
-use system_dynamics_compat::{open_vensim, open_xmile};
+use system_dynamics_compat::{open_vensim, open_xmile, to_xmile};
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -41,6 +41,7 @@ fn usage() -> ! {
          OPTIONS:\n",
             "    -h, --help    show this message\n",
             "    --vensim      model is a Vensim .mdl file\n",
+            "    --to-xmile    output should be XMILE not protobuf\n",
             "    --model-only  for conversion, only output model instead of project\n",
             "    --output FILE path to write output file\n",
             "    --no-output   don't print the output (for benchmarking)\n",
@@ -60,6 +61,7 @@ struct Args {
     path: Option<String>,
     output: Option<String>,
     is_vensim: bool,
+    is_to_xmile: bool,
     is_convert: bool,
     is_model_only: bool,
     is_no_output: bool,
@@ -94,6 +96,7 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     args.output = parsed.value_from_str("--output").ok();
     args.is_no_output = parsed.contains("--no-output");
     args.is_model_only = parsed.contains("--model-only");
+    args.is_to_xmile = parsed.contains("--to-xmile");
     args.is_vensim = parsed.contains("--vensim");
 
     let free_arguments = parsed.free()?;
@@ -215,7 +218,7 @@ fn main() {
     } else if args.is_convert {
         let pb_project = serde::serialize(&project);
 
-        let buf: Vec<u8> = if args.is_model_only {
+        let mut buf: Vec<u8> = if args.is_model_only {
             if pb_project.models.len() != 1 {
                 die!("--model-only specified, but more than 1 model in this project");
             }
@@ -227,6 +230,18 @@ fn main() {
             pb_project.encode(&mut buf).unwrap();
             buf
         };
+
+        if args.is_to_xmile {
+            match to_xmile(&project) {
+                Ok(s) => {
+                    buf = s.into_bytes();
+                    buf.push(b'\n');
+                }
+                Err(err) => {
+                    die!("error converting to XMILE: {}", err);
+                }
+            }
+        }
 
         let mut output_file =
             File::create(&args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();

@@ -1,6 +1,6 @@
-// Copyright 2020 Bobby Powers. All rights reserved.
-// Use of this source code is governed by the MIT License
-// that can be found in the LICENSE file.
+// Copyright 2021 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
 
 export function defined<T>(object: T | undefined): T {
   if (object === undefined) {
