@@ -5,16 +5,34 @@
 import * as React from 'react';
 
 import { List, Map, Set, Stack } from 'immutable';
-
 import { Canvg } from 'canvg';
 
+import IconButton from '@material-ui/core/IconButton';
+import TextField from '@material-ui/core/TextField';
+import Autocomplete from '@material-ui/core/Autocomplete';
+import Paper from '@material-ui/core/Paper';
+import Snackbar from '@material-ui/core/Snackbar';
+import ClearIcon from '@material-ui/icons/Clear';
+import EditIcon from '@material-ui/icons/Edit';
+import MenuIcon from '@material-ui/icons/Menu';
+import SpeedDial, { CloseReason } from '@material-ui/core/SpeedDial';
+import SpeedDialAction from '@material-ui/core/SpeedDialAction';
+import SpeedDialIcon from '@material-ui/core/SpeedDialIcon';
+import { createStyles, Theme } from '@material-ui/core/styles';
+import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
+import { Card } from '@material-ui/core';
+import Button from '@material-ui/core/Button';
+import CardActions from '@material-ui/core/CardActions';
+import CardContent from '@material-ui/core/CardContent';
+import { canonicalize } from '@system-dynamics/core/canonicalize';
+
+import { toXmile } from '@system-dynamics/importer';
 import type {
   Engine as IEngine,
   Error as EngineError,
   EquationError as EngineEquationError,
 } from '@system-dynamics/engine';
 import { open, errorCodeDescription } from '@system-dynamics/engine';
-
 import {
   Project,
   Model,
@@ -37,50 +55,25 @@ import {
   ErrorCode,
   Rect,
 } from '@system-dynamics/core/datamodel';
-
 import { defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
-
-import { ErrorDetails } from './ErrorDetails';
-import { ZoomBar } from './ZoomBar';
-import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
-import { Point } from './drawing/common';
-import { takeoffθ } from './drawing/Connector';
-import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
-
-import IconButton from '@material-ui/core/IconButton';
-import TextField from '@material-ui/core/TextField';
-import Autocomplete from '@material-ui/core/Autocomplete';
-import Paper from '@material-ui/core/Paper';
-import Snackbar from '@material-ui/core/Snackbar';
-
-import ClearIcon from '@material-ui/icons/Clear';
-import EditIcon from '@material-ui/icons/Edit';
-import MenuIcon from '@material-ui/icons/Menu';
-
-import SpeedDial, { CloseReason } from '@material-ui/core/SpeedDial';
-import SpeedDialAction from '@material-ui/core/SpeedDialAction';
-import SpeedDialIcon from '@material-ui/core/SpeedDialIcon';
 
 import { AuxIcon } from './AuxIcon';
 import { Toast } from './ErrorToast';
 import { FlowIcon } from './FlowIcon';
 import { LinkIcon } from './LinkIcon';
 import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
+import { renderSvgToString } from './render-common';
 import { Snapshotter } from './Snapshotter';
 import { Status } from './Status';
 import { StockIcon } from './StockIcon';
 import { UndoRedoBar } from './UndoRedoBar';
 import { VariableDetails } from './VariableDetails';
-
-import { createStyles, Theme } from '@material-ui/core/styles';
-import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
-import { renderSvgToString } from './render-common';
-
-import { Card } from '@material-ui/core';
-import Button from '@material-ui/core/Button';
-import CardActions from '@material-ui/core/CardActions';
-import CardContent from '@material-ui/core/CardContent';
-import { canonicalize } from '@system-dynamics/core/canonicalize';
+import { ErrorDetails } from './ErrorDetails';
+import { ZoomBar } from './ZoomBar';
+import { Canvas, fauxCloudTargetUid, inCreationCloudUid, inCreationUid } from './drawing/Canvas';
+import { Point } from './drawing/common';
+import { takeoffθ } from './drawing/Connector';
+import { UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './drawing/Flow';
 
 const MaxUndoSize = 5;
 const SearchbarWidthSm = 359;
@@ -1025,6 +1018,34 @@ export const Editor = withStyles(styles)(
       this.scheduleSimRun();
     };
 
+    handleDownloadXmile = () => {
+      const engine = defined(this.engine());
+      const projectPb = engine.serializeToProtobuf();
+      toXmile(projectPb)
+        .then((xmile) => {
+          if (!xmile) {
+            this.appendModelError('unable to download as XMILE at this time');
+            return;
+          }
+          const encoder = new TextEncoder();
+          const xmileBytes = encoder.encode(xmile);
+          const blob = new Blob([xmileBytes], {
+            type: 'application/octet-stream',
+          });
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          document.body.appendChild(a);
+          a.style = 'display: none';
+          a.href = url;
+          a.download = 'model.stmx';
+          a.click();
+          window.URL.revokeObjectURL(url);
+        })
+        .catch((err) => {
+          this.appendModelError(err.msg);
+        });
+    };
+
     getDrawer() {
       const project = this.project();
       if (!project || this.props.embedded) {
@@ -1052,6 +1073,7 @@ export const Editor = withStyles(styles)(
           onStopTimeChange={this.handleStopTimeChange}
           onDtChange={this.handleDtChange}
           onTimeUnitsChange={this.handleTimeUnitsChange}
+          onDownloadXmile={this.handleDownloadXmile}
         />
       );
     }

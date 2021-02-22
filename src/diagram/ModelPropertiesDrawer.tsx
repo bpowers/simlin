@@ -6,12 +6,14 @@ import * as React from 'react';
 
 import { Link } from 'react-router-dom';
 
+import Button from '@material-ui/core/Button';
 import IconButton from '@material-ui/core/IconButton';
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import SwipeableDrawer from '@material-ui/core/SwipeableDrawer';
 import TextField from '@material-ui/core/TextField';
 import ArrowBackIcon from '@material-ui/icons/ArrowBack';
 import ClearIcon from '@material-ui/icons/Clear';
+import CloudDownloadIcon from '@material-ui/icons/CloudDownload';
 
 import { ModelIcon } from './ModelIcon';
 
@@ -67,6 +69,9 @@ const styles = createStyles({
   exitLink: {
     color: 'inherit',
   },
+  downloadButton: {
+    justifyContent: 'center',
+  },
 });
 
 interface ModelPropertiesDrawerPropsFull extends WithStyles<typeof styles> {
@@ -81,6 +86,7 @@ interface ModelPropertiesDrawerPropsFull extends WithStyles<typeof styles> {
   onStopTimeChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onDtChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onTimeUnitsChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onDownloadXmile: () => void;
 }
 
 export const ModelPropertiesDrawer = withStyles(styles)(
@@ -155,6 +161,17 @@ export const ModelPropertiesDrawer = withStyles(styles)(
                 margin="normal"
                 fullWidth
               />
+              <br />
+              <Button
+                className={classes.downloadButton}
+                variant="contained"
+                color="primary"
+                size="large"
+                startIcon={<CloudDownloadIcon />}
+                onClick={this.props.onDownloadXmile}
+              >
+                Download model
+              </Button>
             </div>
           </div>
         </SwipeableDrawer>
