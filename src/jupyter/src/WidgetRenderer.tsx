@@ -103,6 +103,7 @@ export class WidgetRenderer extends ReactWidget implements IRenderMime.IRenderer
         <Editor
           initialProjectBinary={defined(this.project)}
           initialProjectVersion={1}
+          name={"model"}
           embedded={!this.isEditable}
           onSave={this.handleSave}
         />
