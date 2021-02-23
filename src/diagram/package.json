@@ -25,6 +25,7 @@
     "@material-ui/core": "5.0.0-alpha.20",
     "@system-dynamics/core": "^1.1.9",
     "@system-dynamics/engine": "^1.1.5",
+    "@system-dynamics/importer": "^1.2.0",
     "canvg": "^3.0.0-beta.2",
     "chroma-js": "^2.1.0",
     "google-protobuf": "^3.14.0",
