@@ -223,6 +223,7 @@ interface EditorState {
 interface EditorProps extends WithStyles<typeof styles> {
   initialProjectBinary: Readonly<Uint8Array>;
   initialProjectVersion: number;
+  name: string; // used when saving
   embedded?: boolean;
   onSave: (project: Readonly<Uint8Array>, currVersion: number) => Promise<number | undefined>;
 }
@@ -1035,9 +1036,13 @@ export const Editor = withStyles(styles)(
           const url = window.URL.createObjectURL(blob);
           const a = document.createElement('a');
           document.body.appendChild(a);
-          a.style = 'display: none';
+          try {
+            ((a as unknown) as any).style = 'display: none';
+          } catch (_err) {
+            // oh well
+          }
           a.href = url;
-          a.download = 'model.stmx';
+          a.download = `${this.props.name}-${this.state.projectVersion|0}.stmx`;
           a.click();
           window.URL.revokeObjectURL(url);
         })

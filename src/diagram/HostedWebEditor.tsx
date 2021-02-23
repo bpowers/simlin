@@ -150,6 +150,7 @@ export const HostedWebEditor = withStyles(styles)(
           <Editor
             initialProjectBinary={this.state.projectBinary}
             initialProjectVersion={this.state.projectVersion}
+            name={this.props.projectName}
             embedded={this.props.embedded}
             onSave={this.handleSave}
           />
