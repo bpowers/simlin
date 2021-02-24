@@ -25,7 +25,7 @@
   "scripts": {
     "build:dev": "yarn run build:lib && yarn run build:labextension:dev",
     "build:prod": "yarn run build:lib && yarn run build:labextension",
-    "build": "yarn run build:prod",
+    "build": "echo 'maybe you mean yarn build:prod'",
     "build:labextension": "jupyter labextension build .",
     "build:labextension:dev": "jupyter labextension build --development True .",
     "build:lib": "tsc",
@@ -36,7 +36,7 @@
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
     "install:extension": "jupyter labextension develop --overwrite .",
-    "prepare": "yarn run clean && yarn run build:prod",
+    "prepare": "yarn run clean",
     "watch": "run-p watch:src watch:labextension",
     "watch:src": "tsc -w",
     "watch:labextension": "jupyter labextension watch ."
