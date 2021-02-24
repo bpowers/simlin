@@ -11,7 +11,7 @@
       "cookiePath": "/",
       "httpOnly": true,
       "secure": true,
-      "sameSite": "lax",
+      "sameSite": "strict",
       "maxAgeInSeconds": 1209600
     },
     "google": {
