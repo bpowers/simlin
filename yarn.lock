@@ -13193,10 +13193,10 @@ serve-static@1.14.1:
     parseurl "~1.3.3"
     send "0.17.1"
 
-seshcookie@^1.1.0:
-  version "1.1.0"
-  resolved "https://registry.yarnpkg.com/seshcookie/-/seshcookie-1.1.0.tgz#c3e9e71c8c9c00d40fe3ea36765e2945b847aece"
-  integrity sha512-iW9CrTLWqNCmnrPkEuCxFgqD8TpdzwcWS8a/O7u4w7vSjgTLzgOOzBAmWNroFEFuWbnB2VJ63v6d9edI+i0o/w==
+seshcookie@^1.2.0:
+  version "1.2.0"
+  resolved "https://registry.yarnpkg.com/seshcookie/-/seshcookie-1.2.0.tgz#35f216e0aa2b7f2d116b98b86ad4fbd8a6f195bf"
+  integrity sha512-gl1l8k4BESrNeRJ04wcrxuM4EKFbCk8JAEQZEJqCLB6tivgx7rReh0B7mdmzGaLsp8ifuH7EwdDK+yllGdYo5g==
   dependencies:
     cookie-parser "^1.4.3"
     express "^4.16.4"

@@ -25,7 +25,7 @@
     "passport": "^0.4.0",
     "passport-google-oauth": "^2.0.0",
     "serve-favicon": "^2.5.0",
-    "seshcookie": "^1.1.0",
+    "seshcookie": "^1.2.0",
     "uuid": "^8.0.0",
     "winston": "^3.2.1",
     "xmldom": "^0.4.0"
