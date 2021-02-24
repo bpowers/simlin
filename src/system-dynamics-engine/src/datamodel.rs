@@ -378,12 +378,27 @@ impl Dimension {
     }
 }
 
+#[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Extension {
+    Unspecified,
+    Xmile,
+    Vensim,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Source {
+    pub extension: Extension,
+    pub content: String,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,
     pub dimensions: Vec<Dimension>,
     pub models: Vec<Model>,
+    pub source: Option<Source>,
 }
 
 impl Project {

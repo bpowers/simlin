@@ -11,7 +11,7 @@ use prost::Message;
 
 use system_dynamics_engine as engine;
 use system_dynamics_engine::common::{ErrorCode, ErrorKind};
-use system_dynamics_engine::datamodel::{GraphicalFunction, Variable};
+use system_dynamics_engine::datamodel::{Extension, GraphicalFunction, Source, Variable};
 use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error, VM};
 
 #[wasm_bindgen]
@@ -458,6 +458,33 @@ impl Engine {
                 Ordering::Equal => model.views.push(view.clone()),
                 Ordering::Greater => {}
             });
+
+        self.instantiate_sim();
+
+        None
+    }
+
+    #[wasm_bindgen(js_name = setSource)]
+    pub fn set_source(&mut self, content: &str, extension: &str) -> Option<Error> {
+        let project = &mut self.project.datamodel;
+
+        let extension = match extension {
+            "vensim" => Extension::Vensim,
+            "mdl" => Extension::Vensim,
+            "itmx" => Extension::Xmile,
+            "stmx" => Extension::Xmile,
+            "xmile" => Extension::Xmile,
+            _ => Extension::Unspecified,
+        };
+
+        project.source = if content.is_empty() {
+            None
+        } else {
+            Some(Source {
+                extension,
+                content: content.to_owned(),
+            })
+        };
 
         self.instantiate_sim();
 

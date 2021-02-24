@@ -2268,6 +2268,7 @@ fn test_arrays() {
         use crate::datamodel::*;
         Project {
             name: "arrays".to_owned(),
+            source: None,
             sim_specs: SimSpecs {
                 start: 0.0,
                 stop: 12.0,

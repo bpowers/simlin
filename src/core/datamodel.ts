@@ -20,6 +20,7 @@ import {
   SimMethodMap as PbSimMethodMap,
   Dimension as PbDimension,
   Rect as PbRect,
+  Source as PbSource,
 } from './pb/project_io_pb';
 import { canonicalize } from './canonicalize';
 
@@ -1244,12 +1245,63 @@ export class Dimension extends Record(dimensionDefaults) {
   }
 }
 
+export type Extension = 'xmile' | 'vensim' | undefined;
+
+function getExtension(ext: PbSource.ExtensionMap[keyof PbSource.ExtensionMap]): Extension {
+  switch (ext) {
+    case PbSource.Extension.UNSPECIFIED:
+      return undefined;
+    case PbSource.Extension.XMILE:
+      return 'xmile';
+    case PbSource.Extension.VENSIM:
+      return 'vensim';
+    default:
+      return undefined;
+  }
+}
+
+function extensionToPb(ext: Extension): PbSource.ExtensionMap[keyof PbSource.ExtensionMap] {
+  switch (ext) {
+    case 'xmile':
+      return PbSource.Extension.XMILE;
+    case 'vensim':
+      return PbSource.Extension.VENSIM;
+    default:
+      return PbSource.Extension.UNSPECIFIED;
+  }
+}
+
+const sourceDefaults = {
+  extension: undefined as Extension,
+  content: '',
+};
+export class Source extends Record(sourceDefaults) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof sourceDefaults) {
+    super(props);
+  }
+  static fromPb(source: PbSource): Source {
+    return new Source({
+      extension: getExtension(source.getExtension()),
+      content: source.getContent(),
+    });
+  }
+  toPb(): PbSource {
+    const source = new PbSource();
+    source.setExtension(extensionToPb(this.extension));
+    source.setContent(this.content);
+    return source;
+  }
+}
+
 const projectDefaults = {
   name: '',
   simSpecs: SimSpecs.default(),
   models: Map<string, Model>(),
   dimensions: Map<string, Dimension>(),
   hasNoEquations: false,
+  source: undefined as Source | undefined,
 };
 export class Project extends Record(projectDefaults) {
   // this isn't useless, as it ensures we specify the full object
@@ -1258,12 +1310,14 @@ export class Project extends Record(projectDefaults) {
     super(props);
   }
   static fromPb(project: PbProject): Project {
+    const source = project.getSource();
     return new Project({
       name: project.getName(),
       simSpecs: SimSpecs.fromPb(defined(project.getSimSpecs())),
       models: Map(project.getModelsList().map((model) => [model.getName(), Model.fromPb(model)])),
       dimensions: Map(project.getDimensionsList().map((dim) => [dim.getName(), Dimension.fromPb(dim)])),
       hasNoEquations: false,
+      source: source ? Source.fromPb(source) : undefined,
     });
   }
   static deserializeBinary(serializedPb: Readonly<Uint8Array>): Project {

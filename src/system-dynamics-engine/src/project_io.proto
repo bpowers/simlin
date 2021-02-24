@@ -246,9 +246,24 @@ message Dimension {
   repeated string elements = 2;
 };
 
+// often we want to import or export a project to a string; whether it is
+// an XMILE model, Vensim, or something else.  This is very useful for
+// debugging import problems, and can be used to send both the protobuf and
+// XMILE output from the frontend to the filesystem
+message Source {
+  enum Extension {
+    UNSPECIFIED = 0;
+    XMILE = 1;
+    VENSIM = 2;
+  };
+  Extension extension = 1;
+  string content = 2;
+};
+
 message Project {
   string name = 1;
   SimSpecs sim_specs = 2;
   repeated Dimension dimensions = 4;
   repeated Model models = 3;
+  Source source = 5;
 };

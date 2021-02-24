@@ -135,6 +135,7 @@ impl From<File> for datamodel::Project {
                 .into_iter()
                 .map(datamodel::Model::from)
                 .collect(),
+            source: None,
         }
     }
 }

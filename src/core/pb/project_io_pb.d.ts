@@ -1066,6 +1066,38 @@ export namespace Dimension {
   };
 }
 
+export class Source extends jspb.Message {
+  getExtension(): Source.ExtensionMap[keyof Source.ExtensionMap];
+  setExtension(value: Source.ExtensionMap[keyof Source.ExtensionMap]): void;
+
+  getContent(): string;
+  setContent(value: string): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): Source.AsObject;
+  static toObject(includeInstance: boolean, msg: Source): Source.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: Source, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): Source;
+  static deserializeBinaryFromReader(message: Source, reader: jspb.BinaryReader): Source;
+}
+
+export namespace Source {
+  export type AsObject = {
+    extension: Source.ExtensionMap[keyof Source.ExtensionMap];
+    content: string;
+  };
+
+  export interface ExtensionMap {
+    UNSPECIFIED: 0;
+    XMILE: 1;
+    VENSIM: 2;
+  }
+
+  export const Extension: ExtensionMap;
+}
+
 export class Project extends jspb.Message {
   getName(): string;
   setName(value: string): void;
@@ -1085,6 +1117,11 @@ export class Project extends jspb.Message {
   setModelsList(value: Array<Model>): void;
   addModels(value?: Model, index?: number): Model;
 
+  hasSource(): boolean;
+  clearSource(): void;
+  getSource(): Source | undefined;
+  setSource(value?: Source): void;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Project.AsObject;
   static toObject(includeInstance: boolean, msg: Project): Project.AsObject;
@@ -1101,6 +1138,7 @@ export namespace Project {
     simSpecs?: SimSpecs.AsObject;
     dimensionsList: Array<Dimension.AsObject>;
     modelsList: Array<Model.AsObject>;
+    source?: Source.AsObject;
   };
 }
 

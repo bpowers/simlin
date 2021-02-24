@@ -5,9 +5,9 @@
 use float_cmp::approx_eq;
 
 use crate::datamodel::{
-    view_element, Aux, Dimension, Dt, Equation, Flow, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect, SimMethod, SimSpecs,
-    Stock, StockFlow, Variable, View, ViewElement,
+    view_element, Aux, Dimension, Dt, Equation, Extension, Flow, GraphicalFunction,
+    GraphicalFunctionKind, GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect,
+    SimMethod, SimSpecs, Source, Stock, StockFlow, Variable, View, ViewElement,
 };
 use crate::project_io;
 
@@ -1398,6 +1398,55 @@ impl From<project_io::Dimension> for Dimension {
     }
 }
 
+impl From<project_io::source::Extension> for Extension {
+    fn from(ext: project_io::source::Extension) -> Self {
+        match ext {
+            project_io::source::Extension::Unspecified => Extension::Unspecified,
+            project_io::source::Extension::Xmile => Extension::Xmile,
+            project_io::source::Extension::Vensim => Extension::Vensim,
+        }
+    }
+}
+
+impl From<Extension> for project_io::source::Extension {
+    fn from(ext: Extension) -> Self {
+        match ext {
+            Extension::Unspecified => project_io::source::Extension::Unspecified,
+            Extension::Xmile => project_io::source::Extension::Xmile,
+            Extension::Vensim => project_io::source::Extension::Vensim,
+        }
+    }
+}
+
+impl From<i32> for project_io::source::Extension {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => project_io::source::Extension::Unspecified,
+            1 => project_io::source::Extension::Xmile,
+            2 => project_io::source::Extension::Vensim,
+            _ => project_io::source::Extension::Unspecified,
+        }
+    }
+}
+
+impl From<Source> for project_io::Source {
+    fn from(source: Source) -> Self {
+        project_io::Source {
+            extension: project_io::source::Extension::from(source.extension).into(),
+            content: source.content,
+        }
+    }
+}
+
+impl From<project_io::Source> for Source {
+    fn from(source: project_io::Source) -> Self {
+        Source {
+            extension: project_io::source::Extension::from(source.extension).into(),
+            content: source.content,
+        }
+    }
+}
+
 impl From<Project> for project_io::Project {
     fn from(project: Project) -> Self {
         project_io::Project {
@@ -1413,6 +1462,7 @@ impl From<Project> for project_io::Project {
                 .into_iter()
                 .map(project_io::Model::from)
                 .collect(),
+            source: project.source.map(|source| source.into()),
         }
     }
 }
@@ -1428,6 +1478,7 @@ impl From<project_io::Project> for Project {
                 .map(Dimension::from)
                 .collect(),
             models: project.models.into_iter().map(Model::from).collect(),
+            source: project.source.map(|source| source.into()),
         }
     }
 }
