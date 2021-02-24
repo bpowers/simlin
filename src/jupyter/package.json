@@ -77,6 +77,7 @@
       }
     },
     "extension": true,
-    "outputDir": "jupyter_simlin/labextension"
+    "outputDir": "jupyter_simlin/labextension",
+    "webpackConfig": "./webpack.config.js"
   }
 }
