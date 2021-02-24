@@ -1042,7 +1042,7 @@ export const Editor = withStyles(styles)(
             // oh well
           }
           a.href = url;
-          a.download = `${this.props.name}-${this.state.projectVersion|0}.stmx`;
+          a.download = `${this.props.name}-${this.state.projectVersion | 0}.stmx`;
           a.click();
           window.URL.revokeObjectURL(url);
         })
