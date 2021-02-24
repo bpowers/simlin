@@ -11,7 +11,7 @@
       "cookiePath": "/",
       "httpOnly": true,
       "secure": true,
-      "maxAgeInSeconds": 50400
+      "maxAgeInSeconds": 1209600
     },
     "google": {
       "successRedirect": "/",
