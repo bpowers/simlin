@@ -538,8 +538,37 @@ module.exports = function (webpackEnv) {
         cwd: paths.appPath,
         resolvePluginsRelativeTo: __dirname,
         baseConfig: {
-          extends: [require.resolve('eslint-config-react-app/base')],
+          root: true,
+
+          parser: 'babel-eslint',
+
+          plugins: ['react'],
+
+          env: {
+            browser: true,
+            commonjs: true,
+            es6: true,
+            jest: false,
+            node: true,
+          },
+
+          parserOptions: {
+            ecmaVersion: 2018,
+            sourceType: 'module',
+            ecmaFeatures: {
+              jsx: true,
+            },
+          },
+
+          settings: {
+            react: {
+              version: 'detect',
+            },
+          },
+
           rules: {
+            'react/jsx-uses-vars': 'warn',
+            'react/jsx-uses-react': 'warn',
             ...(!hasJsxRuntime && {
               'react/react-in-jsx-scope': 'error',
             }),
