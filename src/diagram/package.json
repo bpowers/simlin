@@ -44,6 +44,7 @@
     "immer": "8.0.1"
   },
   "devDependencies": {
+    "@babel/core": "^7.13.1",
     "@material-ui/icons": "5.0.0-alpha.20",
     "@system-dynamics/react-mathquill": "^1.1.1",
     "@types/chroma-js": "^2.1.3",
