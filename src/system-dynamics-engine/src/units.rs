@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::result::Result as StdResult;
 
-use crate::ast::parse_equation;
-use crate::common::EquationError;
+use crate::ast::{parse_equation, Expr};
+use crate::common::{EquationError, Result};
 use crate::datamodel::Unit;
 
 type UnitMap = BTreeMap<String, i32>;
@@ -49,15 +49,31 @@ impl Context {
 
             let eqn = unit.equation.as_ref().unwrap();
 
-            let (_ast, errors) = parse_equation(eqn);
-            if !errors.is_empty() {
-                unit_errors.push((unit.name.clone(), errors));
-                continue;
-            }
+            let ast = match parse_equation(eqn) {
+                Ok(ast) => ast,
+                Err(errors) => {
+                    unit_errors.push((unit.name.clone(), errors));
+                    continue;
+                }
+            };
 
-            // then using the Context turn the equation into a UnitMap
-
-            let unit_components = UnitMap::new();
+            let unit_components = match ast {
+                Some(ref ast) => match build_unit_components(&ctx, ast) {
+                    Ok(unit_components) => unit_components,
+                    Err(err) => {
+                        unit_errors.push((
+                            unit.name.clone(),
+                            vec![EquationError {
+                                start: 0,
+                                end: 0,
+                                code: err.code,
+                            }],
+                        ));
+                        continue;
+                    }
+                },
+                None => [(unit.name.clone(), 1)].iter().cloned().collect(),
+            };
 
             ctx.units.insert(unit.name.clone(), unit_components);
         }
@@ -68,6 +84,11 @@ impl Context {
             Err(unit_errors)
         }
     }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn build_unit_components(_ctx: &Context, _ast: &Expr) -> Result<UnitMap> {
+    Ok(UnitMap::new())
 }
 
 #[test]
@@ -111,6 +132,40 @@ fn test_context_creation() {
     };
 
     assert_eq!(expected, Context::new(simple_units).unwrap());
+
+    let _more_units = &[
+        Unit {
+            name: "time".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec![],
+        },
+        Unit {
+            name: "invtime".to_owned(),
+            equation: Some("1/time".to_owned()),
+            disabled: false,
+            aliases: vec![],
+        },
+    ];
+
+    let _expected2 = Context {
+        aliases: HashMap::new(),
+        units: [
+            (
+                "time".to_owned(),
+                [("time".to_owned(), 1)].iter().cloned().collect(),
+            ),
+            (
+                "invtime".to_owned(),
+                [("time".to_owned(), -1)].iter().cloned().collect(),
+            ),
+        ]
+        .iter()
+        .cloned()
+        .collect(),
+    };
+
+    // assert_eq!(expected2, Context::new(more_units).unwrap());
 }
 
 #[test]

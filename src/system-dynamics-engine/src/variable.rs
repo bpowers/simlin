@@ -218,11 +218,16 @@ fn parse_equation(
 ) -> (Option<AST>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
-            let (ast, errors) = parse_single_equation(eqn);
-            (ast.map(AST::Scalar), errors)
+            match parse_single_equation(eqn).map(|eqn| eqn.map(AST::Scalar)) {
+                Ok(expr) => (expr, vec![]),
+                Err(errors) => (None, errors),
+            }
         }
         datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
-            let (ast, mut errors) = parse_single_equation(eqn);
+            let (ast, mut errors) = match parse_single_equation(eqn) {
+                Ok(expr) => (expr, vec![]),
+                Err(errors) => (None, errors),
+            };
             match get_dimensions(dimensions, dimension_names) {
                 Ok(dims) => (ast.map(|ast| AST::ApplyToAll(dims, ast)), errors),
                 Err(err) => {
@@ -236,7 +241,10 @@ fn parse_equation(
             let elements: Vec<_> = elements
                 .iter()
                 .map(|(subscript, equation)| {
-                    let (ast, single_errors) = parse_single_equation(equation);
+                    let (ast, single_errors) = match parse_single_equation(equation) {
+                        Ok(expr) => (expr, vec![]),
+                        Err(errors) => (None, errors),
+                    };
                     errors.extend(single_errors);
                     (subscript.clone(), ast)
                 })
@@ -516,164 +524,6 @@ fn test_identifier_sets() {
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
         let id_set_test = identifier_set(&ast, &dimensions);
         assert_eq!(id_set_expected, id_set_test);
-    }
-}
-
-#[test]
-fn test_parse() {
-    use crate::ast::BinaryOp::*;
-    use crate::ast::Expr::*;
-
-    let if1 = Box::new(If(
-        Box::new(Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Const("2".to_string(), 2.0, Loc::default())),
-        Box::new(Const("3".to_string(), 3.0, Loc::default())),
-        Loc::default(),
-    ));
-
-    let if2 = Box::new(If(
-        Box::new(Op2(
-            Eq,
-            Box::new(Var("blerg".to_string(), Loc::default())),
-            Box::new(Var("foo".to_string(), Loc::default())),
-            Loc::default(),
-        )),
-        Box::new(Const("2".to_string(), 2.0, Loc::default())),
-        Box::new(Const("3".to_string(), 3.0, Loc::default())),
-        Loc::default(),
-    ));
-
-    let if3 = Box::new(If(
-        Box::new(Op2(
-            Eq,
-            Box::new(Var("quotient".to_string(), Loc::default())),
-            Box::new(Var("quotient_target".to_string(), Loc::default())),
-            Loc::default(),
-        )),
-        Box::new(Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Const("0".to_string(), 0.0, Loc::default())),
-        Loc::default(),
-    ));
-
-    let if4 = Box::new(If(
-        Box::new(Op2(
-            And,
-            Box::new(Var("true_input".to_string(), Loc::default())),
-            Box::new(Var("false_input".to_string(), Loc::default())),
-            Loc::default(),
-        )),
-        Box::new(Const("1".to_string(), 1.0, Loc::default())),
-        Box::new(Const("0".to_string(), 0.0, Loc::default())),
-        Loc::default(),
-    ));
-
-    let quoting_eq = Box::new(Op2(
-        Eq,
-        Box::new(Var("oh_dear".to_string(), Loc::default())),
-        Box::new(Var("oh_dear".to_string(), Loc::default())),
-        Loc::default(),
-    ));
-
-    let subscript1 = Box::new(Subscript(
-        "a".to_owned(),
-        vec![Const("1".to_owned(), 1.0, Loc::default())],
-        Loc::default(),
-    ));
-    let subscript2 = Box::new(Subscript(
-        "a".to_owned(),
-        vec![
-            Const("2".to_owned(), 2.0, Loc::default()),
-            App(
-                "int".to_owned(),
-                vec![Var("b".to_owned(), Loc::default())],
-                Loc::default(),
-            ),
-        ],
-        Loc::default(),
-    ));
-
-    use crate::ast::print_eqn;
-
-    let cases = [
-        ("if 1 then 2 else 3", if1, "if (1) then (2) else (3)"),
-        (
-            "if blerg = foo then 2 else 3",
-            if2,
-            "if ((blerg = foo)) then (2) else (3)",
-        ),
-        (
-            "IF quotient = quotient_target THEN 1 ELSE 0",
-            if3.clone(),
-            "if ((quotient = quotient_target)) then (1) else (0)",
-        ),
-        (
-            "(IF quotient = quotient_target THEN 1 ELSE 0)",
-            if3.clone(),
-            "if ((quotient = quotient_target)) then (1) else (0)",
-        ),
-        (
-            "( IF true_input and false_input THEN 1 ELSE 0 )",
-            if4.clone(),
-            "if ((true_input && false_input)) then (1) else (0)",
-        ),
-        (
-            "( IF true_input && false_input THEN 1 ELSE 0 )",
-            if4.clone(),
-            "if ((true_input && false_input)) then (1) else (0)",
-        ),
-        (
-            "\"oh dear\" = oh_dear",
-            quoting_eq.clone(),
-            "(oh_dear = oh_dear)",
-        ),
-        ("a[1]", subscript1.clone(), "a[1]"),
-        ("a[2, INT(b)]", subscript2.clone(), "a[2, int(b)]"),
-    ];
-
-    for case in cases.iter() {
-        let eqn = case.0;
-        let (ast, err) = parse_single_equation(eqn);
-        assert_eq!(err.len(), 0);
-        assert!(ast.is_some());
-        let ast = ast.unwrap().strip_loc();
-        assert_eq!(&*case.1, &ast);
-        let printed = print_eqn(&ast);
-        assert_eq!(case.2, &printed);
-    }
-
-    let (ast, err) = parse_single_equation("NAN");
-    assert_eq!(err.len(), 0);
-    assert!(ast.is_some());
-    let ast = ast.unwrap();
-    assert!(matches!(&ast, Expr::Const(_, _, _)));
-    if let Expr::Const(id, n, _) = &ast {
-        assert_eq!("NaN", id);
-        assert!(n.is_nan());
-    }
-    let printed = print_eqn(&ast);
-    assert_eq!("NaN", &printed);
-}
-
-#[test]
-fn test_parse_failures() {
-    let failures = &[
-        "(",
-        "(3",
-        "3 +",
-        "3 *",
-        "(3 +)",
-        "call(a,",
-        "call(a,1+",
-        "if if",
-        "if 1 then",
-        "if then",
-        "if 1 then 2 else",
-    ];
-
-    for case in failures {
-        let (ast, err) = parse_single_equation(case);
-        assert!(ast.is_none());
-        assert!(err.len() > 0);
     }
 }
 

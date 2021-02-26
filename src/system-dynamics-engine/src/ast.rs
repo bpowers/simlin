@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
+use std::result::Result as StdResult;
 
 use lalrpop_util::ParseError;
 
@@ -132,12 +133,12 @@ impl Default for Expr {
     }
 }
 
-pub fn parse_equation(eqn: &str) -> (Option<Expr>, Vec<EquationError>) {
+pub fn parse_equation(eqn: &str) -> StdResult<Option<Expr>, Vec<EquationError>> {
     let mut errs = Vec::new();
 
     let lexer = crate::token::Lexer::new(eqn);
     match crate::equation::EquationParser::new().parse(eqn, lexer) {
-        Ok(ast) => (Some(ast), errs),
+        Ok(ast) => Ok(Some(ast)),
         Err(err) => {
             use crate::common::ErrorCode::*;
             let err = match err {
@@ -151,9 +152,10 @@ pub fn parse_equation(eqn: &str) -> (Option<Expr>, Vec<EquationError>) {
                     expected: _e,
                 } => {
                     // if we get an EOF at position 0, that simply means
-                    // we have an empty (or comment-only) equation
+                    // we have an empty (or comment-only) equation.  Its not
+                    // an _error_, but we also don't have an AST
                     if l == 0 {
-                        return (None, errs);
+                        return Ok(None);
                     }
                     // TODO: we can give a more precise error message here, including what
                     //   types of tokens would be ok
@@ -182,8 +184,163 @@ pub fn parse_equation(eqn: &str) -> (Option<Expr>, Vec<EquationError>) {
 
             errs.push(err);
 
-            (None, errs)
+            Err(errs)
         }
+    }
+}
+
+#[test]
+fn test_parse() {
+    use crate::ast::BinaryOp::*;
+    use crate::ast::Expr::*;
+
+    let if1 = Box::new(If(
+        Box::new(Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Const("2".to_string(), 2.0, Loc::default())),
+        Box::new(Const("3".to_string(), 3.0, Loc::default())),
+        Loc::default(),
+    ));
+
+    let if2 = Box::new(If(
+        Box::new(Op2(
+            Eq,
+            Box::new(Var("blerg".to_string(), Loc::default())),
+            Box::new(Var("foo".to_string(), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Const("2".to_string(), 2.0, Loc::default())),
+        Box::new(Const("3".to_string(), 3.0, Loc::default())),
+        Loc::default(),
+    ));
+
+    let if3 = Box::new(If(
+        Box::new(Op2(
+            Eq,
+            Box::new(Var("quotient".to_string(), Loc::default())),
+            Box::new(Var("quotient_target".to_string(), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Const("0".to_string(), 0.0, Loc::default())),
+        Loc::default(),
+    ));
+
+    let if4 = Box::new(If(
+        Box::new(Op2(
+            And,
+            Box::new(Var("true_input".to_string(), Loc::default())),
+            Box::new(Var("false_input".to_string(), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Const("1".to_string(), 1.0, Loc::default())),
+        Box::new(Const("0".to_string(), 0.0, Loc::default())),
+        Loc::default(),
+    ));
+
+    let quoting_eq = Box::new(Op2(
+        Eq,
+        Box::new(Var("oh_dear".to_string(), Loc::default())),
+        Box::new(Var("oh_dear".to_string(), Loc::default())),
+        Loc::default(),
+    ));
+
+    let subscript1 = Box::new(Subscript(
+        "a".to_owned(),
+        vec![Const("1".to_owned(), 1.0, Loc::default())],
+        Loc::default(),
+    ));
+    let subscript2 = Box::new(Subscript(
+        "a".to_owned(),
+        vec![
+            Const("2".to_owned(), 2.0, Loc::default()),
+            App(
+                "int".to_owned(),
+                vec![Var("b".to_owned(), Loc::default())],
+                Loc::default(),
+            ),
+        ],
+        Loc::default(),
+    ));
+
+    use crate::ast::print_eqn;
+
+    let cases = [
+        ("if 1 then 2 else 3", if1, "if (1) then (2) else (3)"),
+        (
+            "if blerg = foo then 2 else 3",
+            if2,
+            "if ((blerg = foo)) then (2) else (3)",
+        ),
+        (
+            "IF quotient = quotient_target THEN 1 ELSE 0",
+            if3.clone(),
+            "if ((quotient = quotient_target)) then (1) else (0)",
+        ),
+        (
+            "(IF quotient = quotient_target THEN 1 ELSE 0)",
+            if3.clone(),
+            "if ((quotient = quotient_target)) then (1) else (0)",
+        ),
+        (
+            "( IF true_input and false_input THEN 1 ELSE 0 )",
+            if4.clone(),
+            "if ((true_input && false_input)) then (1) else (0)",
+        ),
+        (
+            "( IF true_input && false_input THEN 1 ELSE 0 )",
+            if4.clone(),
+            "if ((true_input && false_input)) then (1) else (0)",
+        ),
+        (
+            "\"oh dear\" = oh_dear",
+            quoting_eq.clone(),
+            "(oh_dear = oh_dear)",
+        ),
+        ("a[1]", subscript1.clone(), "a[1]"),
+        ("a[2, INT(b)]", subscript2.clone(), "a[2, int(b)]"),
+    ];
+
+    for case in cases.iter() {
+        let eqn = case.0;
+        let ast = parse_equation(eqn).unwrap();
+        assert!(ast.is_some());
+        let ast = ast.unwrap().strip_loc();
+        assert_eq!(&*case.1, &ast);
+        let printed = print_eqn(&ast);
+        assert_eq!(case.2, &printed);
+    }
+
+    let ast = parse_equation("NAN").unwrap();
+    assert!(ast.is_some());
+    let ast = ast.unwrap();
+    assert!(matches!(&ast, Expr::Const(_, _, _)));
+    if let Expr::Const(id, n, _) = &ast {
+        assert_eq!("NaN", id);
+        assert!(n.is_nan());
+    }
+    let printed = print_eqn(&ast);
+    assert_eq!("NaN", &printed);
+}
+
+#[test]
+fn test_parse_failures() {
+    let failures = &[
+        "(",
+        "(3",
+        "3 +",
+        "3 *",
+        "(3 +)",
+        "call(a,",
+        "call(a,1+",
+        "if if",
+        "if 1 then",
+        "if then",
+        "if 1 then 2 else",
+    ];
+
+    for case in failures {
+        let err = parse_equation(case).unwrap_err();
+        assert!(err.len() > 0);
     }
 }
 
