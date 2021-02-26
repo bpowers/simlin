@@ -4,11 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lalrpop_util::ParseError;
-
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{self, Expr, Visitor, AST};
+use crate::ast::{parse_equation as parse_single_equation, Expr, Visitor, AST};
 use crate::builtins::{is_builtin_fn, is_builtin_fn_or_time};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident};
@@ -256,61 +254,6 @@ fn parse_equation(
                     (None, errors)
                 }
             }
-        }
-    }
-}
-
-fn parse_single_equation(eqn: &str) -> (Option<ast::Expr>, Vec<EquationError>) {
-    let mut errs = Vec::new();
-
-    let lexer = crate::token::Lexer::new(eqn);
-    match crate::equation::EquationParser::new().parse(eqn, lexer) {
-        Ok(ast) => (Some(ast), errs),
-        Err(err) => {
-            use crate::common::ErrorCode::*;
-            let err = match err {
-                ParseError::InvalidToken { location: l } => EquationError {
-                    start: l as u16,
-                    end: (l + 1) as u16,
-                    code: InvalidToken,
-                },
-                ParseError::UnrecognizedEOF {
-                    location: l,
-                    expected: _e,
-                } => {
-                    // if we get an EOF at position 0, that simply means
-                    // we have an empty (or comment-only) equation
-                    if l == 0 {
-                        return (None, errs);
-                    }
-                    // TODO: we can give a more precise error message here, including what
-                    //   types of tokens would be ok
-                    EquationError {
-                        start: l as u16,
-                        end: (l + 1) as u16,
-                        code: UnrecognizedEOF,
-                    }
-                }
-                ParseError::UnrecognizedToken {
-                    token: (l, _t, r), ..
-                } => EquationError {
-                    start: l as u16,
-                    end: r as u16,
-                    code: UnrecognizedToken,
-                },
-                ParseError::ExtraToken {
-                    token: (l, _t, r), ..
-                } => EquationError {
-                    start: l as u16,
-                    end: r as u16,
-                    code: ExtraToken,
-                },
-                ParseError::User { error: e } => e,
-            };
-
-            errs.push(err);
-
-            (None, errs)
         }
     }
 }
