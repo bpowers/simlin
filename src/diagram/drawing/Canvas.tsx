@@ -1339,7 +1339,7 @@ export const Canvas = withStyles(styles)(
           zOrder = 5;
         } else if (element instanceof ModuleViewElement) {
           component = this.module(element);
-          zOrder = 1;
+          zOrder = 4;
         }
 
         if (!component) {
