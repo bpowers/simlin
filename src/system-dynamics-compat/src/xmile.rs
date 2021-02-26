@@ -1,4 +1,4 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -80,7 +80,16 @@ impl ToXML<XMLWriter> for File {
             sim_specs.write_xml(writer)?;
         }
 
-        // TODO: units
+        if let Some(Units {
+            unit: Some(ref units),
+        }) = self.units
+        {
+            write_tag_start(writer, "model_units")?;
+            for unit in units.iter() {
+                unit.write_xml(writer)?;
+            }
+            write_tag_end(writer, "model_units")?;
+        }
 
         if let Some(Dimensions {
             dimensions: Some(ref dimensions),
@@ -130,6 +139,15 @@ impl From<File> for datamodel::Project {
                     .map(datamodel::Dimension::from)
                     .collect(),
             },
+            units: match file.units {
+                None => vec![],
+                Some(units) => units
+                    .unit
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(datamodel::Unit::from)
+                    .collect(),
+            },
             models: file
                 .models
                 .into_iter()
@@ -171,7 +189,6 @@ impl From<datamodel::Project> for File {
                 includes: None,
             }),
             sim_specs: Some(project.sim_specs.into()),
-            units: None,
             dimensions: if project.dimensions.is_empty() {
                 None
             } else {
@@ -183,6 +200,13 @@ impl From<datamodel::Project> for File {
                             .map(Dimension::from)
                             .collect(),
                     ),
+                })
+            },
+            units: if project.units.is_empty() {
+                None
+            } else {
+                Some(Units {
+                    unit: Some(project.units.into_iter().map(Unit::from).collect()),
                 })
             },
             behavior: None,
@@ -825,6 +849,89 @@ pub struct Unit {
     pub eqn: Option<String>,
     pub alias: Option<Vec<String>>,
     pub disabled: Option<bool>,
+}
+
+impl ToXML<XMLWriter> for Unit {
+    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+        let mut attrs = vec![("name", self.name.as_str())];
+        if matches!(self.disabled, Some(true)) {
+            attrs.push(("disabled", "true"));
+        }
+        write_tag_start_with_attrs(writer, "unit", &attrs)?;
+
+        if let Some(ref eqn) = self.eqn {
+            write_tag(writer, "eqn", eqn)?;
+        }
+
+        if let Some(ref aliases) = self.alias {
+            for alias in aliases.iter() {
+                write_tag(writer, "alias", alias)?;
+            }
+        }
+
+        write_tag_end(writer, "unit")
+    }
+}
+
+impl From<datamodel::Unit> for Unit {
+    fn from(unit: datamodel::Unit) -> Self {
+        Unit {
+            name: unit.name,
+            eqn: unit.equation,
+            disabled: if unit.disabled { Some(true) } else { None },
+            alias: if unit.aliases.is_empty() {
+                None
+            } else {
+                Some(unit.aliases)
+            },
+        }
+    }
+}
+
+impl From<Unit> for datamodel::Unit {
+    fn from(unit: Unit) -> Self {
+        datamodel::Unit {
+            name: unit.name,
+            equation: if let Some(eqn) = unit.eqn {
+                if eqn.is_empty() {
+                    None
+                } else {
+                    Some(eqn)
+                }
+            } else {
+                None
+            },
+            disabled: matches!(unit.disabled, Some(true)),
+            aliases: if let Some(aliases) = unit.alias {
+                aliases
+            } else {
+                vec![]
+            },
+        }
+    }
+}
+
+#[test]
+fn test_unit_roundtrip() {
+    let cases: &[_] = &[
+        datamodel::Unit {
+            name: "people".to_string(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["peoples".to_owned(), "person".to_owned()],
+        },
+        datamodel::Unit {
+            name: "cows".to_string(),
+            equation: Some("1/people".to_owned()),
+            disabled: true,
+            aliases: vec![],
+        },
+    ];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = datamodel::Unit::from(Unit::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]

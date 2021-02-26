@@ -32,6 +32,7 @@ mod stdlib {
 
 mod bytecode;
 mod interpreter;
+mod units;
 mod vm;
 
 pub use self::common::{canonicalize, Error, ErrorCode, Ident, Result};

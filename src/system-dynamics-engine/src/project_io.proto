@@ -246,6 +246,13 @@ message Dimension {
   repeated string elements = 2;
 };
 
+message Unit {
+  string name = 1;
+  string equation = 2;
+  bool disabled = 3;
+  repeated string alias = 4;
+};
+
 // often we want to import or export a project to a string; whether it is
 // an XMILE model, Vensim, or something else.  This is very useful for
 // debugging import problems, and can be used to send both the protobuf and
@@ -264,6 +271,7 @@ message Project {
   string name = 1;
   SimSpecs sim_specs = 2;
   repeated Dimension dimensions = 4;
+  repeated Unit units = 6;
   repeated Model models = 3;
   Source source = 5;
 };

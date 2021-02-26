@@ -378,6 +378,14 @@ impl Dimension {
     }
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub struct Unit {
+    pub name: String,
+    pub equation: Option<String>,
+    pub disabled: bool,
+    pub aliases: Vec<String>,
+}
+
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Extension {
@@ -397,6 +405,7 @@ pub struct Project {
     pub name: String,
     pub sim_specs: SimSpecs,
     pub dimensions: Vec<Dimension>,
+    pub units: Vec<Unit>,
     pub models: Vec<Model>,
     pub source: Option<Source>,
 }

@@ -7,7 +7,7 @@ use float_cmp::approx_eq;
 use crate::datamodel::{
     view_element, Aux, Dimension, Dt, Equation, Extension, Flow, GraphicalFunction,
     GraphicalFunctionKind, GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect,
-    SimMethod, SimSpecs, Source, Stock, StockFlow, Variable, View, ViewElement,
+    SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement,
 };
 use crate::project_io;
 
@@ -1447,6 +1447,32 @@ impl From<project_io::Source> for Source {
     }
 }
 
+impl From<Unit> for project_io::Unit {
+    fn from(unit: Unit) -> Self {
+        project_io::Unit {
+            name: unit.name,
+            equation: unit.equation.unwrap_or_default(),
+            disabled: unit.disabled,
+            alias: unit.aliases,
+        }
+    }
+}
+
+impl From<project_io::Unit> for Unit {
+    fn from(unit: project_io::Unit) -> Self {
+        Unit {
+            name: unit.name,
+            equation: if unit.equation.is_empty() {
+                None
+            } else {
+                Some(unit.equation)
+            },
+            disabled: unit.disabled,
+            aliases: unit.alias,
+        }
+    }
+}
+
 impl From<Project> for project_io::Project {
     fn from(project: Project) -> Self {
         project_io::Project {
@@ -1456,6 +1482,11 @@ impl From<Project> for project_io::Project {
                 .dimensions
                 .into_iter()
                 .map(project_io::Dimension::from)
+                .collect(),
+            units: project
+                .units
+                .into_iter()
+                .map(project_io::Unit::from)
                 .collect(),
             models: project
                 .models
@@ -1477,6 +1508,7 @@ impl From<project_io::Project> for Project {
                 .into_iter()
                 .map(Dimension::from)
                 .collect(),
+            units: project.units.into_iter().map(Unit::from).collect(),
             models: project.models.into_iter().map(Model::from).collect(),
             source: project.source.map(|source| source.into()),
         }

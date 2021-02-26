@@ -2281,6 +2281,7 @@ fn test_arrays() {
                 name: "letters".to_owned(),
                 elements: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
             }],
+            units: vec![],
             models: vec![Model {
                 name: "main".to_owned(),
                 variables: vec![
