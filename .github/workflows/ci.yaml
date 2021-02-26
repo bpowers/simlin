@@ -112,7 +112,7 @@ jobs:
       - name: Build the extension
         run: |
           yarn install
-          yarn build
+          DISABLE_WASM_OPT=1 yarn build
           cd src/jupyter
           yarn build:prod
           yarn lint
