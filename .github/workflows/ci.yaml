@@ -117,8 +117,5 @@ jobs:
           yarn build:prod
           yarn lint
           python -m pip install .
-
-          jupyter serverextension list 2>&1 | grep -ie "simlin.*OK"
-
-          jupyter labextension list 2>&1 | grep -ie "simlin.*OK"
+          jupyter labextension list 2>&1 | grep -ie "jupyter-simlin.*OK"
           python -m jupyterlab.browser_check
