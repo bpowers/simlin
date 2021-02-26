@@ -1066,6 +1066,40 @@ export namespace Dimension {
   };
 }
 
+export class Unit extends jspb.Message {
+  getName(): string;
+  setName(value: string): void;
+
+  getEquation(): string;
+  setEquation(value: string): void;
+
+  getDisabled(): boolean;
+  setDisabled(value: boolean): void;
+
+  clearAliasList(): void;
+  getAliasList(): Array<string>;
+  setAliasList(value: Array<string>): void;
+  addAlias(value: string, index?: number): string;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): Unit.AsObject;
+  static toObject(includeInstance: boolean, msg: Unit): Unit.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: Unit, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): Unit;
+  static deserializeBinaryFromReader(message: Unit, reader: jspb.BinaryReader): Unit;
+}
+
+export namespace Unit {
+  export type AsObject = {
+    name: string;
+    equation: string;
+    disabled: boolean;
+    aliasList: Array<string>;
+  };
+}
+
 export class Source extends jspb.Message {
   getExtension(): Source.ExtensionMap[keyof Source.ExtensionMap];
   setExtension(value: Source.ExtensionMap[keyof Source.ExtensionMap]): void;
@@ -1112,6 +1146,11 @@ export class Project extends jspb.Message {
   setDimensionsList(value: Array<Dimension>): void;
   addDimensions(value?: Dimension, index?: number): Dimension;
 
+  clearUnitsList(): void;
+  getUnitsList(): Array<Unit>;
+  setUnitsList(value: Array<Unit>): void;
+  addUnits(value?: Unit, index?: number): Unit;
+
   clearModelsList(): void;
   getModelsList(): Array<Model>;
   setModelsList(value: Array<Model>): void;
@@ -1137,6 +1176,7 @@ export namespace Project {
     name: string;
     simSpecs?: SimSpecs.AsObject;
     dimensionsList: Array<Dimension.AsObject>;
+    unitsList: Array<Unit.AsObject>;
     modelsList: Array<Model.AsObject>;
     source?: Source.AsObject;
   };
