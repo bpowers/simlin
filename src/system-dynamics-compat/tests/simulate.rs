@@ -13,8 +13,9 @@ use csv;
 use float_cmp::approx_eq;
 
 use system_dynamics_compat::xmile;
-use system_dynamics_engine::VM;
-use system_dynamics_engine::{canonicalize, Method, Project, Results, SimSpecs, Simulation};
+use system_dynamics_engine::project_io;
+use system_dynamics_engine::serde::{deserialize, serialize};
+use system_dynamics_engine::{canonicalize, Method, Project, Results, SimSpecs, Simulation, VM};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
@@ -247,11 +248,32 @@ fn simulate_path(xmile_path: &str) {
     ensure_results(&expected, &results1);
     ensure_results(&expected, &results2);
 
+    // serialized our project through protobufs and ensure we don't see problems
+    let results3 = {
+        use system_dynamics_compat::prost::Message;
+
+        let pb_project_inner = serialize(&datamodel_project);
+        let pb_project = &pb_project_inner;
+        let mut buf = Vec::with_capacity(pb_project.encoded_len());
+        pb_project.encode(&mut buf).unwrap();
+
+        let datamodel_project2 = deserialize(project_io::Project::decode(&*buf).unwrap());
+        assert_eq!(datamodel_project, datamodel_project2);
+        let project = Project::from(datamodel_project2.clone());
+        let project = Rc::new(project);
+        let sim = Simulation::new(&project, "main").unwrap();
+        let compiled_sim = sim.compile().unwrap();
+        let mut vm = VM::new(compiled_sim).unwrap();
+        vm.run_to_end().unwrap();
+        vm.into_results()
+    };
+    ensure_results(&expected, &results3);
+
     // serialize our project back to XMILE
     let serialized_xmile = xmile::project_to_xmile(&datamodel_project).unwrap();
 
     // and then read it back in from the XMILE string and simulate it
-    let (roundtripped_project, results3) = {
+    let (roundtripped_project, results4) = {
         let mut xmile_reader = BufReader::new(serialized_xmile.as_bytes());
         // eprintln!("xmile:\n{}", serialized_xmile);
         let roundtripped_project = xmile::project_from_reader(&mut xmile_reader).unwrap();
@@ -266,7 +288,7 @@ fn simulate_path(xmile_path: &str) {
         vm.run_to_end().unwrap();
         (roundtripped_project, vm.into_results())
     };
-    ensure_results(&expected, &results3);
+    ensure_results(&expected, &results4);
 
     // finally ensure that if we re-serialize to XMILE the results are
     // byte-for-byte identical (we aren't losing any information)
