@@ -33,7 +33,7 @@ import {
   Rect as ViewRect,
 } from '@system-dynamics/core/datamodel';
 
-import { Aux, auxBounds, auxContains, AuxProps } from './Aux';
+import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
 import { Connector, ConnectorProps } from './Connector';
