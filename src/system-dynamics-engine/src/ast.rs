@@ -31,6 +31,18 @@ impl Loc {
     }
 }
 
+#[test]
+fn test_loc_basics() {
+    let a = Loc { start: 3, end: 7 };
+    assert_eq!(a, Loc::new(3, 7));
+
+    let b = Loc { start: 4, end: 11 };
+    assert_eq!(Loc::new(3, 11), a.union(&b));
+
+    let c = Loc { start: 1, end: 5 };
+    assert_eq!(Loc::new(1, 7), a.union(&c));
+}
+
 // we use Boxs here because we may walk and update ASTs a number of times,
 // and we want to avoid copying and reallocating subexpressions all over
 // the place.
