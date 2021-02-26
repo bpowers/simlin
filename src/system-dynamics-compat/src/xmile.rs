@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Cursor, Write};
 
+use float_cmp::approx_eq;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
-use float_cmp::approx_eq;
 
 use crate::xmile::view_element::LinkEnd;
 use system_dynamics_engine::common::{canonicalize, Result};
@@ -2616,10 +2616,12 @@ impl From<View> for datamodel::View {
                 view_box,
                 zoom: match v.zoom {
                     None => 1.0,
-                    Some(zoom) => if approx_eq!(f64, zoom, 0.0) {
-                        1.0
-                    } else {
-                        zoom
+                    Some(zoom) => {
+                        if approx_eq!(f64, zoom, 0.0) {
+                            1.0
+                        } else {
+                            zoom
+                        }
                     }
                 },
             })
