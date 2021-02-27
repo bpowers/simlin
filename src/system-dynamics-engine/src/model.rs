@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::variable::{parse_var, ModuleInput, Variable};
-use crate::{datamodel, eqn_err, model_err};
+use crate::{canonicalize, datamodel, eqn_err, model_err};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
@@ -144,17 +144,18 @@ pub fn resolve_relative<'a>(
     }
 }
 
+// parent_module_name is the name of the model that has the module instantiation,
+// _not_ the name of the model this module instantiates
 pub fn resolve_module_input<'a>(
     models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
-    model_name: &str,
+    parent_model_name: &str,
     ident: &str,
     orig_src: &'a str,
     orig_dst: &'a str,
-) -> EquationResult<ModuleInput> {
-    use crate::common::canonicalize;
+) -> EquationResult<Option<ModuleInput>> {
     let input_prefix = format!("{}.", ident);
     let maybe_strip_leading_dot = |s: &'a str| -> &'a str {
-        if model_name == "main" && s.starts_with('.') {
+        if parent_model_name == "main" && s.starts_with('.') {
             &s[1..]
         } else {
             s
@@ -162,6 +163,13 @@ pub fn resolve_module_input<'a>(
     };
     let src: Ident = canonicalize(maybe_strip_leading_dot(orig_src));
     let dst: Ident = canonicalize(maybe_strip_leading_dot(orig_dst));
+
+    // Stella has a bug where if you have one module feeding into another,
+    // it writes identical tags to both.  So skip the tag that is non-local
+    // but don't report it as an error
+    if src.starts_with(&input_prefix) {
+        return Ok(None);
+    }
 
     let dst = dst.strip_prefix(&input_prefix);
     if dst.is_none() {
@@ -172,11 +180,11 @@ pub fn resolve_module_input<'a>(
     // TODO: reevaluate if this is really the best option here
     // if the source is a temporary created by the engine, assume it is OK
     if (&src).starts_with("$·") {
-        return Ok(ModuleInput { src, dst });
+        return Ok(Some(ModuleInput { src, dst }));
     }
 
-    match resolve_relative(models, model_name, &src) {
-        Some(_) => Ok(ModuleInput { src, dst }),
+    match resolve_relative(models, parent_model_name, &src) {
+        Some(_) => Ok(Some(ModuleInput { src, dst })),
         None => eqn_err!(BadModuleInputSrc, 0, 0),
     }
 }
@@ -514,7 +522,7 @@ pub fn build_xvars_map(
     m: &datamodel::Model,
 ) -> (Ident, HashMap<Ident, &datamodel::Variable>) {
     (
-        name,
+        canonicalize(&name),
         m.variables
             .iter()
             .map(|v| (v.get_ident().to_string(), v))

@@ -1003,7 +1003,7 @@ impl From<Model> for datamodel::Model {
             })
             .collect();
         datamodel::Model {
-            name: model.name.unwrap_or_else(|| "main".to_string()),
+            name: canonicalize(model.name.as_deref().unwrap_or("main")),
             variables: match model.variables {
                 Some(Variables {
                     variables: Some(vars),

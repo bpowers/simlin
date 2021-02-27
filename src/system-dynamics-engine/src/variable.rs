@@ -372,7 +372,7 @@ pub fn parse_var(
         }
         datamodel::Variable::Module(v) => {
             let ident = v.ident.clone();
-            let inputs: Vec<EquationResult<ModuleInput>> = v
+            let inputs: Vec<EquationResult<Option<ModuleInput>>> = v
                 .references
                 .iter()
                 .map(|mi| {
@@ -381,7 +381,12 @@ pub fn parse_var(
                 .collect();
             let (inputs, errors): (Vec<_>, Vec<_>) =
                 inputs.into_iter().partition(EquationResult::is_ok);
-            let inputs: Vec<ModuleInput> = inputs.into_iter().map(|i| i.unwrap()).collect();
+            let inputs: Vec<ModuleInput> = inputs
+                .into_iter()
+                .map(|i| i.unwrap())
+                .filter(|i| i.is_some())
+                .map(|i| i.unwrap())
+                .collect();
             let errors: Vec<EquationError> = errors.into_iter().map(|e| e.unwrap_err()).collect();
 
             let direct_deps = inputs

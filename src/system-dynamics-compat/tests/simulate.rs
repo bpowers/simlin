@@ -324,6 +324,11 @@ fn simulates_modules() {
     simulate_path("../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx");
 }
 
+#[test]
+fn simulates_modules2() {
+    simulate_path("../../test/modules2/modules2.xmile");
+}
+
 // #[test]
 // fn simulates_land_model() {
 //     simulate_path("../../test/land_model/land_model.stmx");
