@@ -4,9 +4,15 @@ import { open } from '@system-dynamics/engine';
 
 const args = process.argv.slice(2);
 const inputFile = args[0];
-const pb = readFileSync(args[0]);
+const pb = readFileSync(inputFile);
 
 const engine = await open(pb);
+
+const simError = engine.getSimError();
+if (simError) {
+  console.log(`simulation error: ${simError.getDetails()} (code: ${simError.code})`);
+  process.exit(1);
+}
 
 engine.simRunToEnd();
 
