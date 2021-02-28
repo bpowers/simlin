@@ -361,10 +361,7 @@ fn test_basic_unit_parsing() {
         ),
         (
             "m^2/meters",
-            [("meter".to_owned(), 1)]
-                .iter()
-                .cloned()
-                .collect(),
+            [("meter".to_owned(), 1)].iter().cloned().collect(),
         ),
     ];
 
