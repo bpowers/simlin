@@ -50,6 +50,10 @@ pub enum ErrorCode {
     UnknownDependency,
     VariablesHaveErrors,
     Generic,
+    NoAppInUnits,
+    NoSubscriptInUnits,
+    NoIfInUnits,
+    ExpectedInteger,
 }
 
 impl fmt::Display for ErrorCode {
@@ -88,6 +92,10 @@ impl fmt::Display for ErrorCode {
             UnknownDependency => "unknown_dependency",
             VariablesHaveErrors => "variables_have_errors",
             Generic => "generic",
+            NoAppInUnits => "no_app_in_units",
+            NoSubscriptInUnits => "no_subscript_in_units",
+            NoIfInUnits => "no_if_in_units",
+            ExpectedInteger => "expected_integer",
         };
 
         write!(f, "{}", name)

@@ -5,9 +5,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::result::Result as StdResult;
 
-use crate::ast::{parse_equation, Expr};
-use crate::common::{EquationError, Result};
+use float_cmp::approx_eq;
+
+use crate::ast::{parse_equation, BinaryOp, Expr, UnaryOp};
+use crate::common::{EquationError, EquationResult};
 use crate::datamodel::Unit;
+use crate::eqn_err;
 
 type UnitMap = BTreeMap<String, i32>;
 
@@ -86,10 +89,101 @@ impl Context {
     }
 }
 
-#[allow(clippy::unnecessary_wraps)]
-fn build_unit_components(_ctx: &Context, _ast: &Expr) -> Result<UnitMap> {
-    Ok(UnitMap::new())
+#[allow(dead_code)]
+fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
+    match ast {
+        Expr::Const(_, n, loc) => {
+            if approx_eq!(f64, *n, n.round()) {
+                Ok(n.round() as i32)
+            } else {
+                eqn_err!(ExpectedInteger, loc.start, loc.end)
+            }
+        }
+        Expr::Var(_, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
+        }
+        Expr::App(_, _, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
+        }
+        Expr::Subscript(_, _, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
+        }
+        Expr::Op1(op, expr, _) => {
+            let expr = const_int_eval(expr)?;
+            let result = match op {
+                UnaryOp::Positive => expr,
+                UnaryOp::Negative => -expr,
+                UnaryOp::Not => {
+                    if expr == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+            };
+            Ok(result)
+        }
+        Expr::Op2(op, l, r, _) => {
+            let l = const_int_eval(l)?;
+            let r = const_int_eval(r)?;
+            let result = match op {
+                BinaryOp::Add => l + r,
+                BinaryOp::Sub => l - r,
+                BinaryOp::Exp => l.pow(r as u32),
+                BinaryOp::Mul => l * r,
+                BinaryOp::Div => {
+                    if r == 0 {
+                        0
+                    } else {
+                        l / r
+                    }
+                }
+                BinaryOp::Mod => l % r,
+                BinaryOp::Gt => (l > r) as i32,
+                BinaryOp::Lt => (l < r) as i32,
+                BinaryOp::Gte => (l >= r) as i32,
+                BinaryOp::Lte => (l <= r) as i32,
+                BinaryOp::Eq => (l == r) as i32,
+                BinaryOp::Neq => (l != r) as i32,
+                BinaryOp::And => ((l != 0) && (r != 0)) as i32,
+                BinaryOp::Or => ((l != 0) || (r != 0)) as i32,
+            };
+            Ok(result)
+        }
+        Expr::If(_, _, _, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
+        }
+    }
 }
+
+fn build_unit_components(_ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
+    let mut unit_map = UnitMap::new();
+
+    match ast {
+        Expr::Const(_, _, _) => {
+            // nothing to do here (handled below in Op2)
+        }
+        Expr::Var(id, _) => {
+            unit_map.insert(id.to_owned(), 1);
+        }
+        Expr::App(_, _, loc) => {
+            return eqn_err!(NoAppInUnits, loc.start, loc.end);
+        }
+        Expr::Subscript(_, _, loc) => {
+            return eqn_err!(NoSubscriptInUnits, loc.start, loc.end);
+        }
+        Expr::Op1(_op, _expr, _) => {}
+        Expr::Op2(_op, _l, _r, _) => {}
+        Expr::If(_, _, _, loc) => {
+            return eqn_err!(NoSubscriptInUnits, loc.start, loc.end);
+        }
+    }
+
+    Ok(unit_map)
+}
+
+// we have 2 problems here: the first (and simpler) is evaluating unit equations and turning them in to UnitMaps
+// the second is: given a context of unitmaps, can we check and _infer_ the types of variables
 
 #[test]
 fn test_context_creation() {
@@ -173,4 +267,41 @@ fn test_basic_unit_checks() {
     // from a set of datamodel::Units build a Context
 
     // with a context, check if a set of variables unit checks
+}
+
+#[test]
+fn test_const_int_eval() {
+    let positive_cases = &[
+        ("0", 0),
+        ("1", 1),
+        ("-1", -1),
+        ("1 * 1", 1),
+        ("2 / 3", 0),
+        ("4 - 1", 3),
+        ("15 mod 7", 1),
+        ("3^(1+2)", 27),
+        ("4 > 2", 1),
+        ("4 < 2", 0),
+        ("5 >= 5", 1),
+        ("7 <= 6", 0),
+        ("3 and 2", 1),
+        ("0 or 3", 1),
+    ];
+
+    for (input, output) in positive_cases {
+        let expr = parse_equation(input).unwrap().unwrap();
+        assert_eq!(*output, const_int_eval(&expr).unwrap());
+    }
+
+    use crate::common::ErrorCode;
+
+    let negative_cases = &["3.5", "foo", "if 1 then 2 else 3", "bar[2]", "foo(1, 2)"];
+
+    for input in negative_cases {
+        let expr = parse_equation(input).unwrap().unwrap();
+        assert_eq!(
+            ErrorCode::ExpectedInteger,
+            const_int_eval(&expr).unwrap_err().code
+        );
+    }
 }
