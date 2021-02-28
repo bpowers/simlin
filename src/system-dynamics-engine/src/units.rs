@@ -230,7 +230,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
             }
         },
         Expr::If(_, _, _, loc) => {
-            return eqn_err!(NoSubscriptInUnits, loc.start, loc.end);
+            return eqn_err!(NoIfInUnits, loc.start, loc.end);
         }
     };
 
@@ -293,12 +293,15 @@ fn test_context_creation() {
             name: "invtime".to_owned(),
             equation: Some("1/time".to_owned()),
             disabled: false,
-            aliases: vec![],
+            aliases: vec!["itime".to_owned()],
         },
     ];
 
     let expected2 = Context {
-        aliases: HashMap::new(),
+        aliases: [("itime".to_owned(), "invtime".to_owned())]
+            .iter()
+            .cloned()
+            .collect(),
         units: [
             (
                 "time".to_owned(),
@@ -347,7 +350,7 @@ fn test_basic_unit_parsing() {
     ])
     .unwrap();
 
-    let positive_cases: &[(&str, UnitMap); 3] = &[
+    let positive_cases: &[(&str, UnitMap); 4] = &[
         (
             "m^2/s",
             [("meter".to_owned(), 2), ("second".to_owned(), -1)]
@@ -362,6 +365,10 @@ fn test_basic_unit_parsing() {
         (
             "m^2/meters",
             [("meter".to_owned(), 1)].iter().cloned().collect(),
+        ),
+        (
+            "time * people / time",
+            [("people".to_owned(), 1)].iter().cloned().collect(),
         ),
     ];
 
@@ -379,6 +386,8 @@ fn test_basic_unit_parsing() {
         ("foo(time)", ErrorCode::NoAppInUnits),
         ("bar[time]", ErrorCode::NoSubscriptInUnits),
         ("-time", ErrorCode::NoUnaryOpInUnits),
+        ("if 1 then time else people", ErrorCode::NoIfInUnits),
+        ("time + people", ErrorCode::BadBinaryOpInUnits),
     ];
 
     for (input, output) in negative_cases {
@@ -403,6 +412,7 @@ fn test_const_int_eval() {
         ("-1", -1),
         ("1 * 1", 1),
         ("2 / 3", 0),
+        ("7 / 0", 0),
         ("4 - 1", 3),
         ("15 mod 7", 1),
         ("3^(1+2)", 27),
@@ -412,6 +422,10 @@ fn test_const_int_eval() {
         ("7 <= 6", 0),
         ("3 and 2", 1),
         ("0 or 3", 1),
+        ("3 = 3", 1),
+        ("3 <> 3", 0),
+        ("not 7", 0),
+        ("not 0", 1),
     ];
 
     for (input, output) in positive_cases {
