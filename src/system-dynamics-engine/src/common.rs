@@ -53,7 +53,11 @@ pub enum ErrorCode {
     NoAppInUnits,
     NoSubscriptInUnits,
     NoIfInUnits,
+    NoUnaryOpInUnits,
+    BadBinaryOpInUnits,
+    NoConstInUnits,
     ExpectedInteger,
+    ExpectedIntegerOne,
 }
 
 impl fmt::Display for ErrorCode {
@@ -95,7 +99,11 @@ impl fmt::Display for ErrorCode {
             NoAppInUnits => "no_app_in_units",
             NoSubscriptInUnits => "no_subscript_in_units",
             NoIfInUnits => "no_if_in_units",
+            NoUnaryOpInUnits => "no_unary_op_in_units",
+            BadBinaryOpInUnits => "bad_binary_op_in_units",
+            NoConstInUnits => "no_const_in_units",
             ExpectedInteger => "expected_integer",
+            ExpectedIntegerOne => "expected_integer_one",
         };
 
         write!(f, "{}", name)

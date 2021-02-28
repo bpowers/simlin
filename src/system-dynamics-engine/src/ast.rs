@@ -92,6 +92,18 @@ impl Expr {
         }
     }
 
+    pub(crate) fn get_loc(&self) -> Loc {
+        match self {
+            Expr::Const(_, _, loc) => *loc,
+            Expr::Var(_, loc) => *loc,
+            Expr::App(_, _, loc) => *loc,
+            Expr::Subscript(_, _, loc) => *loc,
+            Expr::Op1(_, _, loc) => *loc,
+            Expr::Op2(_, _, _, loc) => *loc,
+            Expr::If(_, _, _, loc) => *loc,
+        }
+    }
+
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Expr::Const(_s, _n, _loc) => None,

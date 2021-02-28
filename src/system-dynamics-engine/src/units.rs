@@ -156,28 +156,83 @@ fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
     }
 }
 
-fn build_unit_components(_ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
-    let mut unit_map = UnitMap::new();
-
-    match ast {
-        Expr::Const(_, _, _) => {
+fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
+    let unit_map: UnitMap = match ast {
+        Expr::Const(_, _, loc) => {
             // nothing to do here (handled below in Op2)
+            return eqn_err!(NoConstInUnits, loc.start, loc.end);
         }
         Expr::Var(id, _) => {
-            unit_map.insert(id.to_owned(), 1);
-        }
+            let id = ctx.aliases.get(id).unwrap_or(id);
+            [(id.to_owned(), 1)].iter().cloned().collect()
+        },
         Expr::App(_, _, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
         }
         Expr::Subscript(_, _, loc) => {
             return eqn_err!(NoSubscriptInUnits, loc.start, loc.end);
         }
-        Expr::Op1(_op, _expr, _) => {}
-        Expr::Op2(_op, _l, _r, _) => {}
+        Expr::Op1(_, _, loc) => {
+            return eqn_err!(NoUnaryOpInUnits, loc.start, loc.end);
+        }
+        Expr::Op2(op, l, r, loc) => match op {
+            BinaryOp::Exp => {
+                let exp = const_int_eval(r)?;
+                let mut unit_map = build_unit_components(ctx, l)?;
+                unit_map.iter_mut().for_each(|(_name, unit)| {
+                    *unit *= exp;
+                });
+                unit_map
+            }
+            BinaryOp::Mul => {
+                let mut unit_map = build_unit_components(ctx, l)?;
+                let r = build_unit_components(ctx, r)?;
+                for (unit, n) in r.into_iter() {
+                    let new_value = match unit_map.get(&unit) {
+                        None => n,
+                        Some(m) => n + *m,
+                    };
+                    unit_map.insert(unit, new_value);
+                }
+                unit_map
+            }
+            BinaryOp::Div => {
+                // check first for the reciprocal case -- 1/blah
+                if let Ok(i) = const_int_eval(l) {
+                    if i != 1 {
+                        let loc = l.get_loc();
+                        return eqn_err!(ExpectedIntegerOne, loc.start, loc.end);
+                    }
+                    let mut unit_map = build_unit_components(ctx, r)?;
+                    unit_map.iter_mut().for_each(|(_name, unit)| {
+                        *unit *= -1;
+                    });
+                    unit_map
+                } else {
+                    let mut unit_map = build_unit_components(ctx, l)?;
+                    let r = build_unit_components(ctx, r)?;
+                    for (unit, n) in r.into_iter() {
+                        let new_value = match unit_map.get(&unit) {
+                            None => -n,
+                            Some(m) => *m - n,
+                        };
+                        if new_value == 0 {
+                            unit_map.remove(&unit);
+                        } else {
+                            unit_map.insert(unit, new_value);
+                        }
+                    }
+                    unit_map
+                }
+            }
+            _ => {
+                return eqn_err!(BadBinaryOpInUnits, loc.start, loc.end);
+            }
+        },
         Expr::If(_, _, _, loc) => {
             return eqn_err!(NoSubscriptInUnits, loc.start, loc.end);
         }
-    }
+    };
 
     Ok(unit_map)
 }
@@ -227,7 +282,7 @@ fn test_context_creation() {
 
     assert_eq!(expected, Context::new(simple_units).unwrap());
 
-    let _more_units = &[
+    let more_units = &[
         Unit {
             name: "time".to_owned(),
             equation: None,
@@ -242,7 +297,7 @@ fn test_context_creation() {
         },
     ];
 
-    let _expected2 = Context {
+    let expected2 = Context {
         aliases: HashMap::new(),
         units: [
             (
@@ -259,7 +314,49 @@ fn test_context_creation() {
         .collect(),
     };
 
-    // assert_eq!(expected2, Context::new(more_units).unwrap());
+    assert_eq!(expected2, Context::new(more_units).unwrap());
+}
+
+#[test]
+fn test_basic_unit_parsing() {
+    let context = Context::new(&[
+        Unit {
+            name: "time".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec![],
+        },
+        Unit {
+            name: "people".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["person".to_owned(), "persons".to_owned()],
+        },
+        Unit {
+            name: "meter".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["m".to_owned(), "meters".to_owned()],
+        },
+        Unit {
+            name: "second".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["s".to_owned(), "seconds".to_owned()],
+        },
+    ]).unwrap();
+
+    let positive_cases: &[(&str, UnitMap); 2] = &[
+        ("m^2/s", [("meter".to_owned(), 2), ("second".to_owned(), -1)].iter().cloned().collect()),
+        ("person * people * persons", [("people".to_owned(), 3)].iter().cloned().collect()),
+    ];
+
+    for (input, output) in positive_cases {
+        let expr = parse_equation(input).unwrap().unwrap();
+        let result = build_unit_components(&context, &expr).unwrap();
+        assert_eq!(*output, result);
+    }
+
 }
 
 #[test]
