@@ -165,7 +165,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
         Expr::Var(id, _) => {
             let id = ctx.aliases.get(id).unwrap_or(id);
             [(id.to_owned(), 1)].iter().cloned().collect()
-        },
+        }
         Expr::App(_, _, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
         }
@@ -344,11 +344,21 @@ fn test_basic_unit_parsing() {
             disabled: false,
             aliases: vec!["s".to_owned(), "seconds".to_owned()],
         },
-    ]).unwrap();
+    ])
+    .unwrap();
 
     let positive_cases: &[(&str, UnitMap); 2] = &[
-        ("m^2/s", [("meter".to_owned(), 2), ("second".to_owned(), -1)].iter().cloned().collect()),
-        ("person * people * persons", [("people".to_owned(), 3)].iter().cloned().collect()),
+        (
+            "m^2/s",
+            [("meter".to_owned(), 2), ("second".to_owned(), -1)]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
+        (
+            "person * people * persons",
+            [("people".to_owned(), 3)].iter().cloned().collect(),
+        ),
     ];
 
     for (input, output) in positive_cases {
@@ -356,7 +366,6 @@ fn test_basic_unit_parsing() {
         let result = build_unit_components(&context, &expr).unwrap();
         assert_eq!(*output, result);
     }
-
 }
 
 #[test]
