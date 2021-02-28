@@ -347,7 +347,7 @@ fn test_basic_unit_parsing() {
     ])
     .unwrap();
 
-    let positive_cases: &[(&str, UnitMap); 2] = &[
+    let positive_cases: &[(&str, UnitMap); 3] = &[
         (
             "m^2/s",
             [("meter".to_owned(), 2), ("second".to_owned(), -1)]
@@ -359,12 +359,35 @@ fn test_basic_unit_parsing() {
             "person * people * persons",
             [("people".to_owned(), 3)].iter().cloned().collect(),
         ),
+        (
+            "m^2/meters",
+            [("meter".to_owned(), 1)]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
     ];
 
     for (input, output) in positive_cases {
         let expr = parse_equation(input).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
         assert_eq!(*output, result);
+    }
+
+    use crate::common::ErrorCode;
+
+    let negative_cases = &[
+        ("2 / time", ErrorCode::ExpectedIntegerOne),
+        ("2 * time", ErrorCode::NoConstInUnits),
+        ("foo(time)", ErrorCode::NoAppInUnits),
+        ("bar[time]", ErrorCode::NoSubscriptInUnits),
+        ("-time", ErrorCode::NoUnaryOpInUnits),
+    ];
+
+    for (input, output) in negative_cases {
+        let expr = parse_equation(input).unwrap().unwrap();
+        let result = build_unit_components(&context, &expr).unwrap_err();
+        assert_eq!(*output, result.code);
     }
 }
 
