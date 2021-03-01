@@ -60,6 +60,7 @@ pub enum ErrorCode {
     ExpectedIntegerOne,
 }
 
+#[cfg(not(tarpaulin_include))]
 impl fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use ErrorCode::*;
@@ -209,6 +210,7 @@ impl Error {
     }
 }
 
+#[cfg(not(tarpaulin_include))]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let kind = match self.kind {
