@@ -444,6 +444,27 @@ fn test_basic_unit_parsing() {
 
 #[test]
 fn test_basic_unit_checks() {
+    let _context = Context::new(&[
+        Unit {
+            name: "time".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec![],
+        },
+        Unit {
+            name: "people".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["person".to_owned(), "persons".to_owned()],
+        },
+        Unit {
+            name: "USD".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["dollar".to_owned(), "dollars".to_owned(), "$".to_owned()],
+        },
+    ])
+    .unwrap();
     // from a set of datamodel::Units build a Context
 
     // with a context, check if a set of variables unit checks
