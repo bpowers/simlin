@@ -58,6 +58,7 @@ pub enum ErrorCode {
     NoConstInUnits,
     ExpectedInteger,
     ExpectedIntegerOne,
+    DuplicateUnit,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -105,6 +106,7 @@ impl fmt::Display for ErrorCode {
             NoConstInUnits => "no_const_in_units",
             ExpectedInteger => "expected_integer",
             ExpectedIntegerOne => "expected_integer_one",
+            DuplicateUnit => "duplicate_unit",
         };
 
         write!(f, "{}", name)

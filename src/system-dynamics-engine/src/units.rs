@@ -8,7 +8,7 @@ use std::result::Result as StdResult;
 use float_cmp::approx_eq;
 
 use crate::ast::{parse_equation, BinaryOp, Expr, UnaryOp};
-use crate::common::{EquationError, EquationResult};
+use crate::common::{EquationError, EquationResult, ErrorCode};
 use crate::datamodel::Unit;
 use crate::eqn_err;
 
@@ -24,17 +24,41 @@ pub struct Context {
 impl Context {
     #[allow(dead_code)]
     fn new(units: &[Unit]) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+        let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
+
         // step 1: build our base context consisting of all prime units
         let mut aliases = HashMap::new();
         let mut parsed_units = HashMap::new();
         for unit in units.iter().filter(|unit| unit.equation.is_none()) {
             for alias in unit.aliases.iter() {
-                aliases.insert(alias.clone(), unit.name.clone());
+                if aliases.contains_key(alias) {
+                    unit_errors.push((
+                        unit.name.clone(),
+                        vec![EquationError {
+                            start: 0,
+                            end: 0,
+                            code: ErrorCode::DuplicateUnit,
+                        }],
+                    ));
+                } else {
+                    aliases.insert(alias.clone(), unit.name.clone());
+                }
             }
-            parsed_units.insert(
-                unit.name.clone(),
-                [(unit.name.clone(), 1)].iter().cloned().collect(),
-            );
+            if aliases.contains_key(&unit.name) || parsed_units.contains_key(&unit.name) {
+                unit_errors.push((
+                    unit.name.clone(),
+                    vec![EquationError {
+                        start: 0,
+                        end: 0,
+                        code: ErrorCode::DuplicateUnit,
+                    }],
+                ));
+            } else {
+                parsed_units.insert(
+                    unit.name.clone(),
+                    [(unit.name.clone(), 1)].iter().cloned().collect(),
+                );
+            }
         }
 
         let mut ctx = Context {
@@ -42,12 +66,21 @@ impl Context {
             units: parsed_units,
         };
 
-        let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
-
         // step 2: use this base context to parse our units with equations
         for unit in units.iter().filter(|unit| unit.equation.is_some()) {
             for alias in unit.aliases.iter() {
-                ctx.aliases.insert(alias.clone(), unit.name.clone());
+                if ctx.aliases.contains_key(alias) {
+                    unit_errors.push((
+                        unit.name.clone(),
+                        vec![EquationError {
+                            start: 0,
+                            end: 0,
+                            code: ErrorCode::DuplicateUnit,
+                        }],
+                    ));
+                } else {
+                    ctx.aliases.insert(alias.clone(), unit.name.clone());
+                }
             }
 
             let eqn = unit.equation.as_ref().unwrap();
@@ -78,7 +111,18 @@ impl Context {
                 None => [(unit.name.clone(), 1)].iter().cloned().collect(),
             };
 
-            ctx.units.insert(unit.name.clone(), unit_components);
+            if ctx.aliases.contains_key(&unit.name) || ctx.units.contains_key(&unit.name) {
+                unit_errors.push((
+                    unit.name.clone(),
+                    vec![EquationError {
+                        start: 0,
+                        end: 0,
+                        code: ErrorCode::DuplicateUnit,
+                    }],
+                ));
+            } else {
+                ctx.units.insert(unit.name.clone(), unit_components);
+            }
         }
 
         if unit_errors.is_empty() {
@@ -237,8 +281,9 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
     Ok(unit_map)
 }
 
-// we have 2 problems here: the first (and simpler) is evaluating unit equations and turning them in to UnitMaps
-// the second is: given a context of unitmaps, can we check and _infer_ the types of variables
+// we have 3 problems here: the first (and simpler) is evaluating unit equations and turning them in to UnitMaps (done)
+// the second is: given a context of unitmaps, can we _check_ the types of variables
+// the third is: if we only have _some_ units filled in, can we _infer_ the rest?
 
 #[test]
 fn test_context_creation() {
