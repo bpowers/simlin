@@ -4,35 +4,20 @@ set -euo pipefail
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
-# Check if jq is installed
-if ! [ -x "$(command -v jq)" ]; then
-    echo "jq is not installed" >& 2
-    exit 1
-fi
-
 # Clean previous packages
-if [ -d "pkg" ]; then
-    rm -rf pkg
-fi
+rm -rf lib lib.browser pkg pkg-node core
 
-if [ -d "pkg-node" ]; then
-    rm -rf pkg-node
-fi
+# Get the package name
+PKG_NAME=${PWD##*/}
 
-if [ -d "core" ]; then
-    rm -rf core
-fi
+cargo build --lib --release --target wasm32-unknown-unknown
 
-rm -rf lib lib.browser
-
-# Build for both targets
-CC=emcc CXX=em++ wasm-pack build --release -t nodejs -d pkg-node
-CC=emcc CXX=em++ wasm-pack build --release -t browser -d pkg
-
-rm pkg/package.json
-rm pkg/.gitignore
+echo "running wasm-bindgen"
+wasm-bindgen ../../target/wasm32-unknown-unknown/release/${PKG_NAME}.wasm --out-dir pkg --typescript --target web
+wasm-bindgen ../../target/wasm32-unknown-unknown/release/${PKG_NAME}.wasm --out-dir pkg-node --typescript --target nodejs
 
 if [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
+  echo "running wasm-opt"
   wasm-opt pkg/engine_bg.wasm -o pkg/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
   wasm-opt pkg-node/engine_bg.wasm -o pkg-node/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
   mv pkg/engine_bg.{wasm-opt.,}wasm
@@ -40,10 +25,6 @@ if [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
 else
   echo "skipping wasm-opt"
 fi
-
-
-# Get the package name
-PKG_NAME=${PWD##*/}
 
 mv pkg core
 
@@ -62,7 +43,5 @@ mv lib/index{_main,}.js
 mv lib/index{_main,}.js.map
 mv lib/index{_main,}.d.ts
 rm lib.browser/index_main*
-rm lib/core/package.json
-rm lib/core/.gitignore
 
 yarn format

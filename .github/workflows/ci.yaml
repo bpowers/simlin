@@ -106,7 +106,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
             toolchain: stable
-      - run: cargo install wasm-pack
+      - run: cargo install wasm-bindgen-cli
       - name: Install dependencies
         run: python -m pip install jupyterlab
       - name: Build the extension
