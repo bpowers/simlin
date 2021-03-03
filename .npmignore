@@ -1,7 +1,6 @@
 src
 .npmignore
 tsconfig*
-/*.ts
 /*.wasm
 .eslintrc.js
 /core
@@ -9,5 +8,4 @@ tsconfig*
 Cargo.*
 build.sh
 /pb
-/*.tsx
 /drawing
