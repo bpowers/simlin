@@ -128,6 +128,10 @@ class App {
     this.app.use(cookieParser());
     this.app.use(seshcookie(this.app.get('authentication').seshcookie));
 
+    // etags don't work well on Google App Engine, and we don't have
+    // the type of content that is really amenable to etags anyway.
+    this.app.set('etag', false);
+
     const indexHtml = fs.readFileSync('public/index.html').toString('utf-8');
     const metaTagContentsMatch = indexHtml.match(/http-equiv="Content-Security-Policy"[^>]+/g);
     const additionalScriptSrcs: string[] = [];
@@ -239,6 +243,8 @@ class App {
         }
 
         req.url = '/index.html';
+        res.set('Cache-Control', 'no-store');
+        res.set('Max-Age', '0');
 
         // eslint-disable-next-line @typescript-eslint/await-thenable
         await next();
