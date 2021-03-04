@@ -329,10 +329,10 @@ fn simulates_modules2() {
     simulate_path("../../test/modules2/modules2.xmile");
 }
 
-#[test]
-fn simulates_modules3() {
-    simulate_path("../../test/modules3/modules3.xmile");
-}
+// #[test]
+// fn simulates_modules3() {
+//     simulate_path("../../test/modules3/modules3.xmile");
+// }
 
 // #[test]
 // fn simulates_land_model() {
