@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/importer",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "convert XMILE models to model-app protobufs",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
@@ -10,6 +10,20 @@
   "license": "MIT",
   "main": "lib",
   "browser": "lib.browser",
+  "exports": {
+    ".": {
+      "module": "./lib.browser/index.js",
+      "node": "./lib/index.js"
+    },
+    "./*": {
+      "module": "./lib.browser/*.js",
+      "node": "./lib/*.js"
+    },
+    "./core/*": {
+      "module": "./lib.browser/core/*.js",
+      "node": "./lib/core/*.js"
+    }
+  },
   "sideEffects": false,
   "dependencies": {},
   "devDependencies": {

@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/engine",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "an engine for constructing and checking SD models",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
@@ -10,6 +10,20 @@
   "license": "MIT",
   "main": "lib",
   "browser": "lib.browser",
+  "exports": {
+    ".": {
+      "module": "./lib.browser/index.js",
+      "node": "./lib/index.js"
+    },
+    "./*": {
+      "module": "./lib.browser/*.js",
+      "node": "./lib/*.js"
+    },
+    "./core/*": {
+      "module": "./lib.browser/core/*.js",
+      "node": "./lib/core/*.js"
+    }
+  },
   "sideEffects": false,
   "dependencies": {},
   "devDependencies": {

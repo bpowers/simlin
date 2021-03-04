@@ -13,7 +13,7 @@ PKG_NAME=${PWD##*/}
 cargo build --lib --release --target wasm32-unknown-unknown
 
 echo "running wasm-bindgen"
-wasm-bindgen ../../target/wasm32-unknown-unknown/release/${PKG_NAME}.wasm --out-dir pkg --typescript --target web
+wasm-bindgen ../../target/wasm32-unknown-unknown/release/${PKG_NAME}.wasm --out-dir pkg --typescript --target bundler
 wasm-bindgen ../../target/wasm32-unknown-unknown/release/${PKG_NAME}.wasm --out-dir pkg-node --typescript --target nodejs
 
 if [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
