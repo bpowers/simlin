@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>incorrect-circular-dep</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>100</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model>
+        <variables>
+            <aux name="a">
+                <eqn>b</eqn>
+            </aux>
+            <aux name="b">
+                <eqn>SMTH1(a, 1, 0)</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <aux name="a" x="340" y="243" label_side="left"></aux>
+                <aux name="b" x="435.60003662109375" y="243" label_side="right"></aux>
+                <connector angle="40.301877971195836">
+                    <from>a</from>
+                    <to>b</to>
+                </connector>
+                <connector angle="-160.77470846941696">
+                    <from>b</from>
+                    <to>a</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

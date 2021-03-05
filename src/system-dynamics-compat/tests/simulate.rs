@@ -329,6 +329,11 @@ fn simulates_modules2() {
     simulate_path("../../test/modules2/modules2.xmile");
 }
 
+#[test]
+fn simulates_circular_dep_1() {
+    simulate_path("../../test/circular-dep-1/model.stmx");
+}
+
 // #[test]
 // fn simulates_modules3() {
 //     simulate_path("../../test/modules3/modules3.xmile");
