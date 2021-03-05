@@ -11,9 +11,9 @@
     "@google-cloud/firestore": "^4.1.1",
     "@google-cloud/trace-agent": "^5.0.0",
     "@iarna/toml": "^2.2.3",
-    "@system-dynamics/importer": "^1.0.0",
     "@system-dynamics/core": "^1.0.0",
     "@system-dynamics/diagram": "^1.0.0",
+    "@system-dynamics/importer": "^1.0.0",
     "canvas": "^2.6.0",
     "cookie-parser": "^1.4.4",
     "cors": "^2.8.5",
@@ -49,8 +49,10 @@
     "eslint-plugin-import": "^2.20.1",
     "eslint-plugin-prettier": "^3.1.3",
     "prettier": "^2.0.1",
-    "ts-node-dev": "^1.1.1",
     "typescript": "^4.1.3"
+  },
+  "resolutions": {
+    "immer": "8.0.1"
   },
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
@@ -59,6 +61,6 @@
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib",
     "build": "tsc -p tsconfig.json",
-    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; exec node_modules/.bin/ts-node-dev --no-notify --respawn ./index.ts"
+    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; yarn build && exec node lib/index.js"
   }
 }
