@@ -21,6 +21,10 @@ pub struct Model {
     pub implicit: bool,
 }
 
+// fn module_deps<'a>(var_name: &str, inputs: &[(&str, &str)], module_ident, model_name, models) -> Result<HashSet<Ident>> {
+//
+// }
+
 // to ensure we sort the list of variables in O(n*log(n)) time, we
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
@@ -63,32 +67,45 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
             // TODO: we could potentially handle this by passing around some context
             //   variable, but its just terrible.
             if dep.starts_with("\\.") {
-                return model_err!(NoAbsoluteReferences, id.to_string());
+                return model_err!(NoAbsoluteReferences, id.to_owned());
             }
 
-            // if the dependency was e.g. "submodel.output", we only depend on submodel
-            let dep = dep.splitn(2, '.').next().unwrap();
+            // in the case of module output dependencies, this one dep may
+            // turn into several.
+            let filtered_deps = if dep.contains('.') {
+                // if the dependency was e.g. "submodel.output", do a dataflow analysis to
+                // figure out which of the set of (inputs + module) we depend on
+                let parts = dep.splitn(2, '.').collect::<Vec<_>>();
+                let _module = parts[0];
+                let _var = parts[1];
+                vec![dep.splitn(2, '.').next().unwrap()]
+            } else {
+                vec![dep]
+            };
 
-            if !all_vars.contains_key(dep) {
-                // TODO: this is probably an error
-                continue;
+            for dep in filtered_deps {
+                if !all_vars.contains_key(dep) {
+                    // the variable has an unknown dependency, but we actually
+                    // handle this later so just skip for now.
+                    continue;
+                }
+
+                if !all_vars[dep].is_stock() || is_initial {
+                    all_deps.insert(dep.to_string());
+
+                    // ensure we don't blow the stack
+                    if processing.contains(dep) {
+                        return model_err!(CircularDependency, id.to_owned());
+                    }
+
+                    if all_var_deps[dep].is_none() {
+                        all_deps_inner(dep, is_initial, processing, all_vars, all_var_deps)?;
+                    }
+
+                    let dep_deps = all_var_deps[dep].as_ref().unwrap();
+                    all_deps.extend(dep_deps.iter().cloned());
+                }
             }
-
-            if !all_vars[dep].is_stock() || is_initial {
-                all_deps.insert(dep.to_string());
-            }
-
-            // ensure we don't blow the stack
-            if processing.contains(dep) {
-                return model_err!(CircularDependency, id.to_string());
-            }
-
-            if all_var_deps[dep].is_none() {
-                all_deps_inner(dep, is_initial, processing, all_vars, all_var_deps)?;
-            }
-
-            let dep_deps = all_var_deps[dep].as_ref().unwrap();
-            all_deps.extend(dep_deps.iter().cloned());
         }
 
         processing.remove(id);
