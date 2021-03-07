@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
@@ -988,7 +988,7 @@ pub struct Module {
 
 fn topo_sort<'out>(
     vars: &'out HashMap<Ident, Variable>,
-    all_deps: &'out HashMap<Ident, HashSet<Ident>>,
+    all_deps: &'out HashMap<Ident, BTreeSet<Ident>>,
     runlist: Vec<&'out str>,
 ) -> Vec<&'out str> {
     let runlist_len = runlist.len();
@@ -1001,7 +1001,7 @@ fn topo_sort<'out>(
     // By this point, we have already errored out if we have e.g. a cycle
     fn add<'a>(
         vars: &HashMap<Ident, Variable>,
-        all_deps: &'a HashMap<Ident, HashSet<Ident>>,
+        all_deps: &'a HashMap<Ident, BTreeSet<Ident>>,
         result: &mut Vec<&'a str>,
         used: &mut HashSet<&'a str>,
         ident: &'a str,
@@ -1270,7 +1270,7 @@ impl Module {
         };
         let module_models = calc_module_model_map(project, model_name);
 
-        let build_runlist = |deps: &HashMap<Ident, HashSet<Ident>>,
+        let build_runlist = |deps: &HashMap<Ident, BTreeSet<Ident>>,
                              part: StepPart,
                              predicate: &dyn Fn(&&str) -> bool|
          -> Result<Vec<Var>> {

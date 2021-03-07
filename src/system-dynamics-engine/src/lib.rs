@@ -81,6 +81,16 @@ impl From<datamodel::Project> for Project {
                 .map(|m| Model::new(&models, m, &project_datamodel.dimensions, false)),
         );
 
+        // dependency resolution; we need to do this as a second pass
+        // to ensure we have the information available for modules
+        {
+            let mut models: HashMap<Ident, &Model> = HashMap::new();
+            for model in models_list.iter_mut() {
+                model.set_dependencies(&models).unwrap();
+                models.insert(model.name.clone(), model);
+            }
+        }
+
         let models = models_list
             .into_iter()
             .map(|m| (m.name.to_string(), Rc::new(m)))

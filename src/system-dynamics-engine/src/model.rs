@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
@@ -14,31 +14,36 @@ pub struct Model {
     pub name: String,
     pub variables: HashMap<String, Variable>,
     pub errors: Option<Vec<Error>>,
-    pub dt_deps: Option<HashMap<Ident, HashSet<Ident>>>,
-    pub initial_deps: Option<HashMap<Ident, HashSet<Ident>>>,
+    /// model_deps is the transitive set of model names referenced from modules in this model
+    pub model_deps: Option<BTreeSet<Ident>>,
+    pub dt_deps: Option<HashMap<Ident, BTreeSet<Ident>>>,
+    pub initial_deps: Option<HashMap<Ident, BTreeSet<Ident>>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
 }
 
 fn module_deps<'a>(
-    _output_ident: &str,
+    output_ident: &str,
     _inputs: &[ModuleInput],
     module_ident: &'a str,
     model_name: &'a str,
-    _is_initial: bool,
-    models: &HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
-) -> Result<HashSet<&'a str>> {
+    is_initial: bool,
+    models: &'a HashMap<Ident, &'a Model>,
+) -> Result<BTreeSet<&'a str>> {
     if !models.contains_key(model_name) {
         return model_err!(BadModelName, model_name.to_owned());
     }
-    let model = &models[model_name];
-    let _vars = model.values().cloned().cloned().collect::<Vec<_>>();
+    let model = models[model_name];
 
-    // let deps = all_deps(&vars, is_initial, models)?;
-    // if !deps.contains_key(output_ident) {
-    //     return model_err!(UnknownDependency, output_ident.to_owned());
-    // }
+    let deps = all_deps(model.variables.values(), is_initial, models)?;
+    if !deps.contains_key(output_ident) {
+        return model_err!(UnknownDependency, output_ident.to_owned());
+    }
+
+    let _output_deps = &deps[output_ident];
+
+    // TODO: filter output_deps for ones that match inputs
 
     Ok(vec![module_ident].into_iter().collect())
 }
@@ -47,24 +52,29 @@ fn module_deps<'a>(
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-fn all_deps<'a>(
-    vars: &'a [Variable],
+fn all_deps<'a, Iter>(
+    vars: Iter,
     is_initial: bool,
-    models: &'a HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
-) -> Result<HashMap<Ident, HashSet<Ident>>> {
-    let mut processing: HashSet<&'a str> = HashSet::new();
+    models: &'a HashMap<Ident, &'a Model>,
+) -> Result<HashMap<Ident, BTreeSet<Ident>>>
+where
+    Iter: Iterator<Item = &'a Variable>,
+{
+    // we need to use vars multiple times, so collect it into a Vec once
+    let vars = vars.collect::<Vec<_>>();
+    let mut processing: BTreeSet<&'a str> = BTreeSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
-        vars.iter().map(|v| (v.ident(), v)).collect();
-    let mut all_var_deps: HashMap<&'a str, Option<HashSet<Ident>>> =
+        vars.iter().map(|v| (v.ident(), *v)).collect();
+    let mut all_var_deps: HashMap<&'a str, Option<BTreeSet<Ident>>> =
         vars.iter().map(|v| (v.ident(), None)).collect();
 
     fn all_deps_inner<'a>(
         id: &'a str,
         is_initial: bool,
-        processing: &mut HashSet<&'a str>,
+        processing: &mut BTreeSet<&'a str>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
-        all_var_deps: &mut HashMap<&'a str, Option<HashSet<Ident>>>,
-        models: &'a HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
+        all_var_deps: &mut HashMap<&'a str, Option<BTreeSet<Ident>>>,
+        models: &'a HashMap<Ident, &'a Model>,
     ) -> Result<()> {
         let var = all_vars[id];
 
@@ -77,14 +87,14 @@ fn all_deps<'a>(
         // last dt timestep.  BUT if we are calculating dependencies in the
         // initial dt, then we need to treat stocks as ordinary variables.
         if var.is_stock() && !is_initial {
-            all_var_deps.insert(id, Some(HashSet::new()));
+            all_var_deps.insert(id, Some(BTreeSet::new()));
             return Ok(());
         }
 
         processing.insert(id);
 
         // all deps start out as the direct deps
-        let mut all_deps: HashSet<Ident> = HashSet::new();
+        let mut all_deps: BTreeSet<Ident> = BTreeSet::new();
 
         for dep in var.direct_deps().iter().map(|d| d.as_str()) {
             // TODO: we could potentially handle this by passing around some context
@@ -168,7 +178,7 @@ fn all_deps<'a>(
         Ok(())
     }
 
-    for var in vars.iter() {
+    for var in vars {
         all_deps_inner(
             var.ident(),
             is_initial,
@@ -180,7 +190,7 @@ fn all_deps<'a>(
     }
 
     // this unwrap is safe, because of the full iteration over vars directly above
-    let var_deps: HashMap<Ident, HashSet<Ident>> = all_var_deps
+    let var_deps: HashMap<Ident, BTreeSet<Ident>> = all_var_deps
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.unwrap()))
         .collect();
@@ -292,27 +302,11 @@ impl Model {
 
         let mut errors: Vec<Error> = Vec::new();
 
-        let dt_deps = match all_deps(&variable_list, false, models) {
-            Ok(deps) => Some(deps),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        };
-
-        let initial_deps = match all_deps(&variable_list, true, models) {
-            Ok(deps) => Some(deps),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        };
-
         let mut variables: HashMap<String, Variable> = variable_list
             .into_iter()
             .map(|v| (v.ident().to_string(), v))
             .collect();
-        let variable_names: HashSet<String> = variables.keys().cloned().collect();
+        let variable_names: BTreeSet<String> = variables.keys().cloned().collect();
 
         let mut variables_have_errors = false;
         for (_ident, var) in variables.iter_mut() {
@@ -355,10 +349,41 @@ impl Model {
             name: x_model.name.clone(),
             variables,
             errors: maybe_errors,
-            dt_deps,
-            initial_deps,
+            model_deps: None,
+            dt_deps: None,
+            initial_deps: None,
             implicit,
         }
+    }
+
+    pub fn set_dependencies(&mut self, models: &HashMap<Ident, &Model>) -> Result<()> {
+        let mut errors: Vec<Error> = Vec::new();
+
+        self.dt_deps = match all_deps(self.variables.values(), false, models) {
+            Ok(deps) => Some(deps),
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        };
+
+        self.initial_deps = match all_deps(self.variables.values(), true, models) {
+            Ok(deps) => Some(deps),
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        };
+
+        if !errors.is_empty() {
+            if self.errors.is_some() {
+                self.errors.as_mut().unwrap().extend_from_slice(&errors);
+            } else {
+                self.errors = Some(errors);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
@@ -637,15 +662,18 @@ fn test_errors() {
 fn test_all_deps() {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
-    use std::iter::FromIterator;
 
-    fn verify_all_deps(expected_deps_list: &[(&Variable, &[&str])], is_initial: bool) {
-        let expected_deps: HashMap<Ident, HashSet<Ident>> = expected_deps_list
+    fn verify_all_deps(
+        expected_deps_list: &[(&Variable, &[&str])],
+        is_initial: bool,
+        models: &HashMap<Ident, &Model>,
+    ) {
+        let expected_deps: HashMap<Ident, BTreeSet<Ident>> = expected_deps_list
             .iter()
             .map(|(v, deps)| {
                 (
                     v.ident().to_string(),
-                    HashSet::from_iter(deps.iter().map(|s| s.to_string())),
+                    deps.iter().map(|s| s.to_string()).collect(),
                 )
             })
             .collect();
@@ -654,7 +682,7 @@ fn test_all_deps() {
             .iter()
             .map(|(v, _)| (*v).clone())
             .collect();
-        let deps = all_deps(&all_vars, is_initial, &HashMap::new()).unwrap();
+        let deps = all_deps(all_vars.iter(), is_initial, models).unwrap();
 
         if expected_deps != deps {
             let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
@@ -676,10 +704,18 @@ fn test_all_deps() {
         // (even though the order of recursion might change)
         for _ in 0..16 {
             all_vars.shuffle(&mut rng);
-            let deps = all_deps(&all_vars, is_initial, &HashMap::new()).unwrap();
+            let deps = all_deps(all_vars.iter(), is_initial, &HashMap::new()).unwrap();
             assert_eq!(expected_deps, deps);
         }
     }
+
+    let mod_1_model = x_model(
+        "mod_1",
+        vec![
+            x_aux("input", "{expects to be set with module input}"),
+            x_aux("output", "3 * TIME"),
+        ],
+    );
 
     let main_model = x_model(
         "main",
@@ -689,18 +725,41 @@ fn test_all_deps() {
             x_flow("inflow", "mod_1.output"),
         ],
     );
-    let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> =
-        vec![("main".to_string(), &main_model)]
-            .into_iter()
-            .map(|(name, m)| build_xvars_map(name, m))
-            .collect();
+    let x_models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = vec![
+        ("mod_1".to_owned(), &mod_1_model),
+        ("main".to_owned(), &main_model),
+    ]
+    .into_iter()
+    .map(|(name, m)| build_xvars_map(name, m))
+    .collect();
+
+    let mut model_list = x_models
+        .iter()
+        .map(|(name, vars)| {
+            let x_model = datamodel::Model {
+                name: name.to_owned(),
+                variables: vars.values().cloned().cloned().collect(),
+                views: vec![],
+            };
+            Model::new(&x_models, &x_model, &[], false)
+        })
+        .collect::<Vec<_>>();
+
+    let models = {
+        let mut models: HashMap<Ident, &Model> = HashMap::new();
+        for model in model_list.iter_mut() {
+            model.set_dependencies(&models).unwrap();
+            models.insert(model.name.clone(), model);
+        }
+        models
+    };
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let mod_1 = parse_var(
-        &models,
+        &x_models,
         "main",
         &[],
-        models["main"]["mod_1"],
+        x_models["main"]["mod_1"],
         &mut implicit_vars,
     );
     assert!(implicit_vars.is_empty());
@@ -712,7 +771,7 @@ fn test_all_deps() {
         (&aux_3, &[]),
     ];
 
-    verify_all_deps(&expected_deps_list, false);
+    verify_all_deps(&expected_deps_list, false, &models);
 
     let aux_used_in_initial = aux("aux_used_in_initial", "7");
     let aux_2 = aux("aux_2", "aux_used_in_initial");
@@ -731,20 +790,20 @@ fn test_all_deps() {
         (&stock_1, &[]),
     ];
 
-    verify_all_deps(&expected_deps_list, false);
+    verify_all_deps(&expected_deps_list, false, &models);
 
     // test circular references return an error and don't do something like infinitely
     // recurse
     let aux_a = aux("aux_a", "aux_b");
     let aux_b = aux("aux_b", "aux_a");
     let all_vars = vec![aux_a, aux_b];
-    let deps_result = all_deps(&all_vars, false, &models);
+    let deps_result = all_deps(all_vars.iter(), false, &HashMap::new());
     assert!(deps_result.is_err());
 
     // also self-references should return an error and not blow stock
     let aux_a = aux("aux_a", "aux_a");
     let all_vars = vec![aux_a];
-    let deps_result = all_deps(&all_vars, false, &models);
+    let deps_result = all_deps(all_vars.iter(), false, &HashMap::new());
     assert!(deps_result.is_err());
 
     // test initials
@@ -758,7 +817,7 @@ fn test_all_deps() {
         (&stock_1, &["aux_used_in_initial"]),
     ];
 
-    verify_all_deps(&expected_deps_list, true);
+    verify_all_deps(&expected_deps_list, true, &models);
 
     // test non-existant variables
 }
