@@ -139,16 +139,14 @@ where
                 let output_ident = parts[1];
 
                 if !all_vars.contains_key(module_ident) {
-                    // the variable has an unknown dependency, but we actually
-                    // handle this later so just skip for now.
-                    continue;
+                    return model_err!(UnknownDependency, module_ident.to_owned());
                 }
 
                 if let Variable::Module {
                     model_name, inputs, ..
                 } = all_vars[module_ident]
                 {
-                    module_deps(
+                    let deps = module_deps(
                         output_ident,
                         &inputs,
                         module_ident,
@@ -157,7 +155,9 @@ where
                         models,
                     )?
                     .into_iter()
-                    .collect()
+                    .collect();
+
+                    deps
                 } else {
                     return model_err!(ExpectedModule, module_ident.to_owned());
                 }
@@ -167,9 +167,7 @@ where
 
             for dep in filtered_deps {
                 if !all_vars.contains_key(dep) {
-                    // the variable has an unknown dependency, but we actually
-                    // handle this later so just skip for now.
-                    continue;
+                    return model_err!(UnknownDependency, dep.to_owned());
                 }
 
                 if !all_vars[dep].is_stock() || is_initial {
@@ -191,8 +189,12 @@ where
                         )?;
                     }
 
-                    let dep_deps = all_var_deps[dep].as_ref().unwrap();
-                    all_deps.extend(dep_deps.iter().cloned());
+                    // we actually don't want the module's dependencies here;
+                    // we handled that above in module_deps()
+                    if !all_vars[dep].is_module() {
+                        let dep_deps = all_var_deps[dep].as_ref().unwrap();
+                        all_deps.extend(dep_deps.iter().cloned());
+                    }
                 }
             }
         }
@@ -371,18 +373,30 @@ impl Model {
             _ => Some(errors),
         };
 
+        let model_deps = variables
+            .values()
+            .filter(|v| v.is_module())
+            .map(|v| {
+                if let Variable::Module { model_name, .. } = v {
+                    model_name.to_owned()
+                } else {
+                    unreachable!();
+                }
+            })
+            .collect();
+
         Model {
             name: x_model.name.clone(),
             variables,
             errors: maybe_errors,
-            model_deps: None,
+            model_deps: Some(model_deps),
             dt_deps: None,
             initial_deps: None,
             implicit,
         }
     }
 
-    pub fn set_dependencies(&mut self, models: &HashMap<Ident, &Model>) -> Result<()> {
+    pub(crate) fn set_dependencies(&mut self, models: &HashMap<Ident, &Model>) {
         let mut errors: Vec<Error> = Vec::new();
 
         self.dt_deps = match all_deps(self.variables.values(), false, models) {
@@ -408,8 +422,6 @@ impl Model {
                 self.errors = Some(errors);
             }
         }
-
-        Ok(())
     }
 
     pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
@@ -730,7 +742,7 @@ fn test_all_deps() {
         // (even though the order of recursion might change)
         for _ in 0..16 {
             all_vars.shuffle(&mut rng);
-            let deps = all_deps(all_vars.iter(), is_initial, &HashMap::new()).unwrap();
+            let deps = all_deps(all_vars.iter(), is_initial, models).unwrap();
             assert_eq!(expected_deps, deps);
         }
     }
@@ -750,7 +762,8 @@ fn test_all_deps() {
         vec![
             x_module("mod_1", &[("aux_3", "mod_1.input")]),
             x_aux("aux_3", "6"),
-            x_flow("inflow", "mod_1.output"),
+            x_flow("inflow", "mod_1.flow"),
+            x_aux("aux_4", "mod_1.output"),
         ],
     );
     let x_models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = vec![
@@ -761,9 +774,10 @@ fn test_all_deps() {
     .map(|(name, m)| build_xvars_map(name, m))
     .collect();
 
-    let mut model_list = x_models
-        .iter()
-        .map(|(name, vars)| {
+    let mut model_list = vec!["mod_1", "main"]
+        .into_iter()
+        .map(|name| {
+            let vars = &x_models[name];
             let x_model = datamodel::Model {
                 name: name.to_owned(),
                 variables: vars.values().cloned().cloned().collect(),
@@ -776,7 +790,7 @@ fn test_all_deps() {
     let models = {
         let mut models: HashMap<Ident, &Model> = HashMap::new();
         for model in model_list.iter_mut() {
-            model.set_dependencies(&models).unwrap();
+            model.set_dependencies(&models);
             models.insert(model.name.clone(), model);
         }
         models
@@ -792,11 +806,13 @@ fn test_all_deps() {
     );
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
-    let inflow = flow("inflow", "mod_1.output");
+    let aux_4 = aux("aux_4", "mod_1.output");
+    let inflow = flow("inflow", "mod_1.flow");
     let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
         (&inflow, &["mod_1", "aux_3"]),
         (&mod_1, &["aux_3"]),
         (&aux_3, &[]),
+        (&aux_4, &["mod_1"]),
     ];
 
     verify_all_deps(&expected_deps_list, false, &models);

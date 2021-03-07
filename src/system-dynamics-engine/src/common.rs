@@ -269,7 +269,7 @@ fn test_canonicalize() {
 
 pub fn topo_sort<'out>(
     runlist: Vec<&'out str>,
-    transitive_deps: &'out HashMap<Ident, BTreeSet<Ident>>,
+    dependencies: &'out HashMap<Ident, BTreeSet<Ident>>,
 ) -> Vec<&'out str> {
     use std::collections::HashSet;
 
@@ -282,7 +282,7 @@ pub fn topo_sort<'out>(
     // dependencies are calculated before the variables that reference them.
     // By this point, we have already errored out if we have e.g. a cycle
     fn add<'a>(
-        all_deps: &'a HashMap<Ident, BTreeSet<Ident>>,
+        dependencies: &'a HashMap<Ident, BTreeSet<Ident>>,
         result: &mut Vec<&'a str>,
         used: &mut HashSet<&'a str>,
         ident: &'a str,
@@ -291,14 +291,14 @@ pub fn topo_sort<'out>(
             return;
         }
         used.insert(ident);
-        for dep in all_deps[ident].iter() {
-            add(all_deps, result, used, dep)
+        for dep in dependencies[ident].iter() {
+            add(dependencies, result, used, dep)
         }
         result.push(ident);
     }
 
     for ident in runlist.into_iter() {
-        add(transitive_deps, &mut result, &mut used, ident);
+        add(dependencies, &mut result, &mut used, ident);
     }
 
     assert_eq!(runlist_len, result.len());
