@@ -25,7 +25,7 @@ pub struct Model {
 
 fn module_deps<'a>(
     output_ident: &str,
-    _inputs: &[ModuleInput],
+    inputs: &'a [ModuleInput],
     module_ident: &'a str,
     model_name: &'a str,
     is_initial: bool,
@@ -41,11 +41,37 @@ fn module_deps<'a>(
         return model_err!(UnknownDependency, output_ident.to_owned());
     }
 
-    let _output_deps = &deps[output_ident];
+    let output_var = &model.variables[output_ident];
+    let output_deps = &deps[output_ident];
 
-    // TODO: filter output_deps for ones that match inputs
+    let mut final_deps: BTreeSet<&str> = BTreeSet::new();
 
-    Ok(vec![module_ident].into_iter().collect())
+    if is_initial || !output_var.is_stock() {
+        final_deps.insert(module_ident);
+    }
+
+    eprintln!(
+        "{}.{} (model: \"{}\"; initial: {}):",
+        module_ident, output_ident, model_name, is_initial
+    );
+    for dep in output_deps.iter() {
+        eprintln!("\t{}", dep);
+        for module_input in inputs.iter() {
+            if &module_input.dst == dep {
+                eprintln!(
+                    "\t\t input dep: '{}' -> '{}'",
+                    module_input.src, module_input.dst
+                );
+                final_deps.insert(&module_input.src);
+            }
+        }
+    }
+
+    for fdep in final_deps.iter() {
+        eprintln!("\t. {}", fdep);
+    }
+
+    Ok(final_deps)
 }
 
 // to ensure we sort the list of variables in O(n*log(n)) time, we
@@ -714,6 +740,8 @@ fn test_all_deps() {
         vec![
             x_aux("input", "{expects to be set with module input}"),
             x_aux("output", "3 * TIME"),
+            x_aux("flow", "2 * input"),
+            x_stock("output_2", "input", &["flow"], &[]),
         ],
     );
 
