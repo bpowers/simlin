@@ -2,14 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::{error, result};
 
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
-
 use lazy_static::lazy_static;
 use regex::Regex;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 pub type Ident = String;
 pub type DimensionName = String;
@@ -265,4 +265,42 @@ fn test_canonicalize() {
     assert_eq!("a_b", canonicalize("   a b"));
     assert_eq!("å_b", canonicalize("Å\nb"));
     assert_eq!("a_b", canonicalize("a \n b"));
+}
+
+pub fn topo_sort<'out>(
+    runlist: Vec<&'out str>,
+    transitive_deps: &'out HashMap<Ident, BTreeSet<Ident>>,
+) -> Vec<&'out str> {
+    use std::collections::HashSet;
+
+    let runlist_len = runlist.len();
+    let mut result: Vec<&'out str> = Vec::with_capacity(runlist_len);
+    // TODO: remove this allocation (should be &str)
+    let mut used: HashSet<&str> = HashSet::new();
+
+    // We want to do a postorder, recursive traversal of variables to ensure
+    // dependencies are calculated before the variables that reference them.
+    // By this point, we have already errored out if we have e.g. a cycle
+    fn add<'a>(
+        all_deps: &'a HashMap<Ident, BTreeSet<Ident>>,
+        result: &mut Vec<&'a str>,
+        used: &mut HashSet<&'a str>,
+        ident: &'a str,
+    ) {
+        if used.contains(ident) {
+            return;
+        }
+        used.insert(ident);
+        for dep in all_deps[ident].iter() {
+            add(all_deps, result, used, dep)
+        }
+        result.push(ident);
+    }
+
+    for ident in runlist.into_iter() {
+        add(transitive_deps, &mut result, &mut used, ident);
+    }
+
+    assert_eq!(runlist_len, result.len());
+    result
 }

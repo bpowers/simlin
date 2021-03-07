@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::borrow::BorrowMut;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -13,7 +14,6 @@ use crate::bytecode::{
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{Ident, Result};
-use crate::datamodel;
 use crate::datamodel::Dimension;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
@@ -22,8 +22,8 @@ use crate::vm::{
     is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
+use crate::{common, datamodel};
 use crate::{sim_err, Error, Project};
-use std::borrow::BorrowMut;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -986,44 +986,6 @@ pub struct Module {
     tables: HashMap<Ident, Table>,
 }
 
-fn topo_sort<'out>(
-    vars: &'out HashMap<Ident, Variable>,
-    all_deps: &'out HashMap<Ident, BTreeSet<Ident>>,
-    runlist: Vec<&'out str>,
-) -> Vec<&'out str> {
-    let runlist_len = runlist.len();
-    let mut result: Vec<&'out str> = Vec::with_capacity(runlist_len);
-    // TODO: remove this allocation (should be &str)
-    let mut used: HashSet<&str> = HashSet::new();
-
-    // We want to do a postorder, recursive traversal of variables to ensure
-    // dependencies are calculated before the variables that reference them.
-    // By this point, we have already errored out if we have e.g. a cycle
-    fn add<'a>(
-        vars: &HashMap<Ident, Variable>,
-        all_deps: &'a HashMap<Ident, BTreeSet<Ident>>,
-        result: &mut Vec<&'a str>,
-        used: &mut HashSet<&'a str>,
-        ident: &'a str,
-    ) {
-        if used.contains(ident) {
-            return;
-        }
-        used.insert(ident);
-        for dep in all_deps[ident].iter() {
-            add(vars, all_deps, result, used, dep)
-        }
-        result.push(ident);
-    }
-
-    for ident in runlist.into_iter() {
-        add(vars, all_deps, &mut result, &mut used, ident)
-    }
-
-    assert_eq!(runlist_len, result.len());
-    result
-}
-
 // calculate a mapping of module variable name -> module model name
 fn calc_module_model_map(
     project: &Project,
@@ -1292,9 +1254,9 @@ impl Module {
                         .collect();
                     runlist.extend(needed);
                     let runlist = runlist.into_iter().collect();
-                    topo_sort(&model.variables, deps, runlist)
+                    common::topo_sort(runlist, deps)
                 }
-                StepPart::Flows => topo_sort(&model.variables, deps, runlist),
+                StepPart::Flows => common::topo_sort(runlist, deps),
                 StepPart::Stocks => runlist,
             };
             // eprintln!("runlist {}", model_name);
