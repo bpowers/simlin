@@ -383,6 +383,7 @@ pub fn parse_var(
 struct IdentifierSetVisitor<'a> {
     identifiers: HashSet<Ident>,
     dimensions: &'a [Dimension],
+    module_inputs: &'a [ModuleInput],
 }
 
 impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
@@ -437,6 +438,26 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                 self.walk(l);
             }
             Expr::If(cond, t, f, _) => {
+                if let Expr::App(builtin_id, args, _) = cond.as_ref() {
+                    if builtin_id == "ismoduleinput" && args.len() == 1 {
+                        if let Expr::Var(ident, _) = &args[0] {
+                            let mut is_input = false;
+                            for input in self.module_inputs.iter() {
+                                if &input.dst == ident {
+                                    is_input = true;
+                                    break;
+                                }
+                            }
+                            if is_input {
+                                self.walk(t);
+                            } else {
+                                self.walk(f);
+                            }
+                            return;
+                        }
+                    }
+                }
+
                 self.walk(cond);
                 self.walk(t);
                 self.walk(f);
@@ -445,10 +466,15 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
     }
 }
 
-pub fn identifier_set(ast: &AST, dimensions: &[Dimension]) -> HashSet<Ident> {
+pub fn identifier_set(
+    ast: &AST,
+    dimensions: &[Dimension],
+    module_inputs: &[ModuleInput],
+) -> HashSet<Ident> {
     let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
         dimensions,
+        module_inputs,
     };
     match ast {
         AST::Scalar(ast) => id_visitor.walk(ast),
@@ -465,6 +491,7 @@ pub fn identifier_set(ast: &AST, dimensions: &[Dimension]) -> HashSet<Ident> {
 #[test]
 fn test_identifier_sets() {
     let cases: &[(&str, &[&str])] = &[
+        ("if isModuleInput(input) then b else c", &["b"]),
         ("if a then b else c", &["a", "b", "c"]),
         ("a(1, b, c)", &["a", "b", "c"]),
         ("-(a)", &["a"]),
@@ -478,13 +505,18 @@ fn test_identifier_sets() {
         elements: vec!["foo".to_owned()],
     }];
 
+    let module_inputs: &[ModuleInput] = &[ModuleInput {
+        src: "whatever".to_string(),
+        dst: "input".to_string(),
+    }];
+
     for (eqn, id_list) in cases.iter() {
         let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let ast = ast.unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
-        let id_set_test = identifier_set(&ast, &dimensions);
+        let id_set_test = identifier_set(&ast, &dimensions, &module_inputs);
         assert_eq!(id_set_expected, id_set_test);
     }
 }

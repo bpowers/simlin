@@ -23,7 +23,7 @@ pub struct Model {
     pub implicit: bool,
 }
 
-fn module_deps(var: &Variable, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
+fn module_deps(var: &Variable, is_initial: bool, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
     if let Variable::Module { inputs, .. } = var {
         inputs
             .iter()
@@ -33,6 +33,10 @@ fn module_deps(var: &Variable, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
                     Some(pos) => &src[..pos],
                     None => src,
                 };
+
+                if is_initial {
+                    eprintln!("TODO: we need to (1) identify our stocks, (2) get their dependencies, and (3) check which of those are module inputs.  if a stock is only used to compute a flow, it shouldn't show up as a module dependency in the initial runlist");
+                }
 
                 if is_stock(src) {
                     None
@@ -73,25 +77,12 @@ fn module_output_deps<'a>(
         final_deps.insert(module_ident);
     }
 
-    eprintln!(
-        "{}.{} (model: \"{}\"; initial: {}):",
-        module_ident, output_ident, ctx.model_name, ctx.is_initial
-    );
     for dep in output_deps.iter() {
-        eprintln!("\t{}", dep);
         for module_input in inputs.iter() {
             if &module_input.dst == dep {
-                eprintln!(
-                    "\t\t input dep: '{}' -> '{}'",
-                    module_input.src, module_input.dst
-                );
                 final_deps.insert(&module_input.src);
             }
         }
-    }
-
-    for fdep in final_deps.iter() {
-        eprintln!("\t. {}", fdep);
     }
 
     Ok(final_deps)
@@ -99,14 +90,18 @@ fn module_output_deps<'a>(
 
 fn direct_deps_rough(
     var: &Variable,
+    is_initial: bool,
     dimensions: &[Dimension],
+    module_inputs: &[ModuleInput],
     is_stock: &dyn Fn(&str) -> bool,
 ) -> Vec<Ident> {
     if var.is_module() {
-        module_deps(var, is_stock)
+        module_deps(var, is_initial, is_stock)
     } else {
         match var.ast() {
-            Some(ast) => identifier_set(ast, dimensions).into_iter().collect(),
+            Some(ast) => identifier_set(ast, dimensions, module_inputs)
+                .into_iter()
+                .collect(),
             None => vec![],
         }
     }
@@ -116,7 +111,13 @@ fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
     let is_stock = |ident: &str| -> bool {
         matches!(resolve_relative2(ctx, ident), Some(Variable::Stock { .. }))
     };
-    direct_deps_rough(var, ctx.dimensions, &is_stock)
+    direct_deps_rough(
+        var,
+        ctx.is_initial,
+        ctx.dimensions,
+        ctx.module_inputs,
+        &is_stock,
+    )
 }
 
 struct DepContext<'a> {
@@ -421,7 +422,7 @@ impl Model {
         let mut variables_have_errors = false;
         for (_ident, var) in variables.iter_mut() {
             let mut missing_deps: Vec<String> = vec![];
-            for dep in direct_deps_rough(var, dimensions, &is_stock).into_iter() {
+            for dep in direct_deps_rough(var, false, dimensions, &[], &is_stock).into_iter() {
                 let dep = if let Some(dot_off) = dep.find('.') {
                     &dep[..dot_off]
                 } else {

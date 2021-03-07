@@ -384,7 +384,10 @@ impl<'a> Context<'a> {
                         if let ast::Expr::Var(ident, _loc) = &orig_args[0] {
                             BuiltinFn::IsModuleInput(ident.clone())
                         } else {
-                            return sim_err!(ExpectedIdent, "input to isModuleBuiltin must be a variable name".to_owned());
+                            return sim_err!(
+                                ExpectedIdent,
+                                "input to isModuleBuiltin must be a variable name".to_owned()
+                            );
                         }
                     }
                     "ln" => check_arity!(Ln, 1),
@@ -1755,7 +1758,9 @@ impl<'a> ModuleEvaluator<'a> {
                     BuiltinFn::Inf => std::f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
-                    BuiltinFn::IsModuleInput(ident) => self.module.inputs.contains(ident) as i8 as f64,
+                    BuiltinFn::IsModuleInput(ident) => {
+                        self.module.inputs.contains(ident) as i8 as f64
+                    }
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
                     BuiltinFn::Log10(a) => self.eval(a).log10(),
                     BuiltinFn::SafeDiv(a, b, default) => {
