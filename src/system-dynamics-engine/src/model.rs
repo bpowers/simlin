@@ -21,15 +21,37 @@ pub struct Model {
     pub implicit: bool,
 }
 
-// fn module_deps<'a>(var_name: &str, inputs: &[(&str, &str)], module_ident, model_name, models) -> Result<HashSet<Ident>> {
-//
-// }
+fn module_deps<'a>(
+    _output_ident: &str,
+    _inputs: &[ModuleInput],
+    module_ident: &'a str,
+    model_name: &'a str,
+    _is_initial: bool,
+    models: &HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
+) -> Result<HashSet<&'a str>> {
+    if !models.contains_key(model_name) {
+        return model_err!(BadModelName, model_name.to_owned());
+    }
+    let model = &models[model_name];
+    let _vars = model.values().cloned().cloned().collect::<Vec<_>>();
+
+    // let deps = all_deps(&vars, is_initial, models)?;
+    // if !deps.contains_key(output_ident) {
+    //     return model_err!(UnknownDependency, output_ident.to_owned());
+    // }
+
+    Ok(vec![module_ident].into_iter().collect())
+}
 
 // to ensure we sort the list of variables in O(n*log(n)) time, we
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident, HashSet<Ident>>> {
+fn all_deps<'a>(
+    vars: &'a [Variable],
+    is_initial: bool,
+    models: &'a HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
+) -> Result<HashMap<Ident, HashSet<Ident>>> {
     let mut processing: HashSet<&'a str> = HashSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
         vars.iter().map(|v| (v.ident(), v)).collect();
@@ -42,6 +64,7 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
         processing: &mut HashSet<&'a str>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
         all_var_deps: &mut HashMap<&'a str, Option<HashSet<Ident>>>,
+        models: &'a HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
     ) -> Result<()> {
         let var = all_vars[id];
 
@@ -72,13 +95,36 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
 
             // in the case of module output dependencies, this one dep may
             // turn into several.
-            let filtered_deps = if dep.contains('.') {
+            let filtered_deps: Vec<&str> = if dep.contains('.') {
                 // if the dependency was e.g. "submodel.output", do a dataflow analysis to
                 // figure out which of the set of (inputs + module) we depend on
                 let parts = dep.splitn(2, '.').collect::<Vec<_>>();
-                let _module = parts[0];
-                let _var = parts[1];
-                vec![dep.splitn(2, '.').next().unwrap()]
+                let module_ident = parts[0];
+                let output_ident = parts[1];
+
+                if !all_vars.contains_key(module_ident) {
+                    // the variable has an unknown dependency, but we actually
+                    // handle this later so just skip for now.
+                    continue;
+                }
+
+                if let Variable::Module {
+                    model_name, inputs, ..
+                } = all_vars[module_ident]
+                {
+                    module_deps(
+                        output_ident,
+                        &inputs,
+                        module_ident,
+                        model_name,
+                        is_initial,
+                        models,
+                    )?
+                    .into_iter()
+                    .collect()
+                } else {
+                    return model_err!(ExpectedModule, module_ident.to_owned());
+                }
             } else {
                 vec![dep]
             };
@@ -99,7 +145,14 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
                     }
 
                     if all_var_deps[dep].is_none() {
-                        all_deps_inner(dep, is_initial, processing, all_vars, all_var_deps)?;
+                        all_deps_inner(
+                            dep,
+                            is_initial,
+                            processing,
+                            all_vars,
+                            all_var_deps,
+                            models,
+                        )?;
                     }
 
                     let dep_deps = all_var_deps[dep].as_ref().unwrap();
@@ -122,6 +175,7 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
             &mut processing,
             &mut all_vars,
             &mut all_var_deps,
+            models,
         )?;
     }
 
@@ -238,7 +292,7 @@ impl Model {
 
         let mut errors: Vec<Error> = Vec::new();
 
-        let dt_deps = match all_deps(&variable_list, false) {
+        let dt_deps = match all_deps(&variable_list, false, models) {
             Ok(deps) => Some(deps),
             Err(err) => {
                 errors.push(err);
@@ -246,7 +300,7 @@ impl Model {
             }
         };
 
-        let initial_deps = match all_deps(&variable_list, true) {
+        let initial_deps = match all_deps(&variable_list, true, models) {
             Ok(deps) => Some(deps),
             Err(err) => {
                 errors.push(err);
@@ -600,7 +654,7 @@ fn test_all_deps() {
             .iter()
             .map(|(v, _)| (*v).clone())
             .collect();
-        let deps = all_deps(&all_vars, is_initial).unwrap();
+        let deps = all_deps(&all_vars, is_initial, &HashMap::new()).unwrap();
 
         if expected_deps != deps {
             let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
@@ -622,7 +676,7 @@ fn test_all_deps() {
         // (even though the order of recursion might change)
         for _ in 0..16 {
             all_vars.shuffle(&mut rng);
-            let deps = all_deps(&all_vars, is_initial).unwrap();
+            let deps = all_deps(&all_vars, is_initial, &HashMap::new()).unwrap();
             assert_eq!(expected_deps, deps);
         }
     }
@@ -684,13 +738,13 @@ fn test_all_deps() {
     let aux_a = aux("aux_a", "aux_b");
     let aux_b = aux("aux_b", "aux_a");
     let all_vars = vec![aux_a, aux_b];
-    let deps_result = all_deps(&all_vars, false);
+    let deps_result = all_deps(&all_vars, false, &models);
     assert!(deps_result.is_err());
 
     // also self-references should return an error and not blow stock
     let aux_a = aux("aux_a", "aux_a");
     let all_vars = vec![aux_a];
-    let deps_result = all_deps(&all_vars, false);
+    let deps_result = all_deps(&all_vars, false, &models);
     assert!(deps_result.is_err());
 
     // test initials
