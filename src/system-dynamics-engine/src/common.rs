@@ -60,6 +60,7 @@ pub enum ErrorCode {
     ExpectedIntegerOne,
     DuplicateUnit,
     ExpectedModule,
+    ExpectedIdent,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -109,6 +110,7 @@ impl fmt::Display for ErrorCode {
             ExpectedIntegerOne => "expected_integer_one",
             DuplicateUnit => "duplicate_unit",
             ExpectedModule => "expected_module",
+            ExpectedIdent => "expected_ident",
         };
 
         write!(f, "{}", name)

@@ -95,7 +95,7 @@ impl Expr {
             Expr::App(builtin, _loc) => {
                 let builtin = match builtin {
                     BuiltinFn::Lookup(id, a) => BuiltinFn::Lookup(id, Box::new(a.strip_loc())),
-                    BuiltinFn::Inf | BuiltinFn::Pi => builtin,
+                    BuiltinFn::Inf | BuiltinFn::Pi | BuiltinFn::IsModuleInput(_) => builtin,
                     BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.strip_loc())),
                     BuiltinFn::Arccos(a) => BuiltinFn::Arccos(Box::new(a.strip_loc())),
                     BuiltinFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(a.strip_loc())),
@@ -380,6 +380,13 @@ impl<'a> Context<'a> {
                     "exp" => check_arity!(Exp, 1),
                     "inf" => check_arity!(Inf, 0),
                     "int" => check_arity!(Int, 1),
+                    "ismoduleinput" => {
+                        if let ast::Expr::Var(ident, _loc) = &orig_args[0] {
+                            BuiltinFn::IsModuleInput(ident.clone())
+                        } else {
+                            return sim_err!(ExpectedIdent, "input to isModuleBuiltin must be a variable name".to_owned());
+                        }
+                    }
                     "ln" => check_arity!(Ln, 1),
                     "log10" => check_arity!(Log10, 1),
                     "max" => check_arity!(Max, 2),
@@ -970,6 +977,7 @@ impl Var {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
     ident: Ident,
+    inputs: HashSet<Ident>,
     n_slots: usize, // number of f64s we need storage for
     runlist_initials: Vec<Expr>,
     runlist_flows: Vec<Expr>,
@@ -1326,6 +1334,7 @@ impl Module {
 
         Ok(Module {
             ident: model_name.to_string(),
+            inputs: inputs_set,
             n_slots,
             runlist_initials,
             runlist_flows,
@@ -1414,12 +1423,22 @@ impl<'module> Compiler<'module> {
                     return Ok(Some(()));
                 };
 
+                // so are module builtins
+                if let BuiltinFn::IsModuleInput(ident) = builtin {
+                    let id = if self.module.inputs.contains(ident) {
+                        self.curr_code.intern_literal(1.0)
+                    } else {
+                        self.curr_code.intern_literal(0.0)
+                    };
+                    self.push(Opcode::LoadConstant { id });
+                    return Ok(Some(()));
+                };
+
                 match builtin {
-                    BuiltinFn::Lookup(_, _) => unreachable!(),
+                    BuiltinFn::Lookup(_, _) | BuiltinFn::IsModuleInput(_) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         // nothing to do here -- no arguments to push
                     }
-
                     BuiltinFn::Abs(a)
                     | BuiltinFn::Arccos(a)
                     | BuiltinFn::Arcsin(a)
@@ -1498,6 +1517,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Exp(_) => BuiltinId::Exp,
                     BuiltinFn::Inf => BuiltinId::Inf,
                     BuiltinFn::Int(_) => BuiltinId::Int,
+                    BuiltinFn::IsModuleInput(_) => unreachable!(),
                     BuiltinFn::Ln(_) => BuiltinId::Ln,
                     BuiltinFn::Log10(_) => BuiltinId::Log10,
                     BuiltinFn::Max(_, _) => BuiltinId::Max,
@@ -1735,6 +1755,7 @@ impl<'a> ModuleEvaluator<'a> {
                     BuiltinFn::Inf => std::f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
+                    BuiltinFn::IsModuleInput(ident) => self.module.inputs.contains(ident) as i8 as f64,
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
                     BuiltinFn::Log10(a) => self.eval(a).log10(),
                     BuiltinFn::SafeDiv(a, b, default) => {
@@ -1891,6 +1912,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Exp(l) => format!("exp({})", pretty(l)),
             BuiltinFn::Inf => "∞".to_string(),
             BuiltinFn::Int(l) => format!("int({})", pretty(l)),
+            BuiltinFn::IsModuleInput(ident) => format!("isModuleInput({})", ident),
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
             BuiltinFn::Max(l, r) => format!("max({}, {})", pretty(l), pretty(r)),
