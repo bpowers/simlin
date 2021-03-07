@@ -50,25 +50,12 @@ fn module_deps<'a>(
         final_deps.insert(module_ident);
     }
 
-    eprintln!(
-        "{}.{} (model: \"{}\"; initial: {}):",
-        module_ident, output_ident, model_name, is_initial
-    );
     for dep in output_deps.iter() {
-        eprintln!("\t{}", dep);
         for module_input in inputs.iter() {
             if &module_input.dst == dep {
-                eprintln!(
-                    "\t\t input dep: '{}' -> '{}'",
-                    module_input.src, module_input.dst
-                );
                 final_deps.insert(&module_input.src);
             }
         }
-    }
-
-    for fdep in final_deps.iter() {
-        eprintln!("\t. {}", fdep);
     }
 
     Ok(final_deps)
@@ -859,6 +846,22 @@ fn test_all_deps() {
         (&inflow, &["aux_used_in_initial", "aux_2", "aux_3", "aux_4"]),
         (&outflow, &["stock_1", "aux_used_in_initial"]),
         (&stock_1, &["aux_used_in_initial"]),
+    ];
+
+    verify_all_deps(&expected_deps_list, true, &models);
+
+    let aux_if = aux(
+        "aux_if",
+        "if (aux_cond_const = NAN) THEN aux_true ELSE aux_false",
+    );
+    let aux_cond_const = aux("aux_cond_const", "NAN");
+    let aux_true = aux("aux_true", "TIME * 3");
+    let aux_false = aux("aux_false", "TIME * 4");
+    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
+        (&aux_if, &["aux_true"]),
+        (&aux_cond_const, &[]),
+        (&aux_true, &[]),
+        (&aux_false, &[]),
     ];
 
     verify_all_deps(&expected_deps_list, true, &models);
