@@ -569,7 +569,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -588,7 +587,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -656,7 +654,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -675,7 +672,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -734,7 +730,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -753,7 +748,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -772,7 +766,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -791,7 +784,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -1041,7 +1033,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -1060,7 +1051,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -1079,7 +1069,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -1098,7 +1087,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -2473,4 +2461,9 @@ fn test_arrays() {
 
     let sim = Simulation::new(&parsed_project, "main");
     assert!(sim.is_ok());
+}
+
+#[test]
+fn nan_is_approx_eq() {
+    assert!(approx_eq!(f64, f64::NAN, f64::NAN));
 }

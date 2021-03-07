@@ -110,7 +110,7 @@ impl From<datamodel::Project> for Project {
         {
             let mut models: HashMap<Ident, &Model> = HashMap::new();
             for model in models_list.iter_mut() {
-                model.set_dependencies(&models);
+                model.set_dependencies(&models, &project_datamodel.dimensions);
                 models.insert(model.name.clone(), model);
             }
         }

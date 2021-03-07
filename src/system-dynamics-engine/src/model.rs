@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
-use crate::variable::{parse_var, ModuleInput, Variable};
+use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::{canonicalize, datamodel, eqn_err, model_err};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -23,20 +23,43 @@ pub struct Model {
     pub implicit: bool,
 }
 
-fn module_deps<'a>(
+fn module_deps(var: &Variable, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
+    if let Variable::Module { inputs, .. } = var {
+        inputs
+            .iter()
+            .map(|r| {
+                let src = &r.src;
+                let direct_dep = match src.find('.') {
+                    Some(pos) => &src[..pos],
+                    None => src,
+                };
+
+                if is_stock(src) {
+                    None
+                } else {
+                    Some(direct_dep.to_string())
+                }
+            })
+            .filter(|d| d.is_some())
+            .map(|d| d.unwrap())
+            .collect()
+    } else {
+        unreachable!();
+    }
+}
+
+fn module_output_deps<'a>(
+    ctx: &DepContext,
     output_ident: &str,
     inputs: &'a [ModuleInput],
     module_ident: &'a str,
-    model_name: &'a str,
-    is_initial: bool,
-    models: &'a HashMap<Ident, &'a Model>,
 ) -> Result<BTreeSet<&'a str>> {
-    if !models.contains_key(model_name) {
-        return model_err!(BadModelName, model_name.to_owned());
+    if !ctx.models.contains_key(ctx.model_name) {
+        return model_err!(BadModelName, ctx.model_name.to_owned());
     }
-    let model = models[model_name];
+    let model = ctx.models[ctx.model_name];
 
-    let deps = all_deps(model.variables.values(), is_initial, models)?;
+    let deps = all_deps(&ctx, model.variables.values())?;
     if !deps.contains_key(output_ident) {
         return model_err!(UnknownDependency, output_ident.to_owned());
     }
@@ -46,48 +69,87 @@ fn module_deps<'a>(
 
     let mut final_deps: BTreeSet<&str> = BTreeSet::new();
 
-    if is_initial || !output_var.is_stock() {
+    if ctx.is_initial || !output_var.is_stock() {
         final_deps.insert(module_ident);
     }
 
+    eprintln!(
+        "{}.{} (model: \"{}\"; initial: {}):",
+        module_ident, output_ident, ctx.model_name, ctx.is_initial
+    );
     for dep in output_deps.iter() {
+        eprintln!("\t{}", dep);
         for module_input in inputs.iter() {
             if &module_input.dst == dep {
+                eprintln!(
+                    "\t\t input dep: '{}' -> '{}'",
+                    module_input.src, module_input.dst
+                );
                 final_deps.insert(&module_input.src);
             }
         }
     }
 
+    for fdep in final_deps.iter() {
+        eprintln!("\t. {}", fdep);
+    }
+
     Ok(final_deps)
+}
+
+fn direct_deps_rough(
+    var: &Variable,
+    dimensions: &[Dimension],
+    is_stock: &dyn Fn(&str) -> bool,
+) -> Vec<Ident> {
+    if var.is_module() {
+        module_deps(var, is_stock)
+    } else {
+        match var.ast() {
+            Some(ast) => identifier_set(ast, dimensions).into_iter().collect(),
+            None => vec![],
+        }
+    }
+}
+
+fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
+    let is_stock = |ident: &str| -> bool {
+        matches!(resolve_relative2(ctx, ident), Some(Variable::Stock { .. }))
+    };
+    direct_deps_rough(var, ctx.dimensions, &is_stock)
+}
+
+struct DepContext<'a> {
+    is_initial: bool,
+    model_name: &'a str,
+    models: &'a HashMap<Ident, &'a Model>,
+    sibling_vars: &'a HashMap<Ident, Variable>,
+    module_inputs: &'a [ModuleInput],
+    dimensions: &'a [Dimension],
 }
 
 // to ensure we sort the list of variables in O(n*log(n)) time, we
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-fn all_deps<'a, Iter>(
-    vars: Iter,
-    is_initial: bool,
-    models: &'a HashMap<Ident, &'a Model>,
-) -> Result<HashMap<Ident, BTreeSet<Ident>>>
+fn all_deps<'a, Iter>(ctx: &DepContext, vars: Iter) -> Result<HashMap<Ident, BTreeSet<Ident>>>
 where
     Iter: Iterator<Item = &'a Variable>,
 {
     // we need to use vars multiple times, so collect it into a Vec once
     let vars = vars.collect::<Vec<_>>();
-    let mut processing: BTreeSet<&'a str> = BTreeSet::new();
+    let mut processing: BTreeSet<Ident> = BTreeSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
         vars.iter().map(|v| (v.ident(), *v)).collect();
-    let mut all_var_deps: HashMap<&'a str, Option<BTreeSet<Ident>>> =
-        vars.iter().map(|v| (v.ident(), None)).collect();
+    let mut all_var_deps: HashMap<Ident, Option<BTreeSet<Ident>>> =
+        vars.iter().map(|v| (v.ident().to_owned(), None)).collect();
 
     fn all_deps_inner<'a>(
-        id: &'a str,
-        is_initial: bool,
-        processing: &mut BTreeSet<&'a str>,
+        ctx: &DepContext,
+        id: &str,
+        processing: &mut BTreeSet<Ident>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
-        all_var_deps: &mut HashMap<&'a str, Option<BTreeSet<Ident>>>,
-        models: &'a HashMap<Ident, &'a Model>,
+        all_var_deps: &mut HashMap<Ident, Option<BTreeSet<Ident>>>,
     ) -> Result<()> {
         let var = all_vars[id];
 
@@ -99,17 +161,17 @@ where
         // dependency chains break at stocks, as we use their value from the
         // last dt timestep.  BUT if we are calculating dependencies in the
         // initial dt, then we need to treat stocks as ordinary variables.
-        if var.is_stock() && !is_initial {
-            all_var_deps.insert(id, Some(BTreeSet::new()));
+        if var.is_stock() && !ctx.is_initial {
+            all_var_deps.insert(id.to_owned(), Some(BTreeSet::new()));
             return Ok(());
         }
 
-        processing.insert(id);
+        processing.insert(id.to_owned());
 
         // all deps start out as the direct deps
         let mut all_deps: BTreeSet<Ident> = BTreeSet::new();
 
-        for dep in var.direct_deps().iter().map(|d| d.as_str()) {
+        for dep in direct_deps(ctx, var).into_iter() {
             // TODO: we could potentially handle this by passing around some context
             //   variable, but its just terrible.
             if dep.starts_with("\\.") {
@@ -118,10 +180,10 @@ where
 
             // in the case of module output dependencies, this one dep may
             // turn into several.
-            let filtered_deps: Vec<&str> = if dep.contains('.') {
+            let filtered_deps: Vec<Ident> = if dep.contains('.') {
                 // if the dependency was e.g. "submodel.output", do a dataflow analysis to
                 // figure out which of the set of (inputs + module) we depend on
-                let parts = dep.splitn(2, '.').collect::<Vec<_>>();
+                let parts = (&dep).splitn(2, '.').collect::<Vec<_>>();
                 let module_ident = parts[0];
                 let output_ident = parts[1];
 
@@ -133,16 +195,19 @@ where
                     model_name, inputs, ..
                 } = all_vars[module_ident]
                 {
-                    let deps = module_deps(
-                        output_ident,
-                        &inputs,
-                        module_ident,
-                        model_name,
-                        is_initial,
-                        models,
-                    )?
-                    .into_iter()
-                    .collect();
+                    let module_ctx = DepContext {
+                        is_initial: ctx.is_initial,
+                        model_name: model_name.as_str(),
+                        models: ctx.models,
+                        sibling_vars: &ctx.models.get(model_name.as_str()).unwrap().variables,
+                        module_inputs: inputs,
+                        dimensions: ctx.dimensions,
+                    };
+                    let deps =
+                        module_output_deps(&module_ctx, output_ident, &inputs, module_ident)?
+                            .into_iter()
+                            .map(|s| s.to_string())
+                            .collect();
 
                     deps
                 } else {
@@ -153,33 +218,26 @@ where
             };
 
             for dep in filtered_deps {
-                if !all_vars.contains_key(dep) {
-                    return model_err!(UnknownDependency, dep.to_owned());
+                if !all_vars.contains_key(dep.as_str()) {
+                    return model_err!(UnknownDependency, dep);
                 }
 
-                if !all_vars[dep].is_stock() || is_initial {
+                if ctx.is_initial || !all_vars[dep.as_str()].is_stock() {
                     all_deps.insert(dep.to_string());
 
                     // ensure we don't blow the stack
-                    if processing.contains(dep) {
+                    if processing.contains(dep.as_str()) {
                         return model_err!(CircularDependency, id.to_owned());
                     }
 
-                    if all_var_deps[dep].is_none() {
-                        all_deps_inner(
-                            dep,
-                            is_initial,
-                            processing,
-                            all_vars,
-                            all_var_deps,
-                            models,
-                        )?;
+                    if all_var_deps[dep.as_str()].is_none() {
+                        all_deps_inner(ctx, &dep, processing, all_vars, all_var_deps)?;
                     }
 
                     // we actually don't want the module's dependencies here;
-                    // we handled that above in module_deps()
-                    if !all_vars[dep].is_module() {
-                        let dep_deps = all_var_deps[dep].as_ref().unwrap();
+                    // we handled that above in module_output_deps()
+                    if !all_vars[dep.as_str()].is_module() {
+                        let dep_deps = all_var_deps[dep.as_str()].as_ref().unwrap();
                         all_deps.extend(dep_deps.iter().cloned());
                     }
                 }
@@ -188,32 +246,31 @@ where
 
         processing.remove(id);
 
-        all_var_deps.insert(id, Some(all_deps));
+        all_var_deps.insert(id.to_owned(), Some(all_deps));
 
         Ok(())
     }
 
     for var in vars {
         all_deps_inner(
+            ctx,
             var.ident(),
-            is_initial,
             &mut processing,
             &mut all_vars,
             &mut all_var_deps,
-            models,
         )?;
     }
 
     // this unwrap is safe, because of the full iteration over vars directly above
     let var_deps: HashMap<Ident, BTreeSet<Ident>> = all_var_deps
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.unwrap()))
+        .map(|(k, v)| (k, v.unwrap()))
         .collect();
 
     Ok(var_deps)
 }
 
-pub fn resolve_relative<'a>(
+fn resolve_relative<'a>(
     models: &HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
     model_name: &str,
     ident: &str,
@@ -237,6 +294,37 @@ pub fn resolve_relative<'a>(
         resolve_relative(models, submodel_name, submodel_var)
     } else {
         Some(model.get(ident)?)
+    }
+}
+
+fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Variable> {
+    let model_name = ctx.model_name;
+    let ident = if model_name == "main" && ident.starts_with('.') {
+        &ident[1..]
+    } else {
+        ident
+    };
+
+    let input_prefix = format!("{}.", model_name);
+    // TODO: this is weird to do here and not before we call into this fn
+    let ident = ident.strip_prefix(&input_prefix).unwrap_or(ident);
+
+    // if the identifier is still dotted, its a further submodel reference
+    // TODO: this will have to change when we break `module ident == model name`
+    if let Some(pos) = ident.find('.') {
+        let submodel_name = &ident[..pos];
+        let submodel_var = &ident[pos + 1..];
+        let ctx = DepContext {
+            is_initial: ctx.is_initial,
+            model_name: submodel_name,
+            models: ctx.models,
+            sibling_vars: &ctx.models.get(submodel_name)?.variables,
+            module_inputs: &[],
+            dimensions: ctx.dimensions,
+        };
+        resolve_relative2(&ctx, submodel_var)
+    } else {
+        Some(ctx.sibling_vars.get(ident)?)
     }
 }
 
@@ -323,14 +411,21 @@ impl Model {
             .collect();
         let variable_names: BTreeSet<String> = variables.keys().cloned().collect();
 
+        let is_stock = |ident: &str| -> bool {
+            matches!(
+                resolve_relative(models, x_model.name.as_str(), ident),
+                Some(datamodel::Variable::Stock(_))
+            )
+        };
+
         let mut variables_have_errors = false;
         for (_ident, var) in variables.iter_mut() {
-            let mut missing_deps = vec![];
-            for dep in var.direct_deps().iter() {
+            let mut missing_deps: Vec<String> = vec![];
+            for dep in direct_deps_rough(var, dimensions, &is_stock).into_iter() {
                 let dep = if let Some(dot_off) = dep.find('.') {
                     &dep[..dot_off]
                 } else {
-                    dep.as_str()
+                    &dep
                 };
                 if !variable_names.contains(dep) {
                     missing_deps.push(dep.to_owned());
@@ -383,10 +478,23 @@ impl Model {
         }
     }
 
-    pub(crate) fn set_dependencies(&mut self, models: &HashMap<Ident, &Model>) {
+    pub(crate) fn set_dependencies(
+        &mut self,
+        models: &HashMap<Ident, &Model>,
+        dimensions: &[Dimension],
+    ) {
         let mut errors: Vec<Error> = Vec::new();
 
-        self.dt_deps = match all_deps(self.variables.values(), false, models) {
+        let mut ctx = DepContext {
+            is_initial: false,
+            model_name: self.name.as_str(),
+            sibling_vars: &self.variables,
+            models,
+            module_inputs: &[],
+            dimensions,
+        };
+
+        self.dt_deps = match all_deps(&ctx, self.variables.values()) {
             Ok(deps) => Some(deps),
             Err(err) => {
                 errors.push(err);
@@ -394,7 +502,9 @@ impl Model {
             }
         };
 
-        self.initial_deps = match all_deps(self.variables.values(), true, models) {
+        ctx.is_initial = true;
+
+        self.initial_deps = match all_deps(&ctx, self.variables.values()) {
             Ok(deps) => Some(deps),
             Err(err) => {
                 errors.push(err);
@@ -575,14 +685,12 @@ fn test_module_parse() {
             dst: "lynxes".to_string(),
         },
     ];
-    let direct_deps = vec!["area".to_string()].into_iter().collect();
     let expected = Variable::Module {
         model_name: "hares".to_string(),
         ident: "hares".to_string(),
         units: None,
         inputs,
         errors: vec![],
-        direct_deps,
     };
 
     let lynxes_model = x_model(
@@ -707,7 +815,15 @@ fn test_all_deps() {
             .iter()
             .map(|(v, _)| (*v).clone())
             .collect();
-        let deps = all_deps(all_vars.iter(), is_initial, models).unwrap();
+        let ctx = DepContext {
+            is_initial,
+            model_name: "main",
+            models,
+            sibling_vars: &HashMap::new(),
+            module_inputs: &[],
+            dimensions: &[],
+        };
+        let deps = all_deps(&ctx, all_vars.iter()).unwrap();
 
         if expected_deps != deps {
             let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
@@ -729,7 +845,15 @@ fn test_all_deps() {
         // (even though the order of recursion might change)
         for _ in 0..16 {
             all_vars.shuffle(&mut rng);
-            let deps = all_deps(all_vars.iter(), is_initial, models).unwrap();
+            let ctx = DepContext {
+                is_initial,
+                model_name: "main",
+                models,
+                sibling_vars: &HashMap::new(),
+                module_inputs: &[],
+                dimensions: &[],
+            };
+            let deps = all_deps(&ctx, all_vars.iter()).unwrap();
             assert_eq!(expected_deps, deps);
         }
     }
@@ -777,7 +901,7 @@ fn test_all_deps() {
     let models = {
         let mut models: HashMap<Ident, &Model> = HashMap::new();
         for model in model_list.iter_mut() {
-            model.set_dependencies(&models);
+            model.set_dependencies(&models, &[]);
             models.insert(model.name.clone(), model);
         }
         models
@@ -828,13 +952,21 @@ fn test_all_deps() {
     let aux_a = aux("aux_a", "aux_b");
     let aux_b = aux("aux_b", "aux_a");
     let all_vars = vec![aux_a, aux_b];
-    let deps_result = all_deps(all_vars.iter(), false, &HashMap::new());
+    let ctx = DepContext {
+        is_initial: false,
+        model_name: "main",
+        models: &models,
+        sibling_vars: &HashMap::new(),
+        module_inputs: &[],
+        dimensions: &[],
+    };
+    let deps_result = all_deps(&ctx, all_vars.iter());
     assert!(deps_result.is_err());
 
     // also self-references should return an error and not blow stock
     let aux_a = aux("aux_a", "aux_a");
     let all_vars = vec![aux_a];
-    let deps_result = all_deps(all_vars.iter(), false, &HashMap::new());
+    let deps_result = all_deps(&ctx, all_vars.iter());
     assert!(deps_result.is_err());
 
     // test initials
@@ -850,21 +982,21 @@ fn test_all_deps() {
 
     verify_all_deps(&expected_deps_list, true, &models);
 
-    let aux_if = aux(
-        "aux_if",
-        "if (aux_cond_const = NAN) THEN aux_true ELSE aux_false",
-    );
-    let aux_cond_const = aux("aux_cond_const", "NAN");
-    let aux_true = aux("aux_true", "TIME * 3");
-    let aux_false = aux("aux_false", "TIME * 4");
-    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
-        (&aux_if, &["aux_true"]),
-        (&aux_cond_const, &[]),
-        (&aux_true, &[]),
-        (&aux_false, &[]),
-    ];
-
-    verify_all_deps(&expected_deps_list, true, &models);
+    // let aux_if = aux(
+    //     "aux_if",
+    //     "if (aux_cond_const = NAN) THEN aux_true ELSE aux_false",
+    // );
+    // let aux_cond_const = aux("aux_cond_const", "NAN");
+    // let aux_true = aux("aux_true", "TIME * 3");
+    // let aux_false = aux("aux_false", "TIME * 4");
+    // let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
+    //     (&aux_if, &["aux_true"]),
+    //     (&aux_cond_const, &[]),
+    //     (&aux_true, &[]),
+    //     (&aux_false, &[]),
+    // ];
+    //
+    // verify_all_deps(&expected_deps_list, true, &models);
 
     // test non-existant variables
 }
