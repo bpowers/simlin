@@ -16,7 +16,7 @@ pub type DimensionName = String;
 pub type ElementName = String;
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
@@ -118,7 +118,7 @@ impl fmt::Display for ErrorCode {
 }
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
     pub end: u16,
@@ -128,6 +128,26 @@ pub struct EquationError {
 impl fmt::Display for EquationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}:{}", self.start, self.end, self.code)
+    }
+}
+
+impl From<Error> for EquationError {
+    fn from(err: Error) -> Self {
+        EquationError {
+            code: err.code,
+            start: 0,
+            end: 0,
+        }
+    }
+}
+
+impl From<(Ident, EquationError)> for Error {
+    fn from(err: (Ident, EquationError)) -> Self {
+        Error {
+            kind: ErrorKind::Variable,
+            code: err.1.code,
+            details: Some(err.0),
+        }
     }
 }
 
@@ -146,6 +166,14 @@ macro_rules! eqn_err(
     ($code:tt, $start:expr, $end:expr) => {{
         use crate::common::{EquationError, ErrorCode};
         Err(EquationError{ start: $start, end: $end, code: ErrorCode::$code})
+    }}
+);
+
+#[macro_export]
+macro_rules! var_eqn_err(
+    ($ident:expr, $code:tt, $start:expr, $end:expr) => {{
+        use crate::common::{EquationError, ErrorCode};
+        Err(($ident, EquationError{ start: $start, end: $end, code: ErrorCode::$code}))
     }}
 );
 

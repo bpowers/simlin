@@ -2,12 +2,13 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::result::Result as StdResult;
 
 use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
-use crate::{canonicalize, datamodel, eqn_err, model_err};
+use crate::{canonicalize, datamodel, eqn_err, model_err, var_eqn_err};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
@@ -133,7 +134,10 @@ struct DepContext<'a> {
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-fn all_deps<'a, Iter>(ctx: &DepContext, vars: Iter) -> Result<HashMap<Ident, BTreeSet<Ident>>>
+fn all_deps<'a, Iter>(
+    ctx: &DepContext,
+    vars: Iter,
+) -> StdResult<HashMap<Ident, BTreeSet<Ident>>, (Ident, EquationError)>
 where
     Iter: Iterator<Item = &'a Variable>,
 {
@@ -151,7 +155,7 @@ where
         processing: &mut BTreeSet<Ident>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
         all_var_deps: &mut HashMap<Ident, Option<BTreeSet<Ident>>>,
-    ) -> Result<()> {
+    ) -> StdResult<(), (Ident, EquationError)> {
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
@@ -176,7 +180,13 @@ where
             // TODO: we could potentially handle this by passing around some context
             //   variable, but its just terrible.
             if dep.starts_with("\\.") {
-                return model_err!(NoAbsoluteReferences, id.to_owned());
+                let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                return var_eqn_err!(
+                    var.ident().to_owned(),
+                    NoAbsoluteReferences,
+                    loc.start,
+                    loc.end
+                );
             }
 
             // in the case of module output dependencies, this one dep may
@@ -189,7 +199,13 @@ where
                 let output_ident = parts[1];
 
                 if !all_vars.contains_key(module_ident) {
-                    return model_err!(UnknownDependency, module_ident.to_owned());
+                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    return var_eqn_err!(
+                        var.ident().to_owned(),
+                        UnknownDependency,
+                        loc.start,
+                        loc.end
+                    );
                 }
 
                 if let Variable::Module {
@@ -204,15 +220,20 @@ where
                         module_inputs: inputs,
                         dimensions: ctx.dimensions,
                     };
-                    let deps =
-                        module_output_deps(&module_ctx, output_ident, &inputs, module_ident)?
-                            .into_iter()
-                            .map(|s| s.to_string())
-                            .collect();
-
-                    deps
+                    match module_output_deps(&module_ctx, output_ident, &inputs, module_ident) {
+                        Ok(deps) => deps.into_iter().map(|s| s.to_string()).collect(),
+                        Err(err) => {
+                            return Err((var.ident().to_owned(), err.into()));
+                        }
+                    }
                 } else {
-                    return model_err!(ExpectedModule, module_ident.to_owned());
+                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    return var_eqn_err!(
+                        var.ident().to_owned(),
+                        ExpectedModule,
+                        loc.start,
+                        loc.end
+                    );
                 }
             } else {
                 vec![dep]
@@ -220,7 +241,13 @@ where
 
             for dep in filtered_deps {
                 if !all_vars.contains_key(dep.as_str()) {
-                    return model_err!(UnknownDependency, dep);
+                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    return var_eqn_err!(
+                        var.ident().to_owned(),
+                        UnknownDependency,
+                        loc.start,
+                        loc.end
+                    );
                 }
 
                 if ctx.is_initial || !all_vars[dep.as_str()].is_stock() {
@@ -228,7 +255,13 @@ where
 
                     // ensure we don't blow the stack
                     if processing.contains(dep.as_str()) {
-                        return model_err!(CircularDependency, id.to_owned());
+                        let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                        return var_eqn_err!(
+                            var.ident().to_owned(),
+                            CircularDependency,
+                            loc.start,
+                            loc.end
+                        );
                     }
 
                     if all_var_deps[dep.as_str()].is_none() {
@@ -404,41 +437,83 @@ impl Model {
             assert_eq!(0, dummy_implicit_vars.len());
         }
 
-        let mut errors: Vec<Error> = Vec::new();
-
-        let mut variables: HashMap<String, Variable> = variable_list
+        let variables: HashMap<String, Variable> = variable_list
             .into_iter()
             .map(|v| (v.ident().to_string(), v))
             .collect();
-        let variable_names: BTreeSet<String> = variables.keys().cloned().collect();
 
-        let is_stock = |ident: &str| -> bool {
-            matches!(
-                resolve_relative(models, x_model.name.as_str(), ident),
-                Some(datamodel::Variable::Stock(_))
-            )
+        let model_deps = variables
+            .values()
+            .filter(|v| v.is_module())
+            .map(|v| {
+                if let Variable::Module { model_name, .. } = v {
+                    model_name.to_owned()
+                } else {
+                    unreachable!();
+                }
+            })
+            .collect();
+
+        Model {
+            name: x_model.name.clone(),
+            variables,
+            errors: None,
+            model_deps: Some(model_deps),
+            dt_deps: None,
+            initial_deps: None,
+            implicit,
+        }
+    }
+
+    pub(crate) fn set_dependencies(
+        &mut self,
+        models: &HashMap<Ident, &Model>,
+        dimensions: &[Dimension],
+    ) {
+        // use a Set to deduplicate problems we see in dt_deps and initial_deps
+        let mut var_errors: HashMap<Ident, HashSet<EquationError>> = HashMap::new();
+
+        let mut ctx = DepContext {
+            is_initial: false,
+            model_name: self.name.as_str(),
+            sibling_vars: &self.variables,
+            models,
+            module_inputs: &[],
+            dimensions,
         };
 
-        let mut variables_have_errors = false;
-        for (_ident, var) in variables.iter_mut() {
-            let mut missing_deps: Vec<String> = vec![];
-            for dep in direct_deps_rough(var, false, dimensions, &[], &is_stock).into_iter() {
-                let dep = if let Some(dot_off) = dep.find('.') {
-                    &dep[..dot_off]
-                } else {
-                    &dep
-                };
-                if !variable_names.contains(dep) {
-                    missing_deps.push(dep.to_owned());
-                }
+        self.dt_deps = match all_deps(&ctx, self.variables.values()) {
+            Ok(deps) => Some(deps),
+            Err((ident, err)) => {
+                var_errors
+                    .entry(ident)
+                    .or_insert_with(|| HashSet::new())
+                    .insert(err);
+                None
             }
-            for dep in missing_deps.into_iter() {
-                let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
-                var.push_error(EquationError {
-                    start: loc.start,
-                    end: loc.end,
-                    code: ErrorCode::UnknownDependency,
-                });
+        };
+
+        ctx.is_initial = true;
+
+        self.initial_deps = match all_deps(&ctx, self.variables.values()) {
+            Ok(deps) => Some(deps),
+            Err((ident, err)) => {
+                var_errors
+                    .entry(ident)
+                    .or_insert_with(|| HashSet::new())
+                    .insert(err);
+                None
+            }
+        };
+
+        let mut errors: Vec<Error> = Vec::new();
+        let mut variables_have_errors = false;
+        for (ident, var) in self.variables.iter_mut() {
+            if var_errors.contains_key(ident) {
+                let errors = std::mem::take(var_errors.get_mut(ident).unwrap());
+                for error in errors.into_iter() {
+                    var.push_error(error);
+                }
                 variables_have_errors = true;
             }
         }
@@ -456,70 +531,7 @@ impl Model {
             _ => Some(errors),
         };
 
-        let model_deps = variables
-            .values()
-            .filter(|v| v.is_module())
-            .map(|v| {
-                if let Variable::Module { model_name, .. } = v {
-                    model_name.to_owned()
-                } else {
-                    unreachable!();
-                }
-            })
-            .collect();
-
-        Model {
-            name: x_model.name.clone(),
-            variables,
-            errors: maybe_errors,
-            model_deps: Some(model_deps),
-            dt_deps: None,
-            initial_deps: None,
-            implicit,
-        }
-    }
-
-    pub(crate) fn set_dependencies(
-        &mut self,
-        models: &HashMap<Ident, &Model>,
-        dimensions: &[Dimension],
-    ) {
-        let mut errors: Vec<Error> = Vec::new();
-
-        let mut ctx = DepContext {
-            is_initial: false,
-            model_name: self.name.as_str(),
-            sibling_vars: &self.variables,
-            models,
-            module_inputs: &[],
-            dimensions,
-        };
-
-        self.dt_deps = match all_deps(&ctx, self.variables.values()) {
-            Ok(deps) => Some(deps),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        };
-
-        ctx.is_initial = true;
-
-        self.initial_deps = match all_deps(&ctx, self.variables.values()) {
-            Ok(deps) => Some(deps),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        };
-
-        if !errors.is_empty() {
-            if self.errors.is_some() {
-                self.errors.as_mut().unwrap().extend_from_slice(&errors);
-            } else {
-                self.errors = Some(errors);
-            }
-        }
+        self.errors = maybe_errors;
     }
 
     pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
@@ -769,7 +781,11 @@ fn test_errors() {
             .map(|(name, m)| build_xvars_map(name, m))
             .collect();
 
-    let model = Model::new(&models, &main_model, &[], false);
+    let model = {
+        let mut model = Model::new(&models, &main_model, &[], false);
+        model.set_dependencies(&HashMap::new(), &[]);
+        model
+    };
 
     assert!(model.errors.is_some());
     assert_eq!(
