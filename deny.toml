@@ -23,10 +23,6 @@ multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 
-[[bans.skip]]
-name = "cfg-if"
-version = "=0.1"
-
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
