@@ -2,21 +2,21 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::{error, result};
 
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
-
 use lazy_static::lazy_static;
 use regex::Regex;
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 pub type Ident = String;
 pub type DimensionName = String;
 pub type ElementName = String;
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     NoError,      // will never be produced
     DoesNotExist, // the named entity doesn't exist
@@ -59,6 +59,8 @@ pub enum ErrorCode {
     ExpectedInteger,
     ExpectedIntegerOne,
     DuplicateUnit,
+    ExpectedModule,
+    ExpectedIdent,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -107,6 +109,8 @@ impl fmt::Display for ErrorCode {
             ExpectedInteger => "expected_integer",
             ExpectedIntegerOne => "expected_integer_one",
             DuplicateUnit => "duplicate_unit",
+            ExpectedModule => "expected_module",
+            ExpectedIdent => "expected_ident",
         };
 
         write!(f, "{}", name)
@@ -114,7 +118,7 @@ impl fmt::Display for ErrorCode {
 }
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EquationError {
     pub start: u16,
     pub end: u16,
@@ -124,6 +128,26 @@ pub struct EquationError {
 impl fmt::Display for EquationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}:{}", self.start, self.end, self.code)
+    }
+}
+
+impl From<Error> for EquationError {
+    fn from(err: Error) -> Self {
+        EquationError {
+            code: err.code,
+            start: 0,
+            end: 0,
+        }
+    }
+}
+
+impl From<(Ident, EquationError)> for Error {
+    fn from(err: (Ident, EquationError)) -> Self {
+        Error {
+            kind: ErrorKind::Variable,
+            code: err.1.code,
+            details: Some(err.0),
+        }
     }
 }
 
@@ -142,6 +166,14 @@ macro_rules! eqn_err(
     ($code:tt, $start:expr, $end:expr) => {{
         use crate::common::{EquationError, ErrorCode};
         Err(EquationError{ start: $start, end: $end, code: ErrorCode::$code})
+    }}
+);
+
+#[macro_export]
+macro_rules! var_eqn_err(
+    ($ident:expr, $code:tt, $start:expr, $end:expr) => {{
+        use crate::common::{EquationError, ErrorCode};
+        Err(($ident, EquationError{ start: $start, end: $end, code: ErrorCode::$code}))
     }}
 );
 
@@ -263,4 +295,42 @@ fn test_canonicalize() {
     assert_eq!("a_b", canonicalize("   a b"));
     assert_eq!("å_b", canonicalize("Å\nb"));
     assert_eq!("a_b", canonicalize("a \n b"));
+}
+
+pub fn topo_sort<'out>(
+    runlist: Vec<&'out str>,
+    dependencies: &'out HashMap<Ident, BTreeSet<Ident>>,
+) -> Vec<&'out str> {
+    use std::collections::HashSet;
+
+    let runlist_len = runlist.len();
+    let mut result: Vec<&'out str> = Vec::with_capacity(runlist_len);
+    // TODO: remove this allocation (should be &str)
+    let mut used: HashSet<&str> = HashSet::new();
+
+    // We want to do a postorder, recursive traversal of variables to ensure
+    // dependencies are calculated before the variables that reference them.
+    // By this point, we have already errored out if we have e.g. a cycle
+    fn add<'a>(
+        dependencies: &'a HashMap<Ident, BTreeSet<Ident>>,
+        result: &mut Vec<&'a str>,
+        used: &mut HashSet<&'a str>,
+        ident: &'a str,
+    ) {
+        if used.contains(ident) {
+            return;
+        }
+        used.insert(ident);
+        for dep in dependencies[ident].iter() {
+            add(dependencies, result, used, dep)
+        }
+        result.push(ident);
+    }
+
+    for ident in runlist.into_iter() {
+        add(dependencies, &mut result, &mut used, ident);
+    }
+
+    assert_eq!(runlist_len, result.len());
+    result
 }

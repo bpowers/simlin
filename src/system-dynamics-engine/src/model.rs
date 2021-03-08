@@ -2,43 +2,196 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::result::Result as StdResult;
 
 use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
-use crate::variable::{parse_var, ModuleInput, Variable};
-use crate::{canonicalize, datamodel, eqn_err, model_err};
+use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
+use crate::{canonicalize, datamodel, eqn_err, model_err, var_eqn_err};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
     pub variables: HashMap<String, Variable>,
     pub errors: Option<Vec<Error>>,
-    pub dt_deps: Option<HashMap<Ident, HashSet<Ident>>>,
-    pub initial_deps: Option<HashMap<Ident, HashSet<Ident>>>,
+    /// model_deps is the transitive set of model names referenced from modules in this model
+    pub model_deps: Option<BTreeSet<Ident>>,
+    pub dt_deps: Option<HashMap<Ident, BTreeSet<Ident>>>,
+    pub initial_deps: Option<HashMap<Ident, BTreeSet<Ident>>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
+}
+
+fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
+    if let Variable::Module {
+        inputs, model_name, ..
+    } = var
+    {
+        if ctx.is_initial {
+            let model = ctx.models[model_name];
+            if model.initial_deps.is_some() {
+                let model_ctx = DepContext {
+                    is_initial: ctx.is_initial,
+                    model_name: &model.name,
+                    models: ctx.models,
+                    sibling_vars: &model.variables,
+                    module_inputs: Some(inputs),
+                    dimensions: ctx.dimensions,
+                };
+                // this unwrap should be safe because we _already_ successfully computed
+                // this (the if initial_deps.is_some() we are in).  We have to recompute it to narrow down
+                // if statements containing `isModuleInput()` conditions, now that we have
+                // the context to know what our module inputs are.
+                let initial_deps = all_deps(&model_ctx, model.variables.values()).unwrap();
+                let mut stock_deps = HashSet::<Ident>::new();
+
+                for var in model.variables.values() {
+                    if let Variable::Stock { .. } = var {
+                        if let Some(deps) = initial_deps.get(var.ident()) {
+                            stock_deps.extend(deps.iter().cloned());
+                        }
+                    }
+                }
+
+                inputs
+                    .iter()
+                    .map(|input| {
+                        let src = &input.src;
+                        if stock_deps.contains(&input.dst) {
+                            let direct_dep = match src.find('.') {
+                                Some(pos) => &src[..pos],
+                                None => src,
+                            };
+
+                            if is_stock(src) {
+                                None
+                            } else {
+                                Some(direct_dep.to_string())
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .filter(|d| d.is_some())
+                    .map(|d| d.unwrap())
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            inputs
+                .iter()
+                .map(|r| {
+                    let src = &r.src;
+                    let direct_dep = match src.find('.') {
+                        Some(pos) => &src[..pos],
+                        None => src,
+                    };
+
+                    if is_stock(src) {
+                        None
+                    } else {
+                        Some(direct_dep.to_string())
+                    }
+                })
+                .filter(|d| d.is_some())
+                .map(|d| d.unwrap())
+                .collect()
+        }
+    } else {
+        unreachable!();
+    }
+}
+
+fn module_output_deps<'a>(
+    ctx: &DepContext,
+    output_ident: &str,
+    inputs: &'a [ModuleInput],
+    module_ident: &'a str,
+) -> Result<BTreeSet<&'a str>> {
+    if !ctx.models.contains_key(ctx.model_name) {
+        return model_err!(BadModelName, ctx.model_name.to_owned());
+    }
+    let model = ctx.models[ctx.model_name];
+
+    let deps = all_deps(&ctx, model.variables.values())?;
+    if !deps.contains_key(output_ident) {
+        return model_err!(UnknownDependency, output_ident.to_owned());
+    }
+
+    let output_var = &model.variables[output_ident];
+    let output_deps = &deps[output_ident];
+
+    let mut final_deps: BTreeSet<&str> = BTreeSet::new();
+
+    if ctx.is_initial || !output_var.is_stock() {
+        final_deps.insert(module_ident);
+    }
+
+    for dep in output_deps.iter() {
+        for module_input in inputs.iter() {
+            if &module_input.dst == dep {
+                final_deps.insert(&module_input.src);
+            }
+        }
+    }
+
+    Ok(final_deps)
+}
+
+fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
+    let is_stock = |ident: &str| -> bool {
+        matches!(resolve_relative2(ctx, ident), Some(Variable::Stock { .. }))
+    };
+    if var.is_module() {
+        module_deps(ctx, var, &is_stock)
+    } else {
+        match var.ast() {
+            Some(ast) => identifier_set(ast, ctx.dimensions, ctx.module_inputs)
+                .into_iter()
+                .collect(),
+            None => vec![],
+        }
+    }
+}
+
+struct DepContext<'a> {
+    is_initial: bool,
+    model_name: &'a str,
+    models: &'a HashMap<Ident, &'a Model>,
+    sibling_vars: &'a HashMap<Ident, Variable>,
+    module_inputs: Option<&'a [ModuleInput]>,
+    dimensions: &'a [Dimension],
 }
 
 // to ensure we sort the list of variables in O(n*log(n)) time, we
 // need to iterate over the set of variables we have and compute
 // their recursive dependencies.  (assuming this function runs
 // in <= O(n*log(n)))
-fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident, HashSet<Ident>>> {
-    let mut processing: HashSet<&'a str> = HashSet::new();
+fn all_deps<'a, Iter>(
+    ctx: &DepContext,
+    vars: Iter,
+) -> StdResult<HashMap<Ident, BTreeSet<Ident>>, (Ident, EquationError)>
+where
+    Iter: Iterator<Item = &'a Variable>,
+{
+    // we need to use vars multiple times, so collect it into a Vec once
+    let vars = vars.collect::<Vec<_>>();
+    let mut processing: BTreeSet<Ident> = BTreeSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
-        vars.iter().map(|v| (v.ident(), v)).collect();
-    let mut all_var_deps: HashMap<&'a str, Option<HashSet<Ident>>> =
-        vars.iter().map(|v| (v.ident(), None)).collect();
+        vars.iter().map(|v| (v.ident(), *v)).collect();
+    let mut all_var_deps: HashMap<Ident, Option<BTreeSet<Ident>>> =
+        vars.iter().map(|v| (v.ident().to_owned(), None)).collect();
 
     fn all_deps_inner<'a>(
-        id: &'a str,
-        is_initial: bool,
-        processing: &mut HashSet<&'a str>,
+        ctx: &DepContext,
+        id: &str,
+        processing: &mut BTreeSet<Ident>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
-        all_var_deps: &mut HashMap<&'a str, Option<HashSet<Ident>>>,
-    ) -> Result<()> {
+        all_var_deps: &mut HashMap<Ident, Option<BTreeSet<Ident>>>,
+    ) -> StdResult<(), (Ident, EquationError)> {
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
@@ -49,59 +202,132 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
         // dependency chains break at stocks, as we use their value from the
         // last dt timestep.  BUT if we are calculating dependencies in the
         // initial dt, then we need to treat stocks as ordinary variables.
-        if var.is_stock() && !is_initial {
-            all_var_deps.insert(id, Some(HashSet::new()));
+        if var.is_stock() && !ctx.is_initial {
+            all_var_deps.insert(id.to_owned(), Some(BTreeSet::new()));
             return Ok(());
         }
 
-        processing.insert(id);
+        processing.insert(id.to_owned());
 
         // all deps start out as the direct deps
-        let mut all_deps: HashSet<Ident> = HashSet::new();
+        let mut all_deps: BTreeSet<Ident> = BTreeSet::new();
 
-        for dep in var.direct_deps().iter().map(|d| d.as_str()) {
+        for dep in direct_deps(ctx, var).into_iter() {
             // TODO: we could potentially handle this by passing around some context
             //   variable, but its just terrible.
             if dep.starts_with("\\.") {
-                return model_err!(NoAbsoluteReferences, id.to_string());
+                let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                return var_eqn_err!(
+                    var.ident().to_owned(),
+                    NoAbsoluteReferences,
+                    loc.start,
+                    loc.end
+                );
             }
 
-            // if the dependency was e.g. "submodel.output", we only depend on submodel
-            let dep = dep.splitn(2, '.').next().unwrap();
+            // in the case of module output dependencies, this one dep may
+            // turn into several.
+            let filtered_deps: Vec<Ident> = if dep.contains('.') {
+                // if the dependency was e.g. "submodel.output", do a dataflow analysis to
+                // figure out which of the set of (inputs + module) we depend on
+                let parts = (&dep).splitn(2, '.').collect::<Vec<_>>();
+                let module_ident = parts[0];
+                let output_ident = parts[1];
 
-            if !all_vars.contains_key(dep) {
-                // TODO: this is probably an error
-                continue;
+                if !all_vars.contains_key(module_ident) {
+                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    return var_eqn_err!(
+                        var.ident().to_owned(),
+                        UnknownDependency,
+                        loc.start,
+                        loc.end
+                    );
+                }
+
+                if let Variable::Module {
+                    model_name, inputs, ..
+                } = all_vars[module_ident]
+                {
+                    let module_ctx = DepContext {
+                        is_initial: ctx.is_initial,
+                        model_name: model_name.as_str(),
+                        models: ctx.models,
+                        sibling_vars: &ctx.models.get(model_name.as_str()).unwrap().variables,
+                        module_inputs: Some(inputs),
+                        dimensions: ctx.dimensions,
+                    };
+                    match module_output_deps(&module_ctx, output_ident, &inputs, module_ident) {
+                        Ok(deps) => deps.into_iter().map(|s| s.to_string()).collect(),
+                        Err(err) => {
+                            return Err((var.ident().to_owned(), err.into()));
+                        }
+                    }
+                } else {
+                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    return var_eqn_err!(
+                        var.ident().to_owned(),
+                        ExpectedModule,
+                        loc.start,
+                        loc.end
+                    );
+                }
+            } else {
+                vec![dep]
+            };
+
+            for dep in filtered_deps {
+                if !all_vars.contains_key(dep.as_str()) {
+                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    return var_eqn_err!(
+                        var.ident().to_owned(),
+                        UnknownDependency,
+                        loc.start,
+                        loc.end
+                    );
+                }
+
+                if ctx.is_initial || !all_vars[dep.as_str()].is_stock() {
+                    all_deps.insert(dep.to_string());
+
+                    // ensure we don't blow the stack
+                    if processing.contains(dep.as_str()) {
+                        let loc = match var.ast() {
+                            Some(ast) => ast.get_var_loc(&dep).unwrap_or_default(),
+                            None => Default::default(),
+                        };
+                        return var_eqn_err!(
+                            var.ident().to_owned(),
+                            CircularDependency,
+                            loc.start,
+                            loc.end
+                        );
+                    }
+
+                    if all_var_deps[dep.as_str()].is_none() {
+                        all_deps_inner(ctx, &dep, processing, all_vars, all_var_deps)?;
+                    }
+
+                    // we actually don't want the module's dependencies here;
+                    // we handled that above in module_output_deps()
+                    if !all_vars[dep.as_str()].is_module() {
+                        let dep_deps = all_var_deps[dep.as_str()].as_ref().unwrap();
+                        all_deps.extend(dep_deps.iter().cloned());
+                    }
+                }
             }
-
-            if !all_vars[dep].is_stock() || is_initial {
-                all_deps.insert(dep.to_string());
-            }
-
-            // ensure we don't blow the stack
-            if processing.contains(dep) {
-                return model_err!(CircularDependency, id.to_string());
-            }
-
-            if all_var_deps[dep].is_none() {
-                all_deps_inner(dep, is_initial, processing, all_vars, all_var_deps)?;
-            }
-
-            let dep_deps = all_var_deps[dep].as_ref().unwrap();
-            all_deps.extend(dep_deps.iter().cloned());
         }
 
         processing.remove(id);
 
-        all_var_deps.insert(id, Some(all_deps));
+        all_var_deps.insert(id.to_owned(), Some(all_deps));
 
         Ok(())
     }
 
-    for var in vars.iter() {
+    for var in vars {
         all_deps_inner(
+            ctx,
             var.ident(),
-            is_initial,
             &mut processing,
             &mut all_vars,
             &mut all_var_deps,
@@ -109,15 +335,15 @@ fn all_deps<'a>(vars: &'a [Variable], is_initial: bool) -> Result<HashMap<Ident,
     }
 
     // this unwrap is safe, because of the full iteration over vars directly above
-    let var_deps: HashMap<Ident, HashSet<Ident>> = all_var_deps
+    let var_deps: HashMap<Ident, BTreeSet<Ident>> = all_var_deps
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.unwrap()))
+        .map(|(k, v)| (k, v.unwrap()))
         .collect();
 
     Ok(var_deps)
 }
 
-pub fn resolve_relative<'a>(
+fn resolve_relative<'a>(
     models: &HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
     model_name: &str,
     ident: &str,
@@ -141,6 +367,37 @@ pub fn resolve_relative<'a>(
         resolve_relative(models, submodel_name, submodel_var)
     } else {
         Some(model.get(ident)?)
+    }
+}
+
+fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Variable> {
+    let model_name = ctx.model_name;
+    let ident = if model_name == "main" && ident.starts_with('.') {
+        &ident[1..]
+    } else {
+        ident
+    };
+
+    let input_prefix = format!("{}.", model_name);
+    // TODO: this is weird to do here and not before we call into this fn
+    let ident = ident.strip_prefix(&input_prefix).unwrap_or(ident);
+
+    // if the identifier is still dotted, its a further submodel reference
+    // TODO: this will have to change when we break `module ident == model name`
+    if let Some(pos) = ident.find('.') {
+        let submodel_name = &ident[..pos];
+        let submodel_var = &ident[pos + 1..];
+        let ctx = DepContext {
+            is_initial: ctx.is_initial,
+            model_name: submodel_name,
+            models: ctx.models,
+            sibling_vars: &ctx.models.get(submodel_name)?.variables,
+            module_inputs: None,
+            dimensions: ctx.dimensions,
+        };
+        resolve_relative2(&ctx, submodel_var)
+    } else {
+        Some(ctx.sibling_vars.get(ident)?)
     }
 }
 
@@ -219,50 +476,83 @@ impl Model {
             assert_eq!(0, dummy_implicit_vars.len());
         }
 
-        let mut errors: Vec<Error> = Vec::new();
-
-        let dt_deps = match all_deps(&variable_list, false) {
-            Ok(deps) => Some(deps),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        };
-
-        let initial_deps = match all_deps(&variable_list, true) {
-            Ok(deps) => Some(deps),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        };
-
-        let mut variables: HashMap<String, Variable> = variable_list
+        let variables: HashMap<String, Variable> = variable_list
             .into_iter()
             .map(|v| (v.ident().to_string(), v))
             .collect();
-        let variable_names: HashSet<String> = variables.keys().cloned().collect();
 
-        let mut variables_have_errors = false;
-        for (_ident, var) in variables.iter_mut() {
-            let mut missing_deps = vec![];
-            for dep in var.direct_deps().iter() {
-                let dep = if let Some(dot_off) = dep.find('.') {
-                    &dep[..dot_off]
+        let model_deps = variables
+            .values()
+            .filter(|v| v.is_module())
+            .map(|v| {
+                if let Variable::Module { model_name, .. } = v {
+                    model_name.to_owned()
                 } else {
-                    dep.as_str()
-                };
-                if !variable_names.contains(dep) {
-                    missing_deps.push(dep.to_owned());
+                    unreachable!();
                 }
+            })
+            .collect();
+
+        Model {
+            name: x_model.name.clone(),
+            variables,
+            errors: None,
+            model_deps: Some(model_deps),
+            dt_deps: None,
+            initial_deps: None,
+            implicit,
+        }
+    }
+
+    pub(crate) fn set_dependencies(
+        &mut self,
+        models: &HashMap<Ident, &Model>,
+        dimensions: &[Dimension],
+    ) {
+        // use a Set to deduplicate problems we see in dt_deps and initial_deps
+        let mut var_errors: HashMap<Ident, HashSet<EquationError>> = HashMap::new();
+
+        let mut ctx = DepContext {
+            is_initial: false,
+            model_name: self.name.as_str(),
+            sibling_vars: &self.variables,
+            models,
+            module_inputs: None,
+            dimensions,
+        };
+
+        self.dt_deps = match all_deps(&ctx, self.variables.values()) {
+            Ok(deps) => Some(deps),
+            Err((ident, err)) => {
+                var_errors
+                    .entry(ident)
+                    .or_insert_with(HashSet::new)
+                    .insert(err);
+                None
             }
-            for dep in missing_deps.into_iter() {
-                let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
-                var.push_error(EquationError {
-                    start: loc.start,
-                    end: loc.end,
-                    code: ErrorCode::UnknownDependency,
-                });
+        };
+
+        ctx.is_initial = true;
+
+        self.initial_deps = match all_deps(&ctx, self.variables.values()) {
+            Ok(deps) => Some(deps),
+            Err((ident, err)) => {
+                var_errors
+                    .entry(ident)
+                    .or_insert_with(HashSet::new)
+                    .insert(err);
+                None
+            }
+        };
+
+        let mut errors: Vec<Error> = Vec::new();
+        let mut variables_have_errors = false;
+        for (ident, var) in self.variables.iter_mut() {
+            if var_errors.contains_key(ident) {
+                let errors = std::mem::take(var_errors.get_mut(ident).unwrap());
+                for error in errors.into_iter() {
+                    var.push_error(error);
+                }
                 variables_have_errors = true;
             }
         }
@@ -280,14 +570,7 @@ impl Model {
             _ => Some(errors),
         };
 
-        Model {
-            name: x_model.name.clone(),
-            variables,
-            errors: maybe_errors,
-            dt_deps,
-            initial_deps,
-            implicit,
-        }
+        self.errors = maybe_errors;
     }
 
     pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
@@ -454,14 +737,12 @@ fn test_module_parse() {
             dst: "lynxes".to_string(),
         },
     ];
-    let direct_deps = vec!["area".to_string()].into_iter().collect();
     let expected = Variable::Module {
         model_name: "hares".to_string(),
         ident: "hares".to_string(),
         units: None,
         inputs,
         errors: vec![],
-        direct_deps,
     };
 
     let lynxes_model = x_model(
@@ -539,7 +820,11 @@ fn test_errors() {
             .map(|(name, m)| build_xvars_map(name, m))
             .collect();
 
-    let model = Model::new(&models, &main_model, &[], false);
+    let model = {
+        let mut model = Model::new(&models, &main_model, &[], false);
+        model.set_dependencies(&HashMap::new(), &[]);
+        model
+    };
 
     assert!(model.errors.is_some());
     assert_eq!(
@@ -566,15 +851,19 @@ fn test_errors() {
 fn test_all_deps() {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
-    use std::iter::FromIterator;
 
-    fn verify_all_deps(expected_deps_list: &[(&Variable, &[&str])], is_initial: bool) {
-        let expected_deps: HashMap<Ident, HashSet<Ident>> = expected_deps_list
+    fn verify_all_deps(
+        expected_deps_list: &[(&Variable, &[&str])],
+        is_initial: bool,
+        models: &HashMap<Ident, &Model>,
+        module_inputs: Option<&[ModuleInput]>,
+    ) {
+        let expected_deps: HashMap<Ident, BTreeSet<Ident>> = expected_deps_list
             .iter()
             .map(|(v, deps)| {
                 (
                     v.ident().to_string(),
-                    HashSet::from_iter(deps.iter().map(|s| s.to_string())),
+                    deps.iter().map(|s| s.to_string()).collect(),
                 )
             })
             .collect();
@@ -583,7 +872,15 @@ fn test_all_deps() {
             .iter()
             .map(|(v, _)| (*v).clone())
             .collect();
-        let deps = all_deps(&all_vars, is_initial).unwrap();
+        let ctx = DepContext {
+            is_initial,
+            model_name: "main",
+            models,
+            sibling_vars: &HashMap::new(),
+            module_inputs,
+            dimensions: &[],
+        };
+        let deps = all_deps(&ctx, all_vars.iter()).unwrap();
 
         if expected_deps != deps {
             let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
@@ -605,43 +902,88 @@ fn test_all_deps() {
         // (even though the order of recursion might change)
         for _ in 0..16 {
             all_vars.shuffle(&mut rng);
-            let deps = all_deps(&all_vars, is_initial).unwrap();
+            let ctx = DepContext {
+                is_initial,
+                model_name: "main",
+                models,
+                sibling_vars: &HashMap::new(),
+                module_inputs,
+                dimensions: &[],
+            };
+            let deps = all_deps(&ctx, all_vars.iter()).unwrap();
             assert_eq!(expected_deps, deps);
         }
     }
+
+    let mod_1_model = x_model(
+        "mod_1",
+        vec![
+            x_aux("input", "{expects to be set with module input}"),
+            x_aux("output", "3 * TIME"),
+            x_aux("flow", "2 * input"),
+            x_stock("output_2", "input", &["flow"], &[]),
+        ],
+    );
 
     let main_model = x_model(
         "main",
         vec![
             x_module("mod_1", &[("aux_3", "mod_1.input")]),
             x_aux("aux_3", "6"),
-            x_flow("inflow", "mod_1.output"),
+            x_flow("inflow", "mod_1.flow"),
+            x_aux("aux_4", "mod_1.output"),
         ],
     );
-    let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> =
-        vec![("main".to_string(), &main_model)]
-            .into_iter()
-            .map(|(name, m)| build_xvars_map(name, m))
-            .collect();
+    let x_models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = vec![
+        ("mod_1".to_owned(), &mod_1_model),
+        ("main".to_owned(), &main_model),
+    ]
+    .into_iter()
+    .map(|(name, m)| build_xvars_map(name, m))
+    .collect();
+
+    let mut model_list = vec!["mod_1", "main"]
+        .into_iter()
+        .map(|name| {
+            let vars = &x_models[name];
+            let x_model = datamodel::Model {
+                name: name.to_owned(),
+                variables: vars.values().cloned().cloned().collect(),
+                views: vec![],
+            };
+            Model::new(&x_models, &x_model, &[], false)
+        })
+        .collect::<Vec<_>>();
+
+    let models = {
+        let mut models: HashMap<Ident, &Model> = HashMap::new();
+        for model in model_list.iter_mut() {
+            model.set_dependencies(&models, &[]);
+            models.insert(model.name.clone(), model);
+        }
+        models
+    };
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let mod_1 = parse_var(
-        &models,
+        &x_models,
         "main",
         &[],
-        models["main"]["mod_1"],
+        x_models["main"]["mod_1"],
         &mut implicit_vars,
     );
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
-    let inflow = flow("inflow", "mod_1.output");
+    let aux_4 = aux("aux_4", "mod_1.output");
+    let inflow = flow("inflow", "mod_1.flow");
     let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
         (&inflow, &["mod_1", "aux_3"]),
         (&mod_1, &["aux_3"]),
         (&aux_3, &[]),
+        (&aux_4, &["mod_1"]),
     ];
 
-    verify_all_deps(&expected_deps_list, false);
+    verify_all_deps(&expected_deps_list, false, &models, None);
 
     let aux_used_in_initial = aux("aux_used_in_initial", "7");
     let aux_2 = aux("aux_2", "aux_used_in_initial");
@@ -660,20 +1002,28 @@ fn test_all_deps() {
         (&stock_1, &[]),
     ];
 
-    verify_all_deps(&expected_deps_list, false);
+    verify_all_deps(&expected_deps_list, false, &models, None);
 
     // test circular references return an error and don't do something like infinitely
     // recurse
     let aux_a = aux("aux_a", "aux_b");
     let aux_b = aux("aux_b", "aux_a");
     let all_vars = vec![aux_a, aux_b];
-    let deps_result = all_deps(&all_vars, false);
+    let ctx = DepContext {
+        is_initial: false,
+        model_name: "main",
+        models: &models,
+        sibling_vars: &HashMap::new(),
+        module_inputs: None,
+        dimensions: &[],
+    };
+    let deps_result = all_deps(&ctx, all_vars.iter());
     assert!(deps_result.is_err());
 
     // also self-references should return an error and not blow stock
     let aux_a = aux("aux_a", "aux_a");
     let all_vars = vec![aux_a];
-    let deps_result = all_deps(&all_vars, false);
+    let deps_result = all_deps(&ctx, all_vars.iter());
     assert!(deps_result.is_err());
 
     // test initials
@@ -687,7 +1037,29 @@ fn test_all_deps() {
         (&stock_1, &["aux_used_in_initial"]),
     ];
 
-    verify_all_deps(&expected_deps_list, true);
+    verify_all_deps(&expected_deps_list, true, &models, None);
+
+    let aux_if = aux(
+        "aux_if",
+        "if isModuleInput(aux_true) THEN aux_true ELSE aux_false",
+    );
+    let aux_true = aux("aux_true", "TIME * 3");
+    let aux_false = aux("aux_false", "TIME * 4");
+    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
+        (&aux_if, &["aux_true"]),
+        (&aux_true, &[]),
+        (&aux_false, &[]),
+    ];
+
+    verify_all_deps(
+        &expected_deps_list,
+        true,
+        &models,
+        Some(&[ModuleInput {
+            src: "doesnt_matter".to_string(),
+            dst: "aux_true".to_string(),
+        }]),
+    );
 
     // test non-existant variables
 }

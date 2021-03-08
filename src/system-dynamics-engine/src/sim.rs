@@ -2,7 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::borrow::BorrowMut;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
@@ -13,7 +14,6 @@ use crate::bytecode::{
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{Ident, Result};
-use crate::datamodel;
 use crate::datamodel::Dimension;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
@@ -22,8 +22,8 @@ use crate::vm::{
     is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
+use crate::{common, datamodel};
 use crate::{sim_err, Error, Project};
-use std::borrow::BorrowMut;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -95,7 +95,7 @@ impl Expr {
             Expr::App(builtin, _loc) => {
                 let builtin = match builtin {
                     BuiltinFn::Lookup(id, a) => BuiltinFn::Lookup(id, Box::new(a.strip_loc())),
-                    BuiltinFn::Inf | BuiltinFn::Pi => builtin,
+                    BuiltinFn::Inf | BuiltinFn::Pi | BuiltinFn::IsModuleInput(_) => builtin,
                     BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.strip_loc())),
                     BuiltinFn::Arccos(a) => BuiltinFn::Arccos(Box::new(a.strip_loc())),
                     BuiltinFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(a.strip_loc())),
@@ -380,6 +380,16 @@ impl<'a> Context<'a> {
                     "exp" => check_arity!(Exp, 1),
                     "inf" => check_arity!(Inf, 0),
                     "int" => check_arity!(Int, 1),
+                    "ismoduleinput" => {
+                        if let ast::Expr::Var(ident, _loc) = &orig_args[0] {
+                            BuiltinFn::IsModuleInput(ident.clone())
+                        } else {
+                            return sim_err!(
+                                ExpectedIdent,
+                                "input to isModuleBuiltin must be a variable name".to_owned()
+                            );
+                        }
+                    }
                     "ln" => check_arity!(Ln, 1),
                     "log10" => check_arity!(Log10, 1),
                     "max" => check_arity!(Max, 2),
@@ -569,7 +579,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -588,7 +597,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -656,7 +664,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -675,7 +682,6 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -734,7 +740,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -753,7 +758,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -772,7 +776,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -791,7 +794,6 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
-                direct_deps: Default::default(),
             },
         },
     );
@@ -978,50 +980,13 @@ impl Var {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
     ident: Ident,
+    inputs: HashSet<Ident>,
     n_slots: usize, // number of f64s we need storage for
     runlist_initials: Vec<Expr>,
     runlist_flows: Vec<Expr>,
     runlist_stocks: Vec<Expr>,
     offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
     tables: HashMap<Ident, Table>,
-}
-
-fn topo_sort<'out>(
-    vars: &'out HashMap<Ident, Variable>,
-    all_deps: &'out HashMap<Ident, HashSet<Ident>>,
-    runlist: Vec<&'out str>,
-) -> Vec<&'out str> {
-    let runlist_len = runlist.len();
-    let mut result: Vec<&'out str> = Vec::with_capacity(runlist_len);
-    // TODO: remove this allocation (should be &str)
-    let mut used: HashSet<&str> = HashSet::new();
-
-    // We want to do a postorder, recursive traversal of variables to ensure
-    // dependencies are calculated before the variables that reference them.
-    // By this point, we have already errored out if we have e.g. a cycle
-    fn add<'a>(
-        vars: &HashMap<Ident, Variable>,
-        all_deps: &'a HashMap<Ident, HashSet<Ident>>,
-        result: &mut Vec<&'a str>,
-        used: &mut HashSet<&'a str>,
-        ident: &'a str,
-    ) {
-        if used.contains(ident) {
-            return;
-        }
-        used.insert(ident);
-        for dep in all_deps[ident].iter() {
-            add(vars, all_deps, result, used, dep)
-        }
-        result.push(ident);
-    }
-
-    for ident in runlist.into_iter() {
-        add(vars, all_deps, &mut result, &mut used, ident)
-    }
-
-    assert_eq!(runlist_len, result.len());
-    result
 }
 
 // calculate a mapping of module variable name -> module model name
@@ -1079,7 +1044,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -1098,7 +1062,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -1117,7 +1080,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -1136,7 +1098,6 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
-                    direct_deps: Default::default(),
                 },
             },
         );
@@ -1270,7 +1231,7 @@ impl Module {
         };
         let module_models = calc_module_model_map(project, model_name);
 
-        let build_runlist = |deps: &HashMap<Ident, HashSet<Ident>>,
+        let build_runlist = |deps: &HashMap<Ident, BTreeSet<Ident>>,
                              part: StepPart,
                              predicate: &dyn Fn(&&str) -> bool|
          -> Result<Vec<Var>> {
@@ -1292,9 +1253,9 @@ impl Module {
                         .collect();
                     runlist.extend(needed);
                     let runlist = runlist.into_iter().collect();
-                    topo_sort(&model.variables, deps, runlist)
+                    common::topo_sort(runlist, deps)
                 }
-                StepPart::Flows => topo_sort(&model.variables, deps, runlist),
+                StepPart::Flows => common::topo_sort(runlist, deps),
                 StepPart::Stocks => runlist,
             };
             // eprintln!("runlist {}", model_name);
@@ -1376,6 +1337,7 @@ impl Module {
 
         Ok(Module {
             ident: model_name.to_string(),
+            inputs: inputs_set,
             n_slots,
             runlist_initials,
             runlist_flows,
@@ -1464,12 +1426,22 @@ impl<'module> Compiler<'module> {
                     return Ok(Some(()));
                 };
 
+                // so are module builtins
+                if let BuiltinFn::IsModuleInput(ident) = builtin {
+                    let id = if self.module.inputs.contains(ident) {
+                        self.curr_code.intern_literal(1.0)
+                    } else {
+                        self.curr_code.intern_literal(0.0)
+                    };
+                    self.push(Opcode::LoadConstant { id });
+                    return Ok(Some(()));
+                };
+
                 match builtin {
-                    BuiltinFn::Lookup(_, _) => unreachable!(),
+                    BuiltinFn::Lookup(_, _) | BuiltinFn::IsModuleInput(_) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         // nothing to do here -- no arguments to push
                     }
-
                     BuiltinFn::Abs(a)
                     | BuiltinFn::Arccos(a)
                     | BuiltinFn::Arcsin(a)
@@ -1548,6 +1520,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Exp(_) => BuiltinId::Exp,
                     BuiltinFn::Inf => BuiltinId::Inf,
                     BuiltinFn::Int(_) => BuiltinId::Int,
+                    BuiltinFn::IsModuleInput(_) => unreachable!(),
                     BuiltinFn::Ln(_) => BuiltinId::Ln,
                     BuiltinFn::Log10(_) => BuiltinId::Log10,
                     BuiltinFn::Max(_, _) => BuiltinId::Max,
@@ -1785,6 +1758,9 @@ impl<'a> ModuleEvaluator<'a> {
                     BuiltinFn::Inf => std::f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
+                    BuiltinFn::IsModuleInput(ident) => {
+                        self.module.inputs.contains(ident) as i8 as f64
+                    }
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
                     BuiltinFn::Log10(a) => self.eval(a).log10(),
                     BuiltinFn::SafeDiv(a, b, default) => {
@@ -1941,6 +1917,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Exp(l) => format!("exp({})", pretty(l)),
             BuiltinFn::Inf => "∞".to_string(),
             BuiltinFn::Int(l) => format!("int({})", pretty(l)),
+            BuiltinFn::IsModuleInput(ident) => format!("isModuleInput({})", ident),
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
             BuiltinFn::Max(l, r) => format!("max({}, {})", pretty(l), pretty(r)),
@@ -2511,4 +2488,9 @@ fn test_arrays() {
 
     let sim = Simulation::new(&parsed_project, "main");
     assert!(sim.is_ok());
+}
+
+#[test]
+fn nan_is_approx_eq() {
+    assert!(approx_eq!(f64, f64::NAN, f64::NAN));
 }

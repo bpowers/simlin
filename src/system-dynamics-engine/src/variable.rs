@@ -11,7 +11,6 @@ use crate::builtins::{is_builtin_fn, is_builtin_fn_or_time};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;
-use crate::model::resolve_relative;
 use crate::{datamodel, eqn_err, ErrorCode};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -41,7 +40,6 @@ pub enum Variable {
         outflows: Vec<Ident>,
         non_negative: bool,
         errors: Vec<EquationError>,
-        direct_deps: HashSet<Ident>,
     },
     Var {
         ident: Ident,
@@ -53,7 +51,6 @@ pub enum Variable {
         is_flow: bool,
         is_table_only: bool,
         errors: Vec<EquationError>,
-        direct_deps: HashSet<Ident>,
     },
     Module {
         // the current spec has ident == model name
@@ -62,7 +59,6 @@ pub enum Variable {
         units: Option<String>,
         inputs: Vec<ModuleInput>,
         errors: Vec<EquationError>,
-        direct_deps: HashSet<Ident>,
     },
 }
 
@@ -125,14 +121,6 @@ impl Variable {
 
     pub fn is_module(&self) -> bool {
         matches!(self, Variable::Module { .. })
-    }
-
-    pub fn direct_deps(&self) -> &HashSet<Ident> {
-        match self {
-            Variable::Stock { direct_deps, .. } => direct_deps,
-            Variable::Var { direct_deps, .. } => direct_deps,
-            Variable::Module { direct_deps, .. } => direct_deps,
-        }
     }
 
     pub fn errors(&self) -> Option<&Vec<EquationError>> {
@@ -273,43 +261,38 @@ pub fn parse_var(
     v: &datamodel::Variable,
     implicit_vars: &mut Vec<datamodel::Variable>,
 ) -> Variable {
-    let mut parse_and_lower_eqn = |ident: &str,
-                                   eqn: &datamodel::Equation|
-     -> (Option<AST>, HashSet<Ident>, Vec<EquationError>) {
-        let (ast, mut errors) = parse_equation(eqn, dimensions);
-        let ast = match ast {
-            Some(ast) => match instantiate_implicit_modules(ident, ast) {
-                Ok((ast, mut new_vars)) => {
-                    implicit_vars.append(&mut new_vars);
-                    Some(ast)
-                }
-                Err(err) => {
-                    errors.push(err);
+    let mut parse_and_lower_eqn =
+        |ident: &str, eqn: &datamodel::Equation| -> (Option<AST>, Vec<EquationError>) {
+            let (ast, mut errors) = parse_equation(eqn, dimensions);
+            let ast = match ast {
+                Some(ast) => match instantiate_implicit_modules(ident, ast) {
+                    Ok((ast, mut new_vars)) => {
+                        implicit_vars.append(&mut new_vars);
+                        Some(ast)
+                    }
+                    Err(err) => {
+                        errors.push(err);
+                        None
+                    }
+                },
+                None => {
+                    if errors.is_empty() {
+                        errors.push(EquationError {
+                            start: 0,
+                            end: 0,
+                            code: ErrorCode::EmptyEquation,
+                        })
+                    }
                     None
                 }
-            },
-            None => {
-                if errors.is_empty() {
-                    errors.push(EquationError {
-                        start: 0,
-                        end: 0,
-                        code: ErrorCode::EmptyEquation,
-                    })
-                }
-                None
-            }
-        };
-        let direct_deps = match &ast {
-            Some(ast) => identifier_set(ast, dimensions),
-            None => HashSet::new(),
-        };
+            };
 
-        (ast, direct_deps, errors)
-    };
+            (ast, errors)
+        };
     match v {
         datamodel::Variable::Stock(v) => {
             let ident = v.ident.clone();
-            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
+            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation);
             Variable::Stock {
                 ident,
                 ast,
@@ -319,12 +302,11 @@ pub fn parse_var(
                 outflows: v.outflows.clone(),
                 non_negative: v.non_negative,
                 errors,
-                direct_deps,
             }
         }
         datamodel::Variable::Flow(v) => {
             let ident = v.ident.clone();
-            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
+            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation);
             let mut errors: Vec<EquationError> = errors;
             let table = match parse_table(&v.gf) {
                 Ok(table) => table,
@@ -343,12 +325,11 @@ pub fn parse_var(
                 is_table_only: false,
                 non_negative: v.non_negative,
                 errors,
-                direct_deps,
             }
         }
         datamodel::Variable::Aux(v) => {
             let ident = v.ident.clone();
-            let (ast, direct_deps, errors) = parse_and_lower_eqn(&ident, &v.equation);
+            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation);
             let mut errors: Vec<EquationError> = errors;
             let table = match parse_table(&v.gf) {
                 Ok(table) => table,
@@ -367,7 +348,6 @@ pub fn parse_var(
                 is_table_only: false,
                 non_negative: false,
                 errors,
-                direct_deps,
             }
         }
         datamodel::Variable::Module(v) => {
@@ -389,35 +369,12 @@ pub fn parse_var(
                 .collect();
             let errors: Vec<EquationError> = errors.into_iter().map(|e| e.unwrap_err()).collect();
 
-            let direct_deps = inputs
-                .iter()
-                .map(|r| {
-                    let src = &r.src;
-                    let direct_dep = match src.find('.') {
-                        Some(pos) => &src[..pos],
-                        None => src,
-                    };
-
-                    let src = resolve_relative(models, model_name, src);
-                    // will be none if this is a temporary we created;
-                    // if our input is a stock, we don't have any flow
-                    // dependencies to order before us this dt
-                    if let Some(datamodel::Variable::Stock(_)) = src {
-                        None
-                    } else {
-                        Some(direct_dep.to_string())
-                    }
-                })
-                .filter(|d| d.is_some())
-                .map(|d| d.unwrap())
-                .collect();
             Variable::Module {
                 model_name: v.model_name.clone(),
                 ident,
                 units: v.units.clone(),
                 inputs,
                 errors,
-                direct_deps,
             }
         }
     }
@@ -426,6 +383,7 @@ pub fn parse_var(
 struct IdentifierSetVisitor<'a> {
     identifiers: HashSet<Ident>,
     dimensions: &'a [Dimension],
+    module_inputs: Option<&'a [ModuleInput]>,
 }
 
 impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
@@ -480,6 +438,28 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                 self.walk(l);
             }
             Expr::If(cond, t, f, _) => {
+                if let Some(module_inputs) = self.module_inputs {
+                    if let Expr::App(builtin_id, args, _) = cond.as_ref() {
+                        if builtin_id == "ismoduleinput" && args.len() == 1 {
+                            if let Expr::Var(ident, _) = &args[0] {
+                                let mut is_input = false;
+                                for input in module_inputs.iter() {
+                                    if &input.dst == ident {
+                                        is_input = true;
+                                        break;
+                                    }
+                                }
+                                if is_input {
+                                    self.walk(t);
+                                } else {
+                                    self.walk(f);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 self.walk(cond);
                 self.walk(t);
                 self.walk(f);
@@ -488,10 +468,15 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
     }
 }
 
-pub fn identifier_set(ast: &AST, dimensions: &[Dimension]) -> HashSet<Ident> {
+pub fn identifier_set(
+    ast: &AST,
+    dimensions: &[Dimension],
+    module_inputs: Option<&[ModuleInput]>,
+) -> HashSet<Ident> {
     let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
         dimensions,
+        module_inputs,
     };
     match ast {
         AST::Scalar(ast) => id_visitor.walk(ast),
@@ -508,6 +493,7 @@ pub fn identifier_set(ast: &AST, dimensions: &[Dimension]) -> HashSet<Ident> {
 #[test]
 fn test_identifier_sets() {
     let cases: &[(&str, &[&str])] = &[
+        ("if isModuleInput(input) then b else c", &["b"]),
         ("if a then b else c", &["a", "b", "c"]),
         ("a(1, b, c)", &["a", "b", "c"]),
         ("-(a)", &["a"]),
@@ -521,13 +507,18 @@ fn test_identifier_sets() {
         elements: vec!["foo".to_owned()],
     }];
 
+    let module_inputs: &[ModuleInput] = &[ModuleInput {
+        src: "whatever".to_string(),
+        dst: "input".to_string(),
+    }];
+
     for (eqn, id_list) in cases.iter() {
         let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let ast = ast.unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
-        let id_set_test = identifier_set(&ast, &dimensions);
+        let id_set_test = identifier_set(&ast, &dimensions, Some(&module_inputs));
         assert_eq!(id_set_expected, id_set_test);
     }
 }
@@ -580,7 +571,6 @@ fn test_tables() {
         is_flow: false,
         is_table_only: false,
         errors: vec![],
-        direct_deps: HashSet::new(),
     };
 
     if let Variable::Var {

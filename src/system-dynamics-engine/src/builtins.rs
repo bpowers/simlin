@@ -13,6 +13,7 @@ pub enum BuiltinFn<Expr> {
     Exp(Box<Expr>),
     Inf,
     Int(Box<Expr>),
+    IsModuleInput(String),
     Ln(Box<Expr>),
     Log10(Box<Expr>),
     Max(Box<Expr>, Box<Expr>),
@@ -44,6 +45,7 @@ pub fn is_builtin_fn(name: &str) -> bool {
             | "exp"
             | "inf"
             | "int"
+            | "ismoduleinput"
             | "ln"
             | "log10"
             | "max"

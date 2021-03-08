@@ -42,6 +42,7 @@ pub use self::vm::Method;
 pub use self::vm::Results;
 pub use self::vm::Specs as SimSpecs;
 pub use self::vm::VM;
+use crate::common::topo_sort;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
@@ -80,6 +81,39 @@ impl From<datamodel::Project> for Project {
                 .iter()
                 .map(|m| Model::new(&models, m, &project_datamodel.dimensions, false)),
         );
+
+        let model_order = {
+            let model_deps = models_list
+                .iter_mut()
+                .map(|model| (model.name.clone(), model.model_deps.take().unwrap()))
+                .collect::<HashMap<_, _>>();
+
+            let model_runlist = models_list
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<&str>>();
+            let model_runlist = topo_sort(model_runlist, &model_deps);
+            model_runlist
+                .into_iter()
+                .enumerate()
+                .map(|(i, n)| (n.to_owned(), i))
+                .collect::<HashMap<Ident, usize>>()
+        };
+
+        // sort our model list so that the dependency resolution below works
+        models_list.sort_unstable_by(|a, b| {
+            model_order[a.name.as_str()].cmp(&model_order[b.name.as_str()])
+        });
+
+        // dependency resolution; we need to do this as a second pass
+        // to ensure we have the information available for modules
+        {
+            let mut models: HashMap<Ident, &Model> = HashMap::new();
+            for model in models_list.iter_mut() {
+                model.set_dependencies(&models, &project_datamodel.dimensions);
+                models.insert(model.name.clone(), model);
+            }
+        }
 
         let models = models_list
             .into_iter()
