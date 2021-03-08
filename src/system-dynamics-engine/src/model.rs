@@ -24,30 +24,82 @@ pub struct Model {
     pub implicit: bool,
 }
 
-fn module_deps(var: &Variable, is_initial: bool, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
-    if let Variable::Module { inputs, .. } = var {
-        inputs
-            .iter()
-            .map(|r| {
-                let src = &r.src;
-                let direct_dep = match src.find('.') {
-                    Some(pos) => &src[..pos],
-                    None => src,
+fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
+    if let Variable::Module {
+        inputs, model_name, ..
+    } = var
+    {
+        if ctx.is_initial {
+            let model = ctx.models[model_name];
+            if model.initial_deps.is_some() {
+                let model_ctx = DepContext {
+                    is_initial: ctx.is_initial,
+                    model_name: &model.name,
+                    models: ctx.models,
+                    sibling_vars: &model.variables,
+                    module_inputs: Some(inputs),
+                    dimensions: ctx.dimensions,
                 };
+                // this unwrap should be safe because we _already_ successfully computed
+                // this (the if initial_deps.is_some() we are in).  We have to recompute it to narrow down
+                // if statements containing `isModuleInput()` conditions, now that we have
+                // the context to know what our module inputs are.
+                let initial_deps = all_deps(&model_ctx, model.variables.values()).unwrap();
+                let mut stock_deps = HashSet::<Ident>::new();
 
-                if is_initial {
-                    eprintln!("TODO: we need to (1) identify our stocks, (2) get their dependencies, and (3) check which of those are module inputs.  if a stock is only used to compute a flow, it shouldn't show up as a module dependency in the initial runlist");
+                for var in model.variables.values() {
+                    if let Variable::Stock { .. } = var {
+                        if let Some(deps) = initial_deps.get(var.ident()) {
+                            stock_deps.extend(deps.iter().cloned());
+                        }
+                    }
                 }
 
-                if is_stock(src) {
-                    None
-                } else {
-                    Some(direct_dep.to_string())
-                }
-            })
-            .filter(|d| d.is_some())
-            .map(|d| d.unwrap())
-            .collect()
+                inputs
+                    .iter()
+                    .map(|input| {
+                        let src = &input.src;
+                        if stock_deps.contains(&input.dst) {
+                            let direct_dep = match src.find('.') {
+                                Some(pos) => &src[..pos],
+                                None => src,
+                            };
+
+                            if is_stock(src) {
+                                None
+                            } else {
+                                Some(direct_dep.to_string())
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .filter(|d| d.is_some())
+                    .map(|d| d.unwrap())
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            inputs
+                .iter()
+                .map(|r| {
+                    let src = &r.src;
+                    let direct_dep = match src.find('.') {
+                        Some(pos) => &src[..pos],
+                        None => src,
+                    };
+
+                    if is_stock(src) {
+                        None
+                    } else {
+                        Some(direct_dep.to_string())
+                    }
+                })
+                .filter(|d| d.is_some())
+                .map(|d| d.unwrap())
+                .collect()
+        }
     } else {
         unreachable!();
     }
@@ -89,18 +141,15 @@ fn module_output_deps<'a>(
     Ok(final_deps)
 }
 
-fn direct_deps_rough(
-    var: &Variable,
-    is_initial: bool,
-    dimensions: &[Dimension],
-    module_inputs: &[ModuleInput],
-    is_stock: &dyn Fn(&str) -> bool,
-) -> Vec<Ident> {
+fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
+    let is_stock = |ident: &str| -> bool {
+        matches!(resolve_relative2(ctx, ident), Some(Variable::Stock { .. }))
+    };
     if var.is_module() {
-        module_deps(var, is_initial, is_stock)
+        module_deps(ctx, var, &is_stock)
     } else {
         match var.ast() {
-            Some(ast) => identifier_set(ast, dimensions, module_inputs)
+            Some(ast) => identifier_set(ast, ctx.dimensions, ctx.module_inputs)
                 .into_iter()
                 .collect(),
             None => vec![],
@@ -108,25 +157,12 @@ fn direct_deps_rough(
     }
 }
 
-fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
-    let is_stock = |ident: &str| -> bool {
-        matches!(resolve_relative2(ctx, ident), Some(Variable::Stock { .. }))
-    };
-    direct_deps_rough(
-        var,
-        ctx.is_initial,
-        ctx.dimensions,
-        ctx.module_inputs,
-        &is_stock,
-    )
-}
-
 struct DepContext<'a> {
     is_initial: bool,
     model_name: &'a str,
     models: &'a HashMap<Ident, &'a Model>,
     sibling_vars: &'a HashMap<Ident, Variable>,
-    module_inputs: &'a [ModuleInput],
+    module_inputs: Option<&'a [ModuleInput]>,
     dimensions: &'a [Dimension],
 }
 
@@ -217,7 +253,7 @@ where
                         model_name: model_name.as_str(),
                         models: ctx.models,
                         sibling_vars: &ctx.models.get(model_name.as_str()).unwrap().variables,
-                        module_inputs: inputs,
+                        module_inputs: Some(inputs),
                         dimensions: ctx.dimensions,
                     };
                     match module_output_deps(&module_ctx, output_ident, &inputs, module_ident) {
@@ -255,7 +291,10 @@ where
 
                     // ensure we don't blow the stack
                     if processing.contains(dep.as_str()) {
-                        let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                        let loc = match var.ast() {
+                            Some(ast) => ast.get_var_loc(&dep).unwrap_or_default(),
+                            None => Default::default(),
+                        };
                         return var_eqn_err!(
                             var.ident().to_owned(),
                             CircularDependency,
@@ -353,7 +392,7 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
             model_name: submodel_name,
             models: ctx.models,
             sibling_vars: &ctx.models.get(submodel_name)?.variables,
-            module_inputs: &[],
+            module_inputs: None,
             dimensions: ctx.dimensions,
         };
         resolve_relative2(&ctx, submodel_var)
@@ -478,7 +517,7 @@ impl Model {
             model_name: self.name.as_str(),
             sibling_vars: &self.variables,
             models,
-            module_inputs: &[],
+            module_inputs: None,
             dimensions,
         };
 
@@ -487,7 +526,7 @@ impl Model {
             Err((ident, err)) => {
                 var_errors
                     .entry(ident)
-                    .or_insert_with(|| HashSet::new())
+                    .or_insert_with(HashSet::new)
                     .insert(err);
                 None
             }
@@ -500,7 +539,7 @@ impl Model {
             Err((ident, err)) => {
                 var_errors
                     .entry(ident)
-                    .or_insert_with(|| HashSet::new())
+                    .or_insert_with(HashSet::new)
                     .insert(err);
                 None
             }
@@ -817,6 +856,7 @@ fn test_all_deps() {
         expected_deps_list: &[(&Variable, &[&str])],
         is_initial: bool,
         models: &HashMap<Ident, &Model>,
+        module_inputs: Option<&[ModuleInput]>,
     ) {
         let expected_deps: HashMap<Ident, BTreeSet<Ident>> = expected_deps_list
             .iter()
@@ -837,7 +877,7 @@ fn test_all_deps() {
             model_name: "main",
             models,
             sibling_vars: &HashMap::new(),
-            module_inputs: &[],
+            module_inputs,
             dimensions: &[],
         };
         let deps = all_deps(&ctx, all_vars.iter()).unwrap();
@@ -867,7 +907,7 @@ fn test_all_deps() {
                 model_name: "main",
                 models,
                 sibling_vars: &HashMap::new(),
-                module_inputs: &[],
+                module_inputs,
                 dimensions: &[],
             };
             let deps = all_deps(&ctx, all_vars.iter()).unwrap();
@@ -943,7 +983,7 @@ fn test_all_deps() {
         (&aux_4, &["mod_1"]),
     ];
 
-    verify_all_deps(&expected_deps_list, false, &models);
+    verify_all_deps(&expected_deps_list, false, &models, None);
 
     let aux_used_in_initial = aux("aux_used_in_initial", "7");
     let aux_2 = aux("aux_2", "aux_used_in_initial");
@@ -962,7 +1002,7 @@ fn test_all_deps() {
         (&stock_1, &[]),
     ];
 
-    verify_all_deps(&expected_deps_list, false, &models);
+    verify_all_deps(&expected_deps_list, false, &models, None);
 
     // test circular references return an error and don't do something like infinitely
     // recurse
@@ -974,7 +1014,7 @@ fn test_all_deps() {
         model_name: "main",
         models: &models,
         sibling_vars: &HashMap::new(),
-        module_inputs: &[],
+        module_inputs: None,
         dimensions: &[],
     };
     let deps_result = all_deps(&ctx, all_vars.iter());
@@ -997,23 +1037,29 @@ fn test_all_deps() {
         (&stock_1, &["aux_used_in_initial"]),
     ];
 
-    verify_all_deps(&expected_deps_list, true, &models);
+    verify_all_deps(&expected_deps_list, true, &models, None);
 
-    // let aux_if = aux(
-    //     "aux_if",
-    //     "if (aux_cond_const = NAN) THEN aux_true ELSE aux_false",
-    // );
-    // let aux_cond_const = aux("aux_cond_const", "NAN");
-    // let aux_true = aux("aux_true", "TIME * 3");
-    // let aux_false = aux("aux_false", "TIME * 4");
-    // let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
-    //     (&aux_if, &["aux_true"]),
-    //     (&aux_cond_const, &[]),
-    //     (&aux_true, &[]),
-    //     (&aux_false, &[]),
-    // ];
-    //
-    // verify_all_deps(&expected_deps_list, true, &models);
+    let aux_if = aux(
+        "aux_if",
+        "if isModuleInput(aux_true) THEN aux_true ELSE aux_false",
+    );
+    let aux_true = aux("aux_true", "TIME * 3");
+    let aux_false = aux("aux_false", "TIME * 4");
+    let expected_deps_list: Vec<(&Variable, &[&str])> = vec![
+        (&aux_if, &["aux_true"]),
+        (&aux_true, &[]),
+        (&aux_false, &[]),
+    ];
+
+    verify_all_deps(
+        &expected_deps_list,
+        true,
+        &models,
+        Some(&[ModuleInput {
+            src: "doesnt_matter".to_string(),
+            dst: "aux_true".to_string(),
+        }]),
+    );
 
     // test non-existant variables
 }

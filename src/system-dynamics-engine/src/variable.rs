@@ -383,7 +383,7 @@ pub fn parse_var(
 struct IdentifierSetVisitor<'a> {
     identifiers: HashSet<Ident>,
     dimensions: &'a [Dimension],
-    module_inputs: &'a [ModuleInput],
+    module_inputs: Option<&'a [ModuleInput]>,
 }
 
 impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
@@ -438,22 +438,24 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                 self.walk(l);
             }
             Expr::If(cond, t, f, _) => {
-                if let Expr::App(builtin_id, args, _) = cond.as_ref() {
-                    if builtin_id == "ismoduleinput" && args.len() == 1 {
-                        if let Expr::Var(ident, _) = &args[0] {
-                            let mut is_input = false;
-                            for input in self.module_inputs.iter() {
-                                if &input.dst == ident {
-                                    is_input = true;
-                                    break;
+                if let Some(module_inputs) = self.module_inputs {
+                    if let Expr::App(builtin_id, args, _) = cond.as_ref() {
+                        if builtin_id == "ismoduleinput" && args.len() == 1 {
+                            if let Expr::Var(ident, _) = &args[0] {
+                                let mut is_input = false;
+                                for input in module_inputs.iter() {
+                                    if &input.dst == ident {
+                                        is_input = true;
+                                        break;
+                                    }
                                 }
+                                if is_input {
+                                    self.walk(t);
+                                } else {
+                                    self.walk(f);
+                                }
+                                return;
                             }
-                            if is_input {
-                                self.walk(t);
-                            } else {
-                                self.walk(f);
-                            }
-                            return;
                         }
                     }
                 }
@@ -469,7 +471,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
 pub fn identifier_set(
     ast: &AST,
     dimensions: &[Dimension],
-    module_inputs: &[ModuleInput],
+    module_inputs: Option<&[ModuleInput]>,
 ) -> HashSet<Ident> {
     let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
@@ -516,7 +518,7 @@ fn test_identifier_sets() {
         assert!(ast.is_some());
         let ast = ast.unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
-        let id_set_test = identifier_set(&ast, &dimensions, &module_inputs);
+        let id_set_test = identifier_set(&ast, &dimensions, Some(&module_inputs));
         assert_eq!(id_set_expected, id_set_test);
     }
 }
