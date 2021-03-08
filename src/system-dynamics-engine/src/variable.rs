@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use crate::ast::Loc;
 use crate::ast::{parse_equation as parse_single_equation, Expr, Visitor, AST};
-use crate::builtins::{is_builtin_fn, is_builtin_fn_or_time};
+use crate::builtins::is_builtin_fn;
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;
@@ -391,7 +391,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
         match e {
             Expr::Const(_, _, _) => (),
             Expr::Var(id, _) => {
-                if !is_builtin_fn_or_time(id) {
+                if !is_builtin_fn(id) {
                     self.identifiers.insert(id.clone());
                 }
             }
@@ -404,7 +404,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                 }
             }
             Expr::Subscript(id, args, _) => {
-                if !is_builtin_fn_or_time(id) {
+                if !is_builtin_fn(id) {
                     self.identifiers.insert(id.clone());
                 }
                 for arg in args.iter() {

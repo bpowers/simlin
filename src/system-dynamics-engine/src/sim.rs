@@ -94,8 +94,15 @@ impl Expr {
             Expr::Dt(_) => Expr::Dt(loc),
             Expr::App(builtin, _loc) => {
                 let builtin = match builtin {
+                    // nothing to strip from these simple ones
+                    BuiltinFn::Inf
+                    | BuiltinFn::Pi
+                    | BuiltinFn::IsModuleInput(_)
+                    | BuiltinFn::Time
+                    | BuiltinFn::TimeStep
+                    | BuiltinFn::StartTime
+                    | BuiltinFn::FinalTime => builtin,
                     BuiltinFn::Lookup(id, a) => BuiltinFn::Lookup(id, Box::new(a.strip_loc())),
-                    BuiltinFn::Inf | BuiltinFn::Pi | BuiltinFn::IsModuleInput(_) => builtin,
                     BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.strip_loc())),
                     BuiltinFn::Arccos(a) => BuiltinFn::Arccos(Box::new(a.strip_loc())),
                     BuiltinFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(a.strip_loc())),
@@ -1438,6 +1445,20 @@ impl<'module> Compiler<'module> {
                 };
 
                 match builtin {
+                    BuiltinFn::Time
+                    | BuiltinFn::TimeStep
+                    | BuiltinFn::StartTime
+                    | BuiltinFn::FinalTime => {
+                        let off = match builtin {
+                            BuiltinFn::Time => TIME_OFF,
+                            BuiltinFn::TimeStep => DT_OFF,
+                            BuiltinFn::StartTime => INITIAL_TIME_OFF,
+                            BuiltinFn::FinalTime => FINAL_TIME_OFF,
+                            _ => unreachable!(),
+                        } as u16;
+                        self.push(Opcode::LoadGlobalVar { off });
+                        return Ok(Some(()));
+                    }
                     BuiltinFn::Lookup(_, _) | BuiltinFn::IsModuleInput(_) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         // nothing to do here -- no arguments to push
@@ -1534,6 +1555,11 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Sqrt(_) => BuiltinId::Sqrt,
                     BuiltinFn::Step(_, _) => BuiltinId::Step,
                     BuiltinFn::Tan(_) => BuiltinId::Tan,
+                    // handled above; we exit early
+                    BuiltinFn::Time
+                    | BuiltinFn::TimeStep
+                    | BuiltinFn::StartTime
+                    | BuiltinFn::FinalTime => unreachable!(),
                 };
 
                 self.push(Opcode::Apply { func });
@@ -1747,6 +1773,19 @@ impl<'a> ModuleEvaluator<'a> {
             }
             Expr::App(builtin, _) => {
                 match builtin {
+                    BuiltinFn::Time
+                    | BuiltinFn::TimeStep
+                    | BuiltinFn::StartTime
+                    | BuiltinFn::FinalTime => {
+                        let off = match builtin {
+                            BuiltinFn::Time => TIME_OFF,
+                            BuiltinFn::TimeStep => DT_OFF,
+                            BuiltinFn::StartTime => INITIAL_TIME_OFF,
+                            BuiltinFn::FinalTime => FINAL_TIME_OFF,
+                            _ => unreachable!(),
+                        };
+                        self.curr[off]
+                    }
                     BuiltinFn::Abs(a) => self.eval(a).abs(),
                     BuiltinFn::Cos(a) => self.eval(a).cos(),
                     BuiltinFn::Sin(a) => self.eval(a).sin(),
@@ -1908,6 +1947,10 @@ pub fn pretty(expr: &Expr) -> String {
         }
         Expr::Dt(_) => "dt".to_string(),
         Expr::App(builtin, _) => match builtin {
+            BuiltinFn::Time => "time".to_string(),
+            BuiltinFn::TimeStep => "time_step".to_string(),
+            BuiltinFn::StartTime => "initial_time".to_string(),
+            BuiltinFn::FinalTime => "final_time".to_string(),
             BuiltinFn::Lookup(table, idx) => format!("lookup({}, {})", table, pretty(idx)),
             BuiltinFn::Abs(l) => format!("abs({})", pretty(l)),
             BuiltinFn::Arccos(l) => format!("arccos({})", pretty(l)),

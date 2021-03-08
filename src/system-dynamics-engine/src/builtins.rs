@@ -27,10 +27,10 @@ pub enum BuiltinFn<Expr> {
     Sqrt(Box<Expr>),
     Step(Box<Expr>, Box<Expr>),
     Tan(Box<Expr>),
-}
-
-pub fn is_builtin_fn_or_time(name: &str) -> bool {
-    is_builtin_fn(name) || matches!(name, "time" | "dt" | "initial_time" | "final_time")
+    Time,
+    TimeStep,
+    StartTime,
+    FinalTime,
 }
 
 pub fn is_builtin_fn(name: &str) -> bool {
@@ -59,6 +59,11 @@ pub fn is_builtin_fn(name: &str) -> bool {
             | "sqrt"
             | "step"
             | "tan"
+            | "time"
+            | "time_step"
+            | "dt"
+            | "initial_time"
+            | "final_time"
     )
 }
 
