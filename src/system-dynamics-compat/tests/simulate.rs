@@ -334,10 +334,10 @@ fn simulates_circular_dep_1() {
     simulate_path("../../test/circular-dep-1/model.stmx");
 }
 
-// #[test]
-// fn simulates_modules3() {
-//     simulate_path("../../test/modules3/modules3.xmile");
-// }
+#[test]
+fn simulates_modules_with_complex_idents() {
+    simulate_path("../../test/modules_with_complex_idents/modules_with_complex_idents.stmx");
+}
 
 // #[test]
 // fn simulates_land_model() {
