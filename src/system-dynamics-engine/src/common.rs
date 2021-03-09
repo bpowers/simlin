@@ -61,6 +61,7 @@ pub enum ErrorCode {
     DuplicateUnit,
     ExpectedModule,
     ExpectedIdent,
+    ZeroArityBuiltin,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -111,6 +112,7 @@ impl fmt::Display for ErrorCode {
             DuplicateUnit => "duplicate_unit",
             ExpectedModule => "expected_module",
             ExpectedIdent => "expected_ident",
+            ZeroArityBuiltin => "zero_arity_builtin",
         };
 
         write!(f, "{}", name)
@@ -190,16 +192,24 @@ macro_rules! model_err(
 );
 
 #[macro_export]
-macro_rules! sim_err(
+macro_rules! sim_err {
     ($code:tt, $str:expr) => {{
         use crate::common::{Error, ErrorCode, ErrorKind};
-        Err(Error{
+        Err(Error {
             kind: ErrorKind::Simulation,
             code: ErrorCode::$code,
             details: Some($str),
         })
-    }}
-);
+    }};
+    ($code:tt) => {{
+        use crate::common::{Error, ErrorCode, ErrorKind};
+        Err(Error {
+            kind: ErrorKind::Simulation,
+            code: ErrorCode::$code,
+            details: None,
+        })
+    }};
+}
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

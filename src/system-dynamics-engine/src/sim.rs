@@ -13,7 +13,7 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{Ident, Result};
+use crate::common::{ErrorCode, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
@@ -287,7 +287,7 @@ impl<'a> Context<'a> {
                 + self.get_submodel_offset(submodel_name, submodel_var, ignore_arrays)?)
         } else if !ignore_arrays {
             if !metadata.contains_key(ident) {
-                panic!("internal error: unknown var {}?", ident);
+                return sim_err!(ZeroArityBuiltin);
             }
             if let Some(dims) = metadata[ident].var.get_dimensions() {
                 let off = self.get_implicit_subscript_off(dims, ident)?;
@@ -312,7 +312,26 @@ impl<'a> Context<'a> {
                 {
                     Expr::ModuleInput(off, *loc)
                 } else {
-                    Expr::Var(self.get_offset(id)?, *loc)
+                    match self.get_offset(id) {
+                        Ok(off) => Expr::Var(off, *loc),
+                        Err(Error {
+                            code: ErrorCode::ZeroArityBuiltin,
+                            ..
+                        }) => match id.as_str() {
+                            "time" => Expr::App(BuiltinFn::Time, *loc),
+                            "time_step" => Expr::App(BuiltinFn::TimeStep, *loc),
+                            "initial_time" => Expr::App(BuiltinFn::StartTime, *loc),
+                            "final_time" => Expr::App(BuiltinFn::FinalTime, *loc),
+                            "pi" => Expr::App(BuiltinFn::Pi, *loc),
+                            "inf" => Expr::App(BuiltinFn::Inf, *loc),
+                            _ => {
+                                return sim_err!(UnknownBuiltin, id.to_owned());
+                            }
+                        },
+                        Err(err) => {
+                            return Err(err);
+                        }
+                    }
                 }
             }
             ast::Expr::App(id, orig_args, loc) => {
@@ -409,6 +428,10 @@ impl<'a> Context<'a> {
                     "sqrt" => check_arity!(Sqrt, 1),
                     "step" => check_arity!(Step, 2),
                     "tan" => check_arity!(Tan, 1),
+                    "time" => check_arity!(Time, 0),
+                    "time_step" => check_arity!(TimeStep, 0),
+                    "initial_time" => check_arity!(StartTime, 0),
+                    "final_time" => check_arity!(FinalTime, 0),
                     _ => {
                         return sim_err!(UnknownBuiltin, self.ident.to_string());
                     }
@@ -2053,7 +2076,7 @@ fn enumerate_modules(
     model_name: &str,
     modules: &mut HashSet<(Ident, Vec<Ident>)>,
 ) -> Result<()> {
-    use crate::common::{ErrorCode, ErrorKind};
+    use crate::common::ErrorKind;
     let model = project.models.get(model_name).ok_or_else(|| Error {
         kind: ErrorKind::Simulation,
         code: ErrorCode::NotSimulatable,
