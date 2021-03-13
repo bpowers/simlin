@@ -65,7 +65,7 @@ impl<'a> BuiltinVisitor<'a> {
                         if let Expr::Var(id, _loc) = arg {
                             id
                         } else {
-                            let id = format!("$·{}·{}·arg{}", self.variable_name, self.n, i);
+                            let id = format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i);
                             let eqn = print_eqn(&arg);
                             let x_var = datamodel::Variable::Aux(datamodel::Aux {
                                 ident: id.clone(),
@@ -80,7 +80,7 @@ impl<'a> BuiltinVisitor<'a> {
                     })
                     .collect();
 
-                let module_name = format!("$·{}·{}·{}", self.variable_name, self.n, func);
+                let module_name = format!("$⁚{}⁚{}⁚{}", self.variable_name, self.n, func);
                 let references: Vec<_> = ident_args
                     .into_iter()
                     .enumerate()
@@ -91,7 +91,7 @@ impl<'a> BuiltinVisitor<'a> {
                     .collect();
                 let x_module = datamodel::Variable::Module(datamodel::Module {
                     ident: module_name.clone(),
-                    model_name: format!("stdlib·{}", func),
+                    model_name: format!("stdlib⁚{}", func),
                     documentation: "".to_string(),
                     units: None,
                     references,

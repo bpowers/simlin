@@ -436,7 +436,7 @@ pub fn resolve_module_input<'a>(
 
     // TODO: reevaluate if this is really the best option here
     // if the source is a temporary created by the engine, assume it is OK
-    if (&src).starts_with("$·") {
+    if (&src).starts_with("$⁚") {
         return Ok(Some(ModuleInput { src, dst }));
     }
 

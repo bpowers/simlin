@@ -10,7 +10,7 @@
         <stop>13</stop>
         <dt reciprocal="true">4</dt>
     </sim_specs>
-    <model name="stdlib·delay1">
+    <model name="stdlib⁚delay1">
         <variables>
             <stock name="stock">
                 <eqn>(if isModuleInput(initial_value) then initial_value else input) * delay_time</eqn>

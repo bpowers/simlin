@@ -52,8 +52,8 @@ export const inCreationCloudUid = -4;
 export const fauxCloudTargetUid = -5;
 
 const fauxTarget = new AuxViewElement({
-  name: '$·model-internal-faux-target',
-  ident: '$·model-internal-faux-target',
+  name: '$⁚model-internal-faux-target',
+  ident: '$⁚model-internal-faux-target',
   uid: fauxTargetUid,
   var: undefined,
   x: 0,

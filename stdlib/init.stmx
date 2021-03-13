@@ -10,7 +10,7 @@
         <stop>13</stop>
         <dt reciprocal="true">4</dt>
     </sim_specs>
-    <model name="stdlib·init">
+    <model name="stdlib⁚init">
         <variables>
             <stock name="output">
                 <eqn>input</eqn>

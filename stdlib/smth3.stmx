@@ -10,7 +10,7 @@
         <stop>13</stop>
         <dt reciprocal="true">4</dt>
     </sim_specs>
-    <model name="stdlib·smth3">
+    <model name="stdlib⁚smth3">
         <variables>
             <flow name="flow_1">
                 <eqn>(input - Stock_1)/(delay_time/3)</eqn>
