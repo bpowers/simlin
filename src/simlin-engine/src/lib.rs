@@ -22,8 +22,8 @@ mod equation {
 }
 mod builtins;
 mod builtins_visitor;
-mod model;
 mod compiler;
+mod model;
 mod token;
 mod variable;
 mod stdlib {

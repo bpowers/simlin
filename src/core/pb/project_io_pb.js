@@ -1,4 +1,4 @@
-// source: src/system-dynamics-engine/src/project_io.proto
+// source: src/simlin-engine/src/project_io.proto
 /**
  * @fileoverview
  * @enhanceable

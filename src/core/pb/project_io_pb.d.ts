@@ -1,5 +1,5 @@
 // package: project_io
-// file: src/system-dynamics-engine/src/project_io.proto
+// file: src/simlin-engine/src/project_io.proto
 
 import * as jspb from 'google-protobuf';
 
