@@ -287,6 +287,12 @@ export namespace Variable {
     getNonNegative(): boolean;
     setNonNegative(value: boolean): void;
 
+    getCanBeModuleInput(): boolean;
+    setCanBeModuleInput(value: boolean): void;
+
+    getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
+    setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Stock.AsObject;
     static toObject(includeInstance: boolean, msg: Stock): Stock.AsObject;
@@ -306,6 +312,8 @@ export namespace Variable {
       inflowsList: Array<string>;
       outflowsList: Array<string>;
       nonNegative: boolean;
+      canBeModuleInput: boolean;
+      visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
     };
   }
 
@@ -332,6 +340,12 @@ export namespace Variable {
     getNonNegative(): boolean;
     setNonNegative(value: boolean): void;
 
+    getCanBeModuleInput(): boolean;
+    setCanBeModuleInput(value: boolean): void;
+
+    getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
+    setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Flow.AsObject;
     static toObject(includeInstance: boolean, msg: Flow): Flow.AsObject;
@@ -350,6 +364,8 @@ export namespace Variable {
       units: string;
       gf?: GraphicalFunction.AsObject;
       nonNegative: boolean;
+      canBeModuleInput: boolean;
+      visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
     };
   }
 
@@ -373,6 +389,12 @@ export namespace Variable {
     getGf(): GraphicalFunction | undefined;
     setGf(value?: GraphicalFunction): void;
 
+    getCanBeModuleInput(): boolean;
+    setCanBeModuleInput(value: boolean): void;
+
+    getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
+    setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Aux.AsObject;
     static toObject(includeInstance: boolean, msg: Aux): Aux.AsObject;
@@ -390,6 +412,8 @@ export namespace Variable {
       documentation: string;
       units: string;
       gf?: GraphicalFunction.AsObject;
+      canBeModuleInput: boolean;
+      visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
     };
   }
 
@@ -411,6 +435,12 @@ export namespace Variable {
     setReferencesList(value: Array<Variable.Module.Reference>): void;
     addReferences(value?: Variable.Module.Reference, index?: number): Variable.Module.Reference;
 
+    getCanBeModuleInput(): boolean;
+    setCanBeModuleInput(value: boolean): void;
+
+    getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
+    setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Module.AsObject;
     static toObject(includeInstance: boolean, msg: Module): Module.AsObject;
@@ -428,6 +458,8 @@ export namespace Variable {
       documentation: string;
       units: string;
       referencesList: Array<Variable.Module.Reference.AsObject>;
+      canBeModuleInput: boolean;
+      visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
     };
 
     export class Reference extends jspb.Message {
@@ -454,6 +486,13 @@ export namespace Variable {
       };
     }
   }
+
+  export interface VisibilityMap {
+    PRIVATE: 0;
+    PUBLIC: 1;
+  }
+
+  export const Visibility: VisibilityMap;
 
   export enum VCase {
     V_NOT_SET = 0,

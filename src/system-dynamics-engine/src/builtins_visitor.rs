@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::ast::{print_eqn, Expr, AST};
 use crate::builtins::is_builtin_fn;
 use crate::common::{EquationError, Ident};
+use crate::datamodel::Visibility;
 use crate::{datamodel, eqn_err};
 
 fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
@@ -73,6 +74,8 @@ impl<'a> BuiltinVisitor<'a> {
                                 documentation: "".to_string(),
                                 units: None,
                                 gf: None,
+                                can_be_module_input: false,
+                                visibility: datamodel::Visibility::Private,
                             });
                             self.vars.insert(id.clone(), x_var);
                             id
@@ -95,6 +98,8 @@ impl<'a> BuiltinVisitor<'a> {
                     documentation: "".to_string(),
                     units: None,
                     references,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
                 });
                 let module_output_name = format!("{}·output", module_name);
                 self.vars.insert(module_name, x_module);

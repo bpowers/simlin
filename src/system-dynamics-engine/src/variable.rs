@@ -545,6 +545,8 @@ fn test_tables() {
             x_points: None,
             y_points: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
         }),
+        can_be_module_input: false,
+        visibility: datamodel::Visibility::Private,
     });
 
     let expected = Variable::Var {

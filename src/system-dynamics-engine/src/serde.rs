@@ -7,7 +7,7 @@ use float_cmp::approx_eq;
 use crate::datamodel::{
     view_element, Aux, Dimension, Dt, Equation, Extension, Flow, GraphicalFunction,
     GraphicalFunctionKind, GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect,
-    SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement,
+    SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility,
 };
 use crate::project_io;
 
@@ -371,6 +371,49 @@ fn test_equation_roundtrip() {
     }
 }
 
+impl From<Visibility> for project_io::variable::Visibility {
+    fn from(visibility: Visibility) -> Self {
+        match visibility {
+            Visibility::Private => project_io::variable::Visibility::Private,
+            Visibility::Public => project_io::variable::Visibility::Public,
+        }
+    }
+}
+
+impl From<project_io::variable::Visibility> for Visibility {
+    fn from(visibility: project_io::variable::Visibility) -> Self {
+        match visibility {
+            project_io::variable::Visibility::Private => Visibility::Private,
+            project_io::variable::Visibility::Public => Visibility::Public,
+        }
+    }
+}
+
+impl From<i32> for project_io::variable::Visibility {
+    fn from(value: i32) -> Self {
+        match value {
+            0 => project_io::variable::Visibility::Private,
+            1 => project_io::variable::Visibility::Public,
+            _ => project_io::variable::Visibility::Private,
+        }
+    }
+}
+
+#[test]
+fn test_visibility_roundtrip() {
+    let cases: &[Visibility] = &[Visibility::Private, Visibility::Public];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Visibility::from(project_io::variable::Visibility::from(expected.clone()));
+        assert_eq!(expected, actual);
+    }
+
+    assert_eq!(
+        project_io::variable::Visibility::Private,
+        project_io::variable::Visibility::from(666)
+    );
+}
+
 impl From<Stock> for project_io::variable::Stock {
     fn from(stock: Stock) -> Self {
         project_io::variable::Stock {
@@ -381,6 +424,8 @@ impl From<Stock> for project_io::variable::Stock {
             inflows: stock.inflows,
             outflows: stock.outflows,
             non_negative: stock.non_negative,
+            can_be_module_input: stock.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(stock.visibility) as i32,
         }
     }
 }
@@ -399,6 +444,8 @@ impl From<project_io::variable::Stock> for Stock {
             inflows: stock.inflows,
             outflows: stock.outflows,
             non_negative: stock.non_negative,
+            can_be_module_input: stock.can_be_module_input,
+            visibility: Visibility::from(project_io::variable::Visibility::from(stock.visibility)),
         }
     }
 }
@@ -414,6 +461,8 @@ fn test_stock_roundtrip() {
             inflows: vec!["inflow".to_string()],
             outflows: vec![],
             non_negative: false,
+            can_be_module_input: true,
+            visibility: Visibility::Public,
         },
         Stock {
             ident: "blerg2".to_string(),
@@ -423,6 +472,8 @@ fn test_stock_roundtrip() {
             inflows: vec!["inflow".to_string()],
             outflows: vec![],
             non_negative: false,
+            can_be_module_input: false,
+            visibility: Visibility::Private,
         },
     ];
     for expected in cases {
@@ -444,6 +495,8 @@ impl From<Flow> for project_io::variable::Flow {
                 None => None,
             },
             non_negative: flow.non_negative,
+            can_be_module_input: flow.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(flow.visibility) as i32,
         }
     }
 }
@@ -464,6 +517,8 @@ impl From<project_io::variable::Flow> for Flow {
                 None => None,
             },
             non_negative: flow.non_negative,
+            can_be_module_input: flow.can_be_module_input,
+            visibility: Visibility::from(project_io::variable::Visibility::from(flow.visibility)),
         }
     }
 }
@@ -478,6 +533,8 @@ fn test_flow_roundtrip() {
             units: None,
             gf: None,
             non_negative: false,
+            can_be_module_input: true,
+            visibility: Visibility::Private,
         },
         Flow {
             ident: "blerg2".to_string(),
@@ -498,6 +555,8 @@ fn test_flow_roundtrip() {
                 },
             }),
             non_negative: false,
+            can_be_module_input: false,
+            visibility: Visibility::Public,
         },
     ];
     for expected in cases {
@@ -518,6 +577,8 @@ impl From<Aux> for project_io::variable::Aux {
                 Some(gf) => Some(project_io::GraphicalFunction::from(gf)),
                 None => None,
             },
+            can_be_module_input: aux.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(aux.visibility).into(),
         }
     }
 }
@@ -537,6 +598,8 @@ impl From<project_io::variable::Aux> for Aux {
                 Some(gf) => Some(gf.into()),
                 None => None,
             },
+            can_be_module_input: aux.can_be_module_input,
+            visibility: Visibility::from(project_io::variable::Visibility::from(aux.visibility)),
         }
     }
 }
@@ -550,6 +613,8 @@ fn test_aux_roundtrip() {
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
+            can_be_module_input: false,
+            visibility: Visibility::Public,
         },
         Aux {
             ident: "blerg2".to_string(),
@@ -569,6 +634,8 @@ fn test_aux_roundtrip() {
                     max: 8.01,
                 },
             }),
+            can_be_module_input: true,
+            visibility: Visibility::Private,
         },
     ];
     for expected in cases {
@@ -623,6 +690,8 @@ impl From<Module> for project_io::variable::Module {
                 .into_iter()
                 .map(project_io::variable::module::Reference::from)
                 .collect(),
+            can_be_module_input: module.can_be_module_input,
+            visibility: project_io::variable::Visibility::from(module.visibility) as i32,
         }
     }
 }
@@ -643,6 +712,8 @@ impl From<project_io::variable::Module> for Module {
                 .into_iter()
                 .map(ModuleReference::from)
                 .collect(),
+            can_be_module_input: module.can_be_module_input,
+            visibility: Visibility::from(project_io::variable::Visibility::from(module.visibility)),
         }
     }
 }
@@ -659,6 +730,8 @@ fn test_module_roundtrip() {
                 src: "foo".to_string(),
                 dst: "self.bar".to_string(),
             }],
+            can_be_module_input: false,
+            visibility: Visibility::Private,
         },
         Module {
             ident: "blerg2".to_string(),
@@ -666,6 +739,8 @@ fn test_module_roundtrip() {
             documentation: "this is deeper stuff".to_string(),
             units: Some("flarbles".to_string()),
             references: vec![],
+            can_be_module_input: true,
+            visibility: Visibility::Public,
         },
     ];
     for expected in cases {
@@ -715,6 +790,8 @@ fn test_variable_roundtrip() {
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
+            can_be_module_input: false,
+            visibility: Visibility::Public,
         }),
         Variable::Module(Module {
             ident: "blerg2".to_string(),
@@ -722,6 +799,8 @@ fn test_variable_roundtrip() {
             documentation: "this is deeper stuff".to_string(),
             units: Some("flarbles".to_string()),
             references: vec![],
+            can_be_module_input: true,
+            visibility: Visibility::Private,
         }),
     ];
     for expected in cases {

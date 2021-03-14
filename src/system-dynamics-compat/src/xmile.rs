@@ -10,6 +10,7 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
+use crate::engine::datamodel::Visibility;
 use crate::xmile::view_element::LinkEnd;
 use system_dynamics_engine::common::{canonicalize, quoteize, Result};
 use system_dynamics_engine::datamodel;
@@ -2700,6 +2701,37 @@ pub struct Module {
     pub units: Option<String>,
     #[serde(rename = "$value", default)]
     pub refs: Vec<Reference>,
+    pub access: Option<String>,
+}
+
+fn can_be_module_input(access: &Option<String>) -> bool {
+    access
+        .as_ref()
+        .map(|access| access.eq_ignore_ascii_case("input"))
+        .unwrap_or_default()
+}
+
+fn visibility(access: &Option<String>) -> Visibility {
+    access
+        .as_ref()
+        .map(|access| {
+            if access.eq_ignore_ascii_case("output") {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            }
+        })
+        .unwrap_or(Visibility::Private)
+}
+
+fn access_from(visibility: Visibility, can_be_module_input: bool) -> Option<String> {
+    if visibility == Visibility::Public {
+        Some("output".to_owned())
+    } else if can_be_module_input {
+        Some("input".to_owned())
+    } else {
+        None
+    }
 }
 
 impl ToXML<XMLWriter> for Module {
@@ -2707,6 +2739,9 @@ impl ToXML<XMLWriter> for Module {
         let mut attrs = vec![("name", self.name.as_str())];
         if self.model_name.is_some() {
             attrs.push(("simlin:model_name", self.name.as_str()));
+        }
+        if let Some(access) = self.access.as_ref() {
+            attrs.push(("access", access.as_str()));
         }
         write_tag_start_with_attrs(writer, "module", &attrs)?;
 
@@ -2763,6 +2798,8 @@ impl From<Module> for datamodel::Module {
             documentation: module.doc.unwrap_or_default(),
             units: module.units,
             references,
+            can_be_module_input: can_be_module_input(&module.access),
+            visibility: visibility(&module.access),
         }
     }
 }
@@ -2789,6 +2826,7 @@ impl From<datamodel::Module> for Module {
             },
             units: module.units,
             refs,
+            access: access_from(module.visibility, module.can_be_module_input),
         }
     }
 }
@@ -2841,11 +2879,15 @@ pub struct Stock {
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
+    pub access: Option<String>,
 }
 
 impl ToXML<XMLWriter> for Stock {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-        let attrs = vec![("name", self.name.as_str())];
+        let mut attrs = vec![("name", self.name.as_str())];
+        if let Some(access) = self.access.as_ref() {
+            attrs.push(("access", access.as_str()));
+        }
         write_tag_start_with_attrs(writer, "stock", &attrs)?;
 
         if let Some(VarDimensions {
@@ -2939,6 +2981,8 @@ impl From<Stock> for datamodel::Stock {
             inflows,
             outflows,
             non_negative: stock.non_negative.is_some(),
+            can_be_module_input: can_be_module_input(&stock.access),
+            visibility: visibility(&stock.access),
         }
     }
 }
@@ -3012,6 +3056,7 @@ impl From<datamodel::Stock> for Stock {
                         .collect(),
                 ),
             },
+            access: access_from(stock.visibility, stock.can_be_module_input),
         }
     }
 }
@@ -3027,11 +3072,15 @@ pub struct Flow {
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
+    pub access: Option<String>,
 }
 
 impl ToXML<XMLWriter> for Flow {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-        let attrs = vec![("name", self.name.as_str())];
+        let mut attrs = vec![("name", self.name.as_str())];
+        if let Some(access) = self.access.as_ref() {
+            attrs.push(("access", access.as_str()));
+        }
         write_tag_start_with_attrs(writer, "flow", &attrs)?;
 
         if let Some(VarDimensions {
@@ -3085,6 +3134,8 @@ impl From<Flow> for datamodel::Flow {
                 None => None,
             },
             non_negative: flow.non_negative.is_some(),
+            can_be_module_input: can_be_module_input(&flow.access),
+            visibility: visibility(&flow.access),
         }
     }
 }
@@ -3152,6 +3203,7 @@ impl From<datamodel::Flow> for Flow {
                         .collect(),
                 ),
             },
+            access: access_from(flow.visibility, flow.can_be_module_input),
         }
     }
 }
@@ -3166,11 +3218,15 @@ pub struct Aux {
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
+    pub access: Option<String>,
 }
 
 impl ToXML<XMLWriter> for Aux {
     fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
-        let attrs = vec![("name", self.name.as_str())];
+        let mut attrs = vec![("name", self.name.as_str())];
+        if let Some(access) = self.access.as_ref() {
+            attrs.push(("access", access.as_str()));
+        }
         write_tag_start_with_attrs(writer, "aux", &attrs)?;
 
         if let Some(VarDimensions {
@@ -3220,6 +3276,8 @@ impl From<Aux> for datamodel::Aux {
                 Some(gf) => Some(datamodel::GraphicalFunction::from(gf)),
                 None => None,
             },
+            can_be_module_input: can_be_module_input(&aux.access),
+            visibility: visibility(&aux.access),
         }
     }
 }
@@ -3282,6 +3340,7 @@ impl From<datamodel::Aux> for Aux {
                         .collect(),
                 ),
             },
+            access: access_from(aux.visibility, aux.can_be_module_input),
         }
     }
 }
@@ -3362,6 +3421,7 @@ fn test_canonicalize_stock_inflows() {
         non_negative: None,
         dimensions: None,
         elements: None,
+        access: None,
     });
 
     let expected = datamodel::Variable::Stock(datamodel::Stock {
@@ -3372,6 +3432,8 @@ fn test_canonicalize_stock_inflows() {
         inflows: vec!["solar_radiation".to_string()],
         outflows: vec!["succumbing".to_string(), "succumbing_2".to_string()],
         non_negative: false,
+        can_be_module_input: false,
+        visibility: Visibility::Private,
     });
 
     let output = datamodel::Variable::from(input);
@@ -3454,6 +3516,7 @@ fn test_xml_stock_parsing() {
         non_negative: None,
         dimensions: None,
         elements: None,
+        access: None,
     };
 
     use quick_xml::de;
@@ -3479,6 +3542,7 @@ fn test_xml_gt_parsing() {
         gf: None,
         dimensions: None,
         elements: None,
+        access: None,
     };
 
     use quick_xml::de;
@@ -3493,7 +3557,7 @@ fn test_xml_gt_parsing() {
 
 #[test]
 fn test_xml_gf_parsing() {
-    let input = "            <aux name=\"lookup function table\">
+    let input = "            <aux name=\"lookup function table\" access=\"input\">
                 <eqn>0</eqn>
                 <gf>
                     <yscale min=\"-1\" max=\"1\"/>
@@ -3520,6 +3584,7 @@ fn test_xml_gf_parsing() {
         }),
         dimensions: None,
         elements: None,
+        access: Some("input".to_owned()),
     };
 
     use quick_xml::de;
@@ -3534,7 +3599,7 @@ fn test_xml_gf_parsing() {
 
 #[test]
 fn test_module_parsing() {
-    let input = "<module name=\"hares\" simlin:model_name=\"hares3\">
+    let input = "<module name=\"hares\" simlin:model_name=\"hares3\" access=\"output\">
 				<connect to=\"hares.area\" from=\".area\"/>
 				<connect2 to=\"hares.area\" from=\"area\"/>
 				<connect to=\"lynxes.hare_density\" from=\"hares.hare_density\"/>
@@ -3574,6 +3639,7 @@ fn test_module_parsing() {
                 dst: "hares.lynxes".to_string(),
             }),
         ],
+        access: Some("output".to_owned()),
     };
 
     use quick_xml::de;
@@ -3599,6 +3665,7 @@ fn test_module_parsing() {
                 dst: "hares.lynxes".to_string(),
             }),
         ],
+        access: Some("output".to_owned()),
     };
 
     let roundtripped = Module::from(datamodel::Module::from(actual.clone()));

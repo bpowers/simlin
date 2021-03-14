@@ -594,7 +594,7 @@ fn optional_vec(slice: &[&str]) -> Vec<String> {
 
 #[cfg(test)]
 fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
-    use datamodel::{Module, ModuleReference, Variable};
+    use datamodel::{Module, ModuleReference, Variable, Visibility};
     let references: Vec<ModuleReference> = refs
         .iter()
         .map(|(src, dst)| ModuleReference {
@@ -609,12 +609,14 @@ fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
         documentation: "".to_string(),
         units: None,
         references,
+        can_be_module_input: false,
+        visibility: Visibility::Private,
     })
 }
 
 #[cfg(test)]
 fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
-    use datamodel::{Equation, Flow, Variable};
+    use datamodel::{Equation, Flow, Variable, Visibility};
     Variable::Flow(Flow {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
@@ -622,6 +624,8 @@ fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
         units: None,
         gf: None,
         non_negative: false,
+        can_be_module_input: false,
+        visibility: Visibility::Private,
     })
 }
 
@@ -637,13 +641,15 @@ fn flow(ident: &str, eqn: &str) -> Variable {
 
 #[cfg(test)]
 fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
-    use datamodel::{Aux, Equation, Variable};
+    use datamodel::{Aux, Equation, Variable, Visibility};
     Variable::Aux(Aux {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
         units: None,
         gf: None,
+        can_be_module_input: false,
+        visibility: Visibility::Private,
     })
 }
 
@@ -659,7 +665,7 @@ fn aux(ident: &str, eqn: &str) -> Variable {
 
 #[cfg(test)]
 fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> datamodel::Variable {
-    use datamodel::{Equation, Stock, Variable};
+    use datamodel::{Equation, Stock, Variable, Visibility};
     Variable::Stock(Stock {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
@@ -668,6 +674,8 @@ fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> datam
         inflows: optional_vec(inflows),
         outflows: optional_vec(outflows),
         non_negative: false,
+        can_be_module_input: false,
+        visibility: Visibility::Private,
     })
 }
 

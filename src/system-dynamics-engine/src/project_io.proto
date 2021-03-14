@@ -24,6 +24,12 @@ message GraphicalFunction {
 }
 
 message Variable {
+  // access=output XMILE variables have public access, all others are private.
+  enum Visibility {
+    PRIVATE = 0;
+    PUBLIC = 1;
+  };
+
   message ScalarEquation {
     string equation = 1;
   };
@@ -59,7 +65,8 @@ message Variable {
     repeated string inflows = 5;
     repeated string outflows = 6;
     bool non_negative = 7;
-    // dimensions
+    bool can_be_module_input = 9;
+    Visibility visibility = 10;
   };
 
   message Flow {
@@ -69,7 +76,8 @@ message Variable {
     string units = 4;
     GraphicalFunction gf = 5;
     bool non_negative = 7;
-    // dimensions
+    bool can_be_module_input = 9;
+    Visibility visibility = 10;
   };
 
   message Aux {
@@ -78,7 +86,8 @@ message Variable {
     string documentation = 3;
     string units = 4;
     GraphicalFunction gf = 5;
-    // dimensions
+    bool can_be_module_input = 7;
+    Visibility visibility = 8;
   };
 
   message Module {
@@ -92,6 +101,8 @@ message Variable {
     string documentation = 3;
     string units = 4;
     repeated Reference references = 5;
+    bool can_be_module_input = 6;
+    Visibility visibility = 7;
   };
 
   oneof v {

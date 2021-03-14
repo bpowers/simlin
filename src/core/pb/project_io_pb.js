@@ -38,6 +38,7 @@ goog.exportSymbol('project_io.Variable.Module.Reference', null, proto);
 goog.exportSymbol('project_io.Variable.ScalarEquation', null, proto);
 goog.exportSymbol('project_io.Variable.Stock', null, proto);
 goog.exportSymbol('project_io.Variable.VCase', null, proto);
+goog.exportSymbol('project_io.Variable.Visibility', null, proto);
 goog.exportSymbol('project_io.View', null, proto);
 goog.exportSymbol('project_io.View.ViewType', null, proto);
 goog.exportSymbol('project_io.ViewElement', null, proto);
@@ -1415,6 +1416,14 @@ proto.project_io.Variable.serializeBinaryToWriter = function(message, writer) {
 };
 
 
+/**
+ * @enum {number}
+ */
+proto.project_io.Variable.Visibility = {
+  PRIVATE: 0,
+  PUBLIC: 1
+};
+
 
 
 
@@ -2425,7 +2434,9 @@ proto.project_io.Variable.Stock.toObject = function(includeInstance, msg) {
     units: jspb.Message.getFieldWithDefault(msg, 4, ""),
     inflowsList: (f = jspb.Message.getRepeatedField(msg, 5)) == null ? undefined : f,
     outflowsList: (f = jspb.Message.getRepeatedField(msg, 6)) == null ? undefined : f,
-    nonNegative: jspb.Message.getBooleanFieldWithDefault(msg, 7, false)
+    nonNegative: jspb.Message.getBooleanFieldWithDefault(msg, 7, false),
+    canBeModuleInput: jspb.Message.getBooleanFieldWithDefault(msg, 9, false),
+    visibility: jspb.Message.getFieldWithDefault(msg, 10, 0)
   };
 
   if (includeInstance) {
@@ -2490,6 +2501,14 @@ proto.project_io.Variable.Stock.deserializeBinaryFromReader = function(msg, read
     case 7:
       var value = /** @type {boolean} */ (reader.readBool());
       msg.setNonNegative(value);
+      break;
+    case 9:
+      var value = /** @type {boolean} */ (reader.readBool());
+      msg.setCanBeModuleInput(value);
+      break;
+    case 10:
+      var value = /** @type {!proto.project_io.Variable.Visibility} */ (reader.readEnum());
+      msg.setVisibility(value);
       break;
     default:
       reader.skipField();
@@ -2567,6 +2586,20 @@ proto.project_io.Variable.Stock.serializeBinaryToWriter = function(message, writ
   if (f) {
     writer.writeBool(
       7,
+      f
+    );
+  }
+  f = message.getCanBeModuleInput();
+  if (f) {
+    writer.writeBool(
+      9,
+      f
+    );
+  }
+  f = message.getVisibility();
+  if (f !== 0.0) {
+    writer.writeEnum(
+      10,
       f
     );
   }
@@ -2756,6 +2789,42 @@ proto.project_io.Variable.Stock.prototype.setNonNegative = function(value) {
 };
 
 
+/**
+ * optional bool can_be_module_input = 9;
+ * @return {boolean}
+ */
+proto.project_io.Variable.Stock.prototype.getCanBeModuleInput = function() {
+  return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 9, false));
+};
+
+
+/**
+ * @param {boolean} value
+ * @return {!proto.project_io.Variable.Stock} returns this
+ */
+proto.project_io.Variable.Stock.prototype.setCanBeModuleInput = function(value) {
+  return jspb.Message.setProto3BooleanField(this, 9, value);
+};
+
+
+/**
+ * optional Visibility visibility = 10;
+ * @return {!proto.project_io.Variable.Visibility}
+ */
+proto.project_io.Variable.Stock.prototype.getVisibility = function() {
+  return /** @type {!proto.project_io.Variable.Visibility} */ (jspb.Message.getFieldWithDefault(this, 10, 0));
+};
+
+
+/**
+ * @param {!proto.project_io.Variable.Visibility} value
+ * @return {!proto.project_io.Variable.Stock} returns this
+ */
+proto.project_io.Variable.Stock.prototype.setVisibility = function(value) {
+  return jspb.Message.setProto3EnumField(this, 10, value);
+};
+
+
 
 
 
@@ -2793,7 +2862,9 @@ proto.project_io.Variable.Flow.toObject = function(includeInstance, msg) {
     documentation: jspb.Message.getFieldWithDefault(msg, 3, ""),
     units: jspb.Message.getFieldWithDefault(msg, 4, ""),
     gf: (f = msg.getGf()) && proto.project_io.GraphicalFunction.toObject(includeInstance, f),
-    nonNegative: jspb.Message.getBooleanFieldWithDefault(msg, 7, false)
+    nonNegative: jspb.Message.getBooleanFieldWithDefault(msg, 7, false),
+    canBeModuleInput: jspb.Message.getBooleanFieldWithDefault(msg, 9, false),
+    visibility: jspb.Message.getFieldWithDefault(msg, 10, 0)
   };
 
   if (includeInstance) {
@@ -2855,6 +2926,14 @@ proto.project_io.Variable.Flow.deserializeBinaryFromReader = function(msg, reade
     case 7:
       var value = /** @type {boolean} */ (reader.readBool());
       msg.setNonNegative(value);
+      break;
+    case 9:
+      var value = /** @type {boolean} */ (reader.readBool());
+      msg.setCanBeModuleInput(value);
+      break;
+    case 10:
+      var value = /** @type {!proto.project_io.Variable.Visibility} */ (reader.readEnum());
+      msg.setVisibility(value);
       break;
     default:
       reader.skipField();
@@ -2926,6 +3005,20 @@ proto.project_io.Variable.Flow.serializeBinaryToWriter = function(message, write
   if (f) {
     writer.writeBool(
       7,
+      f
+    );
+  }
+  f = message.getCanBeModuleInput();
+  if (f) {
+    writer.writeBool(
+      9,
+      f
+    );
+  }
+  f = message.getVisibility();
+  if (f !== 0.0) {
+    writer.writeEnum(
+      10,
       f
     );
   }
@@ -3078,6 +3171,42 @@ proto.project_io.Variable.Flow.prototype.setNonNegative = function(value) {
 };
 
 
+/**
+ * optional bool can_be_module_input = 9;
+ * @return {boolean}
+ */
+proto.project_io.Variable.Flow.prototype.getCanBeModuleInput = function() {
+  return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 9, false));
+};
+
+
+/**
+ * @param {boolean} value
+ * @return {!proto.project_io.Variable.Flow} returns this
+ */
+proto.project_io.Variable.Flow.prototype.setCanBeModuleInput = function(value) {
+  return jspb.Message.setProto3BooleanField(this, 9, value);
+};
+
+
+/**
+ * optional Visibility visibility = 10;
+ * @return {!proto.project_io.Variable.Visibility}
+ */
+proto.project_io.Variable.Flow.prototype.getVisibility = function() {
+  return /** @type {!proto.project_io.Variable.Visibility} */ (jspb.Message.getFieldWithDefault(this, 10, 0));
+};
+
+
+/**
+ * @param {!proto.project_io.Variable.Visibility} value
+ * @return {!proto.project_io.Variable.Flow} returns this
+ */
+proto.project_io.Variable.Flow.prototype.setVisibility = function(value) {
+  return jspb.Message.setProto3EnumField(this, 10, value);
+};
+
+
 
 
 
@@ -3114,7 +3243,9 @@ proto.project_io.Variable.Aux.toObject = function(includeInstance, msg) {
     equation: (f = msg.getEquation()) && proto.project_io.Variable.Equation.toObject(includeInstance, f),
     documentation: jspb.Message.getFieldWithDefault(msg, 3, ""),
     units: jspb.Message.getFieldWithDefault(msg, 4, ""),
-    gf: (f = msg.getGf()) && proto.project_io.GraphicalFunction.toObject(includeInstance, f)
+    gf: (f = msg.getGf()) && proto.project_io.GraphicalFunction.toObject(includeInstance, f),
+    canBeModuleInput: jspb.Message.getBooleanFieldWithDefault(msg, 7, false),
+    visibility: jspb.Message.getFieldWithDefault(msg, 8, 0)
   };
 
   if (includeInstance) {
@@ -3172,6 +3303,14 @@ proto.project_io.Variable.Aux.deserializeBinaryFromReader = function(msg, reader
       var value = new proto.project_io.GraphicalFunction;
       reader.readMessage(value,proto.project_io.GraphicalFunction.deserializeBinaryFromReader);
       msg.setGf(value);
+      break;
+    case 7:
+      var value = /** @type {boolean} */ (reader.readBool());
+      msg.setCanBeModuleInput(value);
+      break;
+    case 8:
+      var value = /** @type {!proto.project_io.Variable.Visibility} */ (reader.readEnum());
+      msg.setVisibility(value);
       break;
     default:
       reader.skipField();
@@ -3237,6 +3376,20 @@ proto.project_io.Variable.Aux.serializeBinaryToWriter = function(message, writer
       5,
       f,
       proto.project_io.GraphicalFunction.serializeBinaryToWriter
+    );
+  }
+  f = message.getCanBeModuleInput();
+  if (f) {
+    writer.writeBool(
+      7,
+      f
+    );
+  }
+  f = message.getVisibility();
+  if (f !== 0.0) {
+    writer.writeEnum(
+      8,
+      f
     );
   }
 };
@@ -3370,6 +3523,42 @@ proto.project_io.Variable.Aux.prototype.hasGf = function() {
 };
 
 
+/**
+ * optional bool can_be_module_input = 7;
+ * @return {boolean}
+ */
+proto.project_io.Variable.Aux.prototype.getCanBeModuleInput = function() {
+  return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 7, false));
+};
+
+
+/**
+ * @param {boolean} value
+ * @return {!proto.project_io.Variable.Aux} returns this
+ */
+proto.project_io.Variable.Aux.prototype.setCanBeModuleInput = function(value) {
+  return jspb.Message.setProto3BooleanField(this, 7, value);
+};
+
+
+/**
+ * optional Visibility visibility = 8;
+ * @return {!proto.project_io.Variable.Visibility}
+ */
+proto.project_io.Variable.Aux.prototype.getVisibility = function() {
+  return /** @type {!proto.project_io.Variable.Visibility} */ (jspb.Message.getFieldWithDefault(this, 8, 0));
+};
+
+
+/**
+ * @param {!proto.project_io.Variable.Visibility} value
+ * @return {!proto.project_io.Variable.Aux} returns this
+ */
+proto.project_io.Variable.Aux.prototype.setVisibility = function(value) {
+  return jspb.Message.setProto3EnumField(this, 8, value);
+};
+
+
 
 /**
  * List of repeated fields within this message type.
@@ -3414,7 +3603,9 @@ proto.project_io.Variable.Module.toObject = function(includeInstance, msg) {
     documentation: jspb.Message.getFieldWithDefault(msg, 3, ""),
     units: jspb.Message.getFieldWithDefault(msg, 4, ""),
     referencesList: jspb.Message.toObjectList(msg.getReferencesList(),
-    proto.project_io.Variable.Module.Reference.toObject, includeInstance)
+    proto.project_io.Variable.Module.Reference.toObject, includeInstance),
+    canBeModuleInput: jspb.Message.getBooleanFieldWithDefault(msg, 6, false),
+    visibility: jspb.Message.getFieldWithDefault(msg, 7, 0)
   };
 
   if (includeInstance) {
@@ -3471,6 +3662,14 @@ proto.project_io.Variable.Module.deserializeBinaryFromReader = function(msg, rea
       var value = new proto.project_io.Variable.Module.Reference;
       reader.readMessage(value,proto.project_io.Variable.Module.Reference.deserializeBinaryFromReader);
       msg.addReferences(value);
+      break;
+    case 6:
+      var value = /** @type {boolean} */ (reader.readBool());
+      msg.setCanBeModuleInput(value);
+      break;
+    case 7:
+      var value = /** @type {!proto.project_io.Variable.Visibility} */ (reader.readEnum());
+      msg.setVisibility(value);
       break;
     default:
       reader.skipField();
@@ -3535,6 +3734,20 @@ proto.project_io.Variable.Module.serializeBinaryToWriter = function(message, wri
       5,
       f,
       proto.project_io.Variable.Module.Reference.serializeBinaryToWriter
+    );
+  }
+  f = message.getCanBeModuleInput();
+  if (f) {
+    writer.writeBool(
+      6,
+      f
+    );
+  }
+  f = message.getVisibility();
+  if (f !== 0.0) {
+    writer.writeEnum(
+      7,
+      f
     );
   }
 };
@@ -3807,6 +4020,42 @@ proto.project_io.Variable.Module.prototype.addReferences = function(opt_value, o
  */
 proto.project_io.Variable.Module.prototype.clearReferencesList = function() {
   return this.setReferencesList([]);
+};
+
+
+/**
+ * optional bool can_be_module_input = 6;
+ * @return {boolean}
+ */
+proto.project_io.Variable.Module.prototype.getCanBeModuleInput = function() {
+  return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 6, false));
+};
+
+
+/**
+ * @param {boolean} value
+ * @return {!proto.project_io.Variable.Module} returns this
+ */
+proto.project_io.Variable.Module.prototype.setCanBeModuleInput = function(value) {
+  return jspb.Message.setProto3BooleanField(this, 6, value);
+};
+
+
+/**
+ * optional Visibility visibility = 7;
+ * @return {!proto.project_io.Variable.Visibility}
+ */
+proto.project_io.Variable.Module.prototype.getVisibility = function() {
+  return /** @type {!proto.project_io.Variable.Visibility} */ (jspb.Message.getFieldWithDefault(this, 7, 0));
+};
+
+
+/**
+ * @param {!proto.project_io.Variable.Visibility} value
+ * @return {!proto.project_io.Variable.Module} returns this
+ */
+proto.project_io.Variable.Module.prototype.setVisibility = function(value) {
+  return jspb.Message.setProto3EnumField(this, 7, value);
 };
 
 

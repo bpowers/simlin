@@ -11,7 +11,9 @@ use prost::Message;
 
 use system_dynamics_engine as engine;
 use system_dynamics_engine::common::{ErrorCode, ErrorKind};
-use system_dynamics_engine::datamodel::{Extension, GraphicalFunction, Source, Variable};
+use system_dynamics_engine::datamodel::{
+    Extension, GraphicalFunction, Source, Variable, Visibility,
+};
 use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error, VM};
 
 #[wasm_bindgen]
@@ -177,6 +179,8 @@ impl Engine {
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
+                can_be_module_input: false,
+                visibility: Visibility::Private,
             }),
             "flow" => datamodel::Variable::Flow(datamodel::Flow {
                 ident,
@@ -185,6 +189,8 @@ impl Engine {
                 units: None,
                 gf: None,
                 non_negative: false,
+                can_be_module_input: false,
+                visibility: Visibility::Private,
             }),
             "stock" => datamodel::Variable::Stock(datamodel::Stock {
                 ident,
@@ -194,6 +200,8 @@ impl Engine {
                 inflows: vec![],
                 outflows: vec![],
                 non_negative: false,
+                can_be_module_input: false,
+                visibility: Visibility::Private,
             }),
             _ => return None,
         };

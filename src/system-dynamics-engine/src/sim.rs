@@ -2351,6 +2351,8 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
                     }),
                     Variable::Aux(Aux {
                         ident: "picked".to_owned(),
@@ -2358,6 +2360,8 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
                     }),
                     Variable::Aux(Aux {
                         ident: "aux".to_owned(),
@@ -2368,6 +2372,8 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
                     }),
                     Variable::Aux(Aux {
                         ident: "picked2".to_owned(),
@@ -2375,6 +2381,8 @@ fn test_arrays() {
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
+                        can_be_module_input: false,
+                        visibility: Visibility::Private,
                     }),
                 ],
                 views: vec![],

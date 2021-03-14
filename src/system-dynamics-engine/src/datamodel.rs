@@ -38,6 +38,12 @@ pub enum Equation {
     Arrayed(Vec<DimensionName>, Vec<(ElementName, String)>),
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Visibility {
+    Private,
+    Public,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Stock {
     pub ident: String,
@@ -47,6 +53,8 @@ pub struct Stock {
     pub inflows: Vec<String>,
     pub outflows: Vec<String>,
     pub non_negative: bool,
+    pub can_be_module_input: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -57,6 +65,8 @@ pub struct Flow {
     pub units: Option<String>,
     pub gf: Option<GraphicalFunction>,
     pub non_negative: bool,
+    pub can_be_module_input: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -66,6 +76,8 @@ pub struct Aux {
     pub documentation: String,
     pub units: Option<String>,
     pub gf: Option<GraphicalFunction>,
+    pub can_be_module_input: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -81,6 +93,8 @@ pub struct Module {
     pub documentation: String,
     pub units: Option<String>,
     pub references: Vec<ModuleReference>,
+    pub can_be_module_input: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -134,6 +148,24 @@ impl Variable {
             Variable::Flow(flow) => flow.gf = gf,
             Variable::Aux(aux) => aux.gf = gf,
             Variable::Module(_module) => {}
+        }
+    }
+
+    pub fn get_visiblity(&self) -> Visibility {
+        match self {
+            Variable::Stock(stock) => stock.visibility,
+            Variable::Flow(flow) => flow.visibility,
+            Variable::Aux(aux) => aux.visibility,
+            Variable::Module(module) => module.visibility,
+        }
+    }
+
+    pub fn can_be_module_input(&self) -> bool {
+        match self {
+            Variable::Stock(stock) => stock.can_be_module_input,
+            Variable::Flow(flow) => flow.can_be_module_input,
+            Variable::Aux(aux) => aux.can_be_module_input,
+            Variable::Module(module) => module.can_be_module_input,
         }
     }
 }
