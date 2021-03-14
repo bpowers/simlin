@@ -9,12 +9,10 @@ use wasm_bindgen::prelude::*;
 use js_sys::{Array, Map};
 use prost::Message;
 
-use system_dynamics_engine as engine;
-use system_dynamics_engine::common::{ErrorCode, ErrorKind};
-use system_dynamics_engine::datamodel::{
-    Extension, GraphicalFunction, Source, Variable, Visibility,
-};
-use system_dynamics_engine::{canonicalize, datamodel, project_io, prost, serde, Error, VM};
+use simlin_engine as engine;
+use simlin_engine::common::{ErrorCode, ErrorKind};
+use simlin_engine::datamodel::{Extension, GraphicalFunction, Source, Variable, Visibility};
+use simlin_engine::{canonicalize, datamodel, project_io, prost, serde, Error, VM};
 
 #[wasm_bindgen]
 pub struct Engine {

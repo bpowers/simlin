@@ -5,8 +5,8 @@
 use std::fs::File;
 use std::io::BufReader;
 
-use system_dynamics_compat::xmile;
-use system_dynamics_engine::Project;
+use simlin_compat::xmile;
+use simlin_engine::Project;
 
 static TEST_MODELS: &[&str] = &[
     "test/test-models/samples/bpowers-hares_and_lynxes_modules/model.xmile",

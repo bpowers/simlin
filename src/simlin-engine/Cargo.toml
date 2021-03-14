@@ -1,5 +1,5 @@
 [package]
-name = "system-dynamics-engine"
+name = "simlin-engine"
 version = "0.1.0"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"

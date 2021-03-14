@@ -8,12 +8,10 @@ use std::rc::Rc;
 
 use pico_args::Arguments;
 
-use system_dynamics_compat::engine::datamodel::Equation;
-use system_dynamics_compat::engine::{
-    eprintln, serde, ErrorCode, Project, Simulation, Variable, VM,
-};
-use system_dynamics_compat::prost::Message;
-use system_dynamics_compat::{open_vensim, open_xmile, to_xmile};
+use simlin_compat::engine::datamodel::Equation;
+use simlin_compat::engine::{eprintln, serde, ErrorCode, Project, Simulation, Variable, VM};
+use simlin_compat::prost::Message;
+use simlin_compat::{open_vensim, open_xmile, to_xmile};
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;

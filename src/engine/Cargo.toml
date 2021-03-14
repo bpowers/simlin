@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine", features = ["wasm"] }
+simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["wasm"] }
 js-sys = "0.3"
 
 [dev-dependencies]

@@ -4,8 +4,8 @@
 
 use std::io::BufRead;
 
-use system_dynamics_engine::datamodel::Project;
-pub use system_dynamics_engine::{self as engine, prost, Result};
+use simlin_engine::datamodel::Project;
+pub use simlin_engine::{self as engine, prost, Result};
 
 pub mod xmile;
 
@@ -17,7 +17,7 @@ pub fn to_xmile(project: &Project) -> Result<String> {
 pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
     use std::io::BufReader;
 
-    use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+    use simlin_engine::common::{Error, ErrorCode, ErrorKind};
     use xmutil::convert_vensim_mdl;
 
     let mut contents_buf: Vec<u8> = vec![];

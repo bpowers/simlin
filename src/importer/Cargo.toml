@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat" }
+simlin-compat = { version = "0.1", path = "../simlin-compat" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

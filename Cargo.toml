@@ -3,9 +3,9 @@
 members = [
     "src/engine",
     "src/importer",
-    "src/mdl",
-    "src/system-dynamics-compat",
-    "src/system-dynamics-engine",
+    "src/simlin-cli",
+    "src/simlin-compat",
+    "src/simlin-engine",
     "src/xmutil",
 ]
 

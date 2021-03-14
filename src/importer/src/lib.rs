@@ -6,8 +6,8 @@ use wasm_bindgen::prelude::*;
 
 use std::io::BufReader;
 
-use system_dynamics_compat::engine::{self, project_io, serde};
-use system_dynamics_compat::{open_xmile, prost, to_xmile as compat_to_xmile};
+use simlin_compat::engine::{self, project_io, serde};
+use simlin_compat::{open_xmile, prost, to_xmile as compat_to_xmile};
 
 #[wasm_bindgen]
 pub fn from_xmile(xmile_xml: &str) -> Box<[u8]> {
@@ -43,7 +43,7 @@ pub fn to_xmile(project_pb: &[u8]) -> Option<String> {
 
 // #[wasm_bindgen]
 // pub fn from_vensim(xmile_xml: &str) -> Box<[u8]> {
-//     use system_dynamics_compat::open_xmile;
+//     use simlin_compat::open_xmile;
 //     use prost::Message;
 //     let project = open_vensim(&mut BufReader::new(xmile_xml.as_bytes())).unwrap();
 //     let project_pb = engine::serde::serialize(&project);

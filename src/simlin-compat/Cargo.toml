@@ -1,5 +1,5 @@
 [package]
-name = "system-dynamics-compat"
+name = "simlin-compat"
 version = "0.1.0"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
@@ -15,7 +15,7 @@ vensim = ["xmutil"]
 float-cmp = "0.8"
 quick-xml = { version = "0.21", features = [ "serialize" ] }
 serde = { version = "1", features = [ "derive" ] }
-system-dynamics-engine = { version = "0.1", path = "../system-dynamics-engine" }
+simlin-engine = { version = "0.1", path = "../simlin-engine" }
 xmutil = { version = "1", path = "../xmutil", optional = true }
 
 [dev-dependencies]

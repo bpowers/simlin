@@ -187,7 +187,7 @@ name = "engine"
 version = "0.1.0"
 dependencies = [
  "js-sys",
- "system-dynamics-engine",
+ "simlin-engine",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -246,7 +246,7 @@ dependencies = [
 name = "importer"
 version = "0.1.0"
 dependencies = [
- "system-dynamics-compat",
+ "simlin-compat",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -334,15 +334,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51b9bbe6c47d51fc3e1a9b945965946b4c44142ab8792c50835a980d362c2710"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "mdl"
-version = "0.1.0"
-dependencies = [
- "pico-args",
- "stringreader",
- "system-dynamics-compat",
 ]
 
 [[package]]
@@ -626,6 +617,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "simlin-cli"
+version = "0.1.0"
+dependencies = [
+ "pico-args",
+ "simlin-compat",
+ "stringreader",
+]
+
+[[package]]
+name = "simlin-compat"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "float-cmp",
+ "quick-xml",
+ "serde",
+ "simlin-engine",
+ "xmutil",
+]
+
+[[package]]
+name = "simlin-engine"
+version = "0.1.0"
+dependencies = [
+ "float-cmp",
+ "lalrpop",
+ "lalrpop-util",
+ "lazy_static",
+ "ordered-float",
+ "prost",
+ "prost-build",
+ "rand",
+ "regex",
+ "smallvec",
+ "unicode-xid",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "siphasher"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -664,36 +694,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
-]
-
-[[package]]
-name = "system-dynamics-compat"
-version = "0.1.0"
-dependencies = [
- "csv",
- "float-cmp",
- "quick-xml",
- "serde",
- "system-dynamics-engine",
- "xmutil",
-]
-
-[[package]]
-name = "system-dynamics-engine"
-version = "0.1.0"
-dependencies = [
- "float-cmp",
- "lalrpop",
- "lalrpop-util",
- "lazy_static",
- "ordered-float",
- "prost",
- "prost-build",
- "rand",
- "regex",
- "smallvec",
- "unicode-xid",
- "wasm-bindgen",
 ]
 
 [[package]]

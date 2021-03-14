@@ -12,12 +12,10 @@ use std::rc::Rc;
 use csv;
 use float_cmp::approx_eq;
 
-use system_dynamics_compat::xmile;
-use system_dynamics_engine::project_io;
-use system_dynamics_engine::serde::{deserialize, serialize};
-use system_dynamics_engine::{
-    canonicalize, quoteize, Method, Project, Results, SimSpecs, Simulation, VM,
-};
+use simlin_compat::xmile;
+use simlin_engine::project_io;
+use simlin_engine::serde::{deserialize, serialize};
+use simlin_engine::{canonicalize, quoteize, Method, Project, Results, SimSpecs, Simulation, VM};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
@@ -253,7 +251,7 @@ fn simulate_path(xmile_path: &str) {
 
     // serialized our project through protobufs and ensure we don't see problems
     let results3 = {
-        use system_dynamics_compat::prost::Message;
+        use simlin_compat::prost::Message;
 
         let pb_project_inner = serialize(&datamodel_project);
         let pb_project = &pb_project_inner;

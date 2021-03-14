@@ -1,11 +1,15 @@
 [package]
-name = "mdl"
+name = "simlin-cli"
 version = "0.1.0"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
 edition = "2018"
 
+[[bin]]
+name = "simlin"
+path = "src/main.rs"
+
 [dependencies]
 pico-args = "0.4"
 stringreader = "0.1"
-system-dynamics-compat = { version = "0.1", path = "../system-dynamics-compat", features=["vensim"] }
+simlin-compat = { version = "0.1", path = "../simlin-compat", features=["vensim"] }

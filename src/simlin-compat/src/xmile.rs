@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::datamodel::Visibility;
 use crate::xmile::view_element::LinkEnd;
-use system_dynamics_engine::common::{canonicalize, quoteize, Result};
-use system_dynamics_engine::datamodel;
-use system_dynamics_engine::datamodel::{Equation, Rect, ViewElement};
+use simlin_engine::common::{canonicalize, quoteize, Result};
+use simlin_engine::datamodel;
+use simlin_engine::datamodel::{Equation, Rect, ViewElement};
 
 trait ToXML<W: Clone + Write> {
     fn write_xml(&self, writer: &mut Writer<W>) -> Result<()>;
@@ -27,7 +27,7 @@ const STOCK_HEIGHT: f64 = 35.0;
 
 macro_rules! import_err(
     ($code:tt, $str:expr) => {{
-        use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+        use simlin_engine::common::{Error, ErrorCode, ErrorKind};
         Err(Error::new(ErrorKind::Model, ErrorCode::$code, Some($str)))
     }}
 );
@@ -273,8 +273,8 @@ pub struct Header {
     pub includes: Option<Includes>,
 }
 
-fn xml_error(err: quick_xml::Error) -> system_dynamics_engine::common::Error {
-    use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+fn xml_error(err: quick_xml::Error) -> simlin_engine::common::Error {
+    use simlin_engine::common::{Error, ErrorCode, ErrorKind};
 
     Error::new(
         ErrorKind::Import,
@@ -1115,8 +1115,8 @@ pub mod view_element {
     };
     use quick_xml::Writer;
     use serde::{de, Deserialize, Deserializer, Serialize};
-    use system_dynamics_engine::common::Result;
-    use system_dynamics_engine::datamodel::view_element::LinkShape;
+    use simlin_engine::common::Result;
+    use simlin_engine::datamodel::view_element::LinkShape;
 
     // converts an angle associated with a connector (in degrees) into an
     // angle in the coordinate system of SVG canvases where the origin is
@@ -2660,7 +2660,7 @@ impl From<datamodel::View> for View {
 
 #[test]
 fn test_view_roundtrip() {
-    use system_dynamics_engine::datamodel::Rect;
+    use simlin_engine::datamodel::Rect;
     let cases: &[_] = &[datamodel::View::StockFlow(datamodel::StockFlow {
         elements: vec![datamodel::ViewElement::Stock(
             datamodel::view_element::Stock {
@@ -3406,7 +3406,7 @@ impl From<datamodel::Variable> for Var {
 
 #[test]
 fn test_canonicalize_stock_inflows() {
-    use system_dynamics_engine::common::canonicalize;
+    use simlin_engine::common::canonicalize;
 
     let input = Var::Stock(Stock {
         name: canonicalize("Heat Loss To Room"),
@@ -3457,7 +3457,7 @@ pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
 
     let result = writer.into_inner().into_inner();
 
-    use system_dynamics_engine::common::{Error, ErrorCode, ErrorKind};
+    use simlin_engine::common::{Error, ErrorCode, ErrorKind};
     String::from_utf8(result).map_err(|_err| {
         Error::new(
             ErrorKind::Import,
