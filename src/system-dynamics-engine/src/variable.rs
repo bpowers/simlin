@@ -276,7 +276,7 @@ pub fn parse_var(
                     }
                 },
                 None => {
-                    if errors.is_empty() {
+                    if errors.is_empty() && !v.can_be_module_input() {
                         errors.push(EquationError {
                             start: 0,
                             end: 0,
