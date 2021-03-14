@@ -13,7 +13,7 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{ErrorCode, Ident, Result};
+use crate::common::{len_utf8, quoteize, ErrorCode, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::interpreter::{BinaryOp, UnaryOp};
 use crate::model::Model;
@@ -266,10 +266,10 @@ impl<'a> Context<'a> {
 
     fn get_submodel_metadata(&self, model: &str, ident: &str) -> Result<&VariableMetadata> {
         let metadata = &self.metadata[model];
-        if let Some(pos) = ident.find('.') {
+        if let Some(pos) = ident.find('·') {
             let submodel_module_name = &ident[..pos];
             let submodel_name = &self.module_models[model][submodel_module_name];
-            let submodel_var = &ident[pos + 1..];
+            let submodel_var = &ident[pos + len_utf8('·')..];
             self.get_submodel_metadata(submodel_name, submodel_var)
         } else {
             Ok(&metadata[ident])
@@ -278,10 +278,10 @@ impl<'a> Context<'a> {
 
     fn get_submodel_offset(&self, model: &str, ident: &str, ignore_arrays: bool) -> Result<usize> {
         let metadata = &self.metadata[model];
-        if let Some(pos) = ident.find('.') {
+        if let Some(pos) = ident.find('·') {
             let submodel_module_name = &ident[..pos];
             let submodel_name = &self.module_models[model][submodel_module_name];
-            let submodel_var = &ident[pos + 1..];
+            let submodel_var = &ident[pos + len_utf8('·')..];
             let submodel_off = metadata[submodel_module_name].offset;
             Ok(submodel_off
                 + self.get_submodel_offset(submodel_name, submodel_var, ignore_arrays)?)
@@ -1202,26 +1202,29 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
             sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
                 let (sub_off, sub_size) = sub_offsets[sub_name];
-                offsets.insert(format!("{}.{}", ident, sub_name), (i + sub_off, sub_size));
+                offsets.insert(
+                    format!("{}.{}", quoteize(ident), quoteize(sub_name)),
+                    (i + sub_off, sub_size),
+                );
             }
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
         } else if let Some(AST::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let subscripted_ident = format!("{}[{}]", ident, subscript);
+                let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.elements.len()).product()
         } else if let Some(AST::Arrayed(dims, _)) = &model.variables[*ident].ast() {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let subscripted_ident = format!("{}[{}]", ident, subscript);
+                let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.elements.len()).product()
         } else {
-            offsets.insert(ident.to_string(), (i, 1));
+            offsets.insert(quoteize(ident), (i, 1));
             1
         };
         i += size;

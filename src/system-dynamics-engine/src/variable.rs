@@ -498,7 +498,7 @@ fn test_identifier_sets() {
         ("a(1, b, c)", &["a", "b", "c"]),
         ("-(a)", &["a"]),
         ("if a = 1 then -c else c(1, d, b)", &["a", "b", "c", "d"]),
-        ("if a.d then b else c", &["a.d", "b", "c"]),
+        ("if a.d then b else c", &["a·d", "b", "c"]),
         ("g[foo]", &["g"]),
     ];
 

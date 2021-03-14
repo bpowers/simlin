@@ -88,6 +88,11 @@ fn pairs() {
 }
 
 #[test]
+fn quoted_ident() {
+    test("\"a.b\"", vec![("~~~~~", Ident("\"a.b\""))]);
+}
+
+#[test]
 fn comment() {
     test(
         "a{ xx   }1",
@@ -101,7 +106,7 @@ fn idents() {
         "_3 n3_",
         vec![("~~    ", Ident("_3")), ("   ~~~", Ident("n3_"))],
     );
-    test("\"oh no\"", vec![("~~~~~~~", Ident("oh no"))]);
+    test("\"oh no\"", vec![("~~~~~~~", Ident("\"oh no\""))]);
     test("oh.no", vec![("~~~~~", Ident("oh.no"))]);
 }
 

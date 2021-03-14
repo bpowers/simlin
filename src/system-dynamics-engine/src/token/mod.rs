@@ -174,7 +174,7 @@ impl<'input> Lexer<'input> {
             Some(idx1) => {
                 // eat the trailing '"'
                 self.bump();
-                Ok((idx0, Ident(&self.text[idx0 + 1..idx1]), idx1 + 1))
+                Ok((idx0, Ident(&self.text[idx0..idx1 + 1]), idx1 + 1))
             }
             None => error(UnclosedQuotedIdent, idx0, self.text.len()),
         }

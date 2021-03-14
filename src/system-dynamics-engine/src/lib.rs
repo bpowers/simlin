@@ -35,7 +35,7 @@ mod interpreter;
 mod units;
 mod vm;
 
-pub use self::common::{canonicalize, Error, ErrorCode, Ident, Result};
+pub use self::common::{canonicalize, quoteize, Error, ErrorCode, Ident, Result};
 pub use self::sim::Simulation;
 pub use self::variable::Variable;
 pub use self::vm::Method;

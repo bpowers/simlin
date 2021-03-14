@@ -8,6 +8,7 @@ use std::{error, result};
 
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::borrow::Cow;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -280,31 +281,59 @@ pub fn canonicalize(name: &str) -> String {
     // for quotedness as we should treat a quoted string as sacrosanct
     let name = name.trim();
 
-    let bytes = name.as_bytes();
-    let quoted: bool = { bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' };
-
-    let name = if quoted {
-        &name[1..bytes.len() - 1]
-    } else {
-        name
-    };
-
     lazy_static! {
         // TODO: \x{C2AO} ?
         static ref UNDERSCORE_RE: Regex = Regex::new(r"(\\n|\\r|\n|\r| |\x{00A0})+").unwrap();
+        // parses a."b \" c" into: ('a.', '"b \" c"')
+        static ref QUOTED_RE: Regex = Regex::new(r#"[^"]+|"((\\")|[^"])*""#).unwrap();
     }
-    let name = name.replace("\\\\", "\\");
-    let name = UNDERSCORE_RE.replace_all(&name, "_");
 
-    name.to_lowercase()
+    let mut canonicalized_name = String::with_capacity(name.len());
+
+    for part in QUOTED_RE.find_iter(name).map(|part| part.as_str()) {
+        let bytes = part.as_bytes();
+        let quoted: bool =
+            { bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' };
+
+        let part = if quoted {
+            Cow::Borrowed(&part[1..bytes.len() - 1])
+        } else {
+            Cow::Owned(part.replace(".", "·"))
+        };
+
+        let part = part.replace("\\\\", "\\");
+        let part = UNDERSCORE_RE.replace_all(&part, "_");
+        let part = part.to_lowercase();
+
+        canonicalized_name.push_str(&part);
+    }
+
+    canonicalized_name
 }
 
 #[test]
 fn test_canonicalize() {
+    assert_eq!("a.b", canonicalize("\"a.b\""));
+    assert_eq!("a/d·b_\\\"c\\\"", canonicalize("\"a/d\".\"b \\\"c\\\"\""));
+    assert_eq!("a/d·b_c", canonicalize("\"a/d\".\"b c\""));
+    assert_eq!("a·b_c", canonicalize("a.\"b c\""));
+    assert_eq!("a/d·b", canonicalize("\"a/d\".b"));
     assert_eq!("quoted", canonicalize("\"quoted\""));
     assert_eq!("a_b", canonicalize("   a b"));
     assert_eq!("å_b", canonicalize("Å\nb"));
     assert_eq!("a_b", canonicalize("a \n b"));
+    assert_eq!("a·b", canonicalize("a.b"));
+}
+
+pub fn quoteize(ident: &str) -> String {
+    // FIXME: this needs to be smarter
+    ident.replace('·', ".")
+}
+
+#[test]
+fn test_quoteize() {
+    assert_eq!("a_b", quoteize("a_b"));
+    assert_eq!("a.b", quoteize("a·b"));
 }
 
 pub fn topo_sort<'out>(
@@ -343,4 +372,33 @@ pub fn topo_sort<'out>(
 
     assert_eq!(runlist_len, result.len());
     result
+}
+
+#[inline(always)]
+/// len_utf8 returns the number of bytes needed to represent a
+/// unicode character as a utf8 sequence. taken from char.len_utf8,
+/// but made const. (TODO: remove this when the stdlib version is const)
+pub const fn len_utf8(code: char) -> usize {
+    const MAX_ONE_B: u32 = 0x80;
+    const MAX_TWO_B: u32 = 0x800;
+    const MAX_THREE_B: u32 = 0x10000;
+
+    let code = code as u32;
+    if code < MAX_ONE_B {
+        1
+    } else if code < MAX_TWO_B {
+        2
+    } else if code < MAX_THREE_B {
+        3
+    } else {
+        4
+    }
+}
+
+#[test]
+fn test_len_utf8() {
+    assert_eq!(1, len_utf8('a'));
+    assert_eq!(2, len_utf8('·'));
+    assert_eq!(3, len_utf8('⁚'));
+    assert_eq!(4, len_utf8('🁓'));
 }

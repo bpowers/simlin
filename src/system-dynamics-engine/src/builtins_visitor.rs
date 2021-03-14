@@ -96,7 +96,7 @@ impl<'a> BuiltinVisitor<'a> {
                     units: None,
                     references,
                 });
-                let module_output_name = format!("{}.output", module_name);
+                let module_output_name = format!("{}·output", module_name);
                 self.vars.insert(module_name, x_module);
 
                 self.n += 1;

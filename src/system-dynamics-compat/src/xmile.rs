@@ -11,7 +11,7 @@ use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 
 use crate::xmile::view_element::LinkEnd;
-use system_dynamics_engine::common::{canonicalize, Result};
+use system_dynamics_engine::common::{canonicalize, quoteize, Result};
 use system_dynamics_engine::datamodel;
 use system_dynamics_engine::datamodel::{Equation, Rect, ViewElement};
 
@@ -2774,8 +2774,8 @@ impl From<datamodel::Module> for Module {
             .into_iter()
             .map(|mi| {
                 Reference::Connect(Connect {
-                    src: mi.src,
-                    dst: mi.dst,
+                    src: quoteize(&mi.src),
+                    dst: quoteize(&mi.dst),
                 })
             })
             .collect();
