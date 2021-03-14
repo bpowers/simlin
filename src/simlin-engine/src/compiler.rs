@@ -184,7 +184,7 @@ struct Context<'a> {
     metadata: &'a HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
     is_initial: bool,
-    inputs: &'a [Ident],
+    inputs: &'a BTreeSet<Ident>,
 }
 
 impl<'a> Context<'a> {
@@ -591,7 +591,7 @@ fn test_lower() {
         ))
     };
 
-    let inputs = &[];
+    let inputs = &BTreeSet::new();
     let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
     let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
     metadata.insert(
@@ -676,7 +676,7 @@ fn test_lower() {
         ))
     };
 
-    let inputs = &[];
+    let inputs = &BTreeSet::new();
     let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
     let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
     metadata.insert(
@@ -752,7 +752,7 @@ pub struct Var {
 
 #[test]
 fn test_fold_flows() {
-    let inputs = &[];
+    let inputs = &BTreeSet::new();
     let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
     let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
     metadata.insert(
@@ -1243,7 +1243,12 @@ fn calc_n_slots(
 }
 
 impl Module {
-    fn new(project: &Project, model: Rc<Model>, inputs: &[Ident], is_root: bool) -> Result<Self> {
+    fn new(
+        project: &Project,
+        model: Rc<Model>,
+        inputs: &BTreeSet<Ident>,
+        is_root: bool,
+    ) -> Result<Self> {
         if model.dt_deps.is_none() || model.initial_deps.is_none() {
             return sim_err!(NotSimulatable, model.name.clone());
         }
@@ -2082,12 +2087,12 @@ pub struct Simulation {
 }
 
 fn enumerate_modules(
-    project: &Project,
+    models: &HashMap<Ident, Rc<Model>>,
     model_name: &str,
-    modules: &mut HashSet<(Ident, Vec<Ident>)>,
+    modules: &mut HashMap<Ident, BTreeSet<BTreeSet<Ident>>>,
 ) -> Result<()> {
     use crate::common::ErrorKind;
-    let model = project.models.get(model_name).ok_or_else(|| Error {
+    let model = models.get(model_name).ok_or_else(|| Error {
         kind: ErrorKind::Simulation,
         code: ErrorCode::NotSimulatable,
         details: Some(format!("model for module '{}' not found", model_name)),
@@ -2098,12 +2103,18 @@ fn enumerate_modules(
             model_name, inputs, ..
         } = v
         {
-            let mut inputs: Vec<String> = inputs.iter().map(|input| input.dst.clone()).collect();
-            inputs.sort_unstable();
-            if modules.insert((model_name.clone(), inputs)) {
-                // first time we're seeing this monomorphization; recurse
-                enumerate_modules(project, model_name, modules)?;
+            let inputs: BTreeSet<String> = inputs.iter().map(|input| input.dst.clone()).collect();
+
+            if !modules.contains_key(model_name) {
+                // first time we are seeing the model for this module.
+                // make sure all _its_ module instantiations are recorded
+                enumerate_modules(models, model_name, modules)?;
             }
+
+            modules
+                .entry(model_name.clone())
+                .or_insert_with(BTreeSet::new)
+                .insert(inputs);
         }
     }
 
@@ -2118,9 +2129,16 @@ impl Simulation {
                 format!("no model named '{}' to simulate", main_model_name)
             );
         }
-        let mut modules: HashSet<(Ident, Vec<Ident>)> = HashSet::new();
-        modules.insert((main_model_name.to_string(), vec![]));
-        enumerate_modules(project, main_model_name, &mut modules)?;
+        let mut modules: HashMap<Ident, BTreeSet<BTreeSet<Ident>>> = HashMap::new();
+        // manually insert the main model (which has no dependencies)
+        let no_module_inputs = BTreeSet::new();
+        modules.insert(
+            main_model_name.to_string(),
+            [no_module_inputs].iter().cloned().collect(),
+        );
+
+        // then pull in all the module instantiations the main model depends on
+        enumerate_modules(&project.models, main_model_name, &mut modules)?;
 
         let module_names: Vec<&str> = {
             let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();
@@ -2133,7 +2151,8 @@ impl Simulation {
 
         let mut compiled_modules: HashMap<Ident, Module> = HashMap::new();
         for name in module_names {
-            for (_, inputs) in modules.iter().filter(|(n, _)| n == name) {
+            let distinct_inputs = &modules[name];
+            for inputs in distinct_inputs.iter() {
                 let model = Rc::clone(&project.models[name]);
                 let is_root = name == main_model_name;
                 let module = Module::new(project, model, inputs, is_root)?;
@@ -2437,7 +2456,7 @@ fn test_arrays() {
             metadata: &metadata,
             module_models: &module_models,
             is_initial: false,
-            inputs: &[],
+            inputs: &BTreeSet::new(),
         },
         arrayed_constants_var,
     );
@@ -2468,7 +2487,7 @@ fn test_arrays() {
             metadata: &metadata,
             module_models: &module_models,
             is_initial: false,
-            inputs: &[],
+            inputs: &BTreeSet::new(),
         },
         arrayed_aux_var,
     );
@@ -2498,7 +2517,7 @@ fn test_arrays() {
             metadata: &metadata,
             module_models: &module_models,
             is_initial: false,
-            inputs: &[],
+            inputs: &BTreeSet::new(),
         },
         var,
     );
@@ -2533,7 +2552,7 @@ fn test_arrays() {
             metadata: &metadata,
             module_models: &module_models,
             is_initial: false,
-            inputs: &[],
+            inputs: &BTreeSet::new(),
         },
         var,
     );
