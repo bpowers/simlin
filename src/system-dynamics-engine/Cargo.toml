@@ -16,8 +16,8 @@ wasm = ["wasm-bindgen"]
 lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
-lalrpop-util = { git = "https://github.com/bpowers/lalrpop", version = "0.19.4", rev = "322bdffcd65afc49fef3eb0731f38d213b7c8480" }
-prost = "0.7"
+lalrpop-util = { git = "https://github.com/bpowers/lalrpop", version = "0.19.5", rev = "2b45b46ca26fc1700cd1319a02b7e7b1dc457412" }
+prost = { git = "https://github.com/bpowers/prost", version = "0.7", rev = "d688bc4b89fcdfe26abb22869eac0f3d3770f17d" }
 float-cmp = "0.8"
 ordered-float = "2"
 smallvec = { version = "1", features = [ "union" ] }
@@ -27,5 +27,5 @@ wasm-bindgen = { version = "0.2", optional = true }
 rand = "0.8"
 
 [build-dependencies]
-lalrpop = { git = "https://github.com/bpowers/lalrpop", version = "0.19.4", rev = "322bdffcd65afc49fef3eb0731f38d213b7c8480" }
-prost-build = "0.7"
+lalrpop = { git = "https://github.com/bpowers/lalrpop", version = "0.19.5", rev = "2b45b46ca26fc1700cd1319a02b7e7b1dc457412" }
+prost-build = { git = "https://github.com/bpowers/prost", version = "0.7", rev = "d688bc4b89fcdfe26abb22869eac0f3d3770f17d" }

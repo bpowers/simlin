@@ -29,4 +29,6 @@ unknown-git = "deny"
 allow-git = [
     "https://github.com/bpowers/ascii-canvas",
     "https://github.com/bpowers/lalrpop",
+    "https://github.com/bpowers/prost",
+    "https://github.com/bpowers/console_error_panic_hook",
 ]

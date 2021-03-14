@@ -99,13 +99,13 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     args.is_to_xmile = parsed.contains("--to-xmile");
     args.is_vensim = parsed.contains("--vensim");
 
-    let free_arguments = parsed.free()?;
+    let free_arguments = parsed.finish();
     if free_arguments.is_empty() {
         eprintln!("error: input path required");
         usage();
     }
 
-    args.path = Some(free_arguments[0].clone());
+    args.path = free_arguments[0].to_str().map(|s| s.to_owned());
 
     Ok(args)
 }
