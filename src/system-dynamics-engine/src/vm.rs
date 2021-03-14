@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
+use smallvec::SmallVec;
 
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Op2, Opcode,
@@ -280,7 +281,7 @@ impl VM {
 
         {
             let mut stack = Stack::new();
-            let module_inputs: &[f64; 16] = &[0.0; 16];
+            let module_inputs: &[f64] = &[0.0; 0];
 
             let mut slabs = data.chunks_mut(self.n_slots);
             let mut curr = slabs.next().unwrap();
@@ -340,7 +341,7 @@ impl VM {
         &self,
         parent_module: &CompiledModuleSlice,
         parent_module_off: usize,
-        module_inputs: &[f64; 16],
+        module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
         stack: &mut Stack,
@@ -363,7 +364,7 @@ impl VM {
         &self,
         module: &CompiledModuleSlice,
         module_off: usize,
-        module_inputs: &[f64; 16],
+        module_inputs: &[f64],
         curr: &mut [f64],
         next: &mut [f64],
         stack: &mut Stack,
@@ -449,7 +450,9 @@ impl VM {
                     stack.push(module_inputs[input as usize]);
                 }
                 Opcode::EvalModule { id, n_inputs } => {
-                    let mut module_inputs = [0.0; 16];
+                    use std::iter;
+                    use std::iter::FromIterator;
+                    let mut module_inputs = SmallVec::<[f64; 16]>::from_iter(iter::repeat(0.0).take(n_inputs as usize));
                     for j in (0..(n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }

@@ -20,6 +20,7 @@ lalrpop-util = { git = "https://github.com/bpowers/lalrpop", version = "0.19.4",
 prost = "0.7"
 float-cmp = "0.8"
 ordered-float = "2"
+smallvec = { version = "1", features = [ "union" ] }
 wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
