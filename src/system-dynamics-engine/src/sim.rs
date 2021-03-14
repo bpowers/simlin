@@ -1487,7 +1487,14 @@ impl<'module> Compiler<'module> {
                     }
                     BuiltinFn::Lookup(_, _) | BuiltinFn::IsModuleInput(_) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
-                        // nothing to do here -- no arguments to push
+                        let lit = match builtin {
+                            BuiltinFn::Inf => std::f64::INFINITY,
+                            BuiltinFn::Pi => std::f64::consts::PI,
+                            _ => unreachable!(),
+                        };
+                        let id = self.curr_code.intern_literal(lit);
+                        self.push(Opcode::LoadConstant { id });
+                        return Ok(Some(()));
                     }
                     BuiltinFn::Abs(a)
                     | BuiltinFn::Arccos(a)

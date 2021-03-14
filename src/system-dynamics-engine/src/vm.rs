@@ -484,7 +484,7 @@ impl VM {
         }
     }
 
-    /*
+    #[cfg(test)]
     pub fn debug_print_bytecode(&self, _model_name: &str) {
         let mut model_names: Vec<_> = self.sliced_sim.initial_modules.keys().collect();
         model_names.sort_unstable();
@@ -526,7 +526,6 @@ impl VM {
             }
         }
     }
-     */
 }
 
 #[inline(always)]
