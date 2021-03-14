@@ -23,7 +23,7 @@ mod equation {
 mod builtins;
 mod builtins_visitor;
 mod model;
-mod sim;
+mod compiler;
 mod token;
 mod variable;
 mod stdlib {
@@ -36,7 +36,7 @@ mod units;
 mod vm;
 
 pub use self::common::{canonicalize, quoteize, Error, ErrorCode, Ident, Result};
-pub use self::sim::Simulation;
+pub use self::compiler::Simulation;
 pub use self::variable::Variable;
 pub use self::vm::Method;
 pub use self::vm::Results;
