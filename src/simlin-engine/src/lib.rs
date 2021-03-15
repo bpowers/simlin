@@ -109,6 +109,11 @@ impl From<datamodel::Project> for Project {
         let module_instantiations = {
             let models = models_list.iter().map(|m| (m.name.clone(), m)).collect();
             let mut instantiations = HashMap::new();
+            let no_module_inputs = BTreeSet::new();
+            instantiations.insert(
+                "main".to_owned(),
+                [no_module_inputs].iter().cloned().collect(),
+            );
             // FIXME: ignoring the result here because if we have errors, it doesn't really matter
             let _ = enumerate_modules(&models, "main", &mut instantiations);
             instantiations

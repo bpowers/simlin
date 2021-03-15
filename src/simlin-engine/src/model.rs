@@ -576,7 +576,7 @@ impl Model {
         &mut self,
         models: &HashMap<Ident, &Model>,
         dimensions: &[Dimension],
-        instantiations: &BTreeSet<BTreeSet<Ident>>,
+        instantiations: &BTreeSet<ModuleInputSet>,
     ) {
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
         let mut var_errors: HashMap<Ident, HashSet<EquationError>> = HashMap::new();
@@ -590,41 +590,47 @@ impl Model {
             dimensions,
         };
 
-        let empty_instantiation = BTreeSet::<Ident>::new();
-
         let mut dt_dep_map = HashMap::with_capacity(instantiations.len());
-        let dt_deps = match all_deps(&ctx, self.variables.values()) {
-            Ok(deps) => Some(deps),
-            Err((ident, err)) => {
-                var_errors
-                    .entry(ident)
-                    .or_insert_with(HashSet::new)
-                    .insert(err);
-                None
-            }
-        };
+        let mut initial_dep_map = HashMap::with_capacity(instantiations.len());
 
-        if let Some(deps) = dt_deps {
-            dt_dep_map.insert(empty_instantiation.clone(), deps);
-            self.dt_dep_map = Some(dt_dep_map);
+        for instantiation in instantiations.iter() {
+            let dt_deps = match all_deps(&ctx, self.variables.values()) {
+                Ok(deps) => Some(deps),
+                Err((ident, err)) => {
+                    var_errors
+                        .entry(ident)
+                        .or_insert_with(HashSet::new)
+                        .insert(err);
+                    None
+                }
+            };
+
+            if let Some(deps) = dt_deps {
+                dt_dep_map.insert(instantiation.clone(), deps);
+            }
+
+            ctx.is_initial = true;
+
+            let initial_deps = match all_deps(&ctx, self.variables.values()) {
+                Ok(deps) => Some(deps),
+                Err((ident, err)) => {
+                    var_errors
+                        .entry(ident)
+                        .or_insert_with(HashSet::new)
+                        .insert(err);
+                    None
+                }
+            };
+
+            if let Some(deps) = initial_deps {
+                initial_dep_map.insert(instantiation.clone(), deps);
+            }
         }
 
-        ctx.is_initial = true;
-
-        let mut initial_dep_map = HashMap::with_capacity(instantiations.len());
-        let initial_deps = match all_deps(&ctx, self.variables.values()) {
-            Ok(deps) => Some(deps),
-            Err((ident, err)) => {
-                var_errors
-                    .entry(ident)
-                    .or_insert_with(HashSet::new)
-                    .insert(err);
-                None
-            }
-        };
-
-        if let Some(deps) = initial_deps {
-            initial_dep_map.insert(empty_instantiation, deps);
+        if !dt_dep_map.is_empty() {
+            self.dt_dep_map = Some(dt_dep_map);
+        }
+        if !initial_dep_map.is_empty() {
             self.initial_dep_map = Some(initial_dep_map);
         }
 
@@ -912,8 +918,10 @@ fn test_errors() {
             .collect();
 
     let model = {
+        let no_module_inputs: ModuleInputSet = BTreeSet::new();
+        let default_instantiation = [no_module_inputs].iter().cloned().collect();
         let mut model = Model::new(&models, &main_model, &[], false);
-        model.set_dependencies(&HashMap::new(), &[], &BTreeSet::new());
+        model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
 
