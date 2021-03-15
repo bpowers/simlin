@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/core",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "System dynamics data model and utilities",
   "repository": "http://github.com/bpowers/model-app",
   "author": {

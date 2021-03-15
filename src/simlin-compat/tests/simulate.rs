@@ -340,11 +340,6 @@ fn simulates_modules_with_complex_idents() {
     simulate_path("../../test/modules_with_complex_idents/modules_with_complex_idents.stmx");
 }
 
-// #[test]
-// fn simulates_land_model() {
-//     simulate_path("../../test/land_model/land_model.stmx");
-// }
-
 #[test]
 fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
