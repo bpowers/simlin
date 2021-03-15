@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
@@ -383,7 +383,7 @@ pub fn parse_var(
 struct IdentifierSetVisitor<'a> {
     identifiers: HashSet<Ident>,
     dimensions: &'a [Dimension],
-    module_inputs: Option<&'a [ModuleInput]>,
+    module_inputs: Option<&'a BTreeSet<Ident>>,
 }
 
 impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
@@ -442,14 +442,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     if let Expr::App(builtin_id, args, _) = cond.as_ref() {
                         if builtin_id == "ismoduleinput" && args.len() == 1 {
                             if let Expr::Var(ident, _) = &args[0] {
-                                let mut is_input = false;
-                                for input in module_inputs.iter() {
-                                    if &input.dst == ident {
-                                        is_input = true;
-                                        break;
-                                    }
-                                }
-                                if is_input {
+                                if module_inputs.contains(ident) {
                                     self.walk(t);
                                 } else {
                                     self.walk(f);
@@ -471,7 +464,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
 pub fn identifier_set(
     ast: &AST,
     dimensions: &[Dimension],
-    module_inputs: Option<&[ModuleInput]>,
+    module_inputs: Option<&BTreeSet<Ident>>,
 ) -> HashSet<Ident> {
     let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
@@ -519,7 +512,8 @@ fn test_identifier_sets() {
         assert!(ast.is_some());
         let ast = ast.unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
-        let id_set_test = identifier_set(&ast, &dimensions, Some(&module_inputs));
+        let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
+        let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));
         assert_eq!(id_set_expected, id_set_test);
     }
 }

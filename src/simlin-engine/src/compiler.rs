@@ -1249,9 +1249,13 @@ impl Module {
         inputs: &BTreeSet<Ident>,
         is_root: bool,
     ) -> Result<Self> {
-        if model.dt_deps().is_none() || model.initial_deps().is_none() {
+        let dt_deps = model.dt_deps(inputs);
+        let initial_deps = model.initial_deps(inputs);
+        if dt_deps.is_none() || initial_deps.is_none() {
             return sim_err!(NotSimulatable, model.name.clone());
         }
+        let dt_deps = dt_deps.unwrap();
+        let initial_deps = initial_deps.unwrap();
 
         // TODO: eventually we should try to simulate subsets of the model in the face of errors
         if model.errors.is_some() && !model.errors.as_ref().unwrap().is_empty() {
@@ -1328,14 +1332,10 @@ impl Module {
             runlist
         };
 
-        let initial_deps = model.initial_deps().unwrap();
-        // TODO: we can cut this down to just things needed to initialize stocks,
-        //   but thats just an optimization
         let runlist_initials = build_runlist(initial_deps, StepPart::Initials, &|_| true)?;
 
         let inputs_set: HashSet<Ident> = inputs.iter().cloned().collect();
 
-        let dt_deps = model.dt_deps().unwrap();
         let runlist_flows = build_runlist(dt_deps, StepPart::Flows, &|id| {
             inputs_set.contains(*id) || !(&model.variables[*id]).is_stock()
         })?;
