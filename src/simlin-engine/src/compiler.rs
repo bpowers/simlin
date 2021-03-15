@@ -16,7 +16,7 @@ use crate::bytecode::{
 use crate::common::{len_utf8, quoteize, ErrorCode, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::interpreter::{BinaryOp, UnaryOp};
-use crate::model::Model;
+use crate::model::{enumerate_modules, Model};
 use crate::variable::Variable;
 use crate::vm::{
     is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
@@ -1249,7 +1249,7 @@ impl Module {
         inputs: &BTreeSet<Ident>,
         is_root: bool,
     ) -> Result<Self> {
-        if model.dt_deps.is_none() || model.initial_deps.is_none() {
+        if model.dt_deps().is_none() || model.initial_deps().is_none() {
             return sim_err!(NotSimulatable, model.name.clone());
         }
 
@@ -1328,14 +1328,14 @@ impl Module {
             runlist
         };
 
-        let initial_deps = model.initial_deps.as_ref().unwrap();
+        let initial_deps = model.initial_deps().unwrap();
         // TODO: we can cut this down to just things needed to initialize stocks,
         //   but thats just an optimization
         let runlist_initials = build_runlist(initial_deps, StepPart::Initials, &|_| true)?;
 
         let inputs_set: HashSet<Ident> = inputs.iter().cloned().collect();
 
-        let dt_deps = model.dt_deps.as_ref().unwrap();
+        let dt_deps = model.dt_deps().unwrap();
         let runlist_flows = build_runlist(dt_deps, StepPart::Flows, &|id| {
             inputs_set.contains(*id) || !(&model.variables[*id]).is_stock()
         })?;
@@ -2086,41 +2086,6 @@ pub struct Simulation {
     offsets: HashMap<Ident, usize>,
 }
 
-fn enumerate_modules(
-    models: &HashMap<Ident, Rc<Model>>,
-    model_name: &str,
-    modules: &mut HashMap<Ident, BTreeSet<BTreeSet<Ident>>>,
-) -> Result<()> {
-    use crate::common::ErrorKind;
-    let model = models.get(model_name).ok_or_else(|| Error {
-        kind: ErrorKind::Simulation,
-        code: ErrorCode::NotSimulatable,
-        details: Some(format!("model for module '{}' not found", model_name)),
-    })?;
-    let model = Rc::clone(model);
-    for (_id, v) in model.variables.iter() {
-        if let Variable::Module {
-            model_name, inputs, ..
-        } = v
-        {
-            let inputs: BTreeSet<String> = inputs.iter().map(|input| input.dst.clone()).collect();
-
-            if !modules.contains_key(model_name) {
-                // first time we are seeing the model for this module.
-                // make sure all _its_ module instantiations are recorded
-                enumerate_modules(models, model_name, modules)?;
-            }
-
-            modules
-                .entry(model_name.clone())
-                .or_insert_with(BTreeSet::new)
-                .insert(inputs);
-        }
-    }
-
-    Ok(())
-}
-
 impl Simulation {
     pub fn new(project: &Project, main_model_name: &str) -> Result<Self> {
         if !project.models.contains_key(main_model_name) {
@@ -2137,8 +2102,16 @@ impl Simulation {
             [no_module_inputs].iter().cloned().collect(),
         );
 
-        // then pull in all the module instantiations the main model depends on
-        enumerate_modules(&project.models, main_model_name, &mut modules)?;
+        // FIXME: should more generally rip out Rcs
+        {
+            let project_models: HashMap<_, _> = project
+                .models
+                .iter()
+                .map(|(name, model)| (name.clone(), model.as_ref()))
+                .collect();
+            // then pull in all the module instantiations the main model depends on
+            enumerate_modules(&project_models, main_model_name, &mut modules)?;
+        }
 
         let module_names: Vec<&str> = {
             let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();

@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 pub use prost;
@@ -43,6 +43,7 @@ pub use self::vm::Results;
 pub use self::vm::Specs as SimSpecs;
 pub use self::vm::VM;
 use crate::common::topo_sort;
+use crate::model::enumerate_modules;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
@@ -105,12 +106,24 @@ impl From<datamodel::Project> for Project {
             model_order[a.name.as_str()].cmp(&model_order[b.name.as_str()])
         });
 
+        let module_instantiations = {
+            let models = models_list.iter().map(|m| (m.name.clone(), m)).collect();
+            let mut instantiations = HashMap::new();
+            // FIXME: ignoring the result here because if we have errors, it doesn't really matter
+            let _ = enumerate_modules(&models, "main", &mut instantiations);
+            instantiations
+        };
+
         // dependency resolution; we need to do this as a second pass
         // to ensure we have the information available for modules
         {
+            let no_instantiations = BTreeSet::new();
             let mut models: HashMap<Ident, &Model> = HashMap::new();
             for model in models_list.iter_mut() {
-                model.set_dependencies(&models, &project_datamodel.dimensions);
+                let instantiations = module_instantiations
+                    .get(&model.name)
+                    .unwrap_or(&no_instantiations);
+                model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
                 models.insert(model.name.clone(), model);
             }
         }

@@ -12,6 +12,9 @@ use crate::datamodel::Dimension;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::{canonicalize, datamodel, eqn_err, model_err, var_eqn_err};
 
+pub type ModuleInputSet = BTreeSet<Ident>;
+pub type DependencySet = BTreeSet<Ident>;
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
@@ -19,11 +22,41 @@ pub struct Model {
     pub errors: Option<Vec<Error>>,
     /// model_deps is the transitive set of model names referenced from modules in this model
     pub model_deps: Option<BTreeSet<Ident>>,
-    pub dt_deps: Option<HashMap<Ident, BTreeSet<Ident>>>,
-    pub initial_deps: Option<HashMap<Ident, BTreeSet<Ident>>>,
+    // the dep maps have an extra layer of indirection: the key is the
+    // set of module inputs
+    dt_dep_map: Option<HashMap<ModuleInputSet, HashMap<Ident, DependencySet>>>,
+    initial_dep_map: Option<HashMap<ModuleInputSet, HashMap<Ident, DependencySet>>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
+}
+
+impl Model {
+    pub(crate) fn initial_deps(&self) -> Option<&HashMap<Ident, DependencySet>> {
+        match &self.initial_dep_map {
+            Some(deps) => {
+                #[allow(clippy::never_loop)]
+                for v in deps.values() {
+                    return Some(v);
+                }
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub(crate) fn dt_deps(&self) -> Option<&HashMap<Ident, DependencySet>> {
+        match &self.dt_dep_map {
+            Some(deps) => {
+                #[allow(clippy::never_loop)]
+                for v in deps.values() {
+                    return Some(v);
+                }
+                None
+            }
+            None => None,
+        }
+    }
 }
 
 fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
@@ -33,7 +66,7 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
     {
         if ctx.is_initial {
             let model = ctx.models[model_name];
-            if model.initial_deps.is_some() {
+            if model.initial_deps().is_some() {
                 let model_ctx = DepContext {
                     is_initial: ctx.is_initial,
                     model_name: &model.name,
@@ -448,6 +481,39 @@ pub fn resolve_module_input<'a>(
     }
 }
 
+pub(crate) fn enumerate_modules(
+    models: &HashMap<Ident, &Model>,
+    model_name: &str,
+    modules: &mut HashMap<Ident, BTreeSet<BTreeSet<Ident>>>,
+) -> Result<()> {
+    let model = *models.get(model_name).ok_or_else(|| Error {
+        kind: ErrorKind::Simulation,
+        code: ErrorCode::NotSimulatable,
+        details: Some(format!("model for module '{}' not found", model_name)),
+    })?;
+    for (_id, v) in model.variables.iter() {
+        if let Variable::Module {
+            model_name, inputs, ..
+        } = v
+        {
+            let inputs: BTreeSet<String> = inputs.iter().map(|input| input.dst.clone()).collect();
+
+            if !modules.contains_key(model_name) {
+                // first time we are seeing the model for this module.
+                // make sure all _its_ module instantiations are recorded
+                enumerate_modules(models, model_name, modules)?;
+            }
+
+            modules
+                .entry(model_name.clone())
+                .or_insert_with(BTreeSet::new)
+                .insert(inputs);
+        }
+    }
+
+    Ok(())
+}
+
 impl Model {
     pub fn new(
         models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
@@ -500,8 +566,8 @@ impl Model {
             variables,
             errors: None,
             model_deps: Some(model_deps),
-            dt_deps: None,
-            initial_deps: None,
+            dt_dep_map: None,
+            initial_dep_map: None,
             implicit,
         }
     }
@@ -510,6 +576,7 @@ impl Model {
         &mut self,
         models: &HashMap<Ident, &Model>,
         dimensions: &[Dimension],
+        instantiations: &BTreeSet<BTreeSet<Ident>>,
     ) {
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
         let mut var_errors: HashMap<Ident, HashSet<EquationError>> = HashMap::new();
@@ -523,7 +590,10 @@ impl Model {
             dimensions,
         };
 
-        self.dt_deps = match all_deps(&ctx, self.variables.values()) {
+        let empty_instantiation = BTreeSet::<Ident>::new();
+
+        let mut dt_dep_map = HashMap::with_capacity(instantiations.len());
+        let dt_deps = match all_deps(&ctx, self.variables.values()) {
             Ok(deps) => Some(deps),
             Err((ident, err)) => {
                 var_errors
@@ -533,10 +603,16 @@ impl Model {
                 None
             }
         };
+
+        if let Some(deps) = dt_deps {
+            dt_dep_map.insert(empty_instantiation.clone(), deps);
+            self.dt_dep_map = Some(dt_dep_map);
+        }
 
         ctx.is_initial = true;
 
-        self.initial_deps = match all_deps(&ctx, self.variables.values()) {
+        let mut initial_dep_map = HashMap::with_capacity(instantiations.len());
+        let initial_deps = match all_deps(&ctx, self.variables.values()) {
             Ok(deps) => Some(deps),
             Err((ident, err)) => {
                 var_errors
@@ -546,6 +622,11 @@ impl Model {
                 None
             }
         };
+
+        if let Some(deps) = initial_deps {
+            initial_dep_map.insert(empty_instantiation, deps);
+            self.initial_dep_map = Some(initial_dep_map);
+        }
 
         let mut errors: Vec<Error> = Vec::new();
         let mut variables_have_errors = false;
@@ -832,7 +913,7 @@ fn test_errors() {
 
     let model = {
         let mut model = Model::new(&models, &main_model, &[], false);
-        model.set_dependencies(&HashMap::new(), &[]);
+        model.set_dependencies(&HashMap::new(), &[], &BTreeSet::new());
         model
     };
 
@@ -968,7 +1049,7 @@ fn test_all_deps() {
     let models = {
         let mut models: HashMap<Ident, &Model> = HashMap::new();
         for model in model_list.iter_mut() {
-            model.set_dependencies(&models, &[]);
+            model.set_dependencies(&models, &[], &BTreeSet::new());
             models.insert(model.name.clone(), model);
         }
         models
