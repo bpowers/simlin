@@ -108,6 +108,9 @@ pub struct Results {
 
 impl Results {
     pub fn print_tsv(&self) {
+        self.print_tsv_comparison(None)
+    }
+    pub fn print_tsv_comparison(&self, reference: Option<&Results>) {
         let var_names = {
             let offset_name_map: HashMap<usize, &str> =
                 self.offsets.iter().map(|(k, v)| (*v, k.as_str())).collect();
@@ -123,6 +126,10 @@ impl Results {
             var_names
         };
 
+        if reference.is_some() {
+            print!("series\t");
+        }
+
         // print header
         for (i, id) in var_names.iter().enumerate() {
             print!("{}", id);
@@ -133,16 +140,51 @@ impl Results {
             }
         }
 
-        for curr in self.iter() {
-            if curr[TIME_OFF] > self.specs.stop {
-                break;
+        match reference {
+            Some(reference) => {
+                for (curr, ref_curr) in self.iter().zip(reference.iter()) {
+                    if curr[TIME_OFF] > self.specs.stop {
+                        break;
+                    }
+                    print!("reference\t");
+                    for (i, _) in curr.iter().enumerate() {
+                        let var_name = var_names[i];
+                        if let Some(off) = reference.offsets.get(var_name) {
+                            let val = ref_curr[*off];
+                            print!("{}", val);
+                        } else {
+                            print!("")
+                        }
+                        if i == var_names.len() - 1 {
+                            println!();
+                        } else {
+                            print!("\t");
+                        }
+                    }
+                    print!("simlin\t");
+                    for (i, val) in curr.iter().enumerate() {
+                        print!("{}", val);
+                        if i == var_names.len() - 1 {
+                            println!();
+                        } else {
+                            print!("\t");
+                        }
+                    }
+                }
             }
-            for (i, val) in curr.iter().enumerate() {
-                print!("{}", val);
-                if i == var_names.len() - 1 {
-                    println!();
-                } else {
-                    print!("\t");
+            None => {
+                for curr in self.iter() {
+                    if curr[TIME_OFF] > self.specs.stop {
+                        break;
+                    }
+                    for (i, val) in curr.iter().enumerate() {
+                        print!("{}", val);
+                        if i == var_names.len() - 1 {
+                            println!();
+                        } else {
+                            print!("\t");
+                        }
+                    }
                 }
             }
         }

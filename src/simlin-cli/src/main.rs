@@ -13,7 +13,7 @@ use simlin_compat::engine::{
     eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, VM,
 };
 use simlin_compat::prost::Message;
-use simlin_compat::{open_vensim, open_xmile, to_xmile};
+use simlin_compat::{load_csv, open_vensim, open_xmile, to_xmile};
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -44,7 +44,7 @@ fn usage() -> ! {
             "    --to-xmile       output should be XMILE not protobuf\n",
             "    --model-only     for conversion, only output model instead of project\n",
             "    --output FILE    path to write output file\n",
-            "    --reference FILE reference CSV/TSV for debug subcommand\n",
+            "    --reference FILE reference TSV for debug subcommand\n",
             "    --no-output      don't print the output (for benchmarking)\n",
             "\n\
          SUBCOMMANDS:\n",
@@ -316,8 +316,11 @@ fn main() {
             eprintln!("missing required argument --reference FILE");
             std::process::exit(1);
         }
-        let _results = simulate(&project);
-        let _ref_path = args.reference.unwrap();
+        let ref_path = args.reference.unwrap();
+        let reference = load_csv(&ref_path, b'\t').unwrap();
+        let results = simulate(&project);
+
+        results.print_tsv_comparison(Some(&reference));
     } else {
         let results = simulate(&project);
         if !args.is_no_output {
