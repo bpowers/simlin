@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/engine",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "an engine for constructing and checking SD models",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
