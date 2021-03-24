@@ -1376,17 +1376,8 @@ impl Module {
         })?;
 
         let mut runlist_order = Vec::with_capacity(runlist_flows.len() + runlist_stocks.len());
-        eprintln!("\nDEBUG 1 FLOWS ({})\n", model_name);
-        runlist_order.extend(runlist_flows.iter().map(|v| {
-            eprintln!("  {}", v.ident);
-            v.ident.clone()
-        }));
-        eprintln!("\nDEBUG 1 STOCKS ({})\n", model_name);
-        runlist_order.extend(runlist_stocks.iter().map(|v| {
-            eprintln!("  {}", v.ident);
-            v.ident.clone()
-        }));
-        eprintln!("\nEND DEBUG 1\n");
+        runlist_order.extend(runlist_flows.iter().map(|v| v.ident.clone()));
+        runlist_order.extend(runlist_stocks.iter().map(|v| v.ident.clone()));
 
         // flatten out the variables so that we're just dealing with lists of expressions
         let runlist_initials = runlist_initials.into_iter().flat_map(|v| v.ast).collect();
