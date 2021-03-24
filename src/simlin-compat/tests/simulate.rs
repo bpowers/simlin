@@ -282,6 +282,11 @@ fn simulates_modules_with_complex_idents() {
 }
 
 #[test]
+fn simulates_step_into_smth1() {
+    simulate_path("../../test/step_into_smth1/model.stmx");
+}
+
+#[test]
 fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
     let mut f = BufReader::new(f);
