@@ -2,20 +2,16 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
-use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
-use std::iter::FromIterator;
 use std::rc::Rc;
 
-use csv;
 use float_cmp::approx_eq;
 
-use simlin_compat::xmile;
+use simlin_compat::{load_csv, xmile};
 use simlin_engine::project_io;
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{canonicalize, quoteize, Method, Project, Results, SimSpecs, Simulation, VM};
+use simlin_engine::{Project, Results, Simulation, VM};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
@@ -92,61 +88,6 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/xidz_zidz/xidz_zidz.xmile",
     "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 ];
-
-fn load_csv(file_path: &str, delimiter: u8) -> Result<Results, Box<dyn Error>> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .from_path(file_path)?;
-
-    let header = rdr.headers().unwrap();
-    let offsets: HashMap<String, usize> =
-        HashMap::from_iter(header.iter().enumerate().map(|(i, r)| {
-            // stella outputs the first 'time' column as the time _units_, which is bonkers
-            let name = if i == 0 { "time" } else { r };
-            let ident = canonicalize(name);
-            (quoteize(&ident), i)
-        }));
-
-    let step_size = offsets.len();
-    let mut step_data: Vec<Vec<f64>> = Vec::new();
-    let mut step_count = 0;
-
-    for result in rdr.records() {
-        let record = result?;
-
-        let mut row = vec![0.0; step_size];
-        for (i, field) in record.iter().enumerate() {
-            use std::str::FromStr;
-            row[i] = match f64::from_str(field.trim()) {
-                Ok(n) => n,
-                Err(err) => {
-                    eprintln!("invalid: '{}': {}", field.trim(), err);
-                    assert!(false);
-                    0.0
-                }
-            };
-        }
-
-        step_data.push(row);
-        step_count += 1;
-    }
-
-    let step_data: Vec<f64> = step_data.into_iter().flatten().collect();
-
-    Ok(Results {
-        offsets,
-        data: step_data.into_boxed_slice(),
-        step_size,
-        step_count,
-        specs: SimSpecs {
-            start: 0.0,
-            stop: 0.0,
-            dt: 0.0,
-            save_step: 0.0,
-            method: Method::Euler,
-        },
-    })
-}
 
 fn load_expected_results(xmile_path: &str) -> Results {
     let xmile_name = std::path::Path::new(xmile_path).file_name().unwrap();

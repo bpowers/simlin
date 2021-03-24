@@ -8,8 +8,10 @@ use std::rc::Rc;
 
 use pico_args::Arguments;
 
-use simlin_compat::engine::datamodel::Equation;
-use simlin_compat::engine::{eprintln, serde, ErrorCode, Project, Simulation, Variable, VM};
+use simlin_compat::engine::datamodel::{Equation, Project as DatamodelProject};
+use simlin_compat::engine::{
+    eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, VM,
+};
 use simlin_compat::prost::Message;
 use simlin_compat::{open_vensim, open_xmile, to_xmile};
 
@@ -37,17 +39,19 @@ fn usage() -> ! {
             "    {} [SUBCOMMAND] [OPTION...] PATH\n",
             "\n\
          OPTIONS:\n",
-            "    -h, --help    show this message\n",
-            "    --vensim      model is a Vensim .mdl file\n",
-            "    --to-xmile    output should be XMILE not protobuf\n",
-            "    --model-only  for conversion, only output model instead of project\n",
-            "    --output FILE path to write output file\n",
-            "    --no-output   don't print the output (for benchmarking)\n",
+            "    -h, --help       show this message\n",
+            "    --vensim         model is a Vensim .mdl file\n",
+            "    --to-xmile       output should be XMILE not protobuf\n",
+            "    --model-only     for conversion, only output model instead of project\n",
+            "    --output FILE    path to write output file\n",
+            "    --reference FILE reference CSV/TSV for debug subcommand\n",
+            "    --no-output      don't print the output (for benchmarking)\n",
             "\n\
          SUBCOMMANDS:\n",
-            "    simulate      Simulate a model and display output\n",
-            "    convert       Convert an XMILE or Vensim model to protobuf\n",
-            "    equations     Print the equations out\n",
+            "    simulate         Simulate a model and display output\n",
+            "    convert          Convert an XMILE or Vensim model to protobuf\n",
+            "    equations        Print the equations out\n",
+            "    debug            Output model equations interleaved with a reference run\n",
         ),
         VERSION,
         argv0
@@ -58,12 +62,14 @@ fn usage() -> ! {
 struct Args {
     path: Option<String>,
     output: Option<String>,
+    reference: Option<String>,
     is_vensim: bool,
     is_to_xmile: bool,
     is_convert: bool,
     is_model_only: bool,
     is_no_output: bool,
     is_equations: bool,
+    is_debug: bool,
 }
 
 fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
@@ -86,12 +92,15 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     } else if subcommand == "simulate" {
     } else if subcommand == "equations" {
         args.is_equations = true;
+    } else if subcommand == "debug" {
+        args.is_debug = true;
     } else {
         eprintln!("error: unknown subcommand {}", subcommand);
         usage();
     }
 
     args.output = parsed.value_from_str("--output").ok();
+    args.reference = parsed.value_from_str("--reference").ok();
     args.is_no_output = parsed.contains("--no-output");
     args.is_model_only = parsed.contains("--model-only");
     args.is_to_xmile = parsed.contains("--to-xmile");
@@ -106,6 +115,64 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     args.path = free_arguments[0].to_str().map(|s| s.to_owned());
 
     Ok(args)
+}
+
+fn simulate(project: &DatamodelProject) -> Results {
+    let project_datamodel = project.clone();
+    let project = Rc::new(Project::from(project.clone()));
+    let mut found_model_error = false;
+    for (model_name, model) in project.models.iter() {
+        let model_datamodel = project_datamodel.get_model(model_name);
+        if model_datamodel.is_none() {
+            continue;
+        }
+        let model_datamodel = model_datamodel.unwrap();
+        let mut found_var_error = false;
+        for (ident, errors) in model.get_variable_errors() {
+            assert!(!errors.is_empty());
+            let var = model_datamodel.get_variable(&ident).unwrap();
+            found_var_error = true;
+            for error in errors {
+                eprintln!();
+                if let Some(Equation::Scalar(eqn)) = var.get_equation() {
+                    eprintln!("    {}", eqn);
+                    let space = std::iter::repeat(" ")
+                        .take(error.start as usize)
+                        .collect::<String>();
+                    let underline = std::iter::repeat("~")
+                        .take((error.end - error.start) as usize)
+                        .collect::<String>();
+                    eprintln!("    {}{}", space, underline);
+                }
+                eprintln!(
+                    "error in model '{}' variable '{}': {}",
+                    model_name, ident, error.code
+                );
+            }
+        }
+        if let Some(errors) = &model.errors {
+            for error in errors.iter() {
+                if error.code == ErrorCode::VariablesHaveErrors && found_var_error {
+                    continue;
+                }
+                eprintln!("error in model {}: {}", model_name, error);
+                found_model_error = true;
+            }
+        }
+    }
+    let sim = match Simulation::new(&project, "main") {
+        Ok(sim) => sim,
+        Err(err) => {
+            if !(err.code == ErrorCode::NotSimulatable && found_model_error) {
+                eprintln!("error: {}", err);
+            }
+            std::process::exit(1);
+        }
+    };
+    let compiled = sim.compile().unwrap();
+    let mut vm = VM::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    vm.into_results()
 }
 
 fn main() {
@@ -244,63 +311,15 @@ fn main() {
         let mut output_file =
             File::create(&args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
         output_file.write_all(&buf).unwrap();
-    // eprintln!("{:?}", project);
-    } else {
-        let project_datamodel = project.clone();
-        let project = Rc::new(Project::from(project));
-        let mut found_model_error = false;
-        for (model_name, model) in project.models.iter() {
-            let model_datamodel = project_datamodel.get_model(model_name);
-            if model_datamodel.is_none() {
-                continue;
-            }
-            let model_datamodel = model_datamodel.unwrap();
-            let mut found_var_error = false;
-            for (ident, errors) in model.get_variable_errors() {
-                assert!(!errors.is_empty());
-                let var = model_datamodel.get_variable(&ident).unwrap();
-                found_var_error = true;
-                for error in errors {
-                    eprintln!();
-                    if let Some(Equation::Scalar(eqn)) = var.get_equation() {
-                        eprintln!("    {}", eqn);
-                        let space = std::iter::repeat(" ")
-                            .take(error.start as usize)
-                            .collect::<String>();
-                        let underline = std::iter::repeat("~")
-                            .take((error.end - error.start) as usize)
-                            .collect::<String>();
-                        eprintln!("    {}{}", space, underline);
-                    }
-                    eprintln!(
-                        "error in model '{}' variable '{}': {}",
-                        model_name, ident, error.code
-                    );
-                }
-            }
-            if let Some(errors) = &model.errors {
-                for error in errors.iter() {
-                    if error.code == ErrorCode::VariablesHaveErrors && found_var_error {
-                        continue;
-                    }
-                    eprintln!("error in model {}: {}", model_name, error);
-                    found_model_error = true;
-                }
-            }
+    } else if args.is_debug {
+        if args.reference.is_none() {
+            eprintln!("missing required argument --reference FILE");
+            std::process::exit(1);
         }
-        let sim = match Simulation::new(&project, "main") {
-            Ok(sim) => sim,
-            Err(err) => {
-                if !(err.code == ErrorCode::NotSimulatable && found_model_error) {
-                    eprintln!("error: {}", err);
-                }
-                std::process::exit(1);
-            }
-        };
-        let compiled = sim.compile().unwrap();
-        let mut vm = VM::new(compiled).unwrap();
-        vm.run_to_end().unwrap();
-        let results = vm.into_results();
+        let _results = simulate(&project);
+        let _ref_path = args.reference.unwrap();
+    } else {
+        let results = simulate(&project);
         if !args.is_no_output {
             results.print_tsv();
         }
