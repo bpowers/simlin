@@ -8,14 +8,14 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::ast::{self, Loc, AST};
+use crate::ast::{self, BinaryOp, Loc, AST};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{len_utf8, quoteize, ErrorCode, Ident, Result};
 use crate::datamodel::Dimension;
-use crate::interpreter::{BinaryOp, UnaryOp};
+use crate::interpreter::UnaryOp;
 use crate::model::{enumerate_modules, Model};
 use crate::variable::Variable;
 use crate::vm::{
@@ -747,6 +747,7 @@ fn test_lower() {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Var {
+    ident: Ident,
     ast: Vec<Expr>,
 }
 
@@ -1003,7 +1004,10 @@ impl Var {
                 }
             }
         };
-        Ok(Var { ast })
+        Ok(Var {
+            ident: var.ident().to_owned(),
+            ast,
+        })
     }
 }
 
@@ -1016,6 +1020,7 @@ pub struct Module {
     runlist_flows: Vec<Expr>,
     runlist_stocks: Vec<Expr>,
     offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
+    runlist_order: Vec<Ident>,
     tables: HashMap<Ident, Table>,
 }
 
@@ -1233,6 +1238,32 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
     offsets
 }
 
+fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
+    let is_root = model_name == "main";
+
+    let module = &sim.modules[model_name];
+
+    let mut offsets: Vec<Ident> = Vec::with_capacity(module.runlist_order.len() + 1);
+
+    if is_root {
+        offsets.push("time".to_owned());
+    }
+
+    for ident in module.runlist_order.iter() {
+        // FIXME: this isnt' quite right (assumes no regular var has same name as module)
+        if let Some(_) = sim.modules.get(ident) {
+            let sub_var_names = calc_flattened_order(sim, ident);
+            for sub_name in sub_var_names.iter() {
+                offsets.push(format!("{}.{}", quoteize(ident), quoteize(sub_name)));
+            }
+        } else {
+            offsets.push(quoteize(ident));
+        }
+    }
+
+    offsets
+}
+
 fn calc_n_slots(
     all_metadata: &HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     model_name: &str,
@@ -1344,6 +1375,19 @@ impl Module {
             !inputs_set.contains(*id) && (v.is_stock() || v.is_module())
         })?;
 
+        let mut runlist_order = Vec::with_capacity(runlist_flows.len() + runlist_stocks.len());
+        eprintln!("\nDEBUG 1 FLOWS ({})\n", model_name);
+        runlist_order.extend(runlist_flows.iter().map(|v| {
+            eprintln!("  {}", v.ident);
+            v.ident.clone()
+        }));
+        eprintln!("\nDEBUG 1 STOCKS ({})\n", model_name);
+        runlist_order.extend(runlist_stocks.iter().map(|v| {
+            eprintln!("  {}", v.ident);
+            v.ident.clone()
+        }));
+        eprintln!("\nEND DEBUG 1\n");
+
         // flatten out the variables so that we're just dealing with lists of expressions
         let runlist_initials = runlist_initials.into_iter().flat_map(|v| v.ast).collect();
         let runlist_flows = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
@@ -1381,6 +1425,7 @@ impl Module {
             runlist_flows,
             runlist_stocks,
             offsets,
+            runlist_order,
             tables,
         })
     }
@@ -1968,6 +2013,50 @@ impl<'a> ModuleEvaluator<'a> {
     }
 }
 
+fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
+    match parent {
+        // no children so doesn't matter
+        Expr::Const(_, _) | Expr::Var(_, _) => false,
+        // children are comma separated, so no ambiguity possible
+        Expr::App(_, _) | Expr::Subscript(_, _, _, _) => false,
+        // these don't need it
+        Expr::Dt(_)
+        | Expr::EvalModule(_, _, _)
+        | Expr::ModuleInput(_, _)
+        | Expr::AssignCurr(_, _)
+        | Expr::AssignNext(_, _) => false,
+        Expr::Op1(_, _, _) => matches!(child, Expr::Op2(_, _, _, _)),
+        Expr::Op2(parent_op, _, _, _) => match child {
+            Expr::Const(_, _)
+            | Expr::Var(_, _)
+            | Expr::App(_, _)
+            | Expr::Subscript(_, _, _, _)
+            | Expr::If(_, _, _, _)
+            | Expr::Dt(_)
+            | Expr::EvalModule(_, _, _)
+            | Expr::ModuleInput(_, _)
+            | Expr::AssignCurr(_, _)
+            | Expr::AssignNext(_, _)
+            | Expr::Op1(_, _, _) => false,
+            // 3 * 2 + 1
+            Expr::Op2(child_op, _, _, _) => {
+                // if we have `3 * (2 + 3)`, the parent's precedence
+                // is higher than the child and we need enclosing parens
+                parent_op.precedence() > child_op.precedence()
+            }
+        },
+        Expr::If(_, _, _, _) => false,
+    }
+}
+
+fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
+    if child_needs_parens(parent, child) {
+        format!("({})", eqn)
+    } else {
+        eqn
+    }
+}
+
 #[allow(dead_code)]
 pub fn pretty(expr: &Expr) -> String {
     match expr {
@@ -2062,13 +2151,18 @@ pub fn pretty(expr: &Expr) -> String {
                 BinaryOp::Or => "||",
             };
 
-            format!("({}{}{})", pretty(l), op, pretty(r))
+            format!(
+                "{} {} {}",
+                paren_if_necessary(expr, l, pretty(l)),
+                op,
+                paren_if_necessary(expr, r, pretty(r))
+            )
         }
         Expr::Op1(op, l, _) => {
             let op: &str = match op {
                 UnaryOp::Not => "!",
             };
-            format!("{}{}", op, pretty(l))
+            format!("{}{}", op, paren_if_necessary(expr, l, pretty(l)))
         }
         Expr::If(cond, l, r, _) => {
             format!("if {} then {} else {}", pretty(cond), pretty(l), pretty(r))
@@ -2164,6 +2258,10 @@ impl Simulation {
             root: self.root.clone(),
             offsets: self.offsets.clone(),
         })
+    }
+
+    pub fn runlist_order(&self) -> Vec<Ident> {
+        calc_flattened_order(self, "main")
     }
 
     pub fn debug_print_runlists(&self, _model_name: &str) {
@@ -2437,6 +2535,7 @@ fn test_arrays() {
     assert!(parsed_var.is_ok());
 
     let expected = Var {
+        ident: arrayed_constants_var.ident().to_owned(),
         ast: vec![
             Expr::AssignCurr(7, Box::new(Expr::Const(9.0, Loc::default()))),
             Expr::AssignCurr(8, Box::new(Expr::Const(7.0, Loc::default()))),
@@ -2467,6 +2566,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
+        ident: arrayed_aux_var.ident().to_owned(),
         ast: vec![
             Expr::AssignCurr(4, Box::new(Expr::Var(7, Loc::default()))),
             Expr::AssignCurr(5, Box::new(Expr::Var(8, Loc::default()))),
@@ -2497,6 +2597,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
+        ident: var.ident().to_owned(),
         ast: vec![Expr::AssignCurr(
             11,
             Box::new(Expr::Subscript(
@@ -2532,6 +2633,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
+        ident: var.ident().to_owned(),
         ast: vec![Expr::AssignCurr(
             10,
             Box::new(Expr::Subscript(

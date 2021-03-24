@@ -413,7 +413,7 @@ pub enum BinaryOp {
 impl BinaryOp {
     // higher the precedence, the tighter the binding.
     // e.g. Mul.precedence() > Add.precedence()
-    fn precedence(&self) -> u8 {
+    pub(crate) fn precedence(&self) -> u8 {
         // matches equation.lalrpop
         match self {
             BinaryOp::Add => 4,
