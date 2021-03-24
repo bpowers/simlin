@@ -13,7 +13,7 @@
     <model name="stdlib⁚smth1">
         <variables>
             <flow name="flow">
-                <eqn>(input - Output)/(delay_time/3)</eqn>
+                <eqn>(input - Output)/delay_time</eqn>
                 <units>unit/time unit</units>
             </flow>
             <stock name="output">
