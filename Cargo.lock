@@ -11,9 +11,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.39"
+version = "1.0.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81cddc5f91628367664cc7c69714ff08deee8a3efc54623011c772544d7b2767"
+checksum = "28b2cd92db5cbd74e8e5028f7e27dd7aa3090e89e4f2a197cc7c8dfb69c7063b"
 
 [[package]]
 name = "ascii-canvas"
@@ -421,7 +421,7 @@ dependencies = [
 [[package]]
 name = "prost"
 version = "0.7.0"
-source = "git+https://github.com/bpowers/prost?rev=d688bc4b89fcdfe26abb22869eac0f3d3770f17d#d688bc4b89fcdfe26abb22869eac0f3d3770f17d"
+source = "git+https://github.com/danburkert/prost?rev=32ad5a2e1036a9c9425f0a84f032ba9f343b133e#32ad5a2e1036a9c9425f0a84f032ba9f343b133e"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -430,7 +430,7 @@ dependencies = [
 [[package]]
 name = "prost-build"
 version = "0.7.0"
-source = "git+https://github.com/bpowers/prost?rev=d688bc4b89fcdfe26abb22869eac0f3d3770f17d#d688bc4b89fcdfe26abb22869eac0f3d3770f17d"
+source = "git+https://github.com/danburkert/prost?rev=32ad5a2e1036a9c9425f0a84f032ba9f343b133e#32ad5a2e1036a9c9425f0a84f032ba9f343b133e"
 dependencies = [
  "bytes",
  "heck",
@@ -447,7 +447,7 @@ dependencies = [
 [[package]]
 name = "prost-derive"
 version = "0.7.0"
-source = "git+https://github.com/bpowers/prost?rev=d688bc4b89fcdfe26abb22869eac0f3d3770f17d#d688bc4b89fcdfe26abb22869eac0f3d3770f17d"
+source = "git+https://github.com/danburkert/prost?rev=32ad5a2e1036a9c9425f0a84f032ba9f343b133e#32ad5a2e1036a9c9425f0a84f032ba9f343b133e"
 dependencies = [
  "anyhow",
  "itertools",
@@ -459,7 +459,7 @@ dependencies = [
 [[package]]
 name = "prost-types"
 version = "0.7.0"
-source = "git+https://github.com/bpowers/prost?rev=d688bc4b89fcdfe26abb22869eac0f3d3770f17d#d688bc4b89fcdfe26abb22869eac0f3d3770f17d"
+source = "git+https://github.com/danburkert/prost?rev=32ad5a2e1036a9c9425f0a84f032ba9f343b133e#32ad5a2e1036a9c9425f0a84f032ba9f343b133e"
 dependencies = [
  "bytes",
  "prost",
@@ -687,9 +687,9 @@ checksum = "913e7b03d63752f6cdd2df77da36749d82669904798fe8944b9ec3d23f159905"
 
 [[package]]
 name = "syn"
-version = "1.0.64"
+version = "1.0.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fd9d1e9976102a03c542daa2eff1b43f9d72306342f3f8b3ed5fb8908195d6f"
+checksum = "f3a1d708c221c5a612956ef9f75b37e454e88d1f7b899fbd3a18d4252012d663"
 dependencies = [
  "proc-macro2",
  "quote",
