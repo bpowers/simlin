@@ -12,12 +12,12 @@ use prost::Message;
 use simlin_engine as engine;
 use simlin_engine::common::{ErrorCode, ErrorKind};
 use simlin_engine::datamodel::{Extension, GraphicalFunction, Source, Variable, Visibility};
-use simlin_engine::{canonicalize, datamodel, project_io, prost, serde, Error, VM};
+use simlin_engine::{canonicalize, datamodel, project_io, prost, serde, Error, Vm};
 
 #[wasm_bindgen]
 pub struct Engine {
     project: engine::Project,
-    sim_vm: Option<engine::VM>,
+    sim_vm: Option<engine::Vm>,
     sim_error: Option<engine::Error>,
     results: Option<engine::Results>,
 }
@@ -28,7 +28,7 @@ impl Engine {
         let compiler = engine::Simulation::new(&self.project, "main");
         let sim_result = compiler
             .and_then(|compiler| compiler.compile())
-            .and_then(VM::new);
+            .and_then(Vm::new);
         self.sim_error = sim_result.as_ref().err().cloned();
         self.sim_vm = sim_result.ok();
     }

@@ -174,7 +174,7 @@ pub fn parse_equation(eqn: &str) -> StdResult<Option<Expr>, Vec<EquationError>> 
                     EquationError {
                         start: l as u16,
                         end: (l + 1) as u16,
-                        code: UnrecognizedEOF,
+                        code: UnrecognizedEof,
                     }
                 }
                 ParseError::UnrecognizedToken {
@@ -357,18 +357,18 @@ fn test_parse_failures() {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum AST {
+pub enum Ast {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),
     Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
 }
 
-impl AST {
+impl Ast {
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
-            AST::Scalar(expr) => expr.get_var_loc(ident),
-            AST::ApplyToAll(_, expr) => expr.get_var_loc(ident),
-            AST::Arrayed(_, subscripts) => {
+            Ast::Scalar(expr) => expr.get_var_loc(ident),
+            Ast::ApplyToAll(_, expr) => expr.get_var_loc(ident),
+            Ast::Arrayed(_, subscripts) => {
                 for (_, expr) in subscripts.iter() {
                     if let Some(loc) = expr.get_var_loc(ident) {
                         return Some(loc);
@@ -381,9 +381,9 @@ impl AST {
 
     pub fn to_latex(&self) -> String {
         match self {
-            AST::Scalar(expr) => latex_eqn(expr),
-            AST::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
-            AST::Arrayed(_, _) => "TODO(array)".to_owned(),
+            Ast::Scalar(expr) => latex_eqn(expr),
+            Ast::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
+            Ast::Arrayed(_, _) => "TODO(array)".to_owned(),
         }
     }
 }

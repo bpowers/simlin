@@ -16,11 +16,11 @@ use simlin_engine::common::{canonicalize, quoteize, Result};
 use simlin_engine::datamodel;
 use simlin_engine::datamodel::{Equation, Rect, ViewElement};
 
-trait ToXML<W: Clone + Write> {
+trait ToXml<W: Clone + Write> {
     fn write_xml(&self, writer: &mut Writer<W>) -> Result<()>;
 }
 
-type XMLWriter = Cursor<Vec<u8>>;
+type XmlWriter = Cursor<Vec<u8>>;
 
 const STOCK_WIDTH: f64 = 45.0;
 const STOCK_HEIGHT: f64 = 35.0;
@@ -63,8 +63,8 @@ pub struct File {
     pub macros: Vec<Macro>,
 }
 
-impl ToXML<XMLWriter> for File {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for File {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         // xmile tag
         let attrs = &[
             ("version", self.version.as_str()),
@@ -241,8 +241,8 @@ pub struct VarDimension {
     pub name: String,
 }
 
-impl ToXML<XMLWriter> for VarDimension {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for VarDimension {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let attrs = &[("name", self.name.as_ref())];
         write_tag_with_attrs(writer, "dim", "", attrs)
     }
@@ -283,12 +283,12 @@ fn xml_error(err: quick_xml::Error) -> simlin_engine::common::Error {
     )
 }
 
-fn write_tag_start(writer: &mut Writer<XMLWriter>, tag_name: &str) -> Result<()> {
+fn write_tag_start(writer: &mut Writer<XmlWriter>, tag_name: &str) -> Result<()> {
     write_tag_start_with_attrs(writer, tag_name, &[])
 }
 
 fn write_tag_start_with_attrs(
-    writer: &mut Writer<XMLWriter>,
+    writer: &mut Writer<XmlWriter>,
     tag_name: &str,
     attrs: &[(&str, &str)],
 ) -> Result<()> {
@@ -299,24 +299,24 @@ fn write_tag_start_with_attrs(
     writer.write_event(Event::Start(elem)).map_err(xml_error)
 }
 
-fn write_tag_end(writer: &mut Writer<XMLWriter>, tag_name: &str) -> Result<()> {
+fn write_tag_end(writer: &mut Writer<XmlWriter>, tag_name: &str) -> Result<()> {
     writer
         .write_event(Event::End(BytesEnd::borrowed(tag_name.as_bytes())))
         .map_err(xml_error)
 }
 
-fn write_tag_text(writer: &mut Writer<XMLWriter>, content: &str) -> Result<()> {
+fn write_tag_text(writer: &mut Writer<XmlWriter>, content: &str) -> Result<()> {
     writer
         .write_event(Event::Text(BytesText::from_plain_str(content)))
         .map_err(xml_error)
 }
 
-fn write_tag(writer: &mut Writer<XMLWriter>, tag_name: &str, content: &str) -> Result<()> {
+fn write_tag(writer: &mut Writer<XmlWriter>, tag_name: &str, content: &str) -> Result<()> {
     write_tag_with_attrs(writer, tag_name, content, &[])
 }
 
 fn write_tag_with_attrs(
-    writer: &mut Writer<XMLWriter>,
+    writer: &mut Writer<XmlWriter>,
     tag_name: &str,
     content: &str,
     attrs: &[(&str, &str)],
@@ -328,8 +328,8 @@ fn write_tag_with_attrs(
     write_tag_end(writer, tag_name)
 }
 
-impl ToXML<XMLWriter> for Header {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Header {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         // header tag
         write_tag_start(writer, "header")?;
 
@@ -432,8 +432,8 @@ pub struct SimSpecs {
     pub time_units: Option<String>,
 }
 
-impl ToXML<XMLWriter> for SimSpecs {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for SimSpecs {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut elem = BytesStart::owned(b"sim_specs".to_vec(), b"sim_specs".len());
         if let Some(ref method) = self.method {
             elem.push_attribute(("method", method.as_str()));
@@ -558,8 +558,8 @@ pub struct Dimension {
     pub elements: Option<Vec<Index>>,
 }
 
-impl ToXML<XMLWriter> for Dimension {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Dimension {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let attrs = vec![("name", self.name.as_ref())];
         if self.size.is_some() {
             let size = format!("{}", self.size.unwrap());
@@ -669,7 +669,7 @@ impl From<datamodel::GraphicalFunctionKind> for GraphicalFunctionKind {
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
-pub struct GF {
+pub struct Gf {
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub kind: Option<GraphicalFunctionKind>,
@@ -683,8 +683,8 @@ pub struct GF {
     pub y_pts: Option<String>, // comma separated list of points
 }
 
-impl ToXML<XMLWriter> for GF {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Gf {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut elem = BytesStart::owned(b"gf".to_vec(), b"gf".len());
         if let Some(ref name) = self.name {
             elem.push_attribute(("name", name.as_str()));
@@ -728,8 +728,8 @@ impl ToXML<XMLWriter> for GF {
     }
 }
 
-impl From<GF> for datamodel::GraphicalFunction {
-    fn from(gf: GF) -> Self {
+impl From<Gf> for datamodel::GraphicalFunction {
+    fn from(gf: Gf) -> Self {
         use std::str::FromStr;
 
         let kind = datamodel::GraphicalFunctionKind::from(
@@ -802,7 +802,7 @@ impl From<GF> for datamodel::GraphicalFunction {
     }
 }
 
-impl From<datamodel::GraphicalFunction> for GF {
+impl From<datamodel::GraphicalFunction> for Gf {
     fn from(gf: datamodel::GraphicalFunction) -> Self {
         let x_pts: Option<String> = match gf.x_points {
             Some(x_points) => Some(
@@ -820,7 +820,7 @@ impl From<datamodel::GraphicalFunction> for GF {
             .map(|f| f.to_string())
             .collect::<Vec<String>>()
             .join(",");
-        GF {
+        Gf {
             name: None,
             kind: Some(GraphicalFunctionKind::from(gf.kind)),
             x_scale: Some(GraphicalFunctionScale::from(gf.x_scale)),
@@ -853,8 +853,8 @@ pub struct Unit {
     pub disabled: Option<bool>,
 }
 
-impl ToXML<XMLWriter> for Unit {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Unit {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut attrs = vec![("name", self.name.as_str())];
         if matches!(self.disabled, Some(true)) {
             attrs.push(("disabled", "true"));
@@ -947,8 +947,8 @@ pub struct Model {
     pub views: Option<Views>,
 }
 
-impl ToXML<XMLWriter> for Model {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Model {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         if self.name.is_none() || self.name.as_ref().unwrap() == "main" {
             write_tag_start(writer, "model")?;
         } else {
@@ -1111,7 +1111,7 @@ pub mod view_element {
     use crate::engine::datamodel::StockFlow;
     use crate::xmile::{
         write_tag, write_tag_end, write_tag_start, write_tag_start_with_attrs, write_tag_text,
-        write_tag_with_attrs, ToXML, XMLWriter, STOCK_HEIGHT, STOCK_WIDTH,
+        write_tag_with_attrs, ToXml, XmlWriter, STOCK_HEIGHT, STOCK_WIDTH,
     };
     use quick_xml::Writer;
     use serde::{de, Deserialize, Deserializer, Serialize};
@@ -1229,8 +1229,8 @@ pub mod view_element {
         pub label_angle: Option<f64>,
     }
 
-    impl ToXML<XMLWriter> for Aux {
-        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+    impl ToXml<XmlWriter> for Aux {
+        fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -1304,8 +1304,8 @@ pub mod view_element {
         pub label_angle: Option<f64>,
     }
 
-    impl ToXML<XMLWriter> for Stock {
-        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+    impl ToXml<XmlWriter> for Stock {
+        fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -1459,8 +1459,8 @@ pub mod view_element {
         pub points: Option<Points>,
     }
 
-    impl ToXML<XMLWriter> for Flow {
-        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+    impl ToXml<XmlWriter> for Flow {
+        fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -1812,8 +1812,8 @@ pub mod view_element {
         pub points: Option<Points>, // for multi-point connectors
     }
 
-    impl ToXML<XMLWriter> for Link {
-        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+    impl ToXml<XmlWriter> for Link {
+        fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
             let angle = self.angle.map(|angle| format!("{}", angle));
 
             let mut attrs = Vec::with_capacity(1);
@@ -1987,8 +1987,8 @@ pub mod view_element {
         pub label_side: Option<LabelSide>,
     }
 
-    impl ToXML<XMLWriter> for Module {
-        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+    impl ToXml<XmlWriter> for Module {
+        fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());
@@ -2057,8 +2057,8 @@ pub mod view_element {
         pub label_side: Option<LabelSide>,
     }
 
-    impl ToXML<XMLWriter> for Alias {
-        fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+    impl ToXml<XmlWriter> for Alias {
+        fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
             let uid = self.uid.map(|uid| format!("{}", uid));
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
@@ -2192,8 +2192,8 @@ pub enum ViewObject {
     Unhandled,
 }
 
-impl ToXML<XMLWriter> for ViewObject {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for ViewObject {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         match self {
             ViewObject::Aux(aux) => aux.write_xml(writer),
             ViewObject::Stock(stock) => stock.write_xml(writer),
@@ -2319,8 +2319,8 @@ pub struct View {
     pub height: Option<f64>,
 }
 
-impl ToXML<XMLWriter> for View {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for View {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let attrs = &[
             ("isee:show_pages", "false"),
             ("page_width", "800"),
@@ -2734,8 +2734,8 @@ fn access_from(visibility: Visibility, can_be_module_input: bool) -> Option<Stri
     }
 }
 
-impl ToXML<XMLWriter> for Module {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Module {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut attrs = vec![("name", self.name.as_str())];
         if self.model_name.is_some() {
             attrs.push(("simlin:model_name", self.name.as_str()));
@@ -2856,8 +2856,8 @@ pub struct VarElement {
     pub eqn: String,
 }
 
-impl ToXML<XMLWriter> for VarElement {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for VarElement {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let attrs = &[("subscript", self.subscript.as_str())];
         write_tag_start_with_attrs(writer, "element", attrs)?;
         write_tag(writer, "eqn", self.eqn.as_str())?;
@@ -2882,8 +2882,8 @@ pub struct Stock {
     pub access: Option<String>,
 }
 
-impl ToXML<XMLWriter> for Stock {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Stock {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut attrs = vec![("name", self.name.as_str())];
         if let Some(access) = self.access.as_ref() {
             attrs.push(("access", access.as_str()));
@@ -3067,7 +3067,7 @@ pub struct Flow {
     pub eqn: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
-    pub gf: Option<GF>,
+    pub gf: Option<Gf>,
     pub non_negative: Option<NonNegative>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
@@ -3075,8 +3075,8 @@ pub struct Flow {
     pub access: Option<String>,
 }
 
-impl ToXML<XMLWriter> for Flow {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Flow {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut attrs = vec![("name", self.name.as_str())];
         if let Some(access) = self.access.as_ref() {
             attrs.push(("access", access.as_str()));
@@ -3168,7 +3168,7 @@ impl From<datamodel::Flow> for Flow {
             },
             units: flow.units,
             gf: match flow.gf {
-                Some(gf) => Some(GF::from(gf)),
+                Some(gf) => Some(Gf::from(gf)),
                 None => None,
             },
             non_negative: if flow.non_negative {
@@ -3214,15 +3214,15 @@ pub struct Aux {
     pub eqn: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
-    pub gf: Option<GF>,
+    pub gf: Option<Gf>,
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
     pub access: Option<String>,
 }
 
-impl ToXML<XMLWriter> for Aux {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Aux {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         let mut attrs = vec![("name", self.name.as_str())];
         if let Some(access) = self.access.as_ref() {
             attrs.push(("access", access.as_str()));
@@ -3310,7 +3310,7 @@ impl From<datamodel::Aux> for Aux {
             },
             units: aux.units,
             gf: match aux.gf {
-                Some(gf) => Some(GF::from(gf)),
+                Some(gf) => Some(Gf::from(gf)),
                 None => None,
             },
             dimensions: match &aux.equation {
@@ -3369,8 +3369,8 @@ impl Var {
     }
 }
 
-impl ToXML<XMLWriter> for Var {
-    fn write_xml(&self, writer: &mut Writer<XMLWriter>) -> Result<()> {
+impl ToXml<XmlWriter> for Var {
+    fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
         match self {
             Var::Stock(stock) => stock.write_xml(writer),
             Var::Flow(flow) => flow.write_xml(writer),
@@ -3571,7 +3571,7 @@ fn test_xml_gf_parsing() {
         eqn: Some("0".to_string()),
         doc: None,
         units: None,
-        gf: Some(GF {
+        gf: Some(Gf {
             name: None,
             kind: None,
             x_scale: None,

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{print_eqn, Expr, AST};
+use crate::ast::{print_eqn, Expr, Ast};
 use crate::builtins::is_builtin_fn;
 use crate::common::{EquationError, Ident};
 use crate::datamodel::Visibility;
@@ -139,20 +139,20 @@ fn test_builtin_visitor() {}
 
 pub fn instantiate_implicit_modules(
     variable_name: &str,
-    ast: AST,
-) -> std::result::Result<(AST, Vec<datamodel::Variable>), EquationError> {
+    ast: Ast,
+) -> std::result::Result<(Ast, Vec<datamodel::Variable>), EquationError> {
     let mut builtin_visitor = BuiltinVisitor::new(variable_name);
     let ast = match ast {
-        AST::Scalar(ast) => AST::Scalar(builtin_visitor.walk(ast)?),
-        AST::ApplyToAll(dimensions, ast) => AST::ApplyToAll(dimensions, builtin_visitor.walk(ast)?),
-        AST::Arrayed(dimensions, elements) => {
+        Ast::Scalar(ast) => Ast::Scalar(builtin_visitor.walk(ast)?),
+        Ast::ApplyToAll(dimensions, ast) => Ast::ApplyToAll(dimensions, builtin_visitor.walk(ast)?),
+        Ast::Arrayed(dimensions, elements) => {
             let elements: std::result::Result<HashMap<_, _>, EquationError> = elements
                 .into_iter()
                 .map(|(subscript, equation)| {
                     builtin_visitor.walk(equation).map(|ast| (subscript, ast))
                 })
                 .collect();
-            AST::Arrayed(dimensions, elements?)
+            Ast::Arrayed(dimensions, elements?)
         }
     };
     let vars: Vec<_> = builtin_visitor.vars.values().cloned().collect();

@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{parse_equation as parse_single_equation, Expr, Visitor, AST};
+use crate::ast::{parse_equation as parse_single_equation, Expr, Visitor, Ast};
 use crate::builtins::is_builtin_fn;
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident};
@@ -33,7 +33,7 @@ pub struct ModuleInput {
 pub enum Variable {
     Stock {
         ident: Ident,
-        ast: Option<AST>,
+        ast: Option<Ast>,
         eqn: Option<datamodel::Equation>,
         units: Option<String>,
         inflows: Vec<Ident>,
@@ -43,7 +43,7 @@ pub enum Variable {
     },
     Var {
         ident: Ident,
-        ast: Option<AST>,
+        ast: Option<Ast>,
         eqn: Option<datamodel::Equation>,
         units: Option<String>,
         table: Option<Table>,
@@ -71,7 +71,7 @@ impl Variable {
         }
     }
 
-    pub fn ast(&self) -> Option<&AST> {
+    pub fn ast(&self) -> Option<&Ast> {
         match self {
             Variable::Stock { ast: Some(ast), .. } => Some(ast),
             Variable::Var { ast: Some(ast), .. } => Some(ast),
@@ -96,19 +96,19 @@ impl Variable {
     pub fn get_dimensions(&self) -> Option<&[Dimension]> {
         match self {
             Variable::Stock {
-                ast: Some(AST::Arrayed(dims, _)),
+                ast: Some(Ast::Arrayed(dims, _)),
                 ..
             } => Some(dims),
             Variable::Stock {
-                ast: Some(AST::ApplyToAll(dims, _)),
+                ast: Some(Ast::ApplyToAll(dims, _)),
                 ..
             } => Some(dims),
             Variable::Var {
-                ast: Some(AST::Arrayed(dims, _)),
+                ast: Some(Ast::Arrayed(dims, _)),
                 ..
             } => Some(dims),
             Variable::Var {
-                ast: Some(AST::ApplyToAll(dims, _)),
+                ast: Some(Ast::ApplyToAll(dims, _)),
                 ..
             } => Some(dims),
             _ => None,
@@ -203,10 +203,10 @@ fn get_dimensions(
 fn parse_equation(
     eqn: &datamodel::Equation,
     dimensions: &[Dimension],
-) -> (Option<AST>, Vec<EquationError>) {
+) -> (Option<Ast>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
-            match parse_single_equation(eqn).map(|eqn| eqn.map(AST::Scalar)) {
+            match parse_single_equation(eqn).map(|eqn| eqn.map(Ast::Scalar)) {
                 Ok(expr) => (expr, vec![]),
                 Err(errors) => (None, errors),
             }
@@ -217,7 +217,7 @@ fn parse_equation(
                 Err(errors) => (None, errors),
             };
             match get_dimensions(dimensions, dimension_names) {
-                Ok(dims) => (ast.map(|ast| AST::ApplyToAll(dims, ast)), errors),
+                Ok(dims) => (ast.map(|ast| Ast::ApplyToAll(dims, ast)), errors),
                 Err(err) => {
                     errors.push(err);
                     (None, errors)
@@ -242,7 +242,7 @@ fn parse_equation(
 
             match get_dimensions(dimensions, dimension_names) {
                 Ok(dims) => (
-                    Some(AST::Arrayed(dims, elements.iter().cloned().collect())),
+                    Some(Ast::Arrayed(dims, elements.iter().cloned().collect())),
                     errors,
                 ),
                 Err(err) => {
@@ -262,7 +262,7 @@ pub fn parse_var(
     implicit_vars: &mut Vec<datamodel::Variable>,
 ) -> Variable {
     let mut parse_and_lower_eqn =
-        |ident: &str, eqn: &datamodel::Equation| -> (Option<AST>, Vec<EquationError>) {
+        |ident: &str, eqn: &datamodel::Equation| -> (Option<Ast>, Vec<EquationError>) {
             let (ast, mut errors) = parse_equation(eqn, dimensions);
             let ast = match ast {
                 Some(ast) => match instantiate_implicit_modules(ident, ast) {
@@ -462,7 +462,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
 }
 
 pub fn identifier_set(
-    ast: &AST,
+    ast: &Ast,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident>>,
 ) -> HashSet<Ident> {
@@ -472,9 +472,9 @@ pub fn identifier_set(
         module_inputs,
     };
     match ast {
-        AST::Scalar(ast) => id_visitor.walk(ast),
-        AST::ApplyToAll(_, ast) => id_visitor.walk(ast),
-        AST::Arrayed(_, elements) => {
+        Ast::Scalar(ast) => id_visitor.walk(ast),
+        Ast::ApplyToAll(_, ast) => id_visitor.walk(ast),
+        Ast::Arrayed(_, elements) => {
             for ast in elements.values() {
                 id_visitor.walk(ast);
             }
@@ -545,7 +545,7 @@ fn test_tables() {
 
     let expected = Variable::Var {
         ident: "lookup_function_table".to_string(),
-        ast: Some(AST::Scalar(Expr::Const(
+        ast: Some(Ast::Scalar(Expr::Const(
             "0".to_string(),
             0.0,
             Loc::new(0, 1),

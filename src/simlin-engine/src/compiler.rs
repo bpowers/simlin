@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::ast::{self, BinaryOp, Loc, AST};
+use crate::ast::{self, BinaryOp, Loc, Ast};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
@@ -895,10 +895,10 @@ impl Var {
                             return sim_err!(EmptyEquation, var.ident().to_string());
                         }
                         match ast.as_ref().unwrap() {
-                            AST::Scalar(ast) => {
+                            Ast::Scalar(ast) => {
                                 vec![Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))]
                             }
-                            AST::ApplyToAll(dims, ast) => {
+                            Ast::ApplyToAll(dims, ast) => {
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
@@ -911,7 +911,7 @@ impl Var {
                                     .collect();
                                 exprs?
                             }
-                            AST::Arrayed(dims, elements) => {
+                            Ast::Arrayed(dims, elements) => {
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
@@ -929,11 +929,11 @@ impl Var {
                         }
                     } else {
                         match ast.as_ref().unwrap() {
-                            AST::Scalar(_) => vec![Expr::AssignNext(
+                            Ast::Scalar(_) => vec![Expr::AssignNext(
                                 off,
                                 Box::new(ctx.build_stock_update_expr(off, var)),
                             )],
-                            AST::ApplyToAll(dims, _) | AST::Arrayed(dims, _) => {
+                            Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _) => {
                                 let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
@@ -962,7 +962,7 @@ impl Var {
                         return sim_err!(EmptyEquation, var.ident().to_string());
                     }
                     match ast.as_ref().unwrap() {
-                        AST::Scalar(ast) => {
+                        Ast::Scalar(ast) => {
                             let expr = ctx.lower(ast)?;
                             let expr = if table.is_some() {
                                 let loc = expr.get_loc();
@@ -972,7 +972,7 @@ impl Var {
                             };
                             vec![Expr::AssignCurr(off, Box::new(expr))]
                         }
-                        AST::ApplyToAll(dims, ast) => {
+                        Ast::ApplyToAll(dims, ast) => {
                             let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
@@ -985,7 +985,7 @@ impl Var {
                                 .collect();
                             exprs?
                         }
-                        AST::Arrayed(dims, elements) => {
+                        Ast::Arrayed(dims, elements) => {
                             let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
@@ -1153,9 +1153,9 @@ fn build_metadata(
             let sub_size: usize = sub_offsets.values().map(|metadata| metadata.size).sum();
             all_offsets.extend(all_sub_offsets);
             sub_size
-        } else if let Some(AST::ApplyToAll(dims, _)) = model.variables[*ident].ast() {
+        } else if let Some(Ast::ApplyToAll(dims, _)) = model.variables[*ident].ast() {
             dims.iter().map(|dim| dim.elements.len()).product()
-        } else if let Some(AST::Arrayed(dims, _)) = model.variables[*ident].ast() {
+        } else if let Some(Ast::Arrayed(dims, _)) = model.variables[*ident].ast() {
             dims.iter().map(|dim| dim.elements.len()).product()
         } else {
             1
@@ -1214,14 +1214,14 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
             }
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
-        } else if let Some(AST::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
+        } else if let Some(Ast::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
                 let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.elements.len()).product()
-        } else if let Some(AST::Arrayed(dims, _)) = &model.variables[*ident].ast() {
+        } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[*ident].ast() {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
                 let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);

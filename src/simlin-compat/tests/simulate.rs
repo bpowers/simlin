@@ -11,7 +11,7 @@ use float_cmp::approx_eq;
 use simlin_compat::{load_csv, xmile};
 use simlin_engine::project_io;
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Project, Results, Simulation, VM};
+use simlin_engine::{Project, Results, Simulation, Vm};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
 
@@ -176,7 +176,7 @@ fn simulate_path(xmile_path: &str) {
         assert!(compiled.is_ok());
         let compiled_sim = compiled.unwrap();
 
-        let mut vm = VM::new(compiled_sim).unwrap();
+        let mut vm = Vm::new(compiled_sim).unwrap();
         // vm.debug_print_bytecode("main");
         vm.run_to_end().unwrap();
         vm.into_results()
@@ -205,7 +205,7 @@ fn simulate_path(xmile_path: &str) {
         let project = Rc::new(project);
         let sim = Simulation::new(&project, "main").unwrap();
         let compiled_sim = sim.compile().unwrap();
-        let mut vm = VM::new(compiled_sim).unwrap();
+        let mut vm = Vm::new(compiled_sim).unwrap();
         vm.run_to_end().unwrap();
         vm.into_results()
     };
@@ -226,7 +226,7 @@ fn simulate_path(xmile_path: &str) {
         let compiled = sim.compile();
         assert!(compiled.is_ok());
         let compiled_sim = compiled.unwrap();
-        let mut vm = VM::new(compiled_sim).unwrap();
+        let mut vm = Vm::new(compiled_sim).unwrap();
         vm.run_to_end().unwrap();
         (roundtripped_project, vm.into_results())
     };

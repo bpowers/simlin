@@ -10,7 +10,7 @@ use pico_args::Arguments;
 
 use simlin_compat::engine::datamodel::{Equation, Project as DatamodelProject};
 use simlin_compat::engine::{
-    eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, VM,
+    eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, Vm,
 };
 use simlin_compat::prost::Message;
 use simlin_compat::{load_csv, open_vensim, open_xmile, to_xmile};
@@ -170,7 +170,7 @@ fn simulate(project: &DatamodelProject) -> Results {
         }
     };
     let compiled = sim.compile().unwrap();
-    let mut vm = VM::new(compiled).unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
     vm.into_results()
 }

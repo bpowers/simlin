@@ -196,7 +196,7 @@ impl Results {
 }
 
 #[derive(Clone, Debug)]
-pub struct VM {
+pub struct Vm {
     specs: Specs,
     root: Ident,
     offsets: HashMap<Ident, usize>,
@@ -252,8 +252,8 @@ impl CompiledModuleSlice {
     }
 }
 
-impl VM {
-    pub fn new(sim: CompiledSimulation) -> Result<VM> {
+impl Vm {
+    pub fn new(sim: CompiledSimulation) -> Result<Vm> {
         if sim.specs.stop < sim.specs.start {
             return sim_err!(
                 BadSimSpecs,
@@ -272,7 +272,7 @@ impl VM {
         let n_slots = sim.modules[&sim.root].n_slots;
         let n_chunks: usize = ((sim.specs.stop - sim.specs.start) / save_step + 1.0) as usize;
         let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 2)].into_boxed_slice();
-        Ok(VM {
+        Ok(Vm {
             specs: sim.specs,
             root: sim.root,
             offsets: sim.offsets,

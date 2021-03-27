@@ -41,7 +41,7 @@ pub use self::variable::Variable;
 pub use self::vm::Method;
 pub use self::vm::Results;
 pub use self::vm::Specs as SimSpecs;
-pub use self::vm::VM;
+pub use self::vm::Vm;
 use crate::common::topo_sort;
 use crate::model::enumerate_modules;
 
