@@ -148,7 +148,14 @@ const InnerApp = withStyles(styles)(
     };
 
     async maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
-      if (!(authIsKnown || !this.state.authUnknown)) {
+      authIsKnown = authIsKnown || !this.state.authUnknown;
+      if (!authIsKnown) {
+        return;
+      }
+
+      // if we know the user, we don't need to log in
+      const [user] = await userInfo.get();
+      if (user) {
         return;
       }
 
