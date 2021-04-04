@@ -1,9 +1,11 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Model Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
 
+import firebase from 'firebase/app';
+import 'firebase/auth';
 import { BrowserRouter, Route, RouteComponentProps } from 'react-router-dom';
 
 import { createGenerateClassName, StylesProvider } from '@material-ui/styles';
@@ -18,6 +20,12 @@ import { Login } from './Login';
 import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
 import { NewUser } from './NewUser';
 import { User } from './User';
+
+const config = {
+  apiKey: 'AIzaSyB9pGSjgGJAOIZPH0HCuofOVDNMiX-XoGI',
+  authDomain: 'net-systemdynamics.firebaseapp.com',
+};
+firebase.initializeApp(config);
 
 const styles = createStyles({
   modelApp: {
@@ -50,7 +58,7 @@ class UserInfoSingleton {
   private result?: [User | undefined, number];
   constructor() {
     // store this promise; we might race calling get() below, but all racers will
-    // await thins single fetch result.
+    // await this single fetch result.
     this.fetch();
   }
 
@@ -73,13 +81,15 @@ class UserInfoSingleton {
   }
 
   async invalidate(): Promise<void> {
-    if (this.resultPromise) {
-      await this.resultPromise;
-      this.resultPromise = undefined;
-    }
-
     this.result = undefined;
+
+    const resultPromise = this.resultPromise;
     this.fetch();
+
+    if (resultPromise) {
+      // don't leave the promise un-awaited
+      await resultPromise;
+    }
   }
 }
 
@@ -89,6 +99,8 @@ interface AppState {
   authUnknown: boolean;
   isNewUser?: boolean;
   user?: User;
+  auth: firebase.auth.Auth;
+  firebaseIdToken?: string | null;
 }
 type AppProps = WithStyles<typeof styles>;
 
@@ -99,12 +111,80 @@ const InnerApp = withStyles(styles)(
     constructor(props: AppProps) {
       super(props);
 
+      const isDevServer = process.env.NODE_ENV === 'development';
+      const auth = firebase.auth();
+      if (isDevServer) {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore
+        auth.useEmulator('http://localhost:9099', { disableWarnings: true });
+      }
+
       this.state = {
         authUnknown: true,
+        auth,
       };
+
+      // notify our app when a user logs in
+      firebase.auth().onAuthStateChanged(this.authStateChanged);
 
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.getUserInfo);
+    }
+
+    authStateChanged = (user: firebase.User | null) => {
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      setTimeout(this.asyncAuthStateChanged, undefined, user);
+    };
+
+    asyncAuthStateChanged = async (user: firebase.User | null) => {
+      if (!user) {
+        this.setState({ firebaseIdToken: null });
+        return;
+      }
+
+      const firebaseIdToken = await user.getIdToken();
+      this.setState({ firebaseIdToken });
+      await this.maybeLogin(undefined, firebaseIdToken);
+    };
+
+    async maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
+      if (!(authIsKnown || !this.state.authUnknown)) {
+        console.log(`maybeLogin exit auth`);
+        return;
+      }
+
+      const idToken = firebaseIdToken ?? this.state.firebaseIdToken;
+      if (idToken === null || idToken === undefined) {
+        console.log(`maybeLogin exit no id`);
+        return;
+      }
+
+      const bodyContents = {
+        idToken,
+      };
+
+      const base = this.getBaseURL();
+      const apiPath = `${base}/session`;
+      const response = await fetch(apiPath, {
+        credentials: 'same-origin',
+        method: 'POST',
+        cache: 'no-cache',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(bodyContents),
+      });
+
+      const status = response.status;
+      if (!(status >= 200 && status < 400)) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        const body = await response.json();
+        const errorMsg =
+          body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
+        // this.appendModelError(errorMsg);
+        console.log(`session error: ${errorMsg}`);
+        return undefined;
+      }
     }
 
     getUserInfo = async (): Promise<void> => {
@@ -113,6 +193,7 @@ const InnerApp = withStyles(styles)(
         this.setState({
           authUnknown: false,
         });
+        await this.maybeLogin(true);
         return;
       }
       const isNewUser = user.id.startsWith(`temp-`);
@@ -131,9 +212,20 @@ const InnerApp = withStyles(styles)(
       });
     };
 
+    getBaseURL(): string {
+      return '';
+    }
+
     editor = (props: RouteComponentProps<EditorMatchParams>) => {
       const { username, projectName } = props.match.params;
-      return <HostedWebEditor username={username} projectName={projectName} baseURL="" history={props.history} />;
+      return (
+        <HostedWebEditor
+          username={username}
+          projectName={projectName}
+          baseURL={this.getBaseURL()}
+          history={props.history}
+        />
+      );
     };
 
     home = (props: RouteComponentProps) => {
@@ -143,7 +235,7 @@ const InnerApp = withStyles(styles)(
 
     render() {
       if (!this.state.user) {
-        return <Login disabled={this.state.authUnknown} />;
+        return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
       }
 
       if (this.state.isNewUser) {

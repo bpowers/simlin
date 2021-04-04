@@ -53,3 +53,5 @@ yarn-error.log*
 /website/.cache-loader
 /website/build
 
+/src/app/firebase-debug.log
+/src/app/ui-debug.log
