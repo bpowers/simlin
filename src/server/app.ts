@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { IncomingMessage, ServerResponse } from 'http';
 
+import * as admin from 'firebase-admin';
 import * as bodyParser from 'body-parser';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
@@ -48,9 +49,14 @@ export async function createApp(): Promise<App> {
 
 class App {
   private readonly app: Application;
+  private readonly authn: admin.auth.Auth;
 
   constructor() {
     this.app = (express() as any) as Application;
+
+    // initialize firebase
+    admin.initializeApp();
+    this.authn = admin.auth();
   }
 
   listen(): void {
@@ -196,7 +202,7 @@ class App {
 
     this.app.use(favicon(path.join(this.app.get('public'), 'favicon.ico')));
 
-    authn(this.app);
+    authn(this.app, this.authn);
 
     // authenticated:
     // /api is for API requests

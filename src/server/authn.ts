@@ -3,57 +3,104 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
+import { Request, Response } from 'express';
+import { Strategy as BaseStrategy } from 'passport-strategy';
 import { Set } from 'immutable';
 import passport from 'passport';
-import { OAuth2Strategy } from 'passport-google-oauth';
 import { v4 as uuidV4 } from 'uuid';
 import * as logger from 'winston';
+import * as admin from 'firebase-admin';
 
 import { Application } from './application';
 import { Table } from './models/table';
 import { User } from './schemas/user_pb';
 
+// allowlist users for now
 let AllowedUsers = Set<string>();
+
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+interface StrategyOptions {}
+
+interface VerifyFunction {
+  (firestoreIdToken: string, done: (error: any, user?: any) => void): Promise<void>;
+}
+
+class FirestoreAuthStrategy extends BaseStrategy implements passport.Strategy {
+  readonly name: 'firestore-auth';
+  private readonly verify: VerifyFunction;
+
+  constructor(options: StrategyOptions, verify: VerifyFunction) {
+    super();
+    this.name = 'firestore-auth';
+    this.verify = verify;
+  }
+
+  authenticate(req: Request, options?: any): void {
+    if (!req.body || !req.body.idToken) {
+      this.error(new Error('no idToken in body'));
+      return;
+    }
+
+    const idToken = req.body.idToken as string;
+
+    const verified = (error: any, user?: any): void => {
+      if (error) {
+        return this.error(error);
+      }
+      if (!user) {
+        return this.fail(401);
+      }
+      this.success(user);
+    };
+
+    this.verify(idToken, verified)
+      .then(() => {})
+      .catch((err) => {
+        this.error(err);
+      });
+  }
+}
 
 async function getOrCreateUserFromProfile(
   users: Table<User>,
-  profile: any,
+  firebaseAuthn: admin.auth.Auth,
+  firebaseIdToken: string,
 ): Promise<[User, undefined] | [undefined, Error]> {
-  if (!profile) {
-    return [undefined, new Error('no profile returned from Google OAuth2?')];
+  if (!firebaseIdToken) {
+    return [undefined, new Error('no idToken')];
   }
 
-  if (!profile.emails || !profile.emails.length) {
-    const jsonProfile = JSON.stringify(profile);
-    return [undefined, new Error(`profile has unexpected shape ${jsonProfile}`)];
+  let decodedToken: admin.auth.DecodedIdToken;
+  try {
+    decodedToken = await firebaseAuthn.verifyIdToken(firebaseIdToken);
+  } catch (exception) {
+    return [undefined, exception];
   }
 
-  // if we've gotten multiple emails back, just use the main one
-  const accountEmail = (profile.emails.length > 1
-    ? // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-      profile.emails.filter((entry: any) => entry.type === 'account')
-    : profile.emails) as any[];
-  if (accountEmail.length !== 1) {
-    const jsonEmails = JSON.stringify(profile.emails);
-    return [undefined, new Error(`expected account email, but not in: ${jsonEmails}`)];
+  let fbUser: admin.auth.UserRecord;
+  try {
+    fbUser = await firebaseAuthn.getUser(decodedToken.uid);
+  } catch (exception) {
+    return [undefined, exception];
   }
 
-  const email = accountEmail[0].value as string;
-  if (!emailRegExp.test(email)) {
-    return [undefined, new Error(`email doesn't look like an email: ${email}`)];
+  if (fbUser.disabled) {
+    return [undefined, new Error('account is disabled')];
   }
+
+  if (!fbUser.email) {
+    return [undefined, new Error('expected user to have an email')];
+  }
+  const email = fbUser.email;
+
+  // TODO: should we verify the email?
 
   if (!AllowedUsers.has(email)) {
     return [undefined, new Error(`user not in allowlist`)];
   }
 
-  const displayName = profile.displayName ? (profile.displayName as string) : email;
-
-  // we may not be lucky enough to get a photo URL
-  let photoUrl: string | undefined;
-  if (profile.photos && profile.photos.length && profile.photos[0].value) {
-    photoUrl = profile.photos[0].value as string;
-  }
+  const displayName = fbUser.displayName ?? email;
+  const photoUrl = fbUser.photoURL;
 
   // since a document with the email already exists, just get the
   // document with it
@@ -83,13 +130,9 @@ async function getOrCreateUserFromProfile(
   return [user, undefined];
 }
 
-const emailRegExp = /^[^@]+@[^.]+(?:\.[^.]+)+$/;
-
-export const authn = (app: Application): void => {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-  const config = app.get('authentication');
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-  const { google } = config;
+export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void => {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-unused-vars
+  // const config = app.get('authentication');
 
   const userAllowlistKey = 'userAllowlist';
   // eslint-disable-next-line @typescript-eslint/no-unsafe-call
@@ -99,39 +142,18 @@ export const authn = (app: Application): void => {
   }
   AllowedUsers = Set(userAllowlist);
 
-  if (!('MODEL_CLIENT_SECRET' in process.env)) {
-    throw new Error('Google OAuth client secret not in environment.');
-  }
-  google.clientSecret = process.env.MODEL_CLIENT_SECRET;
-
-  const addr = `${app.get('host')}:${app.get('port')}`;
-  let callbackURL = `http://${addr}/auth/google/callback`;
-  if (process.env.NODE_ENV === 'production') {
-    callbackURL = `https://app.simlin.com/auth/google/callback`;
-  }
-
   passport.use(
-    new OAuth2Strategy(
-      {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        clientID: google.clientID,
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        clientSecret: google.clientSecret,
-        callbackURL,
-      },
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
-      async (accessToken: string, refreshToken: string, profile: any, done: (error: any, user?: any) => void) => {
-        const [user, err] = await getOrCreateUserFromProfile(app.db.user, profile);
-        if (err !== undefined) {
-          logger.error(err);
-          done(err);
-        } else if (user) {
-          done(undefined, user);
-        } else {
-          throw new Error('unreachable');
-        }
-      },
-    ),
+    new FirestoreAuthStrategy({}, async (firestoreIdToken: string, done: (error: any, user?: any) => void) => {
+      const [user, err] = await getOrCreateUserFromProfile(app.db.user, firebaseAuthn, firestoreIdToken);
+      if (err !== undefined) {
+        logger.error(err);
+        done(err);
+      } else if (user) {
+        done(undefined, user);
+      } else {
+        throw new Error('unreachable');
+      }
+    }),
   );
 
   passport.serializeUser((rawUser: any, done: (error: any, user?: any) => void) => {
@@ -162,9 +184,15 @@ export const authn = (app: Application): void => {
   app.use(passport.initialize());
   app.use(passport.session());
 
-  app.get('/auth/google', passport.authenticate('google', { scope: ['email'] }));
-
-  app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/login' }), (req, resp) => {
-    resp.redirect(google.successRedirect);
+  app.post('/session', passport.authenticate('firestore-auth', {}), (req: Request, res: Response): void => {
+    res.sendStatus(200);
   });
+
+  app.delete(
+    '/session',
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    (req: Request, res: Response): void => {
+      console.log(`TODO: unset cookie`);
+    },
+  );
 };

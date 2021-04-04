@@ -21,3 +21,4 @@ node_modules
 /src/jupyter
 /src/server/public
 /src/server/config
+/src/app/firebase.json
