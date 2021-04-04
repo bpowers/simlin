@@ -45,10 +45,21 @@ interface LoginPropsFull extends WithStyles<typeof styles> {
 
 export type LoginProps = Pick<LoginPropsFull, 'disabled' | 'auth'>;
 
+function appleProvider(): string {
+  const provider = new firebase.auth.OAuthProvider('apple.com');
+  provider.addScope('email');
+  provider.addScope('name');
+  return provider.providerId;
+}
+
 const uiConfig = {
   signInFlow: 'redirect',
   signInSuccessUrl: '/',
-  signInOptions: [firebase.auth.GoogleAuthProvider.PROVIDER_ID, firebase.auth.EmailAuthProvider.PROVIDER_ID],
+  signInOptions: [
+    appleProvider(),
+    firebase.auth.GoogleAuthProvider.PROVIDER_ID,
+    firebase.auth.EmailAuthProvider.PROVIDER_ID,
+  ],
 };
 
 export const Login = withStyles(styles)(
