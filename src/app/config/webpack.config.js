@@ -404,6 +404,7 @@ module.exports = function (webpackEnv) {
       ),
       isEnvProduction && new CspHtmlWebpackPlugin({
         'default-src': "'self'",
+        'frame-src': ["'self", 'https://apis.google.com'],
         'base-uri': "'self'",
         "block-all-mixed-content": [],
         'connect-src': ["'self'", 'https://www.googleapis.com'],
