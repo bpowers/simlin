@@ -413,6 +413,7 @@ module.exports = function (webpackEnv) {
         // FIXME: unsafe-eval is necessary for wasm in Chrome for now until
         //   https://bugs.chromium.org/p/chromium/issues/detail?id=961485
         'script-src': ["'self'", 'blob:', "'unsafe-eval'"],
+        'script-src-elem': ["'self'", 'blob:', "'unsafe-eval'", 'https://apis.google.com'],
         'style-src': ["'self'", "https://fonts.googleapis.com", "'unsafe-inline'"],
       }, {
         enabled: true,
