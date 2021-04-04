@@ -149,13 +149,11 @@ const InnerApp = withStyles(styles)(
 
     async maybeLogin(authIsKnown = false, firebaseIdToken?: string): Promise<void> {
       if (!(authIsKnown || !this.state.authUnknown)) {
-        console.log(`maybeLogin exit auth`);
         return;
       }
 
       const idToken = firebaseIdToken ?? this.state.firebaseIdToken;
       if (idToken === null || idToken === undefined) {
-        console.log(`maybeLogin exit no id`);
         return;
       }
 
