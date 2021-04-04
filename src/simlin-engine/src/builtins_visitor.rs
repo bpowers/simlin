@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{print_eqn, Expr, Ast};
+use crate::ast::{print_eqn, Ast, Expr};
 use crate::builtins::is_builtin_fn;
 use crate::common::{EquationError, Ident};
 use crate::datamodel::Visibility;

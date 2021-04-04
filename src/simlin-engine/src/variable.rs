@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{parse_equation as parse_single_equation, Expr, Visitor, Ast};
+use crate::ast::{parse_equation as parse_single_equation, Ast, Expr, Visitor};
 use crate::builtins::is_builtin_fn;
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident};
