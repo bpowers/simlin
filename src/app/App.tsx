@@ -183,6 +183,8 @@ const InnerApp = withStyles(styles)(
         console.log(`session error: ${errorMsg}`);
         return undefined;
       }
+
+      this.handleUsernameChanged();
     }
 
     getUserInfo = async (): Promise<void> => {
