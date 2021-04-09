@@ -54,7 +54,7 @@ module.exports = {
   appPath: resolveApp('.'),
   appBuild: resolveApp('build'),
   componentBuild: resolveApp('build-component'),
-  appPublic: resolveApp('public'),
+  appPublic: resolveApp('../../public'),
   appHtml: resolveApp('public/index.html'),
   appIndexJs: resolveModule(resolveApp, 'index'),
   componentIndexJs: resolveModule(resolveApp, 'index-component'),

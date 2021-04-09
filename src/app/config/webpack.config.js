@@ -407,7 +407,7 @@ module.exports = function (webpackEnv) {
         'frame-src': ["'self'", 'https://net-systemdynamics.firebaseapp.com'],
         'base-uri': "'self'",
         "block-all-mixed-content": [],
-        'connect-src': ["'self'", 'https://www.googleapis.com'],
+        'connect-src': ["'self'", 'https://www.googleapis.com', 'https://securetoken.googleapis.com'],
         'font-src': ["'self'", "data:", "https://fonts.gstatic.com"],
         'img-src': ["'self'", "data:", "blob:", "https://*.googleusercontent.com", "https://www.gstatic.com"],
         'object-src': "'none'",
