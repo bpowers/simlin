@@ -117,8 +117,11 @@ const features = [
     imageUrl: 'img/undraw_docusaurus_react.svg',
     description: (
       <>
-        Simlin is designed to be simple, but interops with tools like{' '}
-        <a href="https://pysd.readthedocs.io/en/master/index.html">PySD</a> for tasks like fitting model parameters,
+        Simlin works seamlessly with open-source tools like{' '}
+        <a href="https://pysd.readthedocs.io/en/master/index.html">PySD</a>{' '}
+        and proprietary software like{' '}
+        <a href="https://www.iseesystems.com/store/products/stella-architect.aspx">Stella</a>{' '}
+        for more advanced tasks like fitting model parameters,
         running sensitivity analyses, or working with geographic data.
       </>
     ),
@@ -167,6 +170,15 @@ function Home() {
       <main>
         <br />
         <br />
+        <div className="container">
+          {/* what you get: simulation modeling to define the _Structure_ of the model you have that generates the behavior you are interested in affecting */}
+        </div>
+        <div className="container">
+          {/* how is this different from machine learning? focus on _causation_ rather than correlation; different domains where $x, $y, $z are best suited for SD */}
+        </div>
+        <div className="container">
+          {/* simlin is built on the back of a 60+ year old field of research started at MIT */}
+        </div>
         <div className="container">
           <Diagram projectPbBase64={ reliabilityProject } />
         </div>
