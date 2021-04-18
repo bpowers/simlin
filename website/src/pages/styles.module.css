@@ -36,10 +36,16 @@
   width: 200px;
 }
 
-.button {
+.getStarted {
   border-style: solid;
 }
 
 .heroContainer {
   max-width: 760px;
+}
+
+@media (min-width: 1440px) {
+  .heroContainer {
+    max-width: 760px;
+  }
 }
