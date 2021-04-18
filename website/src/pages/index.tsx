@@ -155,7 +155,7 @@ function Home() {
           <p className="hero__subtitle">{siteConfig.tagline}</p>
           <p>
             Simlin is a tool for simulation modeling, leveling up your ability to learn. With Simlin you can iterate on
-            policy and strategy faster (and with fewer costs and consequences) than you can in the real world.
+            policy and strategy faster than you can in the real world, with fewer costs and the freedom to fail.
           </p>
           <div className={styles.buttons}>
             <Link
