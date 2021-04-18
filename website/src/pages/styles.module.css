@@ -39,3 +39,7 @@
 .button {
   border-style: solid;
 }
+
+.heroContainer {
+  max-width: 760px;
+}

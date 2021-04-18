@@ -150,12 +150,12 @@ function Home() {
   return (
     <Layout title={`Hello from ${siteConfig.title}`} description="Description will go into a meta tag in <head />">
       <header className={clsx('hero hero--primary', styles.heroBanner)}>
-        <div className="container">
+        <div className={clsx('container', styles.heroContainer)}>
           <h1 className="hero__title">{siteConfig.title}</h1>
           <p className="hero__subtitle">{siteConfig.tagline}</p>
           <p>
             Simlin is a tool for simulation modeling, leveling up your ability to learn. With Simlin you can iterate on
-            policy and strategy faster than you can in the real world, with fewer costs and the freedom to fail.
+            strategy and policy faster than you can in the real world, with fewer costs and the freedom to fail.
           </p>
           <div className={styles.buttons}>
             <Link
