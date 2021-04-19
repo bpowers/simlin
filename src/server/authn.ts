@@ -15,9 +15,6 @@ import { Application } from './application';
 import { Table } from './models/table';
 import { User } from './schemas/user_pb';
 
-// allowlist users for now
-let AllowedUsers = Set<string>();
-
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
 interface StrategyOptions {}
 
@@ -95,10 +92,6 @@ async function getOrCreateUserFromProfile(
 
   // TODO: should we verify the email?
 
-  if (!AllowedUsers.has(email)) {
-    return [undefined, new Error(`user not in allowlist`)];
-  }
-
   const displayName = fbUser.displayName ?? email;
   const photoUrl = fbUser.photoURL;
 
@@ -133,14 +126,6 @@ async function getOrCreateUserFromProfile(
 export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void => {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-unused-vars
   // const config = app.get('authentication');
-
-  const userAllowlistKey = 'userAllowlist';
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-  const userAllowlist = (app.get(userAllowlistKey) || '').split(',') as string[];
-  if (userAllowlist === undefined || userAllowlist.length === 0) {
-    throw new Error(`expected ${userAllowlistKey} in config`);
-  }
-  AllowedUsers = Set(userAllowlist);
 
   passport.use(
     new FirestoreAuthStrategy({}, async (firestoreIdToken: string, done: (error: any, user?: any) => void) => {
