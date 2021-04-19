@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>Morecroft Fishbanks</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>40</stop>
+        <dt>0.25</dt>
+    </sim_specs>
+    <model>
+        <variables>
+            <stock name="fish_stock">
+                <eqn>500</eqn>
+                <inflow>new_fish_per_year</inflow>
+                <outflow>harvest_rate</outflow>
+            </stock>
+            <flow name="new_fish_per_year">
+                <eqn>net_regeneration</eqn>
+            </flow>
+            <aux name="net_regeneration">
+                <eqn>fish_density</eqn>
+                <gf>
+                    <xscale min="0" max="1">
+                    </xscale>
+                    <yscale min="0" max="600">
+                    </yscale>
+                    <ypts>0,57.692307692307686,131.53846153846155,212.3076923076923,339.2307692307692,516.9230769230769,581.5384615384615,516.9230769230769,240,73.84615384615385,0</ypts>
+                </gf>
+            </aux>
+            <aux name="fish_density">
+                <eqn>fish_stock / maximum_fishery_size</eqn>
+            </aux>
+            <aux name="maximum_fishery_size">
+                <eqn>4000</eqn>
+            </aux>
+            <flow name="harvest_rate">
+                <eqn>catch</eqn>
+            </flow>
+            <stock name="ships_at_sea">
+                <eqn>0</eqn>
+                <inflow>purchase_of_new_ships_this_year</inflow>
+                <outflow>ships_moved_to_harbor_this_year</outflow>
+            </stock>
+            <stock name="ships_in_harbor">
+                <eqn>0</eqn>
+                <inflow>ships_moved_to_harbor_this_year</inflow>
+            </stock>
+            <flow name="purchase_of_new_ships_this_year">
+                <eqn>1.5</eqn>
+            </flow>
+            <flow name="ships_moved_to_harbor_this_year">
+                <eqn>ships_at_sea / 10</eqn>
+            </flow>
+            <aux name="catch">
+                <eqn>catch_per_ship * ships_at_sea</eqn>
+            </aux>
+            <aux name="catch_per_ship">
+                <eqn>effect_of_fish_density_on_catch_per_ship * normal_catch_per_ship</eqn>
+            </aux>
+            <aux name="normal_catch_per_ship">
+                <eqn>25</eqn>
+            </aux>
+            <aux name="effect_of_fish_density_on_catch_per_ship">
+                <eqn>fish_density</eqn>
+                <gf>
+                    <xscale min="0" max="1">
+                    </xscale>
+                    <yscale min="0" max="1">
+                    </yscale>
+                    <ypts>0,0.2961538461538461,0.5576923076923077,0.6923076923076923,0.7884615384615384,0.8846153846153846,0.9346153846153846,0.9846153846153847,1,1,1</ypts>
+                </gf>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <stock name="Fish stock" x="703.8400268554688" y="198.9999969482422" label_side="top"></stock>
+                <flow name="New fish per year" x="602.7336549704474" y="197.56003723144534" label_side="top">
+                    <pts>
+                        <pt x="513.6000366210938" y="197.56003723144534"></pt>
+                        <pt x="681.3400268554688" y="197.56003723144534"></pt>
+                    </pts>
+                </flow>
+                <aux name="Net regeneration" x="594.3203735351563" y="276.2367248535156" label_side="left"></aux>
+                <aux name="Fish density" x="686.3999633789063" y="285" label_side="right"></aux>
+                <aux name="Maximum\nfishery size" x="656.1351318359375" y="334.9687194824219" label_side="bottom"></aux>
+                <connector angle="57.30983990746586">
+                    <from>Maximum\nfishery size</from>
+                    <to>Fish density</to>
+                </connector>
+                <connector angle="-60.62587059769953">
+                    <from>Fish stock</from>
+                    <to>Fish density</to>
+                </connector>
+                <connector angle="-140.4482917862046">
+                    <from>Fish density</from>
+                    <to>Net regeneration</to>
+                </connector>
+                <connector angle="137.88154691886052">
+                    <from>Net regeneration</from>
+                    <to>New fish per year</to>
+                </connector>
+                <flow name="Harvest Rate" x="793.0969290537698" y="198.9999969482422" label_side="bottom">
+                    <pts>
+                        <pt x="726.3400268554688" y="198.9999969482422"></pt>
+                        <pt x="882.3538312520709" y="198.9999969482422"></pt>
+                    </pts>
+                </flow>
+                <stock name="Ships at Sea" x="927.7937726583209" y="488.74885075471775" label_side="bottom"></stock>
+                <stock name="Ships in Harbor" x="1117.873801955196" y="487.38888981721783" label_side="bottom"></stock>
+                <flow name="Purchase of new\nships this year" x="829.8343076625704" y="491.30890934846775" label_side="bottom">
+                    <pts>
+                        <pt x="762.3538068380083" y="491.30890934846775"></pt>
+                        <pt x="905.2937726583209" y="491.30890934846775"></pt>
+                    </pts>
+                </flow>
+                <flow name="Ships moved to\nharbor this year" x="1019.1400010526096" y="487.1488995828428" label_side="bottom">
+                    <pts>
+                        <pt x="950.2937726583209" y="487.1488995828428"></pt>
+                        <pt x="1095.373801955196" y="487.1488995828428"></pt>
+                    </pts>
+                </flow>
+                <aux name="Catch" x="900.082542189571" y="281.17204411409267" label_side="right"></aux>
+                <aux name="Catch per ship" x="862.1937726583208" y="362.3488995828427" label_side="top"></aux>
+                <aux name="Normal catch\nper ship" x="894.0290347025917" y="449.4422915099262" label_side="left"></aux>
+                <aux name="Effect of fish density
+on catch per ship" x="740.113792189571" y="392.2288800515929" label_side="bottom"></aux>
+                <connector angle="-96.2815305134717">
+                    <from>Fish density</from>
+                    <to>Effect of fish density
+on catch per ship</to>
+                </connector>
+                <connector angle="109.88027832763646">
+                    <from>Normal catch\nper ship</from>
+                    <to>Catch per ship</to>
+                </connector>
+                <connector angle="-16.193791074864862">
+                    <from>Effect of fish density
+on catch per ship</from>
+                    <to>Catch per ship</to>
+                </connector>
+                <connector angle="35.90194770868209">
+                    <from>Catch per ship</from>
+                    <to>Catch</to>
+                </connector>
+                <connector angle="108.91314167391454">
+                    <from>Catch</from>
+                    <to>Harvest Rate</to>
+                </connector>
+                <connector angle="94.53838371683833">
+                    <from>Ships at Sea</from>
+                    <to>Catch</to>
+                </connector>
+                <connector angle="65.86993573490565">
+                    <from>Ships at Sea</from>
+                    <to>Ships moved to\nharbor this year</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>
