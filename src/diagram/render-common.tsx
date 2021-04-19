@@ -79,5 +79,9 @@ export function renderSvgToString(project: Project, modelName: string): [string,
   svg = svg.replace(/^<div[^>]*>/, '');
   svg = svg.replace(/<\/div>$/, '');
 
+  // generate a random string like 'qaqb3rusiha'
+  const prefix = Math.random().toString(36).substr(2);
+  svg = svg.replace(/jss/g, 'simlin-'+prefix);
+
   return [svg, { width, height }];
 }

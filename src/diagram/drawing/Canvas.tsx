@@ -111,9 +111,9 @@ const styles = ({ palette }: Theme) =>
       zIndex: 10,
       transform: 'translateZ(1)',
     },
-    gLayer: {
-      willUpdate: 'translate',
-    },
+    // gLayer: {
+    //   willChange: 'translate',
+    // },
   });
 
 function radToDeg(r: number): number {
@@ -1588,7 +1588,7 @@ export const Canvas = withStyles(styles)(
             onPointerUp={this.handlePointerCancel}
           >
             <defs />
-            <g transform={transform} className={classes.gLayer}>
+            <g transform={transform}>
               {zLayers}
               {dragRect}
             </g>
