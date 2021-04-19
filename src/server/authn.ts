@@ -5,7 +5,6 @@
 import { Timestamp } from 'google-protobuf/google/protobuf/timestamp_pb';
 import { Request, Response } from 'express';
 import { Strategy as BaseStrategy } from 'passport-strategy';
-import { Set } from 'immutable';
 import passport from 'passport';
 import { v4 as uuidV4 } from 'uuid';
 import * as logger from 'winston';
