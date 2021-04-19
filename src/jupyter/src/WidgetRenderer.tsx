@@ -4,7 +4,7 @@ import { Project } from '@system-dynamics/core/datamodel';
 import { renderSvgToString } from '@system-dynamics/diagram';
 import { defined } from '@system-dynamics/core/common';
 import { Editor } from '@system-dynamics/diagram';
-import { fromXmile } from '@system-dynamics/importer';
+import { fromXmile, toXmile } from "@system-dynamics/importer";
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
 
 import { fromBase64, fromUint8Array, toUint8Array } from 'js-base64';
@@ -84,13 +84,15 @@ export class WidgetRenderer extends ReactWidget implements IRenderMime.IRenderer
 
   // eslint-disable-next-line @typescript-eslint/require-await
   handleSave = async (project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> => {
+    const xmile = await toXmile(project);
     const body = {
       contents: fromUint8Array(project as Uint8Array),
+      xmile,
     };
+
     await requestAPI<any>('model/' + encodeURIComponent(this.projectId), body);
 
-    // or whatever
-    return currVersion + 1;
+    return currVersion + 1; // or whatever
   };
 
   render(): React.ReactElement {

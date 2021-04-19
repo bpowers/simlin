@@ -27,8 +27,6 @@ class RouteHandler(APIHandler):
     @tornado.web.authenticated
     def post(self, **kwargs):
         model_name = unquote(kwargs['model_name'])
-        LOG.info("BODY:")
-        LOG.info(self.request.body)
         body = json.loads(self.request.body)
         contents = b64decode(body['contents'])
         try:
@@ -36,9 +34,20 @@ class RouteHandler(APIHandler):
                 f.write(contents)
                 f.flush()
                 fsync(f)
-            self.finish()
         except OSError:
             self.send_error(404)
+            return
+        if 'xmile' in body and len(body['xmile']) > 0:
+            try:
+                with open(model_name + '.xmile', 'w') as f:
+                    f.write(body['xmile'])
+                    f.flush()
+                    fsync(f)
+            except OSError:
+                self.send_error(404)
+                return
+
+        self.finish()
 
 
 def setup_handlers(web_app, log):
