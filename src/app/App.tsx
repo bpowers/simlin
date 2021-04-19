@@ -22,8 +22,8 @@ import { NewUser } from './NewUser';
 import { User } from './User';
 
 const config = {
-  apiKey: 'AIzaSyB9pGSjgGJAOIZPH0HCuofOVDNMiX-XoGI',
-  authDomain: 'net-systemdynamics.firebaseapp.com',
+  apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
+  authDomain: 'simlin.firebaseapp.com',
 };
 firebase.initializeApp(config);
 
