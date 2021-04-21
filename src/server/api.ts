@@ -336,8 +336,11 @@ export const apiRouter = (app: Application): Router => {
       userModel.setCanCreateProjects(true);
       try {
         // updating the primary key of a user doesn't work in mongo
+        logger.error(`creating user ${userModel.getId()}`);
         await app.db.user.create(userModel.getId(), userModel);
+        logger.error(`deleting old user ${origUserId}`);
         await app.db.user.deleteOne(origUserId);
+        logger.error(`done deleting old user ${origUserId}`);
       } catch (err) {
         if (err.code === 'wut') {
           res.status(400).json({ error: 'username already taken' });
