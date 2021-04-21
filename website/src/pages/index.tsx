@@ -215,6 +215,7 @@ function Home() {
           Simlin is built around the <a href="https://en.wikipedia.org/wiki/System_dynamics">system dynamics</a> methodology, as introduced by the <a href="https://www.chelseagreen.com/product/thinking-in-systems/">Thinking in Systems</a> book (among others).
           Models are built in a simple, general visual language:
         </div>
+        <br/>
         <div className={clsx('container', styles.heroContainer)}>
           <Diagram projectPbBase64={ logisticGrowthProject } />
         </div>
