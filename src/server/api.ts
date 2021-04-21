@@ -119,8 +119,11 @@ export const apiRouter = (app: Application): Router => {
     // eslint-disable-next-line @typescript-eslint/no-misused-promises
     async (req: Request, res: Response): Promise<void> => {
       const user = getUser(req, res);
-      const projectModels = await app.db.project.find(user.getId() + '/');
-      const projects = await Promise.all(projectModels.map((project: ProjectPb) => project.toObject()));
+      const idPrefix = user.getId() + '/';
+      const projectModels = await app.db.project.find(idPrefix);
+      let projects = await Promise.all(projectModels.map((project: ProjectPb) => project.toObject()));
+      // we sometimes get false positives in this list
+      projects = projects.filter(project => project.id.startsWith(idPrefix));
       res.status(200).json(projects);
     },
   );
@@ -325,12 +328,11 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      if (!userModel.getId().startsWith(`temp-`)) {
+      const origUserId = userModel.getId();
+      if (!origUserId.startsWith(`temp-`)) {
         res.status(403).json({ error: 'username already set' });
         return;
       }
-
-      const origUserId = userModel.getId();
 
       userModel.setId(proposedUsername);
       userModel.setCanCreateProjects(true);
