@@ -44,7 +44,7 @@
     "html-webpack-plugin": "^4.5.0",
     "prettier": "^2.0.1",
     "react-dev-utils": "^11.0.1",
-    "react-firebaseui": "^4.1.0",
+    "react-firebaseui": "^5.0.2",
     "react-refresh": "^0.10.0",
     "resolve": "^1.19.0",
     "resolve-url-loader": "^3.1.2",
@@ -56,7 +56,7 @@
     "webpack-manifest-plugin": "^3.0.0"
   },
   "resolutions": {
-    "immer": "9.0.1"
+    "immer": "9.0.2"
   },
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
