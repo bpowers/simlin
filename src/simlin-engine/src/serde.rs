@@ -96,10 +96,7 @@ impl From<SimSpecs> for project_io::SimSpecs {
             start: sim_specs.start,
             stop: sim_specs.stop,
             dt: Some(project_io::Dt::from(sim_specs.dt)),
-            save_step: match sim_specs.save_step {
-                None => None,
-                Some(dt) => Some(project_io::Dt::from(dt)),
-            },
+            save_step: sim_specs.save_step.map(project_io::Dt::from),
             sim_method: project_io::SimMethod::from(sim_specs.sim_method) as i32,
             time_units: sim_specs.time_units.unwrap_or_default(),
         }
@@ -115,10 +112,7 @@ impl From<project_io::SimSpecs> for SimSpecs {
                 value: 1.0,
                 is_reciprocal: false,
             })),
-            save_step: match sim_specs.save_step {
-                Some(dt) => Some(Dt::from(dt)),
-                None => None,
-            },
+            save_step: sim_specs.save_step.map(Dt::from),
             sim_method: SimMethod::from(project_io::SimMethod::from(sim_specs.sim_method)),
             time_units: if sim_specs.time_units.is_empty() {
                 None
@@ -490,10 +484,7 @@ impl From<Flow> for project_io::variable::Flow {
             equation: Some(flow.equation.into()),
             documentation: flow.documentation,
             units: flow.units.unwrap_or_default(),
-            gf: match flow.gf {
-                Some(gf) => Some(project_io::GraphicalFunction::from(gf)),
-                None => None,
-            },
+            gf: flow.gf.map(project_io::GraphicalFunction::from),
             non_negative: flow.non_negative,
             can_be_module_input: flow.can_be_module_input,
             visibility: project_io::variable::Visibility::from(flow.visibility) as i32,
@@ -512,10 +503,7 @@ impl From<project_io::variable::Flow> for Flow {
             } else {
                 Some(flow.units)
             },
-            gf: match flow.gf {
-                Some(gf) => Some(GraphicalFunction::from(gf)),
-                None => None,
-            },
+            gf: flow.gf.map(GraphicalFunction::from),
             non_negative: flow.non_negative,
             can_be_module_input: flow.can_be_module_input,
             visibility: Visibility::from(project_io::variable::Visibility::from(flow.visibility)),
@@ -573,10 +561,7 @@ impl From<Aux> for project_io::variable::Aux {
             equation: Some(aux.equation.into()),
             documentation: aux.documentation,
             units: aux.units.unwrap_or_default(),
-            gf: match aux.gf {
-                Some(gf) => Some(project_io::GraphicalFunction::from(gf)),
-                None => None,
-            },
+            gf: aux.gf.map(project_io::GraphicalFunction::from),
             can_be_module_input: aux.can_be_module_input,
             visibility: project_io::variable::Visibility::from(aux.visibility).into(),
         }
@@ -594,10 +579,7 @@ impl From<project_io::variable::Aux> for Aux {
             } else {
                 Some(aux.units)
             },
-            gf: match aux.gf {
-                Some(gf) => Some(gf.into()),
-                None => None,
-            },
+            gf: aux.gf.map(GraphicalFunction::from),
             can_be_module_input: aux.can_be_module_input,
             visibility: Visibility::from(project_io::variable::Visibility::from(aux.visibility)),
         }

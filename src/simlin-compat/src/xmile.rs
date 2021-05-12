@@ -476,14 +476,8 @@ impl From<SimSpecs> for datamodel::SimSpecs {
         datamodel::SimSpecs {
             start: sim_specs.start,
             stop: sim_specs.stop,
-            dt: match sim_specs.dt {
-                Some(dt) => datamodel::Dt::from(dt),
-                None => Default::default(),
-            },
-            save_step: match sim_specs.save_step {
-                Some(save_step) => Some(datamodel::Dt::Dt(save_step)),
-                None => None,
-            },
+            dt: sim_specs.dt.map(datamodel::Dt::from).unwrap_or_default(),
+            save_step: sim_specs.save_step.map(datamodel::Dt::Dt),
             // FIXME: the spec says method is technically a
             //   comma separated list of fallbacks
             sim_method: match sim_method.as_str() {
@@ -804,16 +798,13 @@ impl From<Gf> for datamodel::GraphicalFunction {
 
 impl From<datamodel::GraphicalFunction> for Gf {
     fn from(gf: datamodel::GraphicalFunction) -> Self {
-        let x_pts: Option<String> = match gf.x_points {
-            Some(x_points) => Some(
-                x_points
-                    .into_iter()
-                    .map(|f| f.to_string())
-                    .collect::<Vec<String>>()
-                    .join(","),
-            ),
-            None => None,
-        };
+        let x_pts: Option<String> = gf.x_points.map(|x_points| {
+            x_points
+                .into_iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<String>>()
+                .join(",")
+        });
         let y_pts = gf
             .y_points
             .into_iter()
@@ -3129,10 +3120,7 @@ impl From<Flow> for datamodel::Flow {
             equation: convert_equation!(flow),
             documentation: flow.doc.unwrap_or_default(),
             units: flow.units,
-            gf: match flow.gf {
-                Some(gf) => Some(datamodel::GraphicalFunction::from(gf)),
-                None => None,
-            },
+            gf: flow.gf.map(datamodel::GraphicalFunction::from),
             non_negative: flow.non_negative.is_some(),
             can_be_module_input: can_be_module_input(&flow.access),
             visibility: visibility(&flow.access),
@@ -3167,10 +3155,7 @@ impl From<datamodel::Flow> for Flow {
                 Some(flow.documentation)
             },
             units: flow.units,
-            gf: match flow.gf {
-                Some(gf) => Some(Gf::from(gf)),
-                None => None,
-            },
+            gf: flow.gf.map(Gf::from),
             non_negative: if flow.non_negative {
                 Some(NonNegative {})
             } else {
@@ -3272,10 +3257,7 @@ impl From<Aux> for datamodel::Aux {
             equation: convert_equation!(aux),
             documentation: aux.doc.unwrap_or_default(),
             units: aux.units,
-            gf: match aux.gf {
-                Some(gf) => Some(datamodel::GraphicalFunction::from(gf)),
-                None => None,
-            },
+            gf: aux.gf.map(datamodel::GraphicalFunction::from),
             can_be_module_input: can_be_module_input(&aux.access),
             visibility: visibility(&aux.access),
         }
@@ -3309,10 +3291,7 @@ impl From<datamodel::Aux> for Aux {
                 Some(aux.documentation)
             },
             units: aux.units,
-            gf: match aux.gf {
-                Some(gf) => Some(Gf::from(gf)),
-                None => None,
-            },
+            gf: aux.gf.map(Gf::from),
             dimensions: match &aux.equation {
                 Equation::Scalar(_) => None,
                 Equation::ApplyToAll(dims, _) => Some(VarDimensions {
