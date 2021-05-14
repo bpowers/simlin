@@ -282,8 +282,8 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
 }
 
 // we have 3 problems here: the first (and simpler) is evaluating unit equations and turning them in to UnitMaps (done)
-// the second is: given a context of unitmaps, can we _check_ the types of variables
-// the third is: if we only have _some_ units filled in, can we _infer_ the rest?
+// the second is: given a context of unitmaps, can we _check_ the types of variables.  This won't work if there are builtins in use.
+// the third is: if we only have _some_ units filled in, can we _infer_ the rest? This will also enable units for builtins
 
 #[test]
 fn test_context_creation() {
