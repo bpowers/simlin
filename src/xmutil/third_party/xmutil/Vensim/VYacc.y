@@ -1,8 +1,5 @@
 /* 
-c:\tools\bison\bin\win_bison -o VYacc.tab.cpp -p vpyy -d VYacc.y
-
-
-c:\tools\bison\bin\win_bison -o $(ProjectDir)src\Vensim\VYacc.tab.cpp -p vpyy -d $(ProjectDir)src\Vensim\VYacc.y
+d:\tools\bison\bin\win_bison -o $(ProjectDir)src\Vensim\VYacc.tab.cpp -p vpyy -d $(ProjectDir)src\Vensim\VYacc.y
 Converting VYacc.y
 Outputs: VYacc.tab.cpp VYacc.tab.hpp 
 */
@@ -111,15 +108,14 @@ eqn :
    | lhs '=' VPTT_with_lookup '(' exp ',' '(' tablevals ')' ')' { $$ = vpyy_add_lookup($1,$5,$8, 0) ; }
    | lhs VPTT_dataequals exp {$$ = vpyy_addeq($1,$3,NULL,VPTT_dataequals) ; }
    | lhs { $$ = vpyy_add_lookup($1,NULL,NULL, 0) ; } // treat as if a lookup on time - don't have numbers
-   | VPTT_symbol ':' subdef maplist {$$ = vpyy_addeq(vpyy_addexceptinterp(vpyy_var_expression($1,NULL),NULL,NULL),(Expression *)vpyy_symlist_expression($3,$4),NULL,':') ; }
-   | VPTT_symbol VPTT_equiv VPTT_symbol  {$$ = vpyy_addeq(vpyy_addexceptinterp(vpyy_var_expression($1,NULL),NULL,NULL),(Expression *)vpyy_symlist_expression(vpyy_symlist(NULL,$3,0,NULL),NULL),NULL,VPTT_equiv) ; }
+   | VPTT_symbol ':' subdef maplist {$$ = vpyy_addeq(vpyy_addexceptinterp(vpyy_var_expression($1,NULL),NULL,0),(Expression *)vpyy_symlist_expression($3,$4),NULL,':') ; }
    | lhs '=' VPTT_tabbed_array { $$ = vpyy_addeq($1,$3,NULL,'=') ; }
    ;
 
 
 lhs : 
-   var  { $$ = vpyy_addexceptinterp($1,NULL,NULL) ; }
-   | var exceptlist  {$$ = vpyy_addexceptinterp($1,$2,NULL) ;}
+   var  { $$ = vpyy_addexceptinterp($1,NULL,0) ; }
+   | var exceptlist  {$$ = vpyy_addexceptinterp($1,$2,0) ;}
    | var interpmode {$$ = vpyy_addexceptinterp($1,NULL,$2) ;}
    ;
 
@@ -209,7 +205,7 @@ exp:
 	 | VPTT_na			  { $$ = vpyy_num_expression(-1E38);}
      | var                { $$ = (Expression *)$1 ; } /* ExpressionVariable is subclassed from Expression */
 	 | VPTT_literal       { $$ = vpyy_literal_expression($1) ; } // not part of XMILE - just dumped directly for editing afterward
-	 | var '(' exprlist ')'    { $$ = vpyy_lookup_expression($1,$3) ; }
+	 | var '(' exp ')'    { $$ = vpyy_lookup_expression($1,$3) ; }
 	 | '(' exp ')'        { $$ = vpyy_operator_expression('(',$2,NULL) ; }
      | VPTT_function '(' exprlist ')'   { $$ = vpyy_function_expression($1,$3) ;}
      | VPTT_function '(' ')'   { $$ = vpyy_function_expression($1,NULL) ;}
