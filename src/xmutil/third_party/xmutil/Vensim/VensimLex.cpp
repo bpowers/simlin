@@ -392,9 +392,22 @@ int VensimLex::TestColonKeyword() {
   // CONDITION:
 
   const char *keywords[] = {
-      ":AND:",   ":END OF MACRO:", ":EXCEPT:", ":HOLD BACKWARD:", ":IMPLIES:", ":INTERPOLATE:", ":LOOK FORWARD:",
-      ":MACRO:", ":OR:",           ":NA:",     ":NOT:",           ":RAW:",     ":TESTINPUT:",   ":THECONDITION:",
-      NULL};
+          ":MACRO:",
+          ":END OF MACRO:",
+          ":AND:",
+          ":OR:",
+          ":NOT:",
+          ":NA:",
+          ":EXCEPT:",
+          ":HOLD BACKWARD:",
+          ":IMPLIES:",
+          ":INTERPOLATE:",
+          ":LOOK FORWARD:",
+          ":RAW:",
+          ":TESTINPUT:",
+          ":THECONDITION:",
+          NULL,
+  };
 
   int keyvals[] = {VPTT_and,
                    VPTT_end_of_macro,

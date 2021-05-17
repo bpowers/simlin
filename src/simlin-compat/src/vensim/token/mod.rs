@@ -24,8 +24,8 @@ pub enum Token<'input> {
     Map,
     Equiv,
     GroupStar,
-    Macro,
-    EndMacro,
+    MacroStart,
+    MacroEnd,
     HoldBackward,
     LookForward,
     Except,
@@ -73,12 +73,16 @@ pub enum Token<'input> {
     Function(&'input str),
 }
 
-fn error<T>(code: ErrorCode, start: usize, end: usize) -> Result<T, EquationError> {
-    Err(EquationError {
+fn inner_error(code: ErrorCode, start: usize, end: usize) -> EquationError {
+    EquationError {
         start: start as u16,
         end: end as u16,
         code,
-    })
+    }
+}
+
+fn error<T>(code: ErrorCode, start: usize, end: usize) -> Result<T, EquationError> {
+    Err(inner_error(code, start, end))
 }
 
 pub type Spanned<T> = (usize, T, usize);
@@ -89,12 +93,21 @@ pub struct Lexer<'input> {
     lookahead: Option<(usize, char)>,
 }
 
-const KEYWORDS: &[(&str, Token<'static>)] = &[
-    ("not", Not),
-    ("mod", Mod),
-    ("and", And),
-    ("or", Or),
-    ("nan", Nan),
+const SYMBOLS: &[(&str, Token<'static>)] = &[
+    ("MACRO", MacroStart),
+    ("END OF MACRO", MacroEnd),
+    ("AND", And),
+    ("OR", Or),
+    ("NOT", Not),
+    ("NA", NA),
+    ("EXCEPT", Except),
+    ("HOLD BACKWARD", HoldBackward),
+    ("IMPLIES", Implies),
+    ("INTERPOLATE", Interpolate),
+    ("LOOK FORWARD", LookForward),
+    ("RAW", Raw),
+    ("TESTINPUT", TestInput),
+    ("THECONDITION", TheCondition),
 ];
 
 impl<'input> Lexer<'input> {
@@ -104,7 +117,21 @@ impl<'input> Lexer<'input> {
             chars: input.char_indices(),
             lookahead: None,
         };
-        t.bump();
+
+        let n = {
+            use regex::Regex;
+
+            lazy_static! {
+                static ref UTF8_RE: Regex = Regex::new(r"\s*(\{(UTF|utf)-8\})?").unwrap();
+            }
+
+            match UTF8_RE.find(t.text) {
+                Some(m) => m.end() + 1,
+                None => 1,
+            }
+        };
+
+        t.bump_n(n);
         t
     }
 
@@ -156,21 +183,28 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    fn identifierish(&mut self, idx0: usize) -> Spanned<Token<'input>> {
-        let (start, word, end) = self.word(idx0);
-        let lower_word = word.to_lowercase();
+    fn symbol(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
+        self.bump(); // skip past the ':' at idx0
+        let idx1 =
+            self.take_until(|c| c == ':')
+                .ok_or(inner_error(UnclosedSymbol, idx0, idx0 + 1))?;
+        self.bump(); // skip past the ':' at idx1
 
-        // search for a keyword first; if none are found, this is
-        // either a MacroId or an Id, depending on whether there
-        // is a `<` immediately afterwards
-        let tok = KEYWORDS
+        let symbol = &self.text[idx0 + 1..idx1];
+
+        let tok = SYMBOLS
             .iter()
-            .filter(|&&(w, _)| w == lower_word)
+            .filter(|&&(w, _)| w == symbol)
             .map(|&(_, ref t)| *t)
             .next()
-            .unwrap_or(Ident(word));
+            .ok_or(inner_error(UnknownSymbol, idx0, idx1))?;
 
-        (start, tok, end)
+        Ok((idx0, tok, idx1 + 1))
+    }
+
+    fn identifierish(&mut self, idx0: usize) -> Spanned<Token<'input>> {
+        let (start, word, end) = self.word(idx0);
+        (start, Ident(word), end)
     }
 
     fn number(&mut self, idx0: usize) -> Spanned<Token<'input>> {
@@ -283,6 +317,7 @@ impl<'input> Iterator for Lexer<'input> {
                     self.bump();
                     continue;
                 }
+                Some((i, ':')) => Some(self.symbol(i)),
                 Some((i, _)) => {
                     self.bump(); // eat whatever is killing us
                     let end = match self.lookahead {

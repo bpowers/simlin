@@ -65,6 +65,8 @@ pub enum ErrorCode {
     ExpectedModule,
     ExpectedIdent,
     UnitMismatch,
+    UnclosedSymbol, // vensim-specific
+    UnknownSymbol, // vensim-specific
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -117,6 +119,8 @@ impl fmt::Display for ErrorCode {
             ExpectedModule => "expected_module",
             ExpectedIdent => "expected_ident",
             UnitMismatch => "unit_mismatch",
+            UnclosedSymbol => "unclosed_symbol",
+            UnknownSymbol => "unknown_symbol",
         };
 
         write!(f, "{}", name)

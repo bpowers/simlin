@@ -73,6 +73,23 @@ fn pairs() {
 }
 
 #[test]
+fn test_macro_start() {
+    #[rustfmt::skip]
+    test(
+        "{UTF-8}\n:MACRO: EXPRESSION MACRO(input, parameter)",
+        vec![
+            ("        ~~~~~~~                                  ", MacroStart),
+            ("                ~~~~~~~~~~~~~~~~                 ", Ident("EXPRESSION MACRO")),
+            ("                                ~                ", LParen),
+            ("                                 ~~~~~           ", Ident("input")),
+            ("                                      ~           ", Comma),
+            ("                                        ~~~~~~~~~ ", Ident("parameter")),
+            ("                                                 ~", RParen),
+        ],
+    );
+}
+
+#[test]
 fn quoted_ident() {
     test("\"a.b\"", vec![("~~~~~", Ident("\"a.b\""))]);
 }
@@ -118,14 +135,12 @@ fn subscripts() {
     ]);
 
     #[rustfmt::skip]
-    test("aux[INT(TIME MOD 5) + 1])", vec![
+    test("aux[INT(TIME      ) + 1])", vec![
         ("~~~                      ", Ident("aux")),
         ("   ~                     ", LBracket),
         ("    ~~~                  ", Ident("INT")),
         ("       ~                 ", LParen),
         ("        ~~~~             ", Ident("TIME")),
-        ("             ~~~         ", Mod),
-        ("                 ~       ", Num("5")),
         ("                  ~      ", RParen),
         ("                    ~    ", Plus),
         ("                      ~  ", Num("1")),
