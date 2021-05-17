@@ -14,7 +14,14 @@ vensim = ["xmutil"]
 [dependencies]
 csv = "1"
 float-cmp = "0.8"
+lalrpop-util = { git = "https://github.com/bpowers/lalrpop", version = "0.19.5", rev = "61bb80074a2342de188a23a709b1a8bb900bd0f2" }
+lazy_static = "1"
 quick-xml = { version = "0.21", features = [ "serialize" ] }
+regex = "1"
 serde = { version = "1", features = [ "derive" ] }
 simlin-engine = { version = "0.1", path = "../simlin-engine" }
+unicode-xid = "0.2"
 xmutil = { version = "1", path = "../xmutil", optional = true }
+
+[build-dependencies]
+lalrpop = { git = "https://github.com/bpowers/lalrpop", version = "0.19.5", rev = "61bb80074a2342de188a23a709b1a8bb900bd0f2" }

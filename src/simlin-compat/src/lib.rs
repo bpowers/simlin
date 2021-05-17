@@ -11,6 +11,7 @@ use simlin_engine::datamodel::Project;
 pub use simlin_engine::{self as engine, prost, Result, Results};
 use simlin_engine::{canonicalize, quoteize, Method, SimSpecs};
 
+pub mod vensim;
 pub mod xmile;
 
 pub fn to_xmile(project: &Project) -> Result<String> {

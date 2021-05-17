@@ -6,7 +6,7 @@
 
 pub use prost;
 
-mod ast;
+pub mod ast;
 pub mod common;
 pub mod datamodel;
 pub mod project_io {
@@ -21,7 +21,7 @@ pub mod builtins;
 mod builtins_visitor;
 mod compiler;
 mod model;
-mod token;
+pub mod token;
 mod variable;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));

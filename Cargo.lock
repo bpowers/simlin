@@ -633,9 +633,14 @@ version = "0.1.0"
 dependencies = [
  "csv",
  "float-cmp",
+ "lalrpop",
+ "lalrpop-util",
+ "lazy_static",
  "quick-xml",
+ "regex",
  "serde",
  "simlin-engine",
+ "unicode-xid",
  "xmutil",
 ]
 

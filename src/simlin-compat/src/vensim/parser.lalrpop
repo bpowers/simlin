@@ -1,0 +1,157 @@
+// Copyright 2020 The Model Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+use simlin_engine::ast::{Expr, Loc};
+use simlin_engine::ast::UnaryOp::*;
+use simlin_engine::ast::BinaryOp::*;
+use simlin_engine::ast::Expr::*;
+use simlin_engine::common::{self, canonicalize, EquationError};
+
+use super::token::Token;
+use super::file::*;
+
+grammar<'input>(input: &'input str);
+
+pub File: File = {
+    <defs:Definitions> <control:Control> => {
+        File::default()
+    }
+    // Ordinary Definitions (macros || variables)
+    // Control Definitions (variables)
+    //
+};
+
+Definitions: Vec<Definition> = {
+};
+
+Control: Vec<Variable> = {
+
+};
+
+Equation: Expr = {
+    Expr,
+};
+
+Expr: Expr = {
+    LCmp,
+};
+
+LCmp: Expr = {
+    <lpos:@L> <l:LCmp> "&&" <r:ACmp> <rpos:@R> => Op2(And, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:LCmp> "||" <r:ACmp> <rpos:@R> => Op2(Or, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    ACmp,
+};
+
+ACmp: Expr = {
+    <lpos:@L> <l:ACmp> "=" <r:Eq> <rpos:@R>  => Op2(Eq, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:ACmp> "<>" <r:Eq> <rpos:@R> => Op2(Neq, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:ACmp> "!=" <r:Eq> <rpos:@R> => Op2(Neq, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    Eq,
+};
+
+Eq: Expr = {
+    <lpos:@L> <l:Eq> "<"  <r:Add> <rpos:@R> => Op2(Lt, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Eq> "<=" <r:Add> <rpos:@R> => Op2(Lte, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Eq> ">"  <r:Add> <rpos:@R> => Op2(Gt, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Eq> ">=" <r:Add> <rpos:@R> => Op2(Gte, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    Add,
+};
+
+Add: Expr = {
+    <lpos:@L> <l:Add> "-" <r:Mul> <rpos:@R> => Op2(Sub, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Add> "+" <r:Mul> <rpos:@R> => Op2(Add, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    Mul,
+};
+
+Mul: Expr = {
+    <lpos:@L> <l:Mul> "*" <r:Unary> <rpos:@R> => Op2(Mul, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Mul> "/" <r:Unary> <rpos:@R> => Op2(Div, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Mul> "%" <r:Unary> <rpos:@R> => Op2(Mod, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    Unary,
+};
+
+Unary: Expr = {
+    <lpos:@L> "+" <e:Exp> <rpos:@R> => Op1(Positive, Box::new(e), Loc::new(lpos, rpos)),
+    <lpos:@L> "-" <e:Exp> <rpos:@R> => Op1(Negative, Box::new(e), Loc::new(lpos, rpos)),
+    <lpos:@L> "!" <e:Exp> <rpos:@R> => Op1(Not, Box::new(e), Loc::new(lpos, rpos)),
+    Exp,
+};
+
+Exp: Expr = {
+    <lpos:@L> <l:Exp> "^" <r:App> <rpos:@R> => Op2(Exp, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    App,
+};
+
+App: Expr = {
+    <lpos:@L> <id:Ident> "(" <args:Exprs> ")" <rpos:@R> => App(id, args, Loc::new(lpos, rpos)),
+    Subscript,
+};
+
+Subscript: Expr = {
+    <lpos:@L> <id:Ident> "[" <args:Exprs> "]" <rpos:@R> => Subscript(id, args, Loc::new(lpos, rpos)),
+    Atom,
+};
+
+Atom: Expr = {
+    <lpos:@L> <id:Ident> <rpos:@R> => Var(id, Loc::new(lpos, rpos)),
+    "(" <Expr> ")",
+    <lpos:@L> <s:"Num"> <rpos:@R> => {
+        use std::str::FromStr;
+        Const(s.to_string(), f64::from_str(s).unwrap(), Loc::new(lpos, rpos))
+    },
+    <lpos:@L> <s:"Nan"> <rpos:@R> => Const("NaN".to_string(), f64::NAN, Loc::new(lpos, rpos)),
+};
+
+Comma<T>: Vec<T> = {
+    <v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            let mut v = v;
+            v.push(e);
+            v
+        }
+    }
+};
+
+Exprs = Comma<Expr>;
+
+Ident: common::Ident = {
+    <id:"Iden"> => canonicalize(id),
+};
+
+NoncanonicalIdent: String = {
+    <id:"Iden"> => id.to_owned(),
+};
+
+extern {
+    type Location = usize;
+    type Error = EquationError;
+    enum Token<'input> {
+        "," => Token::Comma,
+        "=" => Token::Eq,
+        "!=" => Token::Neq,
+        "<>" => Token::Neq,
+        "<" => Token::Lt,
+        "<=" => Token::Lte,
+        ">" => Token::Gt,
+        ">=" => Token::Gte,
+        "+" => Token::Plus,
+        "-" => Token::Minus,
+        "*" => Token::Mul,
+        "/" => Token::Div,
+        "%" => Token::Mod,
+        "!" => Token::Not,
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+        "[" => Token::LBracket,
+        "]" => Token::RBracket,
+        "^" => Token::Exp,
+        "&&" => Token::And,
+        "||" => Token::Or,
+        "Nan" => Token::Nan,
+
+        "Iden" => Token::Ident(<&'input str>),
+        "Num" => Token::Num(<&'input str>),
+    }
+}
