@@ -37,6 +37,7 @@ pub enum Token<'input> {
     Implies,
     TabbedArray,
     EqEnd,
+    EqSeparator,
     Units,
     EndUnits,
 
@@ -49,7 +50,6 @@ pub enum Token<'input> {
     Neq,
 
     Eq,
-    Mod,
     Exp,
     Lt,
     Gt,
@@ -64,7 +64,6 @@ pub enum Token<'input> {
     RBracket,
 
     Comma,
-    Nan,
 
     Ident(&'input str),
     Num(&'input str),
@@ -106,8 +105,8 @@ const SYMBOLS: &[(&str, Token<'static>)] = &[
     ("INTERPOLATE", Interpolate),
     ("LOOK FORWARD", LookForward),
     ("RAW", Raw),
-    ("TESTINPUT", TestInput),
-    ("THECONDITION", TheCondition),
+    ("TEST INPUT", TestInput),
+    ("THE CONDITION", TheCondition),
 ];
 
 impl<'input> Lexer<'input> {
@@ -145,22 +144,8 @@ impl<'input> Lexer<'input> {
         self.lookahead
     }
 
-    fn word(&mut self, idx0: usize) -> Spanned<&'input str> {
-        match self.take_while(is_identifier_continue) {
-            Some(end) => (idx0, &self.text[idx0..end], end),
-            None => (idx0, &self.text[idx0..], self.text.len()),
-        }
-    }
-
     fn peek(&self) -> (usize, char) {
         self.lookahead.unwrap()
-    }
-
-    fn take_while<F>(&mut self, mut keep_going: F) -> Option<usize>
-    where
-        F: FnMut(char) -> bool,
-    {
-        self.take_until(|c| !keep_going(c))
     }
 
     fn take_until<F>(&mut self, mut terminate: F) -> Option<usize>
@@ -202,9 +187,20 @@ impl<'input> Lexer<'input> {
         Ok((idx0, tok, idx1 + 1))
     }
 
-    fn identifierish(&mut self, idx0: usize) -> Spanned<Token<'input>> {
-        let (start, word, end) = self.word(idx0);
-        (start, Ident(word), end)
+    fn identifier(&mut self, idx0: usize) -> Spanned<Token<'input>> {
+        use regex::{Match, Regex};
+
+        lazy_static! {
+            // we can have internal spaces, but not trailing spaces
+            static ref IDENT_RE: Regex = Regex::new(r"\w*(\w|\d|\s|_|$|')*(\w|\d|_|$|')").unwrap();
+        }
+
+        let m: Match = IDENT_RE.find(&self.text[idx0..]).unwrap();
+
+        self.bump_n(m.end());
+
+        let end = idx0 + m.end();
+        (idx0, Ident(&self.text[idx0..end]), end)
     }
 
     fn number(&mut self, idx0: usize) -> Spanned<Token<'input>> {
@@ -291,13 +287,11 @@ impl<'input> Iterator for Lexer<'input> {
                         _ => Some(error(UnrecognizedToken, i, i + 2)),
                     }
                 }
-                Some((i, '|')) => {
-                    match self.bump() {
-                        Some((_, '|')) => self.consume(i, Or, 2),
-                        // we've already bumped, don't consume
-                        _ => Some(error(UnrecognizedToken, i, i + 2)),
-                    }
-                }
+                Some((i, '|')) => match self.bump() {
+                    Some((_, '|')) => self.consume(i, Or, 2),
+                    // we've already bumped, don't consume
+                    _ => Some(Ok((i, EqEnd, i + 1))),
+                },
                 Some((i, '-')) => self.consume(i, Minus, 1),
                 Some((i, '+')) => self.consume(i, Plus, 1),
                 Some((i, '*')) => self.consume(i, Mul, 1),
@@ -310,8 +304,9 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, '[')) => self.consume(i, LBracket, 1),
                 Some((i, ']')) => self.consume(i, RBracket, 1),
                 Some((i, ',')) => self.consume(i, Comma, 1),
+                Some((i, '~')) => self.consume(i, EqSeparator, 1),
                 Some((i, '"')) => Some(self.quoted_identifier(i)),
-                Some((i, c)) if is_identifier_start(c) => Some(Ok(self.identifierish(i))),
+                Some((i, c)) if is_identifier_start(c) => Some(Ok(self.identifier(i))),
                 Some((i, c)) if is_number_start(c) => Some(Ok(self.number(i))),
                 Some((_, c)) if c.is_whitespace() => {
                     self.bump();
@@ -342,8 +337,4 @@ fn is_digit(c: char) -> bool {
 
 fn is_identifier_start(c: char) -> bool {
     UnicodeXID::is_xid_start(c) || c == '_'
-}
-
-fn is_identifier_continue(c: char) -> bool {
-    UnicodeXID::is_xid_continue(c) || c == '.'
 }

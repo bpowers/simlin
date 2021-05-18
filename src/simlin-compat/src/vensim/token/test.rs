@@ -104,12 +104,8 @@ fn comment() {
 
 #[test]
 fn idents() {
-    test(
-        "_3 n3_",
-        vec![("~~    ", Ident("_3")), ("   ~~~", Ident("n3_"))],
-    );
+    test("_3 n3_", vec![("~~~~~~", Ident("_3 n3_"))]);
     test("\"oh no\"", vec![("~~~~~~~", Ident("\"oh no\""))]);
-    test("oh.no", vec![("~~~~~", Ident("oh.no"))]);
 }
 
 #[test]

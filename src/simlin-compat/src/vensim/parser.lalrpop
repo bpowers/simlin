@@ -23,10 +23,31 @@ pub File: File = {
 };
 
 Definitions: Vec<Definition> = {
+    <makro:Macro> => {
+        vec![]
+    }
 };
 
 Control: Vec<Variable> = {
 
+};
+
+Macro: Macro = {
+    "MacroStart" <id:Ident> "(" <inputs:Comma<Ident>> ")" <vars:Variables> "MacroEnd" => {
+        Macro::default()
+    }
+};
+
+Variables: Vec<Variable> = {
+    <vars:Variables> <var:Variable> => {
+        vec![]
+    }
+};
+
+Variable: Variable = {
+    <id:Ident> "=" <eq:Equation> "~" "~" "|" => {
+        Variable::default()
+    }
 };
 
 Equation: Expr = {
@@ -67,7 +88,6 @@ Add: Expr = {
 Mul: Expr = {
     <lpos:@L> <l:Mul> "*" <r:Unary> <rpos:@R> => Op2(Mul, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     <lpos:@L> <l:Mul> "/" <r:Unary> <rpos:@R> => Op2(Div, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
-    <lpos:@L> <l:Mul> "%" <r:Unary> <rpos:@R> => Op2(Mod, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
     Unary,
 };
 
@@ -100,7 +120,6 @@ Atom: Expr = {
         use std::str::FromStr;
         Const(s.to_string(), f64::from_str(s).unwrap(), Loc::new(lpos, rpos))
     },
-    <lpos:@L> <s:"Nan"> <rpos:@R> => Const("NaN".to_string(), f64::NAN, Loc::new(lpos, rpos)),
 };
 
 Comma<T>: Vec<T> = {
@@ -140,7 +159,6 @@ extern {
         "-" => Token::Minus,
         "*" => Token::Mul,
         "/" => Token::Div,
-        "%" => Token::Mod,
         "!" => Token::Not,
         "(" => Token::LParen,
         ")" => Token::RParen,
@@ -149,7 +167,10 @@ extern {
         "^" => Token::Exp,
         "&&" => Token::And,
         "||" => Token::Or,
-        "Nan" => Token::Nan,
+        "~" => Token::EqSeparator,
+        "|" => Token::EqEnd,
+        "MacroStart" => Token::MacroStart,
+        "MacroEnd" => Token::MacroEnd,
 
         "Iden" => Token::Ident(<&'input str>),
         "Num" => Token::Num(<&'input str>),
