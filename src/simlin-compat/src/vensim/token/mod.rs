@@ -219,6 +219,19 @@ impl<'input> Lexer<'input> {
         (idx0, Num(&self.text[idx0..end]), end)
     }
 
+    fn group_name(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>> {
+        use regex::{Match, Regex};
+
+        lazy_static! {
+            static ref STAR_RE: Regex = Regex::new(r"\*\*+").unwrap();
+        }
+
+        let m: Match = STAR_RE.find(&self.text[idx0..]).unwrap();
+        self.bump_n(m.end());
+
+        self.next()
+    }
+
     fn quoted_identifier(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
         // eat the opening '"'
         self.bump();
@@ -294,7 +307,13 @@ impl<'input> Iterator for Lexer<'input> {
                 },
                 Some((i, '-')) => self.consume(i, Minus, 1),
                 Some((i, '+')) => self.consume(i, Plus, 1),
-                Some((i, '*')) => self.consume(i, Mul, 1),
+                Some((i, '*')) => {
+                    match self.bump() {
+                        Some((_, '*')) => self.group_name(i),
+                        // we've already bumped, don't consume
+                        _ => Some(Ok((i, Mul, i + 1))),
+                    }
+                }
                 Some((i, '{')) => match self.comment_end() {
                     Ok(()) => self.next(),
                     Err(_) => Some(error(UnclosedComment, i, self.text.len())),

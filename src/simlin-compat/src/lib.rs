@@ -47,6 +47,10 @@ pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {
     xmile::project_from_reader(reader)
 }
 
+pub fn open_vensim_native(reader: &mut dyn BufRead) -> Result<Project> {
+    vensim::project_from_reader(reader)
+}
+
 pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Error>> {
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(delimiter)

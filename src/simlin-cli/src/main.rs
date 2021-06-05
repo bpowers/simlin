@@ -15,7 +15,7 @@ use simlin_compat::engine::{
     eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, Vm,
 };
 use simlin_compat::prost::Message;
-use simlin_compat::{load_csv, open_vensim, open_xmile, to_xmile};
+use simlin_compat::{load_csv, open_vensim, open_vensim_native, open_xmile, to_xmile};
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -86,7 +86,7 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
         usage();
     }
 
-    let mut args: Args = Default::default();
+    let mut args = Args::default();
 
     let subcommand = subcommand.unwrap();
     if subcommand == "convert" {
@@ -224,13 +224,10 @@ fn simulate(project: &DatamodelProject) -> Results {
 }
 
 fn main() {
-    let args = match parse_args() {
-        Ok(args) => args,
-        Err(err) => {
-            eprintln!("error: {}", err);
-            usage();
-        }
-    };
+    let args = parse_args().unwrap_or_else(|err| {
+        eprintln!("error: {}", err);
+        usage();
+    });
     let file_path = args.path.unwrap_or_else(|| "/dev/stdin".to_string());
     let file = File::open(&file_path).unwrap();
     let mut reader = BufReader::new(file);
