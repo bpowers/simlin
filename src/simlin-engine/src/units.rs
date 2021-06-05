@@ -2,17 +2,15 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::result::Result as StdResult;
 
 use float_cmp::approx_eq;
 
 use crate::ast::{parse_equation, BinaryOp, Expr, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode};
-use crate::datamodel::Unit;
+use crate::datamodel::{Unit, UnitMap};
 use crate::eqn_err;
-
-type UnitMap = BTreeMap<String, i32>;
 
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]

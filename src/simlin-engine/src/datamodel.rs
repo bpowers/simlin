@@ -2,10 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::BTreeMap;
+
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 use crate::common::{DimensionName, ElementName};
+
+pub type UnitMap = BTreeMap<String, i32>;
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -151,7 +155,7 @@ impl Variable {
         }
     }
 
-    pub fn get_visiblity(&self) -> Visibility {
+    pub fn get_visibility(&self) -> Visibility {
         match self {
             Variable::Stock(stock) => stock.visibility,
             Variable::Flow(flow) => flow.visibility,
