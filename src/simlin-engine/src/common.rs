@@ -144,6 +144,21 @@ impl From<Error> for EquationError {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VariableError {
+    EquationError(EquationError),
+    UnitError(EquationError),
+}
+
+impl fmt::Display for VariableError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            VariableError::EquationError(err) => write!(f, "eqn:{}", err),
+            VariableError::UnitError(err) => write!(f, "unit:{}", err),
+        }
+    }
+}
+
 impl From<(Ident, EquationError)> for Error {
     fn from(err: (Ident, EquationError)) -> Self {
         Error {

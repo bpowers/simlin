@@ -21,7 +21,7 @@ pub struct Context {
 
 impl Context {
     #[allow(dead_code)]
-    fn new(units: &[Unit]) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+    pub fn new(units: &[Unit]) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
         let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
 
         // step 1: build our base context consisting of all prime units
@@ -277,6 +277,22 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
     };
 
     Ok(unit_map)
+}
+
+pub fn parse_units(
+    ctx: &Context,
+    unit_eqn: Option<&String>,
+) -> StdResult<Option<UnitMap>, Vec<EquationError>> {
+    if let Some(unit_eqn) = unit_eqn {
+        if let Some(expr) = parse_equation(unit_eqn)? {
+            let result = build_unit_components(ctx, &expr).map_err(|err| vec![err])?;
+            Ok(Some(result))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 // we have 3 problems here: the first (and simpler) is evaluating unit equations and turning them in to UnitMaps (done)
