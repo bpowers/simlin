@@ -42,13 +42,15 @@ pub use self::vm::Method;
 pub use self::vm::Results;
 pub use self::vm::Specs as SimSpecs;
 pub use self::vm::Vm;
-use crate::common::topo_sort;
+use crate::common::{topo_sort, ErrorKind};
 use crate::model::enumerate_modules;
+use crate::units::Context;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub datamodel: datamodel::Project,
     pub models: HashMap<String, Rc<model::Model>>,
+    pub errors: Vec<Error>,
 }
 
 impl Project {
@@ -61,13 +63,38 @@ impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         use model::Model;
 
+        // first, build the unit context.
+
+        let mut project_errors = vec![];
+
+        let units_ctx = match Context::new(&project_datamodel.units) {
+            Ok(ctx) => ctx,
+            Err(_err) => {
+                // TODO: propagate err
+                project_errors.push(Error {
+                    kind: ErrorKind::Model,
+                    code: ErrorCode::UnitDefinitionErrors,
+                    details: None,
+                });
+                Default::default()
+            }
+        };
+
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = HashMap::new();
 
         // first, pull in the models we need from the stdlib
         let mut models_list: Vec<Model> = self::stdlib::MODEL_NAMES
             .iter()
             .map(|name| self::stdlib::get(name).unwrap())
-            .map(|x_model| Model::new(&models, &x_model, &project_datamodel.dimensions, true))
+            .map(|x_model| {
+                Model::new(
+                    &models,
+                    &x_model,
+                    &project_datamodel.dimensions,
+                    &units_ctx,
+                    true,
+                )
+            })
             .collect();
 
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = project_datamodel
@@ -80,7 +107,7 @@ impl From<datamodel::Project> for Project {
             project_datamodel
                 .models
                 .iter()
-                .map(|m| Model::new(&models, m, &project_datamodel.dimensions, false)),
+                .map(|m| Model::new(&models, m, &project_datamodel.dimensions, &units_ctx, false)),
         );
 
         let model_order = {
@@ -141,6 +168,7 @@ impl From<datamodel::Project> for Project {
         Project {
             datamodel: project_datamodel,
             models,
+            errors: project_errors,
         }
     }
 }

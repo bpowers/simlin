@@ -13,7 +13,7 @@ use crate::datamodel::{Unit, UnitMap};
 use crate::eqn_err;
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Context {
     aliases: HashMap<String, String>,
     units: HashMap<String, UnitMap>,

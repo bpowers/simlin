@@ -510,11 +510,10 @@ impl Model {
         models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
         x_model: &datamodel::Model,
         dimensions: &[Dimension],
+        units_ctx: &Context,
         implicit: bool,
     ) -> Self {
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-
-        let unit_ctx = Context::new(&[]).unwrap();
 
         let mut variable_list: Vec<Variable> = x_model
             .variables
@@ -526,7 +525,7 @@ impl Model {
                     dimensions,
                     v,
                     &mut implicit_vars,
-                    &unit_ctx,
+                    &units_ctx,
                 )
             })
             .collect();
@@ -541,7 +540,7 @@ impl Model {
                     dimensions,
                     &x_var,
                     &mut dummy_implicit_vars,
-                    &unit_ctx,
+                    &units_ctx,
                 )
             }));
             assert_eq!(0, dummy_implicit_vars.len());
@@ -949,7 +948,8 @@ fn test_errors() {
     let model = {
         let no_module_inputs: ModuleInputSet = BTreeSet::new();
         let default_instantiation = [no_module_inputs].iter().cloned().collect();
-        let mut model = Model::new(&models, &main_model, &[], false);
+        let units_ctx = Context::new(&[]).unwrap();
+        let mut model = Model::new(&models, &main_model, &[], &units_ctx, false);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1080,7 +1080,8 @@ fn test_all_deps() {
                 variables: vars.values().cloned().cloned().collect(),
                 views: vec![],
             };
-            Model::new(&x_models, &x_model, &[], false)
+            let units_ctx = Context::new(&[]).unwrap();
+            Model::new(&x_models, &x_model, &[], &units_ctx, false)
         })
         .collect::<Vec<_>>();
 
