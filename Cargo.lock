@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "prost"
 version = "0.7.0"
-source = "git+https://github.com/danburkert/prost?rev=28e4522f8ae738d4574cce104da6fd88d9ce0c14#28e4522f8ae738d4574cce104da6fd88d9ce0c14"
+source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -429,7 +429,7 @@ dependencies = [
 [[package]]
 name = "prost-build"
 version = "0.7.0"
-source = "git+https://github.com/danburkert/prost?rev=28e4522f8ae738d4574cce104da6fd88d9ce0c14#28e4522f8ae738d4574cce104da6fd88d9ce0c14"
+source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
 dependencies = [
  "bytes",
  "heck",
@@ -446,7 +446,7 @@ dependencies = [
 [[package]]
 name = "prost-derive"
 version = "0.7.0"
-source = "git+https://github.com/danburkert/prost?rev=28e4522f8ae738d4574cce104da6fd88d9ce0c14#28e4522f8ae738d4574cce104da6fd88d9ce0c14"
+source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
 dependencies = [
  "anyhow",
  "itertools",
@@ -458,7 +458,7 @@ dependencies = [
 [[package]]
 name = "prost-types"
 version = "0.7.0"
-source = "git+https://github.com/danburkert/prost?rev=28e4522f8ae738d4574cce104da6fd88d9ce0c14#28e4522f8ae738d4574cce104da6fd88d9ce0c14"
+source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
 dependencies = [
  "bytes",
  "prost",
