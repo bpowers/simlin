@@ -80,7 +80,7 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
 
                 inputs
                     .iter()
-                    .map(|input| {
+                    .flat_map(|input| {
                         let src = &input.src;
                         if stock_deps.contains(&input.dst) {
                             let direct_dep = match src.find('.') {
@@ -97,8 +97,6 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
                             None
                         }
                     })
-                    .filter(|d| d.is_some())
-                    .map(|d| d.unwrap())
                     .collect()
             } else {
                 panic!("internal compiler error: invariant broken");
@@ -106,7 +104,7 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
         } else {
             inputs
                 .iter()
-                .map(|r| {
+                .flat_map(|r| {
                     let src = &r.src;
                     let direct_dep = match src.find('.') {
                         Some(pos) => &src[..pos],
@@ -119,8 +117,6 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
                         Some(direct_dep.to_string())
                     }
                 })
-                .filter(|d| d.is_some())
-                .map(|d| d.unwrap())
                 .collect()
         }
     } else {

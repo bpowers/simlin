@@ -138,12 +138,10 @@ impl Variable {
         Some(
             errors
                 .iter()
-                .map(|err| match err {
+                .flat_map(|err| match err {
                     VariableError::EquationError(err) => Some(err.clone()),
                     VariableError::UnitError(_) => None,
                 })
-                .filter(|err| err.is_some())
-                .map(|err| err.unwrap())
                 .collect(),
         )
     }
@@ -421,12 +419,7 @@ pub fn parse_var(
                 .collect();
             let (inputs, errors): (Vec<_>, Vec<_>) =
                 inputs.into_iter().partition(EquationResult::is_ok);
-            let inputs: Vec<ModuleInput> = inputs
-                .into_iter()
-                .map(|i| i.unwrap())
-                .filter(|i| i.is_some())
-                .map(|i| i.unwrap())
-                .collect();
+            let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
             let mut errors: Vec<VariableError> = errors
                 .into_iter()
                 .map(|e| e.unwrap_err())
