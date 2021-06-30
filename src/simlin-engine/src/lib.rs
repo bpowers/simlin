@@ -69,13 +69,16 @@ impl From<datamodel::Project> for Project {
 
         let units_ctx = match Context::new(&project_datamodel.units) {
             Ok(ctx) => ctx,
-            Err(_err) => {
-                // TODO: propagate err
-                project_errors.push(Error {
-                    kind: ErrorKind::Model,
-                    code: ErrorCode::UnitDefinitionErrors,
-                    details: None,
-                });
+            Err(errs) => {
+                for (unit_name, unit_errs) in errs {
+                    for err in unit_errs {
+                        project_errors.push(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::UnitDefinitionErrors,
+                            details: Some(format!("{}: {}", unit_name, err)),
+                        });
+                    }
+                }
                 Default::default()
             }
         };

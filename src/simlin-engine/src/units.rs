@@ -201,8 +201,12 @@ fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
 fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
     let unit_map: UnitMap = match ast {
         Expr::Const(_, _, loc) => {
-            // nothing to do here (handled below in Op2)
-            return eqn_err!(NoConstInUnits, loc.start, loc.end);
+            if let Ok(1) = const_int_eval(ast) {
+                std::collections::BTreeMap::new()
+            } else {
+                // nothing to do here (handled below in Op2)
+                return eqn_err!(NoConstInUnits, loc.start, loc.end);
+            }
         }
         Expr::Var(id, _) => {
             let id = ctx.aliases.get(id).unwrap_or(id);
@@ -409,7 +413,7 @@ fn test_basic_unit_parsing() {
     ])
     .unwrap();
 
-    let positive_cases: &[(&str, UnitMap); 4] = &[
+    let positive_cases: &[(&str, UnitMap); 5] = &[
         (
             "m^2/s",
             [("meter".to_owned(), 2), ("second".to_owned(), -1)]
@@ -429,6 +433,7 @@ fn test_basic_unit_parsing() {
             "time * people / time",
             [("people".to_owned(), 1)].iter().cloned().collect(),
         ),
+        ("1", std::collections::BTreeMap::new()),
     ];
 
     for (input, output) in positive_cases {

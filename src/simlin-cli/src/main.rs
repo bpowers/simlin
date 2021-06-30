@@ -120,6 +120,12 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
 fn simulate(project: &DatamodelProject) -> Results {
     let project_datamodel = project.clone();
     let project = Rc::new(Project::from(project.clone()));
+    if !project.errors.is_empty() {
+        for err in project.errors.iter() {
+            eprintln!("project error: {}", err);
+        }
+    }
+
     let mut found_model_error = false;
     for (model_name, model) in project.models.iter() {
         let model_datamodel = project_datamodel.get_model(model_name);
