@@ -660,14 +660,17 @@ impl Model {
         self.errors = maybe_errors;
     }
 
+    pub fn get_unit_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
+        self.variables
+            .iter()
+            .flat_map(|(ident, var)| var.unit_errors().map(|errs| (ident.clone(), errs)))
+            .collect()
+    }
+
     pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
         self.variables
             .iter()
-            .filter(|(_, var)| var.equation_errors().is_some())
-            .map(|(ident, var)| {
-                let errors = var.equation_errors().unwrap();
-                (ident.clone(), errors)
-            })
+            .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.clone(), errs)))
             .collect()
     }
 }

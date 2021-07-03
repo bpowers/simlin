@@ -128,6 +128,15 @@ impl Variable {
         }
     }
 
+    pub fn get_units(&self) -> Option<&String> {
+        match self {
+            Variable::Stock(stock) => stock.units.as_ref(),
+            Variable::Flow(flow) => flow.units.as_ref(),
+            Variable::Aux(aux) => aux.units.as_ref(),
+            Variable::Module(module) => module.units.as_ref(),
+        }
+    }
+
     pub fn set_ident(&mut self, ident: String) {
         match self {
             Variable::Stock(stock) => stock.ident = ident,

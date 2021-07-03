@@ -156,6 +156,27 @@ fn simulate(project: &DatamodelProject) -> Results {
                 );
             }
         }
+        for (ident, errors) in model.get_unit_errors() {
+            assert!(!errors.is_empty());
+            let var = model_datamodel.get_variable(&ident).unwrap();
+            for error in errors {
+                eprintln!();
+                if let Some(eqn) = var.get_units() {
+                    eprintln!("    {}", eqn);
+                    let space = std::iter::repeat(" ")
+                        .take(error.start as usize)
+                        .collect::<String>();
+                    let underline = std::iter::repeat("~")
+                        .take((error.end - error.start) as usize)
+                        .collect::<String>();
+                    eprintln!("    {}{}", space, underline);
+                }
+                eprintln!(
+                    "units error in model '{}' variable '{}': {}",
+                    model_name, ident, error.code
+                );
+            }
+        }
         if let Some(errors) = &model.errors {
             for error in errors.iter() {
                 if error.code == ErrorCode::VariablesHaveErrors && found_var_error {
