@@ -61,7 +61,7 @@ fn roundtrips_model() {
 
         for (model_name, model) in project.models.iter() {
             for (var_name, var) in model.variables.iter() {
-                match var.errors() {
+                match var.equation_errors() {
                     Some(errors) => {
                         for err in errors {
                             writeln!(

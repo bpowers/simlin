@@ -663,9 +663,9 @@ impl Model {
     pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
         self.variables
             .iter()
-            .filter(|(_, var)| var.errors().is_some())
+            .filter(|(_, var)| var.equation_errors().is_some())
             .map(|(ident, var)| {
-                let errors = var.errors().unwrap();
+                let errors = var.equation_errors().unwrap();
                 (ident.clone(), errors)
             })
             .collect()
@@ -727,7 +727,7 @@ fn flow(ident: &str, eqn: &str) -> Variable {
         &mut implicit_vars,
         &unit_ctx,
     );
-    assert!(var.errors().is_none());
+    assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     var
 }
@@ -759,7 +759,7 @@ fn aux(ident: &str, eqn: &str) -> Variable {
         &mut implicit_vars,
         &unit_ctx,
     );
-    assert!(var.errors().is_none());
+    assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     var
 }
@@ -793,7 +793,7 @@ fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variabl
         &mut implicit_vars,
         &unit_ctx,
     );
-    assert!(var.errors().is_none());
+    assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     var
 }
@@ -914,7 +914,7 @@ fn test_module_parse() {
         &mut implicit_vars,
         &unit_ctx,
     );
-    assert!(actual.errors().is_none());
+    assert!(actual.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     assert_eq!(expected, actual);
 }

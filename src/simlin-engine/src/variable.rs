@@ -124,26 +124,26 @@ impl Variable {
         matches!(self, Variable::Module { .. })
     }
 
-    pub fn errors(&self) -> Option<Vec<EquationError>> {
+    pub fn equation_errors(&self) -> Option<Vec<EquationError>> {
         let errors = match self {
             Variable::Stock { errors, .. } => errors,
             Variable::Var { errors, .. } => errors,
             Variable::Module { errors, .. } => errors,
         };
 
-        if errors.is_empty() {
-            return None;
-        }
+        let errors: Vec<_> = errors
+            .iter()
+            .flat_map(|err| match err {
+                VariableError::EquationError(err) => Some(err.clone()),
+                VariableError::UnitError(_) => None,
+            })
+            .collect();
 
-        Some(
-            errors
-                .iter()
-                .flat_map(|err| match err {
-                    VariableError::EquationError(err) => Some(err.clone()),
-                    VariableError::UnitError(_) => None,
-                })
-                .collect(),
-        )
+        if errors.is_empty() {
+            None
+        } else {
+            Some(errors)
+        }
     }
 
     pub fn push_error(&mut self, err: EquationError) {
