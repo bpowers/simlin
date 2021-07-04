@@ -219,7 +219,7 @@ impl<'input> Lexer<'input> {
         (idx0, Num(&self.text[idx0..end]), end)
     }
 
-    fn group_name(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>> {
+    fn group_name(&mut self, idx0: usize) -> Result<Spanned<Token<'input>>, EquationError> {
         use regex::{Match, Regex};
 
         lazy_static! {
