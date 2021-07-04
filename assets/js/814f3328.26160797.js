@@ -1,0 +1,1 @@
+(globalThis.webpackChunksimlin_site=globalThis.webpackChunksimlin_site||[]).push([[535],{6353:i=>{"use strict";i.exports=JSON.parse('{"title":"Recent posts","items":[{"title":"Hi Hi","permalink":"/blog/hihi"}]}')}}]);
