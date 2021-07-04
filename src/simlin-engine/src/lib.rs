@@ -30,6 +30,7 @@ mod bytecode;
 mod interpreter;
 mod project;
 mod units;
+mod units_check;
 mod vm;
 
 pub use self::common::{canonicalize, quoteize, Error, ErrorCode, Ident, Result};
