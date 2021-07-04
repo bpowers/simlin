@@ -17,13 +17,14 @@ use crate::common::{len_utf8, quoteize, ErrorCode, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::interpreter::UnaryOp;
 use crate::model::{enumerate_modules, Model};
+use crate::project::Project;
 use crate::variable::Variable;
 use crate::vm::{
     is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
 use crate::{common, datamodel};
-use crate::{sim_err, Error, Project};
+use crate::{sim_err, Error};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
