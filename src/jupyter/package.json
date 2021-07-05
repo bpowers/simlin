@@ -66,7 +66,7 @@
     "webpack": "^5.24.2"
   },
   "resolutions": {
-    "immer": "9.0.4"
+    "immer": "9.0.5"
   },
   "sideEffects": false,
   "jupyterlab": {

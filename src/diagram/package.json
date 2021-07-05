@@ -41,7 +41,7 @@
   },
   "resolutions": {
     "@types/slate*/**/immutable": "4.0.0-rc.12",
-    "immer": "9.0.4"
+    "immer": "9.0.5"
   },
   "devDependencies": {
     "@babel/core": "^7.13.1",
