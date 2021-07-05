@@ -37,7 +37,6 @@ $ yarn install
 # start a local Firestore instance using the Google Cloud SDK
 $ yarn start:firestore
 # in another tab:
-$ . ~/model-oauth # (sets some environmental variables; get out of band)
 $ yarn start:backend
 # in third and final tab:
 $ yarn start:frontend
