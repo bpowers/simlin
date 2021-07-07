@@ -1,6 +1,6 @@
 {
   "name": "jupyter-simlin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "System Dynamics visual editor for Jupyter notebooks",
   "keywords": [
     "jupyter",
