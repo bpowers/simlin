@@ -552,14 +552,14 @@ export const Flow = withStyles(styles)(
         const prevY = defined(pts.get(pts.size - 2)).y;
 
         if (prevX < x) {
-          pts = pts.update(pts.size - 1, (pt) => pt.set('x', x - CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('x', x - CloudRadius));
         } else if (prevX > x) {
-          pts = pts.update(pts.size - 1, (pt) => pt.set('x', x + CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('x', x + CloudRadius));
         }
         if (prevY < y) {
-          pts = pts.update(pts.size - 1, (pt) => pt.set('y', y - CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('y', y - CloudRadius));
         } else if (prevY > y) {
-          pts = pts.update(pts.size - 1, (pt) => pt.set('y', y + CloudRadius));
+          pts = pts.update(pts.size - 1, (pt) => defined(pt).set('y', y + CloudRadius));
         }
       }
 

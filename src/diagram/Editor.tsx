@@ -251,7 +251,7 @@ export const Editor = withStyles(styles)(
         dialOpen: false,
         dialVisible: true,
         selectedTool: undefined,
-        data: Map(),
+        data: Map<string, Series>(),
         selection: Set<number>(),
         status: 'disabled',
         showDetails: undefined,
@@ -1602,7 +1602,7 @@ export const Editor = withStyles(styles)(
         for (const [ident, errors] of varErrors) {
           project = project.updateIn(
             ['models', modelName, 'variables', ident],
-            (v: Variable): Variable => v.set('errors', errors),
+            ((v: Variable): Variable => v.set('errors', errors)) as (value: unknown) => unknown,
           );
         }
       }
