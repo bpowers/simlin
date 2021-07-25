@@ -42,7 +42,7 @@
   },
   "sideEffects": false,
   "dependencies": {
-    "immutable": "^4.0.0-rc.12",
+    "immutable": "^4.0.0-rc.14",
     "js-base64": "^3.6.0",
     "google-protobuf": "^3.14.0"
   },
