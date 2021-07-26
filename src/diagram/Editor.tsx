@@ -1037,7 +1037,7 @@ export const Editor = withStyles(styles)(
           const a = document.createElement('a');
           document.body.appendChild(a);
           try {
-            ((a as unknown) as any).style = 'display: none';
+            (a as unknown as any).style = 'display: none';
           } catch (_err) {
             // oh well
           }

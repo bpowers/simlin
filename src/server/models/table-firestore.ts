@@ -76,7 +76,8 @@ export class FirestoreTable<T extends Message> implements Table<T> {
   async find(idPrefix: string): Promise<T[]> {
     idPrefix = FirestoreTable.filterId(idPrefix);
     // https://stackoverflow.com/questions/46573804/firestore-query-documents-startswith-a-string
-    const successor = idPrefix.substring(0, idPrefix.length - 1) + String.fromCharCode(idPrefix.charCodeAt(idPrefix.length - 1) + 1);
+    const successor =
+      idPrefix.substring(0, idPrefix.length - 1) + String.fromCharCode(idPrefix.charCodeAt(idPrefix.length - 1) + 1);
     const querySnapshot = await this.collection
       .where(FieldPath.documentId(), '>=', idPrefix)
       .where(FieldPath.documentId(), '<', successor)

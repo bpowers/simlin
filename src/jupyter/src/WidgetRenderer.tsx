@@ -4,7 +4,7 @@ import { Project } from '@system-dynamics/core/datamodel';
 import { renderSvgToString } from '@system-dynamics/diagram';
 import { defined } from '@system-dynamics/core/common';
 import { Editor } from '@system-dynamics/diagram';
-import { fromXmile, toXmile } from "@system-dynamics/importer";
+import { fromXmile, toXmile } from '@system-dynamics/importer';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
 
 import { fromBase64, fromUint8Array, toUint8Array } from 'js-base64';
