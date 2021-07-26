@@ -27,6 +27,5 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/tokio-rs/prost",
     "https://github.com/bpowers/console_error_panic_hook",
 ]

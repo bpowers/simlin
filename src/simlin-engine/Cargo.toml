@@ -17,7 +17,7 @@ lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
 lalrpop-util = "0.19.6"
-prost = { git = "https://github.com/tokio-rs/prost", version = "0.7", rev = "c8691b701a5e2e542e52122a73af1f696c437a09" }
+prost = "0.8"
 float-cmp = "0.8"
 ordered-float = "2"
 smallvec = { version = "1", features = [ "union" ] }
@@ -28,4 +28,4 @@ rand = "0.8"
 
 [build-dependencies]
 lalrpop = "0.19.6"
-prost-build = { git = "https://github.com/tokio-rs/prost", version = "0.7", rev = "c8691b701a5e2e542e52122a73af1f696c437a09" }
+prost-build = "0.8"

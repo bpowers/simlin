@@ -419,8 +419,9 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.7.0"
-source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de5e2533f59d08fcf364fd374ebda0692a70bd6d7e66ef97f306f45c6c5d8020"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -428,8 +429,9 @@ dependencies = [
 
 [[package]]
 name = "prost-build"
-version = "0.7.0"
-source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "355f634b43cdd80724ee7848f95770e7e70eefa6dcf14fea676216573b8fd603"
 dependencies = [
  "bytes",
  "heck",
@@ -445,8 +447,9 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.7.0"
-source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "600d2f334aa05acb02a755e217ef1ab6dea4d51b58b7846588b747edec04efba"
 dependencies = [
  "anyhow",
  "itertools",
@@ -457,8 +460,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.7.0"
-source = "git+https://github.com/tokio-rs/prost?rev=c8691b701a5e2e542e52122a73af1f696c437a09#c8691b701a5e2e542e52122a73af1f696c437a09"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "603bbd6394701d13f3f25aada59c7de9d35a6a5887cfc156181234a44002771b"
 dependencies = [
  "bytes",
  "prost",
