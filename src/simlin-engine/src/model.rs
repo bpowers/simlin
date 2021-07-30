@@ -483,7 +483,7 @@ pub(crate) fn enumerate_modules(
             model_name, inputs, ..
         } = v
         {
-            let inputs: BTreeSet<String> = inputs.iter().map(|input| input.dst.clone()).collect();
+            let inputs: BTreeSet<Ident> = inputs.iter().map(|input| input.dst.clone()).collect();
 
             if !modules.contains_key(model_name) {
                 // first time we are seeing the model for this module.
