@@ -1014,14 +1014,14 @@ impl Var {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
-    ident: Ident,
+    pub(crate) ident: Ident,
     inputs: HashSet<Ident>,
     n_slots: usize, // number of f64s we need storage for
-    runlist_initials: Vec<Expr>,
-    runlist_flows: Vec<Expr>,
-    runlist_stocks: Vec<Expr>,
-    offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
-    runlist_order: Vec<Ident>,
+    pub(crate) runlist_initials: Vec<Expr>,
+    pub(crate) runlist_flows: Vec<Expr>,
+    pub(crate) runlist_stocks: Vec<Expr>,
+    pub(crate) offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
+    pub(crate) runlist_order: Vec<Ident>,
     tables: HashMap<Ident, Table>,
 }
 
@@ -2166,7 +2166,7 @@ pub fn pretty(expr: &Expr) -> String {
 
 #[derive(Debug)]
 pub struct Simulation {
-    modules: HashMap<Ident, Module>,
+    pub(crate) modules: HashMap<Ident, Module>,
     specs: Specs,
     root: String,
     offsets: HashMap<Ident, usize>,
@@ -2193,7 +2193,7 @@ impl Simulation {
             let project_models: HashMap<_, _> = project
                 .models
                 .iter()
-                .map(|(name, model)| (name.clone(), model.as_ref()))
+                .map(|(name, model)| (name.as_str(), model.as_ref()))
                 .collect();
             // then pull in all the module instantiations the main model depends on
             enumerate_modules(&project_models, main_model_name, &mut modules)?;
@@ -2218,10 +2218,6 @@ impl Simulation {
                 compiled_modules.insert(name.to_string(), module);
             }
         }
-
-        // module assign offsets
-
-        // reset
 
         let specs = Specs::from(&project.datamodel.sim_specs);
 

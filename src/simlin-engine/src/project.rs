@@ -102,7 +102,7 @@ impl From<datamodel::Project> for Project {
         });
 
         let module_instantiations = {
-            let models = models_list.iter().map(|m| (m.name.clone(), m)).collect();
+            let models = models_list.iter().map(|m| (m.name.as_str(), m)).collect();
             let mut instantiations = HashMap::new();
             let no_module_inputs = BTreeSet::new();
             instantiations.insert(

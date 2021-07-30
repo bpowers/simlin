@@ -469,7 +469,7 @@ pub fn resolve_module_input<'a>(
 }
 
 pub(crate) fn enumerate_modules(
-    models: &HashMap<Ident, &Model>,
+    models: &HashMap<&str, &Model>,
     model_name: &str,
     modules: &mut HashMap<Ident, BTreeSet<BTreeSet<Ident>>>,
 ) -> Result<()> {
@@ -1085,7 +1085,7 @@ fn test_all_deps() {
         .collect::<Vec<_>>();
 
     let module_instantiations = {
-        let models = model_list.iter().map(|m| (m.name.clone(), m)).collect();
+        let models = model_list.iter().map(|m| (m.name.as_str(), m)).collect();
         let mut instantiations = HashMap::new();
         let no_module_inputs = BTreeSet::new();
         instantiations.insert(
