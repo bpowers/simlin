@@ -24,7 +24,7 @@
     "node-fetch": "^2.6.0",
     "passport": "^0.4.0",
     "passport-strategy": "^1.0.0",
-    "resvg-wasm": "^0.1.0",
+    "resvg-wasm": "^0.1.2",
     "serve-favicon": "^2.5.0",
     "seshcookie": "^1.2.0",
     "uuid": "^8.0.0",
