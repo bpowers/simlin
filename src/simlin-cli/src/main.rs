@@ -142,12 +142,8 @@ fn simulate(project: &DatamodelProject) -> Results {
                 eprintln!();
                 if let Some(Equation::Scalar(eqn)) = var.get_equation() {
                     eprintln!("    {}", eqn);
-                    let space = std::iter::repeat(" ")
-                        .take(error.start as usize)
-                        .collect::<String>();
-                    let underline = std::iter::repeat("~")
-                        .take((error.end - error.start) as usize)
-                        .collect::<String>();
+                    let space = " ".repeat(error.start as usize);
+                    let underline = "~".repeat((error.end - error.start) as usize);
                     eprintln!("    {}{}", space, underline);
                 }
                 eprintln!(
@@ -163,12 +159,8 @@ fn simulate(project: &DatamodelProject) -> Results {
                 eprintln!();
                 if let Some(eqn) = var.get_units() {
                     eprintln!("    {}", eqn);
-                    let space = std::iter::repeat(" ")
-                        .take(error.start as usize)
-                        .collect::<String>();
-                    let underline = std::iter::repeat("~")
-                        .take((error.end - error.start) as usize)
-                        .collect::<String>();
+                    let space = " ".repeat(error.start as usize);
+                    let underline = "~".repeat((error.end - error.start) as usize);
                     eprintln!("    {}{}", space, underline);
                 }
                 eprintln!(

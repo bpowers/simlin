@@ -399,7 +399,7 @@ impl Vm {
         };
 
         let module_off = parent_module_off + new_module_decl.off;
-        self.eval(module, module_off, &module_inputs, curr, next, stack);
+        self.eval(module, module_off, module_inputs, curr, next, stack);
     }
 
     fn eval(

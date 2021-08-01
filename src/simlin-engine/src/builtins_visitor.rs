@@ -59,31 +59,28 @@ impl<'a> BuiltinVisitor<'a> {
 
                 let stdlib_model_inputs = stdlib_args(&func).unwrap();
 
-                let ident_args: Vec<Ident> = args
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, arg)| {
-                        if let Expr::Var(id, _loc) = arg {
-                            id
-                        } else {
-                            let id = format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i);
-                            let eqn = print_eqn(&arg);
-                            let x_var = datamodel::Variable::Aux(datamodel::Aux {
-                                ident: id.clone(),
-                                equation: datamodel::Equation::Scalar(eqn),
-                                documentation: "".to_string(),
-                                units: None,
-                                gf: None,
-                                can_be_module_input: false,
-                                visibility: datamodel::Visibility::Private,
-                            });
-                            self.vars.insert(id.clone(), x_var);
-                            id
-                        }
-                    })
-                    .collect();
-
                 let module_name = format!("$⁚{}⁚{}⁚{}", self.variable_name, self.n, func);
+
+                let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
+                    if let Expr::Var(id, _loc) = arg {
+                        id
+                    } else {
+                        let id = format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i);
+                        let eqn = print_eqn(&arg);
+                        let x_var = datamodel::Variable::Aux(datamodel::Aux {
+                            ident: id.clone(),
+                            equation: datamodel::Equation::Scalar(eqn),
+                            documentation: "".to_string(),
+                            units: None,
+                            gf: None,
+                            can_be_module_input: false,
+                            visibility: datamodel::Visibility::Private,
+                        });
+                        self.vars.insert(id.clone(), x_var);
+                        id
+                    }
+                });
+
                 let references: Vec<_> = ident_args
                     .into_iter()
                     .enumerate()

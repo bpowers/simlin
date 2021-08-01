@@ -13,6 +13,7 @@ use crate::vm::StepPart;
 use crate::ErrorCode;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 struct UnitEvaluator<'a> {
     step_part: StepPart,
     ctx: &'a Context,
@@ -27,12 +28,13 @@ struct UnitEvaluator<'a> {
 /// on constants.
 enum Units {
     Explicit(UnitMap),
-    Constant,
+    // Constant,
 }
 
 impl<'a> UnitEvaluator<'a> {
+    #[allow(dead_code)]
     fn get_units(&self, offset: usize) -> Result<UnitMap> {
-        let ident = &self.offsets.get(&offset).ok_or_else(|| Error {
+        let _ident = &self.offsets.get(&offset).ok_or(Error {
             kind: ErrorKind::Model,
             code: ErrorCode::DoesNotExist,
             details: None,
@@ -59,7 +61,7 @@ impl<'a> UnitEvaluator<'a> {
                 // TODO: we should eventually support dimensioned constants
                 // Units::Constant
             }
-            Expr::Var(offset, _) => {
+            Expr::Var(_offset, _) => {
                 // self.module.
             }
             Expr::Subscript(_, _, _, _) => {}
@@ -104,7 +106,7 @@ fn check_runlist(
     };
 
     for expr in runlist.iter() {
-        units.check(expr);
+        let _ = units.check(expr);
     }
 
     // TODO: pull list of errors off UnitEvaluator

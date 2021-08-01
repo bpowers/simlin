@@ -421,15 +421,10 @@ pub fn parse_var(
         }
         datamodel::Variable::Module(v) => {
             let ident = v.ident.clone();
-            let inputs: Vec<EquationResult<Option<ModuleInput>>> = v
-                .references
-                .iter()
-                .map(|mi| {
-                    crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
-                })
-                .collect();
-            let (inputs, errors): (Vec<_>, Vec<_>) =
-                inputs.into_iter().partition(EquationResult::is_ok);
+            let inputs = v.references.iter().map(|mi| {
+                crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
+            });
+            let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
             let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
             let mut errors: Vec<VariableError> = errors
                 .into_iter()

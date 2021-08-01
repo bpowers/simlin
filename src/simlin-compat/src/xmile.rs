@@ -1049,7 +1049,7 @@ pub struct Views {
 
 impl Model {
     pub fn get_name(&self) -> &str {
-        &self.name.as_deref().unwrap_or("main")
+        self.name.as_deref().unwrap_or("main")
     }
 
     // TODO: if this is a bottleneck, we should have a normalize pass over
@@ -1231,7 +1231,7 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref label_side) = label_side {
+            if let Some(label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
             write_tag_with_attrs(writer, "aux", "", &attrs)
@@ -1306,7 +1306,7 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref label_side) = label_side {
+            if let Some(label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
             write_tag_with_attrs(writer, "stock", "", &attrs)
@@ -1461,7 +1461,7 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref label_side) = label_side {
+            if let Some(label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
             write_tag_start_with_attrs(writer, "flow", &attrs)?;
@@ -1989,7 +1989,7 @@ pub mod view_element {
                 ("x", x.as_str()),
                 ("y", y.as_str()),
             ];
-            if let Some(ref label_side) = label_side {
+            if let Some(label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
             write_tag_with_attrs(writer, "module", "", &attrs)
@@ -2059,7 +2059,7 @@ pub mod view_element {
             if let Some(ref uid) = uid {
                 attrs.push(("uid", uid.as_str()));
             }
-            if let Some(ref label_side) = label_side {
+            if let Some(label_side) = label_side {
                 attrs.push(("label_side", label_side));
             }
             write_tag_start_with_attrs(writer, "alias", &attrs)?;

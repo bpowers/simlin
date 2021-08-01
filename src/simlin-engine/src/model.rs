@@ -138,9 +138,9 @@ fn module_output_deps<'a>(
 
     let module_inputs = &inputs.iter().map(|mi| mi.dst.clone()).collect();
     let deps = if ctx.is_initial {
-        model.initial_deps(&module_inputs)
+        model.initial_deps(module_inputs)
     } else {
-        model.dt_deps(&module_inputs)
+        model.dt_deps(module_inputs)
     };
 
     if deps.is_none() {
@@ -278,7 +278,7 @@ where
                     model_name, inputs, ..
                 } = all_vars[module_ident]
                 {
-                    match module_output_deps(ctx, model_name, output_ident, &inputs, module_ident) {
+                    match module_output_deps(ctx, model_name, output_ident, inputs, module_ident) {
                         Ok(deps) => deps.into_iter().map(|s| s.to_string()).collect(),
                         Err(err) => {
                             return Err((var.ident().to_owned(), err.into()));
@@ -521,7 +521,7 @@ impl Model {
                     dimensions,
                     v,
                     &mut implicit_vars,
-                    &units_ctx,
+                    units_ctx,
                 )
             })
             .collect();
@@ -536,7 +536,7 @@ impl Model {
                     dimensions,
                     &x_var,
                     &mut dummy_implicit_vars,
-                    &units_ctx,
+                    units_ctx,
                 )
             }));
             assert_eq!(0, dummy_implicit_vars.len());

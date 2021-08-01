@@ -1423,7 +1423,7 @@ impl Module {
     }
 
     pub fn compile(&self) -> Result<CompiledModule> {
-        Compiler::new(&self).compile()
+        Compiler::new(self).compile()
     }
 }
 
@@ -1469,15 +1469,11 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::Subscript(off, indices, bounds, _) => {
-                let indices: Vec<_> = indices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, expr)| {
-                        self.walk_expr(expr).unwrap().unwrap();
-                        let bounds = bounds[i] as VariableOffset;
-                        self.push(Opcode::PushSubscriptIndex { bounds });
-                    })
-                    .collect();
+                for (i, expr) in indices.iter().enumerate() {
+                    self.walk_expr(expr).unwrap().unwrap();
+                    let bounds = bounds[i] as VariableOffset;
+                    self.push(Opcode::PushSubscriptIndex { bounds });
+                }
                 assert!(indices.len() == bounds.len());
                 self.push(Opcode::LoadSubscript {
                     off: *off as VariableOffset,
@@ -1641,10 +1637,9 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::EvalModule(ident, model_name, args) => {
-                let args: Vec<_> = args
-                    .iter()
-                    .map(|arg| self.walk_expr(arg).unwrap().unwrap())
-                    .collect();
+                for arg in args.iter() {
+                    self.walk_expr(arg).unwrap().unwrap()
+                }
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 self.module_decls.push(ModuleDeclaration {
                     model_name: model_name.clone(),

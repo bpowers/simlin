@@ -68,7 +68,7 @@ impl From<datamodel::Project> for Project {
         let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = project_datamodel
             .models
             .iter()
-            .map(|m| model::build_xvars_map(m.name.clone(), &m))
+            .map(|m| model::build_xvars_map(m.name.clone(), m))
             .collect();
 
         models_list.extend(
