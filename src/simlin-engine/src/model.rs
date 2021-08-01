@@ -12,6 +12,7 @@ use crate::datamodel::Dimension;
 use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::{canonicalize, datamodel, eqn_err, model_err, var_eqn_err};
+use std::hash::Hash;
 
 pub type ModuleInputSet = BTreeSet<Ident>;
 pub type DependencySet = BTreeSet<Ident>;
@@ -468,11 +469,40 @@ pub fn resolve_module_input<'a>(
     }
 }
 
-pub(crate) fn enumerate_modules(
+pub fn enumerate_modules<T>(
+    models: &HashMap<&str, &Model>,
+    main_model_name: &str,
+    mapper: fn(&Model) -> T,
+) -> Result<HashMap<T, BTreeSet<BTreeSet<Ident>>>>
+where
+    T: Eq + Hash,
+{
+    let mut modules = HashMap::new();
+    // manually insert the main model (which has no dependencies)
+    if let Some(main_model) = models.get(main_model_name) {
+        let no_module_inputs = BTreeSet::new();
+        modules.insert(
+            mapper(main_model),
+            [no_module_inputs].iter().cloned().collect(),
+        );
+    } else {
+        return model_err!(BadModelName, main_model_name.to_owned());
+    }
+
+    enumerate_modules_inner(models, main_model_name, mapper, &mut modules)?;
+
+    Ok(modules)
+}
+
+pub(crate) fn enumerate_modules_inner<T>(
     models: &HashMap<&str, &Model>,
     model_name: &str,
-    modules: &mut HashMap<Ident, BTreeSet<BTreeSet<Ident>>>,
-) -> Result<()> {
+    mapper: fn(&Model) -> T,
+    modules: &mut HashMap<T, BTreeSet<BTreeSet<Ident>>>,
+) -> Result<()>
+where
+    T: Eq + Hash,
+{
     let model = *models.get(model_name).ok_or_else(|| Error {
         kind: ErrorKind::Simulation,
         code: ErrorCode::NotSimulatable,
@@ -483,18 +513,25 @@ pub(crate) fn enumerate_modules(
             model_name, inputs, ..
         } = v
         {
-            let inputs: BTreeSet<Ident> = inputs.iter().map(|input| input.dst.clone()).collect();
+            if let Some(model) = models.get(model_name.as_str()) {
+                let inputs: BTreeSet<Ident> =
+                    inputs.iter().map(|input| input.dst.clone()).collect();
 
-            if !modules.contains_key(model_name) {
-                // first time we are seeing the model for this module.
-                // make sure all _its_ module instantiations are recorded
-                enumerate_modules(models, model_name, modules)?;
+                let key = mapper(model);
+
+                if !modules.contains_key(&key) {
+                    // first time we are seeing the model for this module.
+                    // make sure all _its_ module instantiations are recorded
+                    enumerate_modules_inner(models, model_name, mapper, modules)?;
+                }
+
+                modules
+                    .entry(key)
+                    .or_insert_with(BTreeSet::new)
+                    .insert(inputs);
+            } else {
+                return model_err!(BadModelName, model_name.clone());
             }
-
-            modules
-                .entry(model_name.clone())
-                .or_insert_with(BTreeSet::new)
-                .insert(inputs);
         }
     }
 
@@ -1086,15 +1123,8 @@ fn test_all_deps() {
 
     let module_instantiations = {
         let models = model_list.iter().map(|m| (m.name.as_str(), m)).collect();
-        let mut instantiations = HashMap::new();
-        let no_module_inputs = BTreeSet::new();
-        instantiations.insert(
-            "main".to_owned(),
-            [no_module_inputs].iter().cloned().collect(),
-        );
         // FIXME: ignoring the result here because if we have errors, it doesn't really matter
-        let _ = enumerate_modules(&models, "main", &mut instantiations);
-        instantiations
+        enumerate_modules(&models, "main", |model| model.name.clone()).unwrap()
     };
 
     let models = {

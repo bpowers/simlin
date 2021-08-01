@@ -2175,24 +2175,16 @@ impl Simulation {
                 format!("no model named '{}' to simulate", main_model_name)
             );
         }
-        let mut modules: HashMap<Ident, BTreeSet<BTreeSet<Ident>>> = HashMap::new();
-        // manually insert the main model (which has no dependencies)
-        let no_module_inputs = BTreeSet::new();
-        modules.insert(
-            main_model_name.to_string(),
-            [no_module_inputs].iter().cloned().collect(),
-        );
 
-        // FIXME: should more generally rip out Rcs
-        {
+        let modules = {
             let project_models: HashMap<_, _> = project
                 .models
                 .iter()
                 .map(|(name, model)| (name.as_str(), model.as_ref()))
                 .collect();
             // then pull in all the module instantiations the main model depends on
-            enumerate_modules(&project_models, main_model_name, &mut modules)?;
-        }
+            enumerate_modules(&project_models, main_model_name, |model| model.name.clone())?
+        };
 
         let module_names: Vec<&str> = {
             let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();
