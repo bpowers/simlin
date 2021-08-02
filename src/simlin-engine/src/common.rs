@@ -64,6 +64,7 @@ pub enum ErrorCode {
     ExpectedModule,
     ExpectedIdent,
     ZeroArityBuiltin,
+    UnitMismatch,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -116,6 +117,7 @@ impl fmt::Display for ErrorCode {
             ExpectedModule => "expected_module",
             ExpectedIdent => "expected_ident",
             ZeroArityBuiltin => "zero_arity_builtin",
+            UnitMismatch => "unit_mismatch",
         };
 
         write!(f, "{}", name)
