@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use prost::alloc::rc::Rc;
 
 use crate::common::Error;
+use crate::model::ModelStage0;
 use crate::{datamodel, model};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -48,35 +49,27 @@ impl From<datamodel::Project> for Project {
             }
         };
 
-        let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = HashMap::new();
-
         // first, pull in the models we need from the stdlib
-        let mut models_list: Vec<Model> = crate::stdlib::MODEL_NAMES
+        let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES
             .iter()
             .map(|name| crate::stdlib::get(name).unwrap())
             .map(|x_model| {
-                Model::new(
-                    &models,
-                    &x_model,
-                    &project_datamodel.dimensions,
-                    &units_ctx,
-                    true,
-                )
+                ModelStage0::new(&x_model, &project_datamodel.dimensions, &units_ctx, true)
             })
-            .collect();
-
-        let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = project_datamodel
-            .models
-            .iter()
-            .map(|m| model::build_xvars_map(m.name.clone(), m))
             .collect();
 
         models_list.extend(
             project_datamodel
                 .models
                 .iter()
-                .map(|m| Model::new(&models, m, &project_datamodel.dimensions, &units_ctx, false)),
+                .map(|m| ModelStage0::new(m, &project_datamodel.dimensions, &units_ctx, false)),
         );
+
+        let models: HashMap<Ident, ModelStage0> = models_list
+            .iter()
+            .cloned()
+            .map(|m| (m.ident.clone(), m))
+            .collect();
 
         //             let inputs = v.references.iter().map(|mi| {
         //                 crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
@@ -88,6 +81,11 @@ impl From<datamodel::Project> for Project {
         //                 .map(|e| e.unwrap_err())
         //                 .map(VariableError::EquationError)
         //                 .collect();
+
+        let mut models_list: Vec<Model> = models_list
+            .into_iter()
+            .map(|model| Model::new(&models, &model))
+            .collect();
 
         let model_order = {
             let model_deps = models_list

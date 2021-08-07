@@ -63,7 +63,7 @@ pub enum Variable<MI = ModuleInput> {
     },
 }
 
-impl Variable {
+impl<MI> Variable<MI> {
     pub fn ident(&self) -> &str {
         match self {
             Variable::Stock { ident: name, .. } => name.as_str(),

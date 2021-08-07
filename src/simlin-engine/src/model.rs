@@ -5,8 +5,12 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::result::Result as StdResult;
 
-use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
+use crate::common::{
+    EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, VariableError,
+};
 use crate::datamodel::Dimension;
+#[cfg(test)]
+use crate::datamodel::ModuleReference;
 use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::{canonicalize, datamodel, eqn_err, model_err, var_eqn_err};
@@ -15,10 +19,26 @@ use std::hash::Hash;
 pub type ModuleInputSet = BTreeSet<Ident>;
 pub type DependencySet = BTreeSet<Ident>;
 
+pub type VariableStage0 = Variable<datamodel::ModuleReference>;
+
+/// ModelStage0 converts a datamodel::Model to one with a map of canonicalized
+/// identifiers to Variables where module dependencies haven't been resolved.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ModelStage0 {
+    pub ident: Ident,
+    pub display_name: String,
+    pub variables: HashMap<Ident, VariableStage0>,
+    pub errors: Option<Vec<Error>>,
+    /// implicit is true if this model was implicitly added to the project
+    /// by virtue of it being in the stdlib (or some similar reason)
+    pub implicit: bool,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
-    pub variables: HashMap<String, Variable>,
+    pub display_name: String,
+    pub variables: HashMap<Ident, Variable>,
     pub errors: Option<Vec<Error>>,
     /// model_deps is the transitive set of model names referenced from modules in this model
     pub model_deps: Option<BTreeSet<Ident>>,
@@ -365,10 +385,10 @@ where
 }
 
 fn resolve_relative<'a>(
-    models: &HashMap<String, HashMap<Ident, &'a datamodel::Variable>>,
+    models: &'a HashMap<Ident, ModelStage0>,
     model_name: &str,
     ident: &str,
-) -> Option<&'a datamodel::Variable> {
+) -> Option<&'a VariableStage0> {
     let ident = if model_name == "main" && ident.starts_with('·') {
         &ident['·'.len_utf8()..]
     } else {
@@ -387,7 +407,7 @@ fn resolve_relative<'a>(
         let submodel_var = &ident[pos + '·'.len_utf8()..];
         resolve_relative(models, submodel_name, submodel_var)
     } else {
-        Some(model.get(ident)?)
+        Some(model.variables.get(ident)?)
     }
 }
 
@@ -422,10 +442,90 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
     }
 }
 
+pub(crate) fn resolve_module_inputs(
+    models: &HashMap<Ident, ModelStage0>,
+    parent_module_name: &str,
+    var_s0: &VariableStage0,
+) -> Variable {
+    match var_s0 {
+        Variable::Stock {
+            ident,
+            ast,
+            eqn,
+            units,
+            inflows,
+            outflows,
+            non_negative,
+            errors,
+        } => Variable::Stock {
+            ident: ident.clone(),
+            ast: ast.clone(),
+            eqn: eqn.clone(),
+            units: units.clone(),
+            inflows: inflows.clone(),
+            outflows: outflows.clone(),
+            non_negative: *non_negative,
+            errors: errors.clone(),
+        },
+        Variable::Var {
+            ident,
+            ast,
+            eqn,
+            units,
+            table,
+            non_negative,
+            is_flow,
+            is_table_only,
+            errors,
+        } => Variable::Var {
+            ident: ident.clone(),
+            ast: ast.clone(),
+            eqn: eqn.clone(),
+            units: units.clone(),
+            table: table.clone(),
+            non_negative: *non_negative,
+            is_flow: *is_flow,
+            is_table_only: *is_table_only,
+            errors: errors.clone(),
+        },
+        Variable::Module {
+            ident,
+            model_name,
+            units,
+            inputs,
+            errors,
+        } => {
+            let var_errors = errors;
+
+            let inputs = inputs.iter().map(|mi| {
+                resolve_module_input(models, parent_module_name, ident, &mi.src, &mi.dst)
+            });
+
+            let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
+            let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
+            let mut errors: Vec<VariableError> = errors
+                .into_iter()
+                .map(|e| e.unwrap_err())
+                .map(VariableError::EquationError)
+                .collect();
+
+            errors.append(&mut var_errors.clone());
+
+            Variable::Module {
+                ident: ident.clone(),
+                model_name: model_name.clone(),
+                units: units.clone(),
+                inputs,
+                errors,
+            }
+        }
+    }
+}
+
 // parent_module_name is the name of the model that has the module instantiation,
 // _not_ the name of the model this module instantiates
-pub fn resolve_module_input<'a>(
-    models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
+pub(crate) fn resolve_module_input<'a>(
+    models: &HashMap<String, ModelStage0>,
     parent_model_name: &str,
     ident: &str,
     orig_src: &'a str,
@@ -536,9 +636,8 @@ where
     Ok(())
 }
 
-impl Model {
+impl ModelStage0 {
     pub fn new(
-        models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
         x_model: &datamodel::Model,
         dimensions: &[Dimension],
         units_ctx: &Context,
@@ -546,12 +645,12 @@ impl Model {
     ) -> Self {
         let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
 
-        let mut variable_list: Vec<Variable> = x_model
+        let mut variable_list: Vec<VariableStage0> = x_model
             .variables
             .iter()
             .map(|v| {
                 parse_var(dimensions, v, &mut implicit_vars, units_ctx, |mi| {
-                    resolve_module_input(models, &x_model.name, v.get_ident(), &mi.src, &mi.dst)
+                    Ok(Some(mi.clone()))
                 })
             })
             .collect();
@@ -565,26 +664,31 @@ impl Model {
                     &x_var,
                     &mut dummy_implicit_vars,
                     units_ctx,
-                    |mi| {
-                        resolve_module_input(
-                            models,
-                            &x_model.name,
-                            x_var.get_ident(),
-                            &mi.src,
-                            &mi.dst,
-                        )
-                    },
+                    |mi| Ok(Some(mi.clone())),
                 )
             }));
             assert_eq!(0, dummy_implicit_vars.len());
         }
 
-        let variables: HashMap<String, Variable> = variable_list
+        let variables: HashMap<Ident, _> = variable_list
             .into_iter()
             .map(|v| (v.ident().to_string(), v))
             .collect();
 
-        let model_deps = variables
+        Self {
+            ident: canonicalize(&x_model.name),
+            display_name: x_model.name.clone(),
+            variables,
+            errors: None,
+            implicit,
+        }
+    }
+}
+
+impl Model {
+    pub fn new(models: &HashMap<Ident, ModelStage0>, model_s0: &ModelStage0) -> Self {
+        let model_deps = model_s0
+            .variables
             .values()
             .filter(|v| v.is_module())
             .map(|v| {
@@ -597,13 +701,24 @@ impl Model {
             .collect();
 
         Model {
-            name: x_model.name.clone(),
-            variables,
+            name: model_s0.ident.clone(),
+            display_name: model_s0.display_name.clone(),
+            variables: model_s0
+                .variables
+                .iter()
+                .map(|(ident, v)| {
+                    // TODO: parse units here
+                    (
+                        ident.clone(),
+                        resolve_module_inputs(models, &model_s0.ident, v),
+                    )
+                })
+                .collect(),
             errors: None,
             model_deps: Some(model_deps),
             dt_dep_map: None,
             initial_dep_map: None,
-            implicit,
+            implicit: model_s0.implicit,
         }
     }
 
@@ -719,7 +834,7 @@ fn optional_vec(slice: &[&str]) -> Vec<String> {
 
 #[cfg(test)]
 fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
-    use datamodel::{Module, ModuleReference, Variable, Visibility};
+    use datamodel::{Module, Variable, Visibility};
     let references: Vec<ModuleReference> = refs
         .iter()
         .map(|(src, dst)| ModuleReference {
@@ -920,64 +1035,42 @@ fn test_module_parse() {
         ],
     );
 
-    let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = vec![
+    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
+    let units_ctx = crate::units::Context::new(&[]).unwrap();
+
+    let models: HashMap<Ident, ModelStage0> = vec![
         ("main".to_string(), &main_model),
         ("lynxes".to_string(), &lynxes_model),
         ("hares".to_string(), &hares_model),
     ]
     .into_iter()
-    .map(|(name, m)| build_xvars_map(name, m))
+    .map(|(name, m)| (name, ModelStage0::new(m, &[], &units_ctx, false)))
     .collect();
 
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[]).unwrap();
-    let actual = parse_var(
-        &[],
-        models["main"]["hares"],
-        &mut implicit_vars,
-        &unit_ctx,
-        |mi| {
-            resolve_module_input(
-                &models,
-                "main",
-                models["main"]["hares"].get_ident(),
-                &mi.src,
-                &mi.dst,
-            )
-        },
-    );
+    let hares_var = &main_model.variables[2];
+    assert_eq!("hares", hares_var.get_ident());
+
+    let actual = parse_var(&[], hares_var, &mut implicit_vars, &units_ctx, |mi| {
+        resolve_module_input(&models, "main", hares_var.get_ident(), &mi.src, &mi.dst)
+    });
     assert!(actual.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     assert_eq!(expected, actual);
 }
 
-pub fn build_xvars_map(
-    name: Ident,
-    m: &datamodel::Model,
-) -> (Ident, HashMap<Ident, &datamodel::Variable>) {
-    (
-        canonicalize(&name),
-        m.variables
-            .iter()
-            .map(|v| (v.get_ident().to_string(), v))
-            .collect(),
-    )
-}
-
 #[test]
 fn test_errors() {
+    let units_ctx = Context::new(&[]).unwrap();
     let main_model = x_model("main", vec![x_aux("aux_3", "unknown_variable * 3.14")]);
-    let models: HashMap<String, HashMap<Ident, &datamodel::Variable>> =
-        vec![("main".to_string(), &main_model)]
-            .into_iter()
-            .map(|(name, m)| build_xvars_map(name, m))
-            .collect();
+    let models: HashMap<String, ModelStage0> = vec![("main".to_string(), &main_model)]
+        .into_iter()
+        .map(|(name, m)| (name, ModelStage0::new(m, &[], &units_ctx, false)))
+        .collect();
 
     let model = {
         let no_module_inputs: ModuleInputSet = BTreeSet::new();
         let default_instantiation = [no_module_inputs].iter().cloned().collect();
-        let units_ctx = Context::new(&[]).unwrap();
-        let mut model = Model::new(&models, &main_model, &[], &units_ctx, false);
+        let mut model = Model::new(&models, &models["main"]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1091,25 +1184,20 @@ fn test_all_deps() {
             x_aux("aux_4", "mod_1.output"),
         ],
     );
-    let x_models: HashMap<String, HashMap<Ident, &datamodel::Variable>> = vec![
+    let units_ctx = Context::new(&[]).unwrap();
+    let x_models: HashMap<String, ModelStage0> = vec![
         ("mod_1".to_owned(), &mod_1_model),
         ("main".to_owned(), &main_model),
     ]
     .into_iter()
-    .map(|(name, m)| build_xvars_map(name, m))
+    .map(|(name, m)| (name, ModelStage0::new(m, &[], &units_ctx, false)))
     .collect();
 
     let mut model_list = vec!["mod_1", "main"]
         .into_iter()
         .map(|name| {
-            let vars = &x_models[name];
-            let x_model = datamodel::Model {
-                name: name.to_owned(),
-                variables: vars.values().cloned().cloned().collect(),
-                views: vec![],
-            };
-            let units_ctx = Context::new(&[]).unwrap();
-            Model::new(&x_models, &x_model, &[], &units_ctx, false)
+            let model_s0 = &x_models[name];
+            Model::new(&x_models, model_s0)
         })
         .collect::<Vec<_>>();
 
@@ -1134,21 +1222,11 @@ fn test_all_deps() {
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[]).unwrap();
-    let mod_1 = parse_var(
-        &[],
-        x_models["main"]["mod_1"],
-        &mut implicit_vars,
-        &unit_ctx,
-        |mi| {
-            resolve_module_input(
-                &x_models,
-                "main",
-                x_models["main"]["mod_1"].get_ident(),
-                &mi.src,
-                &mi.dst,
-            )
-        },
-    );
+    let mod_1_orig = &main_model.variables[0];
+    assert_eq!("mod_1", mod_1_orig.get_ident());
+    let mod_1 = parse_var(&[], mod_1_orig, &mut implicit_vars, &unit_ctx, |mi| {
+        resolve_module_input(&x_models, "main", mod_1_orig.get_ident(), &mi.src, &mi.dst)
+    });
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
     let aux_4 = aux("aux_4", "mod_1.output");
