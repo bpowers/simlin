@@ -13,7 +13,7 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{len_utf8, quoteize, ErrorCode, Ident, Result};
+use crate::common::{quoteize, ErrorCode, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::interpreter::UnaryOp;
 use crate::model::{enumerate_modules, Model};
@@ -270,7 +270,7 @@ impl<'a> Context<'a> {
         if let Some(pos) = ident.find('·') {
             let submodel_module_name = &ident[..pos];
             let submodel_name = &self.module_models[model][submodel_module_name];
-            let submodel_var = &ident[pos + len_utf8('·')..];
+            let submodel_var = &ident[pos + '·'.len_utf8()..];
             self.get_submodel_metadata(submodel_name, submodel_var)
         } else {
             Ok(&metadata[ident])
@@ -282,7 +282,7 @@ impl<'a> Context<'a> {
         if let Some(pos) = ident.find('·') {
             let submodel_module_name = &ident[..pos];
             let submodel_name = &self.module_models[model][submodel_module_name];
-            let submodel_var = &ident[pos + len_utf8('·')..];
+            let submodel_var = &ident[pos + '·'.len_utf8()..];
             let submodel_off = metadata[submodel_module_name].offset;
             Ok(submodel_off
                 + self.get_submodel_offset(submodel_name, submodel_var, ignore_arrays)?)

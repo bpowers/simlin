@@ -5,9 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::result::Result as StdResult;
 
-use crate::common::{
-    len_utf8, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
-};
+use crate::common::{EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
@@ -372,7 +370,7 @@ fn resolve_relative<'a>(
     ident: &str,
 ) -> Option<&'a datamodel::Variable> {
     let ident = if model_name == "main" && ident.starts_with('·') {
-        &ident[len_utf8('·')..]
+        &ident['·'.len_utf8()..]
     } else {
         ident
     };
@@ -386,7 +384,7 @@ fn resolve_relative<'a>(
     // TODO: this will have to change when we break `module ident == model name`
     if let Some(pos) = ident.find('·') {
         let submodel_name = &ident[..pos];
-        let submodel_var = &ident[pos + len_utf8('·')..];
+        let submodel_var = &ident[pos + '·'.len_utf8()..];
         resolve_relative(models, submodel_name, submodel_var)
     } else {
         Some(model.get(ident)?)
@@ -396,7 +394,7 @@ fn resolve_relative<'a>(
 fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Variable> {
     let model_name = ctx.model_name;
     let ident = if model_name == "main" && ident.starts_with('·') {
-        &ident[len_utf8('·')..]
+        &ident['·'.len_utf8()..]
     } else {
         ident
     };
@@ -409,7 +407,7 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
     // TODO: this will have to change when we break `module ident == model name`
     if let Some(pos) = ident.find('·') {
         let submodel_name = &ident[..pos];
-        let submodel_var = &ident[pos + len_utf8('·')..];
+        let submodel_var = &ident[pos + '·'.len_utf8()..];
         let ctx = DepContext {
             is_initial: ctx.is_initial,
             model_name: submodel_name,
@@ -436,7 +434,7 @@ pub fn resolve_module_input<'a>(
     let input_prefix = format!("{}·", ident);
     let maybe_strip_leading_dot = |s: &'a str| -> &'a str {
         if parent_model_name == "main" && s.starts_with('·') {
-            &s[len_utf8('·')..] // '·' is a 2 byte long unicode character
+            &s['·'.len_utf8()..] // '·' is a 2 byte long unicode character
         } else {
             s
         }

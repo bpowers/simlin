@@ -392,32 +392,3 @@ pub fn topo_sort<'out>(
     assert_eq!(runlist_len, result.len());
     result
 }
-
-#[inline(always)]
-/// len_utf8 returns the number of bytes needed to represent a
-/// unicode character as a utf8 sequence. taken from char.len_utf8,
-/// but made const. (TODO: remove this when the stdlib version is const)
-pub const fn len_utf8(code: char) -> usize {
-    const MAX_ONE_B: u32 = 0x80;
-    const MAX_TWO_B: u32 = 0x800;
-    const MAX_THREE_B: u32 = 0x10000;
-
-    let code = code as u32;
-    if code < MAX_ONE_B {
-        1
-    } else if code < MAX_TWO_B {
-        2
-    } else if code < MAX_THREE_B {
-        3
-    } else {
-        4
-    }
-}
-
-#[test]
-fn test_len_utf8() {
-    assert_eq!(1, len_utf8('a'));
-    assert_eq!(2, len_utf8('·'));
-    assert_eq!(3, len_utf8('⁚'));
-    assert_eq!(4, len_utf8('🁓'));
-}
