@@ -78,6 +78,17 @@ impl From<datamodel::Project> for Project {
                 .map(|m| Model::new(&models, m, &project_datamodel.dimensions, &units_ctx, false)),
         );
 
+        //             let inputs = v.references.iter().map(|mi| {
+        //                 crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
+        //             });
+        //             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
+        //             let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
+        //             let mut errors: Vec<VariableError> = errors
+        //                 .into_iter()
+        //                 .map(|e| e.unwrap_err())
+        //                 .map(VariableError::EquationError)
+        //                 .collect();
+
         let model_order = {
             let model_deps = models_list
                 .iter_mut()

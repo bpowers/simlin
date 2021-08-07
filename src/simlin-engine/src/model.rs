@@ -550,14 +550,9 @@ impl Model {
             .variables
             .iter()
             .map(|v| {
-                parse_var(
-                    models,
-                    &x_model.name,
-                    dimensions,
-                    v,
-                    &mut implicit_vars,
-                    units_ctx,
-                )
+                parse_var(dimensions, v, &mut implicit_vars, units_ctx, |mi| {
+                    resolve_module_input(models, &x_model.name, v.get_ident(), &mi.src, &mi.dst)
+                })
             })
             .collect();
 
@@ -566,12 +561,19 @@ impl Model {
             let mut dummy_implicit_vars: Vec<datamodel::Variable> = Vec::new();
             variable_list.extend(implicit_vars.into_iter().map(|x_var| {
                 parse_var(
-                    models,
-                    &x_model.name,
                     dimensions,
                     &x_var,
                     &mut dummy_implicit_vars,
                     units_ctx,
+                    |mi| {
+                        resolve_module_input(
+                            models,
+                            &x_model.name,
+                            x_var.get_ident(),
+                            &mi.src,
+                            &mi.dst,
+                        )
+                    },
                 )
             }));
             assert_eq!(0, dummy_implicit_vars.len());
@@ -757,14 +759,9 @@ fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[]).unwrap();
-    let var = parse_var(
-        &HashMap::new(),
-        "main",
-        &[],
-        &var,
-        &mut implicit_vars,
-        &unit_ctx,
-    );
+    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
+        resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
+    });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     var
@@ -789,14 +786,9 @@ fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[]).unwrap();
-    let var = parse_var(
-        &HashMap::new(),
-        "main",
-        &[],
-        &var,
-        &mut implicit_vars,
-        &unit_ctx,
-    );
+    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
+        resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
+    });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     var
@@ -823,14 +815,9 @@ fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variabl
     let var = x_stock(ident, eqn, inflows, outflows);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[]).unwrap();
-    let var = parse_var(
-        &HashMap::new(),
-        "main",
-        &[],
-        &var,
-        &mut implicit_vars,
-        &unit_ctx,
-    );
+    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
+        resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
+    });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     var
@@ -945,12 +932,19 @@ fn test_module_parse() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[]).unwrap();
     let actual = parse_var(
-        &models,
-        "main",
         &[],
         models["main"]["hares"],
         &mut implicit_vars,
         &unit_ctx,
+        |mi| {
+            resolve_module_input(
+                &models,
+                "main",
+                models["main"]["hares"].get_ident(),
+                &mi.src,
+                &mi.dst,
+            )
+        },
     );
     assert!(actual.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
@@ -1141,12 +1135,19 @@ fn test_all_deps() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[]).unwrap();
     let mod_1 = parse_var(
-        &x_models,
-        "main",
         &[],
         x_models["main"]["mod_1"],
         &mut implicit_vars,
         &unit_ctx,
+        |mi| {
+            resolve_module_input(
+                &x_models,
+                "main",
+                x_models["main"]["mod_1"].get_ident(),
+                &mi.src,
+                &mi.dst,
+            )
+        },
     );
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");

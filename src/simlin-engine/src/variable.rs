@@ -1,8 +1,8 @@
-// Copyright 2020 The Model Authors. All rights reserved.
+// Copyright 2021 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
@@ -31,7 +31,7 @@ pub struct ModuleInput {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Variable {
+pub enum Variable<MI = ModuleInput> {
     Stock {
         ident: Ident,
         ast: Option<Ast>,
@@ -58,7 +58,7 @@ pub enum Variable {
         ident: Ident,
         model_name: Ident,
         units: Option<datamodel::UnitMap>,
-        inputs: Vec<ModuleInput>,
+        inputs: Vec<MI>,
         errors: Vec<VariableError>,
     },
 }
@@ -283,14 +283,17 @@ fn parse_equation(
     }
 }
 
-pub fn parse_var(
-    models: &HashMap<String, HashMap<Ident, &datamodel::Variable>>,
-    model_name: &str,
+pub fn parse_var<MI, F>(
     dimensions: &[Dimension],
     v: &datamodel::Variable,
     implicit_vars: &mut Vec<datamodel::Variable>,
     units_ctx: &units::Context,
-) -> Variable {
+    module_input_mapper: F,
+) -> Variable<MI>
+where
+    MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
+    F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
+{
     let mut parse_and_lower_eqn =
         |ident: &str, eqn: &datamodel::Equation| -> (Option<Ast>, Vec<EquationError>) {
             let (ast, mut errors) = parse_equation(eqn, dimensions);
@@ -421,11 +424,9 @@ pub fn parse_var(
         }
         datamodel::Variable::Module(v) => {
             let ident = v.ident.clone();
-            let inputs = v.references.iter().map(|mi| {
-                crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
-            });
+            let inputs = v.references.iter().map(module_input_mapper);
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
-            let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
+            let inputs: Vec<MI> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
             let mut errors: Vec<VariableError> = errors
                 .into_iter()
                 .map(|e| e.unwrap_err())
@@ -653,14 +654,9 @@ fn test_tables() {
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[]).unwrap();
-    let output = parse_var(
-        &HashMap::new(),
-        "main",
-        &[],
-        &input,
-        &mut implicit_vars,
-        &unit_ctx,
-    );
+    let output = parse_var(&[], &input, &mut implicit_vars, &unit_ctx, |mi| {
+        Ok(Some(mi.clone()))
+    });
 
     assert_eq!(expected, output);
 }
