@@ -30,6 +30,8 @@ impl From<datamodel::Project> for Project {
         use crate::units::Context;
 
         // first, build the unit context.
+        // TODO: there is probably a shared/common core of units we should
+        //       pull in
 
         let mut project_errors = vec![];
 
@@ -49,7 +51,7 @@ impl From<datamodel::Project> for Project {
             }
         };
 
-        // first, pull in the models we need from the stdlib
+        // next, pull in all the models from the stdlib
         let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES
             .iter()
             .map(|name| crate::stdlib::get(name).unwrap())
@@ -58,6 +60,7 @@ impl From<datamodel::Project> for Project {
             })
             .collect();
 
+        // extend the list with the models from the project/XMILE file
         models_list.extend(
             project_datamodel
                 .models
@@ -70,17 +73,6 @@ impl From<datamodel::Project> for Project {
             .cloned()
             .map(|m| (m.ident.clone(), m))
             .collect();
-
-        //             let inputs = v.references.iter().map(|mi| {
-        //                 crate::model::resolve_module_input(models, model_name, &ident, &mi.src, &mi.dst)
-        //             });
-        //             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
-        //             let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
-        //             let mut errors: Vec<VariableError> = errors
-        //                 .into_iter()
-        //                 .map(|e| e.unwrap_err())
-        //                 .map(VariableError::EquationError)
-        //                 .collect();
 
         let mut models_list: Vec<Model> = models_list
             .into_iter()
