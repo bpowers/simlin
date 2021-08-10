@@ -1,4 +1,4 @@
-// Copyright 2021 The Model Authors. All rights reserved.
+// Copyright 2021 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -7,7 +7,7 @@ import * as React from 'react';
 import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
-import { createEditor, Node, Text } from 'slate';
+import { createEditor, Descendant, Text } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 
@@ -28,6 +28,7 @@ import {
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
+import { EquationElement } from './drawing/SlateEditor';
 import { LookupEditor } from './LookupEditor';
 import { errorCodeDescription } from '@system-dynamics/engine';
 
@@ -93,16 +94,21 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 // export type VariableDetailsProps = Pick<VariableDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
 
 interface VariableDetailsState {
-  equation: Node[];
+  equation: Descendant[];
   editor: ReactEditor;
 }
 
-function equationFromValue(children: Node[]): string {
+function equationFromValue(children: Descendant[]): string {
   return plainSerialize(children);
 }
 
-function valueFromEquation(equation: string): Node[] {
-  return plainDeserialize(equation);
+function valueFromEquation(equation: string): EquationElement[] {
+  return [
+    {
+      type: 'equation',
+      children: plainDeserialize(equation),
+    },
+  ];
 }
 
 function scalarEquationFor(variable: Variable): string {
@@ -146,7 +152,7 @@ export const VariableDetails = withStyles(styles)(
       };
     }
 
-    handleEquationChange = (equation: Node[]): void => {
+    handleEquationChange = (equation: Descendant[]): void => {
       this.setState({ equation });
     };
 
@@ -293,17 +299,13 @@ export const VariableDetails = withStyles(styles)(
 
       return (
         <CardContent>
-          <Slate
-            editor={this.state.editor}
-            value={this.state.equation}
-            onChange={this.handleEquationChange}
-            onBlur={this.handleEquationSave}
-          >
+          <Slate editor={this.state.editor} value={this.state.equation} onChange={this.handleEquationChange}>
             <Editable
               className={classes.eqnEditor}
               renderLeaf={this.renderLeaf}
               placeholder="Enter an equation..."
               spellCheck={false}
+              onBlur={this.handleEquationSave}
             />
           </Slate>
 

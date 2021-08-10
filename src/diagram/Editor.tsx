@@ -1694,7 +1694,7 @@ export const Editor = withStyles(styles)(
       this.handleViewBoxChange(newViewBox, newZoom);
     };
 
-    async takeSnapshot() {
+    takeSnapshot() {
       const project = this.project();
       if (!project || !this.state.modelName) {
         return;
@@ -1704,35 +1704,37 @@ export const Editor = withStyles(styles)(
       const [svg, viewbox] = renderSvgToString(project, modelName);
       const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
       const ctx = exists(osCanvas.getContext('2d'));
-      const svgBlob = new Blob([svg], {type: 'image/svg+xml;charset=utf-8'});
+      const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
       const svgUrl = URL.createObjectURL(svgBlob);
 
       const image = new Image();
       image.onload = () => {
         ctx.drawImage(image, 0, 0, viewbox.width * 4, viewbox.height * 4);
 
-        osCanvas.convertToBlob().then((snapshotBlob) => {
-          this.setState({ snapshotBlob });
-        }, () => {
-          this.setState({
-            modelErrors: this.state.modelErrors.push(new Error('snapshot creation failed (1).')),
-          });
-        });
+        osCanvas.convertToBlob().then(
+          (snapshotBlob) => {
+            this.setState({ snapshotBlob });
+          },
+          () => {
+            this.setState({
+              modelErrors: this.state.modelErrors.push(new Error('snapshot creation failed (1).')),
+            });
+          },
+        );
       };
       image.onerror = () => {
         this.setState({
           modelErrors: this.state.modelErrors.push(new Error('snapshot creation failed (2).')),
         });
-      }
+      };
 
       image.src = svgUrl;
     }
 
     handleSnapshot = (kind: 'show' | 'close') => {
       if (kind === 'show') {
-        // eslint-disable-next-line @typescript-eslint/no-misused-promises
-        setTimeout(async () => {
-          await this.takeSnapshot();
+        setTimeout(() => {
+          this.takeSnapshot();
         });
       }
     };

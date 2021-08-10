@@ -1,4 +1,4 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { createEditor, Node } from 'slate';
+import { createEditor, Descendant, Node } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 
@@ -31,16 +31,14 @@ const styles = createStyles({
 });
 
 interface EditingLabelPropsFull extends CommonLabelProps, WithStyles<typeof styles> {
-  value: Node[];
-  onChange: (value: Node[]) => void;
+  value: Descendant[];
+  onChange: (value: Descendant[]) => void;
   onDone: (isCancel: boolean) => void;
 }
 
 interface EditingLabelState {
   editor: ReactEditor;
 }
-
-export type EditingLabelProps = Pick<EditingLabelPropsFull, 'value' | 'onChange' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
 
 export const EditableLabel = withStyles(styles)(
   class EditableLabel extends React.PureComponent<EditingLabelPropsFull, EditingLabelState> {
@@ -52,7 +50,7 @@ export const EditableLabel = withStyles(styles)(
       };
     }
 
-    handleChange = (value: Node[]): void => {
+    handleChange = (value: Descendant[]): void => {
       this.props.onChange(value);
     };
 

@@ -8,7 +8,7 @@ import * as React from 'react';
 
 import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
 
-import { Node } from 'slate';
+import { Descendant } from 'slate';
 
 import { List, Map, Set } from 'immutable';
 
@@ -33,6 +33,7 @@ import {
   Rect as ViewRect,
 } from '@system-dynamics/core/datamodel';
 
+import { Alias, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
 import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
@@ -41,8 +42,8 @@ import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
 import { Module, moduleBounds, ModuleProps } from './Module';
+import { CustomText } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
-import { Alias, AliasProps } from './Alias';
 
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
@@ -129,7 +130,7 @@ interface CanvasState {
   isMovingArrow: boolean;
   isMovingLabel: boolean;
   labelSide: 'right' | 'bottom' | 'left' | 'top' | undefined;
-  editingName: Array<Node>;
+  editingName: Array<Descendant>;
   editNameOnPointerUp: boolean;
   flowStillBeingCreated: boolean;
   dragSelectionPoint: Point | undefined;
@@ -1167,7 +1168,7 @@ export const Canvas = withStyles(styles)(
       }
 
       let isEditingName = !!isText;
-      let editingName: Array<Node> = [];
+      let editingName: Array<CustomText> = [];
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
@@ -1247,7 +1248,7 @@ export const Canvas = withStyles(styles)(
       this.props.onSetSelection(Set([element.uid]));
     };
 
-    handleEditingNameChange = (value: Node[]): void => {
+    handleEditingNameChange = (value: Descendant[]): void => {
       this.setState({ editingName: value });
     };
 

@@ -1,20 +1,19 @@
-// Copyright 2019 The Model Authors. All rights reserved.
+// Copyright 2021 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
 import { List } from 'immutable';
+import { Node, Descendant } from 'slate';
 
-import { Node } from 'slate';
+import { CustomText } from './SlateEditor';
 
-export function plainDeserialize(str: string): Node[] {
-  return str.split('\n').map((line: string): Node => {
-    return {
-      children: [{ text: line }],
-    };
+export function plainDeserialize(str: string): CustomText[] {
+  return str.split('\n').map((line: string): CustomText => {
+    return { text: line };
   });
 }
 
-export function plainSerialize(value: Node[]): string {
+export function plainSerialize(value: Descendant[]): string {
   return value.map((n) => Node.string(n)).join('\n');
 }
 
