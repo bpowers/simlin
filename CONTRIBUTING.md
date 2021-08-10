@@ -1,4 +1,4 @@
-## How to contribute to Model
+## How to contribute to Simlin
 
 #### **Did you find a bug?**
 
@@ -29,6 +29,6 @@ Model is a volunteer effort. We encourage you to pitch in and join the team!
 
 Thanks! :heart: :heart: :heart:
 
-Model authors
+Simlin authors
 
 _(this is heavily based on the [Ruby on Rails contribution guidelines](https://github.com/rails/rails/blob/master/CONTRIBUTING.md))_
