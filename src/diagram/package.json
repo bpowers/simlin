@@ -51,7 +51,7 @@
     "@types/react-dom": "^17.0.0",
     "@types/react-router": "^5.1.1",
     "@types/react-router-dom": "^5.1.0",
-    "@types/recharts": "^1.8.18",
+    "@types/recharts": "^2.0.0",
     "@types/resize-observer-browser": "^0.1.5",
     "@typescript-eslint/eslint-plugin": "^4.11.0",
     "@typescript-eslint/parser": "^4.11.0",
