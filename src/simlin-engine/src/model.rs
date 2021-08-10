@@ -698,7 +698,7 @@ impl Model {
                     unreachable!();
                 }
             })
-            .collect();
+            .collect::<BTreeSet<_>>();
 
         Model {
             name: model_s0.ident.clone(),
