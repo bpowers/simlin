@@ -1,9 +1,6 @@
-# system dynamics Model editor
+# Simlin: a system dynamics modeling tool
 
-[![Dependency Status](https://david-dm.org/bpowers/simlin/status.svg)](https://david-dm.org/bpowers/simlin)
-[![devDependency Status](https://david-dm.org/bpowers/simlin/dev-status.svg)](https://david-dm.org/bpowers/simlin?type=dev)
-
-Model is a tool for [System Dynamics modeling](https://www.systemdynamics.org/what-is-sd#overview).
+Simlin is a tool for creating and editing [System Dynamics models](https://www.systemdynamics.org/what-is-sd#overview).
 
 ![simple example model](doc/population-model.png)
 
@@ -45,4 +42,4 @@ $ yarn start:frontend
 
 Now to the browser!
 
-Visit http://localhost:3030/auth/google to kick off an oauth request.  Once that is done, you can start local development + iteration on http://localhost:3000/ (any saves of the TypeScript files will automatically recompile + reload the service + React app).
+You can start local development + iteration on http://localhost:3000/

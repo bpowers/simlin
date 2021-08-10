@@ -25,7 +25,7 @@
 
 * Ask any question about the source code by [opening an issue](https://github.com/bpowers/simlin/issues/new).
 
-Model is a volunteer effort. We encourage you to pitch in and join the team!
+Simlin is a volunteer effort. We encourage you to pitch in and join the team!
 
 Thanks! :heart: :heart: :heart:
 
