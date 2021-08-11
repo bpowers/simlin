@@ -16,7 +16,7 @@ use crate::bytecode::{
 use crate::common::{quoteize, ErrorCode, Ident, Result};
 use crate::datamodel::Dimension;
 use crate::interpreter::UnaryOp;
-use crate::model::{enumerate_modules, Model};
+use crate::model::{enumerate_modules, ModelStage1};
 use crate::project::Project;
 use crate::variable::Variable;
 use crate::vm::{
@@ -1277,7 +1277,7 @@ fn calc_n_slots(
 impl Module {
     fn new(
         project: &Project,
-        model: Rc<Model>,
+        model: Rc<ModelStage1>,
         inputs: &BTreeSet<Ident>,
         is_root: bool,
     ) -> Result<Self> {

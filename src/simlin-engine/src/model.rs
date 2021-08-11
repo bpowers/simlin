@@ -35,7 +35,7 @@ pub struct ModelStage0 {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Model {
+pub struct ModelStage1 {
     pub name: String,
     pub display_name: String,
     pub variables: HashMap<Ident, Variable>,
@@ -61,7 +61,7 @@ fn get_deps<'a>(
         .flatten()
 }
 
-impl Model {
+impl ModelStage1 {
     pub(crate) fn dt_deps(
         &self,
         inputs: &ModuleInputSet,
@@ -209,7 +209,7 @@ fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
 struct DepContext<'a> {
     is_initial: bool,
     model_name: &'a str,
-    models: &'a HashMap<Ident, &'a Model>,
+    models: &'a HashMap<Ident, &'a ModelStage1>,
     sibling_vars: &'a HashMap<Ident, Variable>,
     module_inputs: Option<&'a ModuleInputSet>,
     dimensions: &'a [Dimension],
@@ -568,9 +568,9 @@ pub(crate) fn resolve_module_input<'a>(
 }
 
 pub fn enumerate_modules<T>(
-    models: &HashMap<&str, &Model>,
+    models: &HashMap<&str, &ModelStage1>,
     main_model_name: &str,
-    mapper: fn(&Model) -> T,
+    mapper: fn(&ModelStage1) -> T,
 ) -> Result<HashMap<T, BTreeSet<BTreeSet<Ident>>>>
 where
     T: Eq + Hash,
@@ -593,9 +593,9 @@ where
 }
 
 pub(crate) fn enumerate_modules_inner<T>(
-    models: &HashMap<&str, &Model>,
+    models: &HashMap<&str, &ModelStage1>,
     model_name: &str,
-    mapper: fn(&Model) -> T,
+    mapper: fn(&ModelStage1) -> T,
     modules: &mut HashMap<T, BTreeSet<BTreeSet<Ident>>>,
 ) -> Result<()>
 where
@@ -685,7 +685,7 @@ impl ModelStage0 {
     }
 }
 
-impl Model {
+impl ModelStage1 {
     pub fn new(models: &HashMap<Ident, ModelStage0>, model_s0: &ModelStage0) -> Self {
         let model_deps = model_s0
             .variables
@@ -700,7 +700,7 @@ impl Model {
             })
             .collect::<BTreeSet<_>>();
 
-        Model {
+        ModelStage1 {
             name: model_s0.ident.clone(),
             display_name: model_s0.display_name.clone(),
             variables: model_s0
@@ -724,7 +724,7 @@ impl Model {
 
     pub(crate) fn set_dependencies(
         &mut self,
-        models: &HashMap<Ident, &Model>,
+        models: &HashMap<Ident, &ModelStage1>,
         dimensions: &[Dimension],
         instantiations: &BTreeSet<ModuleInputSet>,
     ) {
@@ -1070,7 +1070,7 @@ fn test_errors() {
     let model = {
         let no_module_inputs: ModuleInputSet = BTreeSet::new();
         let default_instantiation = [no_module_inputs].iter().cloned().collect();
-        let mut model = Model::new(&models, &models["main"]);
+        let mut model = ModelStage1::new(&models, &models["main"]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1104,7 +1104,7 @@ fn test_all_deps() {
     fn verify_all_deps(
         expected_deps_list: &[(&Variable, &[&str])],
         is_initial: bool,
-        models: &HashMap<Ident, &Model>,
+        models: &HashMap<Ident, &ModelStage1>,
         module_inputs: Option<&BTreeSet<Ident>>,
     ) {
         let default_inputs = BTreeSet::<Ident>::new();
@@ -1197,7 +1197,7 @@ fn test_all_deps() {
         .into_iter()
         .map(|name| {
             let model_s0 = &x_models[name];
-            Model::new(&x_models, model_s0)
+            ModelStage1::new(&x_models, model_s0)
         })
         .collect::<Vec<_>>();
 
@@ -1209,7 +1209,7 @@ fn test_all_deps() {
 
     let models = {
         let no_instantiations = BTreeSet::new();
-        let mut models: HashMap<Ident, &Model> = HashMap::new();
+        let mut models: HashMap<Ident, &ModelStage1> = HashMap::new();
         for model in model_list.iter_mut() {
             let instantiations = module_instantiations
                 .get(&model.name)

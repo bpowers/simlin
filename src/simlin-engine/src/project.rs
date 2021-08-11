@@ -13,7 +13,7 @@ use crate::{datamodel, model};
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub datamodel: datamodel::Project,
-    pub models: HashMap<String, Rc<model::Model>>,
+    pub models: HashMap<String, Rc<model::ModelStage1>>,
     pub errors: Vec<Error>,
 }
 
@@ -26,7 +26,7 @@ impl Project {
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         use crate::common::{topo_sort, ErrorCode, ErrorKind, Ident};
-        use crate::model::{enumerate_modules, Model};
+        use crate::model::{enumerate_modules, ModelStage1};
         use crate::units::Context;
 
         // first, build the unit context.
@@ -74,9 +74,9 @@ impl From<datamodel::Project> for Project {
             .map(|m| (m.ident.clone(), m))
             .collect();
 
-        let mut models_list: Vec<Model> = models_list
+        let mut models_list: Vec<ModelStage1> = models_list
             .into_iter()
-            .map(|model| Model::new(&models, &model))
+            .map(|model| ModelStage1::new(&models, &model))
             .collect();
 
         let model_order = {
@@ -112,7 +112,7 @@ impl From<datamodel::Project> for Project {
         // to ensure we have the information available for modules
         {
             let no_instantiations = BTreeSet::new();
-            let mut models: HashMap<Ident, &Model> = HashMap::new();
+            let mut models: HashMap<Ident, &ModelStage1> = HashMap::new();
             for model in models_list.iter_mut() {
                 let instantiations = module_instantiations
                     .get(&model.name)

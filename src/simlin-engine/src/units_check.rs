@@ -7,7 +7,7 @@ use std::result::Result as StdResult;
 use crate::ast::{Ast, Expr};
 use crate::common::{Error, ErrorKind, Ident, Result};
 use crate::datamodel::UnitMap;
-use crate::model::Model;
+use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::units::Context;
 use crate::{model_err, ErrorCode};
@@ -15,7 +15,7 @@ use crate::{model_err, ErrorCode};
 #[allow(dead_code)]
 struct UnitEvaluator<'a> {
     project: &'a Project,
-    model: &'a Model,
+    model: &'a ModelStage1,
     ctx: &'a Context,
     // units for module inputs
 }
