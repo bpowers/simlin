@@ -42,23 +42,22 @@ pub struct ModelStage1 {
     pub errors: Option<Vec<Error>>,
     /// model_deps is the transitive set of model names referenced from modules in this model
     pub model_deps: Option<BTreeSet<Ident>>,
-    // the dep maps have an extra layer of indirection: the key is the
-    // set of module inputs
-    dt_dep_map: Option<HashMap<ModuleInputSet, HashMap<Ident, DependencySet>>>,
-    initial_dep_map: Option<HashMap<ModuleInputSet, HashMap<Ident, DependencySet>>>,
+    pub instantiations: Option<HashMap<ModuleInputSet, ModuleStage2>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
     pub implicit: bool,
 }
 
-fn get_deps<'a>(
-    all_deps: &'a Option<HashMap<ModuleInputSet, HashMap<Ident, DependencySet>>>,
-    inputs: &ModuleInputSet,
-) -> Option<&'a HashMap<Ident, DependencySet>> {
-    all_deps
-        .as_ref()
-        .map(|all_deps| all_deps.get(inputs))
-        .flatten()
+#[derive(Clone, PartialEq, Debug)]
+pub struct ModuleStage2 {
+    pub model_ident: Ident,
+    /// inputs is the set of variables overridden (provided as input) in this
+    /// module instantiation.
+    pub inputs: ModuleInputSet,
+    /// initial_dependencies contains variables dependencies needed to calculate the initial values of stocks
+    pub initial_dependencies: HashMap<Ident, DependencySet>,
+    /// dt_dependencies contains the variable dependencies used during normal "dt" iterations/calculations.
+    pub dt_dependencies: HashMap<Ident, DependencySet>,
 }
 
 impl ModelStage1 {
@@ -66,14 +65,20 @@ impl ModelStage1 {
         &self,
         inputs: &ModuleInputSet,
     ) -> Option<&HashMap<Ident, DependencySet>> {
-        get_deps(&self.dt_dep_map, inputs)
+        self.instantiations
+            .as_ref()
+            .and_then(|instances| instances.get(inputs).map(|module| &module.dt_dependencies))
     }
 
     pub(crate) fn initial_deps(
         &self,
         inputs: &ModuleInputSet,
     ) -> Option<&HashMap<Ident, DependencySet>> {
-        get_deps(&self.initial_dep_map, inputs)
+        self.instantiations.as_ref().and_then(|instances| {
+            instances
+                .get(inputs)
+                .map(|module| &module.initial_dependencies)
+        })
     }
 }
 
@@ -274,8 +279,8 @@ where
                 );
             }
 
-            // in the case of module output dependencies, this one dep may
-            // turn into several.
+            // in the case of a dependency on a module output, this one dep may
+            // turn into several: we'll need to depend on the inputs to that module
             let filtered_deps: Vec<Ident> = if dep.contains('·') {
                 // if the dependency was e.g. "submodel.output", do a dataflow analysis to
                 // figure out which of the set of (inputs + module) we depend on
@@ -297,6 +302,9 @@ where
                     model_name, inputs, ..
                 } = all_vars[module_ident]
                 {
+                    // XXX: I don't remember why we do this differently here
+                    //      and then special case modules below (end of this
+                    //      for loop)
                     match module_output_deps(ctx, model_name, output_ident, inputs, module_ident) {
                         Ok(deps) => deps.into_iter().map(|s| s.to_string()).collect(),
                         Err(err) => {
@@ -716,8 +724,7 @@ impl ModelStage1 {
                 .collect(),
             errors: None,
             model_deps: Some(model_deps),
-            dt_dep_map: None,
-            initial_dep_map: None,
+            instantiations: None,
             implicit: model_s0.implicit,
         }
     }
@@ -731,58 +738,55 @@ impl ModelStage1 {
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
         let mut var_errors: HashMap<Ident, HashSet<EquationError>> = HashMap::new();
 
-        let mut dt_dep_map = HashMap::with_capacity(instantiations.len());
-        let mut initial_dep_map = HashMap::with_capacity(instantiations.len());
+        let instantiations = instantiations
+            .iter()
+            .map(|instantiation| {
+                let mut ctx = DepContext {
+                    is_initial: false,
+                    model_name: self.name.as_str(),
+                    sibling_vars: &self.variables,
+                    models,
+                    module_inputs: Some(instantiation),
+                    dimensions,
+                };
 
-        for instantiation in instantiations.iter() {
-            let mut ctx = DepContext {
-                is_initial: false,
-                model_name: self.name.as_str(),
-                sibling_vars: &self.variables,
-                models,
-                module_inputs: Some(instantiation),
-                dimensions,
-            };
+                let dt_deps = match all_deps(&ctx, self.variables.values()) {
+                    Ok(deps) => Some(deps),
+                    Err((ident, err)) => {
+                        var_errors
+                            .entry(ident)
+                            .or_insert_with(HashSet::new)
+                            .insert(err);
+                        None
+                    }
+                };
 
-            let dt_deps = match all_deps(&ctx, self.variables.values()) {
-                Ok(deps) => Some(deps),
-                Err((ident, err)) => {
-                    var_errors
-                        .entry(ident)
-                        .or_insert_with(HashSet::new)
-                        .insert(err);
-                    None
-                }
-            };
+                ctx.is_initial = true;
 
-            if let Some(deps) = dt_deps {
-                dt_dep_map.insert(instantiation.clone(), deps);
-            }
+                let initial_deps = match all_deps(&ctx, self.variables.values()) {
+                    Ok(deps) => Some(deps),
+                    Err((ident, err)) => {
+                        var_errors
+                            .entry(ident)
+                            .or_insert_with(HashSet::new)
+                            .insert(err);
+                        None
+                    }
+                };
 
-            ctx.is_initial = true;
+                (
+                    instantiation.clone(),
+                    ModuleStage2 {
+                        model_ident: self.name.clone(),
+                        inputs: instantiation.clone(),
+                        dt_dependencies: dt_deps.unwrap_or_default(),
+                        initial_dependencies: initial_deps.unwrap_or_default(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
 
-            let initial_deps = match all_deps(&ctx, self.variables.values()) {
-                Ok(deps) => Some(deps),
-                Err((ident, err)) => {
-                    var_errors
-                        .entry(ident)
-                        .or_insert_with(HashSet::new)
-                        .insert(err);
-                    None
-                }
-            };
-
-            if let Some(deps) = initial_deps {
-                initial_dep_map.insert(instantiation.clone(), deps);
-            }
-        }
-
-        if !dt_dep_map.is_empty() {
-            self.dt_dep_map = Some(dt_dep_map);
-        }
-        if !initial_dep_map.is_empty() {
-            self.initial_dep_map = Some(initial_dep_map);
-        }
+        self.instantiations = Some(instantiations);
 
         let mut errors: Vec<Error> = Vec::new();
         let mut variables_have_errors = false;
