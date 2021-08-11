@@ -49,10 +49,7 @@ jobs:
           submodules: true
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          components: rustfmt, clippy
+        run: rustup show
 
       - name: Check formatting
         run: cargo fmt -- --check --color=auto
