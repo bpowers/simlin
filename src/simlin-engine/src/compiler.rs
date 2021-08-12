@@ -13,8 +13,8 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{quoteize, ErrorCode, Ident, Result};
-use crate::datamodel::Dimension;
+use crate::common::{quoteize, ErrorCode, ErrorKind, Ident, Result};
+use crate::datamodel::{self, Dimension};
 use crate::interpreter::UnaryOp;
 use crate::model::{enumerate_modules, ModelStage1};
 use crate::project::Project;
@@ -23,7 +23,6 @@ use crate::vm::{
     is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
 };
-use crate::{common, datamodel};
 use crate::{sim_err, Error};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1281,13 +1280,17 @@ impl Module {
         inputs: &BTreeSet<Ident>,
         is_root: bool,
     ) -> Result<Self> {
-        let dt_deps = model.dt_deps(inputs);
-        let initial_deps = model.initial_deps(inputs);
-        if dt_deps.is_none() || initial_deps.is_none() {
-            return sim_err!(NotSimulatable, model.name.clone());
-        }
-        let dt_deps = dt_deps.unwrap();
-        let initial_deps = initial_deps.unwrap();
+        let inputs_set = inputs.iter().cloned().collect::<BTreeSet<_>>();
+
+        let instantiation = model
+            .instantiations
+            .as_ref()
+            .and_then(|instantiations| instantiations.get(&inputs_set))
+            .ok_or(Error {
+                kind: ErrorKind::Simulation,
+                code: ErrorCode::NotSimulatable,
+                details: Some(model.name.clone()),
+            })?;
 
         // TODO: eventually we should try to simulate subsets of the model in the face of errors
         if model.errors.is_some() && !model.errors.as_ref().unwrap().is_empty() {
@@ -1305,76 +1308,40 @@ impl Module {
         };
         let module_models = calc_module_model_map(project, model_name);
 
-        let build_runlist = |deps: &HashMap<Ident, BTreeSet<Ident>>,
-                             part: StepPart,
-                             predicate: &dyn Fn(&&str) -> bool|
-         -> Result<Vec<Var>> {
-            let runlist: Vec<&str> = var_names.iter().cloned().filter(predicate).collect();
-            let runlist = match part {
-                StepPart::Initials => {
-                    let needed: HashSet<&str> = runlist
-                        .iter()
-                        .cloned()
-                        .filter(|id| {
-                            let v = &model.variables[*id];
-                            v.is_stock() || v.is_module()
-                        })
-                        .collect();
-                    let mut runlist: HashSet<&str> = needed
-                        .iter()
-                        .flat_map(|id| &deps[*id])
-                        .map(|id| id.as_str())
-                        .collect();
-                    runlist.extend(needed);
-                    let runlist = runlist.into_iter().collect();
-                    common::topo_sort(runlist, deps)
-                }
-                StepPart::Flows => common::topo_sort(runlist, deps),
-                StepPart::Stocks => runlist,
-            };
-            // eprintln!("runlist {}", model_name);
-            // for (i, name) in runlist.iter().enumerate() {
-            //     eprintln!("  {}: {}", i, name);
-            // }
-            let is_initial = matches!(part, StepPart::Initials);
-            let runlist: Result<Vec<Var>> = runlist
-                .into_iter()
-                .map(|ident| {
-                    Var::new(
-                        &Context {
-                            dimensions: &project.datamodel.dimensions,
-                            model_name,
-                            ident,
-                            active_dimension: None,
-                            active_subscript: None,
-                            metadata: &metadata,
-                            module_models: &module_models,
-                            is_initial,
-                            inputs,
-                        },
-                        &model.variables[ident],
-                    )
-                })
-                .collect();
-            // for v in runlist.clone().unwrap().iter() {
-            //     eprintln!("{}", pretty(&v.ast));
-            // }
-            // eprintln!("");
-
-            runlist
+        let build_var = |ident, is_initial| {
+            Var::new(
+                &Context {
+                    dimensions: &project.datamodel.dimensions,
+                    model_name,
+                    ident,
+                    active_dimension: None,
+                    active_subscript: None,
+                    metadata: &metadata,
+                    module_models: &module_models,
+                    is_initial,
+                    inputs,
+                },
+                &model.variables[ident],
+            )
         };
 
-        let runlist_initials = build_runlist(initial_deps, StepPart::Initials, &|_| true)?;
+        let runlist_initials = instantiation
+            .runlist_initials
+            .iter()
+            .map(|ident| build_var(ident, true))
+            .collect::<Result<Vec<Var>>>()?;
 
-        let inputs_set: HashSet<Ident> = inputs.iter().cloned().collect();
+        let runlist_flows = instantiation
+            .runlist_flows
+            .iter()
+            .map(|ident| build_var(ident, false))
+            .collect::<Result<Vec<Var>>>()?;
 
-        let runlist_flows = build_runlist(dt_deps, StepPart::Flows, &|id| {
-            inputs_set.contains(*id) || !(&model.variables[*id]).is_stock()
-        })?;
-        let runlist_stocks = build_runlist(dt_deps, StepPart::Stocks, &|id| {
-            let v = &model.variables[*id];
-            !inputs_set.contains(*id) && (v.is_stock() || v.is_module())
-        })?;
+        let runlist_stocks = instantiation
+            .runlist_stocks
+            .iter()
+            .map(|ident| build_var(ident, false))
+            .collect::<Result<Vec<Var>>>()?;
 
         let mut runlist_order = Vec::with_capacity(runlist_flows.len() + runlist_stocks.len());
         runlist_order.extend(runlist_flows.iter().map(|v| v.ident.clone()));
@@ -1411,7 +1378,7 @@ impl Module {
 
         Ok(Module {
             ident: model_name.to_string(),
-            inputs: inputs_set,
+            inputs: inputs_set.into_iter().collect(),
             n_slots,
             runlist_initials,
             runlist_flows,

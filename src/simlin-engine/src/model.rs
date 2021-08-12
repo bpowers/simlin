@@ -6,13 +6,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::result::Result as StdResult;
 
 use crate::common::{
-    EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, VariableError,
+    topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
+    VariableError,
 };
 use crate::datamodel::Dimension;
 #[cfg(test)]
 use crate::datamodel::ModuleReference;
 use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
+use crate::vm::StepPart;
 use crate::{canonicalize, datamodel, eqn_err, model_err, var_eqn_err};
 use std::hash::Hash;
 
@@ -58,6 +60,9 @@ pub struct ModuleStage2 {
     pub initial_dependencies: HashMap<Ident, DependencySet>,
     /// dt_dependencies contains the variable dependencies used during normal "dt" iterations/calculations.
     pub dt_dependencies: HashMap<Ident, DependencySet>,
+    pub runlist_initials: Vec<Ident>,
+    pub runlist_flows: Vec<Ident>,
+    pub runlist_stocks: Vec<Ident>,
 }
 
 impl ModelStage1 {
@@ -735,8 +740,17 @@ impl ModelStage1 {
         dimensions: &[Dimension],
         instantiations: &BTreeSet<ModuleInputSet>,
     ) {
+        // used when building runlists - give us a stable order to start with
+        let var_names: Vec<&str> = {
+            let mut var_names: Vec<_> = self.variables.keys().map(|s| s.as_str()).collect();
+            var_names.sort_unstable();
+            var_names
+        };
+
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
         let mut var_errors: HashMap<Ident, HashSet<EquationError>> = HashMap::new();
+        // model errors
+        let mut errors: Vec<Error> = Vec::new();
 
         let instantiations = instantiations
             .iter()
@@ -774,6 +788,72 @@ impl ModelStage1 {
                     }
                 };
 
+                let build_runlist = |deps: &HashMap<Ident, BTreeSet<Ident>>,
+                                     part: StepPart,
+                                     predicate: &dyn Fn(&&str) -> bool|
+                 -> Vec<Ident> {
+                    let runlist: Vec<&str> = var_names.iter().cloned().filter(predicate).collect();
+                    let runlist = match part {
+                        StepPart::Initials => {
+                            let needed: HashSet<&str> = runlist
+                                .iter()
+                                .cloned()
+                                .filter(|id| {
+                                    let v = &self.variables[*id];
+                                    v.is_stock() || v.is_module()
+                                })
+                                .collect();
+                            let mut runlist: HashSet<&str> = needed
+                                .iter()
+                                .flat_map(|id| &deps[*id])
+                                .map(|id| id.as_str())
+                                .collect();
+                            runlist.extend(needed);
+                            let runlist = runlist.into_iter().collect();
+                            topo_sort(runlist, deps)
+                        }
+                        StepPart::Flows => topo_sort(runlist, deps),
+                        StepPart::Stocks => runlist,
+                    };
+                    // eprintln!("runlist {}", model_name);
+                    // for (i, name) in runlist.iter().enumerate() {
+                    //     eprintln!("  {}: {}", i, name);
+                    // }
+                    let runlist: Vec<Ident> =
+                        runlist.into_iter().map(|ident| ident.to_owned()).collect();
+                    // for v in runlist.clone().unwrap().iter() {
+                    //     eprintln!("{}", pretty(&v.ast));
+                    // }
+                    // eprintln!("");
+
+                    runlist
+                };
+
+                let runlist_initials = if let Some(deps) = initial_deps.as_ref() {
+                    build_runlist(deps, StepPart::Initials, &|_| true)
+                } else {
+                    vec![]
+                };
+
+                let runlist_flows = if let Some(deps) = dt_deps.as_ref() {
+                    build_runlist(deps, StepPart::Flows, &|id| {
+                        instantiation.contains(*id) || !self.variables[*id].is_stock()
+                    })
+                } else {
+                    vec![]
+                };
+
+                let runlist_stocks = if let Some(deps) = dt_deps.as_ref() {
+                    build_runlist(deps, StepPart::Stocks, &|id| {
+                        let v = &self.variables[*id];
+                        // modules need to be called _both_ during Flows and Stocks, as
+                        // they may contain _both_ flows and Stocks
+                        !instantiation.contains(*id) && (v.is_stock() || v.is_module())
+                    })
+                } else {
+                    vec![]
+                };
+
                 (
                     instantiation.clone(),
                     ModuleStage2 {
@@ -781,6 +861,9 @@ impl ModelStage1 {
                         inputs: instantiation.clone(),
                         dt_dependencies: dt_deps.unwrap_or_default(),
                         initial_dependencies: initial_deps.unwrap_or_default(),
+                        runlist_initials,
+                        runlist_flows,
+                        runlist_stocks,
                     },
                 )
             })
@@ -788,7 +871,6 @@ impl ModelStage1 {
 
         self.instantiations = Some(instantiations);
 
-        let mut errors: Vec<Error> = Vec::new();
         let mut variables_have_errors = false;
         for (ident, var) in self.variables.iter_mut() {
             if var_errors.contains_key(ident) {
