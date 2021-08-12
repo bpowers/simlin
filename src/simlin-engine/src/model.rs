@@ -15,7 +15,7 @@ use crate::datamodel::ModuleReference;
 use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::vm::StepPart;
-use crate::{canonicalize, datamodel, eqn_err, model_err, var_eqn_err};
+use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
 use std::hash::Hash;
 
 pub type ModuleInputSet = BTreeSet<Ident>;
@@ -699,7 +699,11 @@ impl ModelStage0 {
 }
 
 impl ModelStage1 {
-    pub fn new(models: &HashMap<Ident, ModelStage0>, model_s0: &ModelStage0) -> Self {
+    pub fn new(
+        units_ctx: &Context,
+        models: &HashMap<Ident, ModelStage0>,
+        model_s0: &ModelStage0,
+    ) -> Self {
         let model_deps = model_s0
             .variables
             .values()
@@ -713,25 +717,40 @@ impl ModelStage1 {
             })
             .collect::<BTreeSet<_>>();
 
-        ModelStage1 {
+        let mut model = ModelStage1 {
             name: model_s0.ident.clone(),
             display_name: model_s0.display_name.clone(),
             variables: model_s0
                 .variables
                 .iter()
                 .map(|(ident, v)| {
-                    // TODO: parse units here
                     (
                         ident.clone(),
                         resolve_module_inputs(models, &model_s0.ident, v),
                     )
                 })
                 .collect(),
-            errors: None,
+            errors: model_s0.errors.clone(),
             model_deps: Some(model_deps),
             instantiations: None,
             implicit: model_s0.implicit,
-        }
+        };
+
+        match units_check::check(units_ctx, &model) {
+            Ok(Ok(())) => {}
+            Ok(Err(errors)) => {
+                for (ident, err) in errors.into_iter() {
+                    eprintln!("unit error in '{}': {}", ident, err);
+                }
+            }
+            Err(err) => {
+                let mut errors = model.errors.take().unwrap_or_default();
+                errors.push(err);
+                model.errors = Some(errors);
+            }
+        };
+
+        model
     }
 
     pub(crate) fn set_dependencies(
@@ -1156,7 +1175,7 @@ fn test_errors() {
     let model = {
         let no_module_inputs: ModuleInputSet = BTreeSet::new();
         let default_instantiation = [no_module_inputs].iter().cloned().collect();
-        let mut model = ModelStage1::new(&models, &models["main"]);
+        let mut model = ModelStage1::new(&Context::default(), &models, &models["main"]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1283,7 +1302,7 @@ fn test_all_deps() {
         .into_iter()
         .map(|name| {
             let model_s0 = &x_models[name];
-            ModelStage1::new(&x_models, model_s0)
+            ModelStage1::new(&Context::default(), &x_models, model_s0)
         })
         .collect::<Vec<_>>();
 

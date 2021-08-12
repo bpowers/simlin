@@ -76,7 +76,7 @@ impl From<datamodel::Project> for Project {
 
         let mut models_list: Vec<ModelStage1> = models_list
             .into_iter()
-            .map(|model| ModelStage1::new(&models, &model))
+            .map(|model| ModelStage1::new(&units_ctx, &models, &model))
             .collect();
 
         let model_order = {

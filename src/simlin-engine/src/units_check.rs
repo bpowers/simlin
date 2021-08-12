@@ -5,18 +5,14 @@
 use std::result::Result as StdResult;
 
 use crate::ast::{Ast, Expr};
-use crate::common::{Error, ErrorKind, Ident, Result};
+use crate::common::{Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
-use crate::project::Project;
 use crate::units::Context;
-use crate::{model_err, ErrorCode};
 
-#[allow(dead_code)]
 struct UnitEvaluator<'a> {
-    project: &'a Project,
-    model: &'a ModelStage1,
     ctx: &'a Context,
+    model: &'a ModelStage1,
     // units for module inputs
 }
 
@@ -51,12 +47,9 @@ impl<'a> UnitEvaluator<'a> {
 // calculate the concrete units for each equation.  The outer result
 // indicates if we had a problem running the analysis.  The inner result
 // returns a list of unit problems, if there was one.
-pub fn check(
-    project: &Project,
-    ctx: Context,
-    main_model_name: &str,
-) -> Result<StdResult<(), Vec<(Ident, Error)>>> {
+pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Ident, Error)>>> {
     let mut errors = vec![];
+
     // TODO: modules
 
     // get the main model
@@ -64,46 +57,37 @@ pub fn check(
     // for each variable, evaluate the equation given the unit context
     // if the result doesn't match the expected thing, accumulate an error
 
-    if let Some(model) = project.models.get(main_model_name) {
-        let units = UnitEvaluator {
-            project,
-            model,
-            ctx: &ctx,
-        };
-        for (ident, var) in model.variables.iter() {
-            if let Some(expected) = var.units() {
-                if let Some(ast) = var.ast() {
-                    match ast {
-                        Ast::Scalar(expr) => match units.check(expr) {
-                            Ok(Units::Explicit(actual)) => {
-                                if &actual != expected {
-                                    errors.push((
-                                        ident.clone(),
-                                        Error {
-                                            kind: ErrorKind::Variable,
-                                            code: ErrorCode::UnitMismatch,
-                                            details: Some(
-                                                "TODO: pretty print the mismatch".to_owned(),
-                                            ),
-                                        },
-                                    ))
-                                }
+    let units = UnitEvaluator { ctx, model };
+
+    for (ident, var) in model.variables.iter() {
+        if let Some(expected) = var.units() {
+            if let Some(ast) = var.ast() {
+                match ast {
+                    Ast::Scalar(expr) => match units.check(expr) {
+                        Ok(Units::Explicit(actual)) => {
+                            if &actual != expected {
+                                errors.push((
+                                    ident.clone(),
+                                    Error {
+                                        kind: ErrorKind::Variable,
+                                        code: ErrorCode::UnitMismatch,
+                                        details: Some("TODO: pretty print the mismatch".to_owned()),
+                                    },
+                                ))
                             }
-                            Ok(Units::Constant) => {
-                                // definitionally we're fine
-                            }
-                            Err(err) => {
-                                errors.push((ident.clone(), err));
-                            }
-                        },
-                        Ast::ApplyToAll(_, _) => {}
-                        Ast::Arrayed(_, _) => {}
-                    }
+                        }
+                        Ok(Units::Constant) => {
+                            // definitionally we're fine
+                        }
+                        Err(err) => {
+                            errors.push((ident.clone(), err));
+                        }
+                    },
+                    Ast::ApplyToAll(_, _) => {}
+                    Ast::Arrayed(_, _) => {}
                 }
             }
         }
-    } else {
-        return model_err!(BadModelName, main_model_name.to_owned());
     }
 
     // units checking uses the model's equations and variable's
