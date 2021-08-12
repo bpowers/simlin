@@ -8,8 +8,9 @@ use crate::ast::{Ast, Expr};
 use crate::common::{Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
-use crate::units::Context;
+use crate::units::{pretty_print_unit, Context};
 
+#[allow(dead_code)]
 struct UnitEvaluator<'a> {
     ctx: &'a Context,
     model: &'a ModelStage1,
@@ -66,12 +67,17 @@ pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Id
                     Ast::Scalar(expr) => match units.check(expr) {
                         Ok(Units::Explicit(actual)) => {
                             if &actual != expected {
+                                let details = format!(
+                                    "expected '{}', found units '{}'",
+                                    pretty_print_unit(expected),
+                                    pretty_print_unit(&actual)
+                                );
                                 errors.push((
                                     ident.clone(),
                                     Error {
                                         kind: ErrorKind::Variable,
                                         code: ErrorCode::UnitMismatch,
-                                        details: Some("TODO: pretty print the mismatch".to_owned()),
+                                        details: Some(details),
                                     },
                                 ))
                             }

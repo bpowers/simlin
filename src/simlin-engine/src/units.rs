@@ -299,6 +299,100 @@ pub fn parse_units(
     }
 }
 
+pub fn pretty_print_unit(units: &UnitMap) -> String {
+    let unit_names = {
+        let mut unit_names = units.keys().map(|unit| unit.as_str()).collect::<Vec<_>>();
+        unit_names.sort_unstable();
+        unit_names
+    };
+
+    let mut result = "".to_owned();
+
+    for (unit, exp) in unit_names
+        .iter()
+        .map(|unit| (unit, units[*unit]))
+        .filter(|(_, exp)| *exp > 0)
+    {
+        result.push_str(unit);
+        if exp.abs() > 1 {
+            result.push_str(format!("^{}", exp.abs()).as_str())
+        }
+    }
+
+    let mut first = true;
+
+    for (unit, exp) in unit_names
+        .iter()
+        .map(|unit| (unit, units[*unit]))
+        .filter(|(_, exp)| *exp < 0)
+    {
+        if first {
+            if result.is_empty() {
+                result.push('1');
+            }
+            result.push('/');
+            first = false;
+        }
+        result.push_str(unit);
+        if exp.abs() > 1 {
+            result.push_str(format!("^{}", exp.abs()).as_str())
+        }
+    }
+
+    if result.is_empty() {
+        "dmnl".to_string()
+    } else {
+        result
+    }
+}
+
+#[test]
+fn test_pretty_print_unit() {
+    let context = Context::new(&[
+        Unit {
+            name: "time".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec![],
+        },
+        Unit {
+            name: "people".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["person".to_owned(), "persons".to_owned()],
+        },
+        Unit {
+            name: "meter".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["m".to_owned(), "meters".to_owned()],
+        },
+        Unit {
+            name: "second".to_owned(),
+            equation: None,
+            disabled: false,
+            aliases: vec!["s".to_owned(), "seconds".to_owned()],
+        },
+    ])
+    .unwrap();
+
+    let positive_cases: &[(&str, &str); 6] = &[
+        ("m^2/s", "meter^2/second"),
+        ("person * people * persons", "people^3"),
+        ("m^2/meters", "meter"),
+        ("time * people / time", "people"),
+        ("1", "dmnl"),
+        ("1/s", "1/second"),
+    ];
+
+    for (input, output) in positive_cases {
+        let expr = parse_equation(input).unwrap().unwrap();
+        let result = build_unit_components(&context, &expr).unwrap();
+        let pretty = pretty_print_unit(&result);
+        assert_eq!(*output, pretty);
+    }
+}
+
 // we have 3 problems here: the first (and simpler) is evaluating unit equations and turning them in to UnitMaps (done)
 // the second is: given a context of unitmaps, can we _check_ the types of variables.  This won't work if there are builtins in use.
 // the third is: if we only have _some_ units filled in, can we _infer_ the rest? This will also enable units for builtins
