@@ -202,7 +202,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
     let unit_map: UnitMap = match ast {
         Expr::Const(_, _, loc) => {
             if let Ok(1) = const_int_eval(ast) {
-                std::collections::BTreeMap::new()
+                UnitMap::new()
             } else {
                 // nothing to do here (handled below in Op2)
                 return eqn_err!(NoConstInUnits, loc.start, loc.end);
@@ -210,7 +210,11 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
         }
         Expr::Var(id, _) => {
             let id = ctx.aliases.get(id).unwrap_or(id);
-            [(id.to_owned(), 1)].iter().cloned().collect()
+            if id == "dmnl" || id == "nil" || id == "dimensionless" || id == "fraction" {
+                UnitMap::new()
+            } else {
+                [(id.to_owned(), 1)].iter().cloned().collect()
+            }
         }
         Expr::App(_, _, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
@@ -308,11 +312,16 @@ pub fn pretty_print_unit(units: &UnitMap) -> String {
 
     let mut result = "".to_owned();
 
+    let mut first = true;
     for (unit, exp) in unit_names
         .iter()
         .map(|unit| (unit, units[*unit]))
         .filter(|(_, exp)| *exp > 0)
     {
+        if !first {
+            result.push('*');
+        }
+        first = false;
         result.push_str(unit);
         if exp.abs() > 1 {
             result.push_str(format!("^{}", exp.abs()).as_str())
@@ -320,7 +329,6 @@ pub fn pretty_print_unit(units: &UnitMap) -> String {
     }
 
     let mut first = true;
-
     for (unit, exp) in unit_names
         .iter()
         .map(|unit| (unit, units[*unit]))
@@ -332,6 +340,8 @@ pub fn pretty_print_unit(units: &UnitMap) -> String {
             }
             result.push('/');
             first = false;
+        } else {
+            result.push('*');
         }
         result.push_str(unit);
         if exp.abs() > 1 {
@@ -376,12 +386,14 @@ fn test_pretty_print_unit() {
     ])
     .unwrap();
 
-    let positive_cases: &[(&str, &str); 6] = &[
+    let positive_cases: &[(&str, &str); 8] = &[
         ("m^2/s", "meter^2/second"),
         ("person * people * persons", "people^3"),
         ("m^2/meters", "meter"),
+        ("m*people/time", "meter*people/time"),
         ("time * people / time", "people"),
         ("1", "dmnl"),
+        ("1/dmnl", "dmnl"),
         ("1/s", "1/second"),
     ];
 
@@ -507,7 +519,7 @@ fn test_basic_unit_parsing() {
     ])
     .unwrap();
 
-    let positive_cases: &[(&str, UnitMap); 5] = &[
+    let positive_cases: &[(&str, UnitMap); 6] = &[
         (
             "m^2/s",
             [("meter".to_owned(), 2), ("second".to_owned(), -1)]
@@ -528,6 +540,7 @@ fn test_basic_unit_parsing() {
             [("people".to_owned(), 1)].iter().cloned().collect(),
         ),
         ("1", std::collections::BTreeMap::new()),
+        ("dmnl", std::collections::BTreeMap::new()),
     ];
 
     for (input, output) in positive_cases {

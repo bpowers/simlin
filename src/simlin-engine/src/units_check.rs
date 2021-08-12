@@ -4,7 +4,7 @@
 
 use std::result::Result as StdResult;
 
-use crate::ast::{Ast, Expr};
+use crate::ast::{Ast, BinaryOp, Expr};
 use crate::common::{Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
@@ -20,6 +20,7 @@ struct UnitEvaluator<'a> {
 /// Units is used to distinguish between explicit units (and explicit
 /// dimensionless-ness) and dimensionless-ness that comes from computing
 /// on constants.
+#[derive(Debug, PartialEq, Eq)]
 enum Units {
     Explicit(UnitMap),
     Constant,
@@ -28,19 +29,121 @@ enum Units {
 impl<'a> UnitEvaluator<'a> {
     fn check(&self, expr: &Expr) -> Result<Units> {
         match expr {
-            Expr::Const(_, _, _) => {
-                return Ok(Units::Constant);
-            }
-            Expr::Var(_, _) => {}
-            Expr::App(_, _, _) => {}
-            Expr::Subscript(_, _, _) => {}
-            Expr::Op1(_, _, _) => {}
-            Expr::Op2(_, _, _, _) => {}
-            Expr::If(_, _, _, _) => {}
-        };
+            Expr::Const(_, _, _) => Ok(Units::Constant),
+            Expr::Var(ident, _) => {
+                let var = self.model.variables.get(ident).ok_or(Error {
+                    kind: ErrorKind::Model,
+                    code: ErrorCode::DoesNotExist,
+                    details: Some(ident.clone()),
+                })?;
 
-        Ok(Units::Explicit(UnitMap::new()))
+                var.units()
+                    .ok_or(Error {
+                        kind: ErrorKind::Variable,
+                        code: ErrorCode::UnitDefinitionErrors,
+                        details: None,
+                    })
+                    .map(|units| Units::Explicit(units.clone()))
+            }
+            Expr::App(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr::Op1(_, l, _) => self.check(l),
+            Expr::Op2(op, l, r, _) => {
+                let lunits = self.check(l)?;
+                let runits = self.check(r)?;
+
+                match op {
+                    BinaryOp::Add | BinaryOp::Sub => match (lunits, runits) {
+                        (Units::Constant, Units::Constant) => Ok(Units::Constant),
+                        (Units::Constant, Units::Explicit(units))
+                        | (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
+                        (Units::Explicit(lunits), Units::Explicit(runits)) => {
+                            if lunits != runits {
+                                let lunits = pretty_print_unit(&lunits);
+                                let runits = pretty_print_unit(&runits);
+                                eprintln!(
+                                    "TODO: error, left ({}) and right ({}) units don't match",
+                                    lunits, runits
+                                );
+                            }
+                            Ok(Units::Explicit(lunits))
+                        }
+                    },
+                    BinaryOp::Exp | BinaryOp::Mod => Ok(lunits),
+                    BinaryOp::Mul => match (lunits, runits) {
+                        (Units::Constant, Units::Constant) => Ok(Units::Constant),
+                        (Units::Explicit(units), Units::Constant)
+                        | (Units::Constant, Units::Explicit(units)) => Ok(Units::Explicit(units)),
+                        (Units::Explicit(lunits), Units::Explicit(runits)) => {
+                            Ok(Units::Explicit(combine(UnitOp::Mul, lunits, runits)))
+                        }
+                    },
+                    BinaryOp::Div => match (lunits, runits) {
+                        (Units::Constant, Units::Constant) => Ok(Units::Constant),
+                        (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
+                        (Units::Constant, Units::Explicit(units)) => {
+                            Ok(Units::Explicit(combine(UnitOp::Div, UnitMap::new(), units)))
+                        }
+                        (Units::Explicit(lunits), Units::Explicit(runits)) => {
+                            Ok(Units::Explicit(combine(UnitOp::Div, lunits, runits)))
+                        }
+                    },
+                    BinaryOp::Gt
+                    | BinaryOp::Lt
+                    | BinaryOp::Gte
+                    | BinaryOp::Lte
+                    | BinaryOp::Eq
+                    | BinaryOp::Neq
+                    | BinaryOp::And
+                    | BinaryOp::Or => {
+                        // binary comparisons result in unitless quantities
+                        Ok(Units::Explicit(UnitMap::new()))
+                    }
+                }
+            }
+            Expr::If(_, l, r, _) => {
+                let lunits = self.check(l)?;
+                let runits = self.check(r)?;
+
+                if lunits != runits {
+                    eprintln!("TODO: if error, left and right units don't match");
+                }
+
+                Ok(lunits)
+            }
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnitOp {
+    Mul,
+    Div,
+}
+
+fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
+    let mut l = l;
+
+    for (unit, power) in r.into_iter() {
+        let lhs = l.get(unit.as_str()).copied().unwrap_or_default();
+        let result = {
+            match op {
+                UnitOp::Mul => lhs + power,
+                UnitOp::Div => lhs - power,
+            }
+        };
+        if result == 0 {
+            l.remove(&unit);
+        } else {
+            *l.entry(unit).or_default() = result;
+        }
+    }
+
+    if l.contains_key("dmnl") {
+        l.remove("dmnl");
+    }
+
+    l
 }
 
 #[allow(dead_code)]
@@ -66,7 +169,7 @@ pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Id
                 match ast {
                     Ast::Scalar(expr) => match units.check(expr) {
                         Ok(Units::Explicit(actual)) => {
-                            if &actual != expected {
+                            if actual != *expected {
                                 let details = format!(
                                     "expected '{}', found units '{}'",
                                     pretty_print_unit(expected),
