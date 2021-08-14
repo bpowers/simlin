@@ -192,6 +192,12 @@ pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Id
     };
 
     for (ident, var) in model.variables.iter() {
+        if var.table().is_some() {
+            // if a variable has a graphical function the equation is fed into
+            // that function like `f(eqn)` -- the units are just whatever is
+            // specified on the variable (like a constant would be)
+            continue;
+        }
         if let Some(expected) = var.units() {
             if let Some(ast) = var.ast() {
                 match ast {
