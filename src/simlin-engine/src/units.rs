@@ -10,7 +10,7 @@ use float_cmp::approx_eq;
 use crate::ast::{parse_equation, BinaryOp, Expr, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode};
 use crate::datamodel::{Unit, UnitMap};
-use crate::eqn_err;
+use crate::{canonicalize, eqn_err};
 
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -28,10 +28,12 @@ impl Context {
         let mut aliases = HashMap::new();
         let mut parsed_units = HashMap::new();
         for unit in units.iter().filter(|unit| unit.equation.is_none()) {
+            let unit_name = canonicalize(&unit.name);
             for alias in unit.aliases.iter() {
-                if aliases.contains_key(alias) {
+                let alias = canonicalize(alias);
+                if aliases.contains_key(&alias) {
                     unit_errors.push((
-                        unit.name.clone(),
+                        unit_name.clone(),
                         vec![EquationError {
                             start: 0,
                             end: 0,
@@ -39,12 +41,12 @@ impl Context {
                         }],
                     ));
                 } else {
-                    aliases.insert(alias.clone(), unit.name.clone());
+                    aliases.insert(alias, unit_name.clone());
                 }
             }
-            if aliases.contains_key(&unit.name) || parsed_units.contains_key(&unit.name) {
+            if aliases.contains_key(&unit_name) || parsed_units.contains_key(&unit_name) {
                 unit_errors.push((
-                    unit.name.clone(),
+                    unit_name.clone(),
                     vec![EquationError {
                         start: 0,
                         end: 0,
@@ -53,8 +55,8 @@ impl Context {
                 ));
             } else {
                 parsed_units.insert(
-                    unit.name.clone(),
-                    [(unit.name.clone(), 1)].iter().cloned().collect(),
+                    unit_name.clone(),
+                    [(unit_name.clone(), 1)].iter().cloned().collect(),
                 );
             }
         }
@@ -66,10 +68,12 @@ impl Context {
 
         // step 2: use this base context to parse our units with equations
         for unit in units.iter().filter(|unit| unit.equation.is_some()) {
+            let unit_name = canonicalize(&unit.name);
             for alias in unit.aliases.iter() {
-                if ctx.aliases.contains_key(alias) {
+                let alias = canonicalize(alias);
+                if ctx.aliases.contains_key(&alias) {
                     unit_errors.push((
-                        unit.name.clone(),
+                        unit_name.clone(),
                         vec![EquationError {
                             start: 0,
                             end: 0,
@@ -77,7 +81,7 @@ impl Context {
                         }],
                     ));
                 } else {
-                    ctx.aliases.insert(alias.clone(), unit.name.clone());
+                    ctx.aliases.insert(alias, unit_name.clone());
                 }
             }
 
@@ -86,7 +90,7 @@ impl Context {
             let ast = match parse_equation(eqn) {
                 Ok(ast) => ast,
                 Err(errors) => {
-                    unit_errors.push((unit.name.clone(), errors));
+                    unit_errors.push((unit_name.clone(), errors));
                     continue;
                 }
             };
@@ -96,7 +100,7 @@ impl Context {
                     Ok(unit_components) => unit_components,
                     Err(err) => {
                         unit_errors.push((
-                            unit.name.clone(),
+                            unit_name.clone(),
                             vec![EquationError {
                                 start: 0,
                                 end: 0,
@@ -106,12 +110,12 @@ impl Context {
                         continue;
                     }
                 },
-                None => [(unit.name.clone(), 1)].iter().cloned().collect(),
+                None => [(unit_name.clone(), 1)].iter().cloned().collect(),
             };
 
-            if ctx.aliases.contains_key(&unit.name) || ctx.units.contains_key(&unit.name) {
+            if ctx.aliases.contains_key(&unit_name) || ctx.units.contains_key(&unit_name) {
                 unit_errors.push((
-                    unit.name.clone(),
+                    unit_name.clone(),
                     vec![EquationError {
                         start: 0,
                         end: 0,
@@ -119,7 +123,7 @@ impl Context {
                     }],
                 ));
             } else {
-                ctx.units.insert(unit.name.clone(), unit_components);
+                ctx.units.insert(unit_name.clone(), unit_components);
             }
         }
 
