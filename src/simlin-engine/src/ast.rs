@@ -51,10 +51,10 @@ fn test_loc_basics() {
 // and we want to avoid copying and reallocating subexpressions all over
 // the place.
 #[derive(PartialEq, Clone, Debug)]
-pub enum Expr<AppId = Ident> {
+pub enum Expr {
     Const(String, f64, Loc),
     Var(Ident, Loc),
-    App(AppId, Vec<Expr>, Loc),
+    App(Ident, Vec<Expr>, Loc),
     Subscript(Ident, Vec<Expr>, Loc),
     Op1(UnaryOp, Box<Expr>, Loc),
     Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
