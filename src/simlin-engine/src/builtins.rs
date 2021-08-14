@@ -2,9 +2,47 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// equations are strings typed by humans for a single
+// variable -- u16 is long enough
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
+pub struct Loc {
+    pub start: u16,
+    pub end: u16,
+}
+
+impl Loc {
+    pub fn new(start: usize, end: usize) -> Self {
+        Loc {
+            start: start as u16,
+            end: end as u16,
+        }
+    }
+
+    pub fn union(&self, rhs: &Self) -> Self {
+        Loc {
+            start: self.start.min(rhs.start),
+            end: self.end.max(rhs.end),
+        }
+    }
+}
+
+#[test]
+fn test_loc_basics() {
+    let a = Loc { start: 3, end: 7 };
+    assert_eq!(a, Loc::new(3, 7));
+
+    let b = Loc { start: 4, end: 11 };
+    assert_eq!(Loc::new(3, 11), a.union(&b));
+
+    let c = Loc { start: 1, end: 5 };
+    assert_eq!(Loc::new(1, 7), a.union(&c));
+}
+
+pub struct UntypedBuiltinFn<Expr>(String, Vec<Expr>);
+
 #[derive(PartialEq, Clone, Debug)]
 pub enum BuiltinFn<Expr> {
-    Lookup(String, Box<Expr>),
+    Lookup(String, Loc, Box<Expr>),
     Abs(Box<Expr>),
     Arccos(Box<Expr>),
     Arcsin(Box<Expr>),
@@ -13,7 +51,7 @@ pub enum BuiltinFn<Expr> {
     Exp(Box<Expr>),
     Inf,
     Int(Box<Expr>),
-    IsModuleInput(String),
+    IsModuleInput(String, Loc),
     Ln(Box<Expr>),
     Log10(Box<Expr>),
     Max(Box<Expr>, Box<Expr>),

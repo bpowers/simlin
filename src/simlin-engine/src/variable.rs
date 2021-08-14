@@ -6,8 +6,8 @@ use std::collections::{BTreeSet, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{parse_equation as parse_single_equation, Ast, Expr, Visitor};
-use crate::builtins::is_builtin_fn;
+use crate::ast::{parse_equation as parse_single_equation, Ast, Expr, Expr0, Visitor};
+use crate::builtins::{is_builtin_fn, BuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, VariableError};
 use crate::datamodel::Dimension;
@@ -32,10 +32,10 @@ pub struct ModuleInput {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Variable<MI = ModuleInput> {
+pub enum Variable<MI = ModuleInput, E = Expr> {
     Stock {
         ident: Ident,
-        ast: Option<Ast>,
+        ast: Option<Ast<E>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
         inflows: Vec<Ident>,
@@ -45,7 +45,7 @@ pub enum Variable<MI = ModuleInput> {
     },
     Var {
         ident: Ident,
-        ast: Option<Ast>,
+        ast: Option<Ast<E>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
         table: Option<Table>,
@@ -64,7 +64,7 @@ pub enum Variable<MI = ModuleInput> {
     },
 }
 
-impl<MI> Variable<MI> {
+impl<MI, E> Variable<MI, E> {
     pub fn ident(&self) -> &str {
         match self {
             Variable::Stock { ident: name, .. } => name.as_str(),
@@ -73,7 +73,7 @@ impl<MI> Variable<MI> {
         }
     }
 
-    pub fn ast(&self) -> Option<&Ast> {
+    pub fn ast(&self) -> Option<&Ast<E>> {
         match self {
             Variable::Stock { ast: Some(ast), .. } => Some(ast),
             Variable::Var { ast: Some(ast), .. } => Some(ast),
@@ -233,7 +233,7 @@ fn get_dimensions(
 fn parse_equation(
     eqn: &datamodel::Equation,
     dimensions: &[Dimension],
-) -> (Option<Ast>, Vec<EquationError>) {
+) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
             match parse_single_equation(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
@@ -470,14 +470,35 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     self.identifiers.insert(id.clone());
                 }
             }
-            Expr::App(func, args, _) => {
-                if !is_builtin_fn(func) {
-                    self.identifiers.insert(func.clone());
-                }
-                for arg in args.iter() {
-                    self.walk(arg);
-                }
-            }
+            Expr::App(func, _) => match func {
+                BuiltinFn::Lookup(..) => {}
+                BuiltinFn::Abs(..) => {}
+                BuiltinFn::Arccos(..) => {}
+                BuiltinFn::Arcsin(..) => {}
+                BuiltinFn::Arctan(..) => {}
+                BuiltinFn::Cos(..) => {}
+                BuiltinFn::Exp(..) => {}
+                BuiltinFn::Inf => {}
+                BuiltinFn::Int(..) => {}
+                BuiltinFn::IsModuleInput(..) => {}
+                BuiltinFn::Ln(_) => {}
+                BuiltinFn::Log10(_) => {}
+                BuiltinFn::Max(_, _) => {}
+                BuiltinFn::Mean(_) => {}
+                BuiltinFn::Min(_, _) => {}
+                BuiltinFn::Pi => {}
+                BuiltinFn::Pulse(_, _, _) => {}
+                BuiltinFn::Ramp(_, _, _) => {}
+                BuiltinFn::SafeDiv(_, _, _) => {}
+                BuiltinFn::Sin(_) => {}
+                BuiltinFn::Sqrt(_) => {}
+                BuiltinFn::Step(_, _) => {}
+                BuiltinFn::Tan(_) => {}
+                BuiltinFn::Time => {}
+                BuiltinFn::TimeStep => {}
+                BuiltinFn::StartTime => {}
+                BuiltinFn::FinalTime => {}
+            },
             Expr::Subscript(id, args, _) => {
                 if !is_builtin_fn(id) {
                     self.identifiers.insert(id.clone());
@@ -514,17 +535,13 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
             }
             Expr::If(cond, t, f, _) => {
                 if let Some(module_inputs) = self.module_inputs {
-                    if let Expr::App(builtin_id, args, _) = cond.as_ref() {
-                        if builtin_id == "ismoduleinput" && args.len() == 1 {
-                            if let Expr::Var(ident, _) = &args[0] {
-                                if module_inputs.contains(ident) {
-                                    self.walk(t);
-                                } else {
-                                    self.walk(f);
-                                }
-                                return;
-                            }
+                    if let Expr::App(BuiltinFn::IsModuleInput(ident, _), _) = cond.as_ref() {
+                        if module_inputs.contains(ident) {
+                            self.walk(t);
+                        } else {
+                            self.walk(f);
                         }
+                        return;
                     }
                 }
 
@@ -537,7 +554,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
 }
 
 pub fn identifier_set(
-    ast: &Ast,
+    ast: &Ast<Expr>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident>>,
 ) -> HashSet<Ident> {
@@ -585,7 +602,7 @@ fn test_identifier_sets() {
         let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
-        let ast = ast.unwrap();
+        let ast = Expr::from(ast.unwrap()).unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
         let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
         let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));

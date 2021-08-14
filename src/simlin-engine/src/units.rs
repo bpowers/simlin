@@ -117,8 +117,15 @@ impl Context {
 
             let eqn = unit.equation.as_ref().unwrap();
 
-            let ast = match parse_equation(eqn, LexerType::Units) {
-                Ok(ast) => ast,
+            let ast: Option<Expr> = match parse_equation(eqn, LexerType::Units) {
+                Ok(ast) => match ast.map(|ast| Expr::from(ast)) {
+                    None => None,
+                    Some(Err(err)) => {
+                        unit_errors.push((unit_name.clone(), vec![err]));
+                        continue;
+                    }
+                    Some(Ok(ast)) => Some(ast),
+                },
                 Err(errors) => {
                     unit_errors.push((unit_name.clone(), errors));
                     continue;
@@ -191,7 +198,7 @@ fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
         Expr::Var(_, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
-        Expr::App(_, _, loc) => {
+        Expr::App(_, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
         Expr::Subscript(_, _, loc) => {
@@ -267,7 +274,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
                     .unwrap_or_else(|| [(id.to_owned(), 1)].iter().cloned().collect())
             }
         }
-        Expr::App(_, _, loc) => {
+        Expr::App(_, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
         }
         Expr::Subscript(_, _, loc) => {
@@ -344,6 +351,7 @@ pub fn parse_units(
 ) -> StdResult<Option<UnitMap>, Vec<EquationError>> {
     if let Some(unit_eqn) = unit_eqn {
         if let Some(expr) = parse_equation(unit_eqn, LexerType::Units)? {
+            let expr = Expr::from(expr).map_err(|err| vec![err])?;
             let result = build_unit_components(ctx, &expr).map_err(|err| vec![err])?;
             Ok(Some(result))
         } else {
