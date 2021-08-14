@@ -17,7 +17,7 @@ use crate::{canonicalize, eqn_err};
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq)]
 pub struct Context {
-    sim_specs: SimSpecs,
+    pub sim_specs: SimSpecs,
     aliases: HashMap<String, String>,
     units: HashMap<String, UnitMap>,
 }
@@ -258,8 +258,8 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
         }
         Expr::Var(id, _) => {
             let id = ctx.aliases.get(id).unwrap_or(id);
-            // dimensionless is special
             if id == "dmnl" || id == "nil" || id == "dimensionless" || id == "fraction" {
+                // dimensionless is special
                 UnitMap::new()
             } else {
                 ctx.lookup(id)

@@ -9,12 +9,14 @@ use crate::common::{Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::units::{pretty_print_unit, Context};
+use crate::variable::Variable;
 
 #[allow(dead_code)]
 struct UnitEvaluator<'a> {
     ctx: &'a Context,
     model: &'a ModelStage1,
     // units for module inputs
+    time: Variable,
 }
 
 /// Units is used to distinguish between explicit units (and explicit
@@ -31,11 +33,16 @@ impl<'a> UnitEvaluator<'a> {
         match expr {
             Expr::Const(_, _, _) => Ok(Units::Constant),
             Expr::Var(ident, _) => {
-                let var = self.model.variables.get(ident).ok_or(Error {
-                    kind: ErrorKind::Model,
-                    code: ErrorCode::DoesNotExist,
-                    details: Some(ident.clone()),
-                })?;
+                let var: &Variable =
+                    if ident == "time" || ident == "initial_time" || ident == "final_time" {
+                        &self.time
+                    } else {
+                        self.model.variables.get(ident).ok_or(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::DoesNotExist,
+                            details: Some(ident.clone()),
+                        })?
+                    };
 
                 var.units()
                     .ok_or(Error {
@@ -161,7 +168,28 @@ pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Id
     // for each variable, evaluate the equation given the unit context
     // if the result doesn't match the expected thing, accumulate an error
 
-    let units = UnitEvaluator { ctx, model };
+    let time_units = ctx
+        .sim_specs
+        .time_units
+        .as_deref()
+        .unwrap_or("time")
+        .to_owned();
+
+    let units = UnitEvaluator {
+        ctx,
+        model,
+        time: Variable::Var {
+            ident: "time".to_string(),
+            ast: None,
+            eqn: None,
+            units: Some([(time_units, 1)].iter().cloned().collect()),
+            table: None,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+        },
+    };
 
     for (ident, var) in model.variables.iter() {
         if let Some(expected) = var.units() {
