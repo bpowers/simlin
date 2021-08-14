@@ -11,6 +11,7 @@ use crate::builtins::is_builtin_fn;
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, VariableError};
 use crate::datamodel::Dimension;
+use crate::token::LexerType;
 use crate::units::parse_units;
 use crate::{datamodel, eqn_err, units, ErrorCode};
 
@@ -235,13 +236,13 @@ fn parse_equation(
 ) -> (Option<Ast>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
-            match parse_single_equation(eqn).map(|eqn| eqn.map(Ast::Scalar)) {
+            match parse_single_equation(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
                 Ok(expr) => (expr, vec![]),
                 Err(errors) => (None, errors),
             }
         }
         datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
-            let (ast, mut errors) = match parse_single_equation(eqn) {
+            let (ast, mut errors) = match parse_single_equation(eqn, LexerType::Equation) {
                 Ok(expr) => (expr, vec![]),
                 Err(errors) => (None, errors),
             };
@@ -258,10 +259,11 @@ fn parse_equation(
             let elements: Vec<_> = elements
                 .iter()
                 .map(|(subscript, equation)| {
-                    let (ast, single_errors) = match parse_single_equation(equation) {
-                        Ok(expr) => (expr, vec![]),
-                        Err(errors) => (None, errors),
-                    };
+                    let (ast, single_errors) =
+                        match parse_single_equation(equation, LexerType::Equation) {
+                            Ok(expr) => (expr, vec![]),
+                            Err(errors) => (None, errors),
+                        };
                     errors.extend(single_errors);
                     (subscript.clone(), ast)
                 })

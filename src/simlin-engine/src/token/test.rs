@@ -4,15 +4,19 @@
 
 use super::ErrorCode::*;
 use super::Token::*;
-use super::{EquationError, ErrorCode, Lexer, Token};
+use super::{EquationError, ErrorCode, Lexer, LexerType, Token};
+
+fn test(input: &str, expected: Vec<(&str, Token)>) {
+    test_inner(input, expected, LexerType::Equation)
+}
 
 // straight from LALRPOP
-fn test(input: &str, expected: Vec<(&str, Token)>) {
+fn test_inner(input: &str, expected: Vec<(&str, Token)>, lexer_type: LexerType) {
     // use $ to signal EOL because it can be replaced with a single space
     // for spans, and because it applies also to r#XXX# style strings:
-    let input = input.replace("$", "\n");
+    // let input = input.replace("$", "\n");
 
-    let tokenizer = Lexer::new(&input);
+    let tokenizer = Lexer::new(&input, lexer_type);
     let len = expected.len();
     for (token, (expected_span, expected_tok)) in tokenizer.zip(expected.into_iter()) {
         let expected_start = expected_span.find("~").unwrap();
@@ -20,16 +24,20 @@ fn test(input: &str, expected: Vec<(&str, Token)>) {
         assert_eq!(Ok((expected_start, expected_tok, expected_end)), token);
     }
 
-    let tokenizer = Lexer::new(&input);
+    let tokenizer = Lexer::new(&input, lexer_type);
     assert_eq!(None, tokenizer.skip(len).next());
 }
 
 fn test_err(input: &str, expected: (&str, ErrorCode)) {
+    test_err_inner(input, expected, LexerType::Equation)
+}
+
+fn test_err_inner(input: &str, expected: (&str, ErrorCode), lexer_type: LexerType) {
     // use $ to signal EOL because it can be replaced with a single space
     // for spans, and because it applies also to r#XXX# style strings:
-    let input = input.replace("$", "\n");
+    // let input = input.replace("$", "\n");
 
-    let tokenizer = Lexer::new(&input);
+    let tokenizer = Lexer::new(&input, lexer_type);
     let token = tokenizer.into_iter().last().unwrap();
     let (expected_span, expected_code) = expected;
     let expected_start = expected_span.find("~").unwrap();
@@ -108,6 +116,16 @@ fn idents() {
     );
     test("\"oh no\"", vec![("~~~~~~~", Ident("\"oh no\""))]);
     test("oh.no", vec![("~~~~~", Ident("oh.no"))]);
+}
+
+#[test]
+fn dollar_idents() {
+    test_inner(
+        "$oh.no",
+        vec![("~~~~~~", Ident("$oh.no"))],
+        LexerType::Units,
+    );
+    test_err("$", ("~", UnrecognizedToken));
 }
 
 #[test]

@@ -17,6 +17,12 @@ use crate::common::{EquationError, ErrorCode};
 #[cfg(test)]
 mod test;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LexerType {
+    Equation,
+    Units,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Token<'input> {
     If,
@@ -61,6 +67,7 @@ pub struct Lexer<'input> {
     text: &'input str,
     chars: CharIndices<'input>,
     lookahead: Option<(usize, char)>,
+    is_units: bool,
 }
 
 const KEYWORDS: &[(&str, Token<'static>)] = &[
@@ -75,11 +82,12 @@ const KEYWORDS: &[(&str, Token<'static>)] = &[
 ];
 
 impl<'input> Lexer<'input> {
-    pub fn new(input: &'input str) -> Self {
+    pub fn new(input: &'input str, lexer_type: LexerType) -> Self {
         let mut t = Lexer {
             text: input,
             chars: input.char_indices(),
             lookahead: None,
+            is_units: matches!(lexer_type, LexerType::Units),
         };
         t.bump();
         t
@@ -96,7 +104,8 @@ impl<'input> Lexer<'input> {
     }
 
     fn word(&mut self, idx0: usize) -> Spanned<&'input str> {
-        match self.take_while(is_identifier_continue) {
+        let is_units = self.is_units;
+        match self.take_while(|c| is_identifier_continue(c, is_units)) {
             Some(end) => (idx0, &self.text[idx0..end], end),
             None => (idx0, &self.text[idx0..], self.text.len()),
         }
@@ -254,7 +263,9 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, ']')) => self.consume(i, RBracket, 1),
                 Some((i, ',')) => self.consume(i, Comma, 1),
                 Some((i, '"')) => Some(self.quoted_identifier(i)),
-                Some((i, c)) if is_identifier_start(c) => Some(Ok(self.identifierish(i))),
+                Some((i, c)) if is_identifier_start(c, self.is_units) => {
+                    Some(Ok(self.identifierish(i)))
+                }
                 Some((i, c)) if is_number_start(c) => Some(Ok(self.number(i))),
                 Some((_, c)) if c.is_whitespace() => {
                     self.bump();
@@ -282,10 +293,10 @@ fn is_digit(c: char) -> bool {
     ('0'..='9').contains(&c)
 }
 
-fn is_identifier_start(c: char) -> bool {
-    UnicodeXID::is_xid_start(c) || c == '_'
+fn is_identifier_start(c: char, is_units: bool) -> bool {
+    UnicodeXID::is_xid_start(c) || c == '_' || (is_units && c == '$')
 }
 
-fn is_identifier_continue(c: char) -> bool {
-    UnicodeXID::is_xid_continue(c) || c == '.'
+fn is_identifier_continue(c: char, is_units: bool) -> bool {
+    UnicodeXID::is_xid_continue(c) || c == '.' || (is_units && c == '$')
 }

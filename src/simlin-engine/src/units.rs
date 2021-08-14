@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::result::Result as StdResult;
 
@@ -10,6 +11,7 @@ use float_cmp::approx_eq;
 use crate::ast::{parse_equation, BinaryOp, Expr, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode};
 use crate::datamodel::{Unit, UnitMap};
+use crate::token::LexerType;
 use crate::{canonicalize, eqn_err};
 
 #[allow(dead_code)]
@@ -20,7 +22,27 @@ pub struct Context {
 }
 
 impl Context {
-    #[allow(dead_code)]
+    pub fn new_with_builtins(units: &[Unit]) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+        let builtin_units: &[(&str, &[&str])] = &[
+            // ("dollars", &["$", "usd"]),
+            // ("year", &["years"]),
+            // ("month", &["months"]),
+            // ("person", &["people", "persons", "peoples"]),
+        ];
+        let mut builtin_units = builtin_units
+            .iter()
+            .map(|(name, aliases)| Unit {
+                name: name.to_string(),
+                equation: None,
+                disabled: false,
+                aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            })
+            .collect::<Vec<_>>();
+
+        builtin_units.append(&mut units.to_vec());
+
+        Self::new(&builtin_units)
+    }
     pub fn new(units: &[Unit]) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
         let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
 
@@ -31,7 +53,9 @@ impl Context {
             let unit_name = canonicalize(&unit.name);
             for alias in unit.aliases.iter() {
                 let alias = canonicalize(alias);
-                if aliases.contains_key(&alias) {
+                if let Entry::Vacant(e) = aliases.entry(alias) {
+                    e.insert(unit_name.clone());
+                } else {
                     unit_errors.push((
                         unit_name.clone(),
                         vec![EquationError {
@@ -40,8 +64,6 @@ impl Context {
                             code: ErrorCode::DuplicateUnit,
                         }],
                     ));
-                } else {
-                    aliases.insert(alias, unit_name.clone());
                 }
             }
             if aliases.contains_key(&unit_name) || parsed_units.contains_key(&unit_name) {
@@ -71,7 +93,9 @@ impl Context {
             let unit_name = canonicalize(&unit.name);
             for alias in unit.aliases.iter() {
                 let alias = canonicalize(alias);
-                if ctx.aliases.contains_key(&alias) {
+                if let Entry::Vacant(e) = ctx.aliases.entry(alias) {
+                    e.insert(unit_name.clone());
+                } else {
                     unit_errors.push((
                         unit_name.clone(),
                         vec![EquationError {
@@ -80,14 +104,12 @@ impl Context {
                             code: ErrorCode::DuplicateUnit,
                         }],
                     ));
-                } else {
-                    ctx.aliases.insert(alias, unit_name.clone());
                 }
             }
 
             let eqn = unit.equation.as_ref().unwrap();
 
-            let ast = match parse_equation(eqn) {
+            let ast = match parse_equation(eqn, LexerType::Units) {
                 Ok(ast) => ast,
                 Err(errors) => {
                     unit_errors.push((unit_name.clone(), errors));
@@ -127,6 +149,7 @@ impl Context {
             }
         }
 
+        // TODO: we shouldn't discard the whole context if there are errors
         if unit_errors.is_empty() {
             Ok(ctx)
         } else {
@@ -143,9 +166,7 @@ impl Context {
     fn lookup(&self, ident: &str) -> Option<&UnitMap> {
         // first, see if this identifier is an alias of a better-known unit
         let normalized = self.aliases.get(ident).map(|s| s.as_str()).unwrap_or(ident);
-        let result = self.units.get(normalized);
-        eprintln!("looking up '{}': {} ({:?})", ident, normalized, result);
-        result
+        self.units.get(normalized)
     }
 }
 
@@ -219,6 +240,7 @@ fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
 fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
     let unit_map: UnitMap = match ast {
         Expr::Const(_, _, loc) => {
+            // dimensionless is special
             if let Ok(1) = const_int_eval(ast) {
                 UnitMap::new()
             } else {
@@ -228,6 +250,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
         }
         Expr::Var(id, _) => {
             let id = ctx.aliases.get(id).unwrap_or(id);
+            // dimensionless is special
             if id == "dmnl" || id == "nil" || id == "dimensionless" || id == "fraction" {
                 UnitMap::new()
             } else {
@@ -312,7 +335,7 @@ pub fn parse_units(
     unit_eqn: Option<&String>,
 ) -> StdResult<Option<UnitMap>, Vec<EquationError>> {
     if let Some(unit_eqn) = unit_eqn {
-        if let Some(expr) = parse_equation(unit_eqn)? {
+        if let Some(expr) = parse_equation(unit_eqn, LexerType::Units)? {
             let result = build_unit_components(ctx, &expr).map_err(|err| vec![err])?;
             Ok(Some(result))
         } else {
@@ -418,7 +441,7 @@ fn test_pretty_print_unit() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = parse_equation(input).unwrap().unwrap();
+        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
         let pretty = pretty_print_unit(&result);
         assert_eq!(*output, pretty);
@@ -564,7 +587,7 @@ fn test_basic_unit_parsing() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = parse_equation(input).unwrap().unwrap();
+        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
         assert_eq!(*output, result);
     }
@@ -582,7 +605,7 @@ fn test_basic_unit_parsing() {
     ];
 
     for (input, output) in negative_cases {
-        let expr = parse_equation(input).unwrap().unwrap();
+        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap_err();
         assert_eq!(*output, result.code);
     }
@@ -641,7 +664,7 @@ fn test_const_int_eval() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = parse_equation(input).unwrap().unwrap();
+        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
         assert_eq!(*output, const_int_eval(&expr).unwrap());
     }
 
@@ -650,7 +673,7 @@ fn test_const_int_eval() {
     let negative_cases = &["3.5", "foo", "if 1 then 2 else 3", "bar[2]", "foo(1, 2)"];
 
     for input in negative_cases {
-        let expr = parse_equation(input).unwrap().unwrap();
+        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
         assert_eq!(
             ErrorCode::ExpectedInteger,
             const_int_eval(&expr).unwrap_err().code

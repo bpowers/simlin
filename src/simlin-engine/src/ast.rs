@@ -9,6 +9,7 @@ use lalrpop_util::ParseError;
 
 use crate::common::{ElementName, EquationError, Ident};
 use crate::datamodel::Dimension;
+use crate::token::LexerType;
 
 // equations are strings typed by humans for a single
 // variable -- u16 is long enough
@@ -145,10 +146,13 @@ impl Default for Expr {
     }
 }
 
-pub fn parse_equation(eqn: &str) -> StdResult<Option<Expr>, Vec<EquationError>> {
+pub fn parse_equation(
+    eqn: &str,
+    lexer_type: LexerType,
+) -> StdResult<Option<Expr>, Vec<EquationError>> {
     let mut errs = Vec::new();
 
-    let lexer = crate::token::Lexer::new(eqn);
+    let lexer = crate::token::Lexer::new(eqn, lexer_type);
     match crate::equation::EquationParser::new().parse(eqn, lexer) {
         Ok(ast) => Ok(Some(ast)),
         Err(err) => {
@@ -314,7 +318,7 @@ fn test_parse() {
 
     for case in cases.iter() {
         let eqn = case.0;
-        let ast = parse_equation(eqn).unwrap();
+        let ast = parse_equation(eqn, LexerType::Equation).unwrap();
         assert!(ast.is_some());
         let ast = ast.unwrap().strip_loc();
         assert_eq!(&*case.1, &ast);
@@ -322,7 +326,7 @@ fn test_parse() {
         assert_eq!(case.2, &printed);
     }
 
-    let ast = parse_equation("NAN").unwrap();
+    let ast = parse_equation("NAN", LexerType::Equation).unwrap();
     assert!(ast.is_some());
     let ast = ast.unwrap();
     assert!(matches!(&ast, Expr::Const(_, _, _)));
@@ -351,7 +355,7 @@ fn test_parse_failures() {
     ];
 
     for case in failures {
-        let err = parse_equation(case).unwrap_err();
+        let err = parse_equation(case, LexerType::Equation).unwrap_err();
         assert!(err.len() > 0);
     }
 }
