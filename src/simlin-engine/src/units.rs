@@ -130,8 +130,22 @@ impl Context {
         if unit_errors.is_empty() {
             Ok(ctx)
         } else {
+            // for (id, errors) in unit_errors.iter() {
+            //     eprintln!("unit errors for '{}'", id);
+            //     for err in errors.iter() {
+            //         eprintln!("    {}", err);
+            //     }
+            // }
             Err(unit_errors)
         }
+    }
+
+    fn lookup(&self, ident: &str) -> Option<&UnitMap> {
+        // first, see if this identifier is an alias of a better-known unit
+        let normalized = self.aliases.get(ident).map(|s| s.as_str()).unwrap_or(ident);
+        let result = self.units.get(normalized);
+        eprintln!("looking up '{}': {} ({:?})", ident, normalized, result);
+        result
     }
 }
 
@@ -217,7 +231,9 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
             if id == "dmnl" || id == "nil" || id == "dimensionless" || id == "fraction" {
                 UnitMap::new()
             } else {
-                [(id.to_owned(), 1)].iter().cloned().collect()
+                ctx.lookup(id)
+                    .cloned()
+                    .unwrap_or_else(|| [(id.to_owned(), 1)].iter().cloned().collect())
             }
         }
         Expr::App(_, _, loc) => {
