@@ -655,7 +655,7 @@ fn test_tables() {
     }
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[]).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let output = parse_var(&[], &input, &mut implicit_vars, &unit_ctx, |mi| {
         Ok(Some(mi.clone()))
     });

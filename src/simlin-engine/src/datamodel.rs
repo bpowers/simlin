@@ -381,6 +381,13 @@ pub enum SimMethod {
     RungeKutta4,
 }
 
+/// The default SimMethod is Euler
+impl Default for SimMethod {
+    fn default() -> Self {
+        Self::Euler
+    }
+}
+
 /// Dt is a UI thing: it can be nice to specify exact
 /// fractions that don't display neatly in the UI, like 1/3
 #[derive(Clone, PartialEq, Debug)]
@@ -396,7 +403,7 @@ impl Default for Dt {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,

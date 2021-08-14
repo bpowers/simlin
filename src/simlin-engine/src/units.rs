@@ -10,19 +10,23 @@ use float_cmp::approx_eq;
 
 use crate::ast::{parse_equation, BinaryOp, Expr, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode};
-use crate::datamodel::{Unit, UnitMap};
+use crate::datamodel::{SimSpecs, Unit, UnitMap};
 use crate::token::LexerType;
 use crate::{canonicalize, eqn_err};
 
 #[allow(dead_code)]
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Context {
+    sim_specs: SimSpecs,
     aliases: HashMap<String, String>,
     units: HashMap<String, UnitMap>,
 }
 
 impl Context {
-    pub fn new_with_builtins(units: &[Unit]) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+    pub fn new_with_builtins(
+        units: &[Unit],
+        sim_specs: &SimSpecs,
+    ) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
         let builtin_units: &[(&str, &[&str])] = &[
             // ("dollars", &["$", "usd"]),
             // ("year", &["years"]),
@@ -41,9 +45,12 @@ impl Context {
 
         builtin_units.append(&mut units.to_vec());
 
-        Self::new(&builtin_units)
+        Self::new(&builtin_units, sim_specs)
     }
-    pub fn new(units: &[Unit]) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
+    pub fn new(
+        units: &[Unit],
+        sim_specs: &SimSpecs,
+    ) -> StdResult<Self, Vec<(String, Vec<EquationError>)>> {
         let mut unit_errors: Vec<(String, Vec<EquationError>)> = Vec::new();
 
         // step 1: build our base context consisting of all prime units
@@ -84,6 +91,7 @@ impl Context {
         }
 
         let mut ctx = Context {
+            sim_specs: sim_specs.clone(),
             aliases,
             units: parsed_units,
         };
@@ -401,32 +409,35 @@ pub fn pretty_print_unit(units: &UnitMap) -> String {
 
 #[test]
 fn test_pretty_print_unit() {
-    let context = Context::new(&[
-        Unit {
-            name: "time".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec![],
-        },
-        Unit {
-            name: "people".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["person".to_owned(), "persons".to_owned()],
-        },
-        Unit {
-            name: "meter".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["m".to_owned(), "meters".to_owned()],
-        },
-        Unit {
-            name: "second".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["s".to_owned(), "seconds".to_owned()],
-        },
-    ])
+    let context = Context::new(
+        &[
+            Unit {
+                name: "time".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec![],
+            },
+            Unit {
+                name: "people".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["person".to_owned(), "persons".to_owned()],
+            },
+            Unit {
+                name: "meter".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["m".to_owned(), "meters".to_owned()],
+            },
+            Unit {
+                name: "second".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["s".to_owned(), "seconds".to_owned()],
+            },
+        ],
+        &Default::default(),
+    )
     .unwrap();
 
     let positive_cases: &[(&str, &str); 8] = &[
@@ -470,6 +481,7 @@ fn test_context_creation() {
     ];
 
     let expected = Context {
+        sim_specs: Default::default(),
         aliases: [
             ("person".to_owned(), "people".to_owned()),
             ("persons".to_owned(), "people".to_owned()),
@@ -492,7 +504,10 @@ fn test_context_creation() {
         .collect(),
     };
 
-    assert_eq!(expected, Context::new(simple_units).unwrap());
+    assert_eq!(
+        expected,
+        Context::new(simple_units, &Default::default()).unwrap()
+    );
 
     let more_units = &[
         Unit {
@@ -510,6 +525,7 @@ fn test_context_creation() {
     ];
 
     let expected2 = Context {
+        sim_specs: Default::default(),
         aliases: [("itime".to_owned(), "invtime".to_owned())]
             .iter()
             .cloned()
@@ -529,37 +545,43 @@ fn test_context_creation() {
         .collect(),
     };
 
-    assert_eq!(expected2, Context::new(more_units).unwrap());
+    assert_eq!(
+        expected2,
+        Context::new(more_units, &Default::default()).unwrap()
+    );
 }
 
 #[test]
 fn test_basic_unit_parsing() {
-    let context = Context::new(&[
-        Unit {
-            name: "time".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec![],
-        },
-        Unit {
-            name: "people".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["person".to_owned(), "persons".to_owned()],
-        },
-        Unit {
-            name: "meter".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["m".to_owned(), "meters".to_owned()],
-        },
-        Unit {
-            name: "second".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["s".to_owned(), "seconds".to_owned()],
-        },
-    ])
+    let context = Context::new(
+        &[
+            Unit {
+                name: "time".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec![],
+            },
+            Unit {
+                name: "people".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["person".to_owned(), "persons".to_owned()],
+            },
+            Unit {
+                name: "meter".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["m".to_owned(), "meters".to_owned()],
+            },
+            Unit {
+                name: "second".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["s".to_owned(), "seconds".to_owned()],
+            },
+        ],
+        &Default::default(),
+    )
     .unwrap();
 
     let positive_cases: &[(&str, UnitMap); 6] = &[
@@ -613,26 +635,29 @@ fn test_basic_unit_parsing() {
 
 #[test]
 fn test_basic_unit_checks() {
-    let _context = Context::new(&[
-        Unit {
-            name: "time".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec![],
-        },
-        Unit {
-            name: "people".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["person".to_owned(), "persons".to_owned()],
-        },
-        Unit {
-            name: "USD".to_owned(),
-            equation: None,
-            disabled: false,
-            aliases: vec!["dollar".to_owned(), "dollars".to_owned(), "$".to_owned()],
-        },
-    ])
+    let _context = Context::new(
+        &[
+            Unit {
+                name: "time".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec![],
+            },
+            Unit {
+                name: "people".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["person".to_owned(), "persons".to_owned()],
+            },
+            Unit {
+                name: "USD".to_owned(),
+                equation: None,
+                disabled: false,
+                aliases: vec!["dollar".to_owned(), "dollars".to_owned(), "$".to_owned()],
+            },
+        ],
+        &Default::default(),
+    )
     .unwrap();
     // from a set of datamodel::Units build a Context
 

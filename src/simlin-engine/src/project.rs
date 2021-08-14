@@ -35,7 +35,10 @@ impl From<datamodel::Project> for Project {
 
         let mut project_errors = vec![];
 
-        let units_ctx = match Context::new_with_builtins(&project_datamodel.units) {
+        let units_ctx = match Context::new_with_builtins(
+            &project_datamodel.units,
+            &project_datamodel.sim_specs,
+        ) {
             Ok(ctx) => ctx,
             Err(errs) => {
                 for (unit_name, unit_errs) in errs {

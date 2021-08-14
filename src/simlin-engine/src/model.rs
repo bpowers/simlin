@@ -978,7 +978,7 @@ fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
 fn flow(ident: &str, eqn: &str) -> Variable {
     let var = x_flow(ident, eqn);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[]).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
         resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
     });
@@ -1005,7 +1005,7 @@ fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
 fn aux(ident: &str, eqn: &str) -> Variable {
     let var = x_aux(ident, eqn);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[]).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
         resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
     });
@@ -1034,7 +1034,7 @@ fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> datam
 fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
     let var = x_stock(ident, eqn, inflows, outflows);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[]).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
         resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
     });
@@ -1141,7 +1141,7 @@ fn test_module_parse() {
     );
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let units_ctx = crate::units::Context::new(&[]).unwrap();
+    let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
 
     let models: HashMap<Ident, ModelStage0> = vec![
         ("main".to_string(), &main_model),
@@ -1165,7 +1165,7 @@ fn test_module_parse() {
 
 #[test]
 fn test_errors() {
-    let units_ctx = Context::new(&[]).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).unwrap();
     let main_model = x_model("main", vec![x_aux("aux_3", "unknown_variable * 3.14")]);
     let models: HashMap<String, ModelStage0> = vec![("main".to_string(), &main_model)]
         .into_iter()
@@ -1289,7 +1289,7 @@ fn test_all_deps() {
             x_aux("aux_4", "mod_1.output"),
         ],
     );
-    let units_ctx = Context::new(&[]).unwrap();
+    let units_ctx = Context::new(&[], &Default::default()).unwrap();
     let x_models: HashMap<String, ModelStage0> = vec![
         ("mod_1".to_owned(), &mod_1_model),
         ("main".to_owned(), &main_model),
@@ -1326,7 +1326,7 @@ fn test_all_deps() {
     };
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[]).unwrap();
+    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let mod_1_orig = &main_model.variables[0];
     assert_eq!("mod_1", mod_1_orig.get_ident());
     let mod_1 = parse_var(&[], mod_1_orig, &mut implicit_vars, &unit_ctx, |mi| {
