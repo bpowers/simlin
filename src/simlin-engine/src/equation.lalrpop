@@ -8,6 +8,7 @@ use crate::ast::BinaryOp::*;
 use crate::ast::Expr::*;
 use crate::common::{self, canonicalize, EquationError};
 use crate::token::Token;
+use crate::builtins::UntypedBuiltinFn;
 
 grammar<'input>(input: &'input str);
 
@@ -67,7 +68,7 @@ Exp: Expr = {
 };
 
 App: Expr = {
-    <lpos:@L> <id:Ident> "(" <args:Exprs> ")" <rpos:@R> => App(id, args, Loc::new(lpos, rpos)),
+    <lpos:@L> <id:Ident> "(" <args:Exprs> ")" <rpos:@R> => App(UntypedBuiltinFn(id, args), Loc::new(lpos, rpos)),
     Subscript,
 };
 

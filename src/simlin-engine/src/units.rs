@@ -191,7 +191,7 @@ fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
         Expr::Var(_, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
-        Expr::App(_, _, loc) => {
+        Expr::App(_, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
         Expr::Subscript(_, _, loc) => {
@@ -267,7 +267,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
                     .unwrap_or_else(|| [(id.to_owned(), 1)].iter().cloned().collect())
             }
         }
-        Expr::App(_, _, loc) => {
+        Expr::App(_, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
         }
         Expr::Subscript(_, _, loc) => {

@@ -3,6 +3,9 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 #[derive(PartialEq, Clone, Debug)]
+pub struct UntypedBuiltinFn<Expr>(pub String, pub Vec<Expr>);
+
+#[derive(PartialEq, Clone, Debug)]
 pub enum BuiltinFn<Expr> {
     Lookup(String, Box<Expr>),
     Abs(Box<Expr>),

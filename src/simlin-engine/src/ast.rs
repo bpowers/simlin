@@ -7,6 +7,7 @@ use std::result::Result as StdResult;
 
 use lalrpop_util::ParseError;
 
+use crate::builtins::UntypedBuiltinFn;
 use crate::common::{ElementName, EquationError, Ident};
 use crate::datamodel::Dimension;
 use crate::token::LexerType;
@@ -54,7 +55,7 @@ fn test_loc_basics() {
 pub enum Expr {
     Const(String, f64, Loc),
     Var(Ident, Loc),
-    App(Ident, Vec<Expr>, Loc),
+    App(UntypedBuiltinFn<Expr>, Loc),
     Subscript(Ident, Vec<Expr>, Loc),
     Op1(UnaryOp, Box<Expr>, Loc),
     Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
@@ -68,9 +69,11 @@ impl Expr {
         match self {
             Expr::Const(s, n, _loc) => Expr::Const(s, n, loc),
             Expr::Var(v, _loc) => Expr::Var(v, loc),
-            Expr::App(builtin, args, _loc) => Expr::App(
-                builtin,
-                args.into_iter().map(|arg| arg.strip_loc()).collect(),
+            Expr::App(UntypedBuiltinFn(builtin, args), _loc) => Expr::App(
+                UntypedBuiltinFn(
+                    builtin,
+                    args.into_iter().map(|arg| arg.strip_loc()).collect(),
+                ),
                 loc,
             ),
             Expr::Subscript(off, subscripts, _) => {
@@ -97,7 +100,7 @@ impl Expr {
         match self {
             Expr::Const(_, _, loc) => *loc,
             Expr::Var(_, loc) => *loc,
-            Expr::App(_, _, loc) => *loc,
+            Expr::App(_, loc) => *loc,
             Expr::Subscript(_, _, loc) => *loc,
             Expr::Op1(_, _, loc) => *loc,
             Expr::Op2(_, _, _, loc) => *loc,
@@ -110,7 +113,7 @@ impl Expr {
             Expr::Const(_s, _n, _loc) => None,
             Expr::Var(v, loc) if v == ident => Some(*loc),
             Expr::Var(_v, _loc) => None,
-            Expr::App(_builtin, args, _loc) => {
+            Expr::App(UntypedBuiltinFn(_builtin, args), _loc) => {
                 for arg in args.iter() {
                     if let Some(loc) = arg.get_var_loc(ident) {
                         return Some(loc);
@@ -270,8 +273,7 @@ fn test_parse() {
         vec![
             Const("2".to_owned(), 2.0, Loc::default()),
             App(
-                "int".to_owned(),
-                vec![Var("b".to_owned(), Loc::default())],
+                UntypedBuiltinFn("int".to_owned(), vec![Var("b".to_owned(), Loc::default())]),
                 Loc::default(),
             ),
         ],
@@ -443,12 +445,12 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
         // no children so doesn't matter
         Expr::Const(_, _, _) | Expr::Var(_, _) => false,
         // children are comma separated, so no ambiguity possible
-        Expr::App(_, _, _) | Expr::Subscript(_, _, _) => false,
+        Expr::App(_, _) | Expr::Subscript(_, _, _) => false,
         Expr::Op1(_, _, _) => matches!(child, Expr::Op2(_, _, _, _)),
         Expr::Op2(parent_op, _, _, _) => match child {
             Expr::Const(_, _, _)
             | Expr::Var(_, _)
-            | Expr::App(_, _, _)
+            | Expr::App(_, _)
             | Expr::Subscript(_, _, _)
             | Expr::If(_, _, _, _)
             | Expr::Op1(_, _, _) => false,
@@ -485,7 +487,7 @@ impl Visitor<String> for PrintVisitor {
         match expr {
             Expr::Const(s, _, _) => s.clone(),
             Expr::Var(id, _) => id.clone(),
-            Expr::App(func, args, _) => {
+            Expr::App(UntypedBuiltinFn(func, args), _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 format!("{}({})", func, args.join(", "))
             }
@@ -580,11 +582,13 @@ fn test_print_eqn() {
     assert_eq!(
         "lookup(a, 1.0)",
         print_eqn(&Expr::App(
-            "lookup".to_string(),
-            vec![
-                Expr::Var("a".to_string(), Loc::new(7, 8)),
-                Expr::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
-            ],
+            UntypedBuiltinFn(
+                "lookup".to_string(),
+                vec![
+                    Expr::Var("a".to_string(), Loc::new(7, 8)),
+                    Expr::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
+                ]
+            ),
             Loc::new(0, 14),
         ))
     );
@@ -606,7 +610,7 @@ impl Visitor<String> for LatexVisitor {
                 let id = str::replace(id, "_", "\\_");
                 format!("\\mathrm{{{}}}", id)
             }
-            Expr::App(func, args, _) => {
+            Expr::App(UntypedBuiltinFn(func, args), _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 format!("\\operatorname{{{}}}({})", func, args.join(", "))
             }
@@ -749,11 +753,13 @@ fn test_latex_eqn() {
     assert_eq!(
         "\\operatorname{lookup}(\\mathrm{a}, 1.0)",
         latex_eqn(&Expr::App(
-            "lookup".to_string(),
-            vec![
-                Expr::Var("a".to_string(), Loc::new(7, 8)),
-                Expr::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
-            ],
+            UntypedBuiltinFn(
+                "lookup".to_string(),
+                vec![
+                    Expr::Var("a".to_string(), Loc::new(7, 8)),
+                    Expr::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
+                ]
+            ),
             Loc::new(0, 14),
         ))
     );

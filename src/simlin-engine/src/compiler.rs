@@ -9,6 +9,7 @@ use std::rc::Rc;
 use float_cmp::approx_eq;
 
 use crate::ast::{self, Ast, BinaryOp, Loc};
+use crate::builtins::UntypedBuiltinFn;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
@@ -334,7 +335,7 @@ impl<'a> Context<'a> {
                     }
                 }
             }
-            ast::Expr::App(id, orig_args, loc) => {
+            ast::Expr::App(UntypedBuiltinFn(id, orig_args), loc) => {
                 let args: Result<Vec<Expr>> = orig_args.iter().map(|e| self.lower(e)).collect();
                 let mut args = args?;
 

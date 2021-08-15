@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 #[cfg(test)]
 use crate::ast::Loc;
 use crate::ast::{parse_equation as parse_single_equation, Ast, Expr, Visitor};
-use crate::builtins::is_builtin_fn;
+use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, VariableError};
 use crate::datamodel::Dimension;
@@ -470,7 +470,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     self.identifiers.insert(id.clone());
                 }
             }
-            Expr::App(func, args, _) => {
+            Expr::App(UntypedBuiltinFn(func, args), _) => {
                 if !is_builtin_fn(func) {
                     self.identifiers.insert(func.clone());
                 }
@@ -514,7 +514,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
             }
             Expr::If(cond, t, f, _) => {
                 if let Some(module_inputs) = self.module_inputs {
-                    if let Expr::App(builtin_id, args, _) = cond.as_ref() {
+                    if let Expr::App(UntypedBuiltinFn(builtin_id, args), _) = cond.as_ref() {
                         if builtin_id == "ismoduleinput" && args.len() == 1 {
                             if let Expr::Var(ident, _) = &args[0] {
                                 if module_inputs.contains(ident) {

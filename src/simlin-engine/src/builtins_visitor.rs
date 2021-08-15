@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{print_eqn, Ast, Expr};
-use crate::builtins::is_builtin_fn;
+use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
 use crate::common::{EquationError, Ident};
 use crate::datamodel::Visibility;
 use crate::{datamodel, eqn_err};
@@ -44,12 +44,12 @@ impl<'a> BuiltinVisitor<'a> {
         let result: Expr = match expr {
             Const(_, _, _) => expr,
             Var(_, _) => expr,
-            App(func, args, loc) => {
+            App(UntypedBuiltinFn(func, args), loc) => {
                 let args: std::result::Result<Vec<Expr>, EquationError> =
                     args.into_iter().map(|e| self.walk(e)).collect();
                 let args = args?;
                 if is_builtin_fn(&func) {
-                    return Ok(App(func, args, loc));
+                    return Ok(App(UntypedBuiltinFn(func, args), loc));
                 }
 
                 // TODO: make this a function call/hash lookup
