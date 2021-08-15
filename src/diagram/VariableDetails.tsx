@@ -200,7 +200,7 @@ export const VariableDetails = withStyles(styles)(
     };
 
     renderLeaf = (props: RenderLeafProps) => {
-      const isError = !!(props.leaf as unknown as any).error;
+      const isError = !!((props.leaf as unknown) as any).error;
       const errorClass = this.props.classes.eqnError;
       return (
         <span {...props.attributes} className={isError ? errorClass : undefined}>

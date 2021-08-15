@@ -43,7 +43,7 @@ export async function updatePreview(db: Database, project: ProjectPb): Promise<P
 }
 
 export const maybeGetUser = (req: Request, _res: Response): UserPb | undefined => {
-  const user = req.user as unknown as UserPb | undefined;
+  const user = (req.user as unknown) as UserPb | undefined;
   if (!user) {
     return undefined;
   }
@@ -51,7 +51,7 @@ export const maybeGetUser = (req: Request, _res: Response): UserPb | undefined =
 };
 
 export const getUser = (req: Request, res: Response): UserPb => {
-  const user = req.user as unknown as UserPb | undefined;
+  const user = (req.user as unknown) as UserPb | undefined;
   if (!user) {
     logger.warn(`user not found, but passed authz?`);
     res.status(500).json({});

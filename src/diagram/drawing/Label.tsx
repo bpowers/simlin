@@ -186,7 +186,7 @@ export const Label = withStyles(styles)(
 
     handleDoubleClick = (e: React.MouseEvent<SVGElement>): void => {
       if (!this.inMove) {
-        this.props.onSelection?.(e as unknown as React.PointerEvent<SVGElement>);
+        this.props.onSelection?.((e as unknown) as React.PointerEvent<SVGElement>);
       }
     };
 

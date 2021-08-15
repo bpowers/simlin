@@ -24,7 +24,7 @@ function getWasmModule(): Promise<typeof import('./xmutil.wasm')> {
       .then((contents) => {
         WebAssembly.instantiate(contents)
           .then((source) => {
-            cachedWasmModule = source.instance.exports as unknown as typeof import('./xmutil.wasm');
+            cachedWasmModule = (source.instance.exports as unknown) as typeof import('./xmutil.wasm');
             resolve(cachedWasmModule);
           })
           .catch(reject);

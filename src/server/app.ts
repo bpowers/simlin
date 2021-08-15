@@ -52,7 +52,7 @@ class App {
   private readonly authn: admin.auth.Auth;
 
   constructor() {
-    this.app = express() as any as Application;
+    this.app = (express() as any) as Application;
 
     // initialize firebase
     admin.initializeApp();
@@ -222,7 +222,7 @@ class App {
       userAuthz,
       async (req: Request, res: Response, next: NextFunction): Promise<void> => {
         const email = req.session.passport.user.email as string;
-        const user = req.user as any as UserPb | undefined;
+        const user = (req.user as any) as UserPb | undefined;
         if (!user) {
           logger.warn(`user not found for '${email}', but passed authz?`);
           res.status(500).json({});

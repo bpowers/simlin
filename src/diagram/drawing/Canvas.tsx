@@ -604,7 +604,7 @@ export const Canvas = withStyles(styles)(
           const off = this.selectionCenterOffset;
           const canvasOffset = this.getCanvasOffset();
           // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-assignment
-          sink = (sink as unknown as any).merge({
+          sink = ((sink as unknown) as any).merge({
             x: off.x - canvasOffset.x,
             y: off.y - canvasOffset.y,
             isZeroRadius: true,
@@ -1275,7 +1275,7 @@ export const Canvas = withStyles(styles)(
 
       if (uid === inCreationUid) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-        this.props.onCreateVariable((element as unknown as any).set('name', newName));
+        this.props.onCreateVariable(((element as unknown) as any).set('name', newName));
       } else {
         this.props.onRenameVariable(oldName, newName);
       }

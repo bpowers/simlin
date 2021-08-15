@@ -8,9 +8,11 @@ import { Node, Descendant } from 'slate';
 import { CustomText } from './SlateEditor';
 
 export function plainDeserialize(str: string): CustomText[] {
-  return str.split('\n').map((line: string): CustomText => {
-    return { text: line };
-  });
+  return str.split('\n').map(
+    (line: string): CustomText => {
+      return { text: line };
+    },
+  );
 }
 
 export function plainSerialize(value: Descendant[]): string {

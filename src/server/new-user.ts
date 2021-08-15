@@ -33,7 +33,7 @@ async function populateExample(db: Database, user: User, exampleModelPath: strin
   if (!metadata.project) {
     throw new Error(`expected [project] section in ${metadataPath}`);
   }
-  const projectMeta = metadata.project as unknown as { name: string; description: string };
+  const projectMeta = (metadata.project as unknown) as { name: string; description: string };
   const projectName = projectMeta.name;
   const projectDescription = projectMeta.description;
   const userId = user.getId();
