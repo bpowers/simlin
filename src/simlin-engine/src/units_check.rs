@@ -52,7 +52,7 @@ impl<'a> UnitEvaluator<'a> {
                     })
                     .map(|units| Units::Explicit(units.clone()))
             }
-            Expr::App(_, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr::App(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
             Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
             Expr::Op1(_, l, _) => self.check(l),
             Expr::Op2(op, l, r, _) => {
