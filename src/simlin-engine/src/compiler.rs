@@ -288,7 +288,7 @@ impl<'a> Context<'a> {
                 + self.get_submodel_offset(submodel_name, submodel_var, ignore_arrays)?)
         } else if !ignore_arrays {
             if !metadata.contains_key(ident) {
-                return sim_err!(ZeroArityBuiltin);
+                return sim_err!(DoesNotExist);
             }
             if let Some(dims) = metadata[ident].var.get_dimensions() {
                 let off = self.get_implicit_subscript_off(dims, ident)?;
@@ -315,20 +315,6 @@ impl<'a> Context<'a> {
                 } else {
                     match self.get_offset(id) {
                         Ok(off) => Expr::Var(off, *loc),
-                        Err(Error {
-                            code: ErrorCode::ZeroArityBuiltin,
-                            ..
-                        }) => match id.as_str() {
-                            "time" => Expr::App(BuiltinFn::Time, *loc),
-                            "time_step" => Expr::App(BuiltinFn::TimeStep, *loc),
-                            "initial_time" => Expr::App(BuiltinFn::StartTime, *loc),
-                            "final_time" => Expr::App(BuiltinFn::FinalTime, *loc),
-                            "pi" => Expr::App(BuiltinFn::Pi, *loc),
-                            "inf" => Expr::App(BuiltinFn::Inf, *loc),
-                            _ => {
-                                return sim_err!(UnknownBuiltin, id.to_owned());
-                            }
-                        },
                         Err(err) => {
                             return Err(err);
                         }
@@ -430,7 +416,7 @@ impl<'a> Context<'a> {
                     "step" => check_arity!(Step, 2),
                     "tan" => check_arity!(Tan, 1),
                     "time" => check_arity!(Time, 0),
-                    "time_step" => check_arity!(TimeStep, 0),
+                    "time_step" | "dt" => check_arity!(TimeStep, 0),
                     "initial_time" => check_arity!(StartTime, 0),
                     "final_time" => check_arity!(FinalTime, 0),
                     _ => {
@@ -2586,7 +2572,7 @@ fn test_arrays() {
                     Box::new(Expr::App(
                         BuiltinFn::Int(Box::new(Expr::Op2(
                             BinaryOp::Mod,
-                            Box::new(Expr::Var(0, Loc::default())), // TIME
+                            Box::new(Expr::App(BuiltinFn::Time, Loc::default())),
                             Box::new(Expr::Const(5.0, Loc::default())),
                             Loc::default(),
                         ))),

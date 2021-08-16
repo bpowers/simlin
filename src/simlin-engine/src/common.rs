@@ -63,7 +63,6 @@ pub enum ErrorCode {
     DuplicateUnit,
     ExpectedModule,
     ExpectedIdent,
-    ZeroArityBuiltin,
     UnitMismatch,
 }
 
@@ -116,7 +115,6 @@ impl fmt::Display for ErrorCode {
             DuplicateUnit => "duplicate_unit",
             ExpectedModule => "expected_module",
             ExpectedIdent => "expected_ident",
-            ZeroArityBuiltin => "zero_arity_builtin",
             UnitMismatch => "unit_mismatch",
         };
 

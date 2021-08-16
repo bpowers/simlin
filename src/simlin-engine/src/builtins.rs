@@ -36,6 +36,13 @@ pub enum BuiltinFn<Expr> {
     FinalTime,
 }
 
+pub fn is_0_arity_builtin_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "inf" | "pi" | "time" | "time_step" | "dt" | "initial_time" | "final_time"
+    )
+}
+
 pub fn is_builtin_fn(name: &str) -> bool {
     matches!(
         name,
@@ -75,4 +82,10 @@ fn test_is_builtin_fn() {
     assert!(is_builtin_fn("lookup"));
     assert!(!is_builtin_fn("lookupz"));
     assert!(is_builtin_fn("log10"));
+}
+
+#[test]
+fn test_is_0_arity_builtin_fn() {
+    assert!(!is_0_arity_builtin_fn("lookup"));
+    assert!(is_0_arity_builtin_fn("time"));
 }

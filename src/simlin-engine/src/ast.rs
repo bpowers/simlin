@@ -7,7 +7,7 @@ use std::result::Result as StdResult;
 
 use lalrpop_util::ParseError;
 
-use crate::builtins::UntypedBuiltinFn;
+use crate::builtins::{is_0_arity_builtin_fn, UntypedBuiltinFn};
 use crate::common::{ElementName, EquationError, Ident};
 use crate::datamodel::Dimension;
 use crate::token::LexerType;
@@ -71,7 +71,15 @@ impl Expr {
 
         let lexer = crate::token::Lexer::new(eqn, lexer_type);
         match crate::equation::EquationParser::new().parse(eqn, lexer) {
-            Ok(ast) => Ok(Some(ast)),
+            Ok(ast) => Ok(Some(match lexer_type {
+                // in variable equations we want to treat `pi` or `time`
+                // as calls to `pi()` or `time()` builtin functions.  But
+                // in unit equations we might have a unit called "time", and
+                // function calls don't make sense there anyway.  So only
+                // reify for definitions/equations.
+                LexerType::Equation => ast.reify_0_arity_builtins(),
+                LexerType::Units => ast,
+            })),
             Err(err) => {
                 use crate::common::ErrorCode::*;
                 let err = match err {
@@ -118,6 +126,50 @@ impl Expr {
                 errs.push(err);
 
                 Err(errs)
+            }
+        }
+    }
+
+    /// reify turns variable references to known 0-arity builtin functions
+    /// like `pi()` into App()s of those functions.
+    fn reify_0_arity_builtins(self) -> Self {
+        match self {
+            Expr::Var(ref id, loc) => {
+                if is_0_arity_builtin_fn(id) {
+                    Expr::App(UntypedBuiltinFn(id.clone(), vec![]), loc)
+                } else {
+                    self
+                }
+            }
+            Expr::Const(_, _, _) => self,
+            Expr::App(UntypedBuiltinFn(func, args), loc) => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| arg.reify_0_arity_builtins())
+                    .collect::<Vec<_>>();
+                Expr::App(UntypedBuiltinFn(func, args), loc)
+            }
+            Expr::Subscript(id, args, loc) => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| arg.reify_0_arity_builtins())
+                    .collect::<Vec<_>>();
+                Expr::Subscript(id, args, loc)
+            }
+            Expr::Op1(op, mut r, loc) => {
+                *r = r.reify_0_arity_builtins();
+                Expr::Op1(op, r, loc)
+            }
+            Expr::Op2(op, mut l, mut r, loc) => {
+                *l = l.reify_0_arity_builtins();
+                *r = r.reify_0_arity_builtins();
+                Expr::Op2(op, l, r, loc)
+            }
+            Expr::If(mut cond, mut t, mut f, loc) => {
+                *cond = cond.reify_0_arity_builtins();
+                *t = t.reify_0_arity_builtins();
+                *f = f.reify_0_arity_builtins();
+                Expr::If(cond, t, f, loc)
             }
         }
     }
@@ -280,42 +332,76 @@ fn test_parse() {
         Loc::default(),
     ));
 
-    use crate::ast::print_eqn;
+    let time1 = Box::new(App(
+        UntypedBuiltinFn("time".to_owned(), vec![]),
+        Loc::default(),
+    ));
+
+    let time2 = Box::new(Subscript(
+        "aux".to_owned(),
+        vec![Op2(
+            BinaryOp::Add,
+            Box::new(App(
+                UntypedBuiltinFn(
+                    "int".to_owned(),
+                    vec![Op2(
+                        BinaryOp::Mod,
+                        Box::new(App(
+                            UntypedBuiltinFn("time".to_owned(), vec![]),
+                            Loc::default(),
+                        )),
+                        Box::new(Const("5".to_owned(), 5.0, Loc::default())),
+                        Loc::default(),
+                    )],
+                ),
+                Loc::default(),
+            )),
+            Box::new(Const("1".to_owned(), 1.0, Loc::default())),
+            Loc::default(),
+        )],
+        Loc::default(),
+    ));
 
     let cases = [
+        (
+            "aux[INT(TIME MOD 5) + 1]",
+            time2.clone(),
+            "aux[int(time() mod 5) + 1]",
+        ),
         ("if 1 then 2 else 3", if1, "if (1) then (2) else (3)"),
         (
             "if blerg = foo then 2 else 3",
             if2,
-            "if ((blerg = foo)) then (2) else (3)",
+            "if (blerg = foo) then (2) else (3)",
         ),
         (
             "IF quotient = quotient_target THEN 1 ELSE 0",
             if3.clone(),
-            "if ((quotient = quotient_target)) then (1) else (0)",
+            "if (quotient = quotient_target) then (1) else (0)",
         ),
         (
             "(IF quotient = quotient_target THEN 1 ELSE 0)",
             if3.clone(),
-            "if ((quotient = quotient_target)) then (1) else (0)",
+            "if (quotient = quotient_target) then (1) else (0)",
         ),
         (
             "( IF true_input and false_input THEN 1 ELSE 0 )",
             if4.clone(),
-            "if ((true_input && false_input)) then (1) else (0)",
+            "if (true_input && false_input) then (1) else (0)",
         ),
         (
             "( IF true_input && false_input THEN 1 ELSE 0 )",
             if4.clone(),
-            "if ((true_input && false_input)) then (1) else (0)",
+            "if (true_input && false_input) then (1) else (0)",
         ),
         (
             "\"oh dear\" = oh_dear",
             quoting_eq.clone(),
-            "(oh_dear = oh_dear)",
+            "oh_dear = oh_dear",
         ),
         ("a[1]", subscript1.clone(), "a[1]"),
         ("a[2, INT(b)]", subscript2.clone(), "a[2, int(b)]"),
+        ("time", time1.clone(), "time()"),
     ];
 
     for case in cases.iter() {
@@ -518,7 +604,7 @@ impl Visitor<String> for PrintVisitor {
                     BinaryOp::Exp => "^",
                     BinaryOp::Mul => "*",
                     BinaryOp::Div => "/",
-                    BinaryOp::Mod => "%",
+                    BinaryOp::Mod => "mod",
                     BinaryOp::Gt => ">",
                     BinaryOp::Lt => "<",
                     BinaryOp::Gte => ">=",
@@ -528,7 +614,7 @@ impl Visitor<String> for PrintVisitor {
                     BinaryOp::And => "&&",
                     BinaryOp::Or => "||",
                 };
-                format!("({} {} {})", l, op, r)
+                format!("{} {} {}", l, op, r)
             }
             Expr::If(cond, t, f, _) => {
                 let cond = self.walk(cond);
@@ -548,11 +634,39 @@ pub fn print_eqn(expr: &Expr) -> String {
 #[test]
 fn test_print_eqn() {
     assert_eq!(
-        "(a + b)",
+        "a + b",
         print_eqn(&Expr::Op2(
             BinaryOp::Add,
             Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
             Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Loc::new(0, 7),
+        ))
+    );
+    assert_eq!(
+        "a + b * c",
+        print_eqn(&Expr::Op2(
+            BinaryOp::Add,
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Op2(
+                BinaryOp::Mul,
+                Box::new(Expr::Var("b".to_string(), Loc::default())),
+                Box::new(Expr::Var("c".to_owned(), Loc::default())),
+                Loc::default()
+            )),
+            Loc::new(0, 7),
+        ))
+    );
+    assert_eq!(
+        "a * (b + c)",
+        print_eqn(&Expr::Op2(
+            BinaryOp::Mul,
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Op2(
+                BinaryOp::Add,
+                Box::new(Expr::Var("b".to_string(), Loc::default())),
+                Box::new(Expr::Var("c".to_owned(), Loc::default())),
+                Loc::default()
+            )),
             Loc::new(0, 7),
         ))
     );

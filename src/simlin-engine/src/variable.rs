@@ -465,11 +465,11 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
         match e {
             Expr::Const(_, _, _) => (),
             Expr::Var(id, _) => {
-                if !is_builtin_fn(id) {
-                    self.identifiers.insert(id.clone());
-                }
+                self.identifiers.insert(id.clone());
             }
             Expr::App(UntypedBuiltinFn(func, args), _) => {
+                // we can index other variable's tables this way, which is
+                // why _every_ application isn't a builtin function call
                 if !is_builtin_fn(func) {
                     self.identifiers.insert(func.clone());
                 }
@@ -478,9 +478,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                 }
             }
             Expr::Subscript(id, args, _) => {
-                if !is_builtin_fn(id) {
-                    self.identifiers.insert(id.clone());
-                }
+                self.identifiers.insert(id.clone());
                 for arg in args.iter() {
                     if let Expr::Var(arg_ident, _) = arg {
                         let mut is_subscript_or_dimension = false;
