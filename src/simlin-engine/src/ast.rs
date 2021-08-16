@@ -12,8 +12,8 @@ use crate::common::{ElementName, EquationError, Ident};
 use crate::datamodel::Dimension;
 use crate::token::LexerType;
 
-// equations are strings typed by humans for a single
-// variable -- u16 is long enough
+/// Loc describes a location in an equation by the starting point and ending point.
+/// Equations are strings typed by humans for a single variable -- u16 is long enough.
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct Loc {
     pub start: u16,
@@ -28,6 +28,8 @@ impl Loc {
         }
     }
 
+    /// union takes a second Loc and returns the inclusive range from the
+    /// start of the earlier token to the end of the later token.
     pub fn union(&self, rhs: &Self) -> Self {
         Loc {
             start: self.start.min(rhs.start),
@@ -48,9 +50,8 @@ fn test_loc_basics() {
     assert_eq!(Loc::new(1, 7), a.union(&c));
 }
 
-// we use Boxs here because we may walk and update ASTs a number of times,
-// and we want to avoid copying and reallocating subexpressions all over
-// the place.
+/// Expr represents a parsed equation, before any calls to
+/// builtin functions have been checked/resolved.
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(String, f64, Loc),
@@ -63,6 +64,64 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// new returns a new Expression AST if one can be constructed, or a list of
+    /// source/equation errors if one couldn't be constructed.
+    pub fn new(eqn: &str, lexer_type: LexerType) -> StdResult<Option<Expr>, Vec<EquationError>> {
+        let mut errs = Vec::new();
+
+        let lexer = crate::token::Lexer::new(eqn, lexer_type);
+        match crate::equation::EquationParser::new().parse(eqn, lexer) {
+            Ok(ast) => Ok(Some(ast)),
+            Err(err) => {
+                use crate::common::ErrorCode::*;
+                let err = match err {
+                    ParseError::InvalidToken { location: l } => EquationError {
+                        start: l as u16,
+                        end: (l + 1) as u16,
+                        code: InvalidToken,
+                    },
+                    ParseError::UnrecognizedEOF {
+                        location: l,
+                        expected: _e,
+                    } => {
+                        // if we get an EOF at position 0, that simply means
+                        // we have an empty (or comment-only) equation.  Its not
+                        // an _error_, but we also don't have an AST
+                        if l == 0 {
+                            return Ok(None);
+                        }
+                        // TODO: we can give a more precise error message here, including what
+                        //   types of tokens would be ok
+                        EquationError {
+                            start: l as u16,
+                            end: (l + 1) as u16,
+                            code: UnrecognizedEof,
+                        }
+                    }
+                    ParseError::UnrecognizedToken {
+                        token: (l, _t, r), ..
+                    } => EquationError {
+                        start: l as u16,
+                        end: r as u16,
+                        code: UnrecognizedToken,
+                    },
+                    ParseError::ExtraToken {
+                        token: (l, _t, r), ..
+                    } => EquationError {
+                        start: l as u16,
+                        end: r as u16,
+                        code: ExtraToken,
+                    },
+                    ParseError::User { error: e } => e,
+                };
+
+                errs.push(err);
+
+                Err(errs)
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn strip_loc(self) -> Self {
         let loc = Loc::default();
@@ -146,65 +205,6 @@ impl Expr {
 impl Default for Expr {
     fn default() -> Self {
         Expr::Const("0.0".to_string(), 0.0, Loc::default())
-    }
-}
-
-pub fn parse_equation(
-    eqn: &str,
-    lexer_type: LexerType,
-) -> StdResult<Option<Expr>, Vec<EquationError>> {
-    let mut errs = Vec::new();
-
-    let lexer = crate::token::Lexer::new(eqn, lexer_type);
-    match crate::equation::EquationParser::new().parse(eqn, lexer) {
-        Ok(ast) => Ok(Some(ast)),
-        Err(err) => {
-            use crate::common::ErrorCode::*;
-            let err = match err {
-                ParseError::InvalidToken { location: l } => EquationError {
-                    start: l as u16,
-                    end: (l + 1) as u16,
-                    code: InvalidToken,
-                },
-                ParseError::UnrecognizedEOF {
-                    location: l,
-                    expected: _e,
-                } => {
-                    // if we get an EOF at position 0, that simply means
-                    // we have an empty (or comment-only) equation.  Its not
-                    // an _error_, but we also don't have an AST
-                    if l == 0 {
-                        return Ok(None);
-                    }
-                    // TODO: we can give a more precise error message here, including what
-                    //   types of tokens would be ok
-                    EquationError {
-                        start: l as u16,
-                        end: (l + 1) as u16,
-                        code: UnrecognizedEof,
-                    }
-                }
-                ParseError::UnrecognizedToken {
-                    token: (l, _t, r), ..
-                } => EquationError {
-                    start: l as u16,
-                    end: r as u16,
-                    code: UnrecognizedToken,
-                },
-                ParseError::ExtraToken {
-                    token: (l, _t, r), ..
-                } => EquationError {
-                    start: l as u16,
-                    end: r as u16,
-                    code: ExtraToken,
-                },
-                ParseError::User { error: e } => e,
-            };
-
-            errs.push(err);
-
-            Err(errs)
-        }
     }
 }
 
@@ -320,7 +320,7 @@ fn test_parse() {
 
     for case in cases.iter() {
         let eqn = case.0;
-        let ast = parse_equation(eqn, LexerType::Equation).unwrap();
+        let ast = Expr::new(eqn, LexerType::Equation).unwrap();
         assert!(ast.is_some());
         let ast = ast.unwrap().strip_loc();
         assert_eq!(&*case.1, &ast);
@@ -328,7 +328,7 @@ fn test_parse() {
         assert_eq!(case.2, &printed);
     }
 
-    let ast = parse_equation("NAN", LexerType::Equation).unwrap();
+    let ast = Expr::new("NAN", LexerType::Equation).unwrap();
     assert!(ast.is_some());
     let ast = ast.unwrap();
     assert!(matches!(&ast, Expr::Const(_, _, _)));
@@ -357,7 +357,7 @@ fn test_parse_failures() {
     ];
 
     for case in failures {
-        let err = parse_equation(case, LexerType::Equation).unwrap_err();
+        let err = Expr::new(case, LexerType::Equation).unwrap_err();
         assert!(err.len() > 0);
     }
 }
@@ -394,10 +394,13 @@ impl Ast {
     }
 }
 
+/// Visitors walk Expr ASTs.
 pub trait Visitor<T> {
     fn walk(&mut self, e: &Expr) -> T;
 }
 
+/// BinaryOp enumerates the different operators supported in
+/// system dynamics equations.
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum BinaryOp {
     Add,
@@ -417,8 +420,8 @@ pub enum BinaryOp {
 }
 
 impl BinaryOp {
-    // higher the precedence, the tighter the binding.
-    // e.g. Mul.precedence() > Add.precedence()
+    /// higher the precedence, the tighter the binding.
+    /// e.g. Mul.precedence() > Add.precedence()
     pub(crate) fn precedence(&self) -> u8 {
         // matches equation.lalrpop
         match self {

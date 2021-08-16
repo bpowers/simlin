@@ -8,7 +8,7 @@ use std::result::Result as StdResult;
 
 use float_cmp::approx_eq;
 
-use crate::ast::{parse_equation, BinaryOp, Expr, UnaryOp};
+use crate::ast::{BinaryOp, Expr, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode};
 use crate::datamodel::{SimSpecs, Unit, UnitMap};
 use crate::token::LexerType;
@@ -117,7 +117,7 @@ impl Context {
 
             let eqn = unit.equation.as_ref().unwrap();
 
-            let ast = match parse_equation(eqn, LexerType::Units) {
+            let ast = match Expr::new(eqn, LexerType::Units) {
                 Ok(ast) => ast,
                 Err(errors) => {
                     unit_errors.push((unit_name.clone(), errors));
@@ -343,7 +343,7 @@ pub fn parse_units(
     unit_eqn: Option<&String>,
 ) -> StdResult<Option<UnitMap>, Vec<EquationError>> {
     if let Some(unit_eqn) = unit_eqn {
-        if let Some(expr) = parse_equation(unit_eqn, LexerType::Units)? {
+        if let Some(expr) = Expr::new(unit_eqn, LexerType::Units)? {
             let result = build_unit_components(ctx, &expr).map_err(|err| vec![err])?;
             Ok(Some(result))
         } else {
@@ -452,7 +452,7 @@ fn test_pretty_print_unit() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
         let pretty = pretty_print_unit(&result);
         assert_eq!(*output, pretty);
@@ -609,7 +609,7 @@ fn test_basic_unit_parsing() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
         assert_eq!(*output, result);
     }
@@ -627,7 +627,7 @@ fn test_basic_unit_parsing() {
     ];
 
     for (input, output) in negative_cases {
-        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap_err();
         assert_eq!(*output, result.code);
     }
@@ -689,7 +689,7 @@ fn test_const_int_eval() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
         assert_eq!(*output, const_int_eval(&expr).unwrap());
     }
 
@@ -698,7 +698,7 @@ fn test_const_int_eval() {
     let negative_cases = &["3.5", "foo", "if 1 then 2 else 3", "bar[2]", "foo(1, 2)"];
 
     for input in negative_cases {
-        let expr = parse_equation(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
         assert_eq!(
             ErrorCode::ExpectedInteger,
             const_int_eval(&expr).unwrap_err().code

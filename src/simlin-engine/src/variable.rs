@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{parse_equation as parse_single_equation, Ast, Expr, Visitor};
+use crate::ast::{Ast, Expr, Visitor};
 use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, VariableError};
@@ -236,13 +236,13 @@ fn parse_equation(
 ) -> (Option<Ast>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
-            match parse_single_equation(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
+            match Expr::new(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
                 Ok(expr) => (expr, vec![]),
                 Err(errors) => (None, errors),
             }
         }
         datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
-            let (ast, mut errors) = match parse_single_equation(eqn, LexerType::Equation) {
+            let (ast, mut errors) = match Expr::new(eqn, LexerType::Equation) {
                 Ok(expr) => (expr, vec![]),
                 Err(errors) => (None, errors),
             };
@@ -259,11 +259,10 @@ fn parse_equation(
             let elements: Vec<_> = elements
                 .iter()
                 .map(|(subscript, equation)| {
-                    let (ast, single_errors) =
-                        match parse_single_equation(equation, LexerType::Equation) {
-                            Ok(expr) => (expr, vec![]),
-                            Err(errors) => (None, errors),
-                        };
+                    let (ast, single_errors) = match Expr::new(equation, LexerType::Equation) {
+                        Ok(expr) => (expr, vec![]),
+                        Err(errors) => (None, errors),
+                    };
                     errors.extend(single_errors);
                     (subscript.clone(), ast)
                 })
