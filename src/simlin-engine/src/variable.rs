@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{Ast, Expr, Visitor};
+use crate::ast::{Ast, Expr0, Visitor};
 use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, VariableError};
@@ -32,7 +32,7 @@ pub struct ModuleInput {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Variable<MI = ModuleInput, E = Expr> {
+pub enum Variable<MI = ModuleInput, E = Expr0> {
     Stock {
         ident: Ident,
         ast: Option<Ast<E>>,
@@ -233,16 +233,16 @@ fn get_dimensions(
 fn parse_equation(
     eqn: &datamodel::Equation,
     dimensions: &[Dimension],
-) -> (Option<Ast<Expr>>, Vec<EquationError>) {
+) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
-            match Expr::new(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
+            match Expr0::new(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
                 Ok(expr) => (expr, vec![]),
                 Err(errors) => (None, errors),
             }
         }
         datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
-            let (ast, mut errors) = match Expr::new(eqn, LexerType::Equation) {
+            let (ast, mut errors) = match Expr0::new(eqn, LexerType::Equation) {
                 Ok(expr) => (expr, vec![]),
                 Err(errors) => (None, errors),
             };
@@ -259,7 +259,7 @@ fn parse_equation(
             let elements: Vec<_> = elements
                 .iter()
                 .map(|(subscript, equation)| {
-                    let (ast, single_errors) = match Expr::new(equation, LexerType::Equation) {
+                    let (ast, single_errors) = match Expr0::new(equation, LexerType::Equation) {
                         Ok(expr) => (expr, vec![]),
                         Err(errors) => (None, errors),
                     };
@@ -296,7 +296,7 @@ where
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
     let mut parse_and_lower_eqn =
-        |ident: &str, eqn: &datamodel::Equation| -> (Option<Ast<Expr>>, Vec<EquationError>) {
+        |ident: &str, eqn: &datamodel::Equation| -> (Option<Ast<Expr0>>, Vec<EquationError>) {
             let (ast, mut errors) = parse_equation(eqn, dimensions);
             let ast = match ast {
                 Some(ast) => match instantiate_implicit_modules(ident, ast) {
@@ -461,13 +461,13 @@ struct IdentifierSetVisitor<'a> {
 }
 
 impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
-    fn walk(&mut self, e: &Expr) {
+    fn walk(&mut self, e: &Expr0) {
         match e {
-            Expr::Const(_, _, _) => (),
-            Expr::Var(id, _) => {
+            Expr0::Const(_, _, _) => (),
+            Expr0::Var(id, _) => {
                 self.identifiers.insert(id.clone());
             }
-            Expr::App(UntypedBuiltinFn(func, args), _) => {
+            Expr0::App(UntypedBuiltinFn(func, args), _) => {
                 // we can index other variable's tables this way, which is
                 // why _every_ application isn't a builtin function call
                 if !is_builtin_fn(func) {
@@ -477,10 +477,10 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     self.walk(arg);
                 }
             }
-            Expr::Subscript(id, args, _) => {
+            Expr0::Subscript(id, args, _) => {
                 self.identifiers.insert(id.clone());
                 for arg in args.iter() {
-                    if let Expr::Var(arg_ident, _) = arg {
+                    if let Expr0::Var(arg_ident, _) = arg {
                         let mut is_subscript_or_dimension = false;
                         // TODO: this should be optimized
                         for dim in self.dimensions.iter() {
@@ -502,18 +502,18 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     }
                 }
             }
-            Expr::Op2(_, l, r, _) => {
+            Expr0::Op2(_, l, r, _) => {
                 self.walk(l);
                 self.walk(r);
             }
-            Expr::Op1(_, l, _) => {
+            Expr0::Op1(_, l, _) => {
                 self.walk(l);
             }
-            Expr::If(cond, t, f, _) => {
+            Expr0::If(cond, t, f, _) => {
                 if let Some(module_inputs) = self.module_inputs {
-                    if let Expr::App(UntypedBuiltinFn(builtin_id, args), _) = cond.as_ref() {
+                    if let Expr0::App(UntypedBuiltinFn(builtin_id, args), _) = cond.as_ref() {
                         if builtin_id == "ismoduleinput" && args.len() == 1 {
-                            if let Expr::Var(ident, _) = &args[0] {
+                            if let Expr0::Var(ident, _) = &args[0] {
                                 if module_inputs.contains(ident) {
                                     self.walk(t);
                                 } else {
@@ -534,7 +534,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
 }
 
 pub fn identifier_set(
-    ast: &Ast<Expr>,
+    ast: &Ast<Expr0>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident>>,
 ) -> HashSet<Ident> {
@@ -617,7 +617,7 @@ fn test_tables() {
 
     let expected = Variable::Var {
         ident: "lookup_function_table".to_string(),
-        ast: Some(Ast::Scalar(Expr::Const(
+        ast: Some(Ast::Scalar(Expr0::Const(
             "0".to_string(),
             0.0,
             Loc::new(0, 1),

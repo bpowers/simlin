@@ -301,10 +301,10 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
+    fn lower(&self, expr: &ast::Expr0) -> Result<Expr> {
         let expr = match expr {
-            ast::Expr::Const(_, n, loc) => Expr::Const(*n, *loc),
-            ast::Expr::Var(id, loc) => {
+            ast::Expr0::Const(_, n, loc) => Expr::Const(*n, *loc),
+            ast::Expr0::Var(id, loc) => {
                 if let Some((off, _)) = self
                     .inputs
                     .iter()
@@ -321,7 +321,7 @@ impl<'a> Context<'a> {
                     }
                 }
             }
-            ast::Expr::App(UntypedBuiltinFn(id, orig_args), loc) => {
+            ast::Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
                 let args: Result<Vec<Expr>> = orig_args.iter().map(|e| self.lower(e)).collect();
                 let mut args = args?;
 
@@ -378,7 +378,7 @@ impl<'a> Context<'a> {
 
                 let builtin = match id.as_str() {
                     "lookup" => {
-                        if let ast::Expr::Var(ident, _loc) = &orig_args[0] {
+                        if let ast::Expr0::Var(ident, _loc) = &orig_args[0] {
                             BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()))
                         } else {
                             return sim_err!(BadTable, id.clone());
@@ -394,7 +394,7 @@ impl<'a> Context<'a> {
                     "inf" => check_arity!(Inf, 0),
                     "int" => check_arity!(Int, 1),
                     "ismoduleinput" => {
-                        if let ast::Expr::Var(ident, _loc) = &orig_args[0] {
+                        if let ast::Expr0::Var(ident, _loc) = &orig_args[0] {
                             BuiltinFn::IsModuleInput(ident.clone())
                         } else {
                             return sim_err!(
@@ -425,7 +425,7 @@ impl<'a> Context<'a> {
                 };
                 Expr::App(builtin, *loc)
             }
-            ast::Expr::Subscript(id, args, loc) => {
+            ast::Expr0::Subscript(id, args, loc) => {
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
@@ -436,7 +436,7 @@ impl<'a> Context<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, arg)| {
-                        if let ast::Expr::Var(ident, loc) = arg {
+                        if let ast::Expr0::Var(ident, loc) = arg {
                             let dim = &dims[i];
                             // we need to check to make sure that any explicit subscript names are
                             // converted to offsets here and not passed to self.lower
@@ -458,7 +458,7 @@ impl<'a> Context<'a> {
                 let bounds = dims.iter().map(|dim| dim.elements.len()).collect();
                 Expr::Subscript(off, args, bounds, *loc)
             }
-            ast::Expr::Op1(op, l, loc) => {
+            ast::Expr0::Op1(op, l, loc) => {
                 let l = self.lower(l)?;
                 match op {
                     ast::UnaryOp::Negative => Expr::Op2(
@@ -471,7 +471,7 @@ impl<'a> Context<'a> {
                     ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
                 }
             }
-            ast::Expr::Op2(op, l, r, loc) => {
+            ast::Expr0::Op2(op, l, r, loc) => {
                 let l = self.lower(l)?;
                 let r = self.lower(r)?;
                 let op = match op {
@@ -492,7 +492,7 @@ impl<'a> Context<'a> {
                 };
                 Expr::Op2(op, Box::new(l), Box::new(r), *loc)
             }
-            ast::Expr::If(cond, t, f, loc) => {
+            ast::Expr0::If(cond, t, f, loc) => {
                 let cond = self.lower(cond)?;
                 let t = self.lower(t)?;
                 let f = self.lower(f)?;
@@ -564,7 +564,7 @@ impl<'a> Context<'a> {
 fn test_lower() {
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr::*;
+        use ast::Expr0::*;
         Box::new(If(
             Box::new(Op2(
                 And,
@@ -649,7 +649,7 @@ fn test_lower() {
 
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr::*;
+        use ast::Expr0::*;
         Box::new(If(
             Box::new(Op2(
                 Or,

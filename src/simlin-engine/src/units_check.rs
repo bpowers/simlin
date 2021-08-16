@@ -4,7 +4,7 @@
 
 use std::result::Result as StdResult;
 
-use crate::ast::{Ast, BinaryOp, Expr};
+use crate::ast::{Ast, BinaryOp, Expr0};
 use crate::common::{Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
@@ -29,10 +29,10 @@ enum Units {
 }
 
 impl<'a> UnitEvaluator<'a> {
-    fn check(&self, expr: &Expr) -> Result<Units> {
+    fn check(&self, expr: &Expr0) -> Result<Units> {
         match expr {
-            Expr::Const(_, _, _) => Ok(Units::Constant),
-            Expr::Var(ident, _) => {
+            Expr0::Const(_, _, _) => Ok(Units::Constant),
+            Expr0::Var(ident, _) => {
                 let var: &Variable =
                     if ident == "time" || ident == "initial_time" || ident == "final_time" {
                         &self.time
@@ -52,10 +52,10 @@ impl<'a> UnitEvaluator<'a> {
                     })
                     .map(|units| Units::Explicit(units.clone()))
             }
-            Expr::App(_, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr::Op1(_, l, _) => self.check(l),
-            Expr::Op2(op, l, r, _) => {
+            Expr0::App(_, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr0::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr0::Op1(_, l, _) => self.check(l),
+            Expr0::Op2(op, l, r, _) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 
@@ -108,7 +108,7 @@ impl<'a> UnitEvaluator<'a> {
                     }
                 }
             }
-            Expr::If(_, l, r, _) => {
+            Expr0::If(_, l, r, _) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 

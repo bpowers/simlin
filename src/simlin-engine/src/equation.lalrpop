@@ -2,10 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::ast::{Expr, Loc};
+use crate::ast::{Expr0 as Expr, Loc};
 use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
-use crate::ast::Expr::*;
+use crate::ast::Expr0::*;
 use crate::common::{self, canonicalize, EquationError};
 use crate::token::Token;
 use crate::builtins::UntypedBuiltinFn;

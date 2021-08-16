@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{print_eqn, Ast, Expr};
+use crate::ast::{print_eqn, Ast, Expr0};
 use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
 use crate::common::{EquationError, Ident};
 use crate::datamodel::Visibility;
@@ -38,14 +38,14 @@ impl<'a> BuiltinVisitor<'a> {
         }
     }
 
-    fn walk(&mut self, expr: Expr) -> std::result::Result<Expr, EquationError> {
-        use crate::ast::Expr::*;
+    fn walk(&mut self, expr: Expr0) -> std::result::Result<Expr0, EquationError> {
+        use crate::ast::Expr0::*;
         use std::mem;
-        let result: Expr = match expr {
+        let result: Expr0 = match expr {
             Const(_, _, _) => expr,
             Var(_, _) => expr,
             App(UntypedBuiltinFn(func, args), loc) => {
-                let args: std::result::Result<Vec<Expr>, EquationError> =
+                let args: std::result::Result<Vec<Expr0>, EquationError> =
                     args.into_iter().map(|e| self.walk(e)).collect();
                 let args = args?;
                 if is_builtin_fn(&func) {
@@ -62,7 +62,7 @@ impl<'a> BuiltinVisitor<'a> {
                 let module_name = format!("$⁚{}⁚{}⁚{}", self.variable_name, self.n, func);
 
                 let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
-                    if let Expr::Var(id, _loc) = arg {
+                    if let Expr0::Var(id, _loc) = arg {
                         id
                     } else {
                         let id = format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i);
@@ -105,7 +105,7 @@ impl<'a> BuiltinVisitor<'a> {
                 Var(module_output_name, loc)
             }
             Subscript(id, args, loc) => {
-                let args: std::result::Result<Vec<Expr>, EquationError> =
+                let args: std::result::Result<Vec<Expr0>, EquationError> =
                     args.into_iter().map(|e| self.walk(e)).collect();
                 let args = args?;
                 Subscript(id, args, loc)
@@ -136,8 +136,8 @@ fn test_builtin_visitor() {}
 
 pub fn instantiate_implicit_modules(
     variable_name: &str,
-    ast: Ast<Expr>,
-) -> std::result::Result<(Ast<Expr>, Vec<datamodel::Variable>), EquationError> {
+    ast: Ast<Expr0>,
+) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
     let mut builtin_visitor = BuiltinVisitor::new(variable_name);
     let ast = match ast {
         Ast::Scalar(ast) => Ast::Scalar(builtin_visitor.walk(ast)?),

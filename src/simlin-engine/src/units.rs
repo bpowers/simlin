@@ -8,7 +8,7 @@ use std::result::Result as StdResult;
 
 use float_cmp::approx_eq;
 
-use crate::ast::{BinaryOp, Expr, UnaryOp};
+use crate::ast::{BinaryOp, Expr0, UnaryOp};
 use crate::common::{EquationError, EquationResult, ErrorCode};
 use crate::datamodel::{SimSpecs, Unit, UnitMap};
 use crate::token::LexerType;
@@ -117,7 +117,7 @@ impl Context {
 
             let eqn = unit.equation.as_ref().unwrap();
 
-            let ast = match Expr::new(eqn, LexerType::Units) {
+            let ast = match Expr0::new(eqn, LexerType::Units) {
                 Ok(ast) => ast,
                 Err(errors) => {
                     unit_errors.push((unit_name.clone(), errors));
@@ -179,25 +179,25 @@ impl Context {
 }
 
 #[allow(dead_code)]
-fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
+fn const_int_eval(ast: &Expr0) -> EquationResult<i32> {
     match ast {
-        Expr::Const(_, n, loc) => {
+        Expr0::Const(_, n, loc) => {
             if approx_eq!(f64, *n, n.round()) {
                 Ok(n.round() as i32)
             } else {
                 eqn_err!(ExpectedInteger, loc.start, loc.end)
             }
         }
-        Expr::Var(_, loc) => {
+        Expr0::Var(_, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
-        Expr::App(_, loc) => {
+        Expr0::App(_, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
-        Expr::Subscript(_, _, loc) => {
+        Expr0::Subscript(_, _, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
-        Expr::Op1(op, expr, _) => {
+        Expr0::Op1(op, expr, _) => {
             let expr = const_int_eval(expr)?;
             let result = match op {
                 UnaryOp::Positive => expr,
@@ -212,7 +212,7 @@ fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
             };
             Ok(result)
         }
-        Expr::Op2(op, l, r, _) => {
+        Expr0::Op2(op, l, r, _) => {
             let l = const_int_eval(l)?;
             let r = const_int_eval(r)?;
             let result = match op {
@@ -239,15 +239,15 @@ fn const_int_eval(ast: &Expr) -> EquationResult<i32> {
             };
             Ok(result)
         }
-        Expr::If(_, _, _, loc) => {
+        Expr0::If(_, _, _, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
     }
 }
 
-fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
+fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> {
     let unit_map: UnitMap = match ast {
-        Expr::Const(_, _, loc) => {
+        Expr0::Const(_, _, loc) => {
             // dimensionless is special
             if let Ok(1) = const_int_eval(ast) {
                 UnitMap::new()
@@ -256,7 +256,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
                 return eqn_err!(NoConstInUnits, loc.start, loc.end);
             }
         }
-        Expr::Var(id, _) => {
+        Expr0::Var(id, _) => {
             let id = ctx.aliases.get(id).unwrap_or(id);
             if id == "dmnl" || id == "nil" || id == "dimensionless" || id == "fraction" {
                 // dimensionless is special
@@ -267,16 +267,16 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
                     .unwrap_or_else(|| [(id.to_owned(), 1)].iter().cloned().collect())
             }
         }
-        Expr::App(_, loc) => {
+        Expr0::App(_, loc) => {
             return eqn_err!(NoAppInUnits, loc.start, loc.end);
         }
-        Expr::Subscript(_, _, loc) => {
+        Expr0::Subscript(_, _, loc) => {
             return eqn_err!(NoSubscriptInUnits, loc.start, loc.end);
         }
-        Expr::Op1(_, _, loc) => {
+        Expr0::Op1(_, _, loc) => {
             return eqn_err!(NoUnaryOpInUnits, loc.start, loc.end);
         }
-        Expr::Op2(op, l, r, loc) => match op {
+        Expr0::Op2(op, l, r, loc) => match op {
             BinaryOp::Exp => {
                 let exp = const_int_eval(r)?;
                 let mut unit_map = build_unit_components(ctx, l)?;
@@ -330,7 +330,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr) -> EquationResult<UnitMap> {
                 return eqn_err!(BadBinaryOpInUnits, loc.start, loc.end);
             }
         },
-        Expr::If(_, _, _, loc) => {
+        Expr0::If(_, _, _, loc) => {
             return eqn_err!(NoIfInUnits, loc.start, loc.end);
         }
     };
@@ -343,7 +343,7 @@ pub fn parse_units(
     unit_eqn: Option<&String>,
 ) -> StdResult<Option<UnitMap>, Vec<EquationError>> {
     if let Some(unit_eqn) = unit_eqn {
-        if let Some(expr) = Expr::new(unit_eqn, LexerType::Units)? {
+        if let Some(expr) = Expr0::new(unit_eqn, LexerType::Units)? {
             let result = build_unit_components(ctx, &expr).map_err(|err| vec![err])?;
             Ok(Some(result))
         } else {
@@ -452,7 +452,7 @@ fn test_pretty_print_unit() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr0::new(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
         let pretty = pretty_print_unit(&result);
         assert_eq!(*output, pretty);
@@ -609,7 +609,7 @@ fn test_basic_unit_parsing() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr0::new(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
         assert_eq!(*output, result);
     }
@@ -627,7 +627,7 @@ fn test_basic_unit_parsing() {
     ];
 
     for (input, output) in negative_cases {
-        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr0::new(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap_err();
         assert_eq!(*output, result.code);
     }
@@ -689,7 +689,7 @@ fn test_const_int_eval() {
     ];
 
     for (input, output) in positive_cases {
-        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr0::new(input, LexerType::Units).unwrap().unwrap();
         assert_eq!(*output, const_int_eval(&expr).unwrap());
     }
 
@@ -698,7 +698,7 @@ fn test_const_int_eval() {
     let negative_cases = &["3.5", "foo", "if 1 then 2 else 3", "bar[2]", "foo(1, 2)"];
 
     for input in negative_cases {
-        let expr = Expr::new(input, LexerType::Units).unwrap().unwrap();
+        let expr = Expr0::new(input, LexerType::Units).unwrap().unwrap();
         assert_eq!(
             ErrorCode::ExpectedInteger,
             const_int_eval(&expr).unwrap_err().code
