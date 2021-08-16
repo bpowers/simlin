@@ -32,10 +32,10 @@ pub struct ModuleInput {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Variable<MI = ModuleInput> {
+pub enum Variable<MI = ModuleInput, E = Expr> {
     Stock {
         ident: Ident,
-        ast: Option<Ast<Expr>>,
+        ast: Option<Ast<E>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
         inflows: Vec<Ident>,
@@ -45,7 +45,7 @@ pub enum Variable<MI = ModuleInput> {
     },
     Var {
         ident: Ident,
-        ast: Option<Ast<Expr>>,
+        ast: Option<Ast<E>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
         table: Option<Table>,
@@ -64,7 +64,7 @@ pub enum Variable<MI = ModuleInput> {
     },
 }
 
-impl<MI> Variable<MI> {
+impl<MI, E> Variable<MI, E> {
     pub fn ident(&self) -> &str {
         match self {
             Variable::Stock { ident: name, .. } => name.as_str(),
@@ -73,7 +73,7 @@ impl<MI> Variable<MI> {
         }
     }
 
-    pub fn ast(&self) -> Option<&Ast<Expr>> {
+    pub fn ast(&self) -> Option<&Ast<E>> {
         match self {
             Variable::Stock { ast: Some(ast), .. } => Some(ast),
             Variable::Var { ast: Some(ast), .. } => Some(ast),
