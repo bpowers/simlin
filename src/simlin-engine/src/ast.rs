@@ -363,13 +363,13 @@ fn test_parse_failures() {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Ast {
+pub enum Ast<Expr> {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),
     Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
 }
 
-impl Ast {
+impl Ast<Expr> {
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
@@ -443,33 +443,35 @@ impl BinaryOp {
     }
 }
 
-fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
-    match parent {
-        // no children so doesn't matter
-        Expr::Const(_, _, _) | Expr::Var(_, _) => false,
-        // children are comma separated, so no ambiguity possible
-        Expr::App(_, _) | Expr::Subscript(_, _, _) => false,
-        Expr::Op1(_, _, _) => matches!(child, Expr::Op2(_, _, _, _)),
-        Expr::Op2(parent_op, _, _, _) => match child {
-            Expr::Const(_, _, _)
-            | Expr::Var(_, _)
-            | Expr::App(_, _)
-            | Expr::Subscript(_, _, _)
-            | Expr::If(_, _, _, _)
-            | Expr::Op1(_, _, _) => false,
-            // 3 * 2 + 1
-            Expr::Op2(child_op, _, _, _) => {
-                // if we have `3 * (2 + 3)`, the parent's precedence
-                // is higher than the child and we need enclosing parens
-                parent_op.precedence() > child_op.precedence()
-            }
-        },
-        Expr::If(_, _, _, _) => false,
-    }
-}
+macro_rules! child_needs_parens(
+    ($expr:tt, $parent:expr, $child:expr, $eqn:expr) => {{
+        match $parent {
+            // no children so doesn't matter
+            $expr::Const(_, _, _) | $expr::Var(_, _) => false,
+            // children are comma separated, so no ambiguity possible
+            $expr::App(_, _) | $expr::Subscript(_, _, _) => false,
+            $expr::Op1(_, _, _) => matches!($child, $expr::Op2(_, _, _, _)),
+            $expr::Op2(parent_op, _, _, _) => match $child {
+                $expr::Const(_, _, _)
+                | $expr::Var(_, _)
+                | $expr::App(_, _)
+                | $expr::Subscript(_, _, _)
+                | $expr::If(_, _, _, _)
+                | $expr::Op1(_, _, _) => false,
+                // 3 * 2 + 1
+                $expr::Op2(child_op, _, _, _) => {
+                    // if we have `3 * (2 + 3)`, the parent's precedence
+                    // is higher than the child and we need enclosing parens
+                    parent_op.precedence() > child_op.precedence()
+                }
+            },
+            $expr::If(_, _, _, _) => false,
+        }
+    }}
+);
 
 fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
-    if child_needs_parens(parent, child) {
+    if child_needs_parens!(Expr, parent, child, eqn) {
         format!("({})", eqn)
     } else {
         eqn

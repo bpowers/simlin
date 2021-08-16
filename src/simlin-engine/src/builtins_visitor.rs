@@ -136,8 +136,8 @@ fn test_builtin_visitor() {}
 
 pub fn instantiate_implicit_modules(
     variable_name: &str,
-    ast: Ast,
-) -> std::result::Result<(Ast, Vec<datamodel::Variable>), EquationError> {
+    ast: Ast<Expr>,
+) -> std::result::Result<(Ast<Expr>, Vec<datamodel::Variable>), EquationError> {
     let mut builtin_visitor = BuiltinVisitor::new(variable_name);
     let ast = match ast {
         Ast::Scalar(ast) => Ast::Scalar(builtin_visitor.walk(ast)?),

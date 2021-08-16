@@ -35,7 +35,7 @@ pub struct ModuleInput {
 pub enum Variable<MI = ModuleInput> {
     Stock {
         ident: Ident,
-        ast: Option<Ast>,
+        ast: Option<Ast<Expr>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
         inflows: Vec<Ident>,
@@ -45,7 +45,7 @@ pub enum Variable<MI = ModuleInput> {
     },
     Var {
         ident: Ident,
-        ast: Option<Ast>,
+        ast: Option<Ast<Expr>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
         table: Option<Table>,
@@ -73,7 +73,7 @@ impl<MI> Variable<MI> {
         }
     }
 
-    pub fn ast(&self) -> Option<&Ast> {
+    pub fn ast(&self) -> Option<&Ast<Expr>> {
         match self {
             Variable::Stock { ast: Some(ast), .. } => Some(ast),
             Variable::Var { ast: Some(ast), .. } => Some(ast),
@@ -233,7 +233,7 @@ fn get_dimensions(
 fn parse_equation(
     eqn: &datamodel::Equation,
     dimensions: &[Dimension],
-) -> (Option<Ast>, Vec<EquationError>) {
+) -> (Option<Ast<Expr>>, Vec<EquationError>) {
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
             match Expr::new(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
@@ -296,7 +296,7 @@ where
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
     let mut parse_and_lower_eqn =
-        |ident: &str, eqn: &datamodel::Equation| -> (Option<Ast>, Vec<EquationError>) {
+        |ident: &str, eqn: &datamodel::Equation| -> (Option<Ast<Expr>>, Vec<EquationError>) {
             let (ast, mut errors) = parse_equation(eqn, dimensions);
             let ast = match ast {
                 Some(ast) => match instantiate_implicit_modules(ident, ast) {
@@ -536,7 +536,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
 }
 
 pub fn identifier_set(
-    ast: &Ast,
+    ast: &Ast<Expr>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident>>,
 ) -> HashSet<Ident> {
