@@ -9,7 +9,6 @@ use std::rc::Rc;
 use float_cmp::approx_eq;
 
 use crate::ast::{self, Ast, BinaryOp, Loc};
-use crate::builtins::UntypedBuiltinFn;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
@@ -301,10 +300,10 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn lower(&self, expr: &ast::Expr0) -> Result<Expr> {
+    fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
         let expr = match expr {
-            ast::Expr0::Const(_, n, loc) => Expr::Const(*n, *loc),
-            ast::Expr0::Var(id, loc) => {
+            ast::Expr::Const(_, n, loc) => Expr::Const(*n, *loc),
+            ast::Expr::Var(id, loc) => {
                 if let Some((off, _)) = self
                     .inputs
                     .iter()
@@ -321,111 +320,72 @@ impl<'a> Context<'a> {
                     }
                 }
             }
-            ast::Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
-                let args: Result<Vec<Expr>> = orig_args.iter().map(|e| self.lower(e)).collect();
-                let mut args = args?;
-
-                macro_rules! check_arity {
-                    ($builtin_fn:tt, 0) => {{
-                        if !args.is_empty() {
-                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
-                        }
-
-                        BuiltinFn::$builtin_fn
-                    }};
-                    ($builtin_fn:tt, 1) => {{
-                        if args.len() != 1 {
-                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
-                        }
-
-                        let a = args.remove(0);
-                        BuiltinFn::$builtin_fn(Box::new(a))
-                    }};
-                    ($builtin_fn:tt, 2) => {{
-                        if args.len() != 2 {
-                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
-                        }
-
-                        let b = args.remove(1);
-                        let a = args.remove(0);
-                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b))
-                    }};
-                    ($builtin_fn:tt, 3) => {{
-                        if args.len() != 3 {
-                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
-                        }
-
-                        let c = args.remove(2);
-                        let b = args.remove(1);
-                        let a = args.remove(0);
-                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Box::new(c))
-                    }};
-                    ($builtin_fn:tt, 2, 3) => {{
-                        if args.len() == 2 {
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), None)
-                        } else if args.len() == 3 {
-                            let c = args.remove(2);
-                            let b = args.remove(1);
-                            let a = args.remove(0);
-                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Some(Box::new(c)))
-                        } else {
-                            return sim_err!(BadBuiltinArgs, self.ident.to_string());
-                        }
-                    }};
-                }
-
-                let builtin = match id.as_str() {
-                    "lookup" => {
-                        if let ast::Expr0::Var(ident, _loc) = &orig_args[0] {
-                            BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()))
-                        } else {
-                            return sim_err!(BadTable, id.clone());
-                        }
+            ast::Expr::App(builtin, loc) => {
+                use crate::builtins::BuiltinFn as BFn;
+                let builtin: BuiltinFn = match builtin {
+                    BFn::Lookup(id, expr) => {
+                        BuiltinFn::Lookup(id.clone(), Box::new(self.lower(expr)?))
                     }
-                    "mean" => BuiltinFn::Mean(args),
-                    "abs" => check_arity!(Abs, 1),
-                    "arccos" => check_arity!(Arccos, 1),
-                    "arcsin" => check_arity!(Arcsin, 1),
-                    "arctan" => check_arity!(Arctan, 1),
-                    "cos" => check_arity!(Cos, 1),
-                    "exp" => check_arity!(Exp, 1),
-                    "inf" => check_arity!(Inf, 0),
-                    "int" => check_arity!(Int, 1),
-                    "ismoduleinput" => {
-                        if let ast::Expr0::Var(ident, _loc) = &orig_args[0] {
-                            BuiltinFn::IsModuleInput(ident.clone())
-                        } else {
-                            return sim_err!(
-                                ExpectedIdent,
-                                "input to isModuleBuiltin must be a variable name".to_owned()
-                            );
-                        }
+                    BFn::Abs(a) => BuiltinFn::Abs(Box::new(self.lower(a)?)),
+                    BFn::Arccos(a) => BuiltinFn::Arccos(Box::new(self.lower(a)?)),
+                    BFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(self.lower(a)?)),
+                    BFn::Arctan(a) => BuiltinFn::Arctan(Box::new(self.lower(a)?)),
+                    BFn::Cos(a) => BuiltinFn::Cos(Box::new(self.lower(a)?)),
+                    BFn::Exp(a) => BuiltinFn::Exp(Box::new(self.lower(a)?)),
+                    BFn::Inf => BuiltinFn::Inf,
+                    BFn::Int(a) => BuiltinFn::Int(Box::new(self.lower(a)?)),
+                    BFn::IsModuleInput(id) => BuiltinFn::IsModuleInput(id.clone()),
+                    BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower(a)?)),
+                    BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower(a)?)),
+                    BFn::Max(a, b) => {
+                        BuiltinFn::Max(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
                     }
-                    "ln" => check_arity!(Ln, 1),
-                    "log10" => check_arity!(Log10, 1),
-                    "max" => check_arity!(Max, 2),
-                    "min" => check_arity!(Min, 2),
-                    "pi" => check_arity!(Pi, 0),
-                    "pulse" => check_arity!(Pulse, 2, 3),
-                    "ramp" => check_arity!(Ramp, 2, 3),
-                    "safediv" => check_arity!(SafeDiv, 2, 3),
-                    "sin" => check_arity!(Sin, 1),
-                    "sqrt" => check_arity!(Sqrt, 1),
-                    "step" => check_arity!(Step, 2),
-                    "tan" => check_arity!(Tan, 1),
-                    "time" => check_arity!(Time, 0),
-                    "time_step" | "dt" => check_arity!(TimeStep, 0),
-                    "initial_time" => check_arity!(StartTime, 0),
-                    "final_time" => check_arity!(FinalTime, 0),
-                    _ => {
-                        return sim_err!(UnknownBuiltin, self.ident.to_string());
+                    BFn::Mean(args) => {
+                        let args = args
+                            .iter()
+                            .map(|arg| self.lower(arg))
+                            .collect::<Result<Vec<Expr>>>();
+                        BuiltinFn::Mean(args?)
                     }
+                    BFn::Min(a, b) => {
+                        BuiltinFn::Min(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
+                    }
+                    BFn::Pi => BuiltinFn::Pi,
+                    BFn::Pulse(a, b, c) => {
+                        let c = match c {
+                            Some(c) => Some(Box::new(self.lower(c)?)),
+                            None => None,
+                        };
+                        BuiltinFn::Pulse(Box::new(self.lower(a)?), Box::new(self.lower(b)?), c)
+                    }
+                    BFn::Ramp(a, b, c) => {
+                        let c = match c {
+                            Some(c) => Some(Box::new(self.lower(c)?)),
+                            None => None,
+                        };
+                        BuiltinFn::Ramp(Box::new(self.lower(a)?), Box::new(self.lower(b)?), c)
+                    }
+                    BFn::SafeDiv(a, b, c) => {
+                        let c = match c {
+                            Some(c) => Some(Box::new(self.lower(c)?)),
+                            None => None,
+                        };
+                        BuiltinFn::SafeDiv(Box::new(self.lower(a)?), Box::new(self.lower(b)?), c)
+                    }
+                    BFn::Sin(a) => BuiltinFn::Sin(Box::new(self.lower(a)?)),
+                    BFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(self.lower(a)?)),
+                    BFn::Step(a, b) => {
+                        BuiltinFn::Step(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
+                    }
+                    BFn::Tan(a) => BuiltinFn::Tan(Box::new(self.lower(a)?)),
+                    BFn::Time => BuiltinFn::Time,
+                    BFn::TimeStep => BuiltinFn::TimeStep,
+                    BFn::StartTime => BuiltinFn::StartTime,
+                    BFn::FinalTime => BuiltinFn::FinalTime,
                 };
                 Expr::App(builtin, *loc)
             }
-            ast::Expr0::Subscript(id, args, loc) => {
+            ast::Expr::Subscript(id, args, loc) => {
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
@@ -436,7 +396,7 @@ impl<'a> Context<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, arg)| {
-                        if let ast::Expr0::Var(ident, loc) = arg {
+                        if let ast::Expr::Var(ident, loc) = arg {
                             let dim = &dims[i];
                             // we need to check to make sure that any explicit subscript names are
                             // converted to offsets here and not passed to self.lower
@@ -458,7 +418,7 @@ impl<'a> Context<'a> {
                 let bounds = dims.iter().map(|dim| dim.elements.len()).collect();
                 Expr::Subscript(off, args, bounds, *loc)
             }
-            ast::Expr0::Op1(op, l, loc) => {
+            ast::Expr::Op1(op, l, loc) => {
                 let l = self.lower(l)?;
                 match op {
                     ast::UnaryOp::Negative => Expr::Op2(
@@ -471,7 +431,7 @@ impl<'a> Context<'a> {
                     ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
                 }
             }
-            ast::Expr0::Op2(op, l, r, loc) => {
+            ast::Expr::Op2(op, l, r, loc) => {
                 let l = self.lower(l)?;
                 let r = self.lower(r)?;
                 let op = match op {
@@ -492,7 +452,7 @@ impl<'a> Context<'a> {
                 };
                 Expr::Op2(op, Box::new(l), Box::new(r), *loc)
             }
-            ast::Expr0::If(cond, t, f, loc) => {
+            ast::Expr::If(cond, t, f, loc) => {
                 let cond = self.lower(cond)?;
                 let t = self.lower(t)?;
                 let f = self.lower(f)?;
@@ -564,7 +524,7 @@ impl<'a> Context<'a> {
 fn test_lower() {
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr0::*;
+        use ast::Expr::*;
         Box::new(If(
             Box::new(Op2(
                 And,
@@ -649,7 +609,7 @@ fn test_lower() {
 
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr0::*;
+        use ast::Expr::*;
         Box::new(If(
             Box::new(Op2(
                 Or,

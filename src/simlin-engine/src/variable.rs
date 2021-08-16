@@ -6,8 +6,8 @@ use std::collections::{BTreeSet, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{Ast, Expr0, Visitor};
-use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
+use crate::ast::{Ast, Expr, Expr0};
+use crate::builtins::{walk_builtin_expr, BuiltinContents, BuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, VariableError};
 use crate::datamodel::Dimension;
@@ -32,7 +32,7 @@ pub struct ModuleInput {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Variable<MI = ModuleInput, E = Expr0> {
+pub enum Variable<MI = ModuleInput, E = Expr> {
     Stock {
         ident: Ident,
         ast: Option<Ast<E>>,
@@ -234,18 +234,20 @@ fn parse_equation(
     eqn: &datamodel::Equation,
     dimensions: &[Dimension],
 ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
+    fn parse_inner(eqn: &str) -> (Option<Expr0>, Vec<EquationError>) {
+        match Expr0::new(eqn, LexerType::Equation) {
+            Ok(expr) => (expr, vec![]),
+            Err(errors) => (None, errors),
+        }
+    }
     match eqn {
         datamodel::Equation::Scalar(eqn) => {
-            match Expr0::new(eqn, LexerType::Equation).map(|eqn| eqn.map(Ast::Scalar)) {
-                Ok(expr) => (expr, vec![]),
-                Err(errors) => (None, errors),
-            }
+            let (ast, errors) = parse_inner(eqn);
+            (ast.map(Ast::Scalar), errors)
         }
         datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
-            let (ast, mut errors) = match Expr0::new(eqn, LexerType::Equation) {
-                Ok(expr) => (expr, vec![]),
-                Err(errors) => (None, errors),
-            };
+            let (ast, mut errors) = parse_inner(eqn);
+
             match get_dimensions(dimensions, dimension_names) {
                 Ok(dims) => (ast.map(|ast| Ast::ApplyToAll(dims, ast)), errors),
                 Err(err) => {
@@ -258,11 +260,8 @@ fn parse_equation(
             let mut errors: Vec<EquationError> = vec![];
             let elements: Vec<_> = elements
                 .iter()
-                .map(|(subscript, equation)| {
-                    let (ast, single_errors) = match Expr0::new(equation, LexerType::Equation) {
-                        Ok(expr) => (expr, vec![]),
-                        Err(errors) => (None, errors),
-                    };
+                .map(|(subscript, eqn)| {
+                    let (ast, single_errors) = parse_inner(eqn);
                     errors.extend(single_errors);
                     (subscript.clone(), ast)
                 })
@@ -290,7 +289,7 @@ pub fn parse_var<MI, F>(
     implicit_vars: &mut Vec<datamodel::Variable>,
     units_ctx: &units::Context,
     module_input_mapper: F,
-) -> Variable<MI>
+) -> Variable<MI, Expr0>
 where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
@@ -460,27 +459,25 @@ struct IdentifierSetVisitor<'a> {
     module_inputs: Option<&'a BTreeSet<Ident>>,
 }
 
-impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
-    fn walk(&mut self, e: &Expr0) {
+impl<'a> IdentifierSetVisitor<'a> {
+    fn walk(&mut self, e: &Expr) {
         match e {
-            Expr0::Const(_, _, _) => (),
-            Expr0::Var(id, _) => {
+            Expr::Const(_, _, _) => (),
+            Expr::Var(id, _) => {
                 self.identifiers.insert(id.clone());
             }
-            Expr0::App(UntypedBuiltinFn(func, args), _) => {
-                // we can index other variable's tables this way, which is
-                // why _every_ application isn't a builtin function call
-                if !is_builtin_fn(func) {
-                    self.identifiers.insert(func.clone());
-                }
-                for arg in args.iter() {
-                    self.walk(arg);
-                }
+            Expr::App(builtin, _) => {
+                walk_builtin_expr(builtin, |contents| match contents {
+                    BuiltinContents::Ident(id) => {
+                        self.identifiers.insert(id.to_owned());
+                    }
+                    BuiltinContents::Expr(expr) => self.walk(expr),
+                });
             }
-            Expr0::Subscript(id, args, _) => {
+            Expr::Subscript(id, args, _) => {
                 self.identifiers.insert(id.clone());
                 for arg in args.iter() {
-                    if let Expr0::Var(arg_ident, _) = arg {
+                    if let Expr::Var(arg_ident, _) = arg {
                         let mut is_subscript_or_dimension = false;
                         // TODO: this should be optimized
                         for dim in self.dimensions.iter() {
@@ -502,26 +499,22 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
                     }
                 }
             }
-            Expr0::Op2(_, l, r, _) => {
+            Expr::Op2(_, l, r, _) => {
                 self.walk(l);
                 self.walk(r);
             }
-            Expr0::Op1(_, l, _) => {
+            Expr::Op1(_, l, _) => {
                 self.walk(l);
             }
-            Expr0::If(cond, t, f, _) => {
+            Expr::If(cond, t, f, _) => {
                 if let Some(module_inputs) = self.module_inputs {
-                    if let Expr0::App(UntypedBuiltinFn(builtin_id, args), _) = cond.as_ref() {
-                        if builtin_id == "ismoduleinput" && args.len() == 1 {
-                            if let Expr0::Var(ident, _) = &args[0] {
-                                if module_inputs.contains(ident) {
-                                    self.walk(t);
-                                } else {
-                                    self.walk(f);
-                                }
-                                return;
-                            }
+                    if let Expr::App(BuiltinFn::IsModuleInput(ident), _) = cond.as_ref() {
+                        if module_inputs.contains(ident) {
+                            self.walk(t);
+                        } else {
+                            self.walk(f);
                         }
+                        return;
                     }
                 }
 
@@ -534,7 +527,7 @@ impl<'a> Visitor<()> for IdentifierSetVisitor<'a> {
 }
 
 pub fn identifier_set(
-    ast: &Ast<Expr0>,
+    ast: &Ast<Expr>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident>>,
 ) -> HashSet<Ident> {
@@ -560,9 +553,9 @@ fn test_identifier_sets() {
     let cases: &[(&str, &[&str])] = &[
         ("if isModuleInput(input) then b else c", &["b"]),
         ("if a then b else c", &["a", "b", "c"]),
-        ("a(1, b, c)", &["a", "b", "c"]),
+        ("lookup(b, c)", &["b", "c"]),
         ("-(a)", &["a"]),
-        ("if a = 1 then -c else c(1, d, b)", &["a", "b", "c", "d"]),
+        ("if a = 1 then -c else lookup(c,b)", &["a", "b", "c"]),
         ("if a.d then b else c", &["a·d", "b", "c"]),
         ("if \"a.d\" then b else c", &["a.d", "b", "c"]),
         ("g[foo]", &["g"]),
@@ -578,11 +571,13 @@ fn test_identifier_sets() {
         dst: "input".to_string(),
     }];
 
+    use crate::ast::lower_ast;
+
     for (eqn, id_list) in cases.iter() {
         let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
-        let ast = ast.unwrap();
+        let ast = lower_ast(ast.unwrap()).unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
         let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
         let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));

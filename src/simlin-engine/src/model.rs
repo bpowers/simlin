@@ -5,6 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::result::Result as StdResult;
 
+use crate::ast::{lower_ast, Expr0};
 use crate::common::{
     topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
     VariableError,
@@ -21,7 +22,7 @@ use std::hash::Hash;
 pub type ModuleInputSet = BTreeSet<Ident>;
 pub type DependencySet = BTreeSet<Ident>;
 
-pub type VariableStage0 = Variable<datamodel::ModuleReference>;
+pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 
 /// ModelStage0 converts a datamodel::Model to one with a map of canonicalized
 /// identifiers to Variables where module dependencies haven't been resolved.
@@ -470,16 +471,29 @@ pub(crate) fn resolve_module_inputs(
             outflows,
             non_negative,
             errors,
-        } => Variable::Stock {
-            ident: ident.clone(),
-            ast: ast.clone(),
-            eqn: eqn.clone(),
-            units: units.clone(),
-            inflows: inflows.clone(),
-            outflows: outflows.clone(),
-            non_negative: *non_negative,
-            errors: errors.clone(),
-        },
+        } => {
+            let mut errors = errors.clone();
+            let ast = ast
+                .as_ref()
+                .map(|ast| match lower_ast(ast.clone()) {
+                    Ok(ast) => Some(ast),
+                    Err(err) => {
+                        errors.push(VariableError::EquationError(err));
+                        None
+                    }
+                })
+                .flatten();
+            Variable::Stock {
+                ident: ident.clone(),
+                ast,
+                eqn: eqn.clone(),
+                units: units.clone(),
+                inflows: inflows.clone(),
+                outflows: outflows.clone(),
+                non_negative: *non_negative,
+                errors,
+            }
+        }
         Variable::Var {
             ident,
             ast,
@@ -490,17 +504,30 @@ pub(crate) fn resolve_module_inputs(
             is_flow,
             is_table_only,
             errors,
-        } => Variable::Var {
-            ident: ident.clone(),
-            ast: ast.clone(),
-            eqn: eqn.clone(),
-            units: units.clone(),
-            table: table.clone(),
-            non_negative: *non_negative,
-            is_flow: *is_flow,
-            is_table_only: *is_table_only,
-            errors: errors.clone(),
-        },
+        } => {
+            let mut errors = errors.clone();
+            let ast = ast
+                .as_ref()
+                .map(|ast| match lower_ast(ast.clone()) {
+                    Ok(ast) => Some(ast),
+                    Err(err) => {
+                        errors.push(VariableError::EquationError(err));
+                        None
+                    }
+                })
+                .flatten();
+            Variable::Var {
+                ident: ident.clone(),
+                ast,
+                eqn: eqn.clone(),
+                units: units.clone(),
+                table: table.clone(),
+                non_negative: *non_negative,
+                is_flow: *is_flow,
+                is_table_only: *is_table_only,
+                errors,
+            }
+        }
         Variable::Module {
             ident,
             model_name,
@@ -980,11 +1007,11 @@ fn flow(ident: &str, eqn: &str) -> Variable {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
+        Ok(Some(mi.clone()))
     });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
-    var
+    resolve_module_inputs(&HashMap::new(), "main", &var)
 }
 
 #[cfg(test)]
@@ -1007,11 +1034,11 @@ fn aux(ident: &str, eqn: &str) -> Variable {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
+        Ok(Some(mi.clone()))
     });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
-    var
+    resolve_module_inputs(&HashMap::new(), "main", &var)
 }
 
 #[cfg(test)]
@@ -1036,11 +1063,11 @@ fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variabl
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        resolve_module_input(&HashMap::new(), "main", var.get_ident(), &mi.src, &mi.dst)
+        Ok(Some(mi.clone()))
     });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
-    var
+    resolve_module_inputs(&HashMap::new(), "main", &var)
 }
 
 #[cfg(test)]
@@ -1330,8 +1357,9 @@ fn test_all_deps() {
     let mod_1_orig = &main_model.variables[0];
     assert_eq!("mod_1", mod_1_orig.get_ident());
     let mod_1 = parse_var(&[], mod_1_orig, &mut implicit_vars, &unit_ctx, |mi| {
-        resolve_module_input(&x_models, "main", mod_1_orig.get_ident(), &mi.src, &mi.dst)
+        Ok(Some(mi.clone()))
     });
+    let mod_1 = resolve_module_inputs(&x_models, "main", &mod_1);
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
     let aux_4 = aux("aux_4", "mod_1.output");

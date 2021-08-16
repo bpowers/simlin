@@ -7,9 +7,12 @@ use std::result::Result as StdResult;
 
 use lalrpop_util::ParseError;
 
-use crate::builtins::{is_0_arity_builtin_fn, UntypedBuiltinFn};
-use crate::common::{ElementName, EquationError, Ident};
+use crate::builtins::{
+    is_0_arity_builtin_fn, walk_builtin_expr, BuiltinContents, BuiltinFn, UntypedBuiltinFn,
+};
+use crate::common::{ElementName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;
+use crate::eqn_err;
 use crate::token::LexerType;
 
 /// Loc describes a location in an equation by the starting point and ending point.
@@ -50,7 +53,7 @@ fn test_loc_basics() {
     assert_eq!(Loc::new(1, 7), a.union(&c));
 }
 
-/// Expr represents a parsed equation, before any calls to
+/// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr0 {
@@ -218,21 +221,177 @@ impl Expr0 {
             Expr0::If(_, _, _, loc) => *loc,
         }
     }
+}
+
+impl Default for Expr0 {
+    fn default() -> Self {
+        Expr0::Const("0.0".to_string(), 0.0, Loc::default())
+    }
+}
+
+/// Expr represents a parsed equation, after calls to
+/// builtin functions have been checked/resolved.
+#[derive(PartialEq, Clone, Debug)]
+pub enum Expr {
+    Const(String, f64, Loc),
+    Var(Ident, Loc),
+    App(BuiltinFn<Expr>, Loc),
+    Subscript(Ident, Vec<Expr>, Loc),
+    Op1(UnaryOp, Box<Expr>, Loc),
+    Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
+    If(Box<Expr>, Box<Expr>, Box<Expr>, Loc),
+}
+
+impl Expr {
+    pub fn from(expr: Expr0) -> EquationResult<Self> {
+        let expr = match expr {
+            Expr0::Const(s, n, loc) => Expr::Const(s, n, loc),
+            Expr0::Var(id, loc) => Expr::Var(id, loc),
+            Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
+                let args: EquationResult<Vec<Expr>> =
+                    orig_args.into_iter().map(Expr::from).collect();
+                let mut args = args?;
+
+                macro_rules! check_arity {
+                    ($builtin_fn:tt, 0) => {{
+                        if !args.is_empty() {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+
+                        BuiltinFn::$builtin_fn
+                    }};
+                    ($builtin_fn:tt, 1) => {{
+                        if args.len() != 1 {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+
+                        let a = args.remove(0);
+                        BuiltinFn::$builtin_fn(Box::new(a))
+                    }};
+                    ($builtin_fn:tt, 2) => {{
+                        if args.len() != 2 {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+
+                        let b = args.remove(1);
+                        let a = args.remove(0);
+                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b))
+                    }};
+                    ($builtin_fn:tt, 3) => {{
+                        if args.len() != 3 {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+
+                        let c = args.remove(2);
+                        let b = args.remove(1);
+                        let a = args.remove(0);
+                        BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Box::new(c))
+                    }};
+                    ($builtin_fn:tt, 2, 3) => {{
+                        if args.len() == 2 {
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), None)
+                        } else if args.len() == 3 {
+                            let c = args.remove(2);
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Some(Box::new(c)))
+                        } else {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+                    }};
+                }
+
+                let builtin = match id.as_str() {
+                    "lookup" => {
+                        if let Some(Expr::Var(ident, _loc)) = args.get(0) {
+                            BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()))
+                        } else {
+                            return eqn_err!(BadTable, loc.start, loc.end);
+                        }
+                    }
+                    "mean" => BuiltinFn::Mean(args),
+                    "abs" => check_arity!(Abs, 1),
+                    "arccos" => check_arity!(Arccos, 1),
+                    "arcsin" => check_arity!(Arcsin, 1),
+                    "arctan" => check_arity!(Arctan, 1),
+                    "cos" => check_arity!(Cos, 1),
+                    "exp" => check_arity!(Exp, 1),
+                    "inf" => check_arity!(Inf, 0),
+                    "int" => check_arity!(Int, 1),
+                    "ismoduleinput" => {
+                        if let Some(Expr::Var(ident, _loc)) = args.get(0) {
+                            BuiltinFn::IsModuleInput(ident.clone())
+                        } else {
+                            return eqn_err!(ExpectedIdent, loc.start, loc.end);
+                        }
+                    }
+                    "ln" => check_arity!(Ln, 1),
+                    "log10" => check_arity!(Log10, 1),
+                    "max" => check_arity!(Max, 2),
+                    "min" => check_arity!(Min, 2),
+                    "pi" => check_arity!(Pi, 0),
+                    "pulse" => check_arity!(Pulse, 2, 3),
+                    "ramp" => check_arity!(Ramp, 2, 3),
+                    "safediv" => check_arity!(SafeDiv, 2, 3),
+                    "sin" => check_arity!(Sin, 1),
+                    "sqrt" => check_arity!(Sqrt, 1),
+                    "step" => check_arity!(Step, 2),
+                    "tan" => check_arity!(Tan, 1),
+                    "time" => check_arity!(Time, 0),
+                    "time_step" | "dt" => check_arity!(TimeStep, 0),
+                    "initial_time" => check_arity!(StartTime, 0),
+                    "final_time" => check_arity!(FinalTime, 0),
+                    _ => {
+                        // TODO: this could be a table reference, array reference,
+                        //       or module instantiation according to 3.3.2 of the spec
+                        return eqn_err!(UnknownBuiltin, loc.start, loc.end);
+                    }
+                };
+                Expr::App(builtin, loc)
+            }
+            Expr0::Subscript(id, args, loc) => {
+                let args: EquationResult<Vec<Expr>> = args.into_iter().map(Expr::from).collect();
+                Expr::Subscript(id, args?, loc)
+            }
+            Expr0::Op1(op, l, loc) => Expr::Op1(op, Box::new(Expr::from(*l)?), loc),
+            Expr0::Op2(op, l, r, loc) => Expr::Op2(
+                op,
+                Box::new(Expr::from(*l)?),
+                Box::new(Expr::from(*r)?),
+                loc,
+            ),
+            Expr0::If(cond, t, f, loc) => Expr::If(
+                Box::new(Expr::from(*cond)?),
+                Box::new(Expr::from(*t)?),
+                Box::new(Expr::from(*f)?),
+                loc,
+            ),
+        };
+        Ok(expr)
+    }
 
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
-            Expr0::Const(_s, _n, _loc) => None,
-            Expr0::Var(v, loc) if v == ident => Some(*loc),
-            Expr0::Var(_v, _loc) => None,
-            Expr0::App(UntypedBuiltinFn(_builtin, args), _loc) => {
-                for arg in args.iter() {
-                    if let Some(loc) = arg.get_var_loc(ident) {
-                        return Some(loc);
+            Expr::Const(_s, _n, _loc) => None,
+            Expr::Var(v, loc) if v == ident => Some(*loc),
+            Expr::Var(_v, _loc) => None,
+            Expr::App(builtin, _loc) => {
+                let mut loc: Option<Loc> = None;
+                walk_builtin_expr(builtin, |contents| match contents {
+                    BuiltinContents::Ident(_id) => {
+                        // TODO
                     }
-                }
-                None
+                    BuiltinContents::Expr(expr) => {
+                        if loc.is_none() {
+                            loc = expr.get_var_loc(ident);
+                        }
+                    }
+                });
+                loc
             }
-            Expr0::Subscript(id, subscripts, loc) => {
+            Expr::Subscript(id, subscripts, loc) => {
                 if id == ident {
                     let start = loc.start as usize;
                     return Some(Loc::new(start, start + id.len()));
@@ -244,9 +403,9 @@ impl Expr0 {
                 }
                 None
             }
-            Expr0::Op1(_op, r, _loc) => r.get_var_loc(ident),
-            Expr0::Op2(_op, l, r, _loc) => l.get_var_loc(ident).or_else(|| r.get_var_loc(ident)),
-            Expr0::If(cond, t, f, _loc) => cond
+            Expr::Op1(_op, r, _loc) => r.get_var_loc(ident),
+            Expr::Op2(_op, l, r, _loc) => l.get_var_loc(ident).or_else(|| r.get_var_loc(ident)),
+            Expr::If(cond, t, f, _loc) => cond
                 .get_var_loc(ident)
                 .or_else(|| t.get_var_loc(ident))
                 .or_else(|| f.get_var_loc(ident)),
@@ -254,9 +413,9 @@ impl Expr0 {
     }
 }
 
-impl Default for Expr0 {
+impl Default for Expr {
     fn default() -> Self {
-        Expr0::Const("0.0".to_string(), 0.0, Loc::default())
+        Expr::Const("0.0".to_string(), 0.0, Loc::default())
     }
 }
 
@@ -455,7 +614,7 @@ pub enum Ast<Expr> {
     Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
 }
 
-impl Ast<Expr0> {
+impl Ast<Expr> {
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
@@ -476,6 +635,26 @@ impl Ast<Expr0> {
             Ast::Scalar(expr) => latex_eqn(expr),
             Ast::ApplyToAll(_, _expr) => "TODO(array)".to_owned(),
             Ast::Arrayed(_, _) => "TODO(array)".to_owned(),
+        }
+    }
+}
+
+pub(crate) fn lower_ast(ast: Ast<Expr0>) -> EquationResult<Ast<Expr>> {
+    match ast {
+        Ast::Scalar(expr) => Expr::from(expr).map(Ast::Scalar),
+        Ast::ApplyToAll(dims, expr) => Expr::from(expr).map(|expr| Ast::ApplyToAll(dims, expr)),
+        Ast::Arrayed(dims, elements) => {
+            let elements: EquationResult<HashMap<ElementName, Expr>> = elements
+                .into_iter()
+                .map(|(id, expr)| match Expr::from(expr) {
+                    Ok(expr) => Ok((id, expr)),
+                    Err(err) => Err(err),
+                })
+                .collect();
+            match elements {
+                Ok(elements) => Ok(Ast::Arrayed(dims, elements)),
+                Err(err) => Err(err),
+            }
         }
     }
 }
@@ -558,6 +737,14 @@ macro_rules! child_needs_parens(
 
 fn paren_if_necessary(parent: &Expr0, child: &Expr0, eqn: String) -> String {
     if child_needs_parens!(Expr0, parent, child, eqn) {
+        format!("({})", eqn)
+    } else {
+        eqn
+    }
+}
+
+fn paren_if_necessary1(parent: &Expr, child: &Expr, eqn: String) -> String {
+    if child_needs_parens!(Expr, parent, child, eqn) {
         format!("({})", eqn)
     } else {
         eqn
@@ -715,30 +902,38 @@ fn test_print_eqn() {
 
 struct LatexVisitor {}
 
-impl Visitor<String> for LatexVisitor {
-    fn walk(&mut self, expr: &Expr0) -> String {
+impl LatexVisitor {
+    fn walk(&mut self, expr: &Expr) -> String {
         match expr {
-            Expr0::Const(s, n, _) => {
+            Expr::Const(s, n, _) => {
                 if n.is_nan() {
                     "\\mathrm{{NaN}}".to_owned()
                 } else {
                     s.clone()
                 }
             }
-            Expr0::Var(id, _) => {
+            Expr::Var(id, _) => {
                 let id = str::replace(id, "_", "\\_");
                 format!("\\mathrm{{{}}}", id)
             }
-            Expr0::App(UntypedBuiltinFn(func, args), _) => {
-                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+            Expr::App(builtin, _) => {
+                let mut args: Vec<String> = vec![];
+                walk_builtin_expr(builtin, |contents| {
+                    let arg = match contents {
+                        BuiltinContents::Ident(id) => format!("\\mathrm{{{}}}", id),
+                        BuiltinContents::Expr(expr) => self.walk(expr),
+                    };
+                    args.push(arg);
+                });
+                let func = builtin.name();
                 format!("\\operatorname{{{}}}({})", func, args.join(", "))
             }
-            Expr0::Subscript(id, args, _) => {
+            Expr::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 format!("{}[{}]", id, args.join(", "))
             }
-            Expr0::Op1(op, l, _) => {
-                let l = paren_if_necessary(expr, l, self.walk(l));
+            Expr::Op1(op, l, _) => {
+                let l = paren_if_necessary1(expr, l, self.walk(l));
                 let op: &str = match op {
                     UnaryOp::Positive => "+",
                     UnaryOp::Negative => "-",
@@ -746,9 +941,9 @@ impl Visitor<String> for LatexVisitor {
                 };
                 format!("{}{}", op, l)
             }
-            Expr0::Op2(op, l, r, _) => {
-                let l = paren_if_necessary(expr, l, self.walk(l));
-                let r = paren_if_necessary(expr, r, self.walk(r));
+            Expr::Op2(op, l, r, _) => {
+                let l = paren_if_necessary1(expr, l, self.walk(l));
+                let r = paren_if_necessary1(expr, r, self.walk(r));
                 let op: &str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -771,7 +966,7 @@ impl Visitor<String> for LatexVisitor {
                 };
                 format!("{} {} {}", l, op, r)
             }
-            Expr0::If(cond, t, f, _) => {
+            Expr::If(cond, t, f, _) => {
                 let cond = self.walk(cond);
                 let t = self.walk(t);
                 let f = self.walk(f);
@@ -788,7 +983,7 @@ impl Visitor<String> for LatexVisitor {
     }
 }
 
-pub fn latex_eqn(expr: &Expr0) -> String {
+pub fn latex_eqn(expr: &Expr) -> String {
     let mut visitor = LatexVisitor {};
     visitor.walk(expr)
 }
@@ -797,45 +992,45 @@ pub fn latex_eqn(expr: &Expr0) -> String {
 fn test_latex_eqn() {
     assert_eq!(
         "\\mathrm{a\\_c} + \\mathrm{b}",
-        latex_eqn(&Expr0::Op2(
+        latex_eqn(&Expr::Op2(
             BinaryOp::Add,
-            Box::new(Expr0::Var("a_c".to_string(), Loc::new(1, 2))),
-            Box::new(Expr0::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "\\mathrm{a\\_c} \\cdot \\mathrm{b}",
-        latex_eqn(&Expr0::Op2(
+        latex_eqn(&Expr::Op2(
             BinaryOp::Mul,
-            Box::new(Expr0::Var("a_c".to_string(), Loc::new(1, 2))),
-            Box::new(Expr0::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "(\\mathrm{a\\_c} - 1) \\cdot \\mathrm{b}",
-        latex_eqn(&Expr0::Op2(
+        latex_eqn(&Expr::Op2(
             BinaryOp::Mul,
-            Box::new(Expr0::Op2(
+            Box::new(Expr::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr0::Var("a_c".to_string(), Loc::new(0, 0))),
-                Box::new(Expr0::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr::Var("a_c".to_string(), Loc::new(0, 0))),
+                Box::new(Expr::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 Loc::new(0, 0),
             )),
-            Box::new(Expr0::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "\\mathrm{b} \\cdot (\\mathrm{a\\_c} - 1)",
-        latex_eqn(&Expr0::Op2(
+        latex_eqn(&Expr::Op2(
             BinaryOp::Mul,
-            Box::new(Expr0::Var("b".to_string(), Loc::new(5, 6))),
-            Box::new(Expr0::Op2(
+            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr0::Var("a_c".to_string(), Loc::new(0, 0))),
-                Box::new(Expr0::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr::Var("a_c".to_string(), Loc::new(0, 0))),
+                Box::new(Expr::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 Loc::new(0, 0),
             )),
             Loc::new(0, 7),
@@ -843,41 +1038,38 @@ fn test_latex_eqn() {
     );
     assert_eq!(
         "-\\mathrm{a}",
-        latex_eqn(&Expr0::Op1(
+        latex_eqn(&Expr::Op1(
             UnaryOp::Negative,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "\\neg \\mathrm{a}",
-        latex_eqn(&Expr0::Op1(
+        latex_eqn(&Expr::Op1(
             UnaryOp::Not,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "+\\mathrm{a}",
-        latex_eqn(&Expr0::Op1(
+        latex_eqn(&Expr::Op1(
             UnaryOp::Positive,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "4.7",
-        latex_eqn(&Expr0::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
+        latex_eqn(&Expr::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
     );
     assert_eq!(
         "\\operatorname{lookup}(\\mathrm{a}, 1.0)",
-        latex_eqn(&Expr0::App(
-            UntypedBuiltinFn(
-                "lookup".to_string(),
-                vec![
-                    Expr0::Var("a".to_string(), Loc::new(7, 8)),
-                    Expr0::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
-                ]
+        latex_eqn(&Expr::App(
+            BuiltinFn::Lookup(
+                "a".to_string(),
+                Box::new(Expr::Const("1.0".to_owned(), 1.0, Default::default()))
             ),
             Loc::new(0, 14),
         ))
