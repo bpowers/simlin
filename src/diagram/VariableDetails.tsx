@@ -94,15 +94,15 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 // export type VariableDetailsProps = Pick<VariableDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
 
 interface VariableDetailsState {
-  equation: Descendant[];
-  editor: ReactEditor;
+  equationContents: Descendant[];
+  equationEditor: ReactEditor;
 }
 
-function equationFromValue(children: Descendant[]): string {
+function stringFromDescendants(children: Descendant[]): string {
   return plainSerialize(children);
 }
 
-function valueFromEquation(equation: string): EquationElement[] {
+function descendantsFromString(equation: string): EquationElement[] {
   return [
     {
       type: 'equation',
@@ -117,7 +117,7 @@ function scalarEquationFor(variable: Variable): string {
   } else if (variable.equation instanceof ApplyToAllEquation) {
     return '{apply-to-all:}\n' + variable.equation.equation;
   } else {
-    return "{ TODO: arrayed variables aren't supported yet}";
+    return "{ TODO: arrayed variable editing isn't supported yet}";
   }
 }
 
@@ -128,7 +128,7 @@ export const VariableDetails = withStyles(styles)(
 
       const { variable } = props;
 
-      const equation = valueFromEquation(scalarEquationFor(variable));
+      const equation = descendantsFromString(scalarEquationFor(variable));
       const errors = props.variable.errors;
       if (errors) {
         // TODO: multiple errors
@@ -147,13 +147,13 @@ export const VariableDetails = withStyles(styles)(
       }
 
       this.state = {
-        editor: withHistory(withReact(createEditor())),
-        equation,
+        equationEditor: withHistory(withReact(createEditor())),
+        equationContents: equation,
       };
     }
 
     handleEquationChange = (equation: Descendant[]): void => {
-      this.setState({ equation });
+      this.setState({ equationContents: equation });
     };
 
     handleVariableDelete = (): void => {
@@ -164,15 +164,15 @@ export const VariableDetails = withStyles(styles)(
 
     handleEquationCancel = (): void => {
       this.setState({
-        equation: valueFromEquation(scalarEquationFor(this.props.variable)),
+        equationContents: descendantsFromString(scalarEquationFor(this.props.variable)),
       });
     };
 
     handleEquationSave = (): void => {
-      const { equation } = this.state;
+      const { equationContents } = this.state;
       const initialEquation = scalarEquationFor(this.props.variable);
 
-      const newEquation = equationFromValue(equation);
+      const newEquation = stringFromDescendants(equationContents);
       if (initialEquation !== newEquation) {
         this.props.onEquationChange(defined(this.props.viewElement.ident), newEquation);
       }
@@ -211,7 +211,7 @@ export const VariableDetails = withStyles(styles)(
 
     renderEquation() {
       const { classes } = this.props;
-      const { equation } = this.state;
+      const { equationContents } = this.state;
       const initialEquation = scalarEquationFor(this.props.variable);
 
       const data: Readonly<Array<Series>> | undefined = this.props.variable.data;
@@ -262,7 +262,7 @@ export const VariableDetails = withStyles(styles)(
       const yAxisWidth = Math.max(40, 20 + charWidth * 6);
 
       // enable saving and canceling if the equation has changed
-      const equationActionsEnabled = initialEquation !== equationFromValue(equation);
+      const equationActionsEnabled = initialEquation !== stringFromDescendants(equationContents);
 
       const { left, right } = {
         left: 'dataMin',
@@ -299,7 +299,7 @@ export const VariableDetails = withStyles(styles)(
 
       return (
         <CardContent>
-          <Slate editor={this.state.editor} value={this.state.equation} onChange={this.handleEquationChange}>
+          <Slate editor={this.state.equationEditor} value={this.state.equationContents} onChange={this.handleEquationChange}>
             <Editable
               className={classes.eqnEditor}
               renderLeaf={this.renderLeaf}
@@ -328,28 +328,6 @@ export const VariableDetails = withStyles(styles)(
             </div>
           </CardActions>
 
-          {/*<TextField*/}
-          {/*  label="Units"*/}
-          {/*  fullWidth*/}
-          {/*  InputLabelProps={{*/}
-          {/*    shrink: true,*/}
-          {/*  }}*/}
-          {/*  value={''}*/}
-          {/*  margin="normal"*/}
-          {/*/>*/}
-
-          {/*<TextField*/}
-          {/*  label="Notes"*/}
-          {/*  fullWidth*/}
-          {/*  InputLabelProps={{*/}
-          {/*    shrink: true,*/}
-          {/*  }}*/}
-          {/*  value={defined(this.props.variable.xmile).doc}*/}
-          {/*  onChange={this.handleNotesChange}*/}
-          {/*  margin="normal"*/}
-          {/*/>*/}
-
-          {/*<br />*/}
           <hr />
           <br />
           {chartOrErrors}
