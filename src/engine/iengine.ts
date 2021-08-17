@@ -93,6 +93,8 @@ export interface Engine {
    * @returns {Error | undefined}
    */
   setEquation(model_name: string, ident: string, new_equation: string): Error | undefined;
+  setUnits(model_name: string, ident: string, new_units: string): Error | undefined;
+  setDocumentation(model_name: string, ident: string, new_docs: string): Error | undefined;
   /**
    * @param {string} model_name
    * @param {string} ident

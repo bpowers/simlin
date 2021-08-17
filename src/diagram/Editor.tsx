@@ -1386,12 +1386,25 @@ export const Editor = withStyles(styles)(
       this.handleSelection(Set());
     };
 
-    handleEquationChange = (ident: string, newEquation: string) => {
+    handleEquationChange = (
+      ident: string,
+      newEquation: string | undefined,
+      newUnits: string | undefined,
+      newDocs: string | undefined,
+    ) => {
       const engine = this.engine();
       if (!engine) {
         return;
       }
-      engine.setEquation(this.state.modelName, ident, newEquation);
+      if (newEquation !== undefined) {
+        engine.setEquation(this.state.modelName, ident, newEquation);
+      }
+      if (newUnits !== undefined) {
+        engine.setUnits(this.state.modelName, ident, newUnits);
+      }
+      if (newDocs !== undefined) {
+        engine.setDocumentation(this.state.modelName, ident, newDocs);
+      }
       this.updateProject(engine.serializeToProtobuf());
       this.scheduleSimRun();
     };

@@ -155,6 +155,29 @@ impl Variable {
         }
     }
 
+    pub fn set_units(&mut self, units: &str) {
+        let units = if units.is_empty() {
+            None
+        } else {
+            Some(units.to_owned())
+        };
+        match self {
+            Variable::Stock(stock) => stock.units = units,
+            Variable::Flow(flow) => flow.units = units,
+            Variable::Aux(aux) => aux.units = units,
+            Variable::Module(module) => module.units = units,
+        }
+    }
+
+    pub fn set_documentation(&mut self, doc: &str) {
+        match self {
+            Variable::Stock(stock) => stock.documentation = doc.to_owned(),
+            Variable::Flow(flow) => flow.documentation = doc.to_owned(),
+            Variable::Aux(aux) => aux.documentation = doc.to_owned(),
+            Variable::Module(module) => module.documentation = doc.to_owned(),
+        }
+    }
+
     pub fn set_graphical_function(&mut self, gf: Option<GraphicalFunction>) {
         match self {
             Variable::Stock(_stock) => {}

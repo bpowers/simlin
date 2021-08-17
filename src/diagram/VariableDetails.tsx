@@ -60,6 +60,25 @@ const styles = ({ breakpoints }: Theme) =>
       padding: 4,
       height: 80,
       fontFamily: "'Roboto Mono', monospace",
+      overflowY: 'auto',
+    },
+    unitsEditor: {
+      backgroundColor: 'rgba(245, 245, 245)',
+      borderRadius: 4,
+      marginTop: 4,
+      padding: 4,
+      height: 36,
+      fontFamily: "'Roboto Mono', monospace",
+      overflowY: 'auto',
+    },
+    notesEditor: {
+      backgroundColor: 'rgba(245, 245, 245)',
+      borderRadius: 4,
+      marginTop: 4,
+      padding: 4,
+      height: 56,
+      fontFamily: "'Roboto Mono', monospace",
+      overflowY: 'auto',
     },
     eqnError: {
       textDecoration: 'underline wavy red',
@@ -85,7 +104,12 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
   variable: Variable;
   viewElement: ViewElement;
   onDelete: (ident: string) => void;
-  onEquationChange: (ident: string, newEquation: string) => void;
+  onEquationChange: (
+    ident: string,
+    newEquation: string | undefined,
+    newUnits: string | undefined,
+    newDoc: string | undefined,
+  ) => void;
   onTableChange: (ident: string, newTable: GraphicalFunction | null) => void;
   activeTab: number;
   onActiveTabChange: (newActiveTab: number) => void;
@@ -96,6 +120,10 @@ interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
 interface VariableDetailsState {
   equationContents: Descendant[];
   equationEditor: ReactEditor;
+  unitsContents: Descendant[];
+  unitsEditor: ReactEditor;
+  notesContents: Descendant[];
+  notesEditor: ReactEditor;
 }
 
 function stringFromDescendants(children: Descendant[]): string {
@@ -149,6 +177,10 @@ export const VariableDetails = withStyles(styles)(
       this.state = {
         equationEditor: withHistory(withReact(createEditor())),
         equationContents: equation,
+        unitsEditor: withHistory(withReact(createEditor())),
+        unitsContents: descendantsFromString(props.variable.units),
+        notesEditor: withHistory(withReact(createEditor())),
+        notesContents: descendantsFromString(props.variable.documentation),
       };
     }
 
@@ -160,21 +192,36 @@ export const VariableDetails = withStyles(styles)(
       this.props.onDelete(defined(this.props.viewElement.ident));
     };
 
-    handleNotesChange = (_event: React.ChangeEvent<HTMLInputElement>): void => {};
+    handleUnitsChange = (equation: Descendant[]): void => {
+      this.setState({ unitsContents: equation });
+    };
+
+    handleNotesChange = (equation: Descendant[]): void => {
+      this.setState({ notesContents: equation });
+    };
 
     handleEquationCancel = (): void => {
       this.setState({
         equationContents: descendantsFromString(scalarEquationFor(this.props.variable)),
+        unitsContents: descendantsFromString(this.props.variable.units),
+        notesContents: descendantsFromString(this.props.variable.documentation),
       });
     };
 
     handleEquationSave = (): void => {
-      const { equationContents } = this.state;
+      const { equationContents, unitsContents, notesContents } = this.state;
       const initialEquation = scalarEquationFor(this.props.variable);
+      const initialUnits = this.props.variable.units;
+      const initialDocs = this.props.variable.documentation;
 
       const newEquation = stringFromDescendants(equationContents);
-      if (initialEquation !== newEquation) {
-        this.props.onEquationChange(defined(this.props.viewElement.ident), newEquation);
+      const newUnits = stringFromDescendants(unitsContents);
+      const newDocs = stringFromDescendants(notesContents);
+      const equation = initialEquation !== newEquation ? newEquation : undefined;
+      const units = initialUnits !== newUnits ? newUnits : undefined;
+      const docs = initialDocs !== newDocs ? newDocs : undefined;
+      if (equation !== undefined || units !== undefined || docs != undefined) {
+        this.props.onEquationChange(defined(this.props.viewElement.ident), equation, units, docs);
       }
     };
 
@@ -213,6 +260,8 @@ export const VariableDetails = withStyles(styles)(
       const { classes } = this.props;
       const { equationContents } = this.state;
       const initialEquation = scalarEquationFor(this.props.variable);
+      const initialUnits = this.props.variable.units;
+      const initialDocs = this.props.variable.documentation;
 
       const data: Readonly<Array<Series>> | undefined = this.props.variable.data;
 
@@ -262,7 +311,10 @@ export const VariableDetails = withStyles(styles)(
       const yAxisWidth = Math.max(40, 20 + charWidth * 6);
 
       // enable saving and canceling if the equation has changed
-      const equationActionsEnabled = initialEquation !== stringFromDescendants(equationContents);
+      const equationActionsEnabled =
+        initialEquation !== stringFromDescendants(equationContents) ||
+        initialUnits !== stringFromDescendants(this.state.unitsContents) ||
+        initialDocs !== stringFromDescendants(this.state.notesContents);
 
       const { left, right } = {
         left: 'dataMin',
@@ -299,11 +351,35 @@ export const VariableDetails = withStyles(styles)(
 
       return (
         <CardContent>
-          <Slate editor={this.state.equationEditor} value={this.state.equationContents} onChange={this.handleEquationChange}>
+          <Slate
+            editor={this.state.equationEditor}
+            value={this.state.equationContents}
+            onChange={this.handleEquationChange}
+          >
             <Editable
               className={classes.eqnEditor}
               renderLeaf={this.renderLeaf}
               placeholder="Enter an equation..."
+              spellCheck={false}
+              onBlur={this.handleEquationSave}
+            />
+          </Slate>
+
+          <Slate editor={this.state.unitsEditor} value={this.state.unitsContents} onChange={this.handleUnitsChange}>
+            <Editable
+              className={classes.unitsEditor}
+              renderLeaf={this.renderLeaf}
+              placeholder="Enter units..."
+              spellCheck={false}
+              onBlur={this.handleEquationSave}
+            />
+          </Slate>
+
+          <Slate editor={this.state.notesEditor} value={this.state.notesContents} onChange={this.handleNotesChange}>
+            <Editable
+              className={classes.notesEditor}
+              renderLeaf={this.renderLeaf}
+              placeholder="Documentation"
               spellCheck={false}
               onBlur={this.handleEquationSave}
             />

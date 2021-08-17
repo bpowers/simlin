@@ -337,6 +337,45 @@ impl Engine {
         None
     }
 
+    #[wasm_bindgen(js_name = setUnits)]
+    pub fn set_units(&mut self, model_name: &str, ident: &str, new_units: &str) -> Option<Error> {
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+        match model.get_variable_mut(ident) {
+            Some(var) => var.set_units(new_units),
+            _ => {
+                return None;
+            }
+        }
+
+        self.project = project.into();
+        self.instantiate_sim();
+
+        None
+    }
+
+    #[wasm_bindgen(js_name = setDocumentation)]
+    pub fn set_documentation(
+        &mut self,
+        model_name: &str,
+        ident: &str,
+        new_docs: &str,
+    ) -> Option<Error> {
+        let mut project = self.project.datamodel.clone();
+        let model = project.get_model_mut(model_name).unwrap();
+        match model.get_variable_mut(ident) {
+            Some(var) => var.set_documentation(new_docs),
+            _ => {
+                return None;
+            }
+        }
+
+        self.project = project.into();
+        self.instantiate_sim();
+
+        None
+    }
+
     fn set_graphical_function_common(
         &mut self,
         model_name: &str,

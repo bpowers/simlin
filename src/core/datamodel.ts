@@ -286,6 +286,8 @@ export interface Variable {
   readonly ident: string;
   readonly equation: Equation | undefined;
   readonly gf: GraphicalFunction | undefined;
+  readonly units: string;
+  readonly documentation: string;
   readonly isArrayed: boolean;
   readonly hasError: boolean;
   readonly errors: List<EquationError> | undefined;
