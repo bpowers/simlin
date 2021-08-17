@@ -76,11 +76,11 @@ impl<'a> UnitEvaluator<'a> {
                             })
                             .map(|units| Units::Explicit(units.clone()))
                     } else {
-                        return Err(Error {
+                        Err(Error {
                             kind: ErrorKind::Model,
                             code: ErrorCode::DoesNotExist,
                             details: Some(ident.clone()),
-                        });
+                        })
                     }
                 }
                 BuiltinFn::Abs(a)
