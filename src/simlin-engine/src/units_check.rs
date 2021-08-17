@@ -5,6 +5,7 @@
 use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr};
+use crate::builtins::BuiltinFn;
 use crate::common::{Error, ErrorCode, ErrorKind, Ident, Result};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
@@ -22,7 +23,7 @@ struct UnitEvaluator<'a> {
 /// Units is used to distinguish between explicit units (and explicit
 /// dimensionless-ness) and dimensionless-ness that comes from computing
 /// on constants.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum Units {
     Explicit(UnitMap),
     Constant,
@@ -52,7 +53,123 @@ impl<'a> UnitEvaluator<'a> {
                     })
                     .map(|units| Units::Explicit(units.clone()))
             }
-            Expr::App(_, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr::App(builtin, _) => match builtin {
+                BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
+                BuiltinFn::Time
+                | BuiltinFn::TimeStep
+                | BuiltinFn::StartTime
+                | BuiltinFn::FinalTime => Ok(Units::Explicit(
+                    self.time.units().cloned().unwrap_or_default(),
+                )),
+                BuiltinFn::IsModuleInput(_) => {
+                    // returns a bool, which is unitless
+                    Ok(Units::Explicit(UnitMap::new()))
+                }
+                BuiltinFn::Lookup(ident, _) => {
+                    // lookups have the units specified on the table
+                    if let Some(var) = self.model.variables.get(ident) {
+                        var.units()
+                            .ok_or(Error {
+                                kind: ErrorKind::Variable,
+                                code: ErrorCode::UnitDefinitionErrors,
+                                details: None,
+                            })
+                            .map(|units| Units::Explicit(units.clone()))
+                    } else {
+                        return Err(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::DoesNotExist,
+                            details: Some(ident.clone()),
+                        });
+                    }
+                }
+                BuiltinFn::Abs(a)
+                | BuiltinFn::Arccos(a)
+                | BuiltinFn::Arcsin(a)
+                | BuiltinFn::Arctan(a)
+                | BuiltinFn::Cos(a)
+                | BuiltinFn::Exp(a)
+                | BuiltinFn::Int(a)
+                | BuiltinFn::Ln(a)
+                | BuiltinFn::Log10(a)
+                | BuiltinFn::Sin(a)
+                | BuiltinFn::Sqrt(a)
+                | BuiltinFn::Tan(a) => self.check(a),
+                BuiltinFn::Mean(args) => {
+                    let args = args
+                        .iter()
+                        .map(|arg| self.check(arg))
+                        .collect::<Result<Vec<_>>>()?;
+
+                    if args.is_empty() {
+                        return Ok(Units::Constant);
+                    }
+
+                    let arg0 = args[0].clone();
+                    if args.iter().all(|arg| *arg == arg0) {
+                        Ok(arg0)
+                    } else {
+                        let expected = match arg0 {
+                            Units::Explicit(units) => units,
+                            Units::Constant => Default::default(),
+                        };
+                        Err(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::UnitDefinitionErrors,
+                            details: Some(format!(
+                                "expected all arguments to mean() to have the units '{}'",
+                                pretty_print_unit(&expected),
+                            )),
+                        })
+                    }
+                }
+                BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                    let a_units = self.check(a)?;
+                    let b_units = self.check(b)?;
+                    if a_units != b_units {
+                        let a_units = match a_units {
+                            Units::Explicit(units) => units,
+                            Units::Constant => Default::default(),
+                        };
+                        let b_units = match b_units {
+                            Units::Explicit(units) => units,
+                            Units::Constant => Default::default(),
+                        };
+                        Err(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::UnitDefinitionErrors,
+                            details: Some(format!(
+                                "expected left and right argument units to match, but '{}' and '{}' don't",
+                                pretty_print_unit(&a_units),
+                                pretty_print_unit(&b_units),
+                            )),
+                        })
+                    } else {
+                        Ok(a_units)
+                    }
+                }
+                BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
+                    Ok(Units::Constant)
+                }
+                BuiltinFn::SafeDiv(a, b, c) => {
+                    let div = Expr::Op2(
+                        BinaryOp::Div,
+                        a.clone(),
+                        b.clone(),
+                        a.get_loc().union(&b.get_loc()),
+                    );
+                    let units = self.check(&div)?;
+
+                    if let Some(c) = c {
+                        let c_units = self.check(c)?;
+                        if c_units != units {
+                            // TODO: return an error here
+                        }
+                    }
+
+                    Ok(units)
+                }
+            },
             Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
             Expr::Op1(_, l, _) => self.check(l),
             Expr::Op2(op, l, r, _) => {
