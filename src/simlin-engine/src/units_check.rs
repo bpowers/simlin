@@ -29,6 +29,17 @@ enum Units {
     Constant,
 }
 
+impl Units {
+    fn equals(&self, rhs: &Units) -> bool {
+        match (self, rhs) {
+            (Units::Constant, Units::Constant)
+            | (Units::Explicit(_), Units::Constant)
+            | (Units::Constant, Units::Explicit(_)) => true,
+            (Units::Explicit(lhs), Units::Explicit(rhs)) => *lhs == *rhs,
+        }
+    }
+}
+
 impl<'a> UnitEvaluator<'a> {
     fn check(&self, expr: &Expr) -> Result<Units> {
         match expr {
@@ -105,28 +116,39 @@ impl<'a> UnitEvaluator<'a> {
                         return Ok(Units::Constant);
                     }
 
-                    let arg0 = args[0].clone();
-                    if args.iter().all(|arg| *arg == arg0) {
-                        Ok(arg0)
-                    } else {
-                        let expected = match arg0 {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        Err(Error {
-                            kind: ErrorKind::Model,
-                            code: ErrorCode::UnitDefinitionErrors,
-                            details: Some(format!(
-                                "expected all arguments to mean() to have the units '{}'",
-                                pretty_print_unit(&expected),
-                            )),
-                        })
+                    // find the first non-constant argument
+                    let arg0 = args
+                        .iter()
+                        .filter(|arg| matches!(arg, Units::Explicit(_)))
+                        .cloned()
+                        .next();
+                    match arg0 {
+                        Some(arg0) => {
+                            if args.iter().all(|arg| arg0.equals(arg)) {
+                                Ok(arg0)
+                            } else {
+                                let expected = match arg0 {
+                                    Units::Explicit(units) => units,
+                                    Units::Constant => Default::default(),
+                                };
+                                Err(Error {
+                                    kind: ErrorKind::Model,
+                                    code: ErrorCode::UnitDefinitionErrors,
+                                    details: Some(format!(
+                                        "expected all arguments to mean() to have the units '{}'",
+                                        pretty_print_unit(&expected),
+                                    )),
+                                })
+                            }
+                        }
+                        // all args were constants, so we're good
+                        None => Ok(Units::Constant),
                     }
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
                     let a_units = self.check(a)?;
                     let b_units = self.check(b)?;
-                    if a_units != b_units {
+                    if !a_units.equals(&b_units) {
                         let a_units = match a_units {
                             Units::Explicit(units) => units,
                             Units::Constant => Default::default(),
@@ -229,7 +251,7 @@ impl<'a> UnitEvaluator<'a> {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 
-                if lunits != runits {
+                if !lunits.equals(&runits) {
                     eprintln!("TODO: if error, left and right units don't match");
                 }
 
