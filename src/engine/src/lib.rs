@@ -133,6 +133,19 @@ impl Engine {
         result.into()
     }
 
+    #[wasm_bindgen(js_name = getModelVariableUnitErrors, typescript_type = "Map<string, EquationError>")]
+    pub fn get_model_variable_unit_errors(&self, model_name: &str) -> JsValue {
+        let model = &self.project.models.get(model_name).unwrap();
+
+        let mut result = Map::new();
+        for (ident, errors) in model.get_unit_errors() {
+            let js_errors: Array = errors.into_iter().map(JsValue::from).collect();
+            result = result.set(&JsValue::from(ident.as_str()), &js_errors)
+        }
+
+        result.into()
+    }
+
     #[wasm_bindgen(js_name = getModelErrors, typescript_type = "Array<Error> | undefined")]
     pub fn get_model_errors(&self, model_name: &str) -> Array {
         let model = &self.project.models.get(model_name).unwrap();

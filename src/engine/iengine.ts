@@ -52,6 +52,7 @@ export interface Engine {
    * @returns {any}
    */
   getModelVariableErrors(model_name: string): any;
+  getModelVariableUnitErrors(model_name: string): any;
   /**
    * @param {string} model_name
    * @returns {Array<any>}
@@ -187,8 +188,8 @@ export enum ErrorKind {
 }
 
 export enum ErrorCode {
-  NoError,
-  DoesNotExist,
+  NoError, // will never be produced
+  DoesNotExist, // the named entity doesn't exist
   XmlDeserialization,
   VensimConversion,
   ProtobufDecode,
@@ -218,5 +219,18 @@ export enum ErrorCode {
   DuplicateVariable,
   UnknownDependency,
   VariablesHaveErrors,
+  UnitDefinitionErrors,
   Generic,
+  NoAppInUnits,
+  NoSubscriptInUnits,
+  NoIfInUnits,
+  NoUnaryOpInUnits,
+  BadBinaryOpInUnits,
+  NoConstInUnits,
+  ExpectedInteger,
+  ExpectedIntegerOne,
+  DuplicateUnit,
+  ExpectedModule,
+  ExpectedIdent,
+  UnitMismatch,
 }

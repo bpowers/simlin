@@ -70,8 +70,34 @@ export function errorCodeDescription(code: ErrorCode): string {
       return 'Equation refers to unknown variable';
     case ErrorCode.VariablesHaveErrors:
       return 'Variables have equation errors';
+    case ErrorCode.UnitDefinitionErrors:
+      return "The project's unit definitions have errors";
     case ErrorCode.Generic:
       return 'Generic error from core engine';
+    case ErrorCode.NoAppInUnits:
+      return 'Function calls are not allowed in unit definition';
+    case ErrorCode.NoSubscriptInUnits:
+      return 'Subscripts are not allowed in unit definition';
+    case ErrorCode.NoIfInUnits:
+      return 'If statements are not allowed in unit definition';
+    case ErrorCode.NoUnaryOpInUnits:
+      return "Negative units like `-people` don't make sense. Try e.g. `1/people`";
+    case ErrorCode.BadBinaryOpInUnits:
+      return 'Only * and / operations are supported in unit definitions';
+    case ErrorCode.NoConstInUnits:
+      return 'Constants are not supported in unit definitions';
+    case ErrorCode.ExpectedInteger:
+      return 'Expected an integer';
+    case ErrorCode.ExpectedIntegerOne:
+      return 'Expected the integer `1`';
+    case ErrorCode.DuplicateUnit:
+      return 'Duplicate unit definition';
+    case ErrorCode.ExpectedModule:
+      return 'Expected a module, found a non-module';
+    case ErrorCode.ExpectedIdent:
+      return 'Expected an identifier';
+    case ErrorCode.UnitMismatch:
+      return 'Unit mismatch';
   }
   return 'Unknown error from core engine';
 }
