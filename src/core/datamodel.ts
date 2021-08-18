@@ -291,8 +291,10 @@ export interface Variable {
   readonly isArrayed: boolean;
   readonly hasError: boolean;
   readonly errors: List<EquationError> | undefined;
+  readonly unitErrors: List<EquationError> | undefined;
   readonly data: Readonly<Array<Series>> | undefined;
   set(prop: 'errors', errors: List<EquationError> | undefined): Variable;
+  set(prop: 'unitErrors', errors: List<EquationError> | undefined): Variable;
   set(prop: 'data', data: Readonly<Array<Series>> | undefined): Variable;
 }
 
@@ -306,6 +308,7 @@ const stockDefaults = {
   nonNegative: false,
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<EquationError> | undefined,
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -324,6 +327,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
       nonNegative: stock.getNonNegative(),
       data: undefined,
       errors: undefined as List<EquationError> | undefined,
+      unitErrors: undefined as List<EquationError> | undefined,
     });
   }
   get gf(): undefined {
@@ -333,7 +337,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
   }
   get hasError(): boolean {
-    return this.errors !== undefined;
+    return this.errors !== undefined || this.unitErrors !== undefined;
   }
 }
 
@@ -346,6 +350,7 @@ const flowDefaults = {
   nonNegative: false,
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<EquationError> | undefined,
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -364,13 +369,14 @@ export class Flow extends Record(flowDefaults) implements Variable {
       nonNegative: flow.getNonNegative(),
       data: undefined,
       errors: undefined,
+      unitErrors: undefined,
     });
   }
   get isArrayed(): boolean {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
   }
   get hasError(): boolean {
-    return this.errors !== undefined;
+    return this.errors !== undefined || this.unitErrors !== undefined;
   }
 }
 
@@ -382,6 +388,7 @@ const auxDefaults = {
   gf: undefined as GraphicalFunction | undefined,
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<EquationError> | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -399,13 +406,14 @@ export class Aux extends Record(auxDefaults) implements Variable {
       gf: gf ? GraphicalFunction.fromPb(gf) : undefined,
       data: undefined,
       errors: undefined,
+      unitErrors: undefined,
     });
   }
   get isArrayed(): boolean {
     return this.equation instanceof ApplyToAllEquation || this.equation instanceof ArrayedEquation;
   }
   get hasError(): boolean {
-    return this.errors !== undefined;
+    return this.errors !== undefined || this.unitErrors !== undefined;
   }
 }
 
@@ -430,6 +438,7 @@ const moduleDefaults = {
   references: List<ModuleReference>(),
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<EquationError> | undefined,
 };
 export class Module extends Record(moduleDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -446,6 +455,7 @@ export class Module extends Record(moduleDefaults) implements Variable {
       references: List(module.getReferencesList().map((modRef) => new ModuleReference(modRef))),
       data: undefined,
       errors: undefined,
+      unitErrors: undefined,
     });
   }
   get equation(): undefined {
