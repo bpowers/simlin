@@ -7,6 +7,8 @@ use std::result::Result as StdResult;
 
 use lalrpop_util::ParseError;
 
+pub use crate::builtins::Loc;
+
 use crate::builtins::{
     is_0_arity_builtin_fn, walk_builtin_expr, BuiltinContents, BuiltinFn, UntypedBuiltinFn,
 };
@@ -14,44 +16,6 @@ use crate::common::{ElementName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;
 use crate::eqn_err;
 use crate::token::LexerType;
-
-/// Loc describes a location in an equation by the starting point and ending point.
-/// Equations are strings typed by humans for a single variable -- u16 is long enough.
-#[derive(PartialEq, Clone, Copy, Debug, Default)]
-pub struct Loc {
-    pub start: u16,
-    pub end: u16,
-}
-
-impl Loc {
-    pub fn new(start: usize, end: usize) -> Self {
-        Loc {
-            start: start as u16,
-            end: end as u16,
-        }
-    }
-
-    /// union takes a second Loc and returns the inclusive range from the
-    /// start of the earlier token to the end of the later token.
-    pub fn union(&self, rhs: &Self) -> Self {
-        Loc {
-            start: self.start.min(rhs.start),
-            end: self.end.max(rhs.end),
-        }
-    }
-}
-
-#[test]
-fn test_loc_basics() {
-    let a = Loc { start: 3, end: 7 };
-    assert_eq!(a, Loc::new(3, 7));
-
-    let b = Loc { start: 4, end: 11 };
-    assert_eq!(Loc::new(3, 11), a.union(&b));
-
-    let c = Loc { start: 1, end: 5 };
-    assert_eq!(Loc::new(1, 7), a.union(&c));
-}
 
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
@@ -305,8 +269,8 @@ impl Expr {
 
                 let builtin = match id.as_str() {
                     "lookup" => {
-                        if let Some(Expr::Var(ident, _loc)) = args.get(0) {
-                            BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()))
+                        if let Some(Expr::Var(ident, loc)) = args.get(0) {
+                            BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()), *loc)
                         } else {
                             return eqn_err!(BadTable, loc.start, loc.end);
                         }
@@ -321,8 +285,8 @@ impl Expr {
                     "inf" => check_arity!(Inf, 0),
                     "int" => check_arity!(Int, 1),
                     "ismoduleinput" => {
-                        if let Some(Expr::Var(ident, _loc)) = args.get(0) {
-                            BuiltinFn::IsModuleInput(ident.clone())
+                        if let Some(Expr::Var(ident, loc)) = args.get(0) {
+                            BuiltinFn::IsModuleInput(ident.clone(), *loc)
                         } else {
                             return eqn_err!(ExpectedIdent, loc.start, loc.end);
                         }
@@ -392,8 +356,10 @@ impl Expr {
             Expr::App(builtin, _loc) => {
                 let mut loc: Option<Loc> = None;
                 walk_builtin_expr(builtin, |contents| match contents {
-                    BuiltinContents::Ident(_id) => {
-                        // TODO
+                    BuiltinContents::Ident(id, id_loc) => {
+                        if ident == id {
+                            loc = Some(id_loc);
+                        }
                     }
                     BuiltinContents::Expr(expr) => {
                         if loc.is_none() {
@@ -932,7 +898,7 @@ impl LatexVisitor {
                 let mut args: Vec<String> = vec![];
                 walk_builtin_expr(builtin, |contents| {
                     let arg = match contents {
-                        BuiltinContents::Ident(id) => format!("\\mathrm{{{}}}", id),
+                        BuiltinContents::Ident(id, _loc) => format!("\\mathrm{{{}}}", id),
                         BuiltinContents::Expr(expr) => self.walk(expr),
                     };
                     args.push(arg);
@@ -1081,7 +1047,8 @@ fn test_latex_eqn() {
         latex_eqn(&Expr::App(
             BuiltinFn::Lookup(
                 "a".to_string(),
-                Box::new(Expr::Const("1.0".to_owned(), 1.0, Default::default()))
+                Box::new(Expr::Const("1.0".to_owned(), 1.0, Default::default())),
+                Default::default(),
             ),
             Loc::new(0, 14),
         ))

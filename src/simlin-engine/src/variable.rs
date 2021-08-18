@@ -468,7 +468,7 @@ impl<'a> IdentifierSetVisitor<'a> {
             }
             Expr::App(builtin, _) => {
                 walk_builtin_expr(builtin, |contents| match contents {
-                    BuiltinContents::Ident(id) => {
+                    BuiltinContents::Ident(id, _loc) => {
                         self.identifiers.insert(id.to_owned());
                     }
                     BuiltinContents::Expr(expr) => self.walk(expr),
@@ -508,7 +508,7 @@ impl<'a> IdentifierSetVisitor<'a> {
             }
             Expr::If(cond, t, f, _) => {
                 if let Some(module_inputs) = self.module_inputs {
-                    if let Expr::App(BuiltinFn::IsModuleInput(ident), _) = cond.as_ref() {
+                    if let Expr::App(BuiltinFn::IsModuleInput(ident, _), _) = cond.as_ref() {
                         if module_inputs.contains(ident) {
                             self.walk(t);
                         } else {

@@ -72,11 +72,11 @@ impl<'a> UnitEvaluator<'a> {
                 | BuiltinFn::FinalTime => Ok(Units::Explicit(
                     self.time.units().cloned().unwrap_or_default(),
                 )),
-                BuiltinFn::IsModuleInput(_) => {
+                BuiltinFn::IsModuleInput(_, _) => {
                     // returns a bool, which is unitless
                     Ok(Units::Explicit(UnitMap::new()))
                 }
-                BuiltinFn::Lookup(ident, _) => {
+                BuiltinFn::Lookup(ident, _, _) => {
                     // lookups have the units specified on the table
                     if let Some(var) = self.model.variables.get(ident) {
                         var.units()

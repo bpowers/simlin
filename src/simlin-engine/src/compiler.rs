@@ -97,12 +97,14 @@ impl Expr {
                     // nothing to strip from these simple ones
                     BuiltinFn::Inf
                     | BuiltinFn::Pi
-                    | BuiltinFn::IsModuleInput(_)
                     | BuiltinFn::Time
                     | BuiltinFn::TimeStep
                     | BuiltinFn::StartTime
                     | BuiltinFn::FinalTime => builtin,
-                    BuiltinFn::Lookup(id, a) => BuiltinFn::Lookup(id, Box::new(a.strip_loc())),
+                    BuiltinFn::IsModuleInput(id, _loc) => BuiltinFn::IsModuleInput(id, loc),
+                    BuiltinFn::Lookup(id, a, _loc) => {
+                        BuiltinFn::Lookup(id, Box::new(a.strip_loc()), loc)
+                    }
                     BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.strip_loc())),
                     BuiltinFn::Arccos(a) => BuiltinFn::Arccos(Box::new(a.strip_loc())),
                     BuiltinFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(a.strip_loc())),
@@ -323,8 +325,8 @@ impl<'a> Context<'a> {
             ast::Expr::App(builtin, loc) => {
                 use crate::builtins::BuiltinFn as BFn;
                 let builtin: BuiltinFn = match builtin {
-                    BFn::Lookup(id, expr) => {
-                        BuiltinFn::Lookup(id.clone(), Box::new(self.lower(expr)?))
+                    BFn::Lookup(id, expr, loc) => {
+                        BuiltinFn::Lookup(id.clone(), Box::new(self.lower(expr)?), *loc)
                     }
                     BFn::Abs(a) => BuiltinFn::Abs(Box::new(self.lower(a)?)),
                     BFn::Arccos(a) => BuiltinFn::Arccos(Box::new(self.lower(a)?)),
@@ -334,7 +336,7 @@ impl<'a> Context<'a> {
                     BFn::Exp(a) => BuiltinFn::Exp(Box::new(self.lower(a)?)),
                     BFn::Inf => BuiltinFn::Inf,
                     BFn::Int(a) => BuiltinFn::Int(Box::new(self.lower(a)?)),
-                    BFn::IsModuleInput(id) => BuiltinFn::IsModuleInput(id.clone()),
+                    BFn::IsModuleInput(id, loc) => BuiltinFn::IsModuleInput(id.clone(), *loc),
                     BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower(a)?)),
                     BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower(a)?)),
                     BFn::Max(a, b) => {
@@ -913,7 +915,10 @@ impl Var {
                             let expr = ctx.lower(ast)?;
                             let expr = if table.is_some() {
                                 let loc = expr.get_loc();
-                                Expr::App(BuiltinFn::Lookup(ident.clone(), Box::new(expr)), loc)
+                                Expr::App(
+                                    BuiltinFn::Lookup(ident.clone(), Box::new(expr), loc),
+                                    loc,
+                                )
                             } else {
                                 expr
                             };
@@ -1402,7 +1407,7 @@ impl<'module> Compiler<'module> {
             }
             Expr::App(builtin, _) => {
                 // lookups are special
-                if let BuiltinFn::Lookup(ident, index) = builtin {
+                if let BuiltinFn::Lookup(ident, index, _loc) = builtin {
                     let table = &self.module.tables[ident];
                     self.graphical_functions.push(table.data.clone());
                     let gf = (self.graphical_functions.len() - 1) as GraphicalFunctionId;
@@ -1412,7 +1417,7 @@ impl<'module> Compiler<'module> {
                 };
 
                 // so are module builtins
-                if let BuiltinFn::IsModuleInput(ident) = builtin {
+                if let BuiltinFn::IsModuleInput(ident, _loc) = builtin {
                     let id = if self.module.inputs.contains(ident) {
                         self.curr_code.intern_literal(1.0)
                     } else {
@@ -1437,7 +1442,7 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::LoadGlobalVar { off });
                         return Ok(Some(()));
                     }
-                    BuiltinFn::Lookup(_, _) | BuiltinFn::IsModuleInput(_) => unreachable!(),
+                    BuiltinFn::Lookup(_, _, _) | BuiltinFn::IsModuleInput(_, _) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         let lit = match builtin {
                             BuiltinFn::Inf => std::f64::INFINITY,
@@ -1517,7 +1522,7 @@ impl<'module> Compiler<'module> {
                     }
                 };
                 let func = match builtin {
-                    BuiltinFn::Lookup(_, _) => unreachable!(),
+                    BuiltinFn::Lookup(_, _, _) => unreachable!(),
                     BuiltinFn::Abs(_) => BuiltinId::Abs,
                     BuiltinFn::Arccos(_) => BuiltinId::Arccos,
                     BuiltinFn::Arcsin(_) => BuiltinId::Arcsin,
@@ -1526,7 +1531,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Exp(_) => BuiltinId::Exp,
                     BuiltinFn::Inf => BuiltinId::Inf,
                     BuiltinFn::Int(_) => BuiltinId::Int,
-                    BuiltinFn::IsModuleInput(_) => unreachable!(),
+                    BuiltinFn::IsModuleInput(_, _) => unreachable!(),
                     BuiltinFn::Ln(_) => BuiltinId::Ln,
                     BuiltinFn::Log10(_) => BuiltinId::Log10,
                     BuiltinFn::Max(_, _) => BuiltinId::Max,
@@ -1781,7 +1786,7 @@ impl<'a> ModuleEvaluator<'a> {
                     BuiltinFn::Inf => std::f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
-                    BuiltinFn::IsModuleInput(ident) => {
+                    BuiltinFn::IsModuleInput(ident, _) => {
                         self.module.inputs.contains(ident) as i8 as f64
                     }
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
@@ -1826,7 +1831,7 @@ impl<'a> ModuleEvaluator<'a> {
                             b
                         }
                     }
-                    BuiltinFn::Lookup(id, index) => {
+                    BuiltinFn::Lookup(id, index, _) => {
                         if !self.module.tables.contains_key(id) {
                             eprintln!("bad lookup for {}", id);
                             unreachable!();
@@ -1979,7 +1984,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::TimeStep => "time_step".to_string(),
             BuiltinFn::StartTime => "initial_time".to_string(),
             BuiltinFn::FinalTime => "final_time".to_string(),
-            BuiltinFn::Lookup(table, idx) => format!("lookup({}, {})", table, pretty(idx)),
+            BuiltinFn::Lookup(table, idx, _loc) => format!("lookup({}, {})", table, pretty(idx)),
             BuiltinFn::Abs(l) => format!("abs({})", pretty(l)),
             BuiltinFn::Arccos(l) => format!("arccos({})", pretty(l)),
             BuiltinFn::Arcsin(l) => format!("arcsin({})", pretty(l)),
@@ -1988,7 +1993,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Exp(l) => format!("exp({})", pretty(l)),
             BuiltinFn::Inf => "∞".to_string(),
             BuiltinFn::Int(l) => format!("int({})", pretty(l)),
-            BuiltinFn::IsModuleInput(ident) => format!("isModuleInput({})", ident),
+            BuiltinFn::IsModuleInput(ident, _loc) => format!("isModuleInput({})", ident),
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
             BuiltinFn::Max(l, r) => format!("max({}, {})", pretty(l), pretty(r)),
