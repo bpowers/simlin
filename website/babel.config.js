@@ -24,5 +24,11 @@ module.exports = {
       "@babel/plugin-proposal-nullish-coalescing-operator",
       {}
     ],
+    [
+      "@babel/plugin-proposal-private-property-in-object",
+      {
+        "loose": true
+      }
+    ]
   ],
 };
