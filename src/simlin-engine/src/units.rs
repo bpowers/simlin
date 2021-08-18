@@ -354,6 +354,7 @@ pub fn parse_units(
     }
 }
 
+#[allow(dead_code)]
 pub fn pretty_print_unit(units: &UnitMap) -> String {
     let unit_names = {
         let mut unit_names = units.keys().map(|unit| unit.as_str()).collect::<Vec<_>>();

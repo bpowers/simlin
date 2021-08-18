@@ -130,9 +130,9 @@ impl<MI, E> Variable<MI, E> {
         filter: fn(&VariableError) -> Option<EquationError>,
     ) -> Option<Vec<EquationError>> {
         let errors = match self {
-            Variable::Stock { errors, .. } => errors,
-            Variable::Var { errors, .. } => errors,
-            Variable::Module { errors, .. } => errors,
+            Variable::Stock { errors, .. }
+            | Variable::Var { errors, .. }
+            | Variable::Module { errors, .. } => errors,
         };
 
         let errors: Vec<_> = errors.iter().flat_map(filter).collect();
@@ -161,9 +161,18 @@ impl<MI, E> Variable<MI, E> {
     pub fn push_error(&mut self, err: EquationError) {
         let err = VariableError::EquationError(err);
         match self {
-            Variable::Stock { errors, .. } => errors.push(err),
-            Variable::Var { errors, .. } => errors.push(err),
-            Variable::Module { errors, .. } => errors.push(err),
+            Variable::Stock { errors, .. }
+            | Variable::Var { errors, .. }
+            | Variable::Module { errors, .. } => errors.push(err),
+        }
+    }
+
+    pub fn push_unit_error(&mut self, err: EquationError) {
+        let err = VariableError::UnitError(err);
+        match self {
+            Variable::Stock { errors, .. }
+            | Variable::Var { errors, .. }
+            | Variable::Module { errors, .. } => errors.push(err),
         }
     }
 

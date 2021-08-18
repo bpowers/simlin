@@ -6,10 +6,10 @@ use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr};
 use crate::builtins::BuiltinFn;
-use crate::common::{Error, ErrorCode, ErrorKind, Ident, Result};
+use crate::common::{EquationError, EquationResult, ErrorCode, Ident, Result};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
-use crate::units::{pretty_print_unit, Context};
+use crate::units::Context;
 use crate::variable::Variable;
 
 #[allow(dead_code)]
@@ -41,26 +41,26 @@ impl Units {
 }
 
 impl<'a> UnitEvaluator<'a> {
-    fn check(&self, expr: &Expr) -> Result<Units> {
+    fn check(&self, expr: &Expr) -> EquationResult<Units> {
         match expr {
             Expr::Const(_, _, _) => Ok(Units::Constant),
-            Expr::Var(ident, _) => {
+            Expr::Var(ident, loc) => {
                 let var: &Variable =
                     if ident == "time" || ident == "initial_time" || ident == "final_time" {
                         &self.time
                     } else {
-                        self.model.variables.get(ident).ok_or(Error {
-                            kind: ErrorKind::Model,
+                        self.model.variables.get(ident).ok_or(EquationError {
                             code: ErrorCode::DoesNotExist,
-                            details: Some(ident.clone()),
+                            start: loc.start,
+                            end: loc.end,
                         })?
                     };
 
                 var.units()
-                    .ok_or(Error {
-                        kind: ErrorKind::Variable,
+                    .ok_or(EquationError {
                         code: ErrorCode::UnitDefinitionErrors,
-                        details: None,
+                        start: 0,
+                        end: 0,
                     })
                     .map(|units| Units::Explicit(units.clone()))
             }
@@ -76,21 +76,21 @@ impl<'a> UnitEvaluator<'a> {
                     // returns a bool, which is unitless
                     Ok(Units::Explicit(UnitMap::new()))
                 }
-                BuiltinFn::Lookup(ident, _, _) => {
+                BuiltinFn::Lookup(ident, _, loc) => {
                     // lookups have the units specified on the table
                     if let Some(var) = self.model.variables.get(ident) {
                         var.units()
-                            .ok_or(Error {
-                                kind: ErrorKind::Variable,
+                            .ok_or(EquationError {
                                 code: ErrorCode::UnitDefinitionErrors,
-                                details: None,
+                                start: 0,
+                                end: 0,
                             })
                             .map(|units| Units::Explicit(units.clone()))
                     } else {
-                        Err(Error {
-                            kind: ErrorKind::Model,
+                        Err(EquationError {
                             code: ErrorCode::DoesNotExist,
-                            details: Some(ident.clone()),
+                            start: loc.start,
+                            end: loc.end,
                         })
                     }
                 }
@@ -110,7 +110,7 @@ impl<'a> UnitEvaluator<'a> {
                     let args = args
                         .iter()
                         .map(|arg| self.check(arg))
-                        .collect::<Result<Vec<_>>>()?;
+                        .collect::<EquationResult<Vec<_>>>()?;
 
                     if args.is_empty() {
                         return Ok(Units::Constant);
@@ -127,17 +127,19 @@ impl<'a> UnitEvaluator<'a> {
                             if args.iter().all(|arg| arg0.equals(arg)) {
                                 Ok(arg0)
                             } else {
-                                let expected = match arg0 {
-                                    Units::Explicit(units) => units,
-                                    Units::Constant => Default::default(),
-                                };
-                                Err(Error {
-                                    kind: ErrorKind::Model,
+                                // let expected = match arg0 {
+                                //     Units::Explicit(units) => units,
+                                //     Units::Constant => Default::default(),
+                                // };
+                                Err(EquationError {
                                     code: ErrorCode::UnitDefinitionErrors,
-                                    details: Some(format!(
-                                        "expected all arguments to mean() to have the units '{}'",
-                                        pretty_print_unit(&expected),
-                                    )),
+                                    // TODO: get a real range for this
+                                    start: 0,
+                                    end: 0,
+                                    // details: Some(format!(
+                                    //     "expected all arguments to mean() to have the units '{}'",
+                                    //     pretty_print_unit(&expected),
+                                    // )),
                                 })
                             }
                         }
@@ -149,22 +151,24 @@ impl<'a> UnitEvaluator<'a> {
                     let a_units = self.check(a)?;
                     let b_units = self.check(b)?;
                     if !a_units.equals(&b_units) {
-                        let a_units = match a_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        let b_units = match b_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        Err(Error {
-                            kind: ErrorKind::Model,
+                        // let a_units = match a_units {
+                        //     Units::Explicit(units) => units,
+                        //     Units::Constant => Default::default(),
+                        // };
+                        // let b_units = match b_units {
+                        //     Units::Explicit(units) => units,
+                        //     Units::Constant => Default::default(),
+                        // };
+                        let loc = a.get_loc().union(&b.get_loc());
+                        Err(EquationError {
                             code: ErrorCode::UnitDefinitionErrors,
-                            details: Some(format!(
-                                "expected left and right argument units to match, but '{}' and '{}' don't",
-                                pretty_print_unit(&a_units),
-                                pretty_print_unit(&b_units),
-                            )),
+                            start: loc.start,
+                            end: loc.end,
+                            // details: Some(format!(
+                            //     "expected left and right argument units to match, but '{}' and '{}' don't",
+                            //     pretty_print_unit(&a_units),
+                            //     pretty_print_unit(&b_units),
+                            // )),
                         })
                     } else {
                         Ok(a_units)
@@ -205,14 +209,21 @@ impl<'a> UnitEvaluator<'a> {
                         | (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
                             if lunits != runits {
-                                let lunits = pretty_print_unit(&lunits);
-                                let runits = pretty_print_unit(&runits);
-                                eprintln!(
-                                    "TODO: error, left ({}) and right ({}) units don't match",
-                                    lunits, runits
-                                );
+                                // let lunits = pretty_print_unit(&lunits);
+                                // let runits = pretty_print_unit(&runits);
+                                // eprintln!(
+                                //     "TODO: error, left ({}) and right ({}) units don't match",
+                                //     lunits, runits
+                                // );
+                                let loc = l.get_loc().union(&r.get_loc());
+                                Err(EquationError {
+                                    code: ErrorCode::UnitMismatch,
+                                    start: loc.start,
+                                    end: loc.end,
+                                })
+                            } else {
+                                Ok(Units::Explicit(lunits))
                             }
-                            Ok(Units::Explicit(lunits))
                         }
                     },
                     BinaryOp::Exp | BinaryOp::Mod => Ok(lunits),
@@ -297,8 +308,11 @@ fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
 // calculate the concrete units for each equation.  The outer result
 // indicates if we had a problem running the analysis.  The inner result
 // returns a list of unit problems, if there was one.
-pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Ident, Error)>>> {
-    let mut errors = vec![];
+pub fn check(
+    ctx: &Context,
+    model: &ModelStage1,
+) -> Result<StdResult<(), Vec<(Ident, EquationError)>>> {
+    let mut errors: Vec<(Ident, EquationError)> = vec![];
 
     // TODO: modules
 
@@ -338,22 +352,33 @@ pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Id
             continue;
         }
         if let Some(expected) = var.units() {
+            // if let Variable::Stock {
+            //     ident,
+            //     inflows,
+            //     outflows,
+            //     ..
+            // } = var
+            // {
+            //     // TODO: check that the flows == expected.combine(`1/time`)
+            // }
             if let Some(ast) = var.ast() {
                 match ast {
                     Ast::Scalar(expr) => match units.check(expr) {
                         Ok(Units::Explicit(actual)) => {
                             if actual != *expected {
-                                let details = format!(
-                                    "expected '{}', found units '{}'",
-                                    pretty_print_unit(expected),
-                                    pretty_print_unit(&actual)
-                                );
+                                // let details = format!(
+                                //     "expected '{}', found units '{}'",
+                                //     pretty_print_unit(expected),
+                                //     pretty_print_unit(&actual)
+                                // );
+                                let loc = expr.get_loc();
                                 errors.push((
                                     ident.clone(),
-                                    Error {
-                                        kind: ErrorKind::Variable,
+                                    EquationError {
                                         code: ErrorCode::UnitMismatch,
-                                        details: Some(details),
+                                        start: loc.start,
+                                        end: loc.end,
+                                        // details: Some(details),
                                     },
                                 ))
                             }

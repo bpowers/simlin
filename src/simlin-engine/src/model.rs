@@ -767,7 +767,9 @@ impl ModelStage1 {
             Ok(Ok(())) => {}
             Ok(Err(errors)) => {
                 for (ident, err) in errors.into_iter() {
-                    eprintln!("unit error in '{}': {}", ident, err);
+                    if let Some(var) = model.variables.get_mut(&ident) {
+                        var.push_unit_error(err);
+                    }
                 }
             }
             Err(err) => {
