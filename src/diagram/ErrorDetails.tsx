@@ -45,6 +45,7 @@ interface ErrorDetailsPropsFull extends WithStyles<typeof styles> {
   simError: SimError | undefined;
   modelErrors: List<ModelError>;
   varErrors: Map<string, List<EquationError>>;
+  varUnitErrors: Map<string, List<EquationError>>;
   status: 'ok' | 'error' | 'disabled';
 }
 
@@ -53,9 +54,15 @@ interface ErrorDetailsPropsFull extends WithStyles<typeof styles> {
 export const ErrorDetails = withStyles(styles)(
   class InnerErrorDetails extends React.PureComponent<ErrorDetailsPropsFull> {
     render() {
-      const { classes, simError, modelErrors, varErrors } = this.props;
+      const { classes, simError, modelErrors, varErrors, varUnitErrors } = this.props;
       const errors = [];
-      if (simError && !(simError.code === ErrorCode.NotSimulatable && !modelErrors.isEmpty())) {
+      if (
+        simError &&
+        !(
+          (simError.code === ErrorCode.NotSimulatable || simError.code === ErrorCode.EmptyEquation) &&
+          !modelErrors.isEmpty()
+        )
+      ) {
         errors.push(
           <Typography className={classes.errorList}>
             simulation error: {errorCodeDescription(simError.code)}
@@ -86,15 +93,20 @@ export const ErrorDetails = withStyles(styles)(
           );
         }
       }
+      for (const [ident, errs] of varUnitErrors) {
+        for (const err of errs) {
+          errors.push(
+            <Typography className={classes.errorList}>
+              variable "{ident}" unit error: {errorCodeDescription(err.code)}
+            </Typography>,
+          );
+        }
+      }
 
       return (
         <Card className={classes.card} elevation={1}>
           <CardContent className={classes.cardInner}>
-            {errors.length > 0 ? (
-              errors
-            ) : (
-              <Typography className={classes.yay}>"Your model is error free! 🎉"</Typography>
-            )}
+            {errors.length > 0 ? errors : <Typography className={classes.yay}>Your model is error free! 🎉</Typography>}
           </CardContent>
         </Card>
       );

@@ -191,6 +191,30 @@ const styles = ({ spacing, palette, breakpoints }: Theme) =>
     },
   });
 
+function lowerErrors(varErrors: globalThis.Map<string, Array<EngineEquationError>>): Map<string, List<EquationError>> {
+  let result = Map<string, List<EquationError>>();
+  if (varErrors.size > 0) {
+    for (const ident of varErrors.keys()) {
+      const rawErrors = defined(varErrors.get(ident));
+      const errors = List(
+        rawErrors.map((err) => {
+          return new EquationError({
+            start: err.start,
+            end: err.end,
+            code: err.code,
+          });
+        }),
+      );
+
+      result = result.set(ident, errors);
+
+      // these things point back into the wasm heap, so ensure we call free on them
+      rawErrors.forEach((err) => err.free());
+    }
+  }
+  return result;
+}
+
 class EditorError implements Error {
   name = 'EditorError';
   message: string;
@@ -1421,6 +1445,54 @@ export const Editor = withStyles(styles)(
       this.scheduleSimRun();
     };
 
+    getErrorDetails() {
+      const classes = this.props.classes;
+
+      let simError: SimError | undefined;
+      let modelErrors = List<ModelError>();
+      let varErrors = Map<string, List<EquationError>>();
+      let unitErrors = Map<string, List<EquationError>>();
+
+      const engine = this.engine();
+      if (engine) {
+        const rawSimError = engine.getSimError();
+        if (rawSimError) {
+          simError = new SimError({
+            code: rawSimError.code,
+            details: rawSimError.getDetails(),
+          });
+          rawSimError.free();
+        }
+
+        const modelName = this.state.modelName;
+        const rawModelErrors = engine.getModelErrors(modelName) as EngineError[];
+        for (let i = 0; i < rawModelErrors.length; i++) {
+          const rawError = rawModelErrors[i];
+          const error = new ModelError({
+            code: rawError.code,
+            details: rawError.getDetails(),
+          });
+          rawError.free();
+          modelErrors = modelErrors.push(error);
+        }
+
+        varErrors = this.getVariableErrors(engine, modelName);
+        unitErrors = this.getVariableUnitErrors(engine, modelName);
+      }
+
+      return (
+        <div className={classes.varDetails}>
+          <ErrorDetails
+            status={this.state.status}
+            simError={simError}
+            modelErrors={modelErrors}
+            varErrors={varErrors}
+            varUnitErrors={unitErrors}
+          />
+        </div>
+      );
+    }
+
     getDetails() {
       const { embedded } = this.props;
       const classes = this.props.classes;
@@ -1434,45 +1506,7 @@ export const Editor = withStyles(styles)(
       }
 
       if (this.state.showDetails === 'errors') {
-        let simError: SimError | undefined;
-        let modelErrors = List<ModelError>();
-        let varErrors = Map<string, List<EquationError>>();
-        const engine = this.engine();
-        if (engine) {
-          const rawSimError = engine.getSimError();
-          if (rawSimError) {
-            simError = new SimError({
-              code: rawSimError.code,
-              details: rawSimError.getDetails(),
-            });
-            rawSimError.free();
-          }
-
-          const modelName = this.state.modelName;
-          const rawModelErrors = engine.getModelErrors(modelName) as EngineError[];
-          for (let i = 0; i < rawModelErrors.length; i++) {
-            const rawError = rawModelErrors[i];
-            const error = new ModelError({
-              code: rawError.code,
-              details: rawError.getDetails(),
-            });
-            rawError.free();
-            modelErrors = modelErrors.push(error);
-          }
-
-          varErrors = this.getVariableErrors(engine, modelName);
-        }
-
-        return (
-          <div className={classes.varDetails}>
-            <ErrorDetails
-              status={this.state.status}
-              simError={simError}
-              modelErrors={modelErrors}
-              varErrors={varErrors}
-            />
-          </div>
-        );
+        return this.getErrorDetails();
       }
 
       const namedElement = this.getNamedSelectedElement();
@@ -1557,30 +1591,16 @@ export const Editor = withStyles(styles)(
     };
 
     getVariableErrors(engine: IEngine, modelName: string): Map<string, List<EquationError>> {
-      let result = Map<string, List<EquationError>>();
-
       const varErrors = engine.getModelVariableErrors(modelName) as globalThis.Map<string, Array<EngineEquationError>>;
-      if (varErrors.size > 0) {
-        for (const ident of varErrors.keys()) {
-          const rawErrors = defined(varErrors.get(ident));
-          const errors = List(
-            rawErrors.map((err) => {
-              return new EquationError({
-                start: err.start,
-                end: err.end,
-                code: err.code,
-              });
-            }),
-          );
+      return lowerErrors(varErrors);
+    }
 
-          result = result.set(ident, errors);
-
-          // these things point back into the wasm heap, so ensure we call free on them
-          rawErrors.forEach((err) => err.free());
-        }
-      }
-
-      return result;
+    getVariableUnitErrors(engine: IEngine, modelName: string): Map<string, List<EquationError>> {
+      const unitErrors = engine.getModelVariableUnitErrors(modelName) as globalThis.Map<
+        string,
+        Array<EngineEquationError>
+      >;
+      return lowerErrors(unitErrors);
     }
 
     updateVariableErrors(project: Project): Project {
@@ -1615,6 +1635,16 @@ export const Editor = withStyles(styles)(
           project = project.updateIn(
             ['models', modelName, 'variables', ident],
             ((v: Variable): Variable => v.set('errors', errors)) as (value: unknown) => unknown,
+          );
+        }
+      }
+
+      const unitErrors = this.getVariableUnitErrors(engine, modelName);
+      if (unitErrors.size > 0) {
+        for (const [ident, errors] of unitErrors) {
+          project = project.updateIn(
+            ['models', modelName, 'variables', ident],
+            ((v: Variable): Variable => v.set('unitErrors', errors)) as (value: unknown) => unknown,
           );
         }
       }

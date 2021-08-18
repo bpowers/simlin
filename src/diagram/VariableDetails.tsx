@@ -24,6 +24,7 @@ import {
   GraphicalFunctionScale,
   ApplyToAllEquation,
   ScalarEquation,
+  EquationError,
 } from '@system-dynamics/core/datamodel';
 
 import { defined, Series } from '@system-dynamics/core/common';
@@ -149,6 +150,27 @@ function scalarEquationFor(variable: Variable): string {
   }
 }
 
+function highlightErrors(s: string, errors: List<EquationError> | undefined): EquationElement[] {
+  const result = descendantsFromString(s);
+  if (errors && errors.size > 0) {
+    // TODO: multiple errors
+    const err = defined(errors.get(0));
+    // if the end is 0 it means this is a problem we don't have position information for
+    if (err.end > 0) {
+      const children = defined(result[0]).children as Array<Text>;
+      const textChild: string = defined(children[0]).text;
+
+      const beforeText = textChild.substring(0, err.start);
+      const errText = textChild.substring(err.start, err.end);
+      const afterText = textChild.substring(err.end);
+
+      defined(result[0]).children = [{ text: beforeText }, { text: errText, error: true }, { text: afterText }];
+    }
+  }
+
+  return result;
+}
+
 export const VariableDetails = withStyles(styles)(
   class InnerVariableDetails extends React.PureComponent<VariableDetailsPropsFull, VariableDetailsState> {
     constructor(props: VariableDetailsPropsFull) {
@@ -156,29 +178,14 @@ export const VariableDetails = withStyles(styles)(
 
       const { variable } = props;
 
-      const equation = descendantsFromString(scalarEquationFor(variable));
-      const errors = props.variable.errors;
-      if (errors) {
-        // TODO: multiple errors
-        const err = defined(errors.get(0));
-        // if the end is 0 it means this is a problem we don't have position information for
-        if (err.end > 0) {
-          const children = defined(equation[0]).children as Array<Text>;
-          const textChild: string = defined(children[0]).text;
-
-          const beforeText = textChild.substring(0, err.start);
-          const errText = textChild.substring(err.start, err.end);
-          const afterText = textChild.substring(err.end);
-
-          defined(equation[0]).children = [{ text: beforeText }, { text: errText, error: true }, { text: afterText }];
-        }
-      }
+      const equation = highlightErrors(scalarEquationFor(variable), props.variable.errors);
+      const units = highlightErrors(props.variable.units, props.variable.unitErrors);
 
       this.state = {
         equationEditor: withHistory(withReact(createEditor())),
         equationContents: equation,
         unitsEditor: withHistory(withReact(createEditor())),
-        unitsContents: descendantsFromString(props.variable.units),
+        unitsContents: units,
         notesEditor: withHistory(withReact(createEditor())),
         notesContents: descendantsFromString(props.variable.documentation),
       };
@@ -323,11 +330,20 @@ export const VariableDetails = withStyles(styles)(
 
       let chartOrErrors;
       const errors = this.props.variable.errors;
-      if (errors) {
-        const error = defined(errors.get(0));
-        chartOrErrors = (
-          <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>
-        );
+      const unitErrors = this.props.variable.unitErrors;
+      if (errors || unitErrors) {
+        if (errors) {
+          const error = defined(errors.get(0));
+          chartOrErrors = (
+            <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>
+          );
+        }
+        if (unitErrors) {
+          const error = defined(unitErrors.get(0));
+          chartOrErrors = (
+            <Typography className={classes.errorList}>unit error: {errorCodeDescription(error.code)}</Typography>
+          );
+        }
       } else {
         chartOrErrors = (
           <ResponsiveContainer width="100%" height={300}>
