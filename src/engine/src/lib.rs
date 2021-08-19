@@ -52,7 +52,7 @@ impl From<engine::common::UnitError> for UnitError {
             },
             engine::common::UnitError::ConsistencyError(code, loc, details) => UnitError {
                 code,
-                is_consistency_error: false,
+                is_consistency_error: true,
                 start: loc.start,
                 end: loc.end,
                 details,
