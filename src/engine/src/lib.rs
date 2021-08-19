@@ -24,12 +24,20 @@ pub struct Engine {
 
 #[wasm_bindgen]
 #[allow(dead_code)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct UnitError {
-    code: ErrorCode,
-    is_consistency_error: bool,
-    start: u16,
-    end: u16,
+    pub code: ErrorCode,
+    pub is_consistency_error: bool,
+    pub start: u16,
+    pub end: u16,
     details: Option<String>,
+}
+
+#[wasm_bindgen]
+impl UnitError {
+    pub fn get_details(&self) -> Option<String> {
+        self.details.clone()
+    }
 }
 
 impl From<engine::common::UnitError> for UnitError {

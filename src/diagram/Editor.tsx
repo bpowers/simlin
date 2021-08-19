@@ -30,6 +30,7 @@ import type {
   Engine as IEngine,
   Error as EngineError,
   EquationError as EngineEquationError,
+  UnitError as EngineUnitError,
 } from '@system-dynamics/engine';
 import { open, errorCodeDescription } from '@system-dynamics/engine';
 import {
@@ -53,6 +54,7 @@ import {
   ModelError,
   ErrorCode,
   Rect,
+  UnitError,
 } from '@system-dynamics/core/datamodel';
 import { defined, exists, Series, toInt, uint8ArraysEqual } from '@system-dynamics/core/common';
 
@@ -202,6 +204,32 @@ function lowerErrors(varErrors: globalThis.Map<string, Array<EngineEquationError
             start: err.start,
             end: err.end,
             code: err.code,
+          });
+        }),
+      );
+
+      result = result.set(ident, errors);
+
+      // these things point back into the wasm heap, so ensure we call free on them
+      rawErrors.forEach((err) => err.free());
+    }
+  }
+  return result;
+}
+
+function lowerUnitErrors(varErrors: globalThis.Map<string, Array<EngineUnitError>>): Map<string, List<UnitError>> {
+  let result = Map<string, List<UnitError>>();
+  if (varErrors.size > 0) {
+    for (const ident of varErrors.keys()) {
+      const rawErrors = defined(varErrors.get(ident));
+      const errors = List(
+        rawErrors.map((err) => {
+          return new UnitError({
+            start: err.start,
+            isConsistencyError: err.is_consistency_error,
+            end: err.end,
+            code: err.code,
+            details: err.get_details(),
           });
         }),
       );
@@ -1451,7 +1479,7 @@ export const Editor = withStyles(styles)(
       let simError: SimError | undefined;
       let modelErrors = List<ModelError>();
       let varErrors = Map<string, List<EquationError>>();
-      let unitErrors = Map<string, List<EquationError>>();
+      let unitErrors = Map<string, List<UnitError>>();
 
       const engine = this.engine();
       if (engine) {
@@ -1595,12 +1623,9 @@ export const Editor = withStyles(styles)(
       return lowerErrors(varErrors);
     }
 
-    getVariableUnitErrors(engine: IEngine, modelName: string): Map<string, List<EquationError>> {
-      const unitErrors = engine.getModelVariableUnitErrors(modelName) as globalThis.Map<
-        string,
-        Array<EngineEquationError>
-      >;
-      return lowerErrors(unitErrors);
+    getVariableUnitErrors(engine: IEngine, modelName: string): Map<string, List<UnitError>> {
+      const unitErrors = engine.getModelVariableUnitErrors(modelName) as globalThis.Map<string, Array<EngineUnitError>>;
+      return lowerUnitErrors(unitErrors);
     }
 
     updateVariableErrors(project: Project): Project {

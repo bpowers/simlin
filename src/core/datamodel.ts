@@ -74,6 +74,21 @@ export class EquationError extends Record(equationErrorDefaults) {
   }
 }
 
+const unitErrorDefaults = {
+  code: ErrorCode.NoError,
+  start: 0.0,
+  end: 0.0,
+  isConsistencyError: false,
+  details: undefined as string | undefined,
+};
+export class UnitError extends Record(unitErrorDefaults) {
+  // this isn't useless, as it ensures we specify the full object
+  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+  constructor(props: typeof unitErrorDefaults) {
+    super(props);
+  }
+}
+
 const simErrorDefaults = {
   code: ErrorCode.NoError,
   details: undefined as string | undefined,
@@ -291,10 +306,10 @@ export interface Variable {
   readonly isArrayed: boolean;
   readonly hasError: boolean;
   readonly errors: List<EquationError> | undefined;
-  readonly unitErrors: List<EquationError> | undefined;
+  readonly unitErrors: List<UnitError> | undefined;
   readonly data: Readonly<Array<Series>> | undefined;
   set(prop: 'errors', errors: List<EquationError> | undefined): Variable;
-  set(prop: 'unitErrors', errors: List<EquationError> | undefined): Variable;
+  set(prop: 'unitErrors', errors: List<UnitError> | undefined): Variable;
   set(prop: 'data', data: Readonly<Array<Series>> | undefined): Variable;
 }
 
@@ -308,7 +323,7 @@ const stockDefaults = {
   nonNegative: false,
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<UnitError> | undefined,
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -327,7 +342,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
       nonNegative: stock.getNonNegative(),
       data: undefined,
       errors: undefined as List<EquationError> | undefined,
-      unitErrors: undefined as List<EquationError> | undefined,
+      unitErrors: undefined as List<UnitError> | undefined,
     });
   }
   get gf(): undefined {
@@ -350,7 +365,7 @@ const flowDefaults = {
   nonNegative: false,
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<UnitError> | undefined,
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -388,7 +403,7 @@ const auxDefaults = {
   gf: undefined as GraphicalFunction | undefined,
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<UnitError> | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -438,7 +453,7 @@ const moduleDefaults = {
   references: List<ModuleReference>(),
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
-  unitErrors: undefined as List<EquationError> | undefined,
+  unitErrors: undefined as List<UnitError> | undefined,
 };
 export class Module extends Record(moduleDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object

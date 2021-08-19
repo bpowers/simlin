@@ -20,7 +20,7 @@ export type EquationElement = {
 
 export type CustomElement = LabelElement | EquationElement;
 
-export type FormattedText = { text: string; error?: true };
+export type FormattedText = { text: string; error?: true; warning?: true };
 
 export type CustomText = FormattedText;
 

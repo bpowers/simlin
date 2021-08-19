@@ -9,7 +9,7 @@ import { List, Map } from 'immutable';
 import { Card, CardContent, Typography } from '@material-ui/core';
 import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
 
-import { SimError, ModelError, EquationError, ErrorCode } from '@system-dynamics/core/datamodel';
+import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@system-dynamics/core/datamodel';
 
 import { errorCodeDescription } from '@system-dynamics/engine';
 
@@ -45,7 +45,7 @@ interface ErrorDetailsPropsFull extends WithStyles<typeof styles> {
   simError: SimError | undefined;
   modelErrors: List<ModelError>;
   varErrors: Map<string, List<EquationError>>;
-  varUnitErrors: Map<string, List<EquationError>>;
+  varUnitErrors: Map<string, List<UnitError>>;
   status: 'ok' | 'error' | 'disabled';
 }
 
@@ -95,9 +95,11 @@ export const ErrorDetails = withStyles(styles)(
       }
       for (const [ident, errs] of varUnitErrors) {
         for (const err of errs) {
+          const details = err.details;
           errors.push(
             <Typography className={classes.errorList}>
               variable "{ident}" unit error: {errorCodeDescription(err.code)}
+              {details ? `: ${details}` : undefined}
             </Typography>,
           );
         }

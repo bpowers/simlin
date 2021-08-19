@@ -25,11 +25,12 @@ import {
   ApplyToAllEquation,
   ScalarEquation,
   EquationError,
+  UnitError,
 } from '@system-dynamics/core/datamodel';
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
-import { EquationElement } from './drawing/SlateEditor';
+import { EquationElement, FormattedText } from './drawing/SlateEditor';
 import { LookupEditor } from './LookupEditor';
 import { errorCodeDescription } from '@system-dynamics/engine';
 
@@ -83,6 +84,9 @@ const styles = ({ breakpoints }: Theme) =>
     },
     eqnError: {
       textDecoration: 'underline wavy red',
+    },
+    eqnWarning: {
+      textDecoration: 'underline wavy orange',
     },
     buttonLeft: {
       float: 'left',
@@ -150,9 +154,14 @@ function scalarEquationFor(variable: Variable): string {
   }
 }
 
-function highlightErrors(s: string, errors: List<EquationError> | undefined): EquationElement[] {
+function highlightErrors(
+  s: string,
+  errors: List<EquationError> | undefined,
+  unitErrors: List<UnitError> | undefined,
+  isUnits: boolean,
+): EquationElement[] {
   const result = descendantsFromString(s);
-  if (errors && errors.size > 0) {
+  if (!isUnits && errors && errors.size > 0) {
     // TODO: multiple errors
     const err = defined(errors.get(0));
     // if the end is 0 it means this is a problem we don't have position information for
@@ -166,6 +175,19 @@ function highlightErrors(s: string, errors: List<EquationError> | undefined): Eq
 
       defined(result[0]).children = [{ text: beforeText }, { text: errText, error: true }, { text: afterText }];
     }
+  } else if (unitErrors && unitErrors.size > 0) {
+    const err = defined(unitErrors.get(0));
+    const children = defined(result[0]).children as Array<Text>;
+    const textChild: string = defined(children[0]).text;
+    const end = err.end === 0 ? textChild.length : err.end;
+
+    const beforeText = textChild.substring(0, err.start);
+    const errText = textChild.substring(err.start, end);
+    const afterText = textChild.substring(end);
+
+    const highlighted: FormattedText = isUnits ? { text: errText, error: true } : { text: errText, warning: true };
+
+    defined(result[0]).children = [{ text: beforeText }, highlighted, { text: afterText }];
   }
 
   return result;
@@ -178,8 +200,13 @@ export const VariableDetails = withStyles(styles)(
 
       const { variable } = props;
 
-      const equation = highlightErrors(scalarEquationFor(variable), props.variable.errors);
-      const units = highlightErrors(props.variable.units, props.variable.unitErrors);
+      const equation = highlightErrors(
+        scalarEquationFor(variable),
+        props.variable.errors,
+        props.variable.unitErrors,
+        false,
+      );
+      const units = highlightErrors(props.variable.units, props.variable.errors, props.variable.unitErrors, true);
 
       this.state = {
         equationEditor: withHistory(withReact(createEditor())),
@@ -255,9 +282,12 @@ export const VariableDetails = withStyles(styles)(
 
     renderLeaf = (props: RenderLeafProps) => {
       const isError = !!((props.leaf as unknown) as any).error;
+      const isWarning = !!((props.leaf as unknown) as any).warning;
       const errorClass = this.props.classes.eqnError;
+      const warningClass = this.props.classes.eqnWarning;
+      const className = isError ? errorClass : isWarning ? warningClass : undefined;
       return (
-        <span {...props.attributes} className={isError ? errorClass : undefined}>
+        <span {...props.attributes} className={className}>
           {props.children}
         </span>
       );
@@ -340,8 +370,12 @@ export const VariableDetails = withStyles(styles)(
         }
         if (unitErrors) {
           const error = defined(unitErrors.get(0));
+          const details = error.details;
           chartOrErrors = (
-            <Typography className={classes.errorList}>unit error: {errorCodeDescription(error.code)}</Typography>
+            <Typography className={classes.errorList}>
+              unit error: {errorCodeDescription(error.code)}
+              {details ? `: ${details}` : undefined}
+            </Typography>
           );
         }
       } else {

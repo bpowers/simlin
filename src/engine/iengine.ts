@@ -180,6 +180,30 @@ export interface Error {
   kind: number;
 }
 
+export interface UnitError {
+  free(): void;
+  /**
+   * @returns {string | undefined}
+   */
+  get_details(): string | undefined;
+  /**
+   * @returns {number}
+   */
+  code: number;
+  /**
+   * @returns {number}
+   */
+  end: number;
+  /**
+   * @returns {boolean}
+   */
+  is_consistency_error: boolean;
+  /**
+   * @returns {number}
+   */
+  start: number;
+}
+
 export enum ErrorKind {
   Import,
   Model,

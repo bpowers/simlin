@@ -65,7 +65,7 @@ impl<'a> UnitEvaluator<'a> {
                 var.units()
                     .ok_or_else(|| {
                         ConsistencyError(
-                            ErrorCode::UnitDefinitionErrors,
+                            ErrorCode::UnitMismatch,
                             *loc,
                             Some(format!("dependency '{}' doesn't have units defined", ident)),
                         )
@@ -90,7 +90,7 @@ impl<'a> UnitEvaluator<'a> {
                         var.units()
                             .ok_or_else(|| {
                                 ConsistencyError(
-                                    ErrorCode::UnitDefinitionErrors,
+                                    ErrorCode::UnitMismatch,
                                     *loc,
                                     Some(format!(
                                         "no units specified for lookup dependency '{}'",
