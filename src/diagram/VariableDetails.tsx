@@ -362,22 +362,26 @@ export const VariableDetails = withStyles(styles)(
       const errors = this.props.variable.errors;
       const unitErrors = this.props.variable.unitErrors;
       if (errors || unitErrors) {
+        const errorList: Array<React.ReactElement> = [];
         if (errors) {
-          const error = defined(errors.get(0));
-          chartOrErrors = (
-            <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>
-          );
+          errors.forEach((error) => {
+            errorList.push(
+              <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>
+            );
+          });
         }
         if (unitErrors) {
-          const error = defined(unitErrors.get(0));
-          const details = error.details;
-          chartOrErrors = (
-            <Typography className={classes.errorList}>
-              unit error: {errorCodeDescription(error.code)}
-              {details ? `: ${details}` : undefined}
-            </Typography>
-          );
+          unitErrors.forEach((error) => {
+            const details = error.details;
+            chartOrErrors = (
+              <Typography className={classes.errorList}>
+                unit error: {errorCodeDescription(error.code)}
+                {details ? `: ${details}` : undefined}
+              </Typography>
+            );
+          });
         }
+        chartOrErrors = errorList;
       } else {
         chartOrErrors = (
           <ResponsiveContainer width="100%" height={300}>
