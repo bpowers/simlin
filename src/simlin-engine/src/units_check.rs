@@ -6,7 +6,7 @@ use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{EquationError, ErrorCode, Ident, Result, UnitError, UnitResult};
+use crate::common::{canonicalize, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::units::{pretty_print_unit, Context};
@@ -327,12 +327,7 @@ pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Id
     // for each variable, evaluate the equation given the unit context
     // if the result doesn't match the expected thing, accumulate an error
 
-    let time_units = ctx
-        .sim_specs
-        .time_units
-        .as_deref()
-        .unwrap_or("time")
-        .to_owned();
+    let time_units = canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
     let units = UnitEvaluator {
         ctx,
