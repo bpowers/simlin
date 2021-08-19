@@ -11,6 +11,12 @@ use crate::common::{DimensionName, ElementName};
 
 pub type UnitMap = BTreeMap<String, i32>;
 
+pub fn invert_units(units: &mut UnitMap) {
+    for (_id, exp) in units.iter_mut() {
+        *exp *= -1;
+    }
+}
+
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum GraphicalFunctionKind {

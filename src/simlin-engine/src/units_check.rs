@@ -335,7 +335,7 @@ pub fn check(
             ident: "time".to_string(),
             ast: None,
             eqn: None,
-            units: Some([(time_units, 1)].iter().cloned().collect()),
+            units: Some([(time_units.clone(), 1)].iter().cloned().collect()),
             table: None,
             non_negative: false,
             is_flow: false,
@@ -343,6 +343,8 @@ pub fn check(
             errors: vec![],
         },
     };
+
+    let one_over_time: UnitMap = [(time_units, -1)].iter().cloned().collect();
 
     for (ident, var) in model.variables.iter() {
         if var.table().is_some() {
@@ -352,15 +354,33 @@ pub fn check(
             continue;
         }
         if let Some(expected) = var.units() {
-            // if let Variable::Stock {
-            //     ident,
-            //     inflows,
-            //     outflows,
-            //     ..
-            // } = var
-            // {
-            //     // TODO: check that the flows == expected.combine(`1/time`)
-            // }
+            if let Variable::Stock {
+                inflows, outflows, ..
+            } = var
+            {
+                let expected_flow_units =
+                    combine(UnitOp::Mul, expected.clone(), one_over_time.clone());
+                let mut check_flows = |flows: &Vec<Ident>| {
+                    for ident in flows.iter() {
+                        if let Some(var) = model.variables.get(ident) {
+                            if let Some(units) = var.units() {
+                                if expected_flow_units != *units {
+                                    errors.push((
+                                        var.ident().to_owned(),
+                                        EquationError {
+                                            code: ErrorCode::UnitMismatch,
+                                            start: 0,
+                                            end: 0,
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                };
+                check_flows(inflows);
+                check_flows(outflows);
+            }
             if let Some(ast) = var.ast() {
                 match ast {
                     Ast::Scalar(expr) => match units.check(expr) {
