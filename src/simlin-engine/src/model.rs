@@ -5,10 +5,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::result::Result as StdResult;
 
-use crate::ast::{lower_ast, Expr0};
+use crate::ast::{lower_ast, Expr0, Loc};
 use crate::common::{
-    topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
-    VariableError,
+    topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, UnitError,
 };
 use crate::datamodel::Dimension;
 #[cfg(test)]
@@ -471,6 +470,7 @@ pub(crate) fn resolve_module_inputs(
             outflows,
             non_negative,
             errors,
+            unit_errors,
         } => {
             let mut errors = errors.clone();
             let ast = ast
@@ -478,7 +478,7 @@ pub(crate) fn resolve_module_inputs(
                 .map(|ast| match lower_ast(ast.clone()) {
                     Ok(ast) => Some(ast),
                     Err(err) => {
-                        errors.push(VariableError::EquationError(err));
+                        errors.push(err);
                         None
                     }
                 })
@@ -492,6 +492,7 @@ pub(crate) fn resolve_module_inputs(
                 outflows: outflows.clone(),
                 non_negative: *non_negative,
                 errors,
+                unit_errors: unit_errors.clone(),
             }
         }
         Variable::Var {
@@ -504,6 +505,7 @@ pub(crate) fn resolve_module_inputs(
             is_flow,
             is_table_only,
             errors,
+            unit_errors,
         } => {
             let mut errors = errors.clone();
             let ast = ast
@@ -511,7 +513,7 @@ pub(crate) fn resolve_module_inputs(
                 .map(|ast| match lower_ast(ast.clone()) {
                     Ok(ast) => Some(ast),
                     Err(err) => {
-                        errors.push(VariableError::EquationError(err));
+                        errors.push(err);
                         None
                     }
                 })
@@ -526,6 +528,7 @@ pub(crate) fn resolve_module_inputs(
                 is_flow: *is_flow,
                 is_table_only: *is_table_only,
                 errors,
+                unit_errors: unit_errors.clone(),
             }
         }
         Variable::Module {
@@ -534,6 +537,7 @@ pub(crate) fn resolve_module_inputs(
             units,
             inputs,
             errors,
+            unit_errors,
         } => {
             let var_errors = errors;
 
@@ -543,12 +547,8 @@ pub(crate) fn resolve_module_inputs(
 
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
             let inputs: Vec<ModuleInput> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
-            let mut errors: Vec<VariableError> = errors
-                .into_iter()
-                .map(|e| e.unwrap_err())
-                .map(VariableError::EquationError)
-                .collect();
-
+            let mut errors: Vec<EquationError> =
+                errors.into_iter().map(|e| e.unwrap_err()).collect();
             errors.append(&mut var_errors.clone());
 
             Variable::Module {
@@ -557,6 +557,7 @@ pub(crate) fn resolve_module_inputs(
                 units: units.clone(),
                 inputs,
                 errors,
+                unit_errors: unit_errors.clone(),
             }
         }
     }
@@ -768,7 +769,11 @@ impl ModelStage1 {
             Ok(Err(errors)) => {
                 for (ident, err) in errors.into_iter() {
                     if let Some(var) = model.variables.get_mut(&ident) {
-                        var.push_unit_error(err);
+                        var.push_unit_error(UnitError::ConsistencyError(
+                            err.code,
+                            Loc::new(err.start.into(), err.end.into()),
+                            None,
+                        ));
                     }
                 }
             }
@@ -946,7 +951,7 @@ impl ModelStage1 {
         self.errors = maybe_errors;
     }
 
-    pub fn get_unit_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
+    pub fn get_unit_errors(&self) -> HashMap<Ident, Vec<UnitError>> {
         self.variables
             .iter()
             .flat_map(|(ident, var)| var.unit_errors().map(|errs| (ident.clone(), errs)))
@@ -1136,6 +1141,7 @@ fn test_module_parse() {
         units: None,
         inputs,
         errors: vec![],
+        unit_errors: vec![],
     };
 
     let lynxes_model = x_model(

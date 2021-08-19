@@ -558,6 +558,7 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -576,6 +577,7 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -643,6 +645,7 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -661,6 +664,7 @@ fn test_lower() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -720,6 +724,7 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -738,6 +743,7 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -756,6 +762,7 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -774,6 +781,7 @@ fn test_fold_flows() {
                 is_flow: false,
                 is_table_only: false,
                 errors: vec![],
+                unit_errors: vec![],
             },
         },
     );
@@ -1031,6 +1039,7 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
+                    unit_errors: vec![],
                 },
             },
         );
@@ -1049,6 +1058,7 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
+                    unit_errors: vec![],
                 },
             },
         );
@@ -1067,6 +1077,7 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
+                    unit_errors: vec![],
                 },
             },
         );
@@ -1085,6 +1096,7 @@ fn build_metadata(
                     is_flow: false,
                     is_table_only: false,
                     errors: vec![],
+                    unit_errors: vec![],
                 },
             },
         );

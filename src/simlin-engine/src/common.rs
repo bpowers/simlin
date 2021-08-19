@@ -6,6 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::{error, result};
 
+use crate::ast::Loc;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::borrow::Cow;
@@ -147,16 +148,22 @@ impl From<Error> for EquationError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum VariableError {
-    EquationError(EquationError),
-    UnitError(EquationError),
+pub enum UnitError {
+    DefinitionError(EquationError),
+    ConsistencyError(ErrorCode, Loc, Option<String>),
 }
 
-impl fmt::Display for VariableError {
+impl fmt::Display for UnitError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            VariableError::EquationError(err) => write!(f, "eqn:{}", err),
-            VariableError::UnitError(err) => write!(f, "unit:{}", err),
+            UnitError::DefinitionError(err) => write!(f, "unit definition:{}", err),
+            UnitError::ConsistencyError(err, loc, details) => {
+                if let Some(details) = details {
+                    write!(f, "unit consistency:{}:{} ({})", loc, err, details)
+                } else {
+                    write!(f, "unit consistency:{}:{}", loc, err)
+                }
+            }
         }
     }
 }

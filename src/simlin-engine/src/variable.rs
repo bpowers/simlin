@@ -9,7 +9,7 @@ use crate::ast::Loc;
 use crate::ast::{Ast, Expr, Expr0};
 use crate::builtins::{walk_builtin_expr, BuiltinContents, BuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
-use crate::common::{DimensionName, EquationError, EquationResult, Ident, VariableError};
+use crate::common::{DimensionName, EquationError, EquationResult, Ident, UnitError};
 use crate::datamodel::Dimension;
 use crate::token::LexerType;
 use crate::units::parse_units;
@@ -41,7 +41,8 @@ pub enum Variable<MI = ModuleInput, E = Expr> {
         inflows: Vec<Ident>,
         outflows: Vec<Ident>,
         non_negative: bool,
-        errors: Vec<VariableError>,
+        errors: Vec<EquationError>,
+        unit_errors: Vec<UnitError>,
     },
     Var {
         ident: Ident,
@@ -52,7 +53,8 @@ pub enum Variable<MI = ModuleInput, E = Expr> {
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
-        errors: Vec<VariableError>,
+        errors: Vec<EquationError>,
+        unit_errors: Vec<UnitError>,
     },
     Module {
         // the current spec has ident == model name
@@ -60,23 +62,25 @@ pub enum Variable<MI = ModuleInput, E = Expr> {
         model_name: Ident,
         units: Option<datamodel::UnitMap>,
         inputs: Vec<MI>,
-        errors: Vec<VariableError>,
+        errors: Vec<EquationError>,
+        unit_errors: Vec<UnitError>,
     },
 }
 
 impl<MI, E> Variable<MI, E> {
     pub fn ident(&self) -> &str {
         match self {
-            Variable::Stock { ident: name, .. } => name.as_str(),
-            Variable::Var { ident: name, .. } => name.as_str(),
-            Variable::Module { ident: name, .. } => name.as_str(),
+            Variable::Stock { ident: name, .. }
+            | Variable::Var { ident: name, .. }
+            | Variable::Module { ident: name, .. } => name.as_str(),
         }
     }
 
     pub fn ast(&self) -> Option<&Ast<E>> {
         match self {
-            Variable::Stock { ast: Some(ast), .. } => Some(ast),
-            Variable::Var { ast: Some(ast), .. } => Some(ast),
+            Variable::Stock { ast: Some(ast), .. } | Variable::Var { ast: Some(ast), .. } => {
+                Some(ast)
+            }
             _ => None,
         }
     }
@@ -86,8 +90,8 @@ impl<MI, E> Variable<MI, E> {
             Variable::Stock {
                 eqn: Some(datamodel::Equation::Scalar(s)),
                 ..
-            } => Some(s),
-            Variable::Var {
+            }
+            | Variable::Var {
                 eqn: Some(datamodel::Equation::Scalar(s)),
                 ..
             } => Some(s),
@@ -100,16 +104,16 @@ impl<MI, E> Variable<MI, E> {
             Variable::Stock {
                 ast: Some(Ast::Arrayed(dims, _)),
                 ..
+            }
+            | Variable::Var {
+                ast: Some(Ast::Arrayed(dims, _)),
+                ..
             } => Some(dims),
             Variable::Stock {
                 ast: Some(Ast::ApplyToAll(dims, _)),
                 ..
-            } => Some(dims),
-            Variable::Var {
-                ast: Some(Ast::Arrayed(dims, _)),
-                ..
-            } => Some(dims),
-            Variable::Var {
+            }
+            | Variable::Var {
                 ast: Some(Ast::ApplyToAll(dims, _)),
                 ..
             } => Some(dims),
@@ -125,41 +129,33 @@ impl<MI, E> Variable<MI, E> {
         matches!(self, Variable::Module { .. })
     }
 
-    pub fn errors(
-        &self,
-        filter: fn(&VariableError) -> Option<EquationError>,
-    ) -> Option<Vec<EquationError>> {
+    pub fn equation_errors(&self) -> Option<Vec<EquationError>> {
         let errors = match self {
             Variable::Stock { errors, .. }
             | Variable::Var { errors, .. }
             | Variable::Module { errors, .. } => errors,
         };
-
-        let errors: Vec<_> = errors.iter().flat_map(filter).collect();
-
         if errors.is_empty() {
             None
         } else {
-            Some(errors)
+            Some(errors.clone())
         }
     }
 
-    pub fn equation_errors(&self) -> Option<Vec<EquationError>> {
-        self.errors(|err| match err {
-            VariableError::EquationError(err) => Some(err.clone()),
-            VariableError::UnitError(_) => None,
-        })
-    }
-
-    pub fn unit_errors(&self) -> Option<Vec<EquationError>> {
-        self.errors(|err| match err {
-            VariableError::EquationError(_) => None,
-            VariableError::UnitError(err) => Some(err.clone()),
-        })
+    pub fn unit_errors(&self) -> Option<Vec<UnitError>> {
+        let errors = match self {
+            Variable::Stock { unit_errors, .. }
+            | Variable::Var { unit_errors, .. }
+            | Variable::Module { unit_errors, .. } => unit_errors,
+        };
+        if errors.is_empty() {
+            None
+        } else {
+            Some(errors.clone())
+        }
     }
 
     pub fn push_error(&mut self, err: EquationError) {
-        let err = VariableError::EquationError(err);
         match self {
             Variable::Stock { errors, .. }
             | Variable::Var { errors, .. }
@@ -167,12 +163,11 @@ impl<MI, E> Variable<MI, E> {
         }
     }
 
-    pub fn push_unit_error(&mut self, err: EquationError) {
-        let err = VariableError::UnitError(err);
+    pub fn push_unit_error(&mut self, err: UnitError) {
         match self {
-            Variable::Stock { errors, .. }
-            | Variable::Var { errors, .. }
-            | Variable::Module { errors, .. } => errors.push(err),
+            Variable::Stock { unit_errors, .. }
+            | Variable::Var { unit_errors, .. }
+            | Variable::Module { unit_errors, .. } => unit_errors.push(err),
         }
     }
 
@@ -335,15 +330,12 @@ where
         datamodel::Variable::Stock(v) => {
             let ident = v.ident.clone();
             let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation);
-            let mut errors: Vec<VariableError> = errors
-                .into_iter()
-                .map(VariableError::EquationError)
-                .collect();
+            let mut unit_errors: Vec<UnitError> = vec![];
             let units = match parse_units(units_ctx, v.units.as_ref()) {
                 Ok(units) => units,
-                Err(unit_errors) => {
-                    for err in unit_errors.into_iter() {
-                        errors.push(VariableError::UnitError(err));
+                Err(errors) => {
+                    for err in errors.into_iter() {
+                        unit_errors.push(UnitError::DefinitionError(err));
                     }
                     None
                 }
@@ -357,20 +349,18 @@ where
                 outflows: v.outflows.clone(),
                 non_negative: v.non_negative,
                 errors,
+                unit_errors,
             }
         }
         datamodel::Variable::Flow(v) => {
             let ident = v.ident.clone();
-            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation);
-            let mut errors: Vec<VariableError> = errors
-                .into_iter()
-                .map(VariableError::EquationError)
-                .collect();
+            let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation);
+            let mut unit_errors: Vec<UnitError> = vec![];
             let units = match parse_units(units_ctx, v.units.as_ref()) {
                 Ok(units) => units,
-                Err(unit_errors) => {
-                    for err in unit_errors.into_iter() {
-                        errors.push(VariableError::UnitError(err));
+                Err(errors) => {
+                    for err in errors.into_iter() {
+                        unit_errors.push(UnitError::DefinitionError(err));
                     }
                     None
                 }
@@ -379,7 +369,7 @@ where
                 Ok(table) => table,
                 Err(err) => {
                     // TODO: should have a TableError variant
-                    errors.push(VariableError::EquationError(err));
+                    errors.push(err);
                     None
                 }
             };
@@ -393,20 +383,18 @@ where
                 is_table_only: false,
                 non_negative: v.non_negative,
                 errors,
+                unit_errors,
             }
         }
         datamodel::Variable::Aux(v) => {
             let ident = v.ident.clone();
-            let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation);
-            let mut errors: Vec<VariableError> = errors
-                .into_iter()
-                .map(VariableError::EquationError)
-                .collect();
+            let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation);
+            let mut unit_errors: Vec<UnitError> = vec![];
             let units = match parse_units(units_ctx, v.units.as_ref()) {
                 Ok(units) => units,
-                Err(unit_errors) => {
-                    for err in unit_errors.into_iter() {
-                        errors.push(VariableError::UnitError(err));
+                Err(errors) => {
+                    for err in errors.into_iter() {
+                        unit_errors.push(UnitError::DefinitionError(err));
                     }
                     None
                 }
@@ -415,7 +403,7 @@ where
                 Ok(table) => table,
                 Err(err) => {
                     // TODO: should have TableError variant
-                    errors.push(VariableError::EquationError(err));
+                    errors.push(err);
                     None
                 }
             };
@@ -429,6 +417,7 @@ where
                 is_table_only: false,
                 non_negative: false,
                 errors,
+                unit_errors,
             }
         }
         datamodel::Variable::Module(v) => {
@@ -436,16 +425,13 @@ where
             let inputs = v.references.iter().map(module_input_mapper);
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
             let inputs: Vec<MI> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
-            let mut errors: Vec<VariableError> = errors
-                .into_iter()
-                .map(|e| e.unwrap_err())
-                .map(VariableError::EquationError)
-                .collect();
+            let errors: Vec<EquationError> = errors.into_iter().map(|e| e.unwrap_err()).collect();
+            let mut unit_errors: Vec<UnitError> = vec![];
             let units = match parse_units(units_ctx, v.units.as_ref()) {
                 Ok(units) => units,
-                Err(unit_errors) => {
-                    for err in unit_errors.into_iter() {
-                        errors.push(VariableError::UnitError(err));
+                Err(errors) => {
+                    for err in errors.into_iter() {
+                        unit_errors.push(UnitError::DefinitionError(err));
                     }
                     None
                 }
@@ -457,6 +443,7 @@ where
                 units,
                 inputs,
                 errors,
+                unit_errors,
             }
         }
     }
@@ -644,6 +631,7 @@ fn test_tables() {
         is_flow: false,
         is_table_only: false,
         errors: vec![],
+        unit_errors: vec![],
     };
 
     if let Variable::Var {

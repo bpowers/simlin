@@ -8,6 +8,8 @@ use std::rc::Rc;
 
 use pico_args::Arguments;
 
+use simlin_compat::engine::builtins::Loc;
+use simlin_compat::engine::common::UnitError;
 use simlin_compat::engine::datamodel::{Equation, Project as DatamodelProject};
 use simlin_compat::engine::{
     eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, Vm,
@@ -157,15 +159,35 @@ fn simulate(project: &DatamodelProject) -> Results {
             let var = model_datamodel.get_variable(&ident).unwrap();
             for error in errors {
                 eprintln!();
-                if let Some(eqn) = var.get_units() {
+                let (eqn, loc, details) = match error {
+                    UnitError::DefinitionError(error) => (
+                        var.get_units(),
+                        Loc::new(error.start.into(), error.end.into()),
+                        format!("{}", error.code),
+                    ),
+                    UnitError::ConsistencyError(code, loc, details) => {
+                        let (eqn, loc, code) =
+                            if let Some(Equation::Scalar(eqn)) = var.get_equation() {
+                                (Some(eqn), loc, code)
+                            } else {
+                                (None, loc, code)
+                            };
+                        let details = match details {
+                            Some(details) => format!("{} -- {}", code, details),
+                            None => format!("{}", code),
+                        };
+                        (eqn, loc, details)
+                    }
+                };
+                if let Some(eqn) = eqn {
                     eprintln!("    {}", eqn);
-                    let space = " ".repeat(error.start as usize);
-                    let underline = "~".repeat((error.end - error.start) as usize);
+                    let space = " ".repeat(loc.start as usize);
+                    let underline = "~".repeat((loc.end - loc.start) as usize);
                     eprintln!("    {}{}", space, underline);
                 }
                 eprintln!(
                     "units error in model '{}' variable '{}': {}",
-                    model_name, ident, error.code
+                    model_name, ident, details
                 );
             }
         }

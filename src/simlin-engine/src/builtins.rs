@@ -2,12 +2,20 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::fmt;
+
 /// Loc describes a location in an equation by the starting point and ending point.
 /// Equations are strings typed by humans for a single variable -- u16 is long enough.
-#[derive(PartialEq, Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Hash)]
 pub struct Loc {
     pub start: u16,
     pub end: u16,
+}
+
+impl fmt::Display for Loc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.start, self.end)
+    }
 }
 
 impl Loc {

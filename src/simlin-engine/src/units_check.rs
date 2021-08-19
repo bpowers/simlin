@@ -341,6 +341,7 @@ pub fn check(
             is_flow: false,
             is_table_only: false,
             errors: vec![],
+            unit_errors: vec![],
         },
     };
 

@@ -23,6 +23,37 @@ pub struct Engine {
 }
 
 #[wasm_bindgen]
+#[allow(dead_code)]
+pub struct UnitError {
+    code: ErrorCode,
+    is_consistency_error: bool,
+    start: u16,
+    end: u16,
+    details: Option<String>,
+}
+
+impl From<engine::common::UnitError> for UnitError {
+    fn from(err: engine::common::UnitError) -> Self {
+        match err {
+            engine::common::UnitError::DefinitionError(err) => UnitError {
+                code: err.code,
+                is_consistency_error: false,
+                start: err.start,
+                end: err.end,
+                details: None,
+            },
+            engine::common::UnitError::ConsistencyError(code, loc, details) => UnitError {
+                code,
+                is_consistency_error: false,
+                start: loc.start,
+                end: loc.end,
+                details,
+            },
+        }
+    }
+}
+
+#[wasm_bindgen]
 impl Engine {
     fn instantiate_sim(&mut self) {
         let compiler = engine::Simulation::new(&self.project, "main");
@@ -139,7 +170,11 @@ impl Engine {
 
         let mut result = Map::new();
         for (ident, errors) in model.get_unit_errors() {
-            let js_errors: Array = errors.into_iter().map(JsValue::from).collect();
+            let js_errors: Array = errors
+                .into_iter()
+                .map(UnitError::from)
+                .map(JsValue::from)
+                .collect();
             result = result.set(&JsValue::from(ident.as_str()), &js_errors)
         }
 
