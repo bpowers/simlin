@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::result::Result as StdResult;
 
-use crate::ast::{lower_ast, Expr0, Loc};
+use crate::ast::{lower_ast, Expr0};
 use crate::common::{
     topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, UnitError,
 };
@@ -769,11 +769,7 @@ impl ModelStage1 {
             Ok(Err(errors)) => {
                 for (ident, err) in errors.into_iter() {
                     if let Some(var) = model.variables.get_mut(&ident) {
-                        var.push_unit_error(UnitError::ConsistencyError(
-                            err.code,
-                            Loc::new(err.start.into(), err.end.into()),
-                            None,
-                        ));
+                        var.push_unit_error(err);
                     }
                 }
             }

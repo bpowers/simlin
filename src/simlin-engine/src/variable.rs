@@ -335,7 +335,7 @@ where
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
-                        unit_errors.push(UnitError::DefinitionError(err));
+                        unit_errors.push(err);
                     }
                     None
                 }
@@ -360,7 +360,7 @@ where
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
-                        unit_errors.push(UnitError::DefinitionError(err));
+                        unit_errors.push(err);
                     }
                     None
                 }
@@ -394,7 +394,7 @@ where
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
-                        unit_errors.push(UnitError::DefinitionError(err));
+                        unit_errors.push(err);
                     }
                     None
                 }
@@ -431,7 +431,7 @@ where
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
-                        unit_errors.push(UnitError::DefinitionError(err));
+                        unit_errors.push(err);
                     }
                     None
                 }

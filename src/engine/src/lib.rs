@@ -35,12 +35,12 @@ pub struct UnitError {
 impl From<engine::common::UnitError> for UnitError {
     fn from(err: engine::common::UnitError) -> Self {
         match err {
-            engine::common::UnitError::DefinitionError(err) => UnitError {
+            engine::common::UnitError::DefinitionError(err, details) => UnitError {
                 code: err.code,
                 is_consistency_error: false,
                 start: err.start,
                 end: err.end,
-                details: None,
+                details,
             },
             engine::common::UnitError::ConsistencyError(code, loc, details) => UnitError {
                 code,

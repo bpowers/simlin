@@ -160,11 +160,18 @@ fn simulate(project: &DatamodelProject) -> Results {
             for error in errors {
                 eprintln!();
                 let (eqn, loc, details) = match error {
-                    UnitError::DefinitionError(error) => (
-                        var.get_units(),
-                        Loc::new(error.start.into(), error.end.into()),
-                        format!("{}", error.code),
-                    ),
+                    UnitError::DefinitionError(error, details) => {
+                        let details = if let Some(details) = details {
+                            format!("{} -- {}", error.code, details)
+                        } else {
+                            format!("{}", error.code)
+                        };
+                        (
+                            var.get_units(),
+                            Loc::new(error.start.into(), error.end.into()),
+                            details,
+                        )
+                    }
                     UnitError::ConsistencyError(code, loc, details) => {
                         let (eqn, loc, code) =
                             if let Some(Equation::Scalar(eqn)) = var.get_equation() {

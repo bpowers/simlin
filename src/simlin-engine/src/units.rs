@@ -9,7 +9,7 @@ use std::result::Result as StdResult;
 use float_cmp::approx_eq;
 
 use crate::ast::{BinaryOp, Expr0, UnaryOp};
-use crate::common::{EquationError, EquationResult, ErrorCode};
+use crate::common::{EquationError, EquationResult, ErrorCode, UnitError};
 use crate::datamodel::{SimSpecs, Unit, UnitMap};
 use crate::token::LexerType;
 use crate::{canonicalize, eqn_err};
@@ -341,10 +341,16 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
 pub fn parse_units(
     ctx: &Context,
     unit_eqn: Option<&String>,
-) -> StdResult<Option<UnitMap>, Vec<EquationError>> {
+) -> StdResult<Option<UnitMap>, Vec<UnitError>> {
     if let Some(unit_eqn) = unit_eqn {
-        if let Some(expr) = Expr0::new(unit_eqn, LexerType::Units)? {
-            let result = build_unit_components(ctx, &expr).map_err(|err| vec![err])?;
+        if let Some(expr) = Expr0::new(unit_eqn, LexerType::Units).map_err(|errors| {
+            errors
+                .into_iter()
+                .map(|err| UnitError::DefinitionError(err, None))
+                .collect::<Vec<UnitError>>()
+        })? {
+            let result = build_unit_components(ctx, &expr)
+                .map_err(|err| vec![UnitError::DefinitionError(err, None)])?;
             Ok(Some(result))
         } else {
             Ok(None)

@@ -149,17 +149,23 @@ impl From<Error> for EquationError {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum UnitError {
-    DefinitionError(EquationError),
+    DefinitionError(EquationError, Option<String>),
     ConsistencyError(ErrorCode, Loc, Option<String>),
 }
 
 impl fmt::Display for UnitError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            UnitError::DefinitionError(err) => write!(f, "unit definition:{}", err),
+            UnitError::DefinitionError(err, details) => {
+                if let Some(details) = details {
+                    write!(f, "unit definition:{} -- {}", err, details)
+                } else {
+                    write!(f, "unit definition:{}", err)
+                }
+            }
             UnitError::ConsistencyError(err, loc, details) => {
                 if let Some(details) = details {
-                    write!(f, "unit consistency:{}:{} ({})", loc, err, details)
+                    write!(f, "unit consistency:{}:{} -- {}", loc, err, details)
                 } else {
                     write!(f, "unit consistency:{}:{}", loc, err)
                 }
@@ -299,6 +305,7 @@ impl error::Error for Error {}
 
 pub type Result<T> = result::Result<T, Error>;
 pub type EquationResult<T> = result::Result<T, EquationError>;
+pub type UnitResult<T> = result::Result<T, UnitError>;
 
 pub fn canonicalize(name: &str) -> String {
     // remove leading and trailing whitespace, do this before testing
