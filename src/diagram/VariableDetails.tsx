@@ -164,6 +164,7 @@ function highlightErrors(
   if (!isUnits && errors && errors.size > 0) {
     // TODO: multiple errors
     const err = defined(errors.get(0));
+    console.log(err);
     // if the end is 0 it means this is a problem we don't have position information for
     if (err.end > 0) {
       const children = defined(result[0]).children as Array<Text>;
@@ -176,18 +177,23 @@ function highlightErrors(
       defined(result[0]).children = [{ text: beforeText }, { text: errText, error: true }, { text: afterText }];
     }
   } else if (unitErrors && unitErrors.size > 0) {
-    const err = defined(unitErrors.get(0));
-    const children = defined(result[0]).children as Array<Text>;
-    const textChild: string = defined(children[0]).text;
-    const end = err.end === 0 ? textChild.length : err.end;
+    for (const err of unitErrors) {
+      if (isUnits === err.isConsistencyError) {
+        continue;
+      }
+      const children = defined(result[0]).children as Array<Text>;
+      const textChild: string = defined(children[0]).text;
+      const end = err.end === 0 ? textChild.length : err.end;
 
-    const beforeText = textChild.substring(0, err.start);
-    const errText = textChild.substring(err.start, end);
-    const afterText = textChild.substring(end);
+      const beforeText = textChild.substring(0, err.start);
+      const errText = textChild.substring(err.start, end);
+      const afterText = textChild.substring(end);
 
-    const highlighted: FormattedText = isUnits ? { text: errText, error: true } : { text: errText, warning: true };
+      const highlighted: FormattedText = isUnits ? { text: errText, error: true } : { text: errText, warning: true };
+      defined(result[0]).children = [{ text: beforeText }, highlighted, { text: afterText }];
 
-    defined(result[0]).children = [{ text: beforeText }, highlighted, { text: afterText }];
+      break;
+    }
   }
 
   return result;
@@ -366,18 +372,18 @@ export const VariableDetails = withStyles(styles)(
         if (errors) {
           errors.forEach((error) => {
             errorList.push(
-              <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>
+              <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>,
             );
           });
         }
         if (unitErrors) {
           unitErrors.forEach((error) => {
             const details = error.details;
-            chartOrErrors = (
+            errorList.push(
               <Typography className={classes.errorList}>
                 unit error: {errorCodeDescription(error.code)}
                 {details ? `: ${details}` : undefined}
-              </Typography>
+              </Typography>,
             );
           });
         }
