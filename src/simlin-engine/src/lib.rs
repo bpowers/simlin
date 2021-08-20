@@ -29,8 +29,11 @@ mod stdlib {
 mod bytecode;
 mod interpreter;
 mod project;
+#[cfg(test)]
+mod testutils;
 mod units;
 mod units_check;
+mod units_infer;
 mod vm;
 
 pub use self::common::{canonicalize, quoteize, Error, ErrorCode, Ident, Result};

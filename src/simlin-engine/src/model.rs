@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
 use std::result::Result as StdResult;
 
 use crate::ast::{lower_ast, Expr0};
@@ -11,12 +12,11 @@ use crate::common::{
 };
 use crate::datamodel::Dimension;
 #[cfg(test)]
-use crate::datamodel::ModuleReference;
+use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
 use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::vm::StepPart;
 use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
-use std::hash::Hash;
 
 pub type ModuleInputSet = BTreeSet<Ident>;
 pub type DependencySet = BTreeSet<Ident>;
@@ -959,126 +959,6 @@ impl ModelStage1 {
             .iter()
             .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.clone(), errs)))
             .collect()
-    }
-}
-
-#[cfg(test)]
-fn optional_vec(slice: &[&str]) -> Vec<String> {
-    slice.iter().map(|id| id.to_string()).collect()
-}
-
-#[cfg(test)]
-fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
-    use datamodel::{Module, Variable, Visibility};
-    let references: Vec<ModuleReference> = refs
-        .iter()
-        .map(|(src, dst)| ModuleReference {
-            src: src.to_string(),
-            dst: dst.to_string(),
-        })
-        .collect();
-
-    Variable::Module(Module {
-        ident: ident.to_string(),
-        model_name: ident.to_string(),
-        documentation: "".to_string(),
-        units: None,
-        references,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
-    })
-}
-
-#[cfg(test)]
-fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
-    use datamodel::{Equation, Flow, Variable, Visibility};
-    Variable::Flow(Flow {
-        ident: ident.to_string(),
-        equation: Equation::Scalar(eqn.to_string()),
-        documentation: "".to_string(),
-        units: None,
-        gf: None,
-        non_negative: false,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
-    })
-}
-
-#[cfg(test)]
-fn flow(ident: &str, eqn: &str) -> Variable {
-    let var = x_flow(ident, eqn);
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
-    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
-    assert!(var.equation_errors().is_none());
-    assert!(implicit_vars.is_empty());
-    resolve_module_inputs(&HashMap::new(), "main", &var)
-}
-
-#[cfg(test)]
-fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
-    use datamodel::{Aux, Equation, Variable, Visibility};
-    Variable::Aux(Aux {
-        ident: ident.to_string(),
-        equation: Equation::Scalar(eqn.to_string()),
-        documentation: "".to_string(),
-        units: None,
-        gf: None,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
-    })
-}
-
-#[cfg(test)]
-fn aux(ident: &str, eqn: &str) -> Variable {
-    let var = x_aux(ident, eqn);
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
-    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
-    assert!(var.equation_errors().is_none());
-    assert!(implicit_vars.is_empty());
-    resolve_module_inputs(&HashMap::new(), "main", &var)
-}
-
-#[cfg(test)]
-fn x_stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> datamodel::Variable {
-    use datamodel::{Equation, Stock, Variable, Visibility};
-    Variable::Stock(Stock {
-        ident: ident.to_string(),
-        equation: Equation::Scalar(eqn.to_string()),
-        documentation: "".to_string(),
-        units: None,
-        inflows: optional_vec(inflows),
-        outflows: optional_vec(outflows),
-        non_negative: false,
-        can_be_module_input: false,
-        visibility: Visibility::Private,
-    })
-}
-
-#[cfg(test)]
-fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
-    let var = x_stock(ident, eqn, inflows, outflows);
-    let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
-    let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
-    let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
-        Ok(Some(mi.clone()))
-    });
-    assert!(var.equation_errors().is_none());
-    assert!(implicit_vars.is_empty());
-    resolve_module_inputs(&HashMap::new(), "main", &var)
-}
-
-#[cfg(test)]
-fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datamodel::Model {
-    datamodel::Model {
-        name: ident.to_string(),
-        variables,
-        views: vec![],
     }
 }
 
