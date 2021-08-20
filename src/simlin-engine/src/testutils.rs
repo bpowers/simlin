@@ -14,13 +14,13 @@ fn optional_vec(slice: &[&str]) -> Vec<String> {
 }
 
 #[cfg(test)]
-pub(crate) fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
+pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
     use datamodel::{Aux, Equation, Variable, Visibility};
     Variable::Aux(Aux {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
-        units: None,
+        units: units.map(|s| s.to_owned()),
         gf: None,
         can_be_module_input: false,
         visibility: Visibility::Private,
@@ -29,7 +29,7 @@ pub(crate) fn x_aux(ident: &str, eqn: &str) -> datamodel::Variable {
 
 #[cfg(test)]
 pub(crate) fn aux(ident: &str, eqn: &str) -> Variable {
-    let var = x_aux(ident, eqn);
+    let var = x_aux(ident, eqn, None);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
@@ -46,13 +46,14 @@ pub(crate) fn x_stock(
     eqn: &str,
     inflows: &[&str],
     outflows: &[&str],
+    units: Option<&str>,
 ) -> datamodel::Variable {
     use datamodel::{Equation, Stock, Variable, Visibility};
     Variable::Stock(Stock {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
-        units: None,
+        units: units.map(|s| s.to_owned()),
         inflows: optional_vec(inflows),
         outflows: optional_vec(outflows),
         non_negative: false,
@@ -63,7 +64,7 @@ pub(crate) fn x_stock(
 
 #[cfg(test)]
 pub(crate) fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str]) -> Variable {
-    let var = x_stock(ident, eqn, inflows, outflows);
+    let var = x_stock(ident, eqn, inflows, outflows, None);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {
@@ -84,7 +85,11 @@ pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datam
 }
 
 #[cfg(test)]
-pub(crate) fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variable {
+pub(crate) fn x_module(
+    ident: &str,
+    refs: &[(&str, &str)],
+    units: Option<&str>,
+) -> datamodel::Variable {
     use datamodel::{Module, Variable, Visibility};
     let references: Vec<ModuleReference> = refs
         .iter()
@@ -98,7 +103,7 @@ pub(crate) fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variabl
         ident: ident.to_string(),
         model_name: ident.to_string(),
         documentation: "".to_string(),
-        units: None,
+        units: units.map(|s| s.to_owned()),
         references,
         can_be_module_input: false,
         visibility: Visibility::Private,
@@ -106,13 +111,13 @@ pub(crate) fn x_module(ident: &str, refs: &[(&str, &str)]) -> datamodel::Variabl
 }
 
 #[cfg(test)]
-pub(crate) fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
+pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
     use datamodel::{Equation, Flow, Variable, Visibility};
     Variable::Flow(Flow {
         ident: ident.to_string(),
         equation: Equation::Scalar(eqn.to_string()),
         documentation: "".to_string(),
-        units: None,
+        units: units.map(|s| s.to_owned()),
         gf: None,
         non_negative: false,
         can_be_module_input: false,
@@ -122,7 +127,7 @@ pub(crate) fn x_flow(ident: &str, eqn: &str) -> datamodel::Variable {
 
 #[cfg(test)]
 pub(crate) fn flow(ident: &str, eqn: &str) -> Variable {
-    let var = x_flow(ident, eqn);
+    let var = x_flow(ident, eqn, None);
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let unit_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
     let var = parse_var(&[], &var, &mut implicit_vars, &unit_ctx, |mi| {

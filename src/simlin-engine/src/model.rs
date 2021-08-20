@@ -967,25 +967,25 @@ fn test_module_dependency() {
     let lynxes_model = x_model(
         "lynxes",
         vec![
-            x_aux("init", "5"),
-            x_stock("lynxes_stock", "100 * init", &["inflow"], &[]),
-            x_flow("inflow", "1"),
+            x_aux("init", "5", None),
+            x_stock("lynxes_stock", "100 * init", &["inflow"], &[], None),
+            x_flow("inflow", "1", None),
         ],
     );
     let hares_model = x_model(
         "hares",
         vec![
-            x_aux("lynxes", "0"),
-            x_stock("hares_stock", "100", &[], &["outflow"]),
-            x_flow("outflow", ".1 * hares_stock"),
+            x_aux("lynxes", "0", None),
+            x_stock("hares_stock", "100", &[], &["outflow"], None),
+            x_flow("outflow", ".1 * hares_stock", None),
         ],
     );
     let main_model = x_model(
         "main",
         vec![
-            x_aux("main_init", "7"),
-            x_module("lynxes", &[("main_init", "lynxes.init")]),
-            x_module("hares", &[("lynxes.lynxes", "hares.lynxes")]),
+            x_aux("main_init", "7", None),
+            x_module("lynxes", &[("main_init", "lynxes.init")], None),
+            x_module("hares", &[("lynxes.lynxes", "hares.lynxes")], None),
         ],
     );
 
@@ -1023,30 +1023,31 @@ fn test_module_parse() {
     let lynxes_model = x_model(
         "lynxes",
         vec![
-            x_aux("init", "5"),
-            x_stock("lynxes_stock", "100 * init", &["inflow"], &[]),
-            x_flow("inflow", "1"),
+            x_aux("init", "5", None),
+            x_stock("lynxes_stock", "100 * init", &["inflow"], &[], None),
+            x_flow("inflow", "1", None),
         ],
     );
     let hares_model = x_model(
         "hares",
         vec![
-            x_aux("lynxes", "0"),
-            x_stock("hares_stock", "100", &[], &["outflow"]),
-            x_flow("outflow", ".1 * hares_stock"),
+            x_aux("lynxes", "0", None),
+            x_stock("hares_stock", "100", &[], &["outflow"], None),
+            x_flow("outflow", ".1 * hares_stock", None),
         ],
     );
     let main_model = x_model(
         "main",
         vec![
-            x_aux("area", "time"),
-            x_module("lynxes", &[]),
+            x_aux("area", "time", None),
+            x_module("lynxes", &[], None),
             x_module(
                 "hares",
                 &[
                     ("area", "hares.area"),
                     ("lynxes.lynxes_stock", "hares.lynxes"),
                 ],
+                None,
             ),
         ],
     );
@@ -1077,7 +1078,10 @@ fn test_module_parse() {
 #[test]
 fn test_errors() {
     let units_ctx = Context::new(&[], &Default::default()).unwrap();
-    let main_model = x_model("main", vec![x_aux("aux_3", "unknown_variable * 3.14")]);
+    let main_model = x_model(
+        "main",
+        vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
+    );
     let models: HashMap<String, ModelStage0> = vec![("main".to_string(), &main_model)]
         .into_iter()
         .map(|(name, m)| (name, ModelStage0::new(m, &[], &units_ctx, false)))
@@ -1184,20 +1188,20 @@ fn test_all_deps() {
     let mod_1_model = x_model(
         "mod_1",
         vec![
-            x_aux("input", "{expects to be set with module input}"),
-            x_aux("output", "3 * TIME"),
-            x_aux("flow", "2 * input"),
-            x_stock("output_2", "input", &["flow"], &[]),
+            x_aux("input", "{expects to be set with module input}", None),
+            x_aux("output", "3 * TIME", None),
+            x_aux("flow", "2 * input", None),
+            x_stock("output_2", "input", &["flow"], &[], None),
         ],
     );
 
     let main_model = x_model(
         "main",
         vec![
-            x_module("mod_1", &[("aux_3", "mod_1.input")]),
-            x_aux("aux_3", "6"),
-            x_flow("inflow", "mod_1.flow"),
-            x_aux("aux_4", "mod_1.output"),
+            x_module("mod_1", &[("aux_3", "mod_1.input")], None),
+            x_aux("aux_3", "6", None),
+            x_flow("inflow", "mod_1.flow", None),
+            x_aux("aux_4", "mod_1.output", None),
         ],
     );
     let units_ctx = Context::new(&[], &Default::default()).unwrap();
