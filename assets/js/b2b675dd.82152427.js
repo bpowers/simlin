@@ -1,1 +1,0 @@
-(globalThis.webpackChunksimlin_site=globalThis.webpackChunksimlin_site||[]).push([[533],{2383:l=>{"use strict";l.exports=JSON.parse('{"permalink":"/blog","page":1,"postsPerPage":10,"totalPages":1,"totalCount":1,"previousPage":null,"nextPage":null,"blogDescription":"Blog","blogTitle":"Blog"}')}}]);
