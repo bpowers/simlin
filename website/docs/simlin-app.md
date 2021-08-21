@@ -19,9 +19,10 @@ Simlin differs from these tools in three big ways:
 Features:
 * Create models with stocks, flows, and auxiliary variables.
 * Import models from Vensim (`*.mdl`) and Stella (`*.stmx`), and export a model as XMILE at any time.
+* Basic unit checking of equations.
 
 In Progress:
-* Unit editing and checking.
+* Unit checking of smooth and delay builtins and inference of not-yet-specified units.
 * Support for modules and arrayed variables.  Simlin can correctly simulate and show results for imported models with these features, but we haven't yet implemented support for creating and editing them.
 
 Planned:
