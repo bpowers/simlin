@@ -9,7 +9,7 @@ use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{canonicalize, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
-use crate::units::{pretty_print_unit, Context};
+use crate::units::{combine, pretty_print_unit, Context, UnitOp, Units};
 use crate::variable::Variable;
 
 #[allow(dead_code)]
@@ -18,26 +18,6 @@ struct UnitEvaluator<'a> {
     model: &'a ModelStage1,
     // units for module inputs
     time: Variable,
-}
-
-/// Units is used to distinguish between explicit units (and explicit
-/// dimensionless-ness) and dimensionless-ness that comes from computing
-/// on constants.
-#[derive(Debug, PartialEq, Eq, Clone)]
-enum Units {
-    Explicit(UnitMap),
-    Constant,
-}
-
-impl Units {
-    fn equals(&self, rhs: &Units) -> bool {
-        match (self, rhs) {
-            (Units::Constant, Units::Constant)
-            | (Units::Explicit(_), Units::Constant)
-            | (Units::Constant, Units::Explicit(_)) => true,
-            (Units::Explicit(lhs), Units::Explicit(rhs)) => *lhs == *rhs,
-        }
-    }
 }
 
 impl<'a> UnitEvaluator<'a> {
@@ -280,38 +260,6 @@ impl<'a> UnitEvaluator<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UnitOp {
-    Mul,
-    Div,
-}
-
-fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
-    let mut l = l;
-
-    for (unit, power) in r.into_iter() {
-        let lhs = l.get(unit.as_str()).copied().unwrap_or_default();
-        let result = {
-            match op {
-                UnitOp::Mul => lhs + power,
-                UnitOp::Div => lhs - power,
-            }
-        };
-        if result == 0 {
-            l.remove(&unit);
-        } else {
-            *l.entry(unit).or_default() = result;
-        }
-    }
-
-    if l.contains_key("dmnl") {
-        l.remove("dmnl");
-    }
-
-    l
-}
-
-#[allow(dead_code)]
 // check uses the model's variables' equations and unit definitions to
 // calculate the concrete units for each equation.  The outer result
 // indicates if we had a problem running the analysis.  The inner result

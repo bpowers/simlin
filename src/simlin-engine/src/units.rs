@@ -14,7 +14,57 @@ use crate::datamodel::{SimSpecs, Unit, UnitMap};
 use crate::token::LexerType;
 use crate::{canonicalize, eqn_err};
 
-#[allow(dead_code)]
+/// Units is used to distinguish between explicit units (and explicit
+/// dimensionless-ness) and dimensionless-ness that comes from computing
+/// on constants.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Units {
+    Explicit(UnitMap),
+    Constant,
+}
+
+impl Units {
+    pub fn equals(&self, rhs: &Units) -> bool {
+        match (self, rhs) {
+            (Units::Constant, Units::Constant)
+            | (Units::Explicit(_), Units::Constant)
+            | (Units::Constant, Units::Explicit(_)) => true,
+            (Units::Explicit(lhs), Units::Explicit(rhs)) => *lhs == *rhs,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnitOp {
+    Mul,
+    Div,
+}
+
+pub(crate) fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
+    let mut l = l;
+
+    for (unit, power) in r.into_iter() {
+        let lhs = l.get(unit.as_str()).copied().unwrap_or_default();
+        let result = {
+            match op {
+                UnitOp::Mul => lhs + power,
+                UnitOp::Div => lhs - power,
+            }
+        };
+        if result == 0 {
+            l.remove(&unit);
+        } else {
+            *l.entry(unit).or_default() = result;
+        }
+    }
+
+    if l.contains_key("dmnl") {
+        l.remove("dmnl");
+    }
+
+    l
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Context {
     pub sim_specs: SimSpecs,
