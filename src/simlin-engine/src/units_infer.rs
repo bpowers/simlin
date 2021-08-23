@@ -25,6 +25,82 @@ struct UnitInferer<'a> {
     time: Variable,
 }
 
+fn single_fv(units: &UnitMap) -> Option<&str> {
+    let mut result = None;
+    for (unit, _) in units.iter() {
+        if unit.starts_with('@') {
+            if result.is_none() {
+                result = Some(unit.as_str())
+            } else {
+                return None;
+            }
+        }
+    }
+    result
+}
+
+fn solve_for(var: &str, lhs: &UnitMap, rhs: &UnitMap) -> UnitMap {
+    let orig_lhs = lhs;
+    let orig_rhs = rhs;
+    // after this, "lhs" is always the UnitMap that contains var
+    let (lhs, rhs) = if lhs.contains_key(var) {
+        (lhs, rhs)
+    } else if rhs.contains_key(var) {
+        (rhs, lhs)
+    } else {
+        unreachable!();
+    };
+    // lhs / var = rhs === lhs / rhs = var
+    let (lhs, rhs) = if lhs[var] < 0 { (rhs, lhs) } else { (lhs, rhs) };
+    // lhs * var = rhs === rhs / lhs
+    // if 'var' is on the left, solve for it by dividing rhs by (lhs \ var)
+    let num: UnitMap = rhs
+        .iter()
+        .filter(|(s, _)| var != *s)
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let div: UnitMap = lhs
+        .iter()
+        .filter(|(s, _)| var != *s)
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+
+    let result = combine(UnitOp::Div, num, div);
+
+    eprintln!(
+        "SOLVED: ({} == {}) -> ({} == {})",
+        pretty_print_unit(orig_lhs),
+        pretty_print_unit(orig_rhs),
+        var,
+        pretty_print_unit(&result)
+    );
+
+    result
+}
+
+fn substitute(
+    var: &str,
+    units: &UnitMap,
+    constraints: Vec<(UnitMap, UnitMap)>,
+) -> Vec<(UnitMap, UnitMap)> {
+    constraints
+        .into_iter()
+        .map(|(mut l, mut r)| {
+            if l.contains_key(var) {
+                let op = if l[var] > 0 { UnitOp::Mul } else { UnitOp::Div };
+                let _ = l.remove(var);
+                l = combine(op, l, units.clone());
+            }
+            if r.contains_key(var) {
+                let op = if r[var] > 0 { UnitOp::Mul } else { UnitOp::Div };
+                let _ = r.remove(var);
+                r = combine(op, r, units.clone());
+            }
+            (l, r)
+        })
+        .collect()
+}
+
 impl<'a> UnitInferer<'a> {
     #[allow(dead_code)]
     fn gen_constraints(
@@ -304,12 +380,58 @@ impl<'a> UnitInferer<'a> {
         }
     }
 
+    fn unify(&self, mut constraints: Vec<(UnitMap, UnitMap)>) -> Vec<(UnitMap, UnitMap)> {
+        // a good guess at capacity
+        let mut final_constraints: Vec<(UnitMap, UnitMap)> = Vec::with_capacity(constraints.len());
+        while let Some((l, r)) = constraints.pop() {
+            if l == r {
+                continue;
+            }
+            let lfv = single_fv(&l);
+            let rfv = single_fv(&r);
+            if lfv.is_some() && !r.contains_key(lfv.unwrap_or_default()) {
+                if let Some(var) = lfv {
+                    let units = solve_for(var, &l, &r);
+                    constraints = substitute(var, &units, constraints);
+                    final_constraints = substitute(var, &units, final_constraints);
+                    final_constraints
+                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
+                }
+            } else if rfv.is_some() && !l.contains_key(rfv.unwrap_or_default()) {
+                if let Some(var) = rfv {
+                    let units = solve_for(var, &l, &r);
+                    constraints = substitute(var, &units, constraints);
+                    final_constraints = substitute(var, &units, final_constraints);
+                    final_constraints
+                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
+                }
+            } else {
+                // TODO: is this safe, or do we need some check
+                final_constraints.push((l, r));
+            }
+        }
+
+        final_constraints
+    }
+
     #[allow(dead_code)]
     fn infer(&self, model: &ModelStage1) -> Result<()> {
+        use rand::seq::SliceRandom;
+        use rand::thread_rng;
+
         let mut constraints = vec![];
         self.gen_all_constraints(model, &mut constraints);
+        constraints.shuffle(&mut thread_rng());
 
         eprintln!("constraints:");
+
+        for (l, r) in constraints.iter() {
+            eprintln!("  {} == {}", pretty_print_unit(l), pretty_print_unit(r));
+        }
+
+        let constraints = self.unify(constraints);
+
+        eprintln!("after unification:");
 
         for (l, r) in constraints.iter() {
             eprintln!("  {} == {}", pretty_print_unit(l), pretty_print_unit(r));
