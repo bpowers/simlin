@@ -4,10 +4,11 @@
 
 #[cfg(test)]
 use std::collections::HashMap;
+use std::mem;
 
 use crate::ast::{Ast, BinaryOp, Expr};
 use crate::builtins::BuiltinFn;
-use crate::common::{canonicalize, ErrorCode, Ident, Result, UnitError, UnitResult};
+use crate::common::{canonicalize, Ident, Result, UnitResult};
 use crate::datamodel::UnitMap;
 #[cfg(test)]
 use crate::model::ModelStage0;
@@ -20,6 +21,7 @@ use crate::variable::Variable;
 
 struct UnitInferer<'a> {
     ctx: &'a Context,
+    #[allow(dead_code)]
     model: &'a ModelStage1,
     // units for module inputs
     time: Variable,
@@ -40,8 +42,6 @@ fn single_fv(units: &UnitMap) -> Option<&str> {
 }
 
 fn solve_for(var: &str, lhs: &UnitMap, rhs: &UnitMap) -> UnitMap {
-    let orig_lhs = lhs;
-    let orig_rhs = rhs;
     // after this, "lhs" is always the UnitMap that contains var
     let (lhs, rhs) = if lhs.contains_key(var) {
         (lhs, rhs)
@@ -65,17 +65,15 @@ fn solve_for(var: &str, lhs: &UnitMap, rhs: &UnitMap) -> UnitMap {
         .map(|(k, v)| (k.clone(), *v))
         .collect();
 
-    let result = combine(UnitOp::Div, num, div);
+    combine(UnitOp::Div, num, div)
 
-    eprintln!(
-        "SOLVED: ({} == {}) -> ({} == {})",
-        pretty_print_unit(orig_lhs),
-        pretty_print_unit(orig_rhs),
-        var,
-        pretty_print_unit(&result)
-    );
-
-    result
+    // eprintln!(
+    //     "SOLVED: ({} == {}) -> ({} == {})",
+    //     pretty_print_unit(orig_lhs),
+    //     pretty_print_unit(orig_rhs),
+    //     var,
+    //     pretty_print_unit(&result)
+    // );
 }
 
 fn substitute(
@@ -108,7 +106,6 @@ impl<'a> UnitInferer<'a> {
         expr: &Expr,
         constraints: &mut Vec<(UnitMap, UnitMap)>,
     ) -> UnitResult<Units> {
-        use UnitError::ConsistencyError;
         match expr {
             Expr::Const(_, _, _) => Ok(Units::Constant),
             Expr::Var(ident, _loc) => {
@@ -128,31 +125,11 @@ impl<'a> UnitInferer<'a> {
                     // returns a bool, which is unitless
                     Ok(Units::Explicit(UnitMap::new()))
                 }
-                BuiltinFn::Lookup(ident, _, loc) => {
+                BuiltinFn::Lookup(ident, _, _loc) => {
                     // lookups have the units specified on the table
-                    if let Some(var) = self.model.variables.get(ident) {
-                        var.units()
-                            .ok_or_else(|| {
-                                ConsistencyError(
-                                    ErrorCode::UnitMismatch,
-                                    *loc,
-                                    Some(format!(
-                                        "no units specified for lookup dependency '{}'",
-                                        ident
-                                    )),
-                                )
-                            })
-                            .map(|units| Units::Explicit(units.clone()))
-                    } else {
-                        Err(ConsistencyError(
-                            ErrorCode::DoesNotExist,
-                            *loc,
-                            Some(format!(
-                                "can't find dependency '{}' for unit checking",
-                                ident,
-                            )),
-                        ))
-                    }
+                    let units: UnitMap = [(format!("@{}", ident), 1)].iter().cloned().collect();
+
+                    Ok(Units::Explicit(units))
                 }
                 BuiltinFn::Abs(a)
                 | BuiltinFn::Arccos(a)
@@ -183,54 +160,30 @@ impl<'a> UnitInferer<'a> {
                         .cloned()
                         .next();
                     match arg0 {
-                        Some(arg0) => {
-                            if args.iter().all(|arg| arg0.equals(arg)) {
-                                Ok(arg0)
-                            } else {
-                                let expected = match arg0 {
-                                    Units::Explicit(units) => units,
-                                    Units::Constant => Default::default(),
-                                };
-                                Err(ConsistencyError(
-                                    ErrorCode::UnitDefinitionErrors,
-                                    expr.get_loc(),
-                                    Some(format!(
-                                        "expected all arguments to mean() to have the same units '{}'",
-                                        pretty_print_unit(&expected),
-                                    )),
-                                ))
+                        Some(Units::Explicit(arg0)) => {
+                            for arg in args.iter() {
+                                if let Units::Explicit(arg) = arg {
+                                    constraints.push((arg0.clone(), arg.clone()));
+                                }
                             }
+                            Ok(Units::Explicit(arg0))
                         }
-                        // all args were constants, so we're good
+                        Some(Units::Constant) => Ok(Units::Constant),
                         None => Ok(Units::Constant),
                     }
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
                     let a_units = self.gen_constraints(a, constraints)?;
                     let b_units = self.gen_constraints(b, constraints)?;
-                    if !a_units.equals(&b_units) {
-                        let a_units = match a_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        let b_units = match b_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        let loc = a.get_loc().union(&b.get_loc());
-                        Err(ConsistencyError (
-                            ErrorCode::UnitDefinitionErrors,
-                            loc,
-                            Some(format!(
-                                "expected left and right argument units to match, but '{}' and '{}' don't",
-                                pretty_print_unit(&a_units),
-                                pretty_print_unit(&b_units),
-                            )),
-                        ))
-                    } else {
-                        Ok(a_units)
+
+                    if let Units::Explicit(ref lunits) = a_units {
+                        if let Units::Explicit(runits) = b_units {
+                            constraints.push((lunits.clone(), runits));
+                        }
                     }
+                    Ok(a_units)
                 }
+
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Ok(Units::Constant)
                 }
@@ -265,17 +218,8 @@ impl<'a> UnitInferer<'a> {
                         (Units::Constant, Units::Explicit(units))
                         | (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
-                            if lunits != runits {
-                                let details = Some(format!(
-                                    "expected left and right argument units to match, but '{}' and '{}' don't",
-                                    pretty_print_unit(&lunits),
-                                    pretty_print_unit(&runits),
-                                ));
-                                let loc = l.get_loc().union(&r.get_loc());
-                                Err(ConsistencyError(ErrorCode::UnitMismatch, loc, details))
-                            } else {
-                                Ok(Units::Explicit(lunits))
-                            }
+                            constraints.push((lunits.clone(), runits));
+                            Ok(Units::Explicit(lunits))
                         }
                     },
                     BinaryOp::Exp | BinaryOp::Mod => Ok(lunits),
@@ -314,8 +258,10 @@ impl<'a> UnitInferer<'a> {
                 let lunits = self.gen_constraints(l, constraints)?;
                 let runits = self.gen_constraints(r, constraints)?;
 
-                if !lunits.equals(&runits) {
-                    eprintln!("TODO: if error, left and right units don't match");
+                if let Units::Explicit(ref lunits) = lunits {
+                    if let Units::Explicit(runits) = runits {
+                        constraints.push((lunits.clone(), runits));
+                    }
                 }
 
                 Ok(lunits)
@@ -356,7 +302,8 @@ impl<'a> UnitInferer<'a> {
                 Some(Ast::Scalar(ast)) => self.gen_constraints(ast, constraints),
                 Some(Ast::ApplyToAll(_, ast)) => self.gen_constraints(ast, constraints),
                 Some(Ast::Arrayed(_, _asts)) => {
-                    todo!();
+                    // todo!();
+                    Ok(Units::Constant)
                 }
                 None => {
                     eprintln!("no equation for {}", id);
@@ -393,6 +340,8 @@ impl<'a> UnitInferer<'a> {
                 if let Some(var) = lfv {
                     let units = solve_for(var, &l, &r);
                     constraints = substitute(var, &units, constraints);
+                    // TODO: can we avoid doing this substitution to final_constraints
+                    //       by walking variables in runlist order?
                     final_constraints = substitute(var, &units, final_constraints);
                     final_constraints
                         .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
@@ -402,6 +351,34 @@ impl<'a> UnitInferer<'a> {
                     let units = solve_for(var, &l, &r);
                     constraints = substitute(var, &units, constraints);
                     final_constraints = substitute(var, &units, final_constraints);
+                    final_constraints
+                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
+                }
+            } else {
+                // TODO: is this safe, or do we need some check
+                final_constraints.push((l, r));
+            }
+        }
+
+        constraints = mem::take(&mut final_constraints);
+
+        // just clean up; no substituting necessary
+        while let Some((l, r)) = constraints.pop() {
+            if l == r {
+                continue;
+            }
+
+            let lfv = single_fv(&l);
+            let rfv = single_fv(&r);
+            if lfv.is_some() && !r.contains_key(lfv.unwrap_or_default()) {
+                if let Some(var) = lfv {
+                    let units = solve_for(var, &l, &r);
+                    final_constraints
+                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
+                }
+            } else if rfv.is_some() && !l.contains_key(rfv.unwrap_or_default()) {
+                if let Some(var) = rfv {
+                    let units = solve_for(var, &l, &r);
                     final_constraints
                         .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
                 }
@@ -474,16 +451,20 @@ fn test_inference() {
     let model = ModelStage0::new(&model, &[], &units_ctx, false);
     let model = ModelStage1::new(&units_ctx, &HashMap::new(), &model);
 
+    infer(&units_ctx, &model).unwrap();
+}
+
+pub(crate) fn infer(units_ctx: &Context, model: &ModelStage1) -> Result<()> {
     let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
     let units = UnitInferer {
-        ctx: &units_ctx,
-        model: &model,
+        ctx: units_ctx,
+        model,
         time: Variable::Var {
             ident: "time".to_string(),
             ast: None,
             eqn: None,
-            units: Some([(time_units.clone(), 1)].iter().cloned().collect()),
+            units: Some([(time_units, 1)].iter().cloned().collect()),
             table: None,
             non_negative: false,
             is_flow: false,
@@ -493,5 +474,5 @@ fn test_inference() {
         },
     };
 
-    units.infer(&model).unwrap();
+    units.infer(model)
 }

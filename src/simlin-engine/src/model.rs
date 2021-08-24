@@ -16,7 +16,7 @@ use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_sto
 use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::vm::StepPart;
-use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
+use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, units_infer, var_eqn_err};
 
 pub type ModuleInputSet = BTreeSet<Ident>;
 pub type DependencySet = BTreeSet<Ident>;
@@ -779,6 +779,8 @@ impl ModelStage1 {
                 model.errors = Some(errors);
             }
         };
+
+        let _ = units_infer::infer(units_ctx, &model);
 
         model
     }
