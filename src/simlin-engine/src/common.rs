@@ -375,7 +375,6 @@ pub fn topo_sort<'out>(
 
     let runlist_len = runlist.len();
     let mut result: Vec<&'out str> = Vec::with_capacity(runlist_len);
-    // TODO: remove this allocation (should be &str)
     let mut used: HashSet<&str> = HashSet::new();
 
     // We want to do a postorder, recursive traversal of variables to ensure
