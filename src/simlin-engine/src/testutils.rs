@@ -137,3 +137,15 @@ pub(crate) fn flow(ident: &str, eqn: &str) -> Variable {
     assert!(implicit_vars.is_empty());
     resolve_module_inputs(&HashMap::new(), "main", &var)
 }
+
+#[cfg(test)]
+pub(crate) fn sim_specs_with_units(time_units: &str) -> crate::datamodel::SimSpecs {
+    crate::datamodel::SimSpecs {
+        start: 0.0,
+        stop: 0.0,
+        dt: Default::default(),
+        save_step: None,
+        sim_method: Default::default(),
+        time_units: Some(time_units.to_owned()),
+    }
+}

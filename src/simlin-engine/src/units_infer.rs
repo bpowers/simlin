@@ -2,7 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-#[cfg(test)]
 use std::collections::HashMap;
 use std::mem;
 
@@ -14,8 +13,7 @@ use crate::datamodel::UnitMap;
 use crate::model::ModelStage0;
 use crate::model::ModelStage1;
 #[cfg(test)]
-use crate::testutils::{x_aux, x_flow, x_model, x_stock};
-use crate::units::pretty_print_unit;
+use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_stock};
 use crate::units::{combine, Context, UnitOp, Units};
 use crate::variable::Variable;
 
@@ -74,6 +72,24 @@ fn solve_for(var: &str, lhs: &UnitMap, rhs: &UnitMap) -> UnitMap {
     //     var,
     //     pretty_print_unit(&result)
     // );
+}
+
+fn maybe_solve_for_one(l: &UnitMap, r: &UnitMap) -> Option<(String, UnitMap)> {
+    let lfv = single_fv(l);
+    let rfv = single_fv(r);
+    let var = if lfv.is_some() && !r.contains_key(lfv.unwrap_or_default()) {
+        lfv
+    } else if rfv.is_some() && !l.contains_key(rfv.unwrap_or_default()) {
+        rfv
+    } else {
+        None
+    };
+    var.map(|ident| {
+        (
+            ident.strip_prefix('@').unwrap().to_owned(),
+            solve_for(ident, l, r),
+        )
+    })
 }
 
 fn substitute(
@@ -274,7 +290,7 @@ impl<'a> UnitInferer<'a> {
         let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
         for (id, var) in model.variables.iter() {
-            eprintln!("generating constraints for {}", id);
+            // eprintln!("generating constraints for {}", id);
             if let Variable::Stock {
                 ident,
                 inflows,
@@ -306,7 +322,7 @@ impl<'a> UnitInferer<'a> {
                     Ok(Units::Constant)
                 }
                 None => {
-                    eprintln!("no equation for {}", id);
+                    // eprintln!("no equation for {}", id);
                     continue;
                 }
             }
@@ -392,9 +408,11 @@ impl<'a> UnitInferer<'a> {
     }
 
     #[allow(dead_code)]
-    fn infer(&self, model: &ModelStage1) -> Result<()> {
+    fn infer(&self, model: &ModelStage1) -> Result<HashMap<String, UnitMap>> {
         use rand::seq::SliceRandom;
         use rand::thread_rng;
+
+        use crate::units::pretty_print_unit;
 
         let mut constraints = vec![];
         self.gen_all_constraints(model, &mut constraints);
@@ -410,51 +428,66 @@ impl<'a> UnitInferer<'a> {
 
         eprintln!("after unification:");
 
+        let mut results: HashMap<String, UnitMap> = HashMap::new();
+
         for (l, r) in constraints.iter() {
             eprintln!("  {} == {}", pretty_print_unit(l), pretty_print_unit(r));
+            if let Some((ident, units)) = maybe_solve_for_one(l, r) {
+                results.insert(ident, units);
+            }
         }
 
-        // todo!();
-
-        Ok(())
+        Ok(results)
     }
 }
 
 #[test]
 fn test_inference() {
-    let sim_specs = crate::datamodel::SimSpecs {
-        start: 0.0,
-        stop: 0.0,
-        dt: Default::default(),
-        save_step: None,
-        sim_method: Default::default(),
-        // if star wars says its a time unit, that's good enough for me
-        time_units: Some("parsec".to_owned()),
-    };
-
-    // we should be able to fully infer the units here:
-    // - window needs to be "parsec"
-    // - seen needs to be "usd"
-    // - and inflow needs to be "usd/parsec"
-    let model = x_model(
-        "main",
-        vec![
-            x_stock("stock_1", "1", &["inflow"], &[], Some("usd")),
-            x_aux("window", "6", None),
-            x_flow("inflow", "seen/window", None),
-            x_aux("seen", "3 * stock_1", None),
-        ],
-    );
-
+    let sim_specs = sim_specs_with_units("parsec");
     let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
 
-    let model = ModelStage0::new(&model, &[], &units_ctx, false);
-    let model = ModelStage1::new(&units_ctx, &HashMap::new(), &model);
+    // test cases where we should be able to infer all units
+    let test_cases = &[&[
+        (
+            x_stock("stock_1", "1", &["inflow"], &[], Some("usd")),
+            "usd",
+        ),
+        (x_aux("window", "6", Some("parsec")), "parsec"),
+        (x_flow("inflow", "seen/window", None), "usd/parsec"),
+        (x_aux("seen", "sin(seen_dep) % 3", None), "usd"),
+        (x_aux("seen_dep", "1 + 3 * stock_1", None), "usd"),
+    ]];
 
-    infer(&units_ctx, &model).unwrap();
+    for test_case in test_cases.into_iter() {
+        let expected = test_case
+            .iter()
+            .map(|(var, units)| (var.get_ident(), *units))
+            .collect::<HashMap<&str, &str>>();
+        let vars = test_case
+            .iter()
+            .map(|(var, _unit)| var)
+            .cloned()
+            .collect::<Vec<_>>();
+        let model = x_model("main", vars);
+        let model = ModelStage0::new(&model, &[], &units_ctx, false);
+        let model = ModelStage1::new(&units_ctx, &HashMap::new(), &model);
+
+        let results = infer(&units_ctx, &model).unwrap();
+        for (ident, expected_units) in expected {
+            let expected_units: UnitMap =
+                crate::units::parse_units(&units_ctx, Some(expected_units))
+                    .unwrap()
+                    .unwrap();
+            if let Some(computed_units) = results.get(ident) {
+                assert_eq!(expected_units, *computed_units);
+            } else {
+                panic!("inference results don't contain variable '{}'", ident);
+            }
+        }
+    }
 }
 
-pub(crate) fn infer(units_ctx: &Context, model: &ModelStage1) -> Result<()> {
+pub(crate) fn infer(units_ctx: &Context, model: &ModelStage1) -> Result<HashMap<String, UnitMap>> {
     let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
     let units = UnitInferer {

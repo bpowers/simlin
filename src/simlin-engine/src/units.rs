@@ -390,7 +390,7 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
 
 pub fn parse_units(
     ctx: &Context,
-    unit_eqn: Option<&String>,
+    unit_eqn: Option<&str>,
 ) -> StdResult<Option<UnitMap>, Vec<UnitError>> {
     if let Some(unit_eqn) = unit_eqn {
         if let Some(expr) = Expr0::new(unit_eqn, LexerType::Units).map_err(|errors| {

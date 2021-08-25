@@ -331,7 +331,7 @@ where
             let ident = v.ident.clone();
             let (ast, errors) = parse_and_lower_eqn(&ident, &v.equation);
             let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_ref()) {
+            let units = match parse_units(units_ctx, v.units.as_deref()) {
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
@@ -356,7 +356,7 @@ where
             let ident = v.ident.clone();
             let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation);
             let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_ref()) {
+            let units = match parse_units(units_ctx, v.units.as_deref()) {
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
@@ -390,7 +390,7 @@ where
             let ident = v.ident.clone();
             let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation);
             let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_ref()) {
+            let units = match parse_units(units_ctx, v.units.as_deref()) {
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
@@ -427,7 +427,7 @@ where
             let inputs: Vec<MI> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
             let errors: Vec<EquationError> = errors.into_iter().map(|e| e.unwrap_err()).collect();
             let mut unit_errors: Vec<UnitError> = vec![];
-            let units = match parse_units(units_ctx, v.units.as_ref()) {
+            let units = match parse_units(units_ctx, v.units.as_deref()) {
                 Ok(units) => units,
                 Err(errors) => {
                     for err in errors.into_iter() {
