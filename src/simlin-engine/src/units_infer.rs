@@ -40,6 +40,9 @@ fn single_fv(units: &UnitMap) -> Option<&str> {
 }
 
 fn solve_for(var: &str, lhs: &UnitMap, rhs: &UnitMap) -> UnitMap {
+    let orig_lhs = lhs;
+    let orig_rhs = rhs;
+
     // after this, "lhs" is always the UnitMap that contains var
     let (lhs, rhs) = if lhs.contains_key(var) {
         (lhs, rhs)
@@ -63,15 +66,18 @@ fn solve_for(var: &str, lhs: &UnitMap, rhs: &UnitMap) -> UnitMap {
         .map(|(k, v)| (k.clone(), *v))
         .collect();
 
-    combine(UnitOp::Div, num, div)
+    let result = combine(UnitOp::Div, num, div);
 
-    // eprintln!(
-    //     "SOLVED: ({} == {}) -> ({} == {})",
-    //     pretty_print_unit(orig_lhs),
-    //     pretty_print_unit(orig_rhs),
-    //     var,
-    //     pretty_print_unit(&result)
-    // );
+    use crate::units::pretty_print_unit;
+    eprintln!(
+        "SOLVED: ({} == {}) -> ({} == {})",
+        pretty_print_unit(orig_lhs),
+        pretty_print_unit(orig_rhs),
+        var,
+        pretty_print_unit(&result)
+    );
+
+    result
 }
 
 fn maybe_solve_for_one(l: &UnitMap, r: &UnitMap) -> Option<(String, UnitMap)> {
@@ -322,7 +328,7 @@ impl<'a> UnitInferer<'a> {
                     Ok(Units::Constant)
                 }
                 None => {
-                    // eprintln!("no equation for {}", id);
+                    eprintln!("no equation for {}", id);
                     continue;
                 }
             }
@@ -344,12 +350,15 @@ impl<'a> UnitInferer<'a> {
     }
 
     fn unify(&self, mut constraints: Vec<(UnitMap, UnitMap)>) -> Vec<(UnitMap, UnitMap)> {
+        eprintln!("!! START");
+
         // a good guess at capacity
         let mut final_constraints: Vec<(UnitMap, UnitMap)> = Vec::with_capacity(constraints.len());
         while let Some((l, r)) = constraints.pop() {
             if l == r {
                 continue;
             }
+            use crate::units::pretty_print_unit;
             let lfv = single_fv(&l);
             let rfv = single_fv(&r);
             if lfv.is_some() && !r.contains_key(lfv.unwrap_or_default()) {
@@ -361,6 +370,14 @@ impl<'a> UnitInferer<'a> {
                     final_constraints = substitute(var, &units, final_constraints);
                     final_constraints
                         .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
+                    eprintln!("   c");
+                    for (l, r) in constraints.iter() {
+                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
+                    }
+                    eprintln!("   f");
+                    for (l, r) in final_constraints.iter() {
+                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
+                    }
                 }
             } else if rfv.is_some() && !l.contains_key(rfv.unwrap_or_default()) {
                 if let Some(var) = rfv {
@@ -369,12 +386,27 @@ impl<'a> UnitInferer<'a> {
                     final_constraints = substitute(var, &units, final_constraints);
                     final_constraints
                         .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
+                    eprintln!("   c");
+                    for (l, r) in constraints.iter() {
+                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
+                    }
+                    eprintln!("   f");
+                    for (l, r) in final_constraints.iter() {
+                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
+                    }
                 }
             } else {
+                eprintln!(
+                    "JUST PUSHING ALONG: {} == {}",
+                    pretty_print_unit(&l),
+                    pretty_print_unit(&r)
+                );
                 // TODO: is this safe, or do we need some check
                 final_constraints.push((l, r));
             }
         }
+
+        eprintln!("!! DONE");
 
         constraints = mem::take(&mut final_constraints);
 
@@ -454,7 +486,7 @@ fn test_inference() {
         ),
         (x_aux("window", "6", Some("parsec")), "parsec"),
         (x_flow("inflow", "seen/window", None), "usd/parsec"),
-        (x_aux("seen", "sin(seen_dep) % 3", None), "usd"),
+        (x_aux("seen", "sin(seen_dep) mod 3", None), "usd"),
         (x_aux("seen_dep", "1 + 3 * stock_1", None), "usd"),
     ]];
 
