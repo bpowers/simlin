@@ -1140,8 +1140,8 @@ export namespace Unit {
 }
 
 export class Source extends jspb.Message {
-  getExtension(): Source.ExtensionMap[keyof Source.ExtensionMap];
-  setExtension(value: Source.ExtensionMap[keyof Source.ExtensionMap]): void;
+  getExtension$(): Source.ExtensionMap[keyof Source.ExtensionMap];
+  setExtension$(value: Source.ExtensionMap[keyof Source.ExtensionMap]): void;
 
   getContent(): string;
   setContent(value: string): void;

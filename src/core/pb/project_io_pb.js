@@ -7,6 +7,8 @@
  * @public
  */
 // GENERATED CODE -- DO NOT EDIT!
+/* eslint-disable */
+// @ts-nocheck
 
 var jspb = require('google-protobuf');
 var goog = jspb;
@@ -811,12 +813,16 @@ proto.project_io.GraphicalFunction.deserializeBinaryFromReader = function(msg, r
       msg.setKind(value);
       break;
     case 2:
-      var value = /** @type {!Array<number>} */ (reader.readPackedDouble());
-      msg.setXPointsList(value);
+      var values = /** @type {!Array<number>} */ (reader.isDelimited() ? reader.readPackedDouble() : [reader.readDouble()]);
+      for (var i = 0; i < values.length; i++) {
+        msg.addXPoints(values[i]);
+      }
       break;
     case 3:
-      var value = /** @type {!Array<number>} */ (reader.readPackedDouble());
-      msg.setYPointsList(value);
+      var values = /** @type {!Array<number>} */ (reader.isDelimited() ? reader.readPackedDouble() : [reader.readDouble()]);
+      for (var i = 0; i < values.length; i++) {
+        msg.addYPoints(values[i]);
+      }
       break;
     case 4:
       var value = new proto.project_io.GraphicalFunction.Scale;
