@@ -40,8 +40,6 @@ fn single_fv(units: &UnitMap) -> Option<&str> {
 }
 
 fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
-    // let orig_lhs = pretty_print_unit(&lhs);
-
     // we have:
     //   `1 == $lhs`
     // where $lhs contains $var.  We want:
@@ -61,16 +59,6 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
     } else {
         lhs
     }
-
-    // use crate::units::pretty_print_unit;
-    // eprintln!(
-    //     "SOLVED: (1 == {}) -> ({} == {})",
-    //     orig_lhs,
-    //     var,
-    //     pretty_print_unit(&result)
-    // );
-    //
-    // result
 }
 
 fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<UnitMap> {
@@ -279,7 +267,6 @@ impl<'a> UnitInferer<'a> {
         let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
         for (id, var) in model.variables.iter() {
-            // eprintln!("generating constraints for {}", id);
             if let Variable::Stock {
                 ident,
                 inflows,
@@ -311,7 +298,7 @@ impl<'a> UnitInferer<'a> {
                     Ok(Units::Constant)
                 }
                 None => {
-                    eprintln!("no equation for {}", id);
+                    // TODO: maybe we should bail early?  If there is no equation we will fail
                     continue;
                 }
             }
@@ -337,8 +324,6 @@ impl<'a> UnitInferer<'a> {
         &self,
         mut constraints: Vec<UnitMap>,
     ) -> Result<(HashMap<Ident, UnitMap>, Option<Vec<UnitMap>>)> {
-        // eprintln!("!! START");
-
         let mut resolved_fvs: HashMap<Ident, UnitMap> = HashMap::new();
         let mut final_constraints: Vec<UnitMap> = Vec::with_capacity(constraints.len());
 
@@ -373,18 +358,7 @@ impl<'a> UnitInferer<'a> {
                         let var = var.strip_prefix('@').unwrap().to_owned();
                         resolved_fvs.insert(var, units);
                     }
-
-                    // eprintln!("   c");
-                    // for c in constraints.iter() {
-                    //     eprintln!("    1 == {}", pretty_print_unit(c));
-                    // }
-                    // eprintln!("   f");
-                    // for c in final_constraints.iter() {
-                    //     eprintln!("    1 == {}", pretty_print_unit(c));
-                    // }
                 } else {
-                    // TODO: is this safe, or do we need some check
-                    // eprintln!("JUST PUSHING ALONG: 1 == {}", pretty_print_unit(&c));
                     final_constraints.push(c);
                 }
             }
@@ -395,8 +369,6 @@ impl<'a> UnitInferer<'a> {
                 constraints = std::mem::take(&mut final_constraints);
             }
         }
-
-        // eprintln!("!! DONE");
 
         let final_constraints = if final_constraints.is_empty() {
             None
@@ -416,23 +388,11 @@ impl<'a> UnitInferer<'a> {
 
         let mut constraints = vec![];
         self.gen_all_constraints(model, &mut constraints);
+        // mostly for robustness: ensure we don't inadvertently depend on
+        // test cases iterating in a specific order.
         constraints.shuffle(&mut thread_rng());
 
-        // eprintln!("constraints:");
-        //
-        // for c in constraints.iter() {
-        //     eprintln!("  1 == {}", pretty_print_unit(c));
-        // }
-        //
         let (results, constraints) = self.unify(constraints)?;
-
-        // eprintln!("after unification:");
-        //
-        // for (ident, units) in results.iter() {
-        //     eprintln!("  {} == {}", ident, pretty_print_unit(units));
-        // }
-        //
-        // eprintln!("  ;");
 
         if let Some(constraints) = constraints {
             use std::fmt::Write;
