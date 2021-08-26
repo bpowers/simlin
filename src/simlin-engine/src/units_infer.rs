@@ -3,7 +3,6 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
-use std::mem;
 
 use crate::ast::{Ast, BinaryOp, Expr};
 use crate::builtins::BuiltinFn;
@@ -12,6 +11,7 @@ use crate::datamodel::UnitMap;
 #[cfg(test)]
 use crate::model::ModelStage0;
 use crate::model::ModelStage1;
+use crate::model_err;
 #[cfg(test)]
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_stock};
 use crate::units::{combine, Context, UnitOp, Units};
@@ -39,95 +39,66 @@ fn single_fv(units: &UnitMap) -> Option<&str> {
     result
 }
 
-fn solve_for(var: &str, lhs: &UnitMap, rhs: &UnitMap) -> UnitMap {
-    let orig_lhs = lhs;
-    let orig_rhs = rhs;
+fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
+    // let orig_lhs = pretty_print_unit(&lhs);
 
-    // after this, "lhs" is always the UnitMap that contains var
-    let (lhs, rhs) = if lhs.contains_key(var) {
-        (lhs, rhs)
-    } else if rhs.contains_key(var) {
-        (rhs, lhs)
+    // we have:
+    //   `1 == $lhs`
+    // where $lhs contains $var.  We want:
+    //   `$var = $lhs'`
+    // so if $var is in the numerator (has a value > 0) we want the
+    // inverse of $lhs; otherwise (value < 0) just delete $var from $lhs
+
+    let inverse = if let Some(exponent) = lhs.remove(var) {
+        exponent > 0
     } else {
-        unreachable!();
+        false
     };
-    // lhs / var = rhs === lhs / rhs = var
-    let (lhs, rhs) = if lhs[var] < 0 { (rhs, lhs) } else { (lhs, rhs) };
-    // lhs * var = rhs === rhs / lhs
-    // if 'var' is on the left, solve for it by dividing rhs by (lhs \ var)
-    let num: UnitMap = rhs
-        .iter()
-        .filter(|(s, _)| var != *s)
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
-    let div: UnitMap = lhs
-        .iter()
-        .filter(|(s, _)| var != *s)
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
 
-    let result = combine(UnitOp::Div, num, div);
+    if inverse {
+        let unit_unit = UnitMap::new();
+        combine(UnitOp::Div, unit_unit, lhs)
+    } else {
+        lhs
+    }
 
-    use crate::units::pretty_print_unit;
-    eprintln!(
-        "SOLVED: ({} == {}) -> ({} == {})",
-        pretty_print_unit(orig_lhs),
-        pretty_print_unit(orig_rhs),
-        var,
-        pretty_print_unit(&result)
-    );
-
-    result
+    // use crate::units::pretty_print_unit;
+    // eprintln!(
+    //     "SOLVED: (1 == {}) -> ({} == {})",
+    //     orig_lhs,
+    //     var,
+    //     pretty_print_unit(&result)
+    // );
+    //
+    // result
 }
 
-fn maybe_solve_for_one(l: &UnitMap, r: &UnitMap) -> Option<(String, UnitMap)> {
-    let lfv = single_fv(l);
-    let rfv = single_fv(r);
-    let var = if lfv.is_some() && !r.contains_key(lfv.unwrap_or_default()) {
-        lfv
-    } else if rfv.is_some() && !l.contains_key(rfv.unwrap_or_default()) {
-        rfv
-    } else {
-        None
-    };
-    var.map(|ident| {
-        (
-            ident.strip_prefix('@').unwrap().to_owned(),
-            solve_for(ident, l, r),
-        )
-    })
-}
-
-fn substitute(
-    var: &str,
-    units: &UnitMap,
-    constraints: Vec<(UnitMap, UnitMap)>,
-) -> Vec<(UnitMap, UnitMap)> {
+fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<UnitMap> {
     constraints
         .into_iter()
-        .map(|(mut l, mut r)| {
-            if l.contains_key(var) {
-                let op = if l[var] > 0 { UnitOp::Mul } else { UnitOp::Div };
-                let _ = l.remove(var);
-                l = combine(op, l, units.clone());
+        .map(|mut l| {
+            if let Some(exponent) = l.remove(var) {
+                let op = if exponent > 0 {
+                    UnitOp::Mul
+                } else {
+                    UnitOp::Div
+                };
+                combine(op, l, units.clone())
+            } else {
+                l
             }
-            if r.contains_key(var) {
-                let op = if r[var] > 0 { UnitOp::Mul } else { UnitOp::Div };
-                let _ = r.remove(var);
-                r = combine(op, r, units.clone());
-            }
-            (l, r)
         })
         .collect()
 }
 
 impl<'a> UnitInferer<'a> {
-    #[allow(dead_code)]
-    fn gen_constraints(
-        &self,
-        expr: &Expr,
-        constraints: &mut Vec<(UnitMap, UnitMap)>,
-    ) -> UnitResult<Units> {
+    /// gen_constraints generates a set of equality constraints for a given expression,
+    /// storing those constraints in the mutable `constraints` argument. This is
+    /// right out of Hindley-Milner type inference/Algorithm W, but because we are
+    /// dealing with arithmatic expressions instead of types, instead of pairs of types
+    /// we can get away with a single UnitMap -- our full constraint is `1 == UnitMap`, we just
+    /// leave off the `1 ==` part.
+    fn gen_constraints(&self, expr: &Expr, constraints: &mut Vec<UnitMap>) -> UnitResult<Units> {
         match expr {
             Expr::Const(_, _, _) => Ok(Units::Constant),
             Expr::Var(ident, _loc) => {
@@ -185,7 +156,11 @@ impl<'a> UnitInferer<'a> {
                         Some(Units::Explicit(arg0)) => {
                             for arg in args.iter() {
                                 if let Units::Explicit(arg) = arg {
-                                    constraints.push((arg0.clone(), arg.clone()));
+                                    constraints.push(combine(
+                                        UnitOp::Div,
+                                        arg0.clone(),
+                                        arg.clone(),
+                                    ));
                                 }
                             }
                             Ok(Units::Explicit(arg0))
@@ -200,7 +175,7 @@ impl<'a> UnitInferer<'a> {
 
                     if let Units::Explicit(ref lunits) = a_units {
                         if let Units::Explicit(runits) = b_units {
-                            constraints.push((lunits.clone(), runits));
+                            constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
                         }
                     }
                     Ok(a_units)
@@ -218,10 +193,18 @@ impl<'a> UnitInferer<'a> {
                     );
                     let units = self.gen_constraints(&div, constraints)?;
 
-                    if let Some(c) = c {
-                        let c_units = self.gen_constraints(c, constraints)?;
-                        if c_units != units {
-                            // TODO: return an error here
+                    // the optional argument to safediv, if specified, should match the units of a/b
+                    if let Units::Explicit(ref result_units) = units {
+                        if let Some(c) = c {
+                            if let Units::Explicit(c_units) =
+                                self.gen_constraints(c, constraints)?
+                            {
+                                constraints.push(combine(
+                                    UnitOp::Div,
+                                    c_units,
+                                    result_units.clone(),
+                                ));
+                            }
                         }
                     }
 
@@ -240,7 +223,7 @@ impl<'a> UnitInferer<'a> {
                         (Units::Constant, Units::Explicit(units))
                         | (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
-                            constraints.push((lunits.clone(), runits));
+                            constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
                             Ok(Units::Explicit(lunits))
                         }
                     },
@@ -282,7 +265,7 @@ impl<'a> UnitInferer<'a> {
 
                 if let Units::Explicit(ref lunits) = lunits {
                     if let Units::Explicit(runits) = runits {
-                        constraints.push((lunits.clone(), runits));
+                        constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
                     }
                 }
 
@@ -292,7 +275,7 @@ impl<'a> UnitInferer<'a> {
     }
 
     #[allow(dead_code)]
-    fn gen_all_constraints(&self, model: &ModelStage1, constraints: &mut Vec<(UnitMap, UnitMap)>) {
+    fn gen_all_constraints(&self, model: &ModelStage1, constraints: &mut Vec<UnitMap>) {
         let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
         for (id, var) in model.variables.iter() {
@@ -314,7 +297,7 @@ impl<'a> UnitInferer<'a> {
                     for ident in flows.iter() {
                         let flow_units: UnitMap =
                             [(format!("@{}", ident), 1)].iter().cloned().collect();
-                        constraints.push((flow_units, expected.clone()));
+                        constraints.push(combine(UnitOp::Div, flow_units, expected.clone()));
                     }
                 };
                 check_flows(inflows);
@@ -339,104 +322,89 @@ impl<'a> UnitInferer<'a> {
                 }
                 Units::Explicit(units) => {
                     let mv = [(format!("@{}", id), 1)].iter().cloned().collect();
-                    constraints.push((mv, units));
+                    constraints.push(combine(UnitOp::Div, mv, units));
                 }
             };
             if let Some(units) = var.units() {
                 let mv = [(format!("@{}", id), 1)].iter().cloned().collect();
-                constraints.push((mv, units.clone()));
+                constraints.push(combine(UnitOp::Div, mv, units.clone()));
             }
         }
     }
 
-    fn unify(&self, mut constraints: Vec<(UnitMap, UnitMap)>) -> Vec<(UnitMap, UnitMap)> {
-        eprintln!("!! START");
+    #[allow(clippy::type_complexity)]
+    fn unify(
+        &self,
+        mut constraints: Vec<UnitMap>,
+    ) -> Result<(HashMap<Ident, UnitMap>, Option<Vec<UnitMap>>)> {
+        // eprintln!("!! START");
 
-        // a good guess at capacity
-        let mut final_constraints: Vec<(UnitMap, UnitMap)> = Vec::with_capacity(constraints.len());
-        while let Some((l, r)) = constraints.pop() {
-            if l == r {
-                continue;
+        let mut resolved_fvs: HashMap<Ident, UnitMap> = HashMap::new();
+        let mut final_constraints: Vec<UnitMap> = Vec::with_capacity(constraints.len());
+
+        // FIXME: I think this is O(n^3) worst case; we could do better
+        //        by maintaining an index of metavar usage -> Units
+        loop {
+            let initial_constraint_count = constraints.len();
+            while let Some(c) = constraints.pop() {
+                // dimensionless/identity unit: `1 == 1`; nothing to do
+                if c.is_empty() {
+                    continue;
+                }
+                use crate::units::pretty_print_unit;
+                if let Some(var) = single_fv(&c) {
+                    let var = var.to_owned();
+                    let units = solve_for(&var, c);
+                    constraints = substitute(&var, &units, constraints);
+                    final_constraints = substitute(&var, &units, final_constraints);
+                    if let Some(existing_units) = resolved_fvs.get(&var) {
+                        if *existing_units != units {
+                            return model_err!(
+                                UnitMismatch,
+                                format!(
+                                    "units for {} don't match ({} != {}); this should be Result",
+                                    var,
+                                    pretty_print_unit(existing_units),
+                                    pretty_print_unit(&units),
+                                )
+                            );
+                        }
+                    } else {
+                        let var = var.strip_prefix('@').unwrap().to_owned();
+                        resolved_fvs.insert(var, units);
+                    }
+
+                    // eprintln!("   c");
+                    // for c in constraints.iter() {
+                    //     eprintln!("    1 == {}", pretty_print_unit(c));
+                    // }
+                    // eprintln!("   f");
+                    // for c in final_constraints.iter() {
+                    //     eprintln!("    1 == {}", pretty_print_unit(c));
+                    // }
+                } else {
+                    // TODO: is this safe, or do we need some check
+                    // eprintln!("JUST PUSHING ALONG: 1 == {}", pretty_print_unit(&c));
+                    final_constraints.push(c);
+                }
             }
-            use crate::units::pretty_print_unit;
-            let lfv = single_fv(&l);
-            let rfv = single_fv(&r);
-            if lfv.is_some() && !r.contains_key(lfv.unwrap_or_default()) {
-                if let Some(var) = lfv {
-                    let units = solve_for(var, &l, &r);
-                    constraints = substitute(var, &units, constraints);
-                    // TODO: can we avoid doing this substitution to final_constraints
-                    //       by walking variables in runlist order?
-                    final_constraints = substitute(var, &units, final_constraints);
-                    final_constraints
-                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
-                    eprintln!("   c");
-                    for (l, r) in constraints.iter() {
-                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
-                    }
-                    eprintln!("   f");
-                    for (l, r) in final_constraints.iter() {
-                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
-                    }
-                }
-            } else if rfv.is_some() && !l.contains_key(rfv.unwrap_or_default()) {
-                if let Some(var) = rfv {
-                    let units = solve_for(var, &l, &r);
-                    constraints = substitute(var, &units, constraints);
-                    final_constraints = substitute(var, &units, final_constraints);
-                    final_constraints
-                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
-                    eprintln!("   c");
-                    for (l, r) in constraints.iter() {
-                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
-                    }
-                    eprintln!("   f");
-                    for (l, r) in final_constraints.iter() {
-                        eprintln!("    {} == {}", pretty_print_unit(l), pretty_print_unit(r));
-                    }
-                }
+            // iterate to a fixed point
+            if final_constraints.len() == initial_constraint_count {
+                break;
             } else {
-                eprintln!(
-                    "JUST PUSHING ALONG: {} == {}",
-                    pretty_print_unit(&l),
-                    pretty_print_unit(&r)
-                );
-                // TODO: is this safe, or do we need some check
-                final_constraints.push((l, r));
+                constraints = std::mem::take(&mut final_constraints);
             }
         }
 
-        eprintln!("!! DONE");
+        // eprintln!("!! DONE");
 
-        constraints = mem::take(&mut final_constraints);
+        let final_constraints = if final_constraints.is_empty() {
+            None
+        } else {
+            Some(final_constraints)
+        };
 
-        // just clean up; no substituting necessary
-        while let Some((l, r)) = constraints.pop() {
-            if l == r {
-                continue;
-            }
-
-            let lfv = single_fv(&l);
-            let rfv = single_fv(&r);
-            if lfv.is_some() && !r.contains_key(lfv.unwrap_or_default()) {
-                if let Some(var) = lfv {
-                    let units = solve_for(var, &l, &r);
-                    final_constraints
-                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
-                }
-            } else if rfv.is_some() && !l.contains_key(rfv.unwrap_or_default()) {
-                if let Some(var) = rfv {
-                    let units = solve_for(var, &l, &r);
-                    final_constraints
-                        .push(([(var.to_owned(), 1)].iter().cloned().collect(), units));
-                }
-            } else {
-                // TODO: is this safe, or do we need some check
-                final_constraints.push((l, r));
-            }
-        }
-
-        final_constraints
+        Ok((resolved_fvs, final_constraints))
     }
 
     #[allow(dead_code)]
@@ -450,26 +418,34 @@ impl<'a> UnitInferer<'a> {
         self.gen_all_constraints(model, &mut constraints);
         constraints.shuffle(&mut thread_rng());
 
-        eprintln!("constraints:");
+        // eprintln!("constraints:");
+        //
+        // for c in constraints.iter() {
+        //     eprintln!("  1 == {}", pretty_print_unit(c));
+        // }
+        //
+        let (results, constraints) = self.unify(constraints)?;
 
-        for (l, r) in constraints.iter() {
-            eprintln!("  {} == {}", pretty_print_unit(l), pretty_print_unit(r));
-        }
+        // eprintln!("after unification:");
+        //
+        // for (ident, units) in results.iter() {
+        //     eprintln!("  {} == {}", ident, pretty_print_unit(units));
+        // }
+        //
+        // eprintln!("  ;");
 
-        let constraints = self.unify(constraints);
-
-        eprintln!("after unification:");
-
-        let mut results: HashMap<String, UnitMap> = HashMap::new();
-
-        for (l, r) in constraints.iter() {
-            eprintln!("  {} == {}", pretty_print_unit(l), pretty_print_unit(r));
-            if let Some((ident, units)) = maybe_solve_for_one(l, r) {
-                results.insert(ident, units);
+        if let Some(constraints) = constraints {
+            use std::fmt::Write;
+            let prefix = "unit checking failed; couldn't resolve: ";
+            let mut s = prefix.to_owned();
+            for c in constraints.iter() {
+                let delim = if s.len() == prefix.len() { "" } else { "; " };
+                write!(s, "{}1 == {}", delim, pretty_print_unit(c)).unwrap();
             }
+            model_err!(UnitMismatch, s)
+        } else {
+            Ok(results)
         }
-
-        Ok(results)
     }
 }
 
@@ -504,16 +480,20 @@ fn test_inference() {
         let model = ModelStage0::new(&model, &[], &units_ctx, false);
         let model = ModelStage1::new(&units_ctx, &HashMap::new(), &model);
 
-        let results = infer(&units_ctx, &model).unwrap();
-        for (ident, expected_units) in expected {
-            let expected_units: UnitMap =
-                crate::units::parse_units(&units_ctx, Some(expected_units))
-                    .unwrap()
-                    .unwrap();
-            if let Some(computed_units) = results.get(ident) {
-                assert_eq!(expected_units, *computed_units);
-            } else {
-                panic!("inference results don't contain variable '{}'", ident);
+        // there is non-determinism in inference; do it a few times to
+        // shake out heisenbugs
+        for _ in 0..64 {
+            let results = infer(&units_ctx, &model).unwrap();
+            for (ident, expected_units) in expected.iter() {
+                let expected_units: UnitMap =
+                    crate::units::parse_units(&units_ctx, Some(expected_units))
+                        .unwrap()
+                        .unwrap();
+                if let Some(computed_units) = results.get(*ident) {
+                    assert_eq!(expected_units, *computed_units);
+                } else {
+                    panic!("inference results don't contain variable '{}'", ident);
+                }
             }
         }
     }
