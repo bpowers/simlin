@@ -1,6 +1,6 @@
 {
   "name": "@system-dynamics/importer",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "description": "convert XMILE models to model-app protobufs",
   "repository": "http://github.com/bpowers/model-app",
   "author": {
