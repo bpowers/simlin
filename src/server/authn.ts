@@ -70,14 +70,14 @@ async function getOrCreateUserFromProfile(
   try {
     decodedToken = await firebaseAuthn.verifyIdToken(firebaseIdToken);
   } catch (exception) {
-    return [undefined, exception];
+    return [undefined, exception as Error];
   }
 
   let fbUser: admin.auth.UserRecord;
   try {
     fbUser = await firebaseAuthn.getUser(decodedToken.uid);
   } catch (exception) {
-    return [undefined, exception];
+    return [undefined, exception as Error];
   }
 
   if (fbUser.disabled) {

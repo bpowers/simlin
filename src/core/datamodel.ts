@@ -1310,13 +1310,13 @@ export class Source extends Record(sourceDefaults) {
   }
   static fromPb(source: PbSource): Source {
     return new Source({
-      extension: getExtension(source.getExtension()),
+      extension: getExtension(source.getExtension$()),
       content: source.getContent(),
     });
   }
   toPb(): PbSource {
     const source = new PbSource();
-    source.setExtension(extensionToPb(this.extension));
+    source.setExtension$(extensionToPb(this.extension));
     source.setContent(this.content);
     return source;
   }

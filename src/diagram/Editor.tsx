@@ -361,7 +361,7 @@ export const Editor = withStyles(styles)(
         });
       } catch (e) {
         this.setState({
-          modelErrors: this.state.modelErrors.push(e),
+          modelErrors: this.state.modelErrors.push(e as Error),
         });
       }
     }
@@ -420,7 +420,7 @@ export const Editor = withStyles(styles)(
         }
       } catch (err) {
         this.setState({
-          modelErrors: this.state.modelErrors.push(err),
+          modelErrors: this.state.modelErrors.push(err as Error),
         });
         return;
       }
@@ -1770,7 +1770,9 @@ export const Editor = withStyles(styles)(
       const { modelName } = this.state;
 
       const [svg, viewbox] = renderSvgToString(project, modelName);
-      const osCanvas = new OffscreenCanvas(viewbox.width * 4, viewbox.height * 4);
+      const osCanvas = new globalThis.HTMLCanvasElement();
+      osCanvas.width = viewbox.width * 4;
+      osCanvas.height = viewbox.height * 4;
       const ctx = exists(osCanvas.getContext('2d'));
       const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
       const svgUrl = URL.createObjectURL(svgBlob);
@@ -1779,16 +1781,15 @@ export const Editor = withStyles(styles)(
       image.onload = () => {
         ctx.drawImage(image, 0, 0, viewbox.width * 4, viewbox.height * 4);
 
-        osCanvas.convertToBlob().then(
-          (snapshotBlob) => {
+        osCanvas.toBlob((snapshotBlob) => {
+          if (snapshotBlob) {
             this.setState({ snapshotBlob });
-          },
-          () => {
+          } else {
             this.setState({
               modelErrors: this.state.modelErrors.push(new Error('snapshot creation failed (1).')),
             });
-          },
-        );
+          }
+        });
       };
       image.onerror = () => {
         this.setState({

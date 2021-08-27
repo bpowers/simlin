@@ -25,7 +25,8 @@ export async function updatePreview(db: Database, project: ProjectPb): Promise<P
   let png: Uint8Array;
   try {
     png = await renderToPNG(fileDoc);
-  } catch (err) {
+  } catch (error) {
+    const err = error as any;
     throw new Error(`renderToPNG: ${err.message}`);
   }
 
@@ -102,7 +103,8 @@ export const apiRouter = (app: Application): Router => {
         await app.db.project.create(project.getId(), project);
 
         res.status(200).json(project.toObject());
-      } catch (err) {
+      } catch (error) {
+        const err = error as any;
         if (err.code === 'wut') {
           res.status(400).json({ error: 'project name already taken' });
           return;
@@ -341,7 +343,8 @@ export const apiRouter = (app: Application): Router => {
         logger.error(`deleting old user ${origUserId}`);
         await app.db.user.deleteOne(origUserId);
         logger.error(`done deleting old user ${origUserId}`);
-      } catch (err) {
+      } catch (error) {
+        const err = error as any;
         if (err.code === 'wut') {
           res.status(400).json({ error: 'username already taken' });
           return;
