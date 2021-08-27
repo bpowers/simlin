@@ -13664,10 +13664,10 @@ restore-cursor@^3.1.0:
     onetime "^5.1.0"
     signal-exit "^3.0.2"
 
-resvg-wasm@^0.1.2:
-  version "0.1.2"
-  resolved "https://registry.yarnpkg.com/resvg-wasm/-/resvg-wasm-0.1.2.tgz#603c0be1f9a167d6c229e2964c20288b993236ee"
-  integrity sha512-/5+FkqHszyws6neeU+LDc1F56JCCJNy4cJKf9tO54MhPSk/Z/elFySmD4q6Enujt2ZGAbDohhUmDF+QsYdiw+A==
+resvg-wasm@^0.2.0:
+  version "0.2.0"
+  resolved "https://registry.yarnpkg.com/resvg-wasm/-/resvg-wasm-0.2.0.tgz#185826c929452e7995f42b4fa8c7b8621317923e"
+  integrity sha512-BMr58SS/h5ySAu9/+G3//9qIFcPNdkKKBIQnFqUHP9JYGGjLD9vCG0w+bvkvx/isrZ7eLGLUbzIaHnIVn65VSg==
 
 ret@~0.1.10:
   version "0.1.15"
