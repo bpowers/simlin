@@ -5,10 +5,10 @@
 import * as React from 'react';
 
 import { Link } from 'react-router-dom';
-
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import Button from '@material-ui/core/Button';
 import IconButton from '@material-ui/core/IconButton';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import SwipeableDrawer from '@material-ui/core/SwipeableDrawer';
 import TextField from '@material-ui/core/TextField';
 import ArrowBackIcon from '@material-ui/icons/ArrowBack';
@@ -19,62 +19,7 @@ import { ModelIcon } from './ModelIcon';
 
 const iOS = typeof navigator !== undefined && /iPad|iPhone|iPod/.test(navigator.userAgent);
 
-const styles = createStyles({
-  content: {
-    width: 359 + 16,
-  },
-  imageWrap: {
-    display: 'inline-block',
-    verticalAlign: 'top',
-    height: 48,
-  },
-  modelApp: {
-    textAlign: 'center',
-    position: 'relative',
-    top: 0,
-    left: 0,
-    paddingLeft: 64,
-    paddingTop: 12,
-    paddingBottom: 12,
-    paddingRight: 70,
-    height: '100%',
-    width: '100%',
-  },
-  modelName: {
-    paddingLeft: 6,
-    paddingTop: 2,
-    display: 'inline-block',
-    height: 48,
-    fontSize: 32,
-  },
-  menuButton: {
-    position: 'absolute',
-    left: 8,
-    top: 8,
-    marginLeft: 4,
-  },
-  closeButton: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    marginRight: 4,
-  },
-  modelIcon: {
-    width: 48,
-    height: 48,
-  },
-  propsForm: {
-    padding: 32,
-  },
-  exitLink: {
-    color: 'inherit',
-  },
-  downloadButton: {
-    justifyContent: 'center',
-  },
-});
-
-interface ModelPropertiesDrawerPropsFull extends WithStyles<typeof styles> {
+interface ModelPropertiesDrawerProps {
   modelName: string;
   open: boolean;
   onDrawerToggle: (isOpen: boolean) => void;
@@ -89,8 +34,8 @@ interface ModelPropertiesDrawerPropsFull extends WithStyles<typeof styles> {
   onDownloadXmile: () => void;
 }
 
-export const ModelPropertiesDrawer = withStyles(styles)(
-  class InnerModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDrawerPropsFull> {
+export const ModelPropertiesDrawer = styled(
+  class InnerModelPropertiesDrawer extends React.PureComponent<ModelPropertiesDrawerProps & { className?: string }> {
     handleOpen = () => {
       this.props.onDrawerToggle(true);
     };
@@ -100,7 +45,7 @@ export const ModelPropertiesDrawer = withStyles(styles)(
     };
 
     render() {
-      const { classes } = this.props;
+      const { className } = this.props;
       const { modelName, open } = this.props;
       return (
         <SwipeableDrawer
@@ -110,25 +55,30 @@ export const ModelPropertiesDrawer = withStyles(styles)(
           onOpen={this.handleOpen}
           onClose={this.handleClose}
         >
-          <div className={classes.content}>
+          <div className={clsx(className, 'simlin-modelpropertiesdrawer-content')}>
             <div>
-              <div className={classes.modelApp}>
-                <div className={classes.imageWrap}>
-                  <ModelIcon className={classes.modelIcon} />
+              <div className="simlin-modelpropertiesdrawer-modelapp">
+                <div className="simlin-modelpropertiesdrawer-imagewrap">
+                  <ModelIcon className="simlin-modelpropertiesdrawer-modelicon" />
                 </div>
-                <div className={classes.modelName}>Simlin</div>
+                <div className="simlin-modelpropertiesdrawer-modelname">Simlin</div>
               </div>
-              <Link to="/" className={classes.exitLink}>
-                <IconButton className={classes.menuButton} color="inherit" aria-label="Exit">
+              <Link to="/" className="simlin-modelpropertiesdrawer-exitlink">
+                <IconButton className="simlin-modelpropertiesdrawer-menubutton" color="inherit" aria-label="Exit">
                   <ArrowBackIcon />
                 </IconButton>
               </Link>
-              <IconButton className={classes.closeButton} color="inherit" aria-label="Close" onClick={this.handleClose}>
+              <IconButton
+                className="simlin-modelpropertiesdrawer-closebutton"
+                color="inherit"
+                aria-label="Close"
+                onClick={this.handleClose}
+              >
                 <ClearIcon />
               </IconButton>
             </div>
 
-            <div className={classes.propsForm}>
+            <div className="simlin-modelpropertiesdrawer-propsform">
               <h2>{modelName}</h2>
               <TextField
                 label="Start Time"
@@ -162,8 +112,9 @@ export const ModelPropertiesDrawer = withStyles(styles)(
                 fullWidth
               />
               <br />
+              <br />
               <Button
-                className={classes.downloadButton}
+                className="simlin-modelpropertiesdrawer-downloadbutton"
                 variant="contained"
                 color="primary"
                 size="large"
@@ -178,4 +129,58 @@ export const ModelPropertiesDrawer = withStyles(styles)(
       );
     }
   },
-);
+)(() => ({
+  '&.simlin-modelpropertiesdrawer-content': {
+    width: 359 + 16,
+  },
+  '.simlin-modelpropertiesdrawer-imagewrap': {
+    display: 'inline-block',
+    verticalAlign: 'top',
+    height: 48,
+  },
+  '.simlin-modelpropertiesdrawer-modelapp': {
+    textAlign: 'center',
+    position: 'relative',
+    top: 0,
+    left: 0,
+    paddingLeft: 64,
+    paddingTop: 12,
+    paddingBottom: 12,
+    paddingRight: 70,
+    height: '100%',
+    width: '100%',
+  },
+  '.simlin-modelpropertiesdrawer-modelname': {
+    paddingLeft: 6,
+    paddingTop: 2,
+    display: 'inline-block',
+    height: 48,
+    fontSize: 32,
+  },
+  '.simlin-modelpropertiesdrawer-menubutton': {
+    position: 'absolute',
+    left: 8,
+    top: 8,
+    marginLeft: 4,
+  },
+  '.simlin-modelpropertiesdrawer-closebutton': {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    marginRight: 4,
+  },
+  '.simlin-modelpropertiesdrawer-modelicon': {
+    width: 48,
+    height: 48,
+  },
+  '.simlin-modelpropertiesdrawer-propsform': {
+    padding: 32,
+  },
+  '.simlin-modelpropertiesdrawer-exitlink': {
+    color: 'inherit',
+  },
+  '.simlin-modelpropertiesdrawer-downloadbutton': {
+    justifyContent: 'center',
+    width: '100%',
+  },
+}));

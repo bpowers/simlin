@@ -7,43 +7,15 @@ import * as React from 'react';
 import StyledFirebaseAuth from 'react-firebaseui/StyledFirebaseAuth';
 import firebase from 'firebase/app';
 import 'firebase/auth';
-
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 
 import { ModelIcon } from '@system-dynamics/diagram/ModelIcon';
 
-const styles = createStyles({
-  loginOuter: {
-    display: 'table',
-    position: 'absolute',
-    height: '100%',
-    width: '100%',
-  },
-  loginMiddle: {
-    display: 'table-cell',
-    verticalAlign: 'middle',
-  },
-  loginInner: {
-    marginLeft: 'auto',
-    marginRight: 'auto',
-    textAlign: 'center',
-  },
-  loginDisabled: {
-    pointerEvents: 'none',
-    opacity: 0,
-  },
-  logo: {
-    width: 160,
-    height: 160,
-  },
-});
-
-interface LoginPropsFull extends WithStyles<typeof styles> {
+export interface LoginProps {
   disabled: boolean;
   auth: firebase.auth.Auth;
 }
-
-export type LoginProps = Pick<LoginPropsFull, 'disabled' | 'auth'>;
 
 function appleProvider(): string {
   const provider = new firebase.auth.OAuthProvider('apple.com');
@@ -62,21 +34,21 @@ const uiConfig = {
   ],
 };
 
-export const Login = withStyles(styles)(
-  class Login extends React.Component<LoginPropsFull> {
+export const Login = styled(
+  class Login extends React.Component<LoginProps & { className?: string }> {
     render() {
-      const { classes } = this.props;
-      const disabledClass = this.props.disabled ? classes.loginDisabled : '';
+      const { className } = this.props;
+      const disabledClass = this.props.disabled ? 'simlin-login-disabled' : '';
 
       const loginUI = !this.props.disabled ? (
         <StyledFirebaseAuth uiConfig={uiConfig} firebaseAuth={this.props.auth} />
       ) : undefined;
 
       return (
-        <div className={classes.loginOuter}>
-          <div className={classes.loginMiddle}>
-            <div className={classes.loginInner}>
-              <ModelIcon className={classes.logo} />
+        <div className={clsx(className, 'simlin-login-outer')}>
+          <div className="simlin-login-middle">
+            <div className="simlin-login-inner">
+              <ModelIcon className="simlin-login-logo" />
               <br />
               <div className={disabledClass}>{loginUI}</div>
             </div>
@@ -85,4 +57,28 @@ export const Login = withStyles(styles)(
       );
     }
   },
-);
+)(() => ({
+  '&.simlin-login-outer': {
+    display: 'table',
+    position: 'absolute',
+    height: '100%',
+    width: '100%',
+  },
+  '.simlin-login-middle': {
+    display: 'table-cell',
+    verticalAlign: 'middle',
+  },
+  '.simlin-login-inner': {
+    marginLeft: 'auto',
+    marginRight: 'auto',
+    textAlign: 'center',
+  },
+  '.simlin-login-disabled': {
+    pointerEvents: 'none',
+    opacity: 0,
+  },
+  '.simlin-login-logo': {
+    width: 160,
+    height: 160,
+  },
+}));

@@ -4,68 +4,13 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { LinkViewElement, ModuleViewElement, StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
 import { Arrowhead } from './Arrowhead';
 import { Circle, isInf, isZero, Point, Rect, square } from './common';
 import { ArrowheadRadius, AuxRadius, StraightLineMax } from './default';
-
-const styles = createStyles({
-  connector: {
-    strokeWidth: 0.5,
-    stroke: 'gray',
-    fill: 'none',
-  },
-  connectorSelected: {
-    strokeWidth: 1,
-    stroke: '#4444dd',
-    fill: 'none',
-  },
-  connectorBg: {
-    strokeWidth: 7,
-    stroke: 'white',
-    opacity: 0,
-    fill: 'none',
-  },
-  connectorB: {
-    strokeWidth: 0.5,
-    stroke: 'green',
-    fill: 'none',
-  },
-  connectorC: {
-    strokeWidth: 0.5,
-    stroke: 'red',
-    fill: 'none',
-  },
-  connectorD: {
-    strokeWidth: 0.5,
-    stroke: 'blue',
-    fill: 'none',
-  },
-  connectorE: {
-    strokeWidth: 0.5,
-    stroke: 'purple',
-    fill: 'none',
-  },
-  dotA: {
-    strokeWidth: 0,
-    fill: 'red',
-  },
-  dotB: {
-    strokeWidth: 0,
-    fill: 'blue',
-  },
-  dotC: {
-    strokeWidth: 0,
-    fill: 'green',
-  },
-  dotD: {
-    strokeWidth: 0,
-    fill: 'yellow',
-  },
-});
 
 // math functions we care about
 const atan2 = Math.atan2;
@@ -180,7 +125,7 @@ export function circleFromPoints(p1: Point, p2: Point, p3: Point): Circle {
   };
 }
 
-interface ConnectorPropsFull extends WithStyles<typeof styles> {
+export interface ConnectorProps {
   isSelected: boolean;
   from: ViewElement;
   element: LinkViewElement;
@@ -189,13 +134,8 @@ interface ConnectorPropsFull extends WithStyles<typeof styles> {
   arcPoint?: Point;
 }
 
-export type ConnectorProps = Pick<
-  ConnectorPropsFull,
-  'isSelected' | 'element' | 'from' | 'to' | 'onSelection' | 'arcPoint'
->;
-
-export const Connector = withStyles(styles)(
-  class Conn extends React.PureComponent<ConnectorPropsFull> {
+export const Connector = styled(
+  class Conn extends React.PureComponent<ConnectorProps & { className?: string }> {
     handlePointerDownArc = (e: React.PointerEvent<SVGElement>): void => {
       e.preventDefault();
       e.stopPropagation();
@@ -236,7 +176,7 @@ export const Connector = withStyles(styles)(
     }
 
     renderStraightLine() {
-      const { from, to, classes, isSelected } = this.props;
+      const { from, to, isSelected } = this.props;
 
       const θ = atan2(to.cy - from.cy, to.cx - from.cx);
       const start = Conn.intersectElementStraight(from, θ);
@@ -247,10 +187,10 @@ export const Connector = withStyles(styles)(
 
       return (
         <g key={this.props.element.uid}>
-          <path d={path} className={classes.connectorBg} onPointerDown={this.handlePointerDownArc} />
+          <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
           <path
             d={path}
-            className={isSelected ? classes.connectorSelected : classes.connector}
+            className={isSelected ? 'simlin-connector-selected' : 'simlin-connector'}
             onPointerDown={this.handlePointerDownArc}
           />
           <Arrowhead
@@ -333,7 +273,7 @@ export const Connector = withStyles(styles)(
     }
 
     renderArc() {
-      const { from, to, classes, isSelected } = this.props;
+      const { className, from, to, isSelected } = this.props;
 
       const takeoffAngle = takeoffθ(this.props);
       const circ = Conn.arcCircle(this.props);
@@ -379,11 +319,11 @@ export const Connector = withStyles(styles)(
       }
 
       return (
-        <g>
-          <path d={path} className={classes.connectorBg} onPointerDown={this.handlePointerDownArc} />
+        <g className={className}>
+          <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
           <path
             d={path}
-            className={isSelected ? classes.connectorSelected : classes.connector}
+            className={isSelected ? 'simlin-connector-selected' : 'simlin-connector'}
             onPointerDown={this.handlePointerDownArc}
           />
           <Arrowhead
@@ -439,4 +379,21 @@ export const Connector = withStyles(styles)(
       }
     }
   },
-);
+)(`
+    & .simlin-connector {
+      stroke-width: 0.5px;
+      stroke: gray;
+      fill: none;
+    }
+    & .simlin-connector-selected {
+      stroke-width: 1px;
+      stroke: #4444dd;
+      fill: none;
+    }
+    & .simlin-connector-bg {
+      stroke-width: 7px;
+      stroke: white;
+      opacity: 0;
+      fill: none;
+    }
+`);

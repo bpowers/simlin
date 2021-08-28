@@ -6,15 +6,11 @@
 
 import * as React from 'react';
 
-import { Theme } from '@material-ui/core/styles';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
-
+import { styled } from '@material-ui/core/styles';
 import { Descendant } from 'slate';
-
 import { List, Map, Set } from 'immutable';
 
 import { defined, exists } from '@system-dynamics/core/common';
-
 import {
   ViewElement,
   AliasViewElement,
@@ -33,11 +29,21 @@ import {
   Model,
   Rect as ViewRect,
 } from '@system-dynamics/core/datamodel';
+import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 import { Alias, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
-import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
+import {
+  calcViewBox,
+  displayName,
+  plainDeserialize,
+  plainDeserializeWithNewlines,
+  plainSerialize,
+  Point,
+  Rect,
+  screenToCanvasPoint,
+} from './common';
 import { Connector, ConnectorProps } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
@@ -45,8 +51,6 @@ import { Flow, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flo
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomText } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
-
-import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 export const inCreationUid = -2;
 export const fauxTargetUid = -3;
@@ -71,52 +75,6 @@ const fauxCloudTarget = new CloudViewElement({
   y: 0,
   isZeroRadius: true,
 });
-
-const styles = ({ palette }: Theme) =>
-  createStyles({
-    canvas: {
-      boxSizing: 'border-box',
-      height: '100%',
-      width: '100%',
-      userSelect: 'none',
-      '-webkit-touch-callout': 'none',
-      '& text': {
-        fill: palette.common.black,
-        fontSize: '12px',
-        fontFamily: '"Roboto", "Open Sans", "Arial", sans-serif',
-        fontWeight: 300,
-        textAnchor: 'middle',
-        whiteSpace: 'nowrap',
-        verticalAlign: 'middle',
-      },
-    },
-    container: {
-      height: '100%',
-      width: '100%',
-    },
-    overlay: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      height: '100%',
-      width: '100%',
-    },
-    noPointerEvents: {
-      pointerEvents: 'none',
-      touchAction: 'none',
-    },
-    selectionOverlay: {
-      stroke: '#4444dd',
-      strokeWidth: 1,
-      fill: '#6363ff',
-      opacity: 0.2,
-      zIndex: 10,
-      transform: 'translateZ(1)',
-    },
-    // gLayer: {
-    //   willChange: 'translate',
-    // },
-  });
 
 function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
@@ -143,7 +101,7 @@ interface CanvasState {
   inCreationCloud: CloudViewElement | undefined;
 }
 
-interface CanvasPropsFull extends WithStyles<typeof styles> {
+export interface CanvasProps {
   embedded: boolean;
   project: Project;
   model: Model;
@@ -170,53 +128,28 @@ interface CanvasPropsFull extends WithStyles<typeof styles> {
   onViewBoxChange: (viewBox: ViewRect, zoom: number) => void;
 }
 
-export type CanvasProps = Pick<
-  CanvasPropsFull,
-  | 'embedded'
-  | 'project'
-  | 'model'
-  | 'view'
-  | 'version'
-  | 'selectedTool'
-  | 'selection'
-  | 'onRenameVariable'
-  | 'onSetSelection'
-  | 'onMoveSelection'
-  | 'onMoveFlow'
-  | 'onAttachLink'
-  | 'onCreateVariable'
-  | 'onClearSelectedTool'
-  | 'onDeleteSelection'
-  | 'onViewBoxChange'
->;
-
-export const Canvas = withStyles(styles)(
-  class InnerCanvas extends React.PureComponent<CanvasPropsFull, CanvasState> {
+export const Canvas = styled(
+  class InnerCanvas extends React.PureComponent<CanvasProps & { className?: string }, CanvasState> {
     state: CanvasState;
 
     readonly svgRef: React.RefObject<InstanceType<typeof HTMLDivElement>>;
-    private svgObserver: ResizeObserver | undefined;
 
-    private mouseDownPoint: Point | undefined;
-    private selectionCenterOffset: Point | undefined;
-
-    private pointerId: number | undefined;
-
-    private elementBounds = List<Rect | undefined>();
-
-    private prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
-
+    // XXX: these should all be private, but that doesn't work with styled
+    svgObserver: ResizeObserver | undefined;
+    mouseDownPoint: Point | undefined;
+    selectionCenterOffset: Point | undefined;
+    pointerId: number | undefined;
+    elementBounds = List<Rect | undefined>();
+    prevSelectedTool: 'stock' | 'flow' | 'aux' | 'link' | undefined;
     // we have to regenerate selectionUpdates when selection !== props.selection
-    private selection = Set<UID>();
+    selection = Set<UID>();
+    cachedVersion = -Infinity;
+    cachedElements = List<ViewElement>();
+    elements = Map<UID, ViewElement>();
+    selectionUpdates = Map<UID, ViewElement>();
+    computeBounds = false;
 
-    private cachedVersion = -Infinity;
-    private cachedElements = List<ViewElement>();
-    private elements = Map<UID, ViewElement>();
-    private selectionUpdates = Map<UID, ViewElement>();
-
-    private computeBounds = false;
-
-    constructor(props: CanvasPropsFull) {
+    constructor(props: CanvasProps) {
       super(props);
 
       this.svgRef = React.createRef();
@@ -275,11 +208,11 @@ export const Canvas = withStyles(styles)(
       return selection;
     }
 
-    private isSelected(element: ViewElement): boolean {
+    isSelected(element: ViewElement): boolean {
       return this.props.selection.has(element.uid);
     }
 
-    private alias(element: AliasViewElement): React.ReactElement {
+    alias(element: AliasViewElement): React.ReactElement {
       const aliasOf = this.elements.get(element.aliasOfUid) as NamedViewElement | undefined;
       let series;
       let isValidTarget: boolean | undefined;
@@ -300,7 +233,7 @@ export const Canvas = withStyles(styles)(
       return <Alias key={element.uid} {...props} />;
     }
 
-    private cloud(element: CloudViewElement): React.ReactElement | undefined {
+    cloud(element: CloudViewElement): React.ReactElement | undefined {
       const isSelected = this.isSelected(element);
 
       const flow = this.getElementByUid(defined(element.flowUid)) as FlowViewElement;
@@ -324,7 +257,7 @@ export const Canvas = withStyles(styles)(
       return <Cloud key={element.uid} {...props} />;
     }
 
-    private isValidTarget(element: ViewElement): boolean | undefined {
+    isValidTarget(element: ViewElement): boolean | undefined {
       if (!this.state.isMovingArrow || !this.selectionCenterOffset) {
         return undefined;
       }
@@ -389,7 +322,7 @@ export const Canvas = withStyles(styles)(
       return element instanceof FlowViewElement || element instanceof AuxViewElement;
     }
 
-    private aux(element: AuxViewElement): React.ReactElement {
+    aux(element: AuxViewElement): React.ReactElement {
       const variable = this.props.model.variables.get(element.ident);
       const hasWarning = variable?.hasError || false;
       const isSelected = this.isSelected(element);
@@ -412,7 +345,7 @@ export const Canvas = withStyles(styles)(
       return <Aux key={element.uid} {...props} />;
     }
 
-    private stock(element: StockViewElement): React.ReactElement {
+    stock(element: StockViewElement): React.ReactElement {
       const variable = this.props.model.variables.get(element.ident);
       const hasWarning = variable?.hasError || false;
       const isSelected = this.isSelected(element);
@@ -434,7 +367,7 @@ export const Canvas = withStyles(styles)(
       return <Stock key={element.uid} {...props} />;
     }
 
-    private module(element: ModuleViewElement) {
+    module(element: ModuleViewElement) {
       const isSelected = this.isSelected(element);
       const props: ModuleProps = {
         element,
@@ -447,7 +380,7 @@ export const Canvas = withStyles(styles)(
       return <Module key={element.uid} {...props} />;
     }
 
-    private connector(element: LinkViewElement) {
+    connector(element: LinkViewElement) {
       const { isMovingArrow } = this.state;
       const isSelected = this.props.selection.has(element.uid);
 
@@ -500,7 +433,7 @@ export const Canvas = withStyles(styles)(
       return <Connector key={element.uid} {...props} />;
     }
 
-    private getArcPoint(): FlowPoint | undefined {
+    getArcPoint(): FlowPoint | undefined {
       if (!this.selectionCenterOffset) {
         return undefined;
       }
@@ -514,7 +447,7 @@ export const Canvas = withStyles(styles)(
       });
     }
 
-    private flow(element: FlowViewElement) {
+    flow(element: FlowViewElement) {
       const variable = this.props.model.variables.get(element.ident);
       const hasWarning = variable?.hasError || false;
       const { isMovingArrow } = this.state;
@@ -561,7 +494,7 @@ export const Canvas = withStyles(styles)(
       );
     }
 
-    private constrainFlowMovement(
+    constrainFlowMovement(
       flow: FlowViewElement,
       moveDelta: Point,
     ): [FlowViewElement, List<StockViewElement | CloudViewElement>] {
@@ -620,7 +553,7 @@ export const Canvas = withStyles(styles)(
       return UpdateFlow(flow, ends, moveDelta);
     }
 
-    private constrainCloudMovement(
+    constrainCloudMovement(
       cloudEl: CloudViewElement,
       moveDelta: Point,
     ): [StockViewElement | CloudViewElement, FlowViewElement] {
@@ -628,10 +561,7 @@ export const Canvas = withStyles(styles)(
       return UpdateCloudAndFlow(cloudEl, flow, moveDelta);
     }
 
-    private constrainStockMovement(
-      stockEl: StockViewElement,
-      moveDelta: Point,
-    ): [StockViewElement, List<FlowViewElement>] {
+    constrainStockMovement(stockEl: StockViewElement, moveDelta: Point): [StockViewElement, List<FlowViewElement>] {
       const flows = List<FlowViewElement>(
         stockEl.inflows
           .concat(stockEl.outflows)
@@ -643,7 +573,7 @@ export const Canvas = withStyles(styles)(
       return UpdateStockAndFlows(stockEl, flows, moveDelta);
     }
 
-    private renderInitAndCache(): List<ViewElement> {
+    renderInitAndCache(): List<ViewElement> {
       if (!this.props.selection.equals(this.selection)) {
         this.selection = this.props.selection;
       }
@@ -767,7 +697,9 @@ export const Canvas = withStyles(styles)(
               throw new Error('invariant broken');
             }
 
-            const editingName = plainDeserialize(displayName(defined((inCreation as NamedViewElement).name)));
+            const editingName = plainDeserializeWithNewlines(
+              displayName(defined((inCreation as NamedViewElement).name)),
+            );
             this.setState({
               isEditingName: true,
               editNameOnPointerUp: false,
@@ -1482,7 +1414,7 @@ export const Canvas = withStyles(styles)(
     }
 
     render() {
-      const { selectedTool, embedded, classes } = this.props;
+      const { selectedTool, embedded, className } = this.props;
 
       let isEditingName = this.state.isEditingName;
       if (isEditingName && selectedTool !== this.prevSelectedTool) {
@@ -1504,7 +1436,7 @@ export const Canvas = withStyles(styles)(
       // phase 2: create React components and add them to the appropriate layer
       const zLayers = this.buildLayers(displayElements);
 
-      let overlayClass = classes.overlay;
+      let overlayClass = 'simlin-canvas-overlay';
       let nameEditor;
 
       let dragRect;
@@ -1518,11 +1450,11 @@ export const Canvas = withStyles(styles)(
         const w = Math.abs(pointA.x - pointB.x);
         const h = Math.abs(pointA.y - pointB.y);
 
-        dragRect = <rect className={classes.selectionOverlay} x={x} y={y} width={w} height={h} />;
+        dragRect = <rect className="simlin-canvas-dragrect-overlay" x={x} y={y} width={w} height={h} />;
       }
 
       if (!isEditingName || this.props.selection.isEmpty()) {
-        overlayClass += ' ' + classes.noPointerEvents;
+        overlayClass += ' ' + 'simlin-no-pointerevents';
       } else {
         const zoom = this.props.view.zoom;
         const editingUid = defined(this.props.selection.first());
@@ -1579,11 +1511,11 @@ export const Canvas = withStyles(styles)(
       // n.b. we don't want to clear this.elements as thats used when handling callbacks
 
       return (
-        <div className={classes.container} ref={this.svgRef}>
+        <div className={className} ref={this.svgRef}>
           <svg
             viewBox={viewBox}
             preserveAspectRatio="xMinYMin"
-            className={classes.canvas}
+            className="simlin-canvas"
             onPointerDown={this.handlePointerDown}
             onPointerMove={this.handlePointerMove}
             onPointerCancel={this.handlePointerCancel}
@@ -1600,4 +1532,49 @@ export const Canvas = withStyles(styles)(
       );
     }
   },
+)(
+  ({ theme }) => `
+    height: 100%;
+    width: 100%;
+
+    & .simlin-canvas {
+      box-sizing: border-box;
+      height: 100%;
+      width: 100%;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    & text {
+      fill: ${theme.palette.common.black};
+      font-size: 12px;
+      font-family: "Roboto", "Open Sans", "Arial", sans-serif;
+      font-weight: 300;
+      text-anchor: middle;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+
+    & .simlin-canvas-overlay {
+      position: absolute;
+      top: 0px;
+      left: 0px;
+      height: 100%;
+      width: 100%;
+    }
+
+    & .simlin-no-pointerevents {
+      pointer-events: none;
+      touch-action: none;
+    }
+
+    & .simlin-canvas-dragrect-overlay {
+      stroke: #4444dd;
+      stroke-width: 1px;
+      fill: #6363ff;
+      opacity: 0.2;
+      z-index: 10;
+      transform: translateZ(1);
+    }
+`,
 );

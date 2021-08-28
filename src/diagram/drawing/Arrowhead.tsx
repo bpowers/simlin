@@ -4,44 +4,11 @@
 
 import * as React from 'react';
 
-import { Theme } from '@material-ui/core/styles';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { Point } from './common';
 
-const styles = ({ palette }: Theme) =>
-  createStyles({
-    flowArrowhead: {
-      strokeWidth: 1,
-      strokeLinejoin: 'round',
-      stroke: palette.common.black,
-      fill: palette.common.white,
-    },
-    flowArrowheadSelected: {
-      strokeWidth: 1,
-      strokeLinejoin: 'round',
-      stroke: '#4444dd',
-      fill: 'white',
-    },
-    connArrowhead: {
-      strokeWidth: 1,
-      strokeLinejoin: 'round',
-      stroke: palette.mode === 'dark' ? '#777777' : 'gray',
-      fill: palette.mode === 'dark' ? '#777777' : 'gray',
-    },
-    connArrowheadSelected: {
-      strokeWidth: 1,
-      strokeLinejoin: 'round',
-      stroke: '#4444dd',
-      fill: '#4444dd',
-    },
-    arrowheadBg: {
-      fill: 'white',
-      opacity: 0,
-    },
-  });
-
-interface ArrowheadProps extends WithStyles<typeof styles> {
+export interface ArrowheadProps {
   isSelected: boolean;
   point: Point;
   angle: number;
@@ -50,8 +17,8 @@ interface ArrowheadProps extends WithStyles<typeof styles> {
   onSelection?: (e: React.PointerEvent<SVGElement>) => void;
 }
 
-export const Arrowhead = withStyles(styles)(
-  class Arrowhead extends React.PureComponent<ArrowheadProps> {
+export const Arrowhead = styled(
+  class Arrowhead extends React.PureComponent<ArrowheadProps & { className?: string }> {
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       if (this.props.onSelection) {
         this.props.onSelection(e);
@@ -59,7 +26,7 @@ export const Arrowhead = withStyles(styles)(
     };
 
     render() {
-      const { classes, type, isSelected } = this.props;
+      const { className, type, isSelected } = this.props;
       const { x, y } = this.props.point;
       let r = this.props.size;
       const path = `M${x},${y}L${x - r},${y + r / 2}A${r * 3},${r * 3} 0 0,1 ${x - r},${y - r / 2}z`;
@@ -68,26 +35,57 @@ export const Arrowhead = withStyles(styles)(
         y - r / 2
       }z`;
 
-      let className: string;
+      let pathClassName: string;
       if (type === 'connector') {
-        className = isSelected ? classes.connArrowheadSelected : classes.connArrowhead;
+        pathClassName = isSelected ? 'simlin-arrowhead-connector-selected' : 'simlin-arrowhead-connector';
       } else {
-        className = isSelected ? classes.flowArrowheadSelected : classes.flowArrowhead;
+        pathClassName = isSelected ? 'simlin-arrowhead-flow-selected' : 'simlin-arrowhead-flow';
       }
 
       const transform = `rotate(${this.props.angle},${x},${y})`;
 
       return (
-        <g>
+        <g className={className}>
           <path
             d={bgPath}
-            className={classes.arrowheadBg}
+            className="simlin-arrowhead-bg"
             transform={transform}
             onPointerDown={this.handlePointerDown}
           />
-          <path d={path} className={className} transform={transform} onPointerDown={this.handlePointerDown} />
+          <path d={path} className={pathClassName} transform={transform} onPointerDown={this.handlePointerDown} />
         </g>
       );
     }
   },
+)(
+  ({ theme }) => `
+  & .simlin-arrowhead-flow {
+    stroke-width: 1px;
+    stroke-linejoin: round;
+    stroke: ${theme.palette.common.black};
+    fill: ${theme.palette.common.white};
+  }
+  & .simlin-arrowhead-flow-selected {
+    stroke-width: 1;
+    stroke-linejoin: round;
+    stroke: #4444dd;
+    fill: white;
+  }
+  & .simlin-arrowhead-connector {
+    stroke-width: 1,
+    stroke-linejoin: round;
+    stroke: ${theme.palette.mode === 'dark' ? '#777777' : 'gray'};
+    fill: ${theme.palette.mode === 'dark' ? '#777777' : 'gray'};
+  }
+  & .simlin-arrowhead-connector-selected {
+    stroke-width: 1,
+    stroke-linejoin: round;
+    stroke: #4444dd;
+    fill: #4444dd;
+  }
+  & .simlin-arrowhead-bg {
+    fill: white;
+    opacity: 0;
+  }
+`,
 );

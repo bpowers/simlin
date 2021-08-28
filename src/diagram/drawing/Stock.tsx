@@ -4,59 +4,20 @@
 
 import * as React from 'react';
 
-import { Theme } from '@material-ui/core/styles';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 
 import { StockViewElement, ViewElement } from '@system-dynamics/core/datamodel';
+import { defined, Series } from '@system-dynamics/core/common';
 
 import { displayName, mergeBounds, Point, Rect } from './common';
 import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 
-import { defined, Series } from '@system-dynamics/core/common';
-
-const styles = ({ palette }: Theme) =>
-  createStyles({
-    stock: {
-      strokeWidth: 1,
-      stroke: palette.common.black,
-      fill: palette.common.white,
-    },
-    stockSelected: {
-      strokeWidth: 1,
-      stroke: '#4444dd',
-      fill: 'white',
-    },
-    targetGood: {
-      '& rect': {
-        stroke: 'rgb(76, 175, 80)',
-        strokeWidth: 2,
-      },
-    },
-    targetBad: {
-      '& rect': {
-        stroke: 'rgb(244, 67, 54)',
-        strokeWidth: 2,
-      },
-    },
-    selected: {
-      '& text': {
-        fill: '#4444dd',
-      },
-      '& rect': {
-        stroke: '#4444dd',
-      },
-    },
-    indicator: {
-      fill: 'rgb(255, 152, 0)',
-      strokeWidth: 0,
-    },
-  });
-
 export const StockWidth = 45;
 export const StockHeight = 35;
 
-interface StockPropsFull extends WithStyles<typeof styles> {
+export interface StockProps {
   isSelected: boolean;
   isEditingName: boolean;
   isValidTarget?: boolean;
@@ -66,11 +27,6 @@ interface StockPropsFull extends WithStyles<typeof styles> {
   onLabelDrag: (uid: number, e: React.PointerEvent<SVGElement>) => void;
   element: StockViewElement;
 }
-
-export type StockProps = Pick<
-  StockPropsFull,
-  'element' | 'series' | 'isSelected' | 'isValidTarget' | 'isEditingName' | 'hasWarning' | 'onSelection' | 'onLabelDrag'
->;
 
 export function stockContains(element: ViewElement, point: Point): boolean {
   const cx = element.cx;
@@ -108,8 +64,8 @@ export function stockBounds(element: StockViewElement): Rect {
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export const Stock = withStyles(styles)(
-  class StockInner extends React.PureComponent<StockPropsFull> {
+export const Stock = styled(
+  class StockInner extends React.PureComponent<StockProps & { className?: string }> {
     handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
       // e.preventDefault();
       // e.stopPropagation();
@@ -132,14 +88,14 @@ export const Stock = withStyles(styles)(
         return undefined;
       }
 
-      const { classes, element } = this.props;
+      const { element } = this.props;
       const w = StockWidth;
       const h = StockHeight;
 
       const cx = element.cx + w / 2 - 1;
       const cy = element.cy - h / 2 + 1;
 
-      return <circle className={classes.indicator} cx={cx} cy={cy} r={3} />;
+      return <circle className="simlin-error-indicator" cx={cx} cy={cy} r={3} />;
     }
 
     sparkline(series: Readonly<Array<Series>> | undefined) {
@@ -162,7 +118,7 @@ export const Stock = withStyles(styles)(
     }
 
     render() {
-      const { element, isEditingName, isSelected, isValidTarget, classes } = this.props;
+      const { element, isEditingName, isSelected, isValidTarget, className } = this.props;
       const w = StockWidth;
       const h = StockHeight;
       const cx = element.cx;
@@ -191,25 +147,29 @@ export const Stock = withStyles(styles)(
       const sparkline = this.sparkline(series);
       const indicator = this.indicators();
 
-      let groupClassName = isSelected ? classes.selected : undefined;
+      let groupClassName = isSelected ? 'simlin-selected' : undefined;
       if (isValidTarget !== undefined) {
-        groupClassName = isValidTarget ? classes.targetGood : classes.targetBad;
+        groupClassName = isValidTarget ? 'simlin-target-good' : 'simlin-target-bad';
       }
 
       const x = cx - w / 2;
       const y = cy - h / 2;
 
-      let rects = [<rect key="1" className={classes.stock} x={x} y={y} width={w} height={h} />];
+      let rects = [<rect key="1" x={x} y={y} width={w} height={h} />];
       if (isArrayed) {
         rects = [
-          <rect key="0" className={classes.stock} x={x + arrayedOffset} y={y + arrayedOffset} width={w} height={h} />,
-          <rect key="1" className={classes.stock} x={x} y={y} width={w} height={h} />,
-          <rect key="2" className={classes.stock} x={x - arrayedOffset} y={y - arrayedOffset} width={w} height={h} />,
+          <rect key="0" x={x + arrayedOffset} y={y + arrayedOffset} width={w} height={h} />,
+          <rect key="1" x={x} y={y} width={w} height={h} />,
+          <rect key="2" x={x - arrayedOffset} y={y - arrayedOffset} width={w} height={h} />,
         ];
       }
 
       return (
-        <g className={groupClassName} onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
+        <g
+          className={clsx(className, groupClassName)}
+          onPointerDown={this.handlePointerDown}
+          onPointerUp={this.handlePointerUp}
+        >
           {rects}
           {sparkline}
           {indicator}
@@ -218,4 +178,32 @@ export const Stock = withStyles(styles)(
       );
     }
   },
+)(
+  ({ theme }) => `
+    & rect {
+      stroke-width: 1px;
+      stroke: ${theme.palette.common.black};
+      fill: ${theme.palette.common.white};
+    }
+    &.simlin-selected {
+      & text {
+        fill: #4444dd;
+      }
+      & rect {
+        stroke: #4444dd;
+      }
+    }
+    &.simlin-target-good rect {
+      stroke: rgb(76, 175, 80);
+      stroke-width: 2px;
+    }
+    &.simlin-target-bad rect {
+      stroke: rgb(244, 67, 54);
+      stroke-width: 2px;
+    }
+    & .simlin-error-indicator {
+      stroke-width: 0px;
+      fill: rgb(255, 152, 0);
+    }
+`,
 );

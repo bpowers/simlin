@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
+import { styled } from '@material-ui/core/styles';
 import { List } from 'immutable';
 import { fromUint8Array, toUint8Array } from 'js-base64';
 import { History } from 'history';
@@ -12,16 +12,6 @@ import { History } from 'history';
 import { baseURL, defined } from '@system-dynamics/core/common';
 
 import { Editor } from './Editor';
-
-const styles = createStyles({
-  editorBg: {
-    background: '#f2f2f2',
-    // background: '#fffff8',
-    width: '100%',
-    height: '100%',
-    position: 'fixed',
-  },
-});
 
 class HostedWebEditorError implements Error {
   name = 'HostedWebEditorError';
@@ -31,7 +21,7 @@ class HostedWebEditorError implements Error {
   }
 }
 
-interface HostedWebEditorProps extends WithStyles<typeof styles> {
+interface HostedWebEditorProps {
   username: string;
   projectName: string;
   embedded?: boolean;
@@ -46,8 +36,11 @@ interface HostedWebEditorState {
   projectVersion: number;
 }
 
-export const HostedWebEditor = withStyles(styles)(
-  class InnerHostedWebEditor extends React.PureComponent<HostedWebEditorProps, HostedWebEditorState> {
+export const HostedWebEditor = styled(
+  class InnerHostedWebEditor extends React.PureComponent<
+    HostedWebEditorProps & { className?: string },
+    HostedWebEditorState
+  > {
     constructor(props: HostedWebEditorProps) {
       super(props);
 
@@ -63,17 +56,17 @@ export const HostedWebEditor = withStyles(styles)(
       });
     }
 
-    private appendModelError(msg: string) {
+    appendModelError(msg: string) {
       this.setState({
         serviceErrors: this.state.serviceErrors.push(new HostedWebEditorError(msg)),
       });
     }
 
-    private getBaseURL(): string {
+    getBaseURL(): string {
       return this.props.baseURL !== undefined ? this.props.baseURL : baseURL;
     }
 
-    private handleSave = async (project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> => {
+    handleSave = async (project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> => {
       const bodyContents = {
         currVersion,
         projectPB: fromUint8Array(project as Uint8Array),
@@ -110,7 +103,7 @@ export const HostedWebEditor = withStyles(styles)(
       return projectVersion;
     };
 
-    private async loadProject(): Promise<void> {
+    async loadProject(): Promise<void> {
       const base = this.getBaseURL();
       const apiPath = `${base}/api/projects/${this.props.username}/${this.props.projectName}`;
       const response = await fetch(apiPath);
@@ -131,7 +124,7 @@ export const HostedWebEditor = withStyles(styles)(
     }
 
     render(): React.ReactNode {
-      const { embedded, classes } = this.props;
+      const { embedded, className } = this.props;
 
       if (!this.state.projectBinary || !this.state.projectVersion) {
         if (!this.state.serviceErrors.isEmpty()) {
@@ -142,7 +135,7 @@ export const HostedWebEditor = withStyles(styles)(
         }
       }
 
-      const classNames = embedded ? '' : classes.editorBg;
+      const classNames = embedded ? className : `${className} simlin-hostedwebeditor-bg`;
 
       return (
         <div className={classNames}>
@@ -157,4 +150,12 @@ export const HostedWebEditor = withStyles(styles)(
       );
     }
   },
-);
+)(() => ({
+  '&.simlin-hostedwebeditor-bg': {
+    background: '#f2f2f2',
+    // background: '#fffff8',
+    width: '100%',
+    height: '100%',
+    position: 'fixed',
+  },
+}));

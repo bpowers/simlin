@@ -6,6 +6,8 @@ import * as React from 'react';
 
 import { List, Map, Set, Stack } from 'immutable';
 
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import IconButton from '@material-ui/core/IconButton';
 import TextField from '@material-ui/core/TextField';
 import Autocomplete from '@material-ui/core/Autocomplete';
@@ -17,8 +19,6 @@ import MenuIcon from '@material-ui/icons/Menu';
 import SpeedDial, { CloseReason } from '@material-ui/core/SpeedDial';
 import SpeedDialAction from '@material-ui/core/SpeedDialAction';
 import SpeedDialIcon from '@material-ui/core/SpeedDialIcon';
-import { Theme } from '@material-ui/core/styles';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import { Card } from '@material-ui/core';
 import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
@@ -84,114 +84,6 @@ const SearchbarWidthLg = 480;
 function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
 }
-
-const styles = ({ spacing, palette, breakpoints }: Theme) =>
-  createStyles({
-    root: {},
-    undoRedoBar: {
-      display: 'flex',
-      position: 'absolute',
-      bottom: spacing(3),
-      left: spacing(10),
-    },
-    speedDial: {
-      position: 'absolute',
-      bottom: spacing(2),
-      left: spacing(1.5),
-    },
-    snapshotCard: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      width: 240,
-      marginTop: 12,
-      marginLeft: 12,
-    },
-    snapshotImg: {
-      width: '100%',
-      objectFit: 'scale-down',
-    },
-    searchbox: {
-      position: 'relative',
-      top: 0,
-      left: 0,
-      paddingLeft: 52,
-      paddingRight: 64,
-      paddingTop: 8,
-      border: 0,
-    },
-    menuButton: {
-      marginLeft: 4,
-      position: 'absolute',
-      zIndex: 100,
-      left: 0,
-      top: 0,
-      display: 'block',
-      color: '#666',
-    },
-    searchbar: {
-      position: 'absolute',
-      top: 8,
-      right: 8,
-      height: 48,
-      [breakpoints.up('lg')]: {
-        width: SearchbarWidthLg,
-      },
-      [breakpoints.between('md', 'lg')]: {
-        width: SearchbarWidthMd,
-      },
-      [breakpoints.down('md')]: {
-        width: SearchbarWidthSm,
-      },
-    },
-    searchbarMd: {
-      position: 'absolute',
-      top: 8,
-      right: 8,
-      height: 48,
-      width: SearchbarWidthSm,
-    },
-    varDetails: {
-      position: 'absolute',
-      top: 8,
-      right: 8,
-    },
-    searchButton: {
-      color: '#aaa',
-    },
-    clearSearchButton: {
-      color: '#aaa',
-      cursor: 'pointer',
-    },
-    divider: {
-      position: 'absolute',
-      top: 0,
-      right: 0,
-      height: 28,
-      marginTop: 10,
-      marginRight: 54,
-      borderLeftWidth: 1,
-      borderLeftStyle: 'solid',
-      borderColor: '#ddd',
-    },
-    editor: {
-      boxSizing: 'border-box',
-      overflow: 'hidden',
-    },
-    editorBg: {
-      width: '100%',
-      height: '100%',
-    },
-    selectedTool: {
-      backgroundColor: palette.secondary.main,
-    },
-    // https://github.com/mui-org/material-ui/issues/19692
-    '@global': {
-      '.MuiAutocomplete-option[data-focus="true"]': {
-        background: '#ADD8E6',
-      },
-    },
-  });
 
 function lowerErrors(varErrors: globalThis.Map<string, Array<EngineEquationError>>): Map<string, List<EquationError>> {
   let result = Map<string, List<EquationError>>();
@@ -271,7 +163,7 @@ interface EditorState {
   variableDetailsActiveTab: number;
 }
 
-interface EditorProps extends WithStyles<typeof styles> {
+interface EditorProps {
   initialProjectBinary: Readonly<Uint8Array>;
   initialProjectVersion: number;
   name: string; // used when saving
@@ -279,14 +171,14 @@ interface EditorProps extends WithStyles<typeof styles> {
   onSave: (project: Readonly<Uint8Array>, currVersion: number) => Promise<number | undefined>;
 }
 
-export const Editor = withStyles(styles)(
-  class InnerEditor extends React.PureComponent<EditorProps, EditorState> {
-    private activeEngine?: IEngine;
-    private newEngineShouldPullView = false;
-    private newEngineQueuedView?: StockFlowView;
+export const Editor = styled(
+  class InnerEditor extends React.PureComponent<EditorProps & { className?: string }, EditorState> {
+    activeEngine?: IEngine;
+    newEngineShouldPullView = false;
+    newEngineQueuedView?: StockFlowView;
 
-    private inSave = false;
-    private queuedModelToSave?: Readonly<Uint8Array>;
+    inSave = false;
+    queuedModelToSave?: Readonly<Uint8Array>;
 
     constructor(props: EditorProps) {
       super(props);
@@ -320,15 +212,15 @@ export const Editor = withStyles(styles)(
       });
     }
 
-    private project(): Project | undefined {
+    project(): Project | undefined {
       return this.state.activeProject;
     }
 
-    private engine(): IEngine | undefined {
+    engine(): IEngine | undefined {
       return this.activeEngine;
     }
 
-    private scheduleSimRun(): void {
+    scheduleSimRun(): void {
       setTimeout(() => {
         const engine = this.engine();
         if (!engine) {
@@ -338,7 +230,7 @@ export const Editor = withStyles(styles)(
       });
     }
 
-    private loadSim(engine: IEngine) {
+    loadSim(engine: IEngine) {
       this.recalculateStatus();
 
       if (!engine.isSimulatable()) {
@@ -366,7 +258,7 @@ export const Editor = withStyles(styles)(
       }
     }
 
-    private updateProject(serializedProject: Readonly<Uint8Array>, scheduleSave = true) {
+    updateProject(serializedProject: Readonly<Uint8Array>, scheduleSave = true) {
       if (this.state.projectHistory.size > 0) {
         const current = this.state.projectHistory.get(this.state.projectOffset);
         if (uint8ArraysEqual(serializedProject, current)) {
@@ -396,7 +288,7 @@ export const Editor = withStyles(styles)(
       }
     }
 
-    private scheduleSave(project: Readonly<Uint8Array>): void {
+    scheduleSave(project: Readonly<Uint8Array>): void {
       const { projectVersion } = this.state;
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
@@ -404,7 +296,7 @@ export const Editor = withStyles(styles)(
       });
     }
 
-    private async save(project: Readonly<Uint8Array>, currVersion: number): Promise<void> {
+    async save(project: Readonly<Uint8Array>, currVersion: number): Promise<void> {
       if (this.inSave) {
         this.queuedModelToSave = project;
         return;
@@ -440,7 +332,7 @@ export const Editor = withStyles(styles)(
       }
     }
 
-    private appendModelError(msg: string) {
+    appendModelError(msg: string) {
       this.setState((prevState: EditorState) => ({
         modelErrors: prevState.modelErrors.push(new EditorError(msg)),
       }));
@@ -1163,7 +1055,7 @@ export const Editor = withStyles(styles)(
       this.setState({ activeProject });
     }
 
-    private queueViewUpdate(view: StockFlowView): void {
+    queueViewUpdate(view: StockFlowView): void {
       const engine = this.engine();
       if (engine) {
         const viewPb = view.toPb();
@@ -1381,7 +1273,6 @@ export const Editor = withStyles(styles)(
 
     getSearchBar() {
       const { embedded } = this.props;
-      const classes = this.props.classes;
 
       if (embedded) {
         return undefined;
@@ -1407,9 +1298,9 @@ export const Editor = withStyles(styles)(
       const status = this.state.status;
 
       return (
-        <Paper className={classes.searchbar} elevation={2}>
+        <Paper className="simlin-editor-searchbar" elevation={2}>
           <IconButton
-            className={classes.menuButton}
+            className="simlin-editor-menubutton"
             color="inherit"
             aria-label="Menu"
             onClick={this.handleShowDrawer}
@@ -1417,7 +1308,7 @@ export const Editor = withStyles(styles)(
           >
             <MenuIcon />
           </IconButton>
-          <div className={classes.searchbox}>
+          <div className="simlin-editor-searchbox">
             <Autocomplete
               key={name}
               value={name}
@@ -1433,7 +1324,7 @@ export const Editor = withStyles(styles)(
               }}
             />
           </div>
-          <div className={classes.divider} />
+          <div className="simlin-editor-divider" />
           <Status status={status} onClick={this.handleStatusClick} />
         </Paper>
       );
@@ -1480,8 +1371,6 @@ export const Editor = withStyles(styles)(
     };
 
     getErrorDetails() {
-      const classes = this.props.classes;
-
       let simError: SimError | undefined;
       let modelErrors = List<ModelError>();
       let varErrors = Map<string, List<EquationError>>();
@@ -1515,7 +1404,7 @@ export const Editor = withStyles(styles)(
       }
 
       return (
-        <div className={classes.varDetails}>
+        <div className="simlin-editor-vardetails">
           <ErrorDetails
             status={this.state.status}
             simError={simError}
@@ -1529,7 +1418,6 @@ export const Editor = withStyles(styles)(
 
     getDetails() {
       const { embedded } = this.props;
-      const classes = this.props.classes;
 
       if (embedded) {
         return;
@@ -1556,7 +1444,7 @@ export const Editor = withStyles(styles)(
       const activeTab = this.state.variableDetailsActiveTab;
 
       return (
-        <div className={classes.varDetails}>
+        <div className="simlin-editor-vardetails">
           <VariableDetails
             key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
             variable={variable}
@@ -1816,7 +1704,6 @@ export const Editor = withStyles(styles)(
 
     getMetaActionsBar() {
       const { embedded } = this.props;
-      const classes = this.props.classes;
       if (embedded) {
         return undefined;
       }
@@ -1828,7 +1715,7 @@ export const Editor = withStyles(styles)(
       const redoEnabled = this.state.projectOffset > 0;
 
       return (
-        <div className={classes.undoRedoBar}>
+        <div className="simlin-editor-undoredobar">
           <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
           <Snapshotter onSnapshot={this.handleSnapshot} />
           <ZoomBar zoom={zoom} onChangeZoom={this.handleZoomChange} />
@@ -1838,7 +1725,6 @@ export const Editor = withStyles(styles)(
 
     getEditorControls() {
       const { embedded } = this.props;
-      const classes = this.props.classes;
       const { dialOpen, dialVisible, selectedTool } = this.state;
 
       if (embedded) {
@@ -1847,8 +1733,8 @@ export const Editor = withStyles(styles)(
 
       return (
         <SpeedDial
-          ariaLabel="SpeedDial openIcon example"
-          className={classes.speedDial}
+          ariaLabel="hide or show editor tools"
+          className="simlin-editor-speeddial"
           hidden={!dialVisible}
           icon={<SpeedDialIcon icon={<EditIcon />} openIcon={<ClearIcon />} />}
           onClick={this.handleDialClick}
@@ -1859,25 +1745,25 @@ export const Editor = withStyles(styles)(
             icon={<StockIcon />}
             title="Stock"
             onClick={this.handleSelectStock}
-            className={selectedTool === 'stock' ? classes.selectedTool : undefined}
+            className={selectedTool === 'stock' ? 'simlin-editor-selectedtool' : undefined}
           />
           <SpeedDialAction
             icon={<FlowIcon />}
             title="Flow"
             onClick={this.handleSelectFlow}
-            className={selectedTool === 'flow' ? classes.selectedTool : undefined}
+            className={selectedTool === 'flow' ? 'simlin-editor-selectedtool' : undefined}
           />
           <SpeedDialAction
             icon={<AuxIcon />}
             title="Variable"
             onClick={this.handleSelectAux}
-            className={selectedTool === 'aux' ? classes.selectedTool : undefined}
+            className={selectedTool === 'aux' ? 'simlin-editor-selectedtool' : undefined}
           />
           <SpeedDialAction
             icon={<LinkIcon />}
             title="Link"
             onClick={this.handleSelectLink}
-            className={selectedTool === 'link' ? classes.selectedTool : undefined}
+            className={selectedTool === 'link' ? 'simlin-editor-selectedtool' : undefined}
           />
         </SpeedDial>
       );
@@ -1885,7 +1771,6 @@ export const Editor = withStyles(styles)(
 
     getSnapshot() {
       const { embedded } = this.props;
-      const classes = this.props.classes;
       const { snapshotBlob } = this.state;
 
       if (embedded || !snapshotBlob) {
@@ -1893,9 +1778,9 @@ export const Editor = withStyles(styles)(
       }
 
       return (
-        <Card className={classes.snapshotCard} elevation={2}>
+        <Card className="simlin-editor-snapshotcard" elevation={2}>
           <CardContent>
-            <img src={URL.createObjectURL(snapshotBlob)} className={classes.snapshotImg} alt="profile snapshot" />
+            <img src={URL.createObjectURL(snapshotBlob)} className="simlin-editor-snapshotimg" alt="diagram snapshot" />
           </CardContent>
           <CardActions>
             <Button size="small" color="primary" onClick={this.handleClearSnapshot}>
@@ -1911,9 +1796,9 @@ export const Editor = withStyles(styles)(
     };
 
     render(): React.ReactNode {
-      const { embedded, classes } = this.props;
+      const { embedded, className } = this.props;
 
-      const classNames = classes.editor + (embedded ? '' : ' ' + classes.editorBg);
+      const classNames = clsx(className, 'simlin-editor', embedded ? '' : 'simlin-editor-bg');
 
       return (
         <div className={classNames}>
@@ -1929,4 +1814,108 @@ export const Editor = withStyles(styles)(
       );
     }
   },
-);
+)(({ theme }) => ({
+  '.simlin-editor-undoredobar': {
+    display: 'flex',
+    position: 'absolute',
+    bottom: theme.spacing(3),
+    left: theme.spacing(10),
+  },
+  '.simlin-editor-speeddial': {
+    position: 'absolute',
+    bottom: theme.spacing(2),
+    left: theme.spacing(1.5),
+  },
+  '.simlin-editor-snapshotcard': {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 240,
+    marginTop: 12,
+    marginLeft: 12,
+  },
+  '.simlin-editor-snapshotimg': {
+    width: '100%',
+    objectFit: 'scale-down',
+  },
+  '.simlin-editor-searchbox': {
+    position: 'relative',
+    top: 0,
+    left: 0,
+    paddingLeft: 52,
+    paddingRight: 64,
+    paddingTop: 8,
+    border: 0,
+  },
+  '.simlin-editor-menubutton': {
+    marginLeft: 4,
+    position: 'absolute',
+    zIndex: 100,
+    left: 0,
+    top: 0,
+    display: 'block',
+    color: '#666',
+  },
+  '.simlin-editor-searchbar': {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    height: 48,
+    [theme.breakpoints.up('lg')]: {
+      width: SearchbarWidthLg,
+    },
+    [theme.breakpoints.between('md', 'lg')]: {
+      width: SearchbarWidthMd,
+    },
+    [theme.breakpoints.down('md')]: {
+      width: SearchbarWidthSm,
+    },
+  },
+  '.simlin-editor-searchbarmd': {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    height: 48,
+    width: SearchbarWidthSm,
+  },
+  '.simlin-editor-vardetails': {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+  },
+  '.simlin-editor-searchbutton': {
+    color: '#aaa',
+  },
+  '.simlin-editor-clearsearchbutton': {
+    color: '#aaa',
+    cursor: 'pointer',
+  },
+  '.simlin-editor-divider': {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    height: 28,
+    marginTop: 10,
+    marginRight: 54,
+    borderLeftWidth: 1,
+    borderLeftStyle: 'solid',
+    borderColor: '#ddd',
+  },
+  '&.simlin-editor': {
+    boxSizing: 'border-box',
+    overflow: 'hidden',
+  },
+  '&.simlin-editor-bg': {
+    width: '100%',
+    height: '100%',
+  },
+  '.simlin-editor-selectedtool': {
+    backgroundColor: theme.palette.secondary.main,
+  },
+  // https://github.com/mui-org/material-ui/issues/19692
+  '@global': {
+    '.MuiAutocomplete-option[data-focus="true"]': {
+      background: '#ADD8E6',
+    },
+  },
+}));

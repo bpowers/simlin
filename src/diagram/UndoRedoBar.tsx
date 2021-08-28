@@ -4,43 +4,21 @@
 
 import * as React from 'react';
 
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import IconButton from '@material-ui/core/IconButton';
 import Paper from '@material-ui/core/Paper';
-import { Theme } from '@material-ui/core/styles';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import RedoIcon from '@material-ui/icons/Redo';
 import UndoIcon from '@material-ui/icons/Undo';
 
-const styles = ({ spacing }: Theme) =>
-  createStyles({
-    card: {
-      height: 40,
-      marginRight: spacing(1),
-    },
-    divider: {
-      display: 'inline-block',
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      marginLeft: 40,
-      marginTop: 12,
-      height: 16,
-      borderLeftWidth: 1,
-      borderLeftStyle: 'solid',
-      borderColor: '#ddd',
-    },
-  });
-
-interface UndoRedoBarPropsFull extends WithStyles<typeof styles> {
+interface UndoRedoBarProps {
   undoEnabled: boolean;
   redoEnabled: boolean;
   onUndoRedo: (kind: 'undo' | 'redo') => void;
 }
 
-// export type UndoRedoProps = Pick<UndoRedoBarPropsFull, 'undoEnabled' | 'redoEnabled' | 'onUndoRedo'>;
-
-export const UndoRedoBar = withStyles(styles)(
-  class InnerVariableDetails extends React.PureComponent<UndoRedoBarPropsFull> {
+export const UndoRedoBar = styled(
+  class InnerVariableDetails extends React.PureComponent<UndoRedoBarProps & { className?: string }> {
     handleUndo = () => {
       this.props.onUndoRedo('undo');
     };
@@ -50,14 +28,14 @@ export const UndoRedoBar = withStyles(styles)(
     };
 
     render() {
-      const { undoEnabled, redoEnabled, classes } = this.props;
+      const { undoEnabled, redoEnabled, className } = this.props;
 
       return (
-        <Paper className={classes.card} elevation={2}>
+        <Paper className={clsx(className, 'simlin-undoredobar-card')} elevation={2}>
           <IconButton disabled={!undoEnabled} aria-label="Undo" onClick={this.handleUndo}>
             <UndoIcon />
           </IconButton>
-          <div className={classes.divider} />
+          <div className="simlin-undoredobar-divider" />
           <IconButton disabled={!redoEnabled} aria-label="Redo" onClick={this.handleRedo}>
             <RedoIcon />
           </IconButton>
@@ -65,4 +43,21 @@ export const UndoRedoBar = withStyles(styles)(
       );
     }
   },
-);
+)(({ theme }) => ({
+  '&.simlin-undoredobar-card': {
+    height: 40,
+    marginRight: theme.spacing(1),
+  },
+  '.simlin-undoredobar-divider': {
+    display: 'inline-block',
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    marginLeft: 40,
+    marginTop: 12,
+    height: 16,
+    borderLeftWidth: 1,
+    borderLeftStyle: 'solid',
+    borderColor: '#ddd',
+  },
+}));

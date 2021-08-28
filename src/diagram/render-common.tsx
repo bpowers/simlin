@@ -11,8 +11,7 @@ import { renderToString } from 'react-dom/server';
 
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 
-import { createTheme } from '@material-ui/core/styles';
-import { ServerStyleSheets, ThemeProvider } from '@material-ui/styles';
+import { createTheme, ThemeProvider } from '@material-ui/core/styles';
 
 import { defined } from '@system-dynamics/core/common';
 import { Canvas } from './drawing/Canvas';
@@ -33,8 +32,6 @@ export function renderSvgToString(project: Project, modelName: string): [string,
   const attachLink = (_element: ViewElement, _to: string): void => {};
   const createCb = (_element: ViewElement): void => {};
   const nullCb = (): void => {};
-
-  const sheets = new ServerStyleSheets();
 
   const canvasElement = (
     <Canvas
@@ -59,7 +56,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
     />
   );
 
-  let svg = renderToString(sheets.collect(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>));
+  let svg = renderToString(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>);
 
   let width = 100;
   let height = 100;
@@ -72,10 +69,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
     height = viewboxParts[3];
   }
 
-  const styles = `<style>\n${sheets.toString()}\n</style>\n<defs>\n`;
-
   svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" xmlns="http://www.w3.org/2000/svg" `);
-  svg = svg.replace(/<defs[^>]*>/, styles);
   svg = svg.replace(/^<div[^>]*>/, '');
   svg = svg.replace(/<\/div>$/, '');
 

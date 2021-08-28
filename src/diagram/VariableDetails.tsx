@@ -6,14 +6,12 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import { createEditor, Descendant, Text } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
-
 import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@material-ui/core';
-import { Theme } from '@material-ui/core/styles';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 
 import { brewer } from 'chroma-js';
 
@@ -39,74 +37,7 @@ const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;
 const SearchbarWidthLg = 480;
 
-const styles = ({ breakpoints }: Theme) =>
-  createStyles({
-    card: {
-      [breakpoints.up('lg')]: {
-        width: SearchbarWidthLg,
-      },
-      [breakpoints.between('md', 'lg')]: {
-        width: SearchbarWidthMd,
-      },
-      [breakpoints.down('md')]: {
-        width: SearchbarWidthSm,
-      },
-    },
-    cardInner: {
-      paddingTop: 52,
-    },
-    editorActions: {},
-    eqnEditor: {
-      backgroundColor: 'rgba(245, 245, 245)',
-      borderRadius: 4,
-      marginTop: 4,
-      padding: 4,
-      height: 80,
-      fontFamily: "'Roboto Mono', monospace",
-      overflowY: 'auto',
-    },
-    unitsEditor: {
-      backgroundColor: 'rgba(245, 245, 245)',
-      borderRadius: 4,
-      marginTop: 4,
-      padding: 4,
-      height: 36,
-      fontFamily: "'Roboto Mono', monospace",
-      overflowY: 'auto',
-    },
-    notesEditor: {
-      backgroundColor: 'rgba(245, 245, 245)',
-      borderRadius: 4,
-      marginTop: 4,
-      padding: 4,
-      height: 56,
-      fontFamily: "'Roboto Mono', monospace",
-      overflowY: 'auto',
-    },
-    eqnError: {
-      textDecoration: 'underline wavy red',
-    },
-    eqnWarning: {
-      textDecoration: 'underline wavy orange',
-    },
-    buttonLeft: {
-      float: 'left',
-      marginRight: 'auto',
-    },
-    buttonRight: {
-      float: 'right',
-    },
-    addLookupButton: {
-      display: 'block',
-      marginLeft: 'auto',
-      marginRight: 'auto',
-    },
-    errorList: {
-      color: '#cc0000',
-    },
-  });
-
-interface VariableDetailsPropsFull extends WithStyles<typeof styles> {
+interface VariableDetailsProps {
   variable: Variable;
   viewElement: ViewElement;
   onDelete: (ident: string) => void;
@@ -200,9 +131,12 @@ function highlightErrors(
   return result;
 }
 
-export const VariableDetails = withStyles(styles)(
-  class InnerVariableDetails extends React.PureComponent<VariableDetailsPropsFull, VariableDetailsState> {
-    constructor(props: VariableDetailsPropsFull) {
+export const VariableDetails = styled(
+  class InnerVariableDetails extends React.PureComponent<
+    VariableDetailsProps & { className?: string },
+    VariableDetailsState
+  > {
+    constructor(props: VariableDetailsProps) {
       super(props);
 
       const { variable } = props;
@@ -290,8 +224,8 @@ export const VariableDetails = withStyles(styles)(
     renderLeaf = (props: RenderLeafProps) => {
       const isError = !!((props.leaf as unknown) as any).error;
       const isWarning = !!((props.leaf as unknown) as any).warning;
-      const errorClass = this.props.classes.eqnError;
-      const warningClass = this.props.classes.eqnWarning;
+      const errorClass = 'simlin-variabledetails-eqnerror';
+      const warningClass = 'simlin-variabledetails-eqnwarning';
       const className = isError ? errorClass : isWarning ? warningClass : undefined;
       return (
         <span {...props.attributes} className={className}>
@@ -301,7 +235,6 @@ export const VariableDetails = withStyles(styles)(
     };
 
     renderEquation() {
-      const { classes } = this.props;
       const { equationContents } = this.state;
       const initialEquation = scalarEquationFor(this.props.variable);
       const initialUnits = this.props.variable.units;
@@ -373,7 +306,9 @@ export const VariableDetails = withStyles(styles)(
         if (errors) {
           errors.forEach((error) => {
             errorList.push(
-              <Typography className={classes.errorList}>error: {errorCodeDescription(error.code)}</Typography>,
+              <Typography className="simlin-variabledetails-errorlist">
+                error: {errorCodeDescription(error.code)}
+              </Typography>,
             );
           });
         }
@@ -381,7 +316,7 @@ export const VariableDetails = withStyles(styles)(
           unitErrors.forEach((error) => {
             const details = error.details;
             errorList.push(
-              <Typography className={classes.errorList}>
+              <Typography className="simlin-variabledetails-errorlist">
                 unit error: {errorCodeDescription(error.code)}
                 {details ? `: ${details}` : undefined}
               </Typography>,
@@ -418,7 +353,7 @@ export const VariableDetails = withStyles(styles)(
             onChange={this.handleEquationChange}
           >
             <Editable
-              className={classes.eqnEditor}
+              className="simlin-variabledetails-eqneditor"
               renderLeaf={this.renderLeaf}
               placeholder="Enter an equation..."
               spellCheck={false}
@@ -428,7 +363,7 @@ export const VariableDetails = withStyles(styles)(
 
           <Slate editor={this.state.unitsEditor} value={this.state.unitsContents} onChange={this.handleUnitsChange}>
             <Editable
-              className={classes.unitsEditor}
+              className="simlin-variabledetails-unitseditor"
               renderLeaf={this.renderLeaf}
               placeholder="Enter units..."
               spellCheck={false}
@@ -438,7 +373,7 @@ export const VariableDetails = withStyles(styles)(
 
           <Slate editor={this.state.notesEditor} value={this.state.notesContents} onChange={this.handleNotesChange}>
             <Editable
-              className={classes.notesEditor}
+              className="simlin-variabledetails-noteseditor"
               renderLeaf={this.renderLeaf}
               placeholder="Documentation"
               spellCheck={false}
@@ -446,11 +381,16 @@ export const VariableDetails = withStyles(styles)(
             />
           </Slate>
 
-          <CardActions className={classes.editorActions}>
-            <Button size="small" color="secondary" onClick={this.handleVariableDelete} className={classes.buttonLeft}>
+          <CardActions>
+            <Button
+              size="small"
+              color="secondary"
+              onClick={this.handleVariableDelete}
+              className="simlin-variabledetails-buttonleft"
+            >
               Delete
             </Button>
-            <div className={classes.buttonRight}>
+            <div className="simlin-variabledetails-buttonright">
               <Button
                 size="small"
                 color="primary"
@@ -477,7 +417,7 @@ export const VariableDetails = withStyles(styles)(
     };
 
     renderLookup() {
-      const { classes, variable } = this.props;
+      const { variable } = this.props;
 
       let table;
       if (variable.gf) {
@@ -489,7 +429,7 @@ export const VariableDetails = withStyles(styles)(
               variant="contained"
               color="secondary"
               onClick={this.handleAddLookupTable}
-              className={classes.addLookupButton}
+              className="simlin-variabledetails-addlookupbutton"
             >
               Add lookup table
             </Button>
@@ -506,16 +446,16 @@ export const VariableDetails = withStyles(styles)(
     }
 
     render() {
-      const { activeTab, classes, viewElement } = this.props;
+      const { activeTab, className, viewElement } = this.props;
 
       const equationType = viewElement instanceof StockViewElement ? 'Initial Value' : 'Equation';
       const content = activeTab === 0 ? this.renderEquation() : this.renderLookup();
       const lookupTab = viewElement instanceof StockViewElement ? undefined : <Tab label="Lookup Function" />;
 
       return (
-        <Card className={classes.card} elevation={1}>
+        <Card className={clsx(className, 'simlin-variabledetails-card')} elevation={1}>
           <Tabs
-            className={classes.cardInner}
+            className="simlin-variabledetails-inner"
             variant="fullWidth"
             value={activeTab}
             indicatorColor="primary"
@@ -532,4 +472,67 @@ export const VariableDetails = withStyles(styles)(
       );
     }
   },
-);
+)(({ theme }) => ({
+  '&.simlin-variabledetails-card': {
+    [theme.breakpoints.up('lg')]: {
+      width: SearchbarWidthLg,
+    },
+    [theme.breakpoints.between('md', 'lg')]: {
+      width: SearchbarWidthMd,
+    },
+    [theme.breakpoints.down('md')]: {
+      width: SearchbarWidthSm,
+    },
+  },
+  '.simlin-variabledetails-inner': {
+    paddingTop: 52,
+  },
+  '.simlin-variabledetails-eqneditor': {
+    backgroundColor: 'rgba(245, 245, 245)',
+    borderRadius: 4,
+    marginTop: 4,
+    padding: 4,
+    height: 80,
+    fontFamily: "'Roboto Mono', monospace",
+    overflowY: 'auto',
+  },
+  '.simlin-variabledetails-unitseditor': {
+    backgroundColor: 'rgba(245, 245, 245)',
+    borderRadius: 4,
+    marginTop: 4,
+    padding: 4,
+    height: 36,
+    fontFamily: "'Roboto Mono', monospace",
+    overflowY: 'auto',
+  },
+  '.simlin-variabledetails-noteseditor': {
+    backgroundColor: 'rgba(245, 245, 245)',
+    borderRadius: 4,
+    marginTop: 4,
+    padding: 4,
+    height: 56,
+    fontFamily: "'Roboto Mono', monospace",
+    overflowY: 'auto',
+  },
+  '.simlin-variabledetails-eqnerror': {
+    textDecoration: 'underline wavy red',
+  },
+  '.simlin-variabledetails-eqnwarning': {
+    textDecoration: 'underline wavy orange',
+  },
+  '.simlin-variabledetails-buttonleft': {
+    float: 'left',
+    marginRight: 'auto',
+  },
+  '.simlin-variabledetails-buttonright': {
+    float: 'right',
+  },
+  '.simlin-variabledetails-addlookupbutton': {
+    display: 'block',
+    marginLeft: 'auto',
+    marginRight: 'auto',
+  },
+  '.simlin-variabledetails-errorlist': {
+    color: '#cc0000',
+  },
+}));

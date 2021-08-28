@@ -4,29 +4,16 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
-
+import { styled } from '@material-ui/core/styles';
 import SvgIcon from '@material-ui/core/SvgIcon';
 
-const styles = createStyles({
-  flow: {
-    strokeWidth: 1,
-    strokeLinejoin: 'round',
-    stroke: 'gray',
-    fill: 'gray',
-    opacity: 1,
-  },
-});
-
-type FlowIconProps = WithStyles<typeof styles>;
-
-export const FlowIcon = withStyles(styles)(
-  class Flow extends React.PureComponent<FlowIconProps> {
+export const FlowIcon = styled(
+  class Flow extends React.PureComponent<{ className?: string }> {
     render() {
-      const { classes } = this.props;
+      const { className } = this.props;
       return (
         <SvgIcon viewBox="0 0 44 44">
-          <g transform="translate(0,-1008.3622)" className={classes.flow}>
+          <g transform="translate(0,-1008.3622)" className={className}>
             <rect y="1027.3622" x="2" height="5" width="31" />
             <path
               transform="matrix(0.56482908,0,0,0.68009598,15.213828,1010.9895)"
@@ -41,7 +28,13 @@ export const FlowIcon = withStyles(styles)(
       );
     }
   },
-);
+)(`
+  stroke-width: 1px;
+  stroke-linejoin: round;
+  stroke: gray;
+  fill: gray;
+  opacity: 1;
+`);
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 (FlowIcon as any).muiName = 'FlowIcon';

@@ -4,53 +4,14 @@
 
 import * as React from 'react';
 
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import IconButton from '@material-ui/core/IconButton';
 import Paper from '@material-ui/core/Paper';
-import { Theme } from '@material-ui/core/styles';
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import AddIcon from '@material-ui/icons/Add';
 import RemoveIcon from '@material-ui/icons/Remove';
 
-const styles = ({ spacing }: Theme) =>
-  createStyles({
-    card: {
-      height: 40,
-      marginRight: spacing(1),
-    },
-    divider1: {
-      display: 'inline-block',
-      top: 0,
-      left: 0,
-      marginRight: 6,
-      marginTop: 12,
-      height: 16,
-      borderLeftWidth: 1,
-      borderLeftStyle: 'solid',
-      borderColor: '#ddd',
-    },
-    divider2: {
-      display: 'inline-block',
-      top: 0,
-      left: 0,
-      marginLeft: 8,
-      marginTop: 12,
-      height: 16,
-      borderLeftWidth: 1,
-      borderLeftStyle: 'solid',
-      borderColor: '#ddd',
-    },
-    zoomText: {
-      width: 21,
-      fontSize: '.6rem',
-      color: '#888',
-      textAlign: 'center',
-      display: 'inline-block',
-      verticalAlign: 4,
-      margin: 0,
-    },
-  });
-
-interface ZoomBarPropsFull extends WithStyles<typeof styles> {
+interface ZoomBarProps {
   zoom: number;
   onChangeZoom: (zoom: number) => void;
 }
@@ -93,8 +54,8 @@ function findNext(zoom: number, dir: 'out' | 'in'): number | undefined {
 
 // export type UndoRedoProps = Pick<ZoomBarPropsFull, 'undoEnabled' | 'redoEnabled' | 'onUndoRedo'>;
 
-export const ZoomBar = withStyles(styles)(
-  class InnerVariableDetails extends React.PureComponent<ZoomBarPropsFull> {
+export const ZoomBar = styled(
+  class InnerVariableDetails extends React.PureComponent<ZoomBarProps & { className?: string }> {
     handleZoomOut = () => {
       const next = findNext(this.props.zoom, 'out');
       if (next) {
@@ -110,7 +71,7 @@ export const ZoomBar = withStyles(styles)(
     };
 
     render() {
-      const { classes } = this.props;
+      const { className } = this.props;
 
       const zoom = snapToZoom(this.props.zoom);
 
@@ -118,7 +79,7 @@ export const ZoomBar = withStyles(styles)(
       const zoomOutEnabled = zoom > zooms[0];
 
       return (
-        <Paper className={classes.card} elevation={2}>
+        <Paper className={clsx(className, 'simlin-zoombar-card')} elevation={2}>
           <IconButton
             disabled={!zoomOutEnabled}
             style={{ display: 'inline-block' }}
@@ -127,9 +88,9 @@ export const ZoomBar = withStyles(styles)(
           >
             <RemoveIcon />
           </IconButton>
-          <div className={classes.divider1} />
-          <p className={classes.zoomText}>{(zoom * 100).toFixed(0)}%</p>
-          <div className={classes.divider2} />
+          <div className="simlin-zoombar-divider1" />
+          <p className="simlin-zoombar-zoomtext">{(zoom * 100).toFixed(0)}%</p>
+          <div className="simlin-zoombar-divider2" />
           <IconButton
             disabled={!zoomInEnabled}
             style={{ display: 'inline-block' }}
@@ -142,4 +103,40 @@ export const ZoomBar = withStyles(styles)(
       );
     }
   },
-);
+)(({ theme }) => ({
+  '&.simlin-zoombar-card': {
+    height: 40,
+    marginRight: theme.spacing(1),
+  },
+  '.simlin-zoombar-divider1': {
+    display: 'inline-block',
+    top: 0,
+    left: 0,
+    marginRight: 6,
+    marginTop: 12,
+    height: 16,
+    borderLeftWidth: 1,
+    borderLeftStyle: 'solid',
+    borderColor: '#ddd',
+  },
+  '.simlin-zoombar-divider2': {
+    display: 'inline-block',
+    top: 0,
+    left: 0,
+    marginLeft: 8,
+    marginTop: 12,
+    height: 16,
+    borderLeftWidth: 1,
+    borderLeftStyle: 'solid',
+    borderColor: '#ddd',
+  },
+  '.simlin-zoombar-zoomtext': {
+    width: 21,
+    fontSize: '.6rem',
+    color: '#888',
+    textAlign: 'center',
+    display: 'inline-block',
+    verticalAlign: 4,
+    margin: 0,
+  },
+}));

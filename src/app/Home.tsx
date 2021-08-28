@@ -5,7 +5,8 @@
 import * as React from 'react';
 
 import { Link } from 'react-router-dom';
-
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import AppBar from '@material-ui/core/AppBar';
 import Button from '@material-ui/core/Button';
 import Grid from '@material-ui/core/Grid';
@@ -17,84 +18,22 @@ import MenuItem from '@material-ui/core/MenuItem';
 import Paper from '@material-ui/core/Paper';
 import Toolbar from '@material-ui/core/Toolbar';
 import Typography from '@material-ui/core/Typography';
-
 import Avatar from '@material-ui/core/Avatar';
-
 import { List } from 'immutable';
-
 import { PopoverOrigin } from '@material-ui/core/Popover';
-
 import AccountCircle from '@material-ui/icons/AccountCircle';
 import MenuIcon from '@material-ui/icons/Menu';
-
-import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 
 import { NewProject } from './NewProject';
 import { Project } from './Project';
 import { User } from './User';
-
-const styles = createStyles({
-  root: {
-    flexGrow: 1,
-  },
-  flex: {
-    flex: 1,
-  },
-  profileIcon: {
-    padding: 8,
-  },
-  sdTitle: {
-    fontWeight: 300,
-  },
-  avatar: {
-    width: 32,
-    height: 32,
-  },
-  menuButton: {
-    marginLeft: -12,
-    marginRight: 20,
-  },
-  newProjectButton: {
-    color: 'white',
-    border: '1px solid rgba(255, 255, 255, 0.76)',
-    textDecoration: 'none',
-    marginRight: 16,
-  },
-  paper: {
-    margin: 24,
-    padding: 12,
-  },
-  preview: {
-    textAlign: 'center',
-    height: 200,
-  },
-  previewImg: {
-    width: '100%',
-    maxHeight: 200,
-    objectFit: 'scale-down',
-  },
-  modelLink: {
-    color: 'white',
-    textDecoration: 'none',
-  },
-  newForm: {
-    margin: 32,
-    padding: 12,
-  },
-  projectGrid: {
-    boxSizing: 'border-box',
-    marginLeft: 'auto',
-    marginRight: 'auto',
-    maxWidth: 1024,
-  },
-});
 
 interface HomeState {
   anchorEl?: HTMLElement;
   projects: List<Project>;
 }
 
-interface HomeProps extends WithStyles<typeof styles> {
+interface HomeProps {
   user: User;
   isNewProject: boolean;
   onNewProjectDone?: () => void;
@@ -105,8 +44,8 @@ const AnchorOrigin: PopoverOrigin = {
   horizontal: 'right',
 };
 
-const Home = withStyles(styles)(
-  class HomeInner extends React.Component<HomeProps, HomeState> {
+const Home = styled(
+  class HomeInner extends React.Component<HomeProps & { className?: string }, HomeState> {
     state: HomeState;
 
     constructor(props: HomeProps) {
@@ -157,9 +96,8 @@ const Home = withStyles(styles)(
     };
 
     newProjectForm() {
-      const { classes } = this.props;
       return (
-        <div className={classes.newForm}>
+        <div className="simlin-home-newprojectform">
           <Grid container direction="row" justifyContent="center" alignItems="center">
             <Grid item>
               <NewProject user={this.props.user} onProjectCreated={this.handleProjectCreated} />
@@ -170,17 +108,16 @@ const Home = withStyles(styles)(
     }
 
     projects() {
-      const { classes } = this.props;
       const { projects } = this.state;
       return (
-        <div className={classes.projectGrid}>
+        <div className="simlin-home-projectgrid">
           <ImageList cols={this.getGridListCols()} gap={0}>
             {projects.map((project) => (
               <ImageListItem key={project.id} style={{ height: 'auto' }}>
-                <Link to={`/${project.id}`} className={classes.modelLink}>
-                  <Paper className={classes.paper} elevation={4}>
-                    <div className={classes.preview}>
-                      <img src={`/api/preview/${project.id}`} alt="model preview" className={classes.previewImg} />
+                <Link to={`/${project.id}`} className="simlin-home-modellink">
+                  <Paper className="simlin-home-paper" elevation={4}>
+                    <div className="simlin-home-preview">
+                      <img src={`/api/preview/${project.id}`} alt="model preview" className="simlin-home-previewimg" />
                     </div>
                     <Typography variant="h5" component="h3">
                       {project.displayName}
@@ -196,13 +133,13 @@ const Home = withStyles(styles)(
     }
 
     render() {
-      const classes = this.props.classes;
+      const { className } = this.props;
       const { anchorEl } = this.state;
       const { photoUrl } = this.props.user;
       const open = Boolean(anchorEl);
 
       const account = photoUrl ? (
-        <Avatar alt={this.props.user.displayName} src={photoUrl} className={classes.avatar} />
+        <Avatar alt={this.props.user.displayName} src={photoUrl} className="simlin-home-avatar" />
       ) : (
         <AccountCircle />
       );
@@ -210,14 +147,14 @@ const Home = withStyles(styles)(
       const content = this.props.isNewProject ? this.newProjectForm() : this.projects();
 
       return (
-        <div className={classes.root}>
+        <div className={clsx(className, 'simlin-home-root')}>
           <AppBar position="fixed">
             <Toolbar variant="dense">
-              <IconButton className={classes.menuButton} color="inherit" aria-label="Menu">
+              <IconButton className="simlin-home-menubutton" color="inherit" aria-label="Menu">
                 <MenuIcon />
               </IconButton>
-              <Typography variant="h6" color="inherit" className={classes.flex}>
-                <Link to="/" className={classes.modelLink}>
+              <Typography variant="h6" color="inherit" className="simlin-home-flex">
+                <Link to="/" className="simlin-home-modellink">
                   Simlin
                 </Link>
                 {/*&nbsp;*/}
@@ -226,14 +163,14 @@ const Home = withStyles(styles)(
                 {/*</span>*/}
               </Typography>
               <div>
-                <Link to="/new" className={classes.modelLink}>
-                  <Button variant="outlined" className={classes.newProjectButton}>
+                <Link to="/new" className="simlin-home-modellink">
+                  <Button variant="outlined" className="simlin-home-newprojectbutton">
                     New Project
                   </Button>
                 </Link>
 
                 <IconButton
-                  className={classes.profileIcon}
+                  className="simlin-home-profileicon"
                   aria-owns={open ? 'menu-appbar' : undefined}
                   aria-haspopup="true"
                   onClick={this.handleMenu}
@@ -262,6 +199,60 @@ const Home = withStyles(styles)(
       );
     }
   },
-);
+)(({ _theme }) => ({
+  '&.simlin-home-root': {
+    flexGrow: 1,
+  },
+  '.simlin-home-flex': {
+    flex: 1,
+  },
+  '.simlin-home-profileicon': {
+    padding: 8,
+  },
+  '.simlin-home-sdtitle': {
+    fontWeight: 300,
+  },
+  '.simlin-home-avatar': {
+    width: 32,
+    height: 32,
+  },
+  '.simlin-home-menubutton': {
+    marginLeft: -12,
+    marginRight: 20,
+  },
+  '.simlin-home-newprojectbutton': {
+    color: 'white',
+    border: '1px solid rgba(255, 255, 255, 0.76)',
+    textDecoration: 'none',
+    marginRight: 16,
+  },
+  '.simlin-home-paper': {
+    margin: 24,
+    padding: 12,
+  },
+  '.simlin-home-preview': {
+    textAlign: 'center',
+    height: 200,
+  },
+  '.simlin-home-previewimg': {
+    width: '100%',
+    maxHeight: 200,
+    objectFit: 'scale-down',
+  },
+  '.simlin-home-modellink': {
+    color: 'white',
+    textDecoration: 'none',
+  },
+  '.simlin-home-newform': {
+    margin: 32,
+    padding: 12,
+  },
+  '.simlin-home-projectgrid': {
+    boxSizing: 'border-box',
+    marginLeft: 'auto',
+    marginRight: 'auto',
+    maxWidth: 1024,
+  },
+}));
 
 export default Home;
