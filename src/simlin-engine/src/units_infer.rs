@@ -381,8 +381,8 @@ impl<'a> UnitInferer<'a> {
 
     #[allow(dead_code)]
     fn infer(&self, model: &ModelStage1) -> Result<HashMap<String, UnitMap>> {
-        use rand::seq::SliceRandom;
-        use rand::thread_rng;
+        // use rand::seq::SliceRandom;
+        // use rand::thread_rng;
 
         use crate::units::pretty_print_unit;
 
@@ -390,7 +390,7 @@ impl<'a> UnitInferer<'a> {
         self.gen_all_constraints(model, &mut constraints);
         // mostly for robustness: ensure we don't inadvertently depend on
         // test cases iterating in a specific order.
-        constraints.shuffle(&mut thread_rng());
+        // constraints.shuffle(&mut thread_rng());
 
         let (results, constraints) = self.unify(constraints)?;
 
