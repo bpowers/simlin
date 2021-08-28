@@ -7,7 +7,8 @@ import * as React from 'react';
 import { List, Map } from 'immutable';
 
 import { Card, CardContent, Typography } from '@material-ui/core';
-import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
+import { Theme } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 
 import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@system-dynamics/core/datamodel';
 

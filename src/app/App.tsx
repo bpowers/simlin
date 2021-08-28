@@ -10,7 +10,8 @@ import { BrowserRouter, Route, RouteComponentProps } from 'react-router-dom';
 
 import { createGenerateClassName, StylesProvider } from '@material-ui/styles';
 
-import { createMuiTheme, createStyles, MuiThemeProvider, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createTheme, ThemeProvider } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 
 import CssBaseline from '@material-ui/core/CssBaseline';
 
@@ -46,7 +47,7 @@ interface EditorMatchParams {
   projectName: string;
 }
 
-const theme = createMuiTheme({
+const theme = createTheme({
   palette: {
     /* primary: purple,
      * secondary: green, */
@@ -252,13 +253,16 @@ const InnerApp = withStyles(styles)(
       const { classes } = this.props;
 
       return (
-        <BrowserRouter>
-          <div className={classes.modelApp}>
-            <Route exact path="/" component={this.home} />
-            <Route exact path="/:username/:projectName" render={this.editor} />
-            <Route exact path="/new" component={this.home} />
-          </div>
-        </BrowserRouter>
+        <React.Fragment>
+          <CssBaseline />
+          <BrowserRouter>
+            <div className={classes.modelApp}>
+              <Route exact path="/" component={this.home} />
+              <Route exact path="/:username/:projectName" render={this.editor} />
+              <Route exact path="/new" component={this.home} />
+            </div>
+          </BrowserRouter>
+        </React.Fragment>
       );
     }
   },
@@ -268,10 +272,9 @@ export class App extends React.PureComponent {
   render(): JSX.Element {
     return (
       <StylesProvider generateClassName={generateClassName}>
-        <MuiThemeProvider theme={theme}>
-          <CssBaseline />
+        <ThemeProvider theme={theme}>
           <InnerApp />
-        </MuiThemeProvider>
+        </ThemeProvider>
       </StylesProvider>
     );
   }

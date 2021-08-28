@@ -12,7 +12,8 @@ import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 
 import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@material-ui/core';
-import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
+import { Theme } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 
 import { brewer } from 'chroma-js';
 

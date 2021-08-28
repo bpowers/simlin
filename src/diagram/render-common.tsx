@@ -11,14 +11,14 @@ import { renderToString } from 'react-dom/server';
 
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 
-import { createMuiTheme } from '@material-ui/core/styles';
+import { createTheme } from '@material-ui/core/styles';
 import { ServerStyleSheets, ThemeProvider } from '@material-ui/styles';
 
 import { defined } from '@system-dynamics/core/common';
 import { Canvas } from './drawing/Canvas';
 import { Box, Point } from './drawing/common';
 
-const theme = createMuiTheme({
+const theme = createTheme({
   palette: {},
 });
 

@@ -4,8 +4,7 @@
 
 import * as React from 'react';
 
-import { createStyles } from '@material-ui/core/styles';
-import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import { List } from 'immutable';
 import { fromUint8Array, toUint8Array } from 'js-base64';
 import { History } from 'history';

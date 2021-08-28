@@ -6,16 +6,16 @@ import * as React from 'react';
 
 import IconButton from '@material-ui/core/IconButton';
 import Paper from '@material-ui/core/Paper';
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import PhotoCamera from '@material-ui/icons/PhotoCamera';
 
 const styles = createStyles({
   card: {
-    height: 36,
+    height: 40,
     marginRight: 8,
   },
   snapshotButton: {
-    paddingTop: 6,
+    paddingTop: 8,
   },
 });
 

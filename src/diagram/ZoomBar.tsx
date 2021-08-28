@@ -6,14 +6,15 @@ import * as React from 'react';
 
 import IconButton from '@material-ui/core/IconButton';
 import Paper from '@material-ui/core/Paper';
-import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
+import { Theme } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import AddIcon from '@material-ui/icons/Add';
 import RemoveIcon from '@material-ui/icons/Remove';
 
 const styles = ({ spacing }: Theme) =>
   createStyles({
     card: {
-      height: 36,
+      height: 40,
       marginRight: spacing(1),
     },
     divider1: {
@@ -21,7 +22,7 @@ const styles = ({ spacing }: Theme) =>
       top: 0,
       left: 0,
       marginRight: 6,
-      marginTop: 10,
+      marginTop: 12,
       height: 16,
       borderLeftWidth: 1,
       borderLeftStyle: 'solid',
@@ -32,19 +33,11 @@ const styles = ({ spacing }: Theme) =>
       top: 0,
       left: 0,
       marginLeft: 8,
-      marginTop: 10,
+      marginTop: 12,
       height: 16,
       borderLeftWidth: 1,
       borderLeftStyle: 'solid',
       borderColor: '#ddd',
-    },
-    zoomOutButton: {
-      paddingTop: 6,
-      paddingRight: 9,
-    },
-    zoomInButton: {
-      paddingTop: 6,
-      paddingLeft: 9,
     },
     zoomText: {
       width: 21,
@@ -128,7 +121,7 @@ export const ZoomBar = withStyles(styles)(
         <Paper className={classes.card} elevation={2}>
           <IconButton
             disabled={!zoomOutEnabled}
-            className={classes.zoomOutButton}
+            style={{ display: 'inline-block' }}
             aria-label="Zoom Out"
             onClick={this.handleZoomOut}
           >
@@ -139,7 +132,7 @@ export const ZoomBar = withStyles(styles)(
           <div className={classes.divider2} />
           <IconButton
             disabled={!zoomInEnabled}
-            className={classes.zoomInButton}
+            style={{ display: 'inline-block' }}
             aria-label="Zoom In"
             onClick={this.handleZoomIn}
           >

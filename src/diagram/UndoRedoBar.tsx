@@ -6,14 +6,15 @@ import * as React from 'react';
 
 import IconButton from '@material-ui/core/IconButton';
 import Paper from '@material-ui/core/Paper';
-import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
+import { Theme } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import RedoIcon from '@material-ui/icons/Redo';
 import UndoIcon from '@material-ui/icons/Undo';
 
 const styles = ({ spacing }: Theme) =>
   createStyles({
     card: {
-      height: 36,
+      height: 40,
       marginRight: spacing(1),
     },
     divider: {
@@ -21,20 +22,12 @@ const styles = ({ spacing }: Theme) =>
       position: 'absolute',
       top: 0,
       left: 0,
-      marginLeft: 44,
-      marginTop: 10,
+      marginLeft: 40,
+      marginTop: 12,
       height: 16,
       borderLeftWidth: 1,
       borderLeftStyle: 'solid',
       borderColor: '#ddd',
-    },
-    undoButton: {
-      paddingTop: 6,
-      paddingRight: 9,
-    },
-    redoButton: {
-      paddingTop: 6,
-      paddingLeft: 9,
     },
   });
 
@@ -61,21 +54,11 @@ export const UndoRedoBar = withStyles(styles)(
 
       return (
         <Paper className={classes.card} elevation={2}>
-          <IconButton
-            disabled={!undoEnabled}
-            className={classes.undoButton}
-            aria-label="Undo"
-            onClick={this.handleUndo}
-          >
+          <IconButton disabled={!undoEnabled} aria-label="Undo" onClick={this.handleUndo}>
             <UndoIcon />
           </IconButton>
           <div className={classes.divider} />
-          <IconButton
-            disabled={!redoEnabled}
-            className={classes.redoButton}
-            aria-label="Redo"
-            onClick={this.handleRedo}
-          >
+          <IconButton disabled={!redoEnabled} aria-label="Redo" onClick={this.handleRedo}>
             <RedoIcon />
           </IconButton>
         </Paper>

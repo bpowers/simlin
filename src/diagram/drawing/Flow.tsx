@@ -6,7 +6,8 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 
-import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
+import { Theme } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 
 import {
   Point,

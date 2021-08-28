@@ -17,8 +17,8 @@ import MenuIcon from '@material-ui/icons/Menu';
 import SpeedDial, { CloseReason } from '@material-ui/core/SpeedDial';
 import SpeedDialAction from '@material-ui/core/SpeedDialAction';
 import SpeedDialIcon from '@material-ui/core/SpeedDialIcon';
-import { createStyles, Theme } from '@material-ui/core/styles';
-import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
+import { Theme } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 import { Card } from '@material-ui/core';
 import Button from '@material-ui/core/Button';
 import CardActions from '@material-ui/core/CardActions';
@@ -91,7 +91,7 @@ const styles = ({ spacing, palette, breakpoints }: Theme) =>
     undoRedoBar: {
       display: 'flex',
       position: 'absolute',
-      bottom: spacing(3.5),
+      bottom: spacing(3),
       left: spacing(10),
     },
     speedDial: {
@@ -1408,7 +1408,13 @@ export const Editor = withStyles(styles)(
 
       return (
         <Paper className={classes.searchbar} elevation={2}>
-          <IconButton className={classes.menuButton} color="inherit" aria-label="Menu" onClick={this.handleShowDrawer}>
+          <IconButton
+            className={classes.menuButton}
+            color="inherit"
+            aria-label="Menu"
+            onClick={this.handleShowDrawer}
+            style={{ color: '#666', display: 'block', marginLeft: 4, position: 'absolute', marginTop: 4, height: 40 }}
+          >
             <MenuIcon />
           </IconButton>
           <div className={classes.searchbox}>

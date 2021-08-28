@@ -8,7 +8,7 @@ import { List } from 'immutable';
 
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { createStyles, withStyles, WithStyles } from '@material-ui/styles';
 
 import { defined } from '@system-dynamics/core/common';
 import { isEqual } from './drawing/common';

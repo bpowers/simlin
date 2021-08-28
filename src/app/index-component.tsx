@@ -10,7 +10,7 @@ import { jssPreset, StylesProvider } from '@material-ui/styles';
 import { create } from 'jss';
 
 import { baseURL } from '@system-dynamics/core/common';
-import { Editor } from '@system-dynamics/diagram/Editor';
+import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
 
 // try to get the base URL from the src attribute of the current script
 // (so that e.g. localhost:3000 works for testing), but fall back to baseURL
@@ -42,7 +42,7 @@ class SDModel extends HTMLElement {
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto+Mono&display=swap" />
         <StylesProvider jss={jss}>
-          <Editor username={username} projectName={projectName} embedded={true} baseURL={base} />
+          <HostedWebEditor username={username} projectName={projectName} embedded={true} baseURL={base} />
         </StylesProvider>
       </div>,
       mountPoint,
