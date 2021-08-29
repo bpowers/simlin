@@ -96,23 +96,52 @@ async function getOrCreateUserFromProfile(
 
   // since a document with the email already exists, just get the
   // document with it
-  let user: User | undefined = await users.findOneByScan({ email });
-  if (!user) {
-    const created = new Timestamp();
-    created.fromDate(new Date());
+  let user: User | undefined;
+  try {
+    user = await users.findOneByScan({ email });
+    if (!user) {
+      const created = new Timestamp();
+      created.fromDate(new Date());
 
-    user = new User();
-    user.setId(`temp-${uuidV4()}`);
-    user.setEmail(email);
-    user.setDisplayName(displayName);
-    user.setProvider('google');
-    if (photoUrl) {
-      user.setPhotoUrl(photoUrl);
+      user = new User();
+      user.setId(`temp-${uuidV4()}`);
+      user.setEmail(email);
+      user.setDisplayName(displayName);
+      user.setProvider('google');
+      if (photoUrl) {
+        user.setPhotoUrl(photoUrl);
+      }
+      user.setCreated(created);
+      user.setCanCreateProjects(false);
+
+      await users.create(user.getId(), user);
     }
-    user.setCreated(created);
-    user.setCanCreateProjects(false);
-
-    await users.create(user.getId(), user);
+  } catch (err) {
+    if (err instanceof Error) {
+      // we have some eventual consistency problem where sometimes we don't
+      // delete the temp user when completing the sign-up flow.  Resolve that
+      // consistency issue manually for now.
+      if (err.message.includes('expected single result document')) {
+        const userDocs = await users.findByScan({ email });
+        if (userDocs) {
+          let fullUserFound = false;
+          let tempUserName: string | undefined = undefined;
+          for (const user of userDocs) {
+            if (user.getId().startsWith('temp-')) {
+              tempUserName = user.getId();
+            } else {
+              fullUserFound = true;
+            }
+          }
+          if (fullUserFound && tempUserName) {
+            logger.info(`fixing inconsistency with ${email} -- deleting '${tempUserName}' in DB`);
+            await users.deleteOne(tempUserName);
+          }
+          // it should work now
+          user = await users.findOneByScan({ email });
+        }
+      }
+    }
   }
 
   if (!user) {

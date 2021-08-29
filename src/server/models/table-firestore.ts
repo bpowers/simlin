@@ -58,19 +58,27 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/explicit-module-boundary-types
   async findOneByScan(query: any): Promise<T | undefined> {
+    const docs = await this.findByScan(query);
+    if (docs === undefined) {
+      return undefined;
+    }
+    if (docs.length !== 1) {
+      throw new Error(`findOneByScan: expected single result document, not ${docs.length}`);
+    }
+    return docs[0];
+  }
+
+  async findByScan(query: any): Promise<T[] | undefined> {
     const keys = Object.keys(query);
     if (keys.length !== 1) {
-      throw new Error('findOneByScan: expected single query key');
+      throw new Error('findByScan: expected single query key');
     }
     const key = keys[0];
     const querySnapshot = await this.collection.where(key, '==', query[key]).get();
     if (!querySnapshot || querySnapshot.empty) {
       return undefined;
     }
-    if (querySnapshot.docs.length !== 1) {
-      throw new Error(`findOneByScan: expected single result document, not ${querySnapshot.docs.length}`);
-    }
-    return this.deserialize(querySnapshot.docs[0].get('value'));
+    return querySnapshot.docs.map((doc) => this.deserialize(doc.get('value')));
   }
 
   async find(idPrefix: string): Promise<T[]> {
