@@ -61,14 +61,14 @@ export function renderSvgToString(project: Project, modelName: string): [string,
   let contents = '';
 
   // our svg is wrapped in a div, which is handled below.
-  const svgStart = svg.indexOf('<div');
-  if (svgStart > 0) {
-    let svgTag = svg.slice(0, svgStart);
+  const divStart = svg.indexOf('<div');
+  if (divStart > 0) {
+    let svgTag = svg.slice(0, divStart);
     svgTag = svgTag.replace(/<style[^>]*>/, '');
     svgTag = svgTag.replace(/<\/style>/, '');
     contents += svgTag;
     contents += '\n';
-    svg = svg.slice(svgStart);
+    svg = svg.slice(divStart);
   }
 
   const origSvg = svg;
@@ -100,10 +100,23 @@ export function renderSvgToString(project: Project, modelName: string): [string,
     height = viewboxParts[3];
   }
 
-  svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" xmlns="http://www.w3.org/2000/svg" `);
-  svg = svg.replace(/<defs[^>]*>/, styles);
+  let rootClass = '';
+  const svgStart = svg.indexOf('<svg');
+  if (svgStart > 0) {
+    const divTag = svg.slice(0, svgStart);
+    const match = /class="(?<className>[^"]*)"/.exec(divTag);
+    if (match && match.groups) {
+      rootClass = match.groups['className'];
+    }
+
+    svg = svg.slice(svgStart);
+  }
+
   svg = svg.replace(/^<div[^>]*>/, '');
   svg = svg.replace(/<\/div>$/, '');
+  svg = svg.replace('class="', `class="${rootClass} `);
+  svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" xmlns="http://www.w3.org/2000/svg" `);
+  svg = svg.replace(/<defs[^>]*>/, styles);
 
   // generate a random string like 'qaqb3rusiha'
   const prefix = Math.random().toString(36).substr(2);

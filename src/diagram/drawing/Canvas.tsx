@@ -1511,11 +1511,11 @@ export const Canvas = styled(
       // n.b. we don't want to clear this.elements as thats used when handling callbacks
 
       return (
-        <div style={{ height: '100%', width: '100%' }} ref={this.svgRef}>
+        <div style={{ height: '100%', width: '100%' }} ref={this.svgRef} className={className}>
           <svg
             viewBox={viewBox}
             preserveAspectRatio="xMinYMin"
-            className={className}
+            className="simlin-canvas"
             onPointerDown={this.handlePointerDown}
             onPointerMove={this.handlePointerMove}
             onPointerCancel={this.handlePointerCancel}
@@ -1536,9 +1536,14 @@ export const Canvas = styled(
   ({ theme }) => `
     height: 100%;
     width: 100%;
-    box-sizing: border-box;
-    user-select: none;
-    -webkit-touch-callout: none;
+
+    &.simlin-canvas {
+      height: 100%;
+      width: 100%;
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
 
     & text {
       fill: ${theme.palette.common.black};
