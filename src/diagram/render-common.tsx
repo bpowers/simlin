@@ -56,7 +56,38 @@ export function renderSvgToString(project: Project, modelName: string): [string,
     />
   );
 
+  // material ui returns two tags: the <style> tag, then the <svg>
   let svg = renderToString(<ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>);
+  let contents = '';
+
+  // our svg is wrapped in a div, which is handled below.
+  const svgStart = svg.indexOf('<div');
+  if (svgStart > 0) {
+    let svgTag = svg.slice(0, svgStart);
+    svgTag = svgTag.replace(/<style[^>]*>/, '');
+    svgTag = svgTag.replace(/<\/style>/, '');
+    contents += svgTag;
+    contents += '\n';
+    svg = svg.slice(svgStart);
+  }
+
+  const origSvg = svg;
+  let consumedLen = 0;
+  svg = '';
+  const styleRe = /<style.*?<\/style>/g;
+  for (const match of origSvg.matchAll(styleRe)) {
+    let svgTag = match[0];
+    const svgTagLen = svgTag.length;
+    svgTag = svgTag.replace(/<style[^>]*>/, '');
+    svgTag = svgTag.replace(/<\/style>/, '');
+    contents += svgTag;
+    contents += '\n';
+    svg += origSvg.slice(consumedLen, match.index);
+    consumedLen = (match.index || 0) + svgTagLen;
+  }
+  svg += origSvg.slice(consumedLen);
+
+  const styles = `<style>\n${contents}\n</style>\n<defs>\n`;
 
   let width = 100;
   let height = 100;
@@ -70,6 +101,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
   }
 
   svg = svg.replace('<svg ', `<svg style="width: ${width}; height: ${height};" xmlns="http://www.w3.org/2000/svg" `);
+  svg = svg.replace(/<defs[^>]*>/, styles);
   svg = svg.replace(/^<div[^>]*>/, '');
   svg = svg.replace(/<\/div>$/, '');
 

@@ -176,7 +176,7 @@ export const Connector = styled(
     }
 
     renderStraightLine() {
-      const { from, to, isSelected } = this.props;
+      const { from, to, isSelected, className } = this.props;
 
       const θ = atan2(to.cy - from.cy, to.cx - from.cx);
       const start = Conn.intersectElementStraight(from, θ);
@@ -186,7 +186,7 @@ export const Connector = styled(
       const path = `M${start.x},${start.y}L${end.x},${end.y}`;
 
       return (
-        <g key={this.props.element.uid}>
+        <g key={this.props.element.uid} className={className}>
           <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
           <path
             d={path}
@@ -319,7 +319,7 @@ export const Connector = styled(
       }
 
       return (
-        <g className={className}>
+        <g key={this.props.element.uid} className={className}>
           <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
           <path
             d={path}
