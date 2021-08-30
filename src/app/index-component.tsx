@@ -5,12 +5,12 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 
-import { jssPreset, StylesProvider } from '@material-ui/styles';
-
-import { create } from 'jss';
+import { createTheme, ThemeProvider } from '@material-ui/core/styles';
 
 import { baseURL } from '@system-dynamics/core/common';
-import { Editor } from '@system-dynamics/diagram/Editor';
+import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
+
+const theme = createTheme({});
 
 // try to get the base URL from the src attribute of the current script
 // (so that e.g. localhost:3000 works for testing), but fall back to baseURL
@@ -26,11 +26,6 @@ class SDModel extends HTMLElement {
     const mountPoint = document.createElement('div');
     mountPoint.setAttribute('class', 'model-Editor-full');
 
-    const jss = create({
-      ...jssPreset(),
-      insertionPoint: mountPoint,
-    });
-
     this.attachShadow({ mode: 'closed' }).appendChild(mountPoint);
 
     const base = `${scriptURL.protocol}//${scriptURL.host}`;
@@ -41,9 +36,9 @@ class SDModel extends HTMLElement {
       <div className="model-Editor-full">
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto+Mono&display=swap" />
-        <StylesProvider jss={jss}>
-          <Editor username={username} projectName={projectName} embedded={true} baseURL={base} />
-        </StylesProvider>
+        <ThemeProvider theme={theme}>
+          <HostedWebEditor username={username} projectName={projectName} embedded={true} baseURL={base} />
+        </ThemeProvider>
       </div>,
       mountPoint,
     );

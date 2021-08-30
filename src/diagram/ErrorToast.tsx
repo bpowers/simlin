@@ -4,12 +4,11 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
-
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import { amber, green } from '@material-ui/core/colors';
 import IconButton from '@material-ui/core/IconButton';
 import SnackbarContent from '@material-ui/core/SnackbarContent';
-import { Theme } from '@material-ui/core/styles';
 import CheckCircleIcon from '@material-ui/icons/CheckCircle';
 import CloseIcon from '@material-ui/icons/Close';
 import ErrorIcon from '@material-ui/icons/Error';
@@ -23,65 +22,37 @@ const variantIcon = {
   info: InfoIcon,
 };
 
-const styles = ({ spacing, palette }: Theme) =>
-  createStyles({
-    success: {
-      backgroundColor: green[600],
-    },
-    error: {
-      backgroundColor: palette.error.dark,
-    },
-    info: {
-      backgroundColor: palette.primary.main,
-    },
-    warning: {
-      backgroundColor: amber[700],
-    },
-    icon: {
-      fontSize: 20,
-    },
-    iconVariant: {
-      opacity: 0.9,
-      marginRight: spacing(1),
-    },
-    message: {
-      display: 'flex',
-      alignItems: 'center',
-    },
-  });
-
-interface ToastPropsFull extends WithStyles<typeof styles> {
-  className?: string;
+export interface ToastProps {
   message: string;
   onClose: (msg: string) => void;
   variant: keyof typeof variantIcon;
 }
 
-export type ToastProps = Pick<ToastPropsFull, 'className' | 'message' | 'onClose' | 'variant'>;
-
-export const Toast = withStyles(styles)(
-  class InnerToast extends React.PureComponent<ToastPropsFull> {
+export const Toast = styled(
+  class InnerToast extends React.PureComponent<ToastProps & { className?: string }> {
     handleClose = () => {
       this.props.onClose(this.props.message);
     };
 
     render() {
-      const { classes, className, message, variant, ...other } = this.props;
+      const { className, message, variant, ...other } = this.props;
       const Icon = variantIcon[variant];
+
+      const variantClass = `simlin-errortoast-${variant}`;
 
       return (
         <SnackbarContent
-          className={classes[variant] + ' ' + (className || '')}
+          className={clsx(className, variantClass)}
           aria-describedby="client-snackbar"
           message={
-            <span id="client-snackbar" className={classes.message}>
-              <Icon className={classes.icon + ' ' + classes.iconVariant} />
+            <span id="client-snackbar" className="simlin-errortoast-message">
+              <Icon className={clsx('simlin-errortoast-icon', 'simlin-errortoast-iconvariant')} />
               {message}
             </span>
           }
           action={[
             <IconButton key="close" aria-label="close" color="inherit" onClick={this.handleClose}>
-              <CloseIcon className={classes.icon} />
+              <CloseIcon className="simlin-errortoast-icon" />
             </IconButton>,
           ]}
           {...other}
@@ -89,4 +60,28 @@ export const Toast = withStyles(styles)(
       );
     }
   },
-);
+)(({ theme }) => ({
+  '&.simlin-errortoast-success': {
+    backgroundColor: green[600],
+  },
+  '&.simlin-errortoast-error': {
+    backgroundColor: theme.palette.error.dark,
+  },
+  '&.simlin-errortoast-info': {
+    backgroundColor: theme.palette.primary.main,
+  },
+  '&.simlin-errortoast-warning': {
+    backgroundColor: amber[700],
+  },
+  '.simlin-errortoast-icon': {
+    fontSize: 20,
+  },
+  '.simlin-errortoast-iconVariant': {
+    opacity: 0.9,
+    marginRight: theme.spacing(1),
+  },
+  '.simlin-errortoast-message': {
+    display: 'flex',
+    alignItems: 'center',
+  },
+}));

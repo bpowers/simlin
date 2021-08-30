@@ -15,6 +15,14 @@ export function plainDeserialize(str: string): CustomText[] {
   );
 }
 
+export function plainDeserializeWithNewlines(str: string): CustomText[] {
+  return str.split('\n').map(
+    (line: string): CustomText => {
+      return { text: line + '\n' };
+    },
+  );
+}
+
 export function plainSerialize(value: Descendant[]): string {
   return value.map((n) => Node.string(n)).join('\n');
 }

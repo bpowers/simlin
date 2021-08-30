@@ -4,43 +4,40 @@
 
 import * as React from 'react';
 
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 import IconButton from '@material-ui/core/IconButton';
 import Paper from '@material-ui/core/Paper';
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 import PhotoCamera from '@material-ui/icons/PhotoCamera';
 
-const styles = createStyles({
-  card: {
-    height: 36,
-    marginRight: 8,
-  },
-  snapshotButton: {
-    paddingTop: 6,
-  },
-});
-
-interface SnapshotterPropsFull extends WithStyles<typeof styles> {
+interface SnapshotterProps {
   onSnapshot: (kind: 'show' | 'close') => void;
 }
 
-// export type UndoRedoProps = Pick<UndoRedoBarPropsFull, 'undoEnabled' | 'redoEnabled' | 'onUndoRedo'>;
-
-export const Snapshotter = withStyles(styles)(
-  class InnerVariableDetails extends React.PureComponent<SnapshotterPropsFull> {
+export const Snapshotter = styled(
+  class InnerSnapshotter extends React.PureComponent<SnapshotterProps & { className?: string }> {
     handleSnapshot = () => {
       this.props.onSnapshot('show');
     };
 
     render() {
-      const { classes } = this.props;
+      const { className } = this.props;
 
       return (
-        <Paper className={classes.card} elevation={2}>
-          <IconButton className={classes.snapshotButton} aria-label="Snapshot" onClick={this.handleSnapshot}>
+        <Paper className={clsx(className, 'simlin-snapshotter-card')} elevation={2}>
+          <IconButton className="simlin-snapshotter-button" aria-label="Snapshot" onClick={this.handleSnapshot}>
             <PhotoCamera />
           </IconButton>
         </Paper>
       );
     }
   },
-);
+)(() => ({
+  '&.simlin-snapshotter-card': {
+    height: 40,
+    marginRight: 8,
+  },
+  '.simlin-snapshotter-button': {
+    paddingTop: 8,
+  },
+}));

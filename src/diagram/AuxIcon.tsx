@@ -4,9 +4,10 @@
 
 import * as React from 'react';
 
+import { styled } from '@material-ui/core/styles';
 import SvgIcon from '@material-ui/core/SvgIcon';
 
-export const AuxIcon: React.FunctionComponent = (props) => {
+export const AuxIcon: React.FunctionComponent = styled((props) => {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>
       <g>
@@ -14,7 +15,9 @@ export const AuxIcon: React.FunctionComponent = (props) => {
       </g>
     </SvgIcon>
   );
-};
+})(`
+  fill: gray;
+`);
 
 AuxIcon.displayName = 'Variable';
 // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access

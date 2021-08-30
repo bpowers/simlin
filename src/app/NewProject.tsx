@@ -5,9 +5,7 @@
 import * as React from 'react';
 
 import { fromUint8Array } from 'js-base64';
-
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
-
+import { styled } from '@material-ui/core/styles';
 import Accordion from '@material-ui/core/Accordion';
 import AccordionDetails from '@material-ui/core/AccordionDetails';
 import AccordionSummary from '@material-ui/core/AccordionSummary';
@@ -25,13 +23,7 @@ import { Project as ProjectDM } from '@system-dynamics/core/datamodel';
 import { convertMdlToXmile } from '@system-dynamics/xmutil';
 import { fromXmile } from '@system-dynamics/importer';
 
-const styles = createStyles({
-  newSubtitle: {
-    marginTop: 6,
-  },
-});
-
-interface NewProjectProps extends WithStyles<typeof styles> {
+interface NewProjectProps {
   user: User;
   onProjectCreated: (project: Project) => void;
 }
@@ -61,8 +53,8 @@ const readFile = (file: any): Promise<string> => {
   });
 };
 
-export const NewProject = withStyles(styles)(
-  class NewProject extends React.Component<NewProjectProps, NewProjectState> {
+export const NewProject = styled(
+  class NewProject extends React.Component<NewProjectProps & { className?: string }, NewProjectState> {
     state: NewProjectState;
 
     constructor(props: NewProjectProps) {
@@ -181,12 +173,12 @@ export const NewProject = withStyles(styles)(
     };
 
     render() {
-      const { classes } = this.props;
+      const { className } = this.props;
       const warningText = this.state.errorMsg || '';
       return (
-        <div>
+        <div className={className}>
           <Typography variant="h2">Create a project</Typography>
-          <div className={classes.newSubtitle}>
+          <div className="simlin-newproject-subtitle">
             <Typography variant="subtitle1">A project holds models and data, along with simulation results.</Typography>
           </div>
           <br />
@@ -272,4 +264,8 @@ export const NewProject = withStyles(styles)(
       );
     }
   },
-);
+)(() => ({
+  '.simlin-newproject-subtitle': {
+    marginTop: 6,
+  },
+}));

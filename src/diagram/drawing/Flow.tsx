@@ -5,8 +5,8 @@
 import * as React from 'react';
 
 import { List } from 'immutable';
-
-import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 
 import {
   Point,
@@ -15,6 +15,7 @@ import {
   StockViewElement,
   CloudViewElement,
 } from '@system-dynamics/core/datamodel';
+import { defined, Series } from '@system-dynamics/core/common';
 
 import { Arrowhead } from './Arrowhead';
 import { displayName, Point as IPoint } from './common';
@@ -22,56 +23,6 @@ import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default';
 import { Label } from './Label';
 import { Sparkline } from './Sparkline';
 import { StockHeight, StockWidth } from './Stock';
-
-import { defined, Series } from '@system-dynamics/core/common';
-
-const styles = ({ palette }: Theme) =>
-  createStyles({
-    flowOuter: {
-      fill: 'none',
-      strokeWidth: 4,
-      stroke: palette.common.black,
-    },
-    flowOuterSelected: {
-      fill: 'none',
-      strokeWidth: 4,
-      stroke: '#4444dd',
-    },
-    flowInner: {
-      fill: 'none',
-      strokeWidth: 2,
-      stroke: palette.common.white,
-    },
-    aux: {
-      strokeWidth: 1,
-      fill: palette.common.white,
-      stroke: palette.common.black,
-    },
-    targetGood: {
-      '& circle': {
-        stroke: 'rgb(76, 175, 80)',
-        strokeWidth: 2,
-      },
-    },
-    targetBad: {
-      '& circle': {
-        stroke: 'rgb(244, 67, 54)',
-        strokeWidth: 2,
-      },
-    },
-    selected: {
-      '& text': {
-        fill: '#4444dd',
-      },
-      '& circle': {
-        stroke: '#4444dd',
-      },
-    },
-    indicator: {
-      fill: 'rgb(255, 152, 0)',
-      strokeWidth: 0,
-    },
-  });
 
 const atan2 = Math.atan2;
 const PI = Math.PI;
@@ -443,7 +394,7 @@ export function UpdateFlow(
   return [flowEl, updatedClouds];
 }
 
-export interface FlowPropsFull extends WithStyles<typeof styles> {
+export interface FlowProps {
   isSelected: boolean;
   isEditingName: boolean;
   isValidTarget?: boolean;
@@ -457,23 +408,8 @@ export interface FlowPropsFull extends WithStyles<typeof styles> {
   sink: StockViewElement | CloudViewElement;
 }
 
-export type FlowProps = Pick<
-  FlowPropsFull,
-  | 'isSelected'
-  | 'isMovingArrow'
-  | 'isEditingName'
-  | 'isValidTarget'
-  | 'hasWarning'
-  | 'series'
-  | 'onSelection'
-  | 'onLabelDrag'
-  | 'source'
-  | 'element'
-  | 'sink'
->;
-
-export const Flow = withStyles(styles)(
-  class Flow extends React.PureComponent<FlowPropsFull> {
+export const Flow = styled(
+  class Flow extends React.PureComponent<FlowProps & { className?: string }> {
     handlePointerUp = (_e: React.PointerEvent<SVGElement>): void => {
       // e.preventDefault();
       // e.stopPropagation();
@@ -506,14 +442,14 @@ export const Flow = withStyles(styles)(
         return undefined;
       }
 
-      const { classes, element } = this.props;
+      const { element } = this.props;
       const r = this.radius();
       const θ = -Math.PI / 4; // 45 degrees
 
       const cx = element.cx + r * Math.cos(θ);
       const cy = element.cy + r * Math.sin(θ);
 
-      return <circle className={classes.indicator} cx={cx} cy={cy} r={3} />;
+      return <circle className="simlin-error-indicator" cx={cx} cy={cy} r={3} />;
     }
 
     sparkline(series: Readonly<Array<Series>> | undefined) {
@@ -535,7 +471,7 @@ export const Flow = withStyles(styles)(
     }
 
     render() {
-      const { classes, element, isEditingName, isMovingArrow, isSelected, isValidTarget, series, sink } = this.props;
+      const { className, element, isEditingName, isMovingArrow, isSelected, isValidTarget, series, sink } = this.props;
 
       const isArrayed = element.var?.isArrayed || false;
       const arrayedOffset = isArrayed ? 3 : 0;
@@ -617,25 +553,25 @@ export const Flow = withStyles(styles)(
       const sparkline = this.sparkline(series);
       const indicator = this.indicators();
 
-      let groupClassName = isSelected ? classes.selected : undefined;
+      let groupClassName = isSelected ? 'simlin-selected' : undefined;
       if (isValidTarget !== undefined) {
-        groupClassName = isValidTarget ? classes.targetGood : classes.targetBad;
+        groupClassName = isValidTarget ? 'simlin-target-good' : 'simlin-target-bad';
       }
 
-      let circles = [<circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />];
+      let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
       if (isArrayed) {
         circles = [
-          <circle key="0" className={classes.aux} cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
-          <circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />,
-          <circle key="2" className={classes.aux} cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+          <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+          <circle key="1" cx={cx} cy={cy} r={r} />,
+          <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
         ];
       }
 
       return (
-        <g className={groupClassName}>
+        <g className={clsx(className, groupClassName)}>
           <path
             d={spath}
-            className={isSelected ? classes.flowOuterSelected : classes.flowOuter}
+            className={isSelected ? 'simlin-flow-outer-selected' : 'simlin-flow-outer'}
             onPointerDown={this.handlePointerDown}
             onPointerUp={this.handlePointerUp}
           />
@@ -647,7 +583,7 @@ export const Flow = withStyles(styles)(
             isSelected={this.props.isSelected}
             onSelection={this.handlePointerDownArrowhead}
           />
-          <path d={spath} className={classes.flowInner} />
+          <path d={spath} className="simlin-flow-inner" />
           <g onPointerDown={this.handlePointerDown} onPointerUp={this.handlePointerUp}>
             {circles}
             {sparkline}
@@ -658,4 +594,47 @@ export const Flow = withStyles(styles)(
       );
     }
   },
+)(
+  ({ theme }) => `
+  & .simlin-flow-outer {
+    fill: none;
+    stroke-width: 4px;
+    stroke: ${theme.palette.common.black};
+  }
+  & .simlin-flow-outer-selected {
+    fill: none;
+    stroke-width: 4px;
+    stroke: #4444dd;
+  }
+  & .simlin-flow-inner {
+    fill: none;
+    stroke-width: 2px;
+    stroke: ${theme.palette.common.white};
+  }
+  & circle {
+    stroke-width: 1px;
+    fill: ${theme.palette.common.white};
+    stroke: ${theme.palette.common.black};
+  }
+  &.simlin-target-good circle {
+    stroke: rgb(76, 175, 80);
+    stroke-width: 2px;
+  }
+  &.simlin-target-bad circle {
+    stroke: rgb(244, 67, 54);
+    stroke-width: 2px;
+  }
+  &.simlin-selected {
+    text {
+      fill: #4444dd;
+    }
+    circle {
+      stroke: #4444dd;
+    }
+  }
+  & .simlin-error-indicator {
+    stroke-width: 0px;
+    fill: rgb(255, 152, 0);
+  }
+`,
 );

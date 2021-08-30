@@ -5,13 +5,11 @@
 import * as React from 'react';
 
 import { List } from 'immutable';
-
+import { styled } from '@material-ui/core/styles';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
 
 import { defined } from '@system-dynamics/core/common';
-import { isEqual } from './drawing/common';
 import {
   Variable,
   GraphicalFunction,
@@ -19,38 +17,7 @@ import {
   GraphicalFunctionKind,
 } from '@system-dynamics/core/datamodel';
 
-const styles = createStyles({
-  yAxisMax: {
-    width: '30%',
-    paddingRight: 4,
-    marginTop: 0,
-  },
-  yAxisMin: {
-    width: '30%',
-    paddingRight: 4,
-    marginTop: 4,
-  },
-  xScaleMin: {
-    width: '30%',
-    paddingRight: 4,
-  },
-  xScaleMax: {
-    width: '30%',
-    paddingLeft: 4,
-    paddingRight: 4,
-  },
-  datapoints: {
-    width: '40%',
-    paddingLeft: 4,
-  },
-  buttonLeft: {
-    float: 'left',
-    marginRight: 'auto',
-  },
-  buttonRight: {
-    float: 'right',
-  },
-});
+import { isEqual } from './drawing/common';
 
 // GFTable is a consistent format for the data from a GF that can be
 // used for efficient lookup operations
@@ -93,7 +60,7 @@ function tableFrom(gf: GraphicalFunction): GFTable | undefined {
   };
 }
 
-interface LookupEditorPropsFull extends WithStyles<typeof styles> {
+interface LookupEditorProps {
   variable: Variable;
   onLookupChange: (ident: string, newTable: GraphicalFunction | null) => void;
 }
@@ -163,11 +130,11 @@ function getAnyElementOfObject(obj: any): any | undefined {
   return undefined;
 }
 
-export const LookupEditor = withStyles(styles)(
-  class InnerLookupEditor extends React.PureComponent<LookupEditorPropsFull, LookupEditorState> {
+export const LookupEditor = styled(
+  class InnerLookupEditor extends React.PureComponent<LookupEditorProps & { className?: string }, LookupEditorState> {
     readonly lookupRef: React.RefObject<InstanceType<typeof LineChart>>;
 
-    constructor(props: LookupEditorPropsFull) {
+    constructor(props: LookupEditorProps) {
       super(props);
 
       const gf = this.getVariableGF();
@@ -498,7 +465,7 @@ export const LookupEditor = withStyles(styles)(
     };
 
     render() {
-      const { classes } = this.props;
+      const { className } = this.props;
       const { datapointCount, gf, table, yMin, yMax } = this.state;
 
       const yMinChart = defined(gf.yScale).min;
@@ -531,10 +498,10 @@ export const LookupEditor = withStyles(styles)(
       const isSaveDisabled = !lookupActionsEnabled || xScaleError || yScaleError || datapointCountError;
 
       return (
-        <div>
+        <div className={className}>
           <CardContent>
             <TextField
-              className={classes.yAxisMax}
+              className="simlin-lookupeditor-yaxismax"
               error={yScaleError}
               label="Y axis max"
               value={yMax}
@@ -575,7 +542,7 @@ export const LookupEditor = withStyles(styles)(
               </ResponsiveContainer>
             </div>
             <TextField
-              className={classes.yAxisMin}
+              className="simlin-lookupeditor-yaxismax"
               error={yScaleError}
               label="Y axis min"
               value={yMin}
@@ -585,7 +552,7 @@ export const LookupEditor = withStyles(styles)(
             />
             <br />
             <TextField
-              className={classes.xScaleMin}
+              className="simlin-lookupeditor-xscalemin"
               error={xScaleError}
               label="X axis min"
               value={xMin}
@@ -594,7 +561,7 @@ export const LookupEditor = withStyles(styles)(
               margin="normal"
             />
             <TextField
-              className={classes.xScaleMax}
+              className="simlin-lookupeditor-xscalemax"
               error={xScaleError}
               label="X axis max"
               value={xMax}
@@ -603,7 +570,7 @@ export const LookupEditor = withStyles(styles)(
               margin="normal"
             />
             <TextField
-              className={classes.datapoints}
+              className="simlin-lookupeditor-datapoints"
               error={datapointCountError}
               label="Datapoint Count"
               value={datapointCount}
@@ -613,10 +580,15 @@ export const LookupEditor = withStyles(styles)(
             />
           </CardContent>
           <CardActions>
-            <Button size="small" color="secondary" onClick={this.handleLookupRemove} className={classes.buttonLeft}>
+            <Button
+              size="small"
+              color="secondary"
+              onClick={this.handleLookupRemove}
+              className="simlin-lookupeditor-buttonleft"
+            >
               Remove
             </Button>
-            <div className={classes.buttonRight}>
+            <div className="simlin-lookupeditor-buttonright">
               <Button size="small" color="primary" disabled={!lookupActionsEnabled} onClick={this.handleLookupCancel}>
                 Cancel
               </Button>
@@ -629,4 +601,35 @@ export const LookupEditor = withStyles(styles)(
       );
     }
   },
-);
+)(({ theme }) => ({
+  '.simlin-lookupeditor-yaxismax': {
+    width: '30%',
+    paddingRight: 4,
+    marginTop: 0,
+  },
+  '.simlin-lookupeditor-yaxismin': {
+    width: '30%',
+    paddingRight: 4,
+    marginTop: 4,
+  },
+  '.simlin-lookupeditor-xscalemin': {
+    width: '30%',
+    paddingRight: 4,
+  },
+  '.simlin-lookupeditor-xscalemax': {
+    width: '30%',
+    paddingLeft: 4,
+    paddingRight: 4,
+  },
+  '.simlin-lookupeditor-datapoints': {
+    width: '40%',
+    paddingLeft: 4,
+  },
+  '.simlin-lookupeditor-buttonleft': {
+    float: 'left',
+    marginRight: 'auto',
+  },
+  '.simlin-lookupeditor-buttonright': {
+    float: 'right',
+  },
+}));

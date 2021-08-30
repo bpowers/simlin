@@ -7,8 +7,7 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { toUint8Array } from 'js-base64';
 import { Map, Set } from 'immutable';
-import { createMuiTheme } from '@material-ui/core/styles';
-import { ServerStyleSheets, ThemeProvider } from "@material-ui/styles";
+import { createTheme, ThemeProvider } from '@material-ui/core/styles';
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
@@ -60,7 +59,7 @@ class Diagram extends React.PureComponent<DiagramProps, DiagramState> {
       window.document.createElement
     );
     const isDarkTheme = this.props.isDarkTheme;
-    const theme = createMuiTheme({
+    const theme = createTheme({
       palette: {
         mode: isDarkTheme ? 'dark' : 'light',
         common: {
@@ -117,10 +116,8 @@ class Diagram extends React.PureComponent<DiagramProps, DiagramState> {
     if (canUseDOM) {
       return themedCanvas;
     } else {
-      const sheets = new ServerStyleSheets();
-      renderToString(sheets.collect(themedCanvas));
+      renderToString(themedCanvas);
       return <>
-        {sheets.getStyleElement()}
         {themedCanvas}
       </>;
     }

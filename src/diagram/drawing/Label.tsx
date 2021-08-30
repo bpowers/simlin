@@ -4,25 +4,12 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { Rect } from './common';
 import { AuxRadius } from './default';
 
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
-
-const styles = createStyles({
-  alignLeft: {
-    '& text': {
-      textAnchor: 'end',
-    },
-  },
-  alignRight: {
-    '& text': {
-      textAnchor: 'start',
-    },
-  },
-});
 
 interface LabelLayout {
   textX: number;
@@ -137,7 +124,7 @@ export function labelBounds(props: LabelProps): Rect {
   };
 }
 
-interface LabelPropsFull extends CommonLabelProps, WithStyles<typeof styles> {
+interface LabelPropsFull extends CommonLabelProps {
   text: string;
   onSelection?: (e: React.PointerEvent<SVGElement>) => void;
   onLabelDrag?: (uid: number, e: React.PointerEvent<SVGElement>) => void;
@@ -145,7 +132,7 @@ interface LabelPropsFull extends CommonLabelProps, WithStyles<typeof styles> {
 
 export type LabelProps = Pick<LabelPropsFull, 'text' | 'onSelection' | 'cx' | 'cy' | 'side' | 'rw' | 'rh'>;
 
-export const Label = withStyles(styles)(
+export const Label = styled(
   class LabelInner extends React.PureComponent<LabelPropsFull> {
     pointerId: number | undefined;
     inMove = false;
@@ -194,15 +181,6 @@ export const Label = withStyles(styles)(
       const { textX, textY, x, lines, reverseBaseline, align } = labelLayout(this.props);
       const linesCount = lines.length;
 
-      /*
-        <circle
-          cx={textX}
-          cy={textY}
-          r={2}
-          fill={'red'}
-          strokeWidth={0}
-        /> */
-
       return (
         <g>
           <text
@@ -231,4 +209,4 @@ export const Label = withStyles(styles)(
       );
     }
   },
-);
+)(``);

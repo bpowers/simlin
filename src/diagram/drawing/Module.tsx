@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { ModuleViewElement } from '@system-dynamics/core/datamodel';
 
@@ -17,20 +17,10 @@ import { defined } from '@system-dynamics/core/common';
 export const ModuleWidth = 55;
 export const ModuleHeight = 45;
 
-const styles = createStyles({
-  module: {
-    fill: 'white',
-    strokeWidth: 1,
-    stroke: 'black',
-  },
-});
-
-interface ModulePropsFull extends WithStyles<typeof styles> {
+export interface ModuleProps {
   isSelected: boolean;
   element: ModuleViewElement;
 }
-
-export type ModuleProps = Pick<ModulePropsFull, 'isSelected' | 'element'>;
 
 export function moduleBounds(props: ModuleProps): Rect {
   const { element } = props;
@@ -45,10 +35,10 @@ export function moduleBounds(props: ModuleProps): Rect {
   };
 }
 
-export const Module = withStyles(styles)(
-  class Module extends React.PureComponent<ModulePropsFull> {
+export const Module = styled(
+  class Module extends React.PureComponent<ModuleProps & { className?: string }> {
     render() {
-      const { element, classes } = this.props;
+      const { element, className } = this.props;
       const w = ModuleWidth;
       const h = ModuleHeight;
       const cx = element.cx;
@@ -56,9 +46,8 @@ export const Module = withStyles(styles)(
       const side = element.labelSide;
 
       return (
-        <g>
+        <g className={className}>
           <rect
-            className={classes.module}
             x={Math.ceil(cx - w / 2)}
             y={Math.ceil(cy - h / 2)}
             width={w}
@@ -79,4 +68,10 @@ export const Module = withStyles(styles)(
       );
     }
   },
-);
+)(`
+    & rect {
+      fill: white;
+      stroke-width: 1px;
+      stroke: black;
+    }
+`);

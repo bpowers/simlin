@@ -4,25 +4,13 @@
 
 import * as React from 'react';
 
-import { createStyles, Theme, withStyles, WithStyles } from '@material-ui/core/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { ViewElement, CloudViewElement } from '@system-dynamics/core/datamodel';
+import { defined } from '@system-dynamics/core/common';
 
 import { Point, Rect, square } from './common';
 import { CloudRadius, CloudWidth } from './default';
-
-import { defined } from '@system-dynamics/core/common';
-
-const styles = ({ palette }: Theme) =>
-  createStyles({
-    cloud: {
-      strokeWidth: 2,
-      strokeLinejoin: 'round',
-      strokeMiterlimit: 4,
-      fill: palette.common.white,
-      stroke: palette.mode === 'dark' ? '#2D498A' : '#6388dc',
-    },
-  });
 
 const CloudPath =
   'M 25.731189,3.8741489 C 21.525742,3.8741489 18.07553,7.4486396 17.497605,' +
@@ -39,16 +27,11 @@ const CloudPath =
   '42.394553,10.092543 38.598118,10.092543 C 36.825927,10.092543 35.215888,10.918252 ' +
   '33.996078,12.248669 C 33.491655,7.5434856 29.994502,3.8741489 25.731189,3.8741489 z';
 
-// eslint-disable-next-line @typescript-eslint/ban-types
-type CloudState = {};
-
-export interface CloudPropsFull extends WithStyles<typeof styles> {
+export interface CloudProps {
   isSelected: boolean;
   onSelection: (element: ViewElement, e: React.PointerEvent<SVGElement>, isText?: boolean) => void;
   element: CloudViewElement;
 }
-
-export type CloudProps = Pick<CloudPropsFull, 'isSelected' | 'onSelection' | 'element'>;
 
 export function cloudContains(element: CloudViewElement, point: Point): boolean {
   const cx = element.x;
@@ -62,23 +45,15 @@ export function cloudBounds(element: CloudViewElement): Rect {
   const { x, y } = element;
   const radius = CloudRadius;
   return {
-    top: (y || 0) - radius,
-    left: (x || 0) - radius,
-    right: (x || 0) + radius,
-    bottom: (y || 0) + radius,
+    top: y - radius,
+    left: x - radius,
+    right: x + radius,
+    bottom: y + radius,
   };
 }
 
-export const Cloud = withStyles(styles)(
-  class Cloud extends React.PureComponent<CloudPropsFull, CloudState> {
-    state: CloudState;
-
-    constructor(props: CloudPropsFull) {
-      super(props);
-
-      this.state = {};
-    }
-
+export const Cloud = styled(
+  class Cloud extends React.PureComponent<CloudProps & { className?: string }> {
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       e.preventDefault();
       e.stopPropagation();
@@ -86,7 +61,7 @@ export const Cloud = withStyles(styles)(
     };
 
     render() {
-      const { element, classes } = this.props;
+      const { element, className } = this.props;
       const x = defined(element.x);
       const y = defined(element.y);
 
@@ -96,7 +71,15 @@ export const Cloud = withStyles(styles)(
       const scale = diameter / CloudWidth;
       const t = `matrix(${scale}, 0, 0, ${scale}, ${x - radius}, ${y - radius})`;
 
-      return <path d={CloudPath} className={classes.cloud} transform={t} onPointerDown={this.handlePointerDown} />;
+      return <path d={CloudPath} className={className} transform={t} onPointerDown={this.handlePointerDown} />;
     }
   },
+)(
+  ({ theme }) => `
+    stroke-width: 2px;
+    stroke-linejoin: round;
+    stroke-miterlimit: 4px;
+    fill: ${theme.palette.common.white};
+    stroke: ${theme.palette.mode === 'dark' ? '#2D498A' : '#6388dc'};
+    `,
 );

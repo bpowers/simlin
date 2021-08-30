@@ -5,43 +5,18 @@
 import * as React from 'react';
 
 import { List, Map } from 'immutable';
-
+import clsx from 'clsx';
 import { Card, CardContent, Typography } from '@material-ui/core';
-import { createStyles, withStyles, WithStyles, Theme } from '@material-ui/core/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@system-dynamics/core/datamodel';
-
 import { errorCodeDescription } from '@system-dynamics/engine';
 
 const SearchbarWidthSm = 359;
 const SearchbarWidthMd = 420;
 const SearchbarWidthLg = 480;
 
-const styles = ({ breakpoints }: Theme) =>
-  createStyles({
-    card: {
-      [breakpoints.up('lg')]: {
-        width: SearchbarWidthLg,
-      },
-      [breakpoints.between('md', 'lg')]: {
-        width: SearchbarWidthMd,
-      },
-      [breakpoints.down('md')]: {
-        width: SearchbarWidthSm,
-      },
-    },
-    cardInner: {
-      paddingTop: 72,
-    },
-    errorList: {
-      color: '#cc0000',
-    },
-    yay: {
-      textAlign: 'center',
-    },
-  });
-
-interface ErrorDetailsPropsFull extends WithStyles<typeof styles> {
+interface ErrorDetailsProps {
   simError: SimError | undefined;
   modelErrors: List<ModelError>;
   varErrors: Map<string, List<EquationError>>;
@@ -49,12 +24,10 @@ interface ErrorDetailsPropsFull extends WithStyles<typeof styles> {
   status: 'ok' | 'error' | 'disabled';
 }
 
-// export type ErrorDetailsProps = Pick<ErrorDetailsPropsFull, 'variable' | 'viewElement' | 'data'>;
-
-export const ErrorDetails = withStyles(styles)(
-  class InnerErrorDetails extends React.PureComponent<ErrorDetailsPropsFull> {
+export const ErrorDetails = styled(
+  class InnerErrorDetails extends React.PureComponent<ErrorDetailsProps & { className?: string }> {
     render() {
-      const { classes, simError, modelErrors, varErrors, varUnitErrors } = this.props;
+      const { className, simError, modelErrors, varErrors, varUnitErrors } = this.props;
       const errors = [];
       if (
         simError &&
@@ -64,7 +37,7 @@ export const ErrorDetails = withStyles(styles)(
         )
       ) {
         errors.push(
-          <Typography className={classes.errorList}>
+          <Typography className="simlin-errordetails-list">
             simulation error: {errorCodeDescription(simError.code)}
           </Typography>,
         );
@@ -77,7 +50,7 @@ export const ErrorDetails = withStyles(styles)(
           }
           const details = err.details;
           errors.push(
-            <Typography className={classes.errorList}>
+            <Typography className="simlin-errordetails-list">
               model error: {errorCodeDescription(err.code)}
               {details ? `: ${details}` : undefined}
             </Typography>,
@@ -87,7 +60,7 @@ export const ErrorDetails = withStyles(styles)(
       for (const [ident, errs] of varErrors) {
         for (const err of errs) {
           errors.push(
-            <Typography className={classes.errorList}>
+            <Typography className="simlin-errordetails-list">
               variable "{ident}" error: {errorCodeDescription(err.code)}
             </Typography>,
           );
@@ -97,7 +70,7 @@ export const ErrorDetails = withStyles(styles)(
         for (const err of errs) {
           const details = err.details;
           errors.push(
-            <Typography className={classes.errorList}>
+            <Typography className="simlin-errordetails-list">
               variable "{ident}" unit error: {errorCodeDescription(err.code)}
               {details ? `: ${details}` : undefined}
             </Typography>,
@@ -106,12 +79,37 @@ export const ErrorDetails = withStyles(styles)(
       }
 
       return (
-        <Card className={classes.card} elevation={1}>
-          <CardContent className={classes.cardInner}>
-            {errors.length > 0 ? errors : <Typography className={classes.yay}>Your model is error free! 🎉</Typography>}
+        <Card className={clsx(className, 'simlin-errordetails-card')} elevation={1}>
+          <CardContent className="simlin-errordetails-inner">
+            {errors.length > 0 ? (
+              errors
+            ) : (
+              <Typography className="simlin-errordetails-yay">Your model is error free! 🎉</Typography>
+            )}
           </CardContent>
         </Card>
       );
     }
   },
-);
+)(({ theme }) => ({
+  '&.simlin-errordetails-card': {
+    [theme.breakpoints.up('lg')]: {
+      width: SearchbarWidthLg,
+    },
+    [theme.breakpoints.between('md', 'lg')]: {
+      width: SearchbarWidthMd,
+    },
+    [theme.breakpoints.down('md')]: {
+      width: SearchbarWidthSm,
+    },
+  },
+  '.simlin-errordetails-inner': {
+    paddingTop: 72,
+  },
+  '.simlin-errordetails-list': {
+    color: '#cc0000',
+  },
+  '.simlin-errordetails-yay': {
+    textAlign: 'center',
+  },
+}));

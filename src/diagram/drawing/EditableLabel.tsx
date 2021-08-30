@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { createEditor, Descendant, Node } from 'slate';
 import { withHistory } from 'slate-history';
@@ -13,24 +13,7 @@ import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
 import { AuxRadius } from './default';
 
-const styles = createStyles({
-  left: {
-    textAnchor: 'end',
-  },
-  right: {
-    textAnchor: 'start',
-  },
-  editor: {
-    fontSize: 12,
-    fontFamily: '"Roboto", "Open Sans", "Arial", sans-serif',
-    fontWeight: 300,
-    textAnchor: 'middle',
-    whiteSpace: 'nowrap',
-    verticalAlign: 'middle',
-  },
-});
-
-interface EditingLabelPropsFull extends CommonLabelProps, WithStyles<typeof styles> {
+interface EditingLabelProps extends CommonLabelProps {
   value: Descendant[];
   onChange: (value: Descendant[]) => void;
   onDone: (isCancel: boolean) => void;
@@ -40,9 +23,9 @@ interface EditingLabelState {
   editor: ReactEditor;
 }
 
-export const EditableLabel = withStyles(styles)(
-  class EditableLabel extends React.PureComponent<EditingLabelPropsFull, EditingLabelState> {
-    constructor(props: EditingLabelPropsFull) {
+export const EditableLabel = styled(
+  class EditableLabel extends React.PureComponent<EditingLabelProps & { className?: string }, EditingLabelState> {
+    constructor(props: EditingLabelProps) {
       super(props);
 
       this.state = {
@@ -135,20 +118,34 @@ export const EditableLabel = withStyles(styles)(
         border: '1px solid #4444dd',
       };
 
-      const { classes } = this.props;
+      const { className } = this.props;
+
+      const value: Descendant[] = [
+        {
+          type: 'equation',
+          children: this.props.value as any,
+        },
+      ];
 
       return (
         <div
-          className={classes.editor}
+          className={className}
           style={style}
           onPointerDown={this.handlePointerUpDown}
           onPointerUp={this.handlePointerUpDown}
         >
-          <Slate editor={this.state.editor} value={this.props.value} onChange={this.handleChange}>
+          <Slate editor={this.state.editor} value={value} onChange={this.handleChange}>
             <Editable autoFocus={true} onKeyUp={this.handleKeyPress} />
           </Slate>
         </div>
       );
     }
   },
-);
+)(`
+    font-size: 12px;
+    font-family: "Roboto", "Open Sans", "Arial", sans-serif;
+    font-weight: 300;
+    text-anchor: middle;
+    white-space: nowrap;
+    vertical-align: middle;
+`);

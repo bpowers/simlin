@@ -6,26 +6,11 @@ import * as React from 'react';
 
 import { List } from 'immutable';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import { styled } from '@material-ui/core/styles';
 
 import { brewer } from 'chroma-js';
 
 import { defined, Series } from '@system-dynamics/core/common';
-
-const styles = createStyles({
-  sparkline: {
-    strokeWidth: 0.5,
-    strokeLinecap: 'round',
-    stroke: '#2299dd',
-    fill: 'none',
-  },
-  axis: {
-    strokeWidth: 0.75,
-    strokeLinecap: 'round',
-    stroke: '#999',
-    fill: 'none',
-  },
-});
 
 function last(arr: Readonly<Float64Array>): number {
   return arr[arr.length - 1];
@@ -61,20 +46,20 @@ function max(arr: Readonly<Float64Array>): number {
   return n;
 }
 
-interface SparklineProps extends WithStyles<typeof styles> {
+export interface SparklineProps {
   series: Readonly<Array<Series>>;
   width: number;
   height: number;
 }
 
-export const Sparkline = withStyles(styles)(
-  class Sparkline extends React.PureComponent<SparklineProps> {
-    private pAxis = '';
-    private sparklines: Array<React.SVGProps<SVGPathElement>> = [];
-    private cachedSeries: List<Series> | unknown;
+export const Sparkline = styled(
+  class Sparkline extends React.PureComponent<SparklineProps & { className?: string }> {
+    // these should all be 'private', but Typescript can't enforce that with the `styled` above
+    pAxis = '';
+    sparklines: Array<React.SVGProps<SVGPathElement>> = [];
+    cachedSeries: List<Series> | unknown;
 
     recache() {
-      const { classes } = this.props;
       const time = defined(this.props.series[0]).time;
       const x = 0;
       const y = 0;
@@ -110,7 +95,7 @@ export const Sparkline = withStyles(styles)(
           p += `${prefix}${x + (w * (time[i] - xMin)) / xSpan},${y + h - (h * (values[i] - yMin)) / ySpan}`;
         }
         const style = this.props.series.length === 1 ? undefined : { stroke: colors[i % colors.length] };
-        sparklines.push(<path key={dataset.name} d={p} className={classes.sparkline} style={style} />);
+        sparklines.push(<path key={dataset.name} d={p} className="simlin-sparkline" style={style} />);
         i++;
       }
 
@@ -124,13 +109,26 @@ export const Sparkline = withStyles(styles)(
         this.recache();
       }
 
-      const { classes } = this.props;
+      const { className } = this.props;
       return (
-        <g>
-          <path key="$axis" d={this.pAxis} className={classes.axis} />
+        <g className={className}>
+          <path key="$axis" d={this.pAxis} className="simlin-sparkline-axis" />
           {this.sparklines}
         </g>
       );
     }
   },
-);
+)(`
+    & .simlin-sparkline {
+      stroke-width: 0.5px;
+      stroke-linecap: round;
+      stroke: #2299dd;
+      fill: none;
+    }
+    & .simlin-sparkline-axis {
+      stroke-width: 0.75px;
+      stroke-linecap: round;
+      stroke: #999;
+      fill: none;
+    }
+`);

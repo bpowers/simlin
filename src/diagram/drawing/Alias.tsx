@@ -4,7 +4,8 @@
 
 import * as React from 'react';
 
-import { createStyles, withStyles, WithStyles } from '@material-ui/core/styles';
+import clsx from 'clsx';
+import { styled } from '@material-ui/core/styles';
 
 import { AliasViewElement, NamedViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 
@@ -15,40 +16,40 @@ import { Sparkline } from './Sparkline';
 
 import { Series } from '@system-dynamics/core/common';
 
-const styles = createStyles({
-  aux: {
-    fill: 'white',
-    strokeWidth: 1,
-    stroke: 'black',
-    strokeDasharray: 2,
-  },
-  targetGood: {
-    '& circle': {
-      stroke: 'rgb(76, 175, 80)',
-      strokeWidth: 2,
-    },
-  },
-  targetBad: {
-    '& circle': {
-      stroke: 'rgb(244, 67, 54)',
-      strokeWidth: 2,
-    },
-  },
-  selected: {
-    '& text': {
-      fill: '#4444dd',
-    },
-    '& circle': {
-      stroke: '#4444dd',
-    },
-  },
-  indicator: {
-    fill: 'rgb(255, 152, 0)',
-    strokeWidth: 0,
-  },
-});
+// const styles = createStyles({
+//   aux: {
+//     fill: 'white',
+//     strokeWidth: 1,
+//     stroke: 'black',
+//     strokeDasharray: 2,
+//   },
+//   targetGood: {
+//     '& circle': {
+//       stroke: 'rgb(76, 175, 80)',
+//       strokeWidth: 2,
+//     },
+//   },
+//   targetBad: {
+//     '& circle': {
+//       stroke: 'rgb(244, 67, 54)',
+//       strokeWidth: 2,
+//     },
+//   },
+//   selected: {
+//     '& text': {
+//       fill: '#4444dd',
+//     },
+//     '& circle': {
+//       stroke: '#4444dd',
+//     },
+//   },
+//   indicator: {
+//     fill: 'rgb(255, 152, 0)',
+//     strokeWidth: 0,
+//   },
+// });
 
-export interface AliasPropsFull extends WithStyles<typeof styles> {
+export interface AliasProps {
   isSelected: boolean;
   isValidTarget?: boolean;
   series: Readonly<Array<Series>> | undefined;
@@ -57,11 +58,6 @@ export interface AliasPropsFull extends WithStyles<typeof styles> {
   element: AliasViewElement;
   aliasOf: NamedViewElement | undefined;
 }
-
-export type AliasProps = Pick<
-  AliasPropsFull,
-  'isSelected' | 'isValidTarget' | 'series' | 'onSelection' | 'onLabelDrag' | 'element' | 'aliasOf'
->;
 
 export function aliasContains(element: ViewElement, point: Point): boolean {
   const cx = element.cx;
@@ -93,8 +89,8 @@ export function aliasBounds(element: AliasViewElement, aliasOf: NamedViewElement
   return mergeBounds(bounds, labelBounds(labelProps));
 }
 
-export const Alias = withStyles(styles)(
-  class AliasInner extends React.PureComponent<AliasPropsFull> {
+export const Alias = styled(
+  class AliasInner extends React.PureComponent<AliasProps & { className?: string }> {
     handlePointerDown = (e: React.PointerEvent<SVGElement>): void => {
       e.preventDefault();
       e.stopPropagation();
@@ -130,7 +126,7 @@ export const Alias = withStyles(styles)(
     }
 
     render() {
-      const { classes, element, isSelected, isValidTarget, series, aliasOf } = this.props;
+      const { className, element, isSelected, isValidTarget, series, aliasOf } = this.props;
       const cx = element.cx;
       const cy = element.cy;
       const r = this.radius();
@@ -155,22 +151,22 @@ export const Alias = withStyles(styles)(
 
       const sparkline = this.sparkline(series);
 
-      let groupClassName = isSelected ? classes.selected : undefined;
+      let groupClassName = isSelected ? 'simlin-selected' : undefined;
       if (isValidTarget !== undefined) {
-        groupClassName = isValidTarget ? classes.targetGood : classes.targetBad;
+        groupClassName = isValidTarget ? 'simlin-target-good' : 'simlin-target-bad';
       }
 
-      let circles = [<circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />];
+      let circles = [<circle key="1" cx={cx} cy={cy} r={r} />];
       if (isArrayed) {
         circles = [
-          <circle key="0" className={classes.aux} cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
-          <circle key="1" className={classes.aux} cx={cx} cy={cy} r={r} />,
-          <circle key="2" className={classes.aux} cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
+          <circle key="0" cx={cx + arrayedOffset} cy={cy + arrayedOffset} r={r} />,
+          <circle key="1" cx={cx} cy={cy} r={r} />,
+          <circle key="2" cx={cx - arrayedOffset} cy={cy - arrayedOffset} r={r} />,
         ];
       }
 
       return (
-        <g className={groupClassName} onPointerDown={this.handlePointerDown}>
+        <g className={clsx(className, groupClassName)} onPointerDown={this.handlePointerDown}>
           {circles}
           {sparkline}
           {label}
@@ -178,4 +174,33 @@ export const Alias = withStyles(styles)(
       );
     }
   },
+)(
+  ({ theme }) => `
+  & circle {
+    stroke-width: 1px;
+    stroke: ${theme.palette.common.black};
+    fill: ${theme.palette.common.white};
+    stroke-dasharray: 2px;
+  }
+  &.simlin-target-good circle {
+    stroke: rgb(76, 175, 80);
+    stroke-width: 2px;
+  }
+  &.simlin-target-bad circle {
+    stroke: rgb(244, 67, 54);
+    stroke-width: 2px;
+  }
+  &.simlin-selected {
+    text {
+      fill: #4444dd;
+    }
+    circle {
+      stroke: #4444dd;
+    }
+  }
+  & .simlin-error-indicator {
+    stroke-width: 0px;
+    fill: rgb(255, 152, 0);
+  }
+  `,
 );

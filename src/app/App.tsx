@@ -6,11 +6,10 @@ import * as React from 'react';
 
 import firebase from 'firebase/app';
 import 'firebase/auth';
+
 import { BrowserRouter, Route, RouteComponentProps } from 'react-router-dom';
-
-import { createGenerateClassName, StylesProvider } from '@material-ui/styles';
-
-import { createMuiTheme, createStyles, MuiThemeProvider, withStyles, WithStyles } from '@material-ui/core/styles';
+import { styled } from '@material-ui/core/styles';
+import { createTheme, ThemeProvider } from '@material-ui/core/styles';
 
 import CssBaseline from '@material-ui/core/CssBaseline';
 
@@ -27,26 +26,12 @@ const config = {
 };
 firebase.initializeApp(config);
 
-const styles = createStyles({
-  modelApp: {
-    height: '100%',
-    width: '100%',
-    margin: 0,
-    border: 0,
-    padding: 0,
-  },
-});
-
-const generateClassName = createGenerateClassName({
-  productionPrefix: 'm',
-});
-
 interface EditorMatchParams {
   username: string;
   projectName: string;
 }
 
-const theme = createMuiTheme({
+const theme = createTheme({
   palette: {
     /* primary: purple,
      * secondary: green, */
@@ -102,9 +87,11 @@ interface AppState {
   auth: firebase.auth.Auth;
   firebaseIdToken?: string | null;
 }
-type AppProps = WithStyles<typeof styles>;
+interface AppProps {
+  className?: string;
+}
 
-const InnerApp = withStyles(styles)(
+const InnerApp = styled(
   class InnerApp extends React.PureComponent<AppProps, AppState> {
     state: AppState;
 
@@ -249,30 +236,36 @@ const InnerApp = withStyles(styles)(
         return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
       }
 
-      const { classes } = this.props;
+      const { className } = this.props;
 
       return (
-        <BrowserRouter>
-          <div className={classes.modelApp}>
-            <Route exact path="/" component={this.home} />
-            <Route exact path="/:username/:projectName" render={this.editor} />
-            <Route exact path="/new" component={this.home} />
-          </div>
-        </BrowserRouter>
+        <React.Fragment>
+          <CssBaseline />
+          <BrowserRouter>
+            <div className={className}>
+              <Route exact path="/" component={this.home} />
+              <Route exact path="/:username/:projectName" render={this.editor} />
+              <Route exact path="/new" component={this.home} />
+            </div>
+          </BrowserRouter>
+        </React.Fragment>
       );
     }
   },
-);
+)(`
+    height: 100%;
+    width: 100%;
+    margin: 0px;
+    border: 0px;
+    padding: 0px;
+`);
 
 export class App extends React.PureComponent {
   render(): JSX.Element {
     return (
-      <StylesProvider generateClassName={generateClassName}>
-        <MuiThemeProvider theme={theme}>
-          <CssBaseline />
-          <InnerApp />
-        </MuiThemeProvider>
-      </StylesProvider>
+      <ThemeProvider theme={theme}>
+        <InnerApp />
+      </ThemeProvider>
     );
   }
 }
