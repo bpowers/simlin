@@ -348,8 +348,10 @@ export const apiRouter = (app: Application): Router => {
         if (err.code === 'wut') {
           res.status(400).json({ error: 'username already taken' });
           return;
+        } else {
+          res.status(400).json({ error: 'username is already taken' });
+          return;
         }
-        throw err;
       }
 
       req.session.passport.user.id = userModel.getId();

@@ -4,19 +4,25 @@
 
 import * as React from 'react';
 
-import firebase from 'firebase/app';
-import 'firebase/auth';
+import { initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  connectAuthEmulator,
+  onAuthStateChanged,
+  Auth as FirebaseAuth,
+  User as FirebaseUser,
+} from 'firebase/auth';
 
 import { BrowserRouter, Route, RouteComponentProps } from 'react-router-dom';
 import { styled } from '@material-ui/core/styles';
 import { createTheme, ThemeProvider } from '@material-ui/core/styles';
-
 import CssBaseline from '@material-ui/core/CssBaseline';
 
 import { defined } from '@system-dynamics/core/common';
+import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
+
 import Home from './Home';
 import { Login } from './Login';
-import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';
 import { NewUser } from './NewUser';
 import { User } from './User';
 
@@ -24,7 +30,7 @@ const config = {
   apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
   authDomain: 'simlin.firebaseapp.com',
 };
-firebase.initializeApp(config);
+const firebaseApp = initializeApp(config);
 
 interface EditorMatchParams {
   username: string;
@@ -84,7 +90,7 @@ interface AppState {
   authUnknown: boolean;
   isNewUser?: boolean;
   user?: User;
-  auth: firebase.auth.Auth;
+  auth: FirebaseAuth;
   firebaseIdToken?: string | null;
 }
 interface AppProps {
@@ -99,11 +105,9 @@ const InnerApp = styled(
       super(props);
 
       const isDevServer = process.env.NODE_ENV === 'development';
-      const auth = firebase.auth();
+      const auth = getAuth(firebaseApp);
       if (isDevServer) {
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore
-        auth.useEmulator('http://localhost:9099', { disableWarnings: true });
+        connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
       }
 
       this.state = {
@@ -112,18 +116,18 @@ const InnerApp = styled(
       };
 
       // notify our app when a user logs in
-      firebase.auth().onAuthStateChanged(this.authStateChanged);
+      onAuthStateChanged(auth, this.authStateChanged);
 
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.getUserInfo);
     }
 
-    authStateChanged = (user: firebase.User | null) => {
+    authStateChanged = (user: FirebaseUser | null) => {
       // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.asyncAuthStateChanged, undefined, user);
     };
 
-    asyncAuthStateChanged = async (user: firebase.User | null) => {
+    asyncAuthStateChanged = async (user: FirebaseUser | null) => {
       if (!user) {
         this.setState({ firebaseIdToken: null });
         return;
