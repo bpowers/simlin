@@ -5,20 +5,16 @@
 import { List } from 'immutable';
 import { Node, Descendant } from 'slate';
 
-import { CustomText } from './SlateEditor';
+import { CustomText, CustomElement } from './SlateEditor';
 
-export function plainDeserialize(str: string): CustomText[] {
+export function plainDeserialize(type: 'label' | 'equation', str: string): CustomElement[] {
   return str.split('\n').map(
-    (line: string): CustomText => {
-      return { text: line };
-    },
-  );
-}
-
-export function plainDeserializeWithNewlines(str: string): CustomText[] {
-  return str.split('\n').map(
-    (line: string): CustomText => {
-      return { text: line + '\n' };
+    (line: string): CustomElement => {
+      const text: CustomText = { text: line };
+      return {
+        type,
+        children: [text],
+      };
     },
   );
 }

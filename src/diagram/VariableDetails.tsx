@@ -12,7 +12,6 @@ import { createEditor, Descendant, Text } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@material-ui/core';
-
 import { brewer } from 'chroma-js';
 
 import {
@@ -29,7 +28,7 @@ import {
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
-import { EquationElement, FormattedText } from './drawing/SlateEditor';
+import { CustomElement, FormattedText } from './drawing/SlateEditor';
 import { LookupEditor } from './LookupEditor';
 import { errorCodeDescription } from '@system-dynamics/engine';
 
@@ -67,13 +66,8 @@ function stringFromDescendants(children: Descendant[]): string {
   return plainSerialize(children);
 }
 
-function descendantsFromString(equation: string): EquationElement[] {
-  return [
-    {
-      type: 'equation',
-      children: plainDeserialize(equation),
-    },
-  ];
+function descendantsFromString(equation: string): CustomElement[] {
+  return plainDeserialize('equation', equation);
 }
 
 function scalarEquationFor(variable: Variable): string {
@@ -91,7 +85,7 @@ function highlightErrors(
   errors: List<EquationError> | undefined,
   unitErrors: List<UnitError> | undefined,
   isUnits: boolean,
-): EquationElement[] {
+): CustomElement[] {
   const result = descendantsFromString(s);
   if (!isUnits && errors && errors.size > 0) {
     // TODO: multiple errors

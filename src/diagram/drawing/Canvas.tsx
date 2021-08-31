@@ -34,22 +34,13 @@ import { canonicalize } from '@system-dynamics/core/canonicalize';
 import { Alias, AliasProps } from './Alias';
 import { Aux, auxBounds, auxContains, AuxProps } from './Auxiliary';
 import { Cloud, cloudBounds, cloudContains, CloudProps } from './Cloud';
-import {
-  calcViewBox,
-  displayName,
-  plainDeserialize,
-  plainDeserializeWithNewlines,
-  plainSerialize,
-  Point,
-  Rect,
-  screenToCanvasPoint,
-} from './common';
+import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect, screenToCanvasPoint } from './common';
 import { Connector, ConnectorProps } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
 import { Flow, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
 import { Module, moduleBounds, ModuleProps } from './Module';
-import { CustomText } from './SlateEditor';
+import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
 
 export const inCreationUid = -2;
@@ -697,9 +688,7 @@ export const Canvas = styled(
               throw new Error('invariant broken');
             }
 
-            const editingName = plainDeserializeWithNewlines(
-              displayName(defined((inCreation as NamedViewElement).name)),
-            );
+            const editingName = plainDeserialize('label', displayName(defined((inCreation as NamedViewElement).name)));
             this.setState({
               isEditingName: true,
               editNameOnPointerUp: false,
@@ -741,7 +730,7 @@ export const Canvas = styled(
               if (inCreation) {
                 this.setState({
                   isEditingName: true,
-                  editingName: plainDeserialize(displayName(defined(element.name))),
+                  editingName: plainDeserialize('label', displayName(defined(element.name))),
                   flowStillBeingCreated: true,
                 });
               }
@@ -1101,7 +1090,7 @@ export const Canvas = styled(
       }
 
       let isEditingName = !!isText;
-      let editingName: Array<CustomText> = [];
+      let editingName: Array<CustomElement> = [];
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
@@ -1163,7 +1152,7 @@ export const Canvas = styled(
         if (isEditingName) {
           const uid = defined(selection.first());
           const editingElement = this.getElementByUid(uid) as NamedViewElement;
-          editingName = plainDeserialize(displayName(defined(editingElement.name)));
+          editingName = plainDeserialize('label', displayName(defined(editingElement.name)));
         }
       }
 

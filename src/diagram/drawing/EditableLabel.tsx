@@ -118,14 +118,7 @@ export const EditableLabel = styled(
         border: '1px solid #4444dd',
       };
 
-      const { className } = this.props;
-
-      const value: Descendant[] = [
-        {
-          type: 'equation',
-          children: this.props.value as any,
-        },
-      ];
+      const { className, value } = this.props;
 
       return (
         <div
