@@ -125,17 +125,20 @@ async function getOrCreateUserFromProfile(
         const userDocs = await users.findByScan({ email });
         if (userDocs) {
           let fullUserFound = false;
-          let tempUserName: string | undefined = undefined;
           for (const user of userDocs) {
-            if (user.getId().startsWith('temp-')) {
-              tempUserName = user.getId();
-            } else {
+            if (!user.getId().startsWith('temp-')) {
               fullUserFound = true;
+              break;
             }
           }
-          if (fullUserFound && tempUserName) {
-            logger.info(`fixing inconsistency with ${email} -- deleting '${tempUserName}' in DB`);
-            await users.deleteOne(tempUserName);
+          if (fullUserFound) {
+            for (const user of userDocs) {
+              const userId = user.getId();
+              if (userId.startsWith('temp-')) {
+                logger.info(`fixing inconsistency with ${email} -- deleting '${userId}' in DB`);
+                await users.deleteOne(userId);
+              }
+            }
           }
           // it should work now
           user = await users.findOneByScan({ email });
