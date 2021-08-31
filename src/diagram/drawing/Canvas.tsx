@@ -1533,11 +1533,21 @@ export const Canvas = styled(
     }
   },
 )(
+  // we need both simlin-canvas definitions below -- one for render to string,
+  // another for the web
   ({ theme }) => `
     height: 100%;
     width: 100%;
 
     &.simlin-canvas {
+      height: 100%;
+      width: 100%;
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    & .simlin-canvas {
       height: 100%;
       width: 100%;
       box-sizing: border-box;
