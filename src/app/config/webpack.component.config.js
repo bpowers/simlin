@@ -399,7 +399,7 @@ module.exports = function (webpackEnv) {
         'frame-src': ["'self'", 'https://simlin.firebaseapp.com'],
         'base-uri': "'self'",
         "block-all-mixed-content": [],
-        'connect-src': ["'self'", 'https://www.googleapis.com', 'https://securetoken.googleapis.com'],
+        'connect-src': ["'self'", 'https://www.googleapis.com', 'https://securetoken.googleapis.com', 'https://identitytoolkit.googleapis.com'],
         'font-src': ["'self'", "data:", "https://fonts.gstatic.com"],
         'img-src': ["'self'", "data:", "blob:", "https://*.googleusercontent.com", "https://www.gstatic.com"],
         'object-src': "'none'",
