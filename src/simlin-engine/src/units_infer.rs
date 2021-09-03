@@ -8,19 +8,17 @@ use crate::ast::{Ast, BinaryOp, Expr};
 use crate::builtins::BuiltinFn;
 use crate::common::{canonicalize, Ident, Result, UnitResult};
 use crate::datamodel::UnitMap;
-#[cfg(test)]
-use crate::model::ModelStage0;
 use crate::model::ModelStage1;
 use crate::model_err;
 #[cfg(test)]
-use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_stock};
+use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
 use crate::units::{combine, Context, UnitOp, Units};
 use crate::variable::Variable;
 
+#[allow(dead_code)]
 struct UnitInferer<'a> {
     ctx: &'a Context,
-    #[allow(dead_code)]
-    model: &'a ModelStage1,
+    models: &'a HashMap<Ident, &'a ModelStage1>,
     // units for module inputs
     time: Variable,
 }
@@ -86,11 +84,19 @@ impl<'a> UnitInferer<'a> {
     /// dealing with arithmatic expressions instead of types, instead of pairs of types
     /// we can get away with a single UnitMap -- our full constraint is `1 == UnitMap`, we just
     /// leave off the `1 ==` part.
-    fn gen_constraints(&self, expr: &Expr, constraints: &mut Vec<UnitMap>) -> UnitResult<Units> {
+    fn gen_constraints(
+        &self,
+        expr: &Expr,
+        prefix: &str,
+        constraints: &mut Vec<UnitMap>,
+    ) -> UnitResult<Units> {
         match expr {
             Expr::Const(_, _, _) => Ok(Units::Constant),
             Expr::Var(ident, _loc) => {
-                let units: UnitMap = [(format!("@{}", ident), 1)].iter().cloned().collect();
+                let units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
+                    .iter()
+                    .cloned()
+                    .collect();
 
                 Ok(Units::Explicit(units))
             }
@@ -108,7 +114,10 @@ impl<'a> UnitInferer<'a> {
                 }
                 BuiltinFn::Lookup(ident, _, _loc) => {
                     // lookups have the units specified on the table
-                    let units: UnitMap = [(format!("@{}", ident), 1)].iter().cloned().collect();
+                    let units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
+                        .iter()
+                        .cloned()
+                        .collect();
 
                     Ok(Units::Explicit(units))
                 }
@@ -123,11 +132,11 @@ impl<'a> UnitInferer<'a> {
                 | BuiltinFn::Log10(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Sqrt(a)
-                | BuiltinFn::Tan(a) => self.gen_constraints(a, constraints),
+                | BuiltinFn::Tan(a) => self.gen_constraints(a, prefix, constraints),
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
-                        .map(|arg| self.gen_constraints(arg, constraints))
+                        .map(|arg| self.gen_constraints(arg, prefix, constraints))
                         .collect::<UnitResult<Vec<_>>>()?;
 
                     if args.is_empty() {
@@ -158,8 +167,8 @@ impl<'a> UnitInferer<'a> {
                     }
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-                    let a_units = self.gen_constraints(a, constraints)?;
-                    let b_units = self.gen_constraints(b, constraints)?;
+                    let a_units = self.gen_constraints(a, prefix, constraints)?;
+                    let b_units = self.gen_constraints(b, prefix, constraints)?;
 
                     if let Units::Explicit(ref lunits) = a_units {
                         if let Units::Explicit(runits) = b_units {
@@ -179,13 +188,13 @@ impl<'a> UnitInferer<'a> {
                         b.clone(),
                         a.get_loc().union(&b.get_loc()),
                     );
-                    let units = self.gen_constraints(&div, constraints)?;
+                    let units = self.gen_constraints(&div, prefix, constraints)?;
 
                     // the optional argument to safediv, if specified, should match the units of a/b
                     if let Units::Explicit(ref result_units) = units {
                         if let Some(c) = c {
                             if let Units::Explicit(c_units) =
-                                self.gen_constraints(c, constraints)?
+                                self.gen_constraints(c, prefix, constraints)?
                             {
                                 constraints.push(combine(
                                     UnitOp::Div,
@@ -200,10 +209,10 @@ impl<'a> UnitInferer<'a> {
                 }
             },
             Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr::Op1(_, l, _) => self.gen_constraints(l, constraints),
+            Expr::Op1(_, l, _) => self.gen_constraints(l, prefix, constraints),
             Expr::Op2(op, l, r, _) => {
-                let lunits = self.gen_constraints(l, constraints)?;
-                let runits = self.gen_constraints(r, constraints)?;
+                let lunits = self.gen_constraints(l, prefix, constraints)?;
+                let runits = self.gen_constraints(r, prefix, constraints)?;
 
                 match op {
                     BinaryOp::Add | BinaryOp::Sub => match (lunits, runits) {
@@ -248,8 +257,8 @@ impl<'a> UnitInferer<'a> {
                 }
             }
             Expr::If(_, l, r, _) => {
-                let lunits = self.gen_constraints(l, constraints)?;
-                let runits = self.gen_constraints(r, constraints)?;
+                let lunits = self.gen_constraints(l, prefix, constraints)?;
+                let runits = self.gen_constraints(r, prefix, constraints)?;
 
                 if let Units::Explicit(ref lunits) = lunits {
                     if let Units::Explicit(runits) = runits {
@@ -263,7 +272,12 @@ impl<'a> UnitInferer<'a> {
     }
 
     #[allow(dead_code)]
-    fn gen_all_constraints(&self, model: &ModelStage1, constraints: &mut Vec<UnitMap>) {
+    fn gen_all_constraints(
+        &self,
+        model: &ModelStage1,
+        prefix: &str,
+        constraints: &mut Vec<UnitMap>,
+    ) {
         let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
         for (id, var) in model.variables.iter() {
@@ -275,24 +289,45 @@ impl<'a> UnitInferer<'a> {
             } = var
             {
                 let stock_ident = ident;
-                let expected: UnitMap =
-                    [(format!("@{}", stock_ident), 1), (time_units.clone(), -1)]
-                        .iter()
-                        .cloned()
-                        .collect();
+                let expected: UnitMap = [
+                    (format!("@{}{}", prefix, stock_ident), 1),
+                    (time_units.clone(), -1),
+                ]
+                .iter()
+                .cloned()
+                .collect();
                 let mut check_flows = |flows: &Vec<Ident>| {
                     for ident in flows.iter() {
-                        let flow_units: UnitMap =
-                            [(format!("@{}", ident), 1)].iter().cloned().collect();
+                        let flow_units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
+                            .iter()
+                            .cloned()
+                            .collect();
                         constraints.push(combine(UnitOp::Div, flow_units, expected.clone()));
                     }
                 };
                 check_flows(inflows);
                 check_flows(outflows);
+            } else if let Variable::Module {
+                ident,
+                model_name,
+                inputs,
+                ..
+            } = var
+            {
+                let submodel = self.models[model_name];
+                let subprefix = format!("{}{}·", prefix, ident);
+                for input in inputs {
+                    let src = format!("@{}{}", prefix, input.src);
+                    let dst = format!("@{}{}", subprefix, input.dst);
+                    // src = dst === 1 = src/dst
+                    let units: UnitMap = [(src, 1), (dst, -1)].iter().cloned().collect();
+                    constraints.push(units);
+                }
+                self.gen_all_constraints(submodel, &subprefix, constraints);
             }
             let var_units = match var.ast() {
-                Some(Ast::Scalar(ast)) => self.gen_constraints(ast, constraints),
-                Some(Ast::ApplyToAll(_, ast)) => self.gen_constraints(ast, constraints),
+                Some(Ast::Scalar(ast)) => self.gen_constraints(ast, prefix, constraints),
+                Some(Ast::ApplyToAll(_, ast)) => self.gen_constraints(ast, prefix, constraints),
                 Some(Ast::Arrayed(_, _asts)) => {
                     // todo!();
                     Ok(Units::Constant)
@@ -308,12 +343,18 @@ impl<'a> UnitInferer<'a> {
                     // TODO: constant means ~ unconstrained I think
                 }
                 Units::Explicit(units) => {
-                    let mv = [(format!("@{}", id), 1)].iter().cloned().collect();
+                    let mv = [(format!("@{}{}", prefix, id), 1)]
+                        .iter()
+                        .cloned()
+                        .collect();
                     constraints.push(combine(UnitOp::Div, mv, units));
                 }
             };
             if let Some(units) = var.units() {
-                let mv = [(format!("@{}", id), 1)].iter().cloned().collect();
+                let mv = [(format!("@{}{}", prefix, id), 1)]
+                    .iter()
+                    .cloned()
+                    .collect();
                 constraints.push(combine(UnitOp::Div, mv, units.clone()));
             }
         }
@@ -387,12 +428,25 @@ impl<'a> UnitInferer<'a> {
         use crate::units::pretty_print_unit;
 
         let mut constraints = vec![];
-        self.gen_all_constraints(model, &mut constraints);
+        self.gen_all_constraints(model, "", &mut constraints);
         // mostly for robustness: ensure we don't inadvertently depend on
         // test cases iterating in a specific order.
         // constraints.shuffle(&mut thread_rng());
 
+        eprintln!("{} constraints:", model.name);
+        for c in constraints.iter() {
+            eprintln!("  1 == {}", pretty_print_unit(c));
+        }
+
         let (results, constraints) = self.unify(constraints)?;
+
+        eprintln!("after unification:");
+
+        for (ident, units) in results.iter() {
+            eprintln!("  {} == {}", ident, pretty_print_unit(units));
+        }
+
+        eprintln!("  ;");
 
         if let Some(constraints) = constraints {
             use std::fmt::Write;
@@ -415,16 +469,36 @@ fn test_inference() {
     let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
 
     // test cases where we should be able to infer all units
-    let test_cases = &[&[
-        (
-            x_stock("stock_1", "1", &["inflow"], &[], Some("usd")),
-            "usd",
-        ),
-        (x_aux("window", "6", Some("parsec")), "parsec"),
-        (x_flow("inflow", "seen/window", None), "usd/parsec"),
-        (x_aux("seen", "sin(seen_dep) mod 3", None), "usd"),
-        (x_aux("seen_dep", "1 + 3 * stock_1", None), "usd"),
-    ]];
+    let test_cases: &[&[(crate::datamodel::Variable, &'static str)]] = &[
+        &[
+            (x_aux("input", "6", Some("widget")), "widget"),
+            (x_flow("delay", "3", Some("parsec")), "parsec"),
+            // testing the 2-input version of smth1
+            (x_aux("seen", "SMTH1(input, delay)", None), "widget"),
+            (x_aux("seen_dep", "seen + 1", None), "widget"),
+        ],
+        &[
+            (
+                x_stock("stock_1", "1", &["inflow"], &[], Some("usd")),
+                "usd",
+            ),
+            (x_aux("window", "6", Some("parsec")), "parsec"),
+            (x_flow("inflow", "seen/window", None), "usd/parsec"),
+            (x_aux("seen", "sin(seen_dep) mod 3", None), "usd"),
+            (x_aux("seen_dep", "1 + 3 * stock_1", None), "usd"),
+        ],
+        &[
+            (x_aux("initial", "70", Some("widget")), "widget"),
+            (x_aux("input", "6", Some("widget")), "widget"),
+            (x_flow("delay", "3", Some("parsec")), "parsec"),
+            // testing the 3-input version of smth1
+            (
+                x_aux("seen", "DELAY1(input, delay, initial)", None),
+                "widget",
+            ),
+            (x_aux("seen_dep", "seen + 1", None), "widget"),
+        ],
+    ];
 
     for test_case in test_cases.into_iter() {
         let expected = test_case
@@ -437,13 +511,20 @@ fn test_inference() {
             .cloned()
             .collect::<Vec<_>>();
         let model = x_model("main", vars);
-        let model = ModelStage0::new(&model, &[], &units_ctx, false);
-        let model = ModelStage1::new(&units_ctx, &HashMap::new(), &model);
+        let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let results = infer(&units_ctx, &model).unwrap();
+            let mut results: Result<HashMap<Ident, UnitMap>> =
+                model_err!(UnitMismatch, "".to_owned());
+            let _project = crate::project::Project::base_from(
+                project_datamodel.clone(),
+                |models, units_ctx, model| {
+                    results = infer(models, units_ctx, model);
+                },
+            );
+            let results = results.unwrap();
             for (ident, expected_units) in expected.iter() {
                 let expected_units: UnitMap =
                     crate::units::parse_units(&units_ctx, Some(expected_units))
@@ -459,12 +540,81 @@ fn test_inference() {
     }
 }
 
-pub(crate) fn infer(units_ctx: &Context, model: &ModelStage1) -> Result<HashMap<String, UnitMap>> {
+#[test]
+fn test_inference_negative() {
+    let sim_specs = sim_specs_with_units("parsec");
+
+    // test cases where we should expect to fail
+    let test_cases: &[&[(crate::datamodel::Variable, &'static str)]] = &[
+        &[
+            // the "+ TIME" here causes constraints to fail
+            (x_aux("input", "6 + TIME", Some("widget")), "widget"),
+            (x_flow("delay", "3", Some("parsec")), "parsec"),
+            // testing the 2-input version of smth1
+            (x_aux("seen", "SMTH1(input, delay)", None), "widget"),
+            (x_aux("seen_dep", "seen + 1", None), "widget"),
+        ],
+        &[
+            (
+                x_stock("stock_1", "1", &["inflow"], &[], Some("usd")),
+                "usd",
+            ),
+            // need this to be defined
+            (x_aux("window", "6", None), "parsec"),
+            (x_flow("inflow", "seen/window", None), "usd/parsec"),
+            (x_aux("seen", "sin(seen_dep) mod 3", None), "usd"),
+            (x_aux("seen_dep", "1 + 3", None), "usd"),
+        ],
+        &[
+            // initial needs to have the same units as input
+            (x_aux("initial", "70", Some("wallop")), "wallop"),
+            (x_aux("input", "6", Some("widget")), "widget"),
+            (x_flow("delay", "3", Some("parsec")), "parsec"),
+            // testing the 3-input version of smth1
+            (
+                x_aux("seen", "SMTH1(input, delay, initial)", None),
+                "widget",
+            ),
+            (x_aux("seen_dep", "seen + 1", None), "widget"),
+        ],
+    ];
+
+    for test_case in test_cases.into_iter() {
+        let vars = test_case
+            .iter()
+            .map(|(var, _unit)| var)
+            .cloned()
+            .collect::<Vec<_>>();
+        let model = x_model("main", vars);
+        let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+        // there is non-determinism in inference; do it a few times to
+        // shake out heisenbugs
+        for _ in 0..64 {
+            let mut results: Result<HashMap<Ident, UnitMap>> =
+                model_err!(UnitMismatch, "".to_owned());
+            let _project = crate::project::Project::base_from(
+                project_datamodel.clone(),
+                |models, units_ctx, model| {
+                    results = infer(models, units_ctx, model);
+                },
+            );
+            assert!(results.is_err());
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn infer(
+    models: &HashMap<Ident, &ModelStage1>,
+    units_ctx: &Context,
+    model: &ModelStage1,
+) -> Result<HashMap<String, UnitMap>> {
     let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
     let units = UnitInferer {
         ctx: units_ctx,
-        model,
+        models,
         time: Variable::Var {
             ident: "time".to_string(),
             ast: None,

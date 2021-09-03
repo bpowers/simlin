@@ -14,11 +14,9 @@
         <variables>
             <stock name="output">
                 <eqn>input</eqn>
-                <units>unit</units>
             </stock>
             <aux name="input">
                 <eqn>0</eqn>
-                <units>unit</units>
             </aux>
         </variables>
         <views>

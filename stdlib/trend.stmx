@@ -14,28 +14,22 @@
         <variables>
             <stock name="stock">
                 <eqn>if isModuleInput(initial_value) then input / (1 + delay_time * initial_value) else input</eqn>
-                <units>unit</units>
                 <inflow>flow</inflow>
             </stock>
             <flow name="flow">
                 <eqn>(input-Stock)/delay_time</eqn>
-                <units>unit/time unit</units>
             </flow>
             <aux name="output">
                 <eqn>SAFEDIV(input-Stock, ABS(Stock)*delay_time)</eqn>
-                <units>1/time unit</units>
             </aux>
             <aux name="delay_time">
                 <eqn>1</eqn>
-                <units>time unit</units>
             </aux>
             <aux name="input">
                 <eqn>0</eqn>
-                <units>unit</units>
             </aux>
             <aux name="initial_value">
                 <eqn>NAN</eqn>
-                <units>unit</units>
             </aux>
         </variables>
         <views>

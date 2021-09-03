@@ -14,42 +14,33 @@
         <variables>
             <flow name="flow_1">
                 <eqn>(input - Stock_1)/(delay_time/3)</eqn>
-                <units>unit/time unit</units>
             </flow>
             <stock name="stock_1">
                 <eqn>if isModuleInput(initial_value) then initial_value else input</eqn>
-                <units>unit</units>
                 <inflow>flow_1</inflow>
             </stock>
             <stock name="stock_2">
                 <eqn>if isModuleInput(initial_value) then initial_value else input</eqn>
-                <units>unit</units>
                 <inflow>flow_2</inflow>
             </stock>
             <flow name="flow_2">
                 <eqn>(Stock_1 - Stock_2)/(delay_time/3)</eqn>
-                <units>unit/time unit</units>
             </flow>
             <stock name="output">
                 <eqn>if isModuleInput(initial_value) then initial_value else input</eqn>
-                <units>unit</units>
                 <inflow>flow_3</inflow>
             </stock>
             <flow name="flow_3">
                 <eqn>(Stock_2 - Output)/(delay_time/3)</eqn>
-                <units>unit/time unit</units>
             </flow>
             <aux name="delay_time">
                 <eqn>1</eqn>
-                <units>time unit</units>
             </aux>
             <aux name="input">
                 <eqn>0</eqn>
-                <units>unit</units>
             </aux>
             <aux name="initial_value">
                 <eqn>NAN</eqn>
-                <units>unit</units>
             </aux>
         </variables>
         <views>

@@ -6,14 +6,18 @@ use std::collections::{BTreeSet, HashMap};
 
 use prost::alloc::rc::Rc;
 
-use crate::common::Error;
-use crate::model::ModelStage0;
+use crate::common::{Error, Ident};
+use crate::model::{ModelStage0, ModelStage1};
+use crate::units::Context;
 use crate::{datamodel, model};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub datamodel: datamodel::Project,
-    pub models: HashMap<String, Rc<model::ModelStage1>>,
+    // these are Rcs so that multiple Modules created by the compiler can
+    // reference the same Model instance
+    pub models: HashMap<Ident, Rc<model::ModelStage1>>,
+    model_order: Vec<Ident>,
     pub errors: Vec<Error>,
 }
 
@@ -25,9 +29,18 @@ impl Project {
 
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
-        use crate::common::{topo_sort, ErrorCode, ErrorKind, Ident};
-        use crate::model::{enumerate_modules, ModelStage1};
-        use crate::units::Context;
+        Self::base_from(project_datamodel, |_, _, _| {})
+        // TODO: infer types and mutate them in to the models in the project
+    }
+}
+
+impl Project {
+    pub(crate) fn base_from<F>(project_datamodel: datamodel::Project, mut model_cb: F) -> Self
+    where
+        F: FnMut(&HashMap<Ident, &ModelStage1>, &Context, &mut ModelStage1),
+    {
+        use crate::common::{topo_sort, ErrorCode, ErrorKind};
+        use crate::model::enumerate_modules;
 
         // first, build the unit context.
         // TODO: there is probably a shared/common core of units we should
@@ -121,9 +134,16 @@ impl From<datamodel::Project> for Project {
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
                 model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
+                // things like unit inference happen through this callback
+                model_cb(&models, &units_ctx, model);
                 models.insert(model.name.clone(), model);
             }
         }
+
+        let ordered_models = models_list
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>();
 
         let models = models_list
             .into_iter()
@@ -133,6 +153,7 @@ impl From<datamodel::Project> for Project {
         Project {
             datamodel: project_datamodel,
             models,
+            model_order: ordered_models,
             errors: project_errors,
         }
     }

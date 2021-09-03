@@ -85,6 +85,21 @@ pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datam
 }
 
 #[cfg(test)]
+pub(crate) fn x_project(
+    sim_specs: datamodel::SimSpecs,
+    models: &[datamodel::Model],
+) -> datamodel::Project {
+    datamodel::Project {
+        name: "test project".to_owned(),
+        sim_specs,
+        dimensions: vec![],
+        units: vec![],
+        models: models.to_vec(),
+        source: Default::default(),
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn x_module(
     ident: &str,
     refs: &[(&str, &str)],
