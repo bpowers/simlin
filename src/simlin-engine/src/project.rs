@@ -29,8 +29,22 @@ impl Project {
 
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
-        Self::base_from(project_datamodel, |_, _, _| {})
-        // TODO: infer types and mutate them in to the models in the project
+        Self::base_from(project_datamodel, |models, units_ctx, model| {
+            let inferred_units = match crate::units_infer::infer(models, units_ctx, model) {
+                Ok(units) => units,
+                Err(_err) => {
+                    // XXX: for now, ignore inference errors.  They aren't
+                    // understandable for anyone but me - we need to thread
+                    // location information through at a minimum.
+
+                    // let mut errors = model.errors.take().unwrap_or_default();
+                    // errors.push(err);
+                    // model.errors = Some(errors);
+                    Default::default()
+                }
+            };
+            model.check_units(units_ctx, &inferred_units)
+        })
     }
 }
 

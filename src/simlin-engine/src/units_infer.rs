@@ -15,7 +15,6 @@ use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, 
 use crate::units::{combine, Context, UnitOp, Units};
 use crate::variable::Variable;
 
-#[allow(dead_code)]
 struct UnitInferer<'a> {
     ctx: &'a Context,
     models: &'a HashMap<Ident, &'a ModelStage1>,
@@ -271,7 +270,6 @@ impl<'a> UnitInferer<'a> {
         }
     }
 
-    #[allow(dead_code)]
     fn gen_all_constraints(
         &self,
         model: &ModelStage1,
@@ -420,7 +418,6 @@ impl<'a> UnitInferer<'a> {
         Ok((resolved_fvs, final_constraints))
     }
 
-    #[allow(dead_code)]
     fn infer(&self, model: &ModelStage1) -> Result<HashMap<String, UnitMap>> {
         // use rand::seq::SliceRandom;
         // use rand::thread_rng;
@@ -433,20 +430,7 @@ impl<'a> UnitInferer<'a> {
         // test cases iterating in a specific order.
         // constraints.shuffle(&mut thread_rng());
 
-        eprintln!("{} constraints:", model.name);
-        for c in constraints.iter() {
-            eprintln!("  1 == {}", pretty_print_unit(c));
-        }
-
         let (results, constraints) = self.unify(constraints)?;
-
-        eprintln!("after unification:");
-
-        for (ident, units) in results.iter() {
-            eprintln!("  {} == {}", ident, pretty_print_unit(units));
-        }
-
-        eprintln!("  ;");
 
         if let Some(constraints) = constraints {
             use std::fmt::Write;
@@ -604,7 +588,6 @@ fn test_inference_negative() {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn infer(
     models: &HashMap<Ident, &ModelStage1>,
     units_ctx: &Context,

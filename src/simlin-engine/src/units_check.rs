@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::HashMap;
 use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr};
@@ -12,10 +13,11 @@ use crate::model::ModelStage1;
 use crate::units::{combine, pretty_print_unit, Context, UnitOp, Units};
 use crate::variable::Variable;
 
-#[allow(dead_code)]
 struct UnitEvaluator<'a> {
+    #[allow(dead_code)]
     ctx: &'a Context,
     model: &'a ModelStage1,
+    inferred_units: &'a HashMap<Ident, UnitMap>,
     // units for module inputs
     time: Variable,
 }
@@ -26,31 +28,31 @@ impl<'a> UnitEvaluator<'a> {
         match expr {
             Expr::Const(_, _, _) => Ok(Units::Constant),
             Expr::Var(ident, loc) => {
-                let var: &Variable =
-                    if ident == "time" || ident == "initial_time" || ident == "final_time" {
-                        &self.time
-                    } else {
-                        self.model.variables.get(ident).ok_or_else(|| {
+                let units: &UnitMap = if ident == "time"
+                    || ident == "initial_time"
+                    || ident == "final_time"
+                {
+                    // we created units, its not None
+                    &self.time.units().unwrap()
+                } else {
+                    // use the variable's explicitly defined units unless they don't exist.
+                    // if they don't exist, try to use any inferred units (this handles modules)
+                    self.model
+                        .variables
+                        .get(ident)
+                        .map(|var| var.units())
+                        .flatten()
+                        .or_else(|| self.inferred_units.get(ident))
+                        .ok_or_else(|| {
                             ConsistencyError(
                                 ErrorCode::DoesNotExist,
                                 *loc,
-                                Some(format!(
-                                    "can't find dependency '{}' for unit checking",
-                                    ident,
-                                )),
+                                Some(format!("can't find or no units for dependency '{}'", ident)),
                             )
                         })?
-                    };
+                };
 
-                var.units()
-                    .ok_or_else(|| {
-                        ConsistencyError(
-                            ErrorCode::UnitMismatch,
-                            *loc,
-                            Some(format!("dependency '{}' doesn't have units defined", ident)),
-                        )
-                    })
-                    .map(|units| Units::Explicit(units.clone()))
+                Ok(Units::Explicit(units.clone()))
             }
             Expr::App(builtin, _) => match builtin {
                 BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
@@ -66,27 +68,20 @@ impl<'a> UnitEvaluator<'a> {
                 }
                 BuiltinFn::Lookup(ident, _, loc) => {
                     // lookups have the units specified on the table
-                    if let Some(var) = self.model.variables.get(ident) {
-                        var.units()
-                            .ok_or_else(|| {
-                                ConsistencyError(
-                                    ErrorCode::UnitMismatch,
-                                    *loc,
-                                    Some(format!(
-                                        "no units specified for lookup dependency '{}'",
-                                        ident
-                                    )),
-                                )
-                            })
-                            .map(|units| Units::Explicit(units.clone()))
+                    if let Some(units) = self
+                        .model
+                        .variables
+                        .get(ident)
+                        .map(|var| var.units())
+                        .flatten()
+                        .or_else(|| self.inferred_units.get(ident))
+                    {
+                        Ok(Units::Explicit(units.clone()))
                     } else {
                         Err(ConsistencyError(
                             ErrorCode::DoesNotExist,
                             *loc,
-                            Some(format!(
-                                "can't find dependency '{}' for unit checking",
-                                ident,
-                            )),
+                            Some(format!("can't find or no units for dependency '{}'", ident,)),
                         ))
                     }
                 }
@@ -264,7 +259,11 @@ impl<'a> UnitEvaluator<'a> {
 // calculate the concrete units for each equation.  The outer result
 // indicates if we had a problem running the analysis.  The inner result
 // returns a list of unit problems, if there was one.
-pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Ident, UnitError)>>> {
+pub fn check(
+    ctx: &Context,
+    inferred_units: &HashMap<Ident, UnitMap>,
+    model: &ModelStage1,
+) -> Result<StdResult<(), Vec<(Ident, UnitError)>>> {
     use UnitError::{ConsistencyError, DefinitionError};
     let mut errors: Vec<(Ident, UnitError)> = vec![];
 
@@ -280,6 +279,7 @@ pub fn check(ctx: &Context, model: &ModelStage1) -> Result<StdResult<(), Vec<(Id
     let units = UnitEvaluator {
         ctx,
         model,
+        inferred_units,
         time: Variable::Var {
             ident: "time".to_string(),
             ast: None,

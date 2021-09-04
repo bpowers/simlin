@@ -10,7 +10,7 @@ use crate::ast::{lower_ast, Expr0};
 use crate::common::{
     topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, UnitError,
 };
-use crate::datamodel::Dimension;
+use crate::datamodel::{Dimension, UnitMap};
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
 use crate::units::Context;
@@ -728,7 +728,7 @@ impl ModelStage0 {
 
 impl ModelStage1 {
     pub fn new(
-        units_ctx: &Context,
+        _units_ctx: &Context,
         models: &HashMap<Ident, ModelStage0>,
         model_s0: &ModelStage0,
     ) -> Self {
@@ -745,7 +745,7 @@ impl ModelStage1 {
             })
             .collect::<BTreeSet<_>>();
 
-        let mut model = ModelStage1 {
+        ModelStage1 {
             name: model_s0.ident.clone(),
             display_name: model_s0.display_name.clone(),
             variables: model_s0
@@ -762,25 +762,29 @@ impl ModelStage1 {
             model_deps: Some(model_deps),
             instantiations: None,
             implicit: model_s0.implicit,
-        };
+        }
+    }
 
-        match units_check::check(units_ctx, &model) {
+    pub(crate) fn check_units(
+        &mut self,
+        units_ctx: &Context,
+        inferred_units: &HashMap<Ident, UnitMap>,
+    ) {
+        match units_check::check(units_ctx, inferred_units, self) {
             Ok(Ok(())) => {}
             Ok(Err(errors)) => {
                 for (ident, err) in errors.into_iter() {
-                    if let Some(var) = model.variables.get_mut(&ident) {
+                    if let Some(var) = self.variables.get_mut(&ident) {
                         var.push_unit_error(err);
                     }
                 }
             }
             Err(err) => {
-                let mut errors = model.errors.take().unwrap_or_default();
+                let mut errors = self.errors.take().unwrap_or_default();
                 errors.push(err);
-                model.errors = Some(errors);
+                self.errors = Some(errors);
             }
         };
-
-        model
     }
 
     pub(crate) fn set_dependencies(
