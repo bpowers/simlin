@@ -274,7 +274,12 @@ pub fn check(
     // for each variable, evaluate the equation given the unit context
     // if the result doesn't match the expected thing, accumulate an error
 
-    let time_units = canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
+    let time_units_name = canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
+    let time_units: UnitMap = ctx
+        .lookup(&time_units_name)
+        .cloned()
+        .unwrap_or_else(|| [(time_units_name.clone(), 1)].iter().cloned().collect());
+    let one_over_time: UnitMap = combine(UnitOp::Div, Default::default(), time_units.clone());
 
     let units = UnitEvaluator {
         ctx,
@@ -284,7 +289,7 @@ pub fn check(
             ident: "time".to_string(),
             ast: None,
             eqn: None,
-            units: Some([(time_units.clone(), 1)].iter().cloned().collect()),
+            units: Some(time_units),
             table: None,
             non_negative: false,
             is_flow: false,
@@ -293,8 +298,6 @@ pub fn check(
             unit_errors: vec![],
         },
     };
-
-    let one_over_time: UnitMap = [(time_units, -1)].iter().cloned().collect();
 
     for (ident, var) in model.variables.iter() {
         if var.table().is_some() {

@@ -221,7 +221,7 @@ impl Context {
         }
     }
 
-    fn lookup(&self, ident: &str) -> Option<&UnitMap> {
+    pub(crate) fn lookup(&self, ident: &str) -> Option<&UnitMap> {
         // first, see if this identifier is an alias of a better-known unit
         let normalized = self.aliases.get(ident).map(|s| s.as_str()).unwrap_or(ident);
         self.units.get(normalized)
