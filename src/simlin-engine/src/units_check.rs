@@ -32,8 +32,8 @@ impl<'a> UnitEvaluator<'a> {
                     || ident == "initial_time"
                     || ident == "final_time"
                 {
-                    // we created units, its not None
-                    &self.time.units().unwrap()
+                    // we created this time variable just for unit checking, it is definitely Some
+                    self.time.units().unwrap()
                 } else {
                     // use the variable's explicitly defined units unless they don't exist.
                     // if they don't exist, try to use any inferred units (this handles modules)
