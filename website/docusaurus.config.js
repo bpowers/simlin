@@ -10,6 +10,7 @@ module.exports = {
   favicon: 'img/favicon.ico',
   organizationName: 'bpowers', // Usually your GitHub org/user name.
   projectName: 'simlin', // Usually your repo name.
+  trailingSlash: false,
   themeConfig: {
     colorMode: {
       defaultMode: 'light',
@@ -117,7 +118,6 @@ module.exports = {
         },
         sitemap: {
           changefreq: 'daily',
-          trailingSlash: false,
         },
       },
     ],
