@@ -28,7 +28,7 @@ import { User } from './User';
 
 const config = {
   apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
-  authDomain: 'simlin.firebaseapp.com',
+  authDomain: 'simlin.com',
 };
 const firebaseApp = initializeApp(config);
 
