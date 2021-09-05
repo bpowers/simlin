@@ -396,7 +396,7 @@ module.exports = function (webpackEnv) {
       ),
       isEnvProduction && new CspHtmlWebpackPlugin({
         'default-src': "'self'",
-        'frame-src': ["'self'", 'https://simlin.firebaseapp.com'],
+        'frame-src': ["'self'", 'https://simlin.firebaseapp.com', 'https://auth.simlin.com'],
         'base-uri': "'self'",
         "block-all-mixed-content": [],
         'connect-src': ["'self'", 'https://www.googleapis.com', 'https://securetoken.googleapis.com', 'https://identitytoolkit.googleapis.com'],
