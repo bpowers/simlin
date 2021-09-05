@@ -13,5 +13,9 @@
         <link href="https://simlin.com/blog/hihi"/>
         <updated>2021-04-19T00:00:00.000Z</updated>
         <summary type="html"><![CDATA[Simlin is an web-first system dynamics modeling editor and engine.]]></summary>
+        <author>
+            <name>Bobby Powers</name>
+            <uri>https://bpowers.net</uri>
+        </author>
     </entry>
 </feed>

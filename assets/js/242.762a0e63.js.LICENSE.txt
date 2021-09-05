@@ -15,14 +15,6 @@
 /*! https://mths.be/esrever v0.2.0 by @mathias */
 
 /**
- * A better abstraction over CSS.
- *
- * @copyright Oleg Isonen (Slobodskoi) / Isonen 2014-present
- * @website https://github.com/cssinjs/jss
- * @license MIT
- */
-
-/**
  * chroma.js - JavaScript library for color conversions
  *
  * Copyright (c) 2011-2019, Gregor Aisch
@@ -79,8 +71,23 @@
  * @preserve
  */
 
+/** @license Material-UI v5.0.0-beta.5
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
 /** @license React v17.0.2
  * react-dom-server.browser.production.min.js
+ *
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+/** @license React v17.0.2
+ * react-jsx-runtime.production.min.js
  *
  * Copyright (c) Facebook, Inc. and its affiliates.
  *
