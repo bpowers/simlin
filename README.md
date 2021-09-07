@@ -1,6 +1,6 @@
 # Simlin: a system dynamics modeling tool
 
-Simlin is a tool for creating and editing [System Dynamics models](https://www.systemdynamics.org/what-is-sd#overview).
+Simlin is an [open source](LICENSE) tool for creating and editing [System Dynamics models](https://www.systemdynamics.org/what-is-sd#overview).  **You can try it today at https://simlin.com**.
 
 ![simple example model](doc/population-model.png)
 
@@ -23,8 +23,7 @@ Simlin is a tool for creating and editing [System Dynamics models](https://www.s
 * You can only detach the arrowhead of a flow, not the origin/source end.
 * Undo/redo only applies within a browser tab.  If you restart your browser (or reload the page), you will lose the ability to undo to before the reload.
 * Only straight-line flows are supported for now.
-* Units aren't implemented.
-* Maybe more!  See the [Issues page](https://github.com/bpowers/simlin/issues) for additional info (or to highlight new bugs and problems)
+* Maybe more!  See the [Issues page](https://github.com/bpowers/simlin/issues) for additional info (and to report a bug or usability issue)
 
 ## Local development
 
