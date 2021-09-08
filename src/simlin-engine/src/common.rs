@@ -390,8 +390,12 @@ pub fn topo_sort<'out>(
             return;
         }
         used.insert(ident);
-        for dep in dependencies[ident].iter() {
-            add(dependencies, result, used, dep)
+        if let Some(deps) = dependencies.get(ident) {
+            for dep in deps.iter() {
+                add(dependencies, result, used, dep)
+            }
+        } else {
+            panic!("internal compiler error: unknown ident {}", ident);
         }
         result.push(ident);
     }

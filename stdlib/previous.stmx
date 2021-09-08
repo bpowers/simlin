@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>previous</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler" time_units="Months">
+        <start>1</start>
+        <stop>13</stop>
+        <dt reciprocal="true">4</dt>
+    </sim_specs>
+    <model name="stdlib⁚previous">
+        <variables>
+            <stock name="output">
+                <eqn>initial_value</eqn>
+                <inflow>measuring</inflow>
+                <outflow>draining</outflow>
+            </stock>
+            <flow name="measuring">
+                <eqn>input / DT</eqn>
+            </flow>
+            <flow name="draining">
+                <eqn>output / DT</eqn>
+            </flow>
+            <aux name="initial_value">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="input">
+                <eqn>0</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <stock name="output" x="418" y="211" label_side="top"></stock>
+                <flow name="measuring" x="351.75" y="211" label_side="bottom">
+                    <pts>
+                        <pt x="308" y="211"></pt>
+                        <pt x="395.5" y="211"></pt>
+                    </pts>
+                </flow>
+                <flow name="draining" x="468.75" y="210" label_side="top">
+                    <pts>
+                        <pt x="440.5" y="210"></pt>
+                        <pt x="521" y="210"></pt>
+                    </pts>
+                </flow>
+                <connector angle="-39.56">
+                    <from>output</from>
+                    <to>draining</to>
+                </connector>
+                <aux name="initial value" x="351.75" y="133" label_side="bottom"></aux>
+                <aux name="input" x="293" y="133" label_side="bottom"></aux>
+                <connector angle="-48.01299999999998">
+                    <from>input</from>
+                    <to>measuring</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

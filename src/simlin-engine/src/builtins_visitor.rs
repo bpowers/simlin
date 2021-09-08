@@ -15,6 +15,7 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
         "smth1" | "smth3" | "delay1" | "delay3" | "trend" => {
             &["input", "delay_time", "initial_value"]
         }
+        "previous" => &["input", "initial_value"],
         "init" => &["input"],
         _ => {
             return None;
@@ -27,6 +28,7 @@ pub struct BuiltinVisitor<'a> {
     variable_name: &'a str,
     vars: HashMap<Ident, datamodel::Variable>,
     n: usize,
+    self_allowed: bool,
 }
 
 impl<'a> BuiltinVisitor<'a> {
@@ -35,6 +37,7 @@ impl<'a> BuiltinVisitor<'a> {
             variable_name,
             vars: Default::default(),
             n: 0,
+            self_allowed: false,
         }
     }
 
@@ -43,10 +46,19 @@ impl<'a> BuiltinVisitor<'a> {
         use std::mem;
         let result: Expr0 = match expr {
             Const(_, _, _) => expr,
-            Var(_, _) => expr,
+            Var(ref ident, loc) => {
+                if ident == "self" && self.self_allowed {
+                    Var(self.variable_name.to_owned(), loc)
+                } else {
+                    expr
+                }
+            }
             App(UntypedBuiltinFn(func, args), loc) => {
+                let orig_self_allowed = self.self_allowed;
+                self.self_allowed |= func == "previous" || func == "size";
                 let args: std::result::Result<Vec<Expr0>, EquationError> =
                     args.into_iter().map(|e| self.walk(e)).collect();
+                self.self_allowed = orig_self_allowed;
                 let args = args?;
                 if is_builtin_fn(&func) {
                     return Ok(App(UntypedBuiltinFn(func, args), loc));
