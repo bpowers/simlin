@@ -277,6 +277,11 @@ fn simulates_circular_dep_1() {
 }
 
 #[test]
+fn simulates_previous() {
+    simulate_path("../../test/previous/model.stmx");
+}
+
+#[test]
 fn simulates_modules_with_complex_idents() {
     simulate_path("../../test/modules_with_complex_idents/modules_with_complex_idents.stmx");
 }
