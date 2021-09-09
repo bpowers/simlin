@@ -7,7 +7,6 @@ use std::io::BufReader;
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
-use test_generator::test_resources;
 
 use simlin_compat::{load_csv, load_dat, xmile};
 use simlin_engine::project_io;
@@ -324,15 +323,16 @@ fn simulates_step_into_smth1() {
 }
 
 #[test]
+#[ignore]
 fn simulates_sdeverywhere_sir() {
     simulate_path("../../test/sdeverywhere/models/sir/sir.xmile");
 }
 
-#[test_resources("test/sdeverywhere/models/**/*.xmile")]
-fn simulates_vensim(resource: &str) {
-    let resource = format!("../../{}", resource);
-    simulate_path(&resource);
-}
+// #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
+// fn simulates_vensim(resource: &str) {
+//     let resource = format!("../../{}", resource);
+//     simulate_path(&resource);
+// }
 
 #[test]
 fn bad_model_name() {
