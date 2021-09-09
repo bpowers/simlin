@@ -4,7 +4,8 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::BufRead;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::result::Result as StdResult;
 
 use simlin_engine::datamodel::Project;
@@ -19,8 +20,6 @@ pub fn to_xmile(project: &Project) -> Result<String> {
 
 #[cfg(feature = "vensim")]
 pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
-    use std::io::BufReader;
-
     use simlin_engine::common::{Error, ErrorCode, ErrorKind};
     use xmutil::convert_vensim_mdl;
 
@@ -44,6 +43,106 @@ pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
 
 pub fn open_xmile(reader: &mut dyn BufRead) -> Result<Project> {
     xmile::project_from_reader(reader)
+}
+
+pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
+    use float_cmp::approx_eq;
+
+    let file = File::open(file_path)?;
+
+    let unprocessed = {
+        let mut unprocessed: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+
+        let mut curr: Vec<(f64, f64)> = vec![];
+        let mut ident: Option<String> = None;
+
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if line.contains('\t') {
+                use std::str::FromStr;
+                let parts = line.split('\t').collect::<Vec<_>>();
+                let l = parts[0].trim();
+                let r = parts[1].trim();
+                curr.push((f64::from_str(l)?, f64::from_str(r)?));
+            } else {
+                if let Some(id) = ident.take() {
+                    assert!(unprocessed.insert(id, std::mem::take(&mut curr)).is_none());
+                }
+                let name = canonicalize(line.trim());
+                ident = Some(quoteize(&name));
+            }
+        }
+        if let Some(id) = ident.take() {
+            assert!(unprocessed.insert(id, std::mem::take(&mut curr)).is_none());
+        }
+        unprocessed
+    };
+
+    let offsets: HashMap<String, usize> = unprocessed
+        .keys()
+        .enumerate()
+        .map(|(i, r)| (r.clone(), i))
+        .collect();
+
+    let initial_time = unprocessed["initial_time"][0].1;
+    let final_time = unprocessed["final_time"][0].1;
+    let saveper = unprocessed["saveper"][0].1;
+
+    let step_size = unprocessed.len();
+    let step_count = ((final_time - initial_time) / saveper).ceil() as usize;
+    let mut step_data: Vec<f64> = Vec::with_capacity(step_size * step_count);
+
+    for (ident, var_off) in offsets.iter() {
+        let data = &unprocessed[ident];
+        let mut data_iter = data.iter().cloned();
+        let mut curr: Option<(f64, f64)> = data_iter.next();
+        let mut next: Option<(f64, f64)> = data_iter.next();
+        for step in 0..step_count {
+            let t: f64 = initial_time + saveper * (step as f64);
+            let datapoint: f64 = if let Some((data_time, value)) = curr {
+                if approx_eq!(f64, data_time, t) {
+                    curr = next;
+                    next = data_iter.next();
+                    value
+                } else {
+                    assert!(data_time < t);
+                    // curr is in the past
+                    if let Some((next_time, next_value)) = next {
+                        if approx_eq!(f64, next_time, t) {
+                            // next is now now
+                            curr = next;
+                            next = data_iter.next();
+                            next_value
+                        } else {
+                            // next is still in the future
+                            assert!(next_time > t);
+                            value
+                        }
+                    } else {
+                        // at the end of the iter, so just use curr
+                        value
+                    }
+                }
+            } else {
+                unreachable!("curr is None");
+            };
+            step_data[step * step_size + var_off] = datapoint;
+        }
+    }
+
+    Ok(Results {
+        offsets,
+        data: step_data.into_boxed_slice(),
+        step_size,
+        step_count,
+        specs: SimSpecs {
+            start: 0.0,
+            stop: 0.0,
+            dt: 0.0,
+            save_step: 0.0,
+            method: Method::Euler,
+        },
+    })
 }
 
 pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Error>> {
