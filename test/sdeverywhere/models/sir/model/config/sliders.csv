@@ -1,0 +1,4 @@
+﻿viewTitle,varName,label,sliderMin,sliderMax,sliderDefault,sliderStep,units,format,description
+Models > SIR Model,Initial Contact Rate,Initial Contact Rate,0,5,1,0.1,per day,'0.0',
+Models > SIR Model,Infectivity i,Infectivity,-2,2,0.1,0.25,probability,'0.00',
+Models > SIR Model,Average Duration of Illness d,Average Duration of Illness,0,10,2,1,days,0a,

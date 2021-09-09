@@ -1,0 +1,20 @@
+{UTF-8}
+description = 0
+~
+~ Demonstrate TREND function equivalence with the expansion from the Vensim documentation.
+|
+
+input = 1 + 0.5 * SIN(2 * 3.14159 * Time / period) ~~|
+average time = 6 ~~|
+initial trend = 10 ~~|
+period = 20 ~~|
+
+TREND of input = TREND(input, average time, initial trend) ~~|
+
+trend1 = ZIDZ(input - average value, average time * ABS(average value)) ~~|
+average value = INTEG((input - average value) / average time, input / (1 + initial trend * average time)) ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 100 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

@@ -1,0 +1,30 @@
+{UTF-8}
+DimA: A1, A2, A3 -> DimB ~~|
+SubA: A2, A3 -> SubB ~~|
+DimB: B1, B2, B3 ~~|
+SubB: B2, B3 ~~|
+
+input = 3 + PULSE(10, 10) ~~|
+input 2[SubA] = 3 + PULSE(10, 10) ~~|
+input 3[DimA] = 3 + PULSE(10, 10) ~~|
+input 3x3[DimA,DimB] = 3 + PULSE(10, 10) ~~|
+input 2x3[SubA,DimB] = 3 + PULSE(10, 10) ~~|
+delay = 2 ~~|
+delay 2[SubA] = 2 ~~|
+delay 3[DimA] = 2 ~~|
+
+s1 = SMOOTH(input, delay) ~~|
+s2[DimA] = SMOOTH(input, delay) ~~|
+s3[DimA] = SMOOTH(input 3[DimA], delay 3[DimA]) ~~|
+s4[SubA] = SMOOTH(input 2[SubA], delay 2[SubA]) ~~|
+s5[SubA] = SMOOTH3(input 2[SubA], delay 2[SubA]) ~~|
+s6[DimB] = SMOOTH(input 3[DimA], delay 3[DimA]) ~~|
+s7[SubB] = SMOOTH(input 2[SubA], delay 2[SubA]) ~~|
+s8[DimA,DimB] = SMOOTH(input 3x3[DimA,DimB], delay) ~~|
+s9[SubA,DimB] = SMOOTH(input 2x3[SubA,DimB], delay) ~~|
+s10[SubA,B1] = SMOOTH(input 2[SubA], delay) ~~|
+
+INITIAL TIME  = 0 ~~|
+FINAL TIME  = 40 ~~|
+SAVEPER  = 1 ~~|
+TIME STEP  = 1 ~~|

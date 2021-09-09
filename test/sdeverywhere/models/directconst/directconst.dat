@@ -1,0 +1,53 @@
+a
+0	2050
+b[B1]
+0	1
+b[B2]
+0	2
+b[B3]
+0	3
+c[B1,C1]
+0	1
+c[B1,C2]
+0	2
+c[B2,C1]
+0	3
+c[B2,C2]
+0	4
+c[B3,C1]
+0	5
+c[B3,C2]
+0	6
+d[D1,B1,C1]
+0	1
+d[D1,B1,C2]
+0	2
+d[D1,B2,C1]
+0	3
+d[D1,B2,C2]
+0	4
+d[D1,B3,C1]
+0	5
+d[D1,B3,C2]
+0	6
+e[C1,B1]
+0	1
+e[C1,B2]
+0	3
+e[C1,B3]
+0	5
+e[C2,B1]
+0	2
+e[C2,B2]
+0	4
+e[C2,B3]
+0	6
+FINAL TIME
+0	1
+INITIAL TIME
+0	0
+SAVEPER
+0	1
+1	1
+TIME STEP
+0	1

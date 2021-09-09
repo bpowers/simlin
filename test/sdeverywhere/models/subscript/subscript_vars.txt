@@ -1,0 +1,110 @@
+b[DimB]: const (non-apply-to-all)
+= 1,2,3
+refId(_b[_b1])
+families(_dimb)
+subscripts(_b1)
+
+b[DimB]: const (non-apply-to-all)
+= 1,2,3
+refId(_b[_b2])
+families(_dimb)
+subscripts(_b2)
+
+b[DimB]: const (non-apply-to-all)
+= 1,2,3
+refId(_b[_b3])
+families(_dimb)
+subscripts(_b3)
+
+a[DimA]: aux
+= b[DimB]
+refId(_a)
+families(_dima)
+subscripts(_dima)
+
+c[DimB]: aux
+= b[DimB]
+refId(_c)
+families(_dimb)
+subscripts(_dimb)
+
+d[A1]: aux
+= b[B1]
+refId(_d)
+families(_dima)
+subscripts(_a1)
+
+e[B1]: aux
+= b[B1]
+refId(_e)
+families(_dimb)
+subscripts(_b1)
+
+f[DimA,B1]: const (non-apply-to-all)
+= 1
+refId(_f[_dima,_b1])
+families(_dima, _dimb)
+subscripts(_dima, _b1)
+
+f[DimA,B2]: const (non-apply-to-all)
+= 2
+refId(_f[_dima,_b2])
+families(_dima, _dimb)
+subscripts(_dima, _b2)
+
+f[DimA,B3]: const (non-apply-to-all)
+= 3
+refId(_f[_dima,_b3])
+families(_dima, _dimb)
+subscripts(_dima, _b3)
+
+g[B1,DimA]: aux (non-apply-to-all)
+= f[DimA,B1]
+refId(_g[_dima,_b1])
+families(_dima, _dimb)
+subscripts(_dima, _b1)
+
+g[B2,DimA]: aux (non-apply-to-all)
+= f[DimA,B2]
+refId(_g[_dima,_b2])
+families(_dima, _dimb)
+subscripts(_dima, _b2)
+
+g[B3,DimA]: aux (non-apply-to-all)
+= f[DimA,B3]
+refId(_g[_dima,_b3])
+families(_dima, _dimb)
+subscripts(_dima, _b3)
+
+o[DimA,DimB]: aux
+= f[DimA,DimB]
+refId(_o)
+families(_dima, _dimb)
+subscripts(_dima, _dimb)
+
+p[DimB,DimA]: aux
+= f[DimA,DimB]
+refId(_p)
+families(_dima, _dimb)
+subscripts(_dima, _dimb)
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+

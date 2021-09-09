@@ -1,0 +1,61 @@
+{UTF-8}
+DimA: A1, A2, A3 -> DimB, DimC ~~|
+DimB:
+	GET DIRECT SUBSCRIPT(
+	   'b_subs.csv',
+	   ',',
+	   'A2',
+	   'A',
+	   ''
+	)
+  ~~|
+DimC:
+	GET DIRECT SUBSCRIPT(
+	   'c_subs.csv',
+	   ',',
+	   'A2',
+	   '2',
+	   ''
+	)
+  ~~|
+a[DimA] = 10, 20, 30
+  ~~|
+b[DimB] = 1, 2, 3
+  ~~~:SUPPLEMENTARY|
+c[DimC] = a[DimA] + 1
+  ~~~:SUPPLEMENTARY|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME = 1 ~~|
+INITIAL TIME = 0 ~~|
+SAVEPER = TIME STEP ~~|
+TIME STEP = 1 ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:Current
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

@@ -1,0 +1,35 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+SubA: A2, A3 ~~|
+SubA2: A2 ~~|
+DimC: C1, C2, C3 ~~|
+SubC: C2, C3 ~~|
+DimD: D1, D2 -> (DimA: SubA, A1) ~~|
+
+a[DimA] = 1 ~~|
+b[SubA] = 2 ~~|
+c[DimA, DimC] = 3 ~~|
+d[SubA, C1] = 4 ~~|
+e[DimA, SubC] = 5 ~~|
+f[A1, C1] = 6 ~~|
+g[DimA] :EXCEPT: [A1] = 7 ~~|
+h[DimA] :EXCEPT: [SubA] = 8 ~~|
+o[SubA] :EXCEPT: [SubA2] = 9 ~~|
+p[DimA, DimC] :EXCEPT: [A1, C1] = 10 ~~|
+q[DimA, DimC] :EXCEPT: [SubA, C2] = 11 ~~|
+r[DimA, DimC] :EXCEPT: [DimA, C1] = 12 ~~|
+s[A3] = 13 ~~|
+s[SubA] :EXCEPT: [A3] = 14 ~~|
+t[SubA, SubC] = 15 ~~|
+u[DimA] :EXCEPT: [A1] = a[DimA] ~~|
+v[SubA] :EXCEPT: [A1] = a[SubA] ~~|
+w[DimA] :EXCEPT: [SubA] = a[DimA] ~~|
+x[DimA] :EXCEPT: [SubA] = c[DimA, C1] ~~|
+y[SubA, SubC] :EXCEPT: [A3, C3] = c[SubA, SubC] ~~|
+j[DimD] = 10, 20 ~~|
+k[DimA] :EXCEPT: [A1] = a[DimA] + j[DimD] ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|

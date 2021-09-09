@@ -1,0 +1,26 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+DimB: B1, B2 -> (DimA: SubA, A3) ~~|
+DimC: SubC, C3 -> DimD ~~|
+DimD: D1, D2, D3 ~~|
+SubA: A1, A2 ~~|
+SubC: C1, C2 ~~|
+
+b[DimB] = 1, 2 ~~|
+a[DimA] = b[DimB] * 10
+	~
+	~	mapping an index to a subdimension
+	|
+c[DimC] = 1, 2, 3
+	~
+	~	defining a dimension with a subdimension
+	|
+d[DimD] = c[DimC] * 10
+	~
+	~	mapping a subdimension to an index
+	|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

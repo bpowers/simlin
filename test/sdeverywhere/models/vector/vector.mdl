@@ -1,0 +1,52 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+DimB: B1, B2 ~~|
+DimX : one,two,three,four,five ~~|
+SubX: two,three,four ~~|
+
+ASCENDING==1 ~~|
+DESCENDING==0 ~~|
+VSSUM==0 ~~|
+VSMAX==3 ~~|
+VSERRNONE==0 ~~|
+VSERRATLEASTONE==1 ~~|
+a[DimA] = 0, 1, 1 ~~|
+b[DimB] = 1, 2 ~~|
+c[DimA] = 10 + VECTOR ELM MAP(b[B1], a[DimA]) ~~|
+d[A1,B1] = 1 ~~|
+d[A2,B1] = 2 ~~|
+d[A3,B1] = 3 ~~|
+d[A1,B2] = 4 ~~|
+d[A2,B2] = 5 ~~|
+d[A3,B2] = 6 ~~|
+e[A1,B1] = 0 ~~|
+e[A2,B1] = 1 ~~|
+e[A3,B1] = 0 ~~|
+e[A1,B2] = 1 ~~|
+e[A2,B2] = 0 ~~|
+e[A3,B2] = 1 ~~|
+f[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], a[DimA]) ~~|
+g[DimA,DimB] = VECTOR ELM MAP(d[DimA,B1], e[DimA,DimB]) ~~|
+h[DimA] = 2100, 2010, 2020 ~~|
+l[DimA] = VECTOR SORT ORDER(h[DimA], ASCENDING) ~~|
+m[DimA] = VECTOR SORT ORDER(h[DimA], 0) ~~|
+o[A1,B1] = 1 ~~|
+o[A1,B2] = 2 ~~|
+o[A2,B1] = 4 ~~|
+o[A2,B2] = 3 ~~|
+o[A3,B1] = 5 ~~|
+o[A3,B2] = 5 ~~|
+p[DimA,DimB] = VECTOR SORT ORDER(o[DimA,DimB], ASCENDING) ~~|
+q[DimB] = VECTOR SELECT(e[DimA!,DimB], c[DimA!], 0, VSSUM, VSERRNONE) ~~|
+r[DimA] = VECTOR SELECT(e[DimA,DimB!], d[DimA,DimB!], :NA:, VSMAX, VSERRNONE) ~~|
+s[DimB] = SUM(c[DimA!] * e[DimA!,DimB]) ~~|
+
+u = VMAX(x[DimX!]) ~~|
+v = VMAX(x[SubX!]) ~~|
+w = VMIN(x[DimX!]) ~~|
+x[DimX] = 1, 2, 3, 4, 5 ~~|
+
+INITIAL TIME  = 0 ~~|
+FINAL TIME  = 1 ~~|
+TIME STEP  = 1 ~~|
+SAVEPER  = TIME STEP ~~|

@@ -1,0 +1,64 @@
+ecc[t1]: aux (non-apply-to-all)
+= ce[t1]+1
+refId(_ecc[_t1])
+families(_target)
+subscripts(_t1)
+
+ecc[tNext]: aux (non-apply-to-all)
+= ce[tNext]+1
+refId(_ecc[_t2])
+families(_target)
+subscripts(_t2)
+separationDim(_tnext)
+refs(_ce[_t2])
+
+ecc[tNext]: aux (non-apply-to-all)
+= ce[tNext]+1
+refId(_ecc[_t3])
+families(_target)
+subscripts(_t3)
+separationDim(_tnext)
+refs(_ce[_t3])
+
+ce[t1]: const (non-apply-to-all)
+= 1
+refId(_ce[_t1])
+families(_target)
+subscripts(_t1)
+
+ce[tNext]: aux (non-apply-to-all)
+= ecc[tPrev]+1
+refId(_ce[_t2])
+families(_target)
+subscripts(_t2)
+separationDim(_tnext)
+refs(_ecc[_t1])
+
+ce[tNext]: aux (non-apply-to-all)
+= ecc[tPrev]+1
+refId(_ce[_t3])
+families(_target)
+subscripts(_t3)
+separationDim(_tnext)
+refs(_ecc[_t2])
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+

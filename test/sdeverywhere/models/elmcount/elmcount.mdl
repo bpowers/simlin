@@ -1,0 +1,9 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+a = ELMCOUNT(DimA) ~~|
+b[DimA]  = 10 * ELMCOUNT(DimA) + a ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

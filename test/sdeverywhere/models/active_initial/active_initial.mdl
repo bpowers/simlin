@@ -1,0 +1,141 @@
+{UTF-8}
+Capacity= INTEG (
+	Capacity Adjustment Rate,
+		Target Capacity)
+	~	widgets/Month
+	~		|
+
+Capacity Adjustment Rate=
+	(Target Capacity-Capacity)/Capacity Adjustment Time
+	~	(widgets/Month)/Month
+	~		|
+
+Capacity Adjustment Time=
+	10
+	~	months
+	~		|
+
+Capacity Utilization=
+	Production/Capacity
+	~	dmnl
+	~		|
+
+Initial Target Capacity=
+	100
+	~	widgets/Month
+	~		|
+
+Production=
+	100+STEP(100,10)
+	~	widgets/Month
+	~		|
+
+Target Capacity= ACTIVE INITIAL (
+	Capacity*Utilization Adjustment,
+		Initial Target Capacity)
+	~	widgets/Month
+	~	ACTIVE INITIAL statement breaks simultaneous initial equation loop by \
+		setting the target capacity to a fixed value, rather than a multiple of \
+		capacity. As an alternative, one could also initialize capacity itself to \
+		a fixed value, but this is not always convenient.
+	|
+
+Utilization Adjustment=
+	Capacity Utilization^Utilization Sensitivity
+	~	dmnl
+	~		|
+
+Utilization Sensitivity=
+	1
+	~	dmnl
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 100
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+12,1,0,220,50,96,28,8,135,0,18,-1,0,0,0,-1--1--1,0-0-0,|12|B|128-0-0
+ACTIVE INITIAL - break simultaneous loops in initial conditions
+10,2,Capacity,305,185,40,20,3,3,0,0,0,0,0,0
+12,3,48,83,183,10,8,0,3,0,0,-1,0,0,0
+1,4,6,2,4,0,0,22,0,0,0,-1--1--1,,1|(217,183)|
+1,5,6,3,100,0,0,22,0,0,0,-1--1--1,,1|(125,183)|
+11,6,48,164,183,6,8,34,3,0,0,1,0,0,0
+10,7,Capacity Adjustment Rate,164,210,54,19,40,3,0,0,-1,0,0,0
+10,8,Target Capacity,275,280,56,11,8,3,0,16,0,0,0,0,0-0-0,0-0-0,|0|B|0-0-0
+1,9,2,8,1,0,0,0,0,64,0,-1--1--1,,1|(312,234)|
+1,10,8,7,1,0,0,0,0,64,0,-1--1--1,,1|(172,265)|
+1,11,8,2,1,0,0,0,0,64,1,-1--1--1,,1|(353,247)|
+10,12,Utilization Adjustment,405,290,37,19,8,3,0,0,-1,0,0,0
+1,13,12,8,0,0,0,0,0,64,0,-1--1--1,,1|(356,286)|
+10,14,Capacity Utilization,475,200,32,19,8,3,0,0,0,0,0,0
+1,15,2,7,1,0,0,0,0,64,0,-1--1--1,,1|(248,232)|
+1,16,2,14,1,0,0,0,0,64,0,-1--1--1,,1|(394,187)|
+1,17,14,12,1,0,0,0,0,64,0,-1--1--1,,1|(466,249)|
+10,18,Production,605,205,35,11,8,3,0,0,0,0,0,0
+1,19,18,14,0,0,0,0,0,64,0,-1--1--1,,1|(545,202)|
+10,20,Capacity Adjustment Time,90,290,55,19,8,3,0,0,-1,0,0,0
+1,21,20,7,0,0,0,0,0,64,0,-1--1--1,,1|(121,255)|
+10,22,Utilization Sensitivity,500,355,32,19,8,3,0,0,-1,0,0,0
+1,23,22,12,0,0,0,0,0,64,0,-1--1--1,,1|(458,326)|
+12,24,0,340,375,81,19,8,7,0,4,-1,0,0,0,-1--1--1,255-255-128,|12||0-0-0
+ACTIVE INITIAL used here to break simultaneity
+1,25,24,8,0,0,0,2,3,64,0,255-0-0,|12||0-0-0,1|(308,329)|
+10,26,Initial Target Capacity,200,375,40,19,8,3,0,0,-1,0,0,0
+1,27,26,8,0,0,0,0,0,64,1,-1--1--1,,1|(236,329)|
+///---\\\
+:L<%^E!@
+1:active_initial.vdf
+9:active_initial
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:0,
+34:0,
+4:Time
+5:Capacity
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:100
+26:100

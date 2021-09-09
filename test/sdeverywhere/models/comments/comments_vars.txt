@@ -1,0 +1,69 @@
+a[DimA]: const (non-apply-to-all)
+= 0,1,2
+refId(_a[_a1])
+families(_dima)
+subscripts(_a1)
+separationDims(_dima)
+hasInitValue(false)
+
+a[DimA]: const (non-apply-to-all)
+= 0,1,2
+refId(_a[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_dima)
+hasInitValue(false)
+
+a[DimA]: const (non-apply-to-all)
+= 0,1,2
+refId(_a[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_dima)
+hasInitValue(false)
+
+b: const
+= 3
+refId(_b)
+hasInitValue(false)
+
+c: const
+= 4
+refId(_c)
+hasInitValue(false)
+
+d: const
+= 8760
+refId(_d)
+hasInitValue(false)
+
+e: const
+= 41+1
+refId(_e)
+hasInitValue(false)
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+hasInitValue(false)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+hasInitValue(false)
+
+SAVEPER: const
+= 1
+refId(_saveper)
+hasInitValue(false)
+
+Time: const
+= 
+refId(_time)
+hasInitValue(false)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+hasInitValue(false)
+

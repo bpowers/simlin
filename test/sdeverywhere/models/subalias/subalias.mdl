@@ -1,0 +1,11 @@
+{UTF-8}
+DimE <-> DimF ~~|
+DimF: F1, F2, F3 ~~|
+
+e[DimE] = 10, 20, 30 ~~~:SUPPLEMENTARY|
+f[DimF] = 1, 2, 3 ~~~:SUPPLEMENTARY|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

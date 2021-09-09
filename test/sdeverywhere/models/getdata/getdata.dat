@@ -1,0 +1,370 @@
+Backward
+0	-1
+FINAL TIME
+0	10
+Forward
+0	1
+Half year
+0	0.5
+INITIAL TIME
+0	0
+Initial value at time plus one year backward[A1]
+0	0
+Initial value at time plus one year backward[A2]
+0	10
+Initial value at time plus one year backward[A3]
+0	20
+Initial value at time plus one year forward[A1]
+0	10
+Initial value at time plus one year forward[A2]
+0	20
+Initial value at time plus one year forward[A3]
+0	30
+Initial value at time plus one year interpolate[A1]
+0	10
+Initial value at time plus one year interpolate[A2]
+0	20
+Initial value at time plus one year interpolate[A3]
+0	30
+Initial value for A1 at time plus one year backward
+0	0
+Initial value for A1 at time plus one year forward
+0	10
+Initial value for A1 at time plus one year interpolate
+0	10
+Interpolate
+0	0
+One year
+0	1
+SAVEPER
+0	1
+1	1
+2	1
+3	1
+4	1
+5	1
+6	1
+7	1
+8	1
+9	1
+10	1
+TIME STEP
+0	1
+Value at time plus half year backward[A1]
+0	0
+1	0
+2	10
+3	20
+4	20
+5	20
+6	20
+7	20
+8	20
+9	20
+10	70
+Value at time plus half year backward[A2]
+0	10
+1	10
+2	20
+3	30
+4	30
+5	30
+6	30
+7	30
+8	30
+9	30
+10	80
+Value at time plus half year backward[A3]
+0	20
+1	20
+2	30
+3	40
+4	40
+5	40
+6	40
+7	40
+8	40
+9	40
+10	90
+Value at time plus half year forward[A1]
+0	0
+1	10
+2	20
+3	70
+4	70
+5	70
+6	70
+7	70
+8	70
+9	70
+10	80
+Value at time plus half year forward[A2]
+0	10
+1	20
+2	30
+3	80
+4	80
+5	80
+6	80
+7	80
+8	80
+9	80
+10	90
+Value at time plus half year forward[A3]
+0	20
+1	30
+2	40
+3	90
+4	90
+5	90
+6	90
+7	90
+8	90
+9	90
+10	100
+Value at time plus one year backward[A1]
+0	0
+1	10
+2	20
+3	20
+4	20
+5	20
+6	20
+7	20
+8	20
+9	70
+10	70
+Value at time plus one year backward[A2]
+0	10
+1	20
+2	30
+3	30
+4	30
+5	30
+6	30
+7	30
+8	30
+9	80
+10	80
+Value at time plus one year backward[A3]
+0	20
+1	30
+2	40
+3	40
+4	40
+5	40
+6	40
+7	40
+8	40
+9	90
+10	90
+Value at time plus one year forward[A1]
+0	10
+1	20
+2	70
+3	70
+4	70
+5	70
+6	70
+7	70
+8	70
+9	80
+10	80
+Value at time plus one year forward[A2]
+0	20
+1	30
+2	80
+3	80
+4	80
+5	80
+6	80
+7	80
+8	80
+9	90
+10	90
+Value at time plus one year forward[A3]
+0	30
+1	40
+2	90
+3	90
+4	90
+5	90
+6	90
+7	90
+8	90
+9	100
+10	100
+Value at time plus one year interpolate[A1]
+0	10
+1	20
+2	27.1429
+3	34.2857
+4	41.4286
+5	48.5714
+6	55.7143
+7	62.8571
+8	70
+9	80
+10	80
+Value at time plus one year interpolate[A2]
+0	20
+1	30
+2	37.1429
+3	44.2857
+4	51.4286
+5	58.5714
+6	65.7143
+7	72.8571
+8	80
+9	90
+10	90
+Value at time plus one year interpolate[A3]
+0	30
+1	40
+2	47.1429
+3	54.2857
+4	61.4286
+5	68.5714
+6	75.7143
+7	82.8571
+8	90
+9	100
+10	100
+Value for A1 at time minus half year backward
+0	0
+1	0
+2	0
+3	10
+4	20
+5	20
+6	20
+7	20
+8	20
+9	20
+10	20
+Value for A1 at time minus half year forward
+0	0
+1	0
+2	10
+3	20
+4	70
+5	70
+6	70
+7	70
+8	70
+9	70
+10	70
+Value for A1 at time minus one year backward
+0	0
+1	0
+2	0
+3	10
+4	20
+5	20
+6	20
+7	20
+8	20
+9	20
+10	20
+Value for A1 at time minus one year forward
+0	0
+1	0
+2	10
+3	20
+4	70
+5	70
+6	70
+7	70
+8	70
+9	70
+10	70
+Value for A1 at time minus one year interpolate
+0	0
+1	0
+2	10
+3	20
+4	27.1429
+5	34.2857
+6	41.4286
+7	48.5714
+8	55.7143
+9	62.8571
+10	70
+Value for A1 at time plus half year backward
+0	0
+1	0
+2	10
+3	20
+4	20
+5	20
+6	20
+7	20
+8	20
+9	20
+10	70
+Value for A1 at time plus half year forward
+0	0
+1	10
+2	20
+3	70
+4	70
+5	70
+6	70
+7	70
+8	70
+9	70
+10	80
+Value for A1 at time plus one year backward
+0	0
+1	10
+2	20
+3	20
+4	20
+5	20
+6	20
+7	20
+8	20
+9	70
+10	70
+Value for A1 at time plus one year forward
+0	10
+1	20
+2	70
+3	70
+4	70
+5	70
+6	70
+7	70
+8	70
+9	80
+10	80
+Value for A1 at time plus one year interpolate
+0	10
+1	20
+2	27.1429
+3	34.2857
+4	41.4286
+5	48.5714
+6	55.7143
+7	62.8571
+8	70
+9	80
+10	80
+Values[A1]
+0	0
+1	10
+2	20
+9	70
+10	80
+Values[A2]
+0	10
+1	20
+2	30
+9	80
+10	90
+Values[A3]
+0	20
+1	30
+2	40
+9	90
+10	100

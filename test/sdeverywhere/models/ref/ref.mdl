@@ -1,0 +1,75 @@
+{UTF-8}
+Target: (t1-t3)
+	~
+	~		|
+
+tNext: (t2-t3) -> tPrev
+	~
+	~		|
+
+tPrev: (t1-t2) -> tNext
+	~
+	~		|
+
+ecc[t1] = ce[t1] + 1 ~~|
+
+ecc[tNext] = ce[tNext] + 1 ~~|
+
+ce[t1] = 1 ~~|
+
+ce[tNext] = ecc[tPrev] + 1 ~~|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+///---\\\
+:L<%^E!@
+1:ref.vdf64
+9:ref
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:ce[Target]
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:1
+26:1
+6:t1

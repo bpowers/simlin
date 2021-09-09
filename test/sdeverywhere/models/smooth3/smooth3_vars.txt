@@ -1,0 +1,174 @@
+a: const
+= 1
+refId(_a)
+
+S3: aux
+= SMOOTH3(s3 input,MAX(a,b))
+refId(_s3)
+refs(__level1, __level2, __level3)
+
+b: const
+= 2
+refId(_b)
+
+s3 input: aux
+= 3+PULSE(10,10)
+refId(_s3_input)
+
+apt: const
+= 1
+refId(_apt)
+
+ca[A1]: aux (non-apply-to-all)
+= 1000+RAMP(100,1,10)
+refId(_ca[_a1])
+families(_dima)
+subscripts(_a1)
+
+ca[A2]: aux (non-apply-to-all)
+= 1000+RAMP(300,1,10)
+refId(_ca[_a2])
+families(_dima)
+subscripts(_a2)
+
+ca[A3]: aux (non-apply-to-all)
+= 1000+RAMP(600,1,10)
+refId(_ca[_a3])
+families(_dima)
+subscripts(_a3)
+
+cs[DimA]: aux
+= MIN(SMOOTH3(sr,apt),ca[DimA]/TIME STEP)
+refId(_cs)
+families(_dima)
+subscripts(_dima)
+refs(__level4, __level5, __level6, _ca[_a1], _ca[_a2], _ca[_a3])
+
+sr: aux
+= COS(Time/5)
+refId(_sr)
+
+S2 Level 1: level
+= INTEG((input-S2 Level 1)/S2 Delay,input)
+refId(_s2_level_1)
+refs(_input, _s2_delay)
+initRefs(_input)
+
+S2: aux
+= scale*S2 Level 3
+refId(_s2)
+refs(_s2_level_3)
+
+S2 Level 3: level
+= INTEG((S2 Level 2-S2 Level 3)/S2 Delay,input)
+refId(_s2_level_3)
+refs(_s2_level_2, _s2_delay)
+initRefs(_input)
+
+S2 Level 2: level
+= INTEG((S2 Level 1-S2 Level 2)/S2 Delay,input)
+refId(_s2_level_2)
+refs(_s2_level_1, _s2_delay)
+initRefs(_input)
+
+S2 Delay: aux
+= delay/3
+refId(_s2_delay)
+
+delay: const
+= 2
+refId(_delay)
+
+input: aux
+= 3+PULSE(10,10)
+refId(_input)
+
+S1: aux
+= scale*SMOOTH3(input,delay)
+refId(_s1)
+refs(__level7, __level8, __level9)
+
+scale: const
+= 6
+refId(_scale)
+
+FINAL TIME: const
+= 40
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+
+_level1: level
+= INTEG((s3 input-_level1)/(MAX(a,b)/3),s3 input)
+refId(__level1)
+refs(_s3_input)
+initRefs(_s3_input)
+
+_level2: level
+= INTEG((_level1-_level2)/(MAX(a,b)/3),s3 input)
+refId(__level2)
+refs(__level1)
+initRefs(_s3_input)
+
+_level3: level
+= INTEG((_level2-_level3)/(MAX(a,b)/3),s3 input)
+refId(__level3)
+refs(__level2)
+initRefs(_s3_input)
+
+_level4[DimA]: level
+= INTEG((sr-_level4[DimA])/(apt/3),sr)
+refId(__level4)
+families(_dima)
+subscripts(_dima)
+refs(_sr)
+initRefs(_sr)
+
+_level5[DimA]: level
+= INTEG((_level4[DimA]-_level5[DimA])/(apt/3),sr)
+refId(__level5)
+families(_dima)
+subscripts(_dima)
+refs(__level4)
+initRefs(_sr)
+
+_level6[DimA]: level
+= INTEG((_level5[DimA]-_level6[DimA])/(apt/3),sr)
+refId(__level6)
+families(_dima)
+subscripts(_dima)
+refs(__level5)
+initRefs(_sr)
+
+_level7: level
+= INTEG((input-_level7)/(delay/3),input)
+refId(__level7)
+refs(_input)
+initRefs(_input)
+
+_level8: level
+= INTEG((_level7-_level8)/(delay/3),input)
+refId(__level8)
+refs(__level7)
+initRefs(_input)
+
+_level9: level
+= INTEG((_level8-_level9)/(delay/3),input)
+refId(__level9)
+refs(__level8)
+initRefs(_input)
+

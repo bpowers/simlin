@@ -1,0 +1,66 @@
+a: aux
+= QUANTUM(1.9,1.0)
+refId(_a)
+hasInitValue(false)
+
+b: aux
+= QUANTUM(0.9,1.0)
+refId(_b)
+hasInitValue(false)
+
+c: aux
+= QUANTUM(-0.9,1.0)
+refId(_c)
+hasInitValue(false)
+
+d: aux
+= QUANTUM(-1.9,1.0)
+refId(_d)
+hasInitValue(false)
+
+e: aux
+= QUANTUM(112.3,10.0)
+refId(_e)
+hasInitValue(false)
+
+f: aux
+= QUANTUM(50,12)
+refId(_f)
+hasInitValue(false)
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+hasInitValue(false)
+
+g: aux
+= QUANTUM(423,63)
+refId(_g)
+hasInitValue(false)
+
+h: aux
+= QUANTUM(10,10)
+refId(_h)
+hasInitValue(false)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+hasInitValue(false)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+hasInitValue(false)
+refs(_time_step)
+
+Time: const
+= 
+refId(_time)
+hasInitValue(false)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+hasInitValue(false)
+

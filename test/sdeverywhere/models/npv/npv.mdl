@@ -1,0 +1,46 @@
+{UTF-8}
+investment = 100 ~~|
+start time = 12 ~~|
+revenue = 3 ~~|
+interest rate = 10 ~~|
+
+stream = -investment / TIME STEP * PULSE(start time, TIME STEP) + STEP(revenue, start time) ~~|
+discount rate = interest rate / 12 / 100 ~~|
+init val = 0 ~~|
+factor = 1 ~~|
+NPV vs initial time = NPV(stream, discount rate, init val, factor) ~~~:SUPPLEMENTARY|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 100 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:npv
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

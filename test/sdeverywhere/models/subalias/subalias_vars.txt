@@ -1,0 +1,74 @@
+e[DimE]: const (non-apply-to-all)
+= 10,20,30
+refId(_e[_f1])
+families(_dime)
+subscripts(_f1)
+separationDims(_dime)
+hasInitValue(false)
+
+e[DimE]: const (non-apply-to-all)
+= 10,20,30
+refId(_e[_f2])
+families(_dime)
+subscripts(_f2)
+separationDims(_dime)
+hasInitValue(false)
+
+e[DimE]: const (non-apply-to-all)
+= 10,20,30
+refId(_e[_f3])
+families(_dime)
+subscripts(_f3)
+separationDims(_dime)
+hasInitValue(false)
+
+f[DimF]: const (non-apply-to-all)
+= 1,2,3
+refId(_f[_f1])
+families(_dime)
+subscripts(_f1)
+separationDims(_dimf)
+hasInitValue(false)
+
+f[DimF]: const (non-apply-to-all)
+= 1,2,3
+refId(_f[_f2])
+families(_dime)
+subscripts(_f2)
+separationDims(_dimf)
+hasInitValue(false)
+
+f[DimF]: const (non-apply-to-all)
+= 1,2,3
+refId(_f[_f3])
+families(_dime)
+subscripts(_f3)
+separationDims(_dimf)
+hasInitValue(false)
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+hasInitValue(false)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+hasInitValue(false)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+hasInitValue(false)
+refs(_time_step)
+
+Time: const
+= 
+refId(_time)
+hasInitValue(false)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+hasInitValue(false)
+

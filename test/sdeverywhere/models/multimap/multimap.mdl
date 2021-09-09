@@ -1,0 +1,13 @@
+{UTF-8}
+DimA: A1, A2, A3 -> (DimB: B3, B2, B1), DimC ~~|
+DimB: B1, B2, B3 ~~|
+DimC: C1, C2, C3 ~~|
+
+a[DimA] = 1, 2, 3 ~~|
+b[DimB] = a[DimA] ~~|
+c[DimC] = a[DimA] ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+SAVEPER = 1 ~~|
+TIME STEP = 1 ~~|

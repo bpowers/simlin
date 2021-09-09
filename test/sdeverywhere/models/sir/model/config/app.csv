@@ -1,0 +1,2 @@
+﻿title,version,initialView,trackSliders,initialTime,startTime,endTime,externalDatfiles,chartDatfiles,logo,helpUrl
+SIR,1.0.0,Models > SIR Model,TRUE,0,0,200,,,logo.png,http://www.mhhe.com/business/opsci/sterman/models.mhtml

@@ -1,0 +1,100 @@
+a: lookup
+refId(_a)
+
+b: aux
+= a(i)
+refId(_b)
+refs(_i)
+
+i: aux
+= Time/10
+refId(_i)
+
+c[A1]: lookup (non-apply-to-all)
+refId(_c[_a1])
+families(_dima)
+subscripts(_a1)
+
+c[A2]: lookup (non-apply-to-all)
+refId(_c[_a2])
+families(_dima)
+subscripts(_a2)
+
+c[A3]: lookup (non-apply-to-all)
+refId(_c[_a3])
+families(_dima)
+subscripts(_a3)
+
+d: aux
+= WITH LOOKUP(i,([(0,0)-(2,2)],(0,0),(0.1,0.01),(0.5,0.7),(1,1),(1.5,1.2),(2,1.3)))
+refId(_d)
+refs(_i)
+
+e[DimA]: aux
+= c[DimA](i)
+refId(_e)
+families(_dima)
+subscripts(_dima)
+refs(_i)
+
+f: aux
+= c[A1](i)
+refId(_f)
+refs(_i)
+
+g: lookup
+refId(_g)
+
+g1: aux
+= LOOKUP FORWARD(g,-1)
+refId(_g1)
+refs(_g)
+
+g2: aux
+= LOOKUP FORWARD(g,1.5)
+refId(_g2)
+refs(_g)
+
+g3: aux
+= LOOKUP FORWARD(g,2.5)
+refId(_g3)
+refs(_g)
+
+g4: aux
+= LOOKUP BACKWARD(g,-1)
+refId(_g4)
+refs(_g)
+
+g5: aux
+= LOOKUP BACKWARD(g,1.5)
+refId(_g5)
+refs(_g)
+
+g6: aux
+= LOOKUP BACKWARD(g,2.5)
+refId(_g6)
+refs(_g)
+
+FINAL TIME: const
+= 10
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+
+_lookup1: lookup
+refId(__lookup1)
+

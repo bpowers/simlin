@@ -1,0 +1,61 @@
+{UTF-8}
+DimA: A1, A2, A3
+~~|
+a[DimA] = b[DimA] + 10
+~~|
+b[A1] = 1
+~~|
+b[A2] = 2
+~~|
+b[A3] = 3
+~~|
+c[DimA] = b[A1] + 1
+~~|
+d[DimA] = b[A1] + b[DimA]
+~~|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+1:index.vdf64
+9:index
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:a[DimA]
+24:0
+25:1
+26:1
+6:A1

@@ -1,0 +1,40 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+
+a[DimA] = GET DIRECT LOOKUPS('lookup_data.csv', ',', '1', 'E2') ~~|
+b[DimA] = a[DimA](Time) ~~~:SUPPLEMENTARY|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+INITIAL TIME = 2020 ~~|
+FINAL TIME = 2050 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:directlookups
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

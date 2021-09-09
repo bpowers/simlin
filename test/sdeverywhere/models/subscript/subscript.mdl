@@ -1,0 +1,113 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+
+DimB: B1, B2, B3 -> DimA ~~|
+
+b[DimB] = 1, 2, 3 ~~|
+
+a[DimA] = b[DimB] ~~~:SUPPLEMENTARY|
+
+c[DimB] = b[DimB] ~~~:SUPPLEMENTARY|
+
+d[A1] = b[B1] ~~~:SUPPLEMENTARY|
+
+e[B1] = b[B1] ~~~:SUPPLEMENTARY|
+
+f[DimA, B1] = 1 ~~|
+f[DimA, B2] = 2 ~~|
+f[DimA, B3] = 3 ~~|
+
+g[B1, DimA] = f[DimA, B1] ~~~:SUPPLEMENTARY|
+g[B2, DimA] = f[DimA, B2] ~~~:SUPPLEMENTARY|
+g[B3, DimA] = f[DimA, B3] ~~~:SUPPLEMENTARY|
+
+o[DimA, DimB] = f[DimA, DimB] ~~~:SUPPLEMENTARY|
+
+p[DimB, DimA] = f[DimA, DimB] ~~~:SUPPLEMENTARY|
+
+r[DimA] = IF THEN ELSE (DimA = Selected A, 1, 0)
+	~
+	~	dimension name reference in an expression
+  ~:SUPPLEMENTARY
+	|
+
+Selected A = 2  ~~~:SUPPLEMENTARY|
+
+s[DimA] = DimB
+	~
+	~	mapped dimension name reference in an expression
+  ~:SUPPLEMENTARY
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 1
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+///---\\\
+:L<%^E!@
+1:subscript.vdfx
+9:subscript
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:p[DimB,DimA]
+76:0
+77:0
+78:0
+79:0
+80:0
+81:0
+24:0
+25:1
+26:1
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+71:0
+44:65001
+46:0
+45:0
+49:0
+50:0
+51:
+52:
+53:
+43:subscript
+47:subscript
+48:
+75:
+43:subscript
+6:A1
+6:B1

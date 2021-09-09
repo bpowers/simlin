@@ -1,0 +1,142 @@
+{UTF-8}
+
+DimA: A1, A2, A3
+  ~~|
+
+Values[DimA]
+  ~~|
+
+One year = 1
+  ~~|
+
+Half year = 0.5
+  ~~|
+
+Interpolate = 0
+  ~~|
+
+Forward = 1
+  ~~|
+
+Backward = -1
+  ~~|
+
+
+Value for A1 at time minus one year interpolate =
+        GET DATA BETWEEN TIMES ( Values[A1] , MAX(INITIAL TIME, Time - One year) , Interpolate )
+  ~~|
+
+Value for A1 at time minus one year forward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MAX(INITIAL TIME, Time - One year) , Forward )
+  ~~|
+
+Value for A1 at time minus one year backward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MAX(INITIAL TIME, Time - One year) , Backward )
+  ~~|
+
+
+Value for A1 at time minus half year forward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MAX(INITIAL TIME, Time - Half year) , Forward )
+  ~~|
+
+Value for A1 at time minus half year backward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MAX(INITIAL TIME, Time - Half year) , Backward )
+  ~~|
+
+
+Value for A1 at time plus half year forward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + Half year) , Forward )
+  ~~|
+
+Value for A1 at time plus half year backward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + Half year) , Backward )
+  ~~|
+
+
+Value for A1 at time plus one year interpolate =
+        GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + One year) , Interpolate )
+  ~~|
+
+Value for A1 at time plus one year forward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + One year) , Forward )
+  ~~|
+
+Value for A1 at time plus one year backward =
+        GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + One year) , Backward )
+  ~~|
+
+
+Value at time plus half year forward[DimA]  =
+        GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + Half year) , Forward )
+  ~~|
+
+Value at time plus half year backward[DimA]  =
+        GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + Half year) , Backward )
+  ~~|
+
+
+Value at time plus one year interpolate[DimA]  =
+        GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + One year) , Interpolate )
+  ~~|
+
+Value at time plus one year forward[DimA]  =
+        GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + One year) , Forward )
+  ~~|
+
+Value at time plus one year backward[DimA]  =
+        GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + One year) , Backward )
+  ~~|
+
+
+Initial value at time plus one year interpolate[DimA]  =
+        INITIAL( GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + One year) , Interpolate ) )
+  ~~|
+
+Initial value at time plus one year forward[DimA]  =
+        INITIAL( GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + One year) , Forward ) )
+  ~~|
+
+Initial value at time plus one year backward[DimA]  =
+        INITIAL( GET DATA BETWEEN TIMES ( Values[DimA] , MIN(FINAL TIME, Time + One year) , Backward ) )
+  ~~|
+
+
+Initial value for A1 at time plus one year interpolate =
+        INITIAL( GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + One year) , Interpolate ) )
+  ~~|
+
+Initial value for A1 at time plus one year forward =
+        INITIAL( GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + One year) , Forward ) )
+  ~~|
+
+Initial value for A1 at time plus one year backward =
+        INITIAL( GET DATA BETWEEN TIMES ( Values[A1] , MIN(FINAL TIME, Time + One year) , Backward ) )
+  ~~|
+
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|

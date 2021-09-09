@@ -1,0 +1,62 @@
+Capacity: level
+= INTEG(Capacity Adjustment Rate,Target Capacity)
+refId(_capacity)
+refs(_capacity_adjustment_rate)
+initRefs(_target_capacity)
+
+Capacity Adjustment Rate: aux
+= (Target Capacity-Capacity)/Capacity Adjustment Time
+refId(_capacity_adjustment_rate)
+refs(_target_capacity, _capacity)
+
+Capacity Adjustment Time: const
+= 10
+refId(_capacity_adjustment_time)
+
+Capacity Utilization: aux
+= Production/Capacity
+refId(_capacity_utilization)
+refs(_production, _capacity)
+
+Initial Target Capacity: const
+= 100
+refId(_initial_target_capacity)
+
+Production: aux
+= 100+STEP(100,10)
+refId(_production)
+
+Target Capacity: aux
+= ACTIVE INITIAL(Capacity*Utilization Adjustment,Initial Target Capacity)
+refId(_target_capacity)
+refs(_capacity, _utilization_adjustment)
+
+Utilization Adjustment: aux
+= Capacity Utilization^Utilization Sensitivity
+refId(_utilization_adjustment)
+refs(_capacity_utilization)
+
+Utilization Sensitivity: const
+= 1
+refId(_utilization_sensitivity)
+
+FINAL TIME: const
+= 100
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+

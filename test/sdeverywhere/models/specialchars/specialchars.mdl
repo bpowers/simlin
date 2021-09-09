@@ -1,0 +1,10 @@
+{UTF-8}
+DOLLAR SIGN$ = 1 ~~|
+time's up = 2 ~~|
+"M&Ms" = 3 ~~|
+"100% true" = 4 ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

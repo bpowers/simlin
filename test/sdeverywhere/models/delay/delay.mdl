@@ -1,0 +1,37 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+SubA: A2, A3 ~~|
+
+input = STEP(10, 0) - STEP(10, 4) ~~|
+delay = 5 ~~|
+init 1 = 0 ~~|
+
+input a[DimA]= 10, 20, 30 ~~|
+delay a[DimA] = 1, 2, 3 ~~|
+init a[DimA] = 0 ~~|
+
+input 2[SubA]= 20, 30 ~~|
+delay 2 = 5 ~~|
+init 2[SubA] = 0 ~~|
+
+k = 42 ~~|
+
+d1 = DELAY1(input, delay) ~~|
+d2[DimA] = DELAY1I(input a[DimA], delay, init 1) ~~|
+d3[DimA] = DELAY1I(input, delay a[DimA], init 1) ~~|
+d4[DimA] = DELAY1I(input, delay, init a[DimA]) ~~|
+d5[DimA] = DELAY1I(input a[DimA], delay a[DimA], init a[DimA]) ~~|
+d6[SubA] = DELAY1I(input 2[SubA], delay 2, init 2[SubA]) ~~|
+
+d7 = DELAY3(input, delay) ~~|
+d8[DimA] = DELAY3(input, delay a[DimA]) ~~|
+d9[SubA] = DELAY3I(input 2[SubA], delay 2, init 2[SubA]) ~~|
+
+d10 = k * DELAY3(input, delay) ~~|
+d11[DimA] = k * DELAY3(input, delay a[DimA]) ~~|
+d12[SubA] = k * DELAY3I(input 2[SubA], delay 2, init 2[SubA]) ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 10 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

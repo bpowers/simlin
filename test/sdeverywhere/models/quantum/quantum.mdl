@@ -1,0 +1,44 @@
+{UTF-8}
+a = QUANTUM(1.9, 1.0) ~~~:SUPPLEMENTARY|
+b = QUANTUM(0.9, 1.0) ~~~:SUPPLEMENTARY|
+c = QUANTUM(-0.9, 1.0) ~~~:SUPPLEMENTARY|
+d = QUANTUM(-1.9, 1.0) ~~~:SUPPLEMENTARY|
+e = QUANTUM(112.3, 10.0) ~~~:SUPPLEMENTARY|
+f = QUANTUM(50, 12) ~~~:SUPPLEMENTARY|
+g = QUANTUM(423, 63) ~~~:SUPPLEMENTARY|
+h = QUANTUM(10, 10) ~~~:SUPPLEMENTARY|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:quantum
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

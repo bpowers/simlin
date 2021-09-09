@@ -1,0 +1,24 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+DimC: C1, C2, C3 ~~|
+SubA: A2, A3 ~~|
+
+a[DimA] = 1, 2, 3 ~~|
+b[DimA] = 4, 5, 6 ~~|
+a 2[SubA] = 1, 2 ~~|
+b 2[SubA] = 4, 5 ~~|
+c = SUM(a[DimA!]) + 1 ~~|
+d = SUM(a[DimA!]) + SUM(b[DimA!]) ~~|
+e = SUM(a[DimA!] * b[DimA!] / TIME STEP) ~~|
+f[DimA, DimC] = 1 ~~|
+g[DimA, DimC] = SUM(f[DimA!, DimC!]) ~~|
+h[DimC] = 10, 20, 30 ~~|
+i = SUM(a[DimA!] + h[DimC!]) ~~|
+j[DimA] = a[DimA] / SUM(b[DimA!]) ~~|
+k[SubA] = SUM(b 2[SubA!]) ~~|
+l[SubA] = a 2[SubA] / SUM(b 2[SubA!]) ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

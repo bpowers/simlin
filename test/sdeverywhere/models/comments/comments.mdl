@@ -1,0 +1,53 @@
+{UTF-8}
+DimA: A1, A2, A3 ~~|
+
+a[DimA]=
+  0,  {transportation sector}
+  1,  {electricity sector}
+  2  {geoengineering sector - NOT USED}
+  ~
+  ~  ~  :SUPPLEMENTARY
+  |
+
+b = 3  {transportation sector}
+  ~
+  ~  ~  :SUPPLEMENTARY
+  |
+
+c = 4
+  {first part and
+    the second part}
+  ~
+  ~  ~  :SUPPLEMENTARY
+  |
+
+d=
+  8760
+
+  {
+  We ignore leap years so that we can get consistent results
+  for various values used in the model that should not change
+  every four years.  If we want to change this value for leap
+  years, instead use the following code:
+
+
+  IF THEN ELSE(
+     (MODULO(Time, 4) = 0 :AND: MODULO(Time, 100) <> 0) :OR: MODULO(Time, 400) = 0,
+     8784 {leap year},
+     8760 {normal year}
+  )
+  }
+  ~  hours
+  ~  Calculates the number of hours in the year, ignoring leap years.
+  ~  :SUPPLEMENTARY
+  |
+
+e = 41 {first part} + 1 {second part}
+  ~
+  ~  ~  :SUPPLEMENTARY
+  |
+
+INITIAL TIME  = 0 ~~|
+FINAL TIME  = 1 ~~|
+SAVEPER  = 1 ~~|
+TIME STEP  = 1 ~~|

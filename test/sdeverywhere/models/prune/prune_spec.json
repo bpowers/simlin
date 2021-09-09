@@ -1,0 +1,27 @@
+{
+  "name": "prune",
+  "inputVarNames": ["Input 1", "Input 2"],
+  "outputVarNames": [
+    "Time",
+    "Input 1 and 2 Total",
+    "Simple Totals",
+    "A Totals",
+    "B1 Totals",
+    "Look1 Value at t1",
+    "With Look1 at t1",
+    "Partial[C2]",
+    "Test 1 Result",
+    "Test 2 Result",
+    "Test 3 Result",
+    "Test 4 Result",
+    "Test 5 Result",
+    "Test 6 Result",
+    "Test 7 Result",
+    "Test 8 Result",
+    "Test 9 Result",
+    "Test 10 Result",
+    "Test 11 Result",
+    "Test 12 Result"
+  ],
+  "externalDatfiles": ["prune_data.dat"]
+}

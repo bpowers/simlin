@@ -1,0 +1,63 @@
+_dima:
+{
+  modelName: 'DimA',
+  modelValue: [ 'A1', 'A2', 'A3' ],
+  modelMappings: [ { toDim: 'DimB', value: [] }, { toDim: 'DimC', value: [] } ],
+  name: '_dima',
+  value: [ '_a1', '_a2', '_a3' ],
+  size: 3,
+  family: '_dima',
+  mappings: { _dimb: [ '_a1', '_a2', '_a3' ], _dimc: [ '_a1', '_a2', '_a3' ] }
+}
+
+_dimb:
+{
+  modelName: 'DimB',
+  modelValue: [ 'B1', 'B2', 'B3' ],
+  modelMappings: [],
+  name: '_dimb',
+  value: [ '_b1', '_b2', '_b3' ],
+  size: 3,
+  family: '_dimb',
+  mappings: {}
+}
+
+_dimc:
+{
+  modelName: 'DimC',
+  modelValue: [ 'C1', 'C2', 'C3' ],
+  modelMappings: [],
+  name: '_dimc',
+  value: [ '_c1', '_c2', '_c3' ],
+  size: 3,
+  family: '_dimc',
+  mappings: {}
+}
+
+_a1:
+{ name: '_a1', value: 0, size: 1, family: '_dima', mappings: {} }
+
+_a2:
+{ name: '_a2', value: 1, size: 1, family: '_dima', mappings: {} }
+
+_a3:
+{ name: '_a3', value: 2, size: 1, family: '_dima', mappings: {} }
+
+_b1:
+{ name: '_b1', value: 0, size: 1, family: '_dimb', mappings: {} }
+
+_b2:
+{ name: '_b2', value: 1, size: 1, family: '_dimb', mappings: {} }
+
+_b3:
+{ name: '_b3', value: 2, size: 1, family: '_dimb', mappings: {} }
+
+_c1:
+{ name: '_c1', value: 0, size: 1, family: '_dimc', mappings: {} }
+
+_c2:
+{ name: '_c2', value: 1, size: 1, family: '_dimc', mappings: {} }
+
+_c3:
+{ name: '_c3', value: 2, size: 1, family: '_dimc', mappings: {} }
+

@@ -1,0 +1,42 @@
+amplitude: const
+= 2
+refId(_amplitude)
+
+Period: const
+= 20
+refId(_period)
+
+x: aux
+= amplitude*COS(6.28*Time/Period)
+refId(_x)
+
+relative x: aux
+= x/INITIAL x
+refId(_relative_x)
+refs(_x, _initial_x)
+
+INITIAL x: initial
+= INITIAL(x)
+refId(_initial_x)
+initRefs(_x)
+
+FINAL TIME: const
+= 100
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+

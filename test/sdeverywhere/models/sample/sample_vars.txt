@@ -1,0 +1,45 @@
+F: aux
+= SAMPLE IF TRUE(Time=5,2,IF THEN ELSE(switch=1,1,0))
+refId(_f)
+refs(_time)
+initRefs(_switch)
+
+G: level
+= INTEG(rate,2*COS(scale))
+refId(_g)
+refs(_rate)
+initRefs(_scale)
+
+rate: aux
+= STEP(10,10)
+refId(_rate)
+
+scale: const
+= 1
+refId(_scale)
+
+switch: const
+= 1
+refId(_switch)
+
+FINAL TIME: const
+= 10
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+refs(_time_step)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+

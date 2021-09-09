@@ -1,0 +1,12 @@
+{UTF-8}
+p = PULSE TRAIN(first pulse time, duration, repeat interval, last pulse time) ~~|
+
+first pulse time = 10 ~~|
+duration = 1 ~~|
+repeat interval = 5 ~~|
+last pulse time = 30 ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 40 ~~|
+TIME STEP = 0.25 ~~|
+SAVEPER = TIME STEP ~~|

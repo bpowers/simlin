@@ -1,0 +1,430 @@
+{UTF-8}
+DimA: A1, A2, A3
+	~	
+	~		|
+
+DimB: B1, B2, B3
+	~	
+	~		|
+
+DimC: C1, C2
+	~	
+	~		|
+
+DimD: D1, D2 -> DimC
+	~	
+	~		|
+
+DimE: E1, E2
+	~	
+	~		|
+
+Simple 1
+	~	dmnl
+	~		|
+
+Simple 2
+	~	dmnl
+	~		|
+
+A Values[DimA]
+	~	dmnl
+	~		|
+
+BC Values[DimB,DimC]
+	~	dmnl
+	~		|
+
+D Values[DimD]
+	~	dmnl
+	~		|
+
+E Values[E1] ~~|
+E Values[E2]
+	~	dmnl
+	~		|
+
+Look1((0,0),(1,1),(2,2))
+	~	dmnl
+	~		|
+
+Look2((0,0),(1,1),(2,2))
+	~	dmnl
+	~		|
+
+Input 1 = 10
+	~	dmnl
+	~		|
+
+Input 2 = 20
+	~	dmnl
+	~		|
+
+Input 3 = 30
+	~	dmnl
+	~		|
+
+Simple Totals =
+  Simple 1 + Simple 2
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+A Totals =
+  SUM( A Values[DimA!] )
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+B1 Totals =
+  SUM( BC Values[B1,DimC!] )
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+D Totals =
+  SUM( D Values[DimD!] )
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+E1 Values =
+  E Values[E1]
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+E2 Values =
+  E Values[E2]
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+Input 1 and 2 Total =
+  Input 1 + Input 2
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+Input 2 and 3 Total =
+  Input 2 + Input 3
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+Look1 Value at t1 =
+  Look1(1)
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+Look2 Value at t1 =
+  Look2(1)
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+With Look1 at t1 = WITH LOOKUP ( 1, ([(0,0)-(2,2)],(0,0),(1,1),(2,2)) )
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+With Look2 at t1 = WITH LOOKUP ( 1, ([(0,0)-(2,2)],(0,0),(1,1),(2,2)) )
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+Constant Partial 1 = 1
+	~	dmnl
+	~		|
+
+Constant Partial 2 = 2
+	~	dmnl
+	~		|
+
+Initial Partial[C1] =
+  INITIAL( Constant Partial 1 ) ~~|
+Initial Partial[C2] =
+  INITIAL( Constant Partial 2 )
+	~	dmnl
+	~		|
+
+Partial[C2] =
+  Initial Partial[C2]
+	~	dmnl
+	~		~	:SUPPLEMENTARY 
+	|
+
+Test 1 T = 1
+	~	dmnl
+	~		|
+
+Test 1 F = 2
+	~	dmnl
+	~		|
+
+Test 1 Result = IF THEN ELSE(Input 1 = 10, Test 1 T, Test 1 F)
+	~	dmnl
+	~	Should not be eliminated because "Input 1" is listed as an input in the \
+		spec file.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 2 T = 1
+	~	dmnl
+	~		|
+
+Test 2 F = 2
+	~	dmnl
+	~		|
+
+Test 2 Result = IF THEN ELSE(0, Test 2 T, Test 2 F)
+	~	dmnl
+	~	Only "Test 2 F" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 3 T = 1
+	~	dmnl
+	~		|
+
+Test 3 F = 2
+	~	dmnl
+	~		|
+
+Test 3 Result = IF THEN ELSE(1, Test 3 T, Test 3 F)
+	~	dmnl
+	~	Only "Test 3 T" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 4 Cond = 0
+	~	dmnl
+	~		|
+
+Test 4 T = 1
+	~	dmnl
+	~		|
+
+Test 4 F = 2
+	~	dmnl
+	~		|
+
+Test 4 Result = IF THEN ELSE(Test 4 Cond, Test 4 T, Test 4 F)
+	~	dmnl
+	~	Only "Test 4 F" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 5 Cond = 1
+	~	dmnl
+	~		|
+
+Test 5 T = 1
+	~	dmnl
+	~		|
+
+Test 5 F = 2
+	~	dmnl
+	~		|
+
+Test 5 Result = IF THEN ELSE(Test 5 Cond, Test 5 T, Test 5 F)
+	~	dmnl
+	~	Only "Test 5 T" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 6 Cond = 0
+	~	dmnl
+	~		|
+
+Test 6 T = 1
+	~	dmnl
+	~		|
+
+Test 6 F = 2
+	~	dmnl
+	~		|
+
+Test 6 Result = IF THEN ELSE(Test 6 Cond = 1, Test 6 T, Test 6 F)
+	~	dmnl
+	~	Only "Test 6 F" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 7 Cond = 1
+	~	dmnl
+	~		|
+
+Test 7 T = 1
+	~	dmnl
+	~		|
+
+Test 7 F = 2
+	~	dmnl
+	~		|
+
+Test 7 Result = IF THEN ELSE(Test 7 Cond = 1, Test 7 T, Test 7 F)
+	~	dmnl
+	~	Only "Test 7 T" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 8 Cond = 0
+	~	dmnl
+	~		|
+
+Test 8 T = 1
+	~	dmnl
+	~		|
+
+Test 8 F = 2
+	~	dmnl
+	~		|
+
+Test 8 Result = IF THEN ELSE(Test 8 Cond > 0, Test 8 T, Test 8 F)
+	~	dmnl
+	~	Only "Test 8 F" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 9 Cond = 1
+	~	dmnl
+	~		|
+
+Test 9 T = 1
+	~	dmnl
+	~		|
+
+Test 9 F = 2
+	~	dmnl
+	~		|
+
+Test 9 Result = IF THEN ELSE(Test 9 Cond > 0, Test 9 T, Test 9 F)
+	~	dmnl
+	~	Only "Test 9 T" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 10 Cond = 1
+	~	dmnl
+	~		|
+
+Test 10 T = 1
+	~	dmnl
+	~		|
+
+Test 10 F = 2
+	~	dmnl
+	~		|
+
+Test 10 Result = IF THEN ELSE(ABS(Test 10 Cond), Test 10 T, Test 10 F)
+	~	dmnl
+	~	Should not be eliminated because condition contains function call.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 11 Cond = 0
+	~	dmnl
+	~		|
+
+Test 11 T = 1
+	~	dmnl
+	~		|
+
+Test 11 F = 2
+	~	dmnl
+	~		|
+
+Test 11 Result = IF THEN ELSE(Test 11 Cond :AND: ABS(Test 11 Cond), Test 11 T, Test 11 F\
+		)
+	~	dmnl
+	~	Only "Test 11 F" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+Test 12 Cond = 1
+	~	dmnl
+	~		|
+
+Test 12 T = 1
+	~	dmnl
+	~		|
+
+Test 12 F = 2
+	~	dmnl
+	~		|
+
+Test 12 Result = IF THEN ELSE(Test 12 Cond :OR: ABS(Test 12 Cond), Test 12 T, Test 12 F\
+		)
+	~	dmnl
+	~	Only "Test 12 T" should be generated.
+	~	:SUPPLEMENTARY 
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|255-255-255|96,96,100,0
+///---\\\
+:L<%^E!@
+1:prune.vdfx
+4:Time
+5:A Values[DimA]
+6:A1
+6:B1
+6:C1
+6:D1
+6:E1
+9:prune
+19:100,0
+24:0
+25:10
+26:10
+13:prune_data.vdfx
+15:0,0,0,0,0,0
+27:0,
+34:0,
+42:0
+72:0
+73:0
+95:0
+96:0
+97:0
+77:0
+78:0
+93:0
+94:0
+92:0
+91:0
+90:0
+87:0
+75:
+43:

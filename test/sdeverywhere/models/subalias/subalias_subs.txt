@@ -1,0 +1,33 @@
+_dime:
+{
+  modelName: 'DimE',
+  modelValue: [ 'F1', 'F2', 'F3' ],
+  modelMappings: [],
+  name: '_dime',
+  value: [ '_f1', '_f2', '_f3' ],
+  size: 3,
+  family: '_dime',
+  mappings: {}
+}
+
+_dimf:
+{
+  modelName: 'DimF',
+  modelValue: [ 'F1', 'F2', 'F3' ],
+  modelMappings: [],
+  name: '_dimf',
+  value: [ '_f1', '_f2', '_f3' ],
+  size: 3,
+  family: '_dime',
+  mappings: {}
+}
+
+_f1:
+{ name: '_f1', value: 0, size: 1, family: '_dime', mappings: {} }
+
+_f2:
+{ name: '_f2', value: 1, size: 1, family: '_dime', mappings: {} }
+
+_f3:
+{ name: '_f3', value: 2, size: 1, family: '_dime', mappings: {} }
+

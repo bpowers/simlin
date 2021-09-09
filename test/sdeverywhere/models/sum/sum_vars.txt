@@ -1,0 +1,221 @@
+_dima:
+{ modelName: 'DimA',
+  modelValue: [ 'A1', 'A2', 'A3' ],
+  modelMappings: [],
+  name: '_dima',
+  value: [ '_a1', '_a2', '_a3' ],
+  size: 3,
+  family: '_dima',
+  mappings: {} }
+
+_dimc:
+{ modelName: 'DimC',
+  modelValue: [ 'C1', 'C2', 'C3' ],
+  modelMappings: [],
+  name: '_dimc',
+  value: [ '_c1', '_c2', '_c3' ],
+  size: 3,
+  family: '_dimc',
+  mappings: {} }
+
+_suba:
+{ modelName: 'SubA',
+  modelValue: [ 'A2', 'A3' ],
+  modelMappings: [],
+  name: '_suba',
+  value: [ '_a2', '_a3' ],
+  size: 2,
+  family: '_dima',
+  mappings: {} }
+
+_a1:
+{ name: '_a1', value: 0, size: 1, family: '_dima', mappings: {} }
+
+_a2:
+{ name: '_a2', value: 1, size: 1, family: '_dima', mappings: {} }
+
+_a3:
+{ name: '_a3', value: 2, size: 1, family: '_dima', mappings: {} }
+
+_c1:
+{ name: '_c1', value: 0, size: 1, family: '_dimc', mappings: {} }
+
+_c2:
+{ name: '_c2', value: 1, size: 1, family: '_dimc', mappings: {} }
+
+_c3:
+{ name: '_c3', value: 2, size: 1, family: '_dimc', mappings: {} }
+
+a[DimA]: const (non-apply-to-all)
+= 1,2,3
+refId(_a[_a1])
+families(_dima)
+subscripts(_a1)
+separationDims(_dima)
+
+a[DimA]: const (non-apply-to-all)
+= 1,2,3
+refId(_a[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_dima)
+
+a[DimA]: const (non-apply-to-all)
+= 1,2,3
+refId(_a[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_dima)
+
+b[DimA]: const (non-apply-to-all)
+= 4,5,6
+refId(_b[_a1])
+families(_dima)
+subscripts(_a1)
+separationDims(_dima)
+
+b[DimA]: const (non-apply-to-all)
+= 4,5,6
+refId(_b[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_dima)
+
+b[DimA]: const (non-apply-to-all)
+= 4,5,6
+refId(_b[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_dima)
+
+a 2[SubA]: const (non-apply-to-all)
+= 1,2
+refId(_a_2[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+
+a 2[SubA]: const (non-apply-to-all)
+= 1,2
+refId(_a_2[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+
+b 2[SubA]: const (non-apply-to-all)
+= 4,5
+refId(_b_2[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+
+b 2[SubA]: const (non-apply-to-all)
+= 4,5
+refId(_b_2[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+
+c: aux
+= SUM(a[DimA!])+1
+refId(_c)
+
+d: aux
+= SUM(a[DimA!])+SUM(b[DimA!])
+refId(_d)
+
+e: aux
+= SUM(a[DimA!]*b[DimA!]/TIME STEP)
+refId(_e)
+
+f[DimA,DimC]: const
+= 1
+refId(_f)
+families(_dima, _dimc)
+subscripts(_dima, _dimc)
+
+g[DimA,DimC]: aux
+= SUM(f[DimA!,DimC!])
+refId(_g)
+families(_dima, _dimc)
+subscripts(_dima, _dimc)
+
+h[DimC]: const (non-apply-to-all)
+= 10,20,30
+refId(_h[_c1])
+families(_dimc)
+subscripts(_c1)
+separationDims(_dimc)
+
+h[DimC]: const (non-apply-to-all)
+= 10,20,30
+refId(_h[_c2])
+families(_dimc)
+subscripts(_c2)
+separationDims(_dimc)
+
+h[DimC]: const (non-apply-to-all)
+= 10,20,30
+refId(_h[_c3])
+families(_dimc)
+subscripts(_c3)
+separationDims(_dimc)
+
+i: aux
+= SUM(a[DimA!]+h[DimC!])
+refId(_i)
+
+j[DimA]: aux
+= a[DimA]/SUM(b[DimA!])
+refId(_j)
+families(_dima)
+subscripts(_dima)
+
+k[SubA]: aux (non-apply-to-all)
+= SUM(b 2[SubA!])
+refId(_k[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+
+k[SubA]: aux (non-apply-to-all)
+= SUM(b 2[SubA!])
+refId(_k[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+
+l[SubA]: aux (non-apply-to-all)
+= a 2[SubA]/SUM(b 2[SubA!])
+refId(_l[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+
+l[SubA]: aux (non-apply-to-all)
+= a 2[SubA]/SUM(b 2[SubA!])
+refId(_l[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+Time: const
+= 
+refId(_time)
+

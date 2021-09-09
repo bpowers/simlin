@@ -1,0 +1,56 @@
+a[DimA]: aux
+= b[DimA]+10
+refId(_a)
+families(_dima)
+subscripts(_dima)
+
+b[A1]: const (non-apply-to-all)
+= 1
+refId(_b[_a1])
+families(_dima)
+subscripts(_a1)
+
+b[A2]: const (non-apply-to-all)
+= 2
+refId(_b[_a2])
+families(_dima)
+subscripts(_a2)
+
+b[A3]: const (non-apply-to-all)
+= 3
+refId(_b[_a3])
+families(_dima)
+subscripts(_a3)
+
+c[DimA]: aux
+= b[A1]+1
+refId(_c)
+families(_dima)
+subscripts(_dima)
+
+d[DimA]: aux
+= b[A1]+b[DimA]
+refId(_d)
+families(_dima)
+subscripts(_dima)
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+SAVEPER: aux
+= TIME STEP
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+

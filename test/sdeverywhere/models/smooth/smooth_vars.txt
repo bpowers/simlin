@@ -1,0 +1,375 @@
+_dima:
+{ modelName: 'DimA',
+  modelValue: [ 'A1', 'A2', 'A3' ],
+  modelMappings: [ { toDim: 'DimB', value: [] } ],
+  name: '_dima',
+  value: [ '_a1', '_a2', '_a3' ],
+  size: 3,
+  family: '_dima',
+  mappings: { _dimb: [ '_a1', '_a2', '_a3' ] } }
+
+_suba:
+{ modelName: 'SubA',
+  modelValue: [ 'A2', 'A3' ],
+  modelMappings: [ { toDim: 'SubB', value: [] } ],
+  name: '_suba',
+  value: [ '_a2', '_a3' ],
+  size: 2,
+  family: '_dima',
+  mappings: { _subb: [ '_a2', '_a3' ] } }
+
+_dimb:
+{ modelName: 'DimB',
+  modelValue: [ 'B1', 'B2', 'B3' ],
+  modelMappings: [],
+  name: '_dimb',
+  value: [ '_b1', '_b2', '_b3' ],
+  size: 3,
+  family: '_dimb',
+  mappings: {} }
+
+_subb:
+{ modelName: 'SubB',
+  modelValue: [ 'B2', 'B3' ],
+  modelMappings: [],
+  name: '_subb',
+  value: [ '_b2', '_b3' ],
+  size: 2,
+  family: '_dimb',
+  mappings: {} }
+
+_a1:
+{ name: '_a1', value: 0, size: 1, family: '_dima', mappings: {} }
+
+_a2:
+{ name: '_a2', value: 1, size: 1, family: '_dima', mappings: {} }
+
+_a3:
+{ name: '_a3', value: 2, size: 1, family: '_dima', mappings: {} }
+
+_b1:
+{ name: '_b1', value: 0, size: 1, family: '_dimb', mappings: {} }
+
+_b2:
+{ name: '_b2', value: 1, size: 1, family: '_dimb', mappings: {} }
+
+_b3:
+{ name: '_b3', value: 2, size: 1, family: '_dimb', mappings: {} }
+
+input: aux
+= 3+PULSE(10,10)
+refId(_input)
+
+input2[SubA]: aux (non-apply-to-all)
+= 3+PULSE(10,10)
+refId(_input2[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+
+input2[SubA]: aux (non-apply-to-all)
+= 3+PULSE(10,10)
+refId(_input2[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+
+input3[DimA]: aux
+= 3+PULSE(10,10)
+refId(_input3)
+families(_dima)
+subscripts(_dima)
+
+input3x3[DimA,DimB]: aux
+= 3+PULSE(10,10)
+refId(_input3x3)
+families(_dima, _dimb)
+subscripts(_dima, _dimb)
+
+input2x3[SubA,DimB]: aux (non-apply-to-all)
+= 3+PULSE(10,10)
+refId(_input2x3[_a2,_dimb])
+families(_dima, _dimb)
+subscripts(_a2, _dimb)
+separationDims(_suba)
+
+input2x3[SubA,DimB]: aux (non-apply-to-all)
+= 3+PULSE(10,10)
+refId(_input2x3[_a3,_dimb])
+families(_dima, _dimb)
+subscripts(_a3, _dimb)
+separationDims(_suba)
+
+delay: const
+= 2
+refId(_delay)
+
+delay_2[SubA]: const (non-apply-to-all)
+= 2
+refId(_delay_2[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+
+delay_2[SubA]: const (non-apply-to-all)
+= 2
+refId(_delay_2[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+
+delay_3[DimA]: const
+= 2
+refId(_delay_3)
+families(_dima)
+subscripts(_dima)
+
+s1: aux
+= SMOOTH(input,delay)
+refId(_s1)
+refs(__level1)
+
+s2[DimA]: aux
+= SMOOTH(input,delay)
+refId(_s2)
+families(_dima)
+subscripts(_dima)
+refs(__level2)
+
+s3[DimA]: aux
+= SMOOTH(input3[DimA],delay_3[DimA])
+refId(_s3)
+families(_dima)
+subscripts(_dima)
+refs(__level3)
+
+s4[SubA]: aux (non-apply-to-all)
+= SMOOTH(input2[SubA],delay_2[SubA])
+refId(_s4[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+refs(__level_s4_1[_a2])
+
+s4[SubA]: aux (non-apply-to-all)
+= SMOOTH(input2[SubA],delay_2[SubA])
+refId(_s4[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+refs(__level_s4_1[_a3])
+
+s5[SubA]: aux (non-apply-to-all)
+= SMOOTH3(input2[SubA],delay_2[SubA])
+refId(_s5[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_suba)
+refs(__level_s5_1[_a2], __level_s5_2[_a2], __level_s5_3[_a2])
+
+s5[SubA]: aux (non-apply-to-all)
+= SMOOTH3(input2[SubA],delay_2[SubA])
+refId(_s5[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_suba)
+refs(__level_s5_1[_a3], __level_s5_2[_a3], __level_s5_3[_a3])
+
+s6[DimB]: aux
+= SMOOTH(input3[DimA],delay_3[DimA])
+refId(_s6)
+families(_dimb)
+subscripts(_dimb)
+refs(__level4)
+
+s7[SubB]: aux (non-apply-to-all)
+= SMOOTH(input2[SubA],delay_2[SubA])
+refId(_s7[_b2])
+families(_dimb)
+subscripts(_b2)
+separationDims(_subb)
+refs(__level_s7_1[_a2])
+
+s7[SubB]: aux (non-apply-to-all)
+= SMOOTH(input2[SubA],delay_2[SubA])
+refId(_s7[_b3])
+families(_dimb)
+subscripts(_b3)
+separationDims(_subb)
+refs(__level_s7_1[_a3])
+
+s8[DimA,DimB]: aux
+= SMOOTH(input3x3[DimA,DimB],delay)
+refId(_s8)
+families(_dima, _dimb)
+subscripts(_dima, _dimb)
+refs(__level5)
+
+s9[SubA,DimB]: aux (non-apply-to-all)
+= SMOOTH(input2x3[SubA,DimB],delay)
+refId(_s9[_a2,_dimb])
+families(_dima, _dimb)
+subscripts(_a2, _dimb)
+separationDims(_suba)
+refs(__level_s9_1[_a2,_dimb])
+
+s9[SubA,DimB]: aux (non-apply-to-all)
+= SMOOTH(input2x3[SubA,DimB],delay)
+refId(_s9[_a3,_dimb])
+families(_dima, _dimb)
+subscripts(_a3, _dimb)
+separationDims(_suba)
+refs(__level_s9_1[_a3,_dimb])
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+
+FINAL TIME: const
+= 40
+refId(_final_time)
+
+SAVEPER: const
+= 1
+refId(_saveper)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+
+Time: const
+= 
+refId(_time)
+
+_level1: level
+= INTEG((input-_level1)/delay,input)
+refId(__level1)
+refs(_input)
+initRefs(_input)
+
+_level2: level
+= INTEG((input-_level2)/delay,input)
+refId(__level2)
+refs(_input)
+initRefs(_input)
+
+_level3[DimA]: level
+= INTEG((input3[DimA]-_level3[DimA])/delay_3[DimA],input3[DimA])
+refId(__level3)
+families(_dima)
+subscripts(_dima)
+refs(_input3)
+initRefs(_input3)
+
+_level_s4_1[a2]: level (non-apply-to-all)
+= INTEG((input2[a2]-_level_s4_1[a2])/delay_2[a2],input2[a2])
+refId(__level_s4_1[_a2])
+families(_dima)
+subscripts(_a2)
+refs(_input2[_a2])
+initRefs(_input2[_a2])
+
+_level_s4_1[a3]: level (non-apply-to-all)
+= INTEG((input2[a3]-_level_s4_1[a3])/delay_2[a3],input2[a3])
+refId(__level_s4_1[_a3])
+families(_dima)
+subscripts(_a3)
+refs(_input2[_a3])
+initRefs(_input2[_a3])
+
+_level_s5_1[a2]: level (non-apply-to-all)
+= INTEG((input2[a2]-_level_s5_1[a2])/(delay_2[a2]/3),input2[a2])
+refId(__level_s5_1[_a2])
+families(_dima)
+subscripts(_a2)
+refs(_input2[_a2])
+initRefs(_input2[_a2])
+
+_level_s5_2[a2]: level (non-apply-to-all)
+= INTEG((_level_s5_1[a2]-_level_s5_2[a2])/(delay_2[a2]/3),input2[a2])
+refId(__level_s5_2[_a2])
+families(_dima)
+subscripts(_a2)
+refs(__level_s5_1[_a2])
+initRefs(_input2[_a2])
+
+_level_s5_3[a2]: level (non-apply-to-all)
+= INTEG((_level_s5_2[a2]-_level_s5_3[a2])/(delay_2[a2]/3),input2[a2])
+refId(__level_s5_3[_a2])
+families(_dima)
+subscripts(_a2)
+refs(__level_s5_2[_a2])
+initRefs(_input2[_a2])
+
+_level_s5_1[a3]: level (non-apply-to-all)
+= INTEG((input2[a3]-_level_s5_1[a3])/(delay_2[a3]/3),input2[a3])
+refId(__level_s5_1[_a3])
+families(_dima)
+subscripts(_a3)
+refs(_input2[_a3])
+initRefs(_input2[_a3])
+
+_level_s5_2[a3]: level (non-apply-to-all)
+= INTEG((_level_s5_1[a3]-_level_s5_2[a3])/(delay_2[a3]/3),input2[a3])
+refId(__level_s5_2[_a3])
+families(_dima)
+subscripts(_a3)
+refs(__level_s5_1[_a3])
+initRefs(_input2[_a3])
+
+_level_s5_3[a3]: level (non-apply-to-all)
+= INTEG((_level_s5_2[a3]-_level_s5_3[a3])/(delay_2[a3]/3),input2[a3])
+refId(__level_s5_3[_a3])
+families(_dima)
+subscripts(_a3)
+refs(__level_s5_2[_a3])
+initRefs(_input2[_a3])
+
+_level4[DimA]: level
+= INTEG((input3[DimA]-_level4[DimA])/delay_3[DimA],input3[DimA])
+refId(__level4)
+families(_dima)
+subscripts(_dima)
+refs(_input3)
+initRefs(_input3)
+
+_level_s7_1[a2]: level (non-apply-to-all)
+= INTEG((input2[a2]-_level_s7_1[a2])/delay_2[a2],input2[a2])
+refId(__level_s7_1[_a2])
+families(_dima)
+subscripts(_a2)
+refs(_input2[_a2])
+initRefs(_input2[_a2])
+
+_level_s7_1[a3]: level (non-apply-to-all)
+= INTEG((input2[a3]-_level_s7_1[a3])/delay_2[a3],input2[a3])
+refId(__level_s7_1[_a3])
+families(_dima)
+subscripts(_a3)
+refs(_input2[_a3])
+initRefs(_input2[_a3])
+
+_level5[DimA,DimB]: level
+= INTEG((input3x3[DimA,DimB]-_level5[DimA,DimB])/delay,input3x3[DimA,DimB])
+refId(__level5)
+families(_dima, _dimb)
+subscripts(_dima, _dimb)
+refs(_input3x3)
+initRefs(_input3x3)
+
+_level_s9_1[a2,DimB]: level (non-apply-to-all)
+= INTEG((input2x3[a2,DimB]-_level_s9_1[a2,DimB])/delay,input2x3[a2,DimB])
+refId(__level_s9_1[_a2,_dimb])
+families(_dima, _dimb)
+subscripts(_a2, _dimb)
+refs(_input2x3[_a2,_dimb])
+initRefs(_input2x3[_a2,_dimb])
+
+_level_s9_1[a3,DimB]: level (non-apply-to-all)
+= INTEG((input2x3[a3,DimB]-_level_s9_1[a3,DimB])/delay,input2x3[a3,DimB])
+refId(__level_s9_1[_a3,_dimb])
+families(_dima, _dimb)
+subscripts(_a3, _dimb)
+refs(_input2x3[_a3,_dimb])
+initRefs(_input2x3[_a3,_dimb])
+
