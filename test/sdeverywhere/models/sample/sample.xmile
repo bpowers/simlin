@@ -1,0 +1,80 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0</start>
+        <stop>10</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions/>
+    <model>
+        <variables>
+            <flow name="rate">
+                <eqn>step(10, 10)</eqn>
+            </flow>
+            <aux name="switch">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="F">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>( IF Time = 5 THEN 2 ELSE PREVIOUS(SELF, ( IF switch = 1 THEN 1 ELSE 0 )) )</eqn>
+            </aux>
+            <aux name="a">
+                <eqn>( IF MODULO(Time, 5) = 0 THEN Time ELSE PREVIOUS(SELF, 0) )</eqn>
+            </aux>
+            <aux name="scale">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="b">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>a</eqn>
+            </aux>
+            <stock name="G">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <inflow>rate</inflow>
+                <eqn>2*COS(scale)</eqn>
+            </stock>
+        </variables>
+        <views>
+            <view>
+                <aux name="F" x="232" y="120"/>
+                <connector uid="3" angle="-269.61691650155382">
+                    <from>
+                        <alias uid="2"/>
+                    </from>
+                    <to>F</to>
+                </connector>
+                <aux name="switch" x="100" y="189"/>
+                <connector uid="5" angle="28.84503875776376">
+                    <from>switch</from>
+                    <to>F</to>
+                </connector>
+                <stock name="G" x="232" y="330"/>
+                <flow name="rate" x="101" y="327">
+                    <pts>
+                        <pt x="-49" y="327"/>
+                        <pt x="126" y="327"/>
+                    </pts>
+                </flow>
+                <aux name="scale" x="122" y="400"/>
+                <aux name="a" x="105" y="537"/>
+                <aux name="b" x="236" y="540"/>
+                <connector uid="18" angle="90">
+                    <from>
+                        <alias uid="17"/>
+                    </from>
+                    <to>a</to>
+                </connector>
+                <connector uid="19" angle="1.0414090836042789">
+                    <from>a</from>
+                    <to>b</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

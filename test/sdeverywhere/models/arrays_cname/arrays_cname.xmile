@@ -1,0 +1,457 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Months" isee:sim_duration="0">
+        <start>0</start>
+        <stop>1</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions>
+        <dim name="SubA">
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+        <dim name="DimD">
+            <elem name="D1"/>
+            <elem name="D2"/>
+            <elem name="D3"/>
+            <elem name="D4"/>
+        </dim>
+        <dim name="DimC&apos;">
+            <elem name="C1"/>
+            <elem name="C2"/>
+            <elem name="C3"/>
+        </dim>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+        <dim name="DimB">
+            <elem name="B1"/>
+            <elem name="B2"/>
+            <elem name="B3"/>
+        </dim>
+        <dim name="DimX">
+            <elem name="A2"/>
+            <elem name="A3"/>
+            <elem name="A1"/>
+        </dim>
+        <dim name="DimC">
+            <elem name="C1"/>
+            <elem name="C2"/>
+            <elem name="C3"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="y">
+                <doc>	2D constant array with dimensions not in normal order</doc>
+                <element subscript="D1, A1">
+                    <eqn>11</eqn>
+                </element>
+                <element subscript="D1, A2">
+                    <eqn>12</eqn>
+                </element>
+                <element subscript="D1, A3">
+                    <eqn>13</eqn>
+                </element>
+                <element subscript="D2, A1">
+                    <eqn>21</eqn>
+                </element>
+                <element subscript="D2, A2">
+                    <eqn>22</eqn>
+                </element>
+                <element subscript="D2, A3">
+                    <eqn>23</eqn>
+                </element>
+                <element subscript="D3, A1">
+                    <eqn>31</eqn>
+                </element>
+                <element subscript="D3, A2">
+                    <eqn>32</eqn>
+                </element>
+                <element subscript="D3, A3">
+                    <eqn>33</eqn>
+                </element>
+                <element subscript="D4, A1">
+                    <eqn>41</eqn>
+                </element>
+                <element subscript="D4, A2">
+                    <eqn>42</eqn>
+                </element>
+                <element subscript="D4, A3">
+                    <eqn>43</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimD"/>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="x">
+                <element subscript="A2">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="A1">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="w">
+                <element subscript="A1, B1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A1, B2">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="A1, B3">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="v">
+                <element subscript="A1, B1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A2, B1">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="A3, B1">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="u">
+                <element subscript="A2">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>2</eqn>
+                </element>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
+            <aux name="s3iii">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC&apos;"/>
+                </dimensions>
+            </aux>
+            <aux name="s3idd">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="s3did">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="s3ddd">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="sc">
+                <doc>	2D constant array where dimensions have matching subscript names</doc>
+                <element subscript="C1, C1">
+                    <eqn>11</eqn>
+                </element>
+                <element subscript="C1, C2">
+                    <eqn>12</eqn>
+                </element>
+                <element subscript="C1, C3">
+                    <eqn>13</eqn>
+                </element>
+                <element subscript="C2, C1">
+                    <eqn>21</eqn>
+                </element>
+                <element subscript="C2, C2">
+                    <eqn>22</eqn>
+                </element>
+                <element subscript="C2, C3">
+                    <eqn>23</eqn>
+                </element>
+                <element subscript="C3, C1">
+                    <eqn>31</eqn>
+                </element>
+                <element subscript="C3, C2">
+                    <eqn>32</eqn>
+                </element>
+                <element subscript="C3, C3">
+                    <eqn>33</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimC&apos;"/>
+                    <dim name="DimC&apos;"/>
+                </dimensions>
+            </aux>
+            <aux name="p">
+                <doc>	sum a 2D array over rows
+	~	:SUPPLEMENTARY</doc>
+                <eqn>SUM(inputAB[DimA, *])</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="s">
+                <doc>	2D constant array</doc>
+                <element subscript="A1, D1">
+                    <eqn>11</eqn>
+                </element>
+                <element subscript="A1, D2">
+                    <eqn>12</eqn>
+                </element>
+                <element subscript="A1, D3">
+                    <eqn>13</eqn>
+                </element>
+                <element subscript="A1, D4">
+                    <eqn>14</eqn>
+                </element>
+                <element subscript="A2, D1">
+                    <eqn>21</eqn>
+                </element>
+                <element subscript="A2, D2">
+                    <eqn>22</eqn>
+                </element>
+                <element subscript="A2, D3">
+                    <eqn>23</eqn>
+                </element>
+                <element subscript="A2, D4">
+                    <eqn>24</eqn>
+                </element>
+                <element subscript="A3, D1">
+                    <eqn>31</eqn>
+                </element>
+                <element subscript="A3, D2">
+                    <eqn>32</eqn>
+                </element>
+                <element subscript="A3, D3">
+                    <eqn>33</eqn>
+                </element>
+                <element subscript="A3, D4">
+                    <eqn>34</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimD"/>
+                </dimensions>
+            </aux>
+            <aux name="h">
+                <doc>	sum an array
+	~	:SUPPLEMENTARY</doc>
+                <eqn>SUM(a[*])+1</eqn>
+            </aux>
+            <aux name="inputAB">
+                <element subscript="A1, B1">
+                    <eqn>11</eqn>
+                </element>
+                <element subscript="A1, B2">
+                    <eqn>12</eqn>
+                </element>
+                <element subscript="A1, B3">
+                    <eqn>13</eqn>
+                </element>
+                <element subscript="A2, B1">
+                    <eqn>14</eqn>
+                </element>
+                <element subscript="A2, B2">
+                    <eqn>15</eqn>
+                </element>
+                <element subscript="A2, B3">
+                    <eqn>16</eqn>
+                </element>
+                <element subscript="A3, B1">
+                    <eqn>17</eqn>
+                </element>
+                <element subscript="A3, B2">
+                    <eqn>18</eqn>
+                </element>
+                <element subscript="A3, B3">
+                    <eqn>19</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="d">
+                <doc>	element to element
+	~	:SUPPLEMENTARY</doc>
+                <eqn>inputA[A1]*10</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="s3dii">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC&apos;"/>
+                </dimensions>
+            </aux>
+            <flow name="a">
+                <doc>	array to array</doc>
+                <eqn>inputA[DimA]*10</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </flow>
+            <aux name="f">
+                <doc>	2-d array
+	~	:SUPPLEMENTARY</doc>
+                <eqn>inputAB[DimA, DimB]*a[DimA]</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="e">
+                <doc>	mapped array</doc>
+                <eqn>inputA[DimA]*10</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s2id">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s1i">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="b">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>42</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="s2ii">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s2dd">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s1d">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="t">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
+            <aux name="r">
+                <eqn>inputAB[DimA, DimB]*g[DimB]</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="o">
+                <doc>	sum a 2D array over columns
+	~	:SUPPLEMENTARY</doc>
+                <eqn>SUM(inputAB[*, DimB])</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s2di">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s3iid">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <stock name="g">
+                <doc>	array of levels
+	~	:SUPPLEMENTARY</doc>
+                <inflow>a</inflow>
+                <eqn>e[DimB]</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </stock>
+            <aux name="s3idi">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC&apos;"/>
+                </dimensions>
+            </aux>
+            <aux name="s3ddi">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC&apos;"/>
+                </dimensions>
+            </aux>
+            <aux name="c">
+                <doc>	adding arrays
+	~	:SUPPLEMENTARY</doc>
+                <eqn>inputA[DimA]+a[DimA]</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views/>
+    </model>
+</xmile>

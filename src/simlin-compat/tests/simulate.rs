@@ -7,6 +7,7 @@ use std::io::BufReader;
 use std::rc::Rc;
 
 use float_cmp::approx_eq;
+use test_generator::test_resources;
 
 use simlin_compat::{load_csv, xmile};
 use simlin_engine::project_io;
@@ -289,6 +290,12 @@ fn simulates_modules_with_complex_idents() {
 #[test]
 fn simulates_step_into_smth1() {
     simulate_path("../../test/step_into_smth1/model.stmx");
+}
+
+#[test_resources("test/sdeverywhere/models/**/*.mdl")]
+fn simulates_vensim(resource: &str) {
+    let resource = format!("../../{}", resource);
+    simulate_path(&resource);
 }
 
 #[test]

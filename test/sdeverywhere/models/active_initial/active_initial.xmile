@@ -1,0 +1,144 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0</start>
+        <stop>100</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions/>
+    <model>
+        <variables>
+            <aux name="Utilization Sensitivity">
+                <eqn>1</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="Capacity Utilization">
+                <eqn>Production/Capacity</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="Target Capacity">
+                <doc>	ACTIVE INITIAL statement breaks simultaneous initial equation loop by setting the target capacity to a fixed value, rather than a multiple of capacity. As an alternative, one could also initialize capacity itself to a fixed value, but this is not always convenient.</doc>
+                <eqn>Capacity*Utilization_Adjustment</eqn>
+                <init_eqn>Initial_Target_Capacity</init_eqn>
+                <units>widgets/Month</units>
+            </aux>
+            <flow name="Capacity Adjustment Rate">
+                <eqn>(Target_Capacity-Capacity)/Capacity_Adjustment_Time</eqn>
+                <units>widgets/(Month*Month)</units>
+            </flow>
+            <stock name="Capacity">
+                <inflow>Capacity_Adjustment_Rate</inflow>
+                <eqn>Target_Capacity</eqn>
+                <units>widgets/Month</units>
+            </stock>
+            <aux name="Utilization Adjustment">
+                <eqn>Capacity_Utilization^Utilization_Sensitivity</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="Production">
+                <eqn>100+step(100, 10)</eqn>
+                <units>widgets/Month</units>
+            </aux>
+            <aux name="Initial Target Capacity">
+                <eqn>100</eqn>
+                <units>widgets/Month</units>
+            </aux>
+            <aux name="Capacity Adjustment Time">
+                <eqn>10</eqn>
+                <units>months</units>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <stock name="Capacity" x="322" y="255"/>
+                <flow name="Capacity_Adjustment_Rate" x="181" y="253">
+                    <pts>
+                        <pt x="100" y="253"/>
+                        <pt x="322" y="255"/>
+                    </pts>
+                </flow>
+                <aux name="Target_Capacity" x="292" y="350"/>
+                <connector uid="9" angle="-60.584081982808421">
+                    <from>Capacity</from>
+                    <to>Target_Capacity</to>
+                </connector>
+                <connector uid="10" angle="-138.79847640315921">
+                    <from>Target_Capacity</from>
+                    <to>Capacity_Adjustment_Rate</to>
+                </connector>
+                <aux name="Utilization_Adjustment" x="422" y="360"/>
+                <connector uid="13" angle="175.1708310726244">
+                    <from>Utilization_Adjustment</from>
+                    <to>Target_Capacity</to>
+                </connector>
+                <aux name="Capacity_Utilization" x="492" y="270"/>
+                <connector uid="15" angle="-115.76159581968308">
+                    <from>Capacity</from>
+                    <to>Capacity_Adjustment_Rate</to>
+                </connector>
+                <connector uid="16" angle="2.7880827430999346">
+                    <from>Capacity</from>
+                    <to>Capacity_Utilization</to>
+                </connector>
+                <connector uid="17" angle="-82.188971952030414">
+                    <from>Capacity_Utilization</from>
+                    <to>Utilization_Adjustment</to>
+                </connector>
+                <aux name="Production" x="622" y="275"/>
+                <connector uid="19" angle="176.57157365373925">
+                    <from>Production</from>
+                    <to>Capacity_Utilization</to>
+                </connector>
+                <aux name="Capacity_Adjustment_Time" x="107" y="360"/>
+                <connector uid="21" angle="49.397451194369665">
+                    <from>Capacity_Adjustment_Time</from>
+                    <to>Capacity_Adjustment_Rate</to>
+                </connector>
+                <aux name="Utilization_Sensitivity" x="517" y="425"/>
+                <connector uid="23" angle="145.18162268258129">
+                    <from>Utilization_Sensitivity</from>
+                    <to>Utilization_Adjustment</to>
+                </connector>
+                <aux name="Initial_Target_Capacity" x="217" y="445"/>
+                <connector uid="27" angle="52.179720583033742">
+                    <from>Initial_Target_Capacity</from>
+                    <to>Target_Capacity</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

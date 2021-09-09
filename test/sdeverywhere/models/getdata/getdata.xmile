@@ -1,0 +1,146 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0</start>
+        <stop>10</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="Initial value for A1 at time plus one year backward">
+                <eqn>INIT(0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Backward_)})</eqn>
+            </aux>
+            <aux name="Initial value for A1 at time plus one year interpolate">
+                <eqn>INIT(0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Interpolate_)})</eqn>
+            </aux>
+            <aux name="Initial value at time plus one year interpolate">
+                <eqn>INIT(0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Interpolate_)})</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Value at time plus one year interpolate">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Interpolate_)}</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Value at time plus half year backward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_Half_year)_,_Backward_)}</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Value for A1 at time plus one year backward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Backward_)}</eqn>
+            </aux>
+            <aux name="Initial value at time plus one year backward">
+                <eqn>INIT(0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Backward_)})</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Value at time plus one year forward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Forward_)}</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Value for A1 at time plus half year forward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_Half_year)_,_Forward_)}</eqn>
+            </aux>
+            <aux name="Value for A1 at time minus half year backward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MAX(INITIAL_TIME,_Time_-_Half_year)_,_Backward_)}</eqn>
+            </aux>
+            <aux name="Value for A1 at time minus half year forward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MAX(INITIAL_TIME,_Time_-_Half_year)_,_Forward_)}</eqn>
+            </aux>
+            <aux name="Value for A1 at time plus half year backward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_Half_year)_,_Backward_)}</eqn>
+            </aux>
+            <aux name="Value for A1 at time minus one year interpolate">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MAX(INITIAL_TIME,_Time_-_One_year)_,_Interpolate_)}</eqn>
+            </aux>
+            <aux name="Value at time plus one year backward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Backward_)}</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Backward">
+                <eqn>-1</eqn>
+            </aux>
+            <aux name="Forward">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="Initial value for A1 at time plus one year forward">
+                <eqn>INIT(0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Forward_)})</eqn>
+            </aux>
+            <aux name="Interpolate">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="Initial value at time plus one year forward">
+                <eqn>INIT(0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Forward_)})</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Value for A1 at time plus one year interpolate">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Interpolate_)}</eqn>
+            </aux>
+            <aux name="Value for A1 at time minus one year backward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MAX(INITIAL_TIME,_Time_-_One_year)_,_Backward_)}</eqn>
+            </aux>
+            <aux name="Value for A1 at time plus one year forward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MIN(FINAL_TIME,_Time_+_One_year)_,_Forward_)}</eqn>
+            </aux>
+            <aux name="Value for A1 at time minus one year forward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[A1]_,_MAX(INITIAL_TIME,_Time_-_One_year)_,_Forward_)}</eqn>
+            </aux>
+            <aux name="One year">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="Value at time plus half year forward">
+                <eqn>0{GET_DATA_BETWEEN_TIMES_(_Values[DimA]_,_MIN(FINAL_TIME,_Time_+_Half_year)_,_Forward_)}</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Values">
+                <eqn>TIME</eqn>
+                <gf>
+                    <yscale min="1" max="2"/>
+                    <xpts>0,1</xpts>
+                    <ypts>1,1</ypts>
+                </gf>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Half year">
+                <eqn>0.5</eqn>
+            </aux>
+        </variables>
+        <views>
+            <group name="Control">
+                <var>STOPTIME</var>
+                <var>STARTTIME</var>
+                <var>DT</var>
+                <var>DT</var>
+            </group>
+        </views>
+    </model>
+</xmile>

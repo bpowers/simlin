@@ -1,0 +1,49 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Months" isee:sim_duration="0">
+        <start>0</start>
+        <stop>100</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions/>
+    <model>
+        <variables>
+            <stock name="average value">
+                <inflow>average_value_net_flow</inflow>
+                <eqn>input/(1+initial_trend*average_time)</eqn>
+            </stock>
+            <aux name="TREND of input">
+                <eqn>TREND(input, average_time, initial_trend)</eqn>
+            </aux>
+            <aux name="initial trend">
+                <eqn>10</eqn>
+            </aux>
+            <aux name="average time">
+                <eqn>6</eqn>
+            </aux>
+            <aux name="input">
+                <eqn>1+0.5*SIN(2*3.14159*Time/period)</eqn>
+            </aux>
+            <aux name="description">
+                <doc> Demonstrate TREND function equivalence with the expansion from the Vensim documentation.</doc>
+                <eqn>0</eqn>
+            </aux>
+            <aux name="trend1">
+                <eqn>SAFEDIV(input-average_value, average_time*ABS(average_value))</eqn>
+            </aux>
+            <flow name="average value net flow">
+                <eqn>(input-average_value)/average_time</eqn>
+            </flow>
+            <aux name="period">
+                <eqn>20</eqn>
+            </aux>
+        </variables>
+        <views/>
+    </model>
+</xmile>

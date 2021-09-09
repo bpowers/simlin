@@ -18,3 +18,6 @@ quick-xml = { version = "0.21", features = [ "serialize" ] }
 serde = { version = "1", features = [ "derive" ] }
 simlin-engine = { version = "0.1", path = "../simlin-engine" }
 xmutil = { version = "1", path = "../xmutil", optional = true }
+
+[dev-dependencies]
+test-generator = { version = "0.3.0", git = "https://github.com/bpowers/test-generator", rev = "b78145bfb6a6f81425dfd6fbacb9c03624e79b2c" }
