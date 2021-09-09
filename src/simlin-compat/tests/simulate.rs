@@ -9,7 +9,7 @@ use std::rc::Rc;
 use float_cmp::approx_eq;
 use test_generator::test_resources;
 
-use simlin_compat::{load_csv, xmile};
+use simlin_compat::{load_csv, load_dat, xmile};
 use simlin_engine::project_io;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Project, Results, Simulation, Vm};
@@ -103,12 +103,20 @@ fn load_expected_results(xmile_path: &str) -> Results {
         return load_csv(&output_path.to_string_lossy(), *delimiter).unwrap();
     }
 
+    let dat_file = xmile_path.replace(".xmile", ".dat");
+    let dat_path = std::path::Path::new(&dat_file);
+    if dat_path.exists() {
+        return load_dat(&dat_file).unwrap();
+    }
+
     unreachable!();
 }
 
 fn ensure_results(expected: &Results, results: &Results) {
     assert_eq!(expected.step_count, results.step_count);
     assert_eq!(expected.iter().len(), results.iter().len());
+
+    let expected_results = expected;
 
     let mut step = 0;
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
@@ -127,12 +135,35 @@ fn ensure_results(expected: &Results, results: &Results) {
                 && approx_eq!(f64, actual, 0.0, epsilon = 1e-6);
 
             // this ulps determined empirically /shrug
-            if !around_zero && !approx_eq!(f64, expected, actual, epsilon = 2e-3) {
-                eprintln!(
-                    "step {}: {}: {} (expected) != {} (actual)",
-                    step, ident, expected, actual
-                );
-                assert!(false);
+            if !around_zero {
+                let (expected, actual, epsilon) = if results.is_vensim || expected_results.is_vensim
+                {
+                    let expected = expected;
+                    let actual_int = format!("{}", actual.round() as i64);
+                    let actual_int_len = actual_int
+                        .strip_prefix("-")
+                        .unwrap_or_else(|| &actual_int)
+                        .len() as i64;
+                    let actual = if actual_int == "0" {
+                        actual
+                    } else {
+                        let precision = std::cmp::max(6 as i64 - actual_int_len, 0) as usize;
+                        let formatted = format!("{:.1$}", actual, precision);
+                        use std::str::FromStr;
+                        f64::from_str(&formatted).unwrap()
+                    };
+                    (expected, actual, 2e-3)
+                } else {
+                    (expected, actual, 2e-3)
+                };
+
+                if !approx_eq!(f64, expected, actual, epsilon = epsilon) {
+                    eprintln!(
+                        "step {}: {}: {} (expected) != {} (actual)",
+                        step, ident, expected, actual
+                    );
+                    assert!(false);
+                }
             }
         }
 
@@ -292,7 +323,12 @@ fn simulates_step_into_smth1() {
     simulate_path("../../test/step_into_smth1/model.stmx");
 }
 
-#[test_resources("test/sdeverywhere/models/**/*.mdl")]
+#[test]
+fn simulates_sdeverywhere_sir() {
+    simulate_path("../../test/sdeverywhere/models/sir/sir.xmile");
+}
+
+#[test_resources("test/sdeverywhere/models/**/*.xmile")]
 fn simulates_vensim(resource: &str) {
     let resource = format!("../../{}", resource);
     simulate_path(&resource);

@@ -89,8 +89,9 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
     let saveper = unprocessed["saveper"][0].1;
 
     let step_size = unprocessed.len();
-    let step_count = ((final_time - initial_time) / saveper).ceil() as usize;
-    let mut step_data: Vec<f64> = Vec::with_capacity(step_size * step_count);
+    let step_count = ((final_time - initial_time) / saveper).ceil() as usize + 1;
+    let mut step_data: Vec<f64> = Vec::with_capacity(step_count * step_size);
+    step_data.extend(std::iter::repeat(f64::NAN).take(step_count * step_size));
 
     for (ident, var_off) in offsets.iter() {
         let data = &unprocessed[ident];
@@ -101,8 +102,10 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
             let t: f64 = initial_time + saveper * (step as f64);
             let datapoint: f64 = if let Some((data_time, value)) = curr {
                 if approx_eq!(f64, data_time, t) {
-                    curr = next;
-                    next = data_iter.next();
+                    if next.is_some() {
+                        curr = next;
+                        next = data_iter.next();
+                    }
                     value
                 } else {
                     assert!(data_time < t);
@@ -142,6 +145,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
             save_step: 0.0,
             method: Method::Euler,
         },
+        is_vensim: true,
     })
 }
 
@@ -198,5 +202,6 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
             save_step: 0.0,
             method: Method::Euler,
         },
+        is_vensim: false,
     })
 }

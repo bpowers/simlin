@@ -15,7 +15,7 @@ use simlin_compat::engine::{
     eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, Vm,
 };
 use simlin_compat::prost::Message;
-use simlin_compat::{load_csv, open_vensim, open_xmile, to_xmile};
+use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
 
 const VERSION: &str = "1.0";
 const EXIT_FAILURE: i32 = 1;
@@ -365,7 +365,11 @@ fn main() {
             std::process::exit(1);
         }
         let ref_path = args.reference.unwrap();
-        let reference = load_csv(&ref_path, b'\t').unwrap();
+        let reference = if ref_path.ends_with(".dat") {
+            load_dat(&ref_path).unwrap()
+        } else {
+            load_csv(&ref_path, b'\t').unwrap()
+        };
         let results = simulate(&project);
 
         results.print_tsv_comparison(Some(&reference));

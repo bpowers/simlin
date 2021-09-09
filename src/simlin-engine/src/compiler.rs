@@ -2307,6 +2307,7 @@ impl Simulation {
             step_size: n_slots,
             step_count: n_chunks,
             specs: spec.clone(),
+            is_vensim: false,
         })
     }
 }

@@ -5,11 +5,10 @@
         <vendor>Ventana Systems, xmutil</vendor>
         <product lang="en">Vensim, xmutil</product>
     </header>
-    <sim_specs method="Euler" time_units="Day" isee:sim_duration="0">
+    <sim_specs method="Euler" time_units="Day" isee:sim_duration="0" isee:save_interval="2.000000">
         <start>0</start>
         <stop>200</stop>
         <dt>0.0625</dt>
-        <isee:save_interval>2</isee:save_interval>
     </sim_specs>
     <model_units/>
     <dimensions/>

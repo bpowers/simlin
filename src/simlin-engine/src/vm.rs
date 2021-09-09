@@ -104,6 +104,7 @@ pub struct Results {
     pub step_size: usize,
     pub step_count: usize,
     pub specs: Specs,
+    pub is_vensim: bool,
 }
 
 impl Results {
@@ -374,6 +375,7 @@ impl Vm {
             step_size: self.n_slots,
             step_count: self.n_chunks,
             specs: self.specs,
+            is_vensim: false,
         }
     }
 
