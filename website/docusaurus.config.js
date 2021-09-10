@@ -46,7 +46,7 @@ module.exports = {
           items: [
             {
               label: 'App',
-              to: 'http://app.simlin.com',
+              to: 'https://app.simlin.com',
             },
             {
               label: 'Terms and Conditions',

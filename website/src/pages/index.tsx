@@ -179,7 +179,7 @@ function Home() {
   const { siteConfig = {} } = context;
 
   return (
-    <Layout title={`Hello from ${siteConfig.title}`} description="System dynamics modeling software">
+    <Layout title={`Simlin system dynamics software`} description="System dynamics modeling software">
       <header className={clsx('hero hero--primary', styles.heroBanner)}>
         <div className={clsx('container', styles.heroContainer)}>
           <h1 className="hero__title">{siteConfig.title}</h1>
@@ -210,6 +210,7 @@ function Home() {
         <br/>
         <div className="container">
           Simlin is built around the <a href="https://en.wikipedia.org/wiki/System_dynamics">system dynamics</a> methodology, as introduced by the <a href="https://www.chelseagreen.com/product/thinking-in-systems/">Thinking in Systems</a> book (among others).
+          You can learn more and connect with experts by engaging with the <a href="http://www.systemdynamics.org/">System Dynamics Society</a>.
           Models are built in a simple, general visual language:
         </div>
         <br/>
