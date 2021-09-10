@@ -179,7 +179,7 @@ function Home() {
   const { siteConfig = {} } = context;
 
   return (
-    <Layout title={`Hello from ${siteConfig.title}`} description="Description will go into a meta tag in <head />">
+    <Layout title={`Hello from ${siteConfig.title}`} description="System dynamics modeling software">
       <header className={clsx('hero hero--primary', styles.heroBanner)}>
         <div className={clsx('container', styles.heroContainer)}>
           <h1 className="hero__title">{siteConfig.title}</h1>
