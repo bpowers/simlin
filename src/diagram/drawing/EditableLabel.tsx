@@ -10,13 +10,14 @@ import { createEditor, Descendant, Node } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 
-import { CommonLabelProps, LabelPadding, lineSpacing } from './CommonLabel';
+import { CommonLabelProps, LabelPadding as baseLabelPadding, lineSpacing as baseLineSpacing } from './CommonLabel';
 import { AuxRadius } from './default';
 
 interface EditingLabelProps extends CommonLabelProps {
   value: Descendant[];
   onChange: (value: Descendant[]) => void;
   onDone: (isCancel: boolean) => void;
+  zoom: number;
 }
 
 interface EditingLabelState {
@@ -52,13 +53,15 @@ export const EditableLabel = styled(
     };
 
     render() {
+      const { cx, cy, side, zoom } = this.props;
+      const fontSize = 12 * zoom;
+
       const lines: string[] = this.props.value.map((n) => Node.string(n));
       const linesCount = lines.length;
 
       const maxWidthChars = lines.reduce((prev, curr) => (curr.length > prev ? curr.length : prev), 0);
-      const editorWidth = maxWidthChars * 6 + 10;
+      const editorWidth = (maxWidthChars * 6 + 10) * zoom;
 
-      const { cx, cy, side } = this.props;
       const rw: number = this.props.rw || AuxRadius;
       const rh: number = this.props.rh || AuxRadius;
       let x = cx;
@@ -67,28 +70,30 @@ export const EditableLabel = styled(
       let textY = y;
       let left = 0;
       let textAlign: 'center' | 'left' | 'right' = 'center';
+      const labelPadding = baseLabelPadding * zoom;
+      const lineSpacing = baseLineSpacing * zoom;
       switch (side) {
         case 'top':
-          y = cy - rh - LabelPadding - lineSpacing * linesCount;
+          y = cy - rh - labelPadding - lineSpacing * linesCount;
           left = textX - editorWidth / 2;
           textY = y;
           break;
         case 'bottom':
-          y = cy + rh + LabelPadding;
+          y = cy + rh + labelPadding;
           left = textX - editorWidth / 2;
           textY = y;
           break;
         case 'left':
-          x = cx - rw - LabelPadding + 1;
+          x = cx - rw - labelPadding + 1;
           textAlign = 'right';
           left = x - editorWidth;
-          textY = y - (12 + (lines.length - 1) * 14) / 2 - 3;
+          textY = y - (fontSize + (lines.length - 1) * 14 * zoom) / 2 - 3;
           break;
         case 'right':
-          x = cx + rw + LabelPadding - 1;
+          x = cx + rw + labelPadding - 1;
           textAlign = 'left';
           left = x;
-          textY = y - (12 + (lines.length - 1) * 14) / 2 - 3;
+          textY = y - (fontSize + (lines.length - 1) * 14 * zoom) / 2 - 3;
           break;
         default:
           // FIXME
@@ -112,10 +117,11 @@ export const EditableLabel = styled(
         top: textY,
         width: editorWidth,
         textAlign,
-        lineHeight: '14px',
+        lineHeight: `${14 * zoom}px`,
         background: 'white',
         borderRadius: '3px',
         border: '1px solid #4444dd',
+        fontSize,
       };
 
       const { className, value } = this.props;
@@ -135,7 +141,6 @@ export const EditableLabel = styled(
     }
   },
 )(`
-    font-size: 12px;
     font-family: "Roboto", "Open Sans", "Arial", sans-serif;
     font-weight: 300;
     text-anchor: middle;
