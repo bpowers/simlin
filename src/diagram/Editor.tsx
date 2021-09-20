@@ -7,22 +7,22 @@ import * as React from 'react';
 import { List, Map, Set, Stack } from 'immutable';
 
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
-import IconButton from '@material-ui/core/IconButton';
-import TextField from '@material-ui/core/TextField';
-import Autocomplete from '@material-ui/core/Autocomplete';
-import Paper from '@material-ui/core/Paper';
-import Snackbar from '@material-ui/core/Snackbar';
-import ClearIcon from '@material-ui/icons/Clear';
-import EditIcon from '@material-ui/icons/Edit';
-import MenuIcon from '@material-ui/icons/Menu';
-import SpeedDial, { CloseReason } from '@material-ui/core/SpeedDial';
-import SpeedDialAction from '@material-ui/core/SpeedDialAction';
-import SpeedDialIcon from '@material-ui/core/SpeedDialIcon';
-import { Card } from '@material-ui/core';
-import Button from '@material-ui/core/Button';
-import CardActions from '@material-ui/core/CardActions';
-import CardContent from '@material-ui/core/CardContent';
+import { styled } from '@mui/material/styles';
+import IconButton from '@mui/material/IconButton';
+import TextField from '@mui/material/TextField';
+import Autocomplete from '@mui/material/Autocomplete';
+import Paper from '@mui/material/Paper';
+import Snackbar from '@mui/material/Snackbar';
+import ClearIcon from '@mui/icons-material/Clear';
+import EditIcon from '@mui/icons-material/Edit';
+import MenuIcon from '@mui/icons-material/Menu';
+import SpeedDial, { CloseReason } from '@mui/material/SpeedDial';
+import SpeedDialAction from '@mui/material/SpeedDialAction';
+import SpeedDialIcon from '@mui/material/SpeedDialIcon';
+import { Card } from '@mui/material';
+import Button from '@mui/material/Button';
+import CardActions from '@mui/material/CardActions';
+import CardContent from '@mui/material/CardContent';
 import { canonicalize } from '@system-dynamics/core/canonicalize';
 
 import { toXmile } from '@system-dynamics/importer';
@@ -1912,7 +1912,7 @@ export const Editor = styled(
   '.simlin-editor-selectedtool': {
     backgroundColor: theme.palette.secondary.main,
   },
-  // https://github.com/mui-org/material-ui/issues/19692
+  // https://github.com/mui-org/mui/issues/19692
   '@global': {
     '.MuiAutocomplete-option[data-focus="true"]': {
       background: '#ADD8E6',

@@ -6,8 +6,8 @@ import * as React from 'react';
 
 import { List, Map } from 'immutable';
 import clsx from 'clsx';
-import { Card, CardContent, Typography } from '@material-ui/core';
-import { styled } from '@material-ui/core/styles';
+import { Card, CardContent, Typography } from '@mui/material';
+import { styled } from '@mui/material/styles';
 
 import { SimError, ModelError, EquationError, ErrorCode, UnitError } from '@system-dynamics/core/datamodel';
 import { errorCodeDescription } from '@system-dynamics/engine';

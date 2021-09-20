@@ -7,11 +7,11 @@ import * as React from 'react';
 import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
+import { styled } from '@mui/material/styles';
 import { createEditor, Descendant, Text } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
-import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@material-ui/core';
+import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@mui/material';
 import { brewer } from 'chroma-js';
 
 import {

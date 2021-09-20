@@ -7,7 +7,7 @@ import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { toUint8Array } from 'js-base64';
 import { Map, Set } from 'immutable';
-import { createTheme, ThemeProvider } from '@material-ui/core/styles';
+import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';

@@ -14,9 +14,9 @@ import {
 } from 'firebase/auth';
 
 import { BrowserRouter, Route, RouteComponentProps } from 'react-router-dom';
-import { styled } from '@material-ui/core/styles';
-import { createTheme, ThemeProvider } from '@material-ui/core/styles';
-import CssBaseline from '@material-ui/core/CssBaseline';
+import { styled } from '@mui/material/styles';
+import { createTheme, ThemeProvider } from '@mui/material/styles';
+import CssBaseline from '@mui/material/CssBaseline';
 
 import { defined } from '@system-dynamics/core/common';
 import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';

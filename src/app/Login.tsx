@@ -16,17 +16,17 @@ import {
   signInWithEmailAndPassword,
 } from 'firebase/auth';
 import clsx from 'clsx';
-import AppleIcon from '@material-ui/icons/Apple';
-import EmailIcon from '@material-ui/icons/Email';
-import Button from '@material-ui/core/Button';
-import SvgIcon from '@material-ui/core/SvgIcon';
-import { styled } from '@material-ui/core/styles';
-import Card from '@material-ui/core/Card';
-import CardActions from '@material-ui/core/CardActions';
-import CardContent from '@material-ui/core/CardContent';
-import Link from '@material-ui/core/Link';
-import Typography from '@material-ui/core/Typography';
-import TextField from '@material-ui/core/TextField';
+import AppleIcon from '@mui/icons-material/Apple';
+import EmailIcon from '@mui/icons-material/Email';
+import Button from '@mui/material/Button';
+import SvgIcon from '@mui/material/SvgIcon';
+import { styled } from '@mui/material/styles';
+import Card from '@mui/material/Card';
+import CardActions from '@mui/material/CardActions';
+import CardContent from '@mui/material/CardContent';
+import Link from '@mui/material/Link';
+import Typography from '@mui/material/Typography';
+import TextField from '@mui/material/TextField';
 
 import { ModelIcon } from '@system-dynamics/diagram/ModelIcon';
 

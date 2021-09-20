@@ -5,15 +5,15 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
-import { amber, green } from '@material-ui/core/colors';
-import IconButton from '@material-ui/core/IconButton';
-import SnackbarContent from '@material-ui/core/SnackbarContent';
-import CheckCircleIcon from '@material-ui/icons/CheckCircle';
-import CloseIcon from '@material-ui/icons/Close';
-import ErrorIcon from '@material-ui/icons/Error';
-import InfoIcon from '@material-ui/icons/Info';
-import WarningIcon from '@material-ui/icons/Warning';
+import { styled } from '@mui/material/styles';
+import { amber, green } from '@mui/material/colors';
+import IconButton from '@mui/material/IconButton';
+import SnackbarContent from '@mui/material/SnackbarContent';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import CloseIcon from '@mui/icons-material/Close';
+import ErrorIcon from '@mui/icons-material/Error';
+import InfoIcon from '@mui/icons-material/Info';
+import WarningIcon from '@mui/icons-material/Warning';
 
 const variantIcon = {
   success: CheckCircleIcon,

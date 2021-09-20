@@ -5,11 +5,11 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
-import IconButton from '@material-ui/core/IconButton';
-import Paper from '@material-ui/core/Paper';
-import AddIcon from '@material-ui/icons/Add';
-import RemoveIcon from '@material-ui/icons/Remove';
+import { styled } from '@mui/material/styles';
+import IconButton from '@mui/material/IconButton';
+import Paper from '@mui/material/Paper';
+import AddIcon from '@mui/icons-material/Add';
+import RemoveIcon from '@mui/icons-material/Remove';
 
 interface ZoomBarProps {
   zoom: number;

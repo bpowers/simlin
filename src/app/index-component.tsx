@@ -5,7 +5,7 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 
-import { createTheme, ThemeProvider } from '@material-ui/core/styles';
+import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 import { baseURL } from '@system-dynamics/core/common';
 import { HostedWebEditor } from '@system-dynamics/diagram/HostedWebEditor';

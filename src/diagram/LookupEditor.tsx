@@ -5,9 +5,9 @@
 import * as React from 'react';
 
 import { List } from 'immutable';
-import { styled } from '@material-ui/core/styles';
+import { styled } from '@mui/material/styles';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { Button, CardActions, CardContent, TextField } from '@material-ui/core';
+import { Button, CardActions, CardContent, TextField } from '@mui/material';
 
 import { defined } from '@system-dynamics/core/common';
 import {

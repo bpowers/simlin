@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { styled } from '@material-ui/core/styles';
+import { styled } from '@mui/material/styles';
 
 import { ModuleViewElement } from '@system-dynamics/core/datamodel';
 

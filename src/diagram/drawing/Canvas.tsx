@@ -6,7 +6,7 @@
 
 import * as React from 'react';
 
-import { styled } from '@material-ui/core/styles';
+import { styled } from '@mui/material/styles';
 import { Descendant } from 'slate';
 import { List, Map, Set } from 'immutable';
 

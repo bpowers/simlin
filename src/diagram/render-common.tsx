@@ -11,7 +11,7 @@ import { renderToString } from 'react-dom/server';
 
 import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 
-import { createTheme, ThemeProvider } from '@material-ui/core/styles';
+import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 import { defined } from '@system-dynamics/core/common';
 import { Canvas } from './drawing/Canvas';

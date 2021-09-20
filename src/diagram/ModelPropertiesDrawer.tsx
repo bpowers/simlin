@@ -6,14 +6,14 @@ import * as React from 'react';
 
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
-import Button from '@material-ui/core/Button';
-import IconButton from '@material-ui/core/IconButton';
-import SwipeableDrawer from '@material-ui/core/SwipeableDrawer';
-import TextField from '@material-ui/core/TextField';
-import ArrowBackIcon from '@material-ui/icons/ArrowBack';
-import ClearIcon from '@material-ui/icons/Clear';
-import CloudDownloadIcon from '@material-ui/icons/CloudDownload';
+import { styled } from '@mui/material/styles';
+import Button from '@mui/material/Button';
+import IconButton from '@mui/material/IconButton';
+import SwipeableDrawer from '@mui/material/SwipeableDrawer';
+import TextField from '@mui/material/TextField';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import ClearIcon from '@mui/icons-material/Clear';
+import CloudDownloadIcon from '@mui/icons-material/CloudDownload';
 
 import { ModelIcon } from './ModelIcon';
 

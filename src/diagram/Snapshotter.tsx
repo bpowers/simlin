@@ -5,10 +5,10 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
-import IconButton from '@material-ui/core/IconButton';
-import Paper from '@material-ui/core/Paper';
-import PhotoCamera from '@material-ui/icons/PhotoCamera';
+import { styled } from '@mui/material/styles';
+import IconButton from '@mui/material/IconButton';
+import Paper from '@mui/material/Paper';
+import PhotoCamera from '@mui/icons-material/PhotoCamera';
 
 interface SnapshotterProps {
   onSnapshot: (kind: 'show' | 'close') => void;

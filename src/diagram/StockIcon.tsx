@@ -4,8 +4,8 @@
 
 import * as React from 'react';
 
-import { styled } from '@material-ui/core/styles';
-import SvgIcon from '@material-ui/core/SvgIcon';
+import { styled } from '@mui/material/styles';
+import SvgIcon from '@mui/material/SvgIcon';
 
 export const StockIcon: React.FunctionComponent = styled((props) => {
   return (

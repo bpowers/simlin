@@ -5,7 +5,7 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
+import { styled } from '@mui/material/styles';
 
 import { AliasViewElement, NamedViewElement, ViewElement } from '@system-dynamics/core/datamodel';
 

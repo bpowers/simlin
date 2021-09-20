@@ -5,11 +5,11 @@
 import * as React from 'react';
 
 import clsx from 'clsx';
-import { styled } from '@material-ui/core/styles';
-import IconButton from '@material-ui/core/IconButton';
-import Paper from '@material-ui/core/Paper';
-import RedoIcon from '@material-ui/icons/Redo';
-import UndoIcon from '@material-ui/icons/Undo';
+import { styled } from '@mui/material/styles';
+import IconButton from '@mui/material/IconButton';
+import Paper from '@mui/material/Paper';
+import RedoIcon from '@mui/icons-material/Redo';
+import UndoIcon from '@mui/icons-material/Undo';
 
 interface UndoRedoBarProps {
   undoEnabled: boolean;
