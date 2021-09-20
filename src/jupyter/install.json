@@ -1,5 +1,0 @@
-{
-  "packageManager": "python",
-  "packageName": "jupyter-simlin",
-  "uninstallInstructions": "Use your Python package manager (pip, conda, etc.) to uninstall the package jupyter-simlin"
-}
