@@ -6,7 +6,7 @@ import * as React from 'react';
 
 import { styled } from '@mui/material/styles';
 
-import { createEditor, Descendant, Node } from 'slate';
+import { createEditor, Descendant, Node, Editor, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, Slate, withReact } from 'slate-react';
 
@@ -29,8 +29,21 @@ export const EditableLabel = styled(
     constructor(props: EditingLabelProps) {
       super(props);
 
+      const { value } = props;
+      const editor = withHistory(withReact(createEditor()));
+      if (value.length > 0) {
+        editor.children = value;
+        Transforms.select(editor, {
+          anchor: {
+            path: [0],
+            offset: 0,
+          },
+          focus: Editor.end(editor, [value.length - 1]),
+        });
+      }
+
       this.state = {
-        editor: withHistory(withReact(createEditor())),
+        editor,
       };
     }
 
