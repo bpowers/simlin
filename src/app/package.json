@@ -11,7 +11,7 @@
     "@system-dynamics/diagram": "^1.0.0",
     "@system-dynamics/importer": "^1.0.0",
     "@system-dynamics/xmutil": "^1.0.0",
-    "google-protobuf": "^3.18.0-rc.1"
+    "google-protobuf": "^3.18.0"
   },
   "devDependencies": {
     "@babel/core": "^7.13.1",
