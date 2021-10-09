@@ -9,6 +9,15 @@ export interface Engine {
    */
   serializeToProtobuf(): Uint8Array;
   /**
+   * @param {Function} callback
+   * @returns {number}
+   */
+  onChange(callback: Function): number;
+  /**
+   * @param {number} callback_id
+   */
+  removeOnChangeCallback(callback_id: number): void;
+  /**
    * @param {number} value
    * @returns {Error | undefined}
    */

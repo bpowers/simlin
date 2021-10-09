@@ -3,10 +3,11 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use wasm_bindgen::prelude::*;
 
-use js_sys::{Array, Map};
+use js_sys::{Array, Function, Map};
 use prost::Message;
 
 use simlin_engine as engine;
@@ -20,6 +21,8 @@ pub struct Engine {
     sim_vm: Option<engine::Vm>,
     sim_error: Option<engine::Error>,
     results: Option<engine::Results>,
+    next_callback_ref: u32,
+    on_change_callbacks: HashMap<u32, Function>,
 }
 
 #[wasm_bindgen]
@@ -70,6 +73,29 @@ impl Engine {
             .and_then(Vm::new);
         self.sim_error = sim_result.as_ref().err().cloned();
         self.sim_vm = sim_result.ok();
+        self.notify_on_change();
+    }
+
+    #[wasm_bindgen(js_name = onChange)]
+    pub fn on_change(&mut self, callback: Function) -> u32 {
+        let cb_id = self.next_callback_ref;
+        self.next_callback_ref += 1;
+        self.on_change_callbacks.insert(cb_id, callback);
+
+        cb_id
+    }
+
+    #[wasm_bindgen(js_name = removeOnChangeCallback)]
+    pub fn remove_on_change_callback(&mut self, callback_id: u32) {
+        self.on_change_callbacks.remove(&callback_id);
+    }
+
+    fn notify_on_change(&self) {
+        let this = JsValue::null();
+
+        for (_, cb) in self.on_change_callbacks.iter() {
+            let _ = cb.call0(&this);
+        }
     }
 
     #[wasm_bindgen(js_name = serializeToProtobuf)]
@@ -657,6 +683,8 @@ pub fn open(project_pb: &[u8]) -> Option<Engine> {
         sim_vm: None,
         sim_error: None,
         results: None,
+        next_callback_ref: 1,
+        on_change_callbacks: HashMap::new(),
     };
     project.instantiate_sim();
 
