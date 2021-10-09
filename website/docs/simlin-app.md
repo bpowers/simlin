@@ -5,6 +5,8 @@ sidebar_label: The Simlin App
 slug: /
 ---
 
+import { open } from '@system-dynamics/engine';
+
 Simlin enables you to build [system dynamics](https://systemdynamics.org/what-is-system-dynamics/) models.
 System dynamics models are explicit, formal representations of our assumptions about how a system works.
 

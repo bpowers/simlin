@@ -1,3 +1,5 @@
+const path = require('path');
+
 const GithubBase = 'https://github.com/bpowers/simlin';
 
 module.exports = {
@@ -125,5 +127,8 @@ module.exports = {
         },
       },
     ],
+  ],
+  plugins: [
+    path.resolve('./plugins/enable-wasm.js'),
   ],
 };
