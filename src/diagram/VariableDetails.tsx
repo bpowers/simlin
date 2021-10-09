@@ -216,8 +216,8 @@ export const VariableDetails = styled(
     };
 
     renderLeaf = (props: RenderLeafProps) => {
-      const isError = !!((props.leaf as unknown) as any).error;
-      const isWarning = !!((props.leaf as unknown) as any).warning;
+      const isError = !!(props.leaf as unknown as any).error;
+      const isWarning = !!(props.leaf as unknown as any).warning;
       const errorClass = 'simlin-variabledetails-eqnerror';
       const warningClass = 'simlin-variabledetails-eqnwarning';
       const className = isError ? errorClass : isWarning ? warningClass : undefined;

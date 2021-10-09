@@ -8,15 +8,13 @@ import { Node, Descendant } from 'slate';
 import { CustomText, CustomElement } from './SlateEditor';
 
 export function plainDeserialize(type: 'label' | 'equation', str: string): CustomElement[] {
-  return str.split('\n').map(
-    (line: string): CustomElement => {
-      const text: CustomText = { text: line };
-      return {
-        type,
-        children: [text],
-      };
-    },
-  );
+  return str.split('\n').map((line: string): CustomElement => {
+    const text: CustomText = { text: line };
+    return {
+      type,
+      children: [text],
+    };
+  });
 }
 
 export function plainSerialize(value: Descendant[]): string {
