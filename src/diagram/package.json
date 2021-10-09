@@ -46,6 +46,7 @@
     "@babel/core": "^7.13.1",
     "@mui/icons-material": "^5.0.0",
     "@types/chroma-js": "^2.1.3",
+    "@types/katex": "^0.11.1",
     "@types/react": "^17.0.0",
     "@types/react-dom": "^17.0.0",
     "@types/react-router": "^5.1.1",
@@ -57,6 +58,7 @@
     "eslint-config-prettier": "^8.0.0",
     "eslint-plugin-import": "^2.20.1",
     "eslint-plugin-prettier": "^4.0.0",
+    "katex": "^0.13.18",
     "prettier": "^2.0.1",
     "recharts": "^2.0.3",
     "typescript": "^4.1.3"
