@@ -238,12 +238,12 @@ export const LookupEditor = styled(
       }
 
       const chart = this.lookupRef.current;
-      if (chart === null || !chart.state.yAxisMap) {
+      if (chart === null || !(chart.state as unknown as any).yAxisMap) {
         return;
       }
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const yAxisMap = getAnyElementOfObject(chart.state.yAxisMap);
+      const yAxisMap = getAnyElementOfObject((chart.state as unknown as any).yAxisMap);
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const yScale = yAxisMap.scale;
       if (!yScale || !yScale.invert) {
