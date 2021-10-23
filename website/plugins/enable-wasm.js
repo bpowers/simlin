@@ -4,6 +4,7 @@ module.exports = function(context, options) {
     configureWebpack(config, isServer, utils) {
       return {
         experiments: {
+          topLevelAwait: true,
           asyncWebAssembly: true,
         },
       };
