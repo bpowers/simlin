@@ -5,7 +5,7 @@ description = "JavaScript interface to convert Vensim and Stella models to proto
 repository = "https://github.com/bpowers/model-app"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
-edition = "2018"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
