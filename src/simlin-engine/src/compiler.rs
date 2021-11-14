@@ -226,7 +226,7 @@ impl<'a> Context<'a> {
                 let off = active_off;
                 active_off += 1;
                 let candidate = &active_dims[off];
-                if candidate.name == dim.name {
+                if candidate.name() == dim.name() {
                     subscripts.push(active_subscripts[off]);
                     break;
                 }
@@ -247,7 +247,7 @@ impl<'a> Context<'a> {
             .iter()
             .zip(subscripts)
             .fold(0_usize, |acc, (dim, subscript)| {
-                acc * dim.elements.len() + dim.get_offset(subscript).unwrap()
+                acc * dim.len() + dim.get_offset(subscript).unwrap()
             });
 
         Ok(off)
@@ -258,7 +258,7 @@ impl<'a> Context<'a> {
         let active_subscripts = self.active_subscript.as_ref().unwrap();
 
         for (dim, subscript) in active_dims.iter().zip(active_subscripts) {
-            if dim.name == dim_name {
+            if dim.name() == dim_name {
                 return dim.get_offset(subscript);
             }
         }
@@ -417,7 +417,7 @@ impl<'a> Context<'a> {
                         }
                     })
                     .collect();
-                let bounds = dims.iter().map(|dim| dim.elements.len()).collect();
+                let bounds = dims.iter().map(|dim| dim.len()).collect();
                 Expr::Subscript(off, args, bounds, *loc)
             }
             ast::Expr::Op1(op, l, loc) => {
@@ -1118,9 +1118,9 @@ fn build_metadata(
             all_offsets.extend(all_sub_offsets);
             sub_size
         } else if let Some(Ast::ApplyToAll(dims, _)) = model.variables[*ident].ast() {
-            dims.iter().map(|dim| dim.elements.len()).product()
+            dims.iter().map(|dim| dim.len()).product()
         } else if let Some(Ast::Arrayed(dims, _)) = model.variables[*ident].ast() {
-            dims.iter().map(|dim| dim.elements.len()).product()
+            dims.iter().map(|dim| dim.len()).product()
         } else {
             1
         };
@@ -1184,14 +1184,14 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
                 let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
-            dims.iter().map(|dim| dim.elements.len()).product()
+            dims.iter().map(|dim| dim.len()).product()
         } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[*ident].ast() {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
                 let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
-            dims.iter().map(|dim| dim.elements.len()).product()
+            dims.iter().map(|dim| dim.len()).product()
         } else {
             offsets.insert(quoteize(ident), (i, 1));
             1
@@ -2327,10 +2327,10 @@ fn test_arrays() {
                 sim_method: SimMethod::Euler,
                 time_units: Some("time".to_owned()),
             },
-            dimensions: vec![Dimension {
-                name: "letters".to_owned(),
-                elements: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-            }],
+            dimensions: vec![Dimension::Named(
+                "letters".to_owned(),
+                vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            )],
             units: vec![],
             models: vec![Model {
                 name: "main".to_owned(),

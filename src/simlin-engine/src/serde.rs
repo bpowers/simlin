@@ -1443,18 +1443,39 @@ impl From<project_io::Model> for Model {
 
 impl From<Dimension> for project_io::Dimension {
     fn from(dimension: Dimension) -> Self {
-        project_io::Dimension {
-            name: dimension.name,
-            elements: dimension.elements,
+        match dimension {
+            Dimension::Indexed(name, size) => project_io::Dimension {
+                name,
+                obsolete_elements: vec![],
+                dimension: Some(project_io::dimension::Dimension::Size(
+                    project_io::dimension::DimensionSize { size },
+                )),
+            },
+            Dimension::Named(name, elements) => project_io::Dimension {
+                name,
+                obsolete_elements: vec![],
+                dimension: Some(project_io::dimension::Dimension::Elements(
+                    project_io::dimension::DimensionElements { elements },
+                )),
+            },
         }
     }
 }
 
 impl From<project_io::Dimension> for Dimension {
     fn from(dimension: project_io::Dimension) -> Self {
-        Dimension {
-            name: dimension.name,
-            elements: dimension.elements,
+        if let Some(dim) = dimension.dimension {
+            match dim {
+                project_io::dimension::Dimension::Elements(elements) => {
+                    Dimension::Named(dimension.name, elements.elements)
+                }
+                project_io::dimension::Dimension::Size(size) => {
+                    Dimension::Indexed(dimension.name, size.size)
+                }
+            }
+        } else {
+            // originally we ignored dimensions with only indexes -- treat that as a fallback
+            Dimension::Named(dimension.name, dimension.obsolete_elements)
         }
     }
 }

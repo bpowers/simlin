@@ -685,8 +685,8 @@ impl SubscriptOffsetIterator {
     pub fn new(arrays: &[Dimension]) -> Self {
         SubscriptOffsetIterator {
             n: 0,
-            size: arrays.iter().map(|v| v.elements.len()).product(),
-            lengths: arrays.iter().map(|v| v.elements.len()).collect(),
+            size: arrays.iter().map(|v| v.len()).product(),
+            lengths: arrays.iter().map(|v| v.len()).collect(),
             next: vec![0; arrays.len()],
         }
     }
@@ -720,22 +720,13 @@ impl Iterator for SubscriptOffsetIterator {
 
 #[test]
 fn test_subscript_offset_iter() {
-    let empty_dim = Dimension {
-        name: "".to_string(),
-        elements: vec![],
-    };
-    let one_dim = Dimension {
-        name: "".to_string(),
-        elements: vec!["0".to_owned()],
-    };
-    let two_dim = Dimension {
-        name: "".to_string(),
-        elements: vec!["0".to_owned(), "1".to_owned()],
-    };
-    let three_dim = Dimension {
-        name: "".to_string(),
-        elements: vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
-    };
+    let empty_dim = Dimension::Named("".to_string(), vec![]);
+    let one_dim = Dimension::Named("".to_string(), vec!["0".to_owned()]);
+    let two_dim = Dimension::Named("".to_string(), vec!["0".to_owned(), "1".to_owned()]);
+    let three_dim = Dimension::Named(
+        "".to_string(),
+        vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
+    );
     let cases: &[(Vec<Dimension>, Vec<Vec<usize>>)] = &[
         (vec![empty_dim.clone()], vec![]),
         (vec![empty_dim.clone(), empty_dim.clone()], vec![]),
@@ -796,7 +787,13 @@ impl<'a> Iterator for SubscriptIterator<'a> {
             subscripts
                 .iter()
                 .enumerate()
-                .map(|(i, elem)| self.dims[i].elements[*elem].as_str())
+                .map(|(i, elem)| {
+                    if let Dimension::Named(_, elements) = &self.dims[i] {
+                        elements[*elem].as_str()
+                    } else {
+                        unreachable!("expected a named dimension")
+                    }
+                })
                 .collect()
         })
     }
@@ -804,22 +801,13 @@ impl<'a> Iterator for SubscriptIterator<'a> {
 
 #[test]
 fn test_subscript_iter() {
-    let empty_dim = Dimension {
-        name: "".to_string(),
-        elements: vec![],
-    };
-    let one_dim = Dimension {
-        name: "".to_string(),
-        elements: vec!["0".to_owned()],
-    };
-    let two_dim = Dimension {
-        name: "".to_string(),
-        elements: vec!["0".to_owned(), "1".to_owned()],
-    };
-    let three_dim = Dimension {
-        name: "".to_string(),
-        elements: vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
-    };
+    let empty_dim = Dimension::Named("".to_string(), vec![]);
+    let one_dim = Dimension::Named("".to_string(), vec!["0".to_owned()]);
+    let two_dim = Dimension::Named("".to_string(), vec!["0".to_owned(), "1".to_owned()]);
+    let three_dim = Dimension::Named(
+        "".to_string(),
+        vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
+    );
     let cases: &[(Vec<Dimension>, Vec<Vec<&str>>)] = &[
         (vec![empty_dim.clone()], vec![]),
         (vec![empty_dim.clone(), empty_dim.clone()], vec![]),

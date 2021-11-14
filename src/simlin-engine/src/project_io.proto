@@ -253,8 +253,18 @@ message SimSpecs {
 };
 
 message Dimension {
+  message DimensionElements {
+    repeated string elements = 1;
+  };
+  message DimensionSize {
+    uint32 size = 1;
+  };
   string name = 1;
-  repeated string elements = 2;
+  repeated string obsolete_elements = 2;
+  oneof dimension {
+    DimensionElements elements = 3;
+    DimensionSize size = 4;
+  }
 };
 
 message Unit {

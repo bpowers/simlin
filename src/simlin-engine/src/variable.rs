@@ -225,7 +225,7 @@ fn get_dimensions(
         .iter()
         .map(|name| -> Result<datamodel::Dimension, EquationError> {
             for dim in dimensions {
-                if dim.name == *name {
+                if dim.name() == name {
                     return Ok(dim.clone());
                 }
             }
@@ -477,14 +477,13 @@ impl<'a> IdentifierSetVisitor<'a> {
                         let mut is_subscript_or_dimension = false;
                         // TODO: this should be optimized
                         for dim in self.dimensions.iter() {
-                            if arg_ident == &dim.name {
+                            if arg_ident == dim.name() {
                                 is_subscript_or_dimension = true;
+                            } else if let Dimension::Named(_, elements) = dim {
+                                is_subscript_or_dimension |= elements.contains(arg_ident);
                             }
-                            for element_name in dim.elements.iter() {
-                                // subscript names aren't dependencies
-                                if arg_ident == element_name {
-                                    is_subscript_or_dimension = true;
-                                }
+                            if is_subscript_or_dimension {
+                                break;
                             }
                         }
                         if !is_subscript_or_dimension {
@@ -557,10 +556,7 @@ fn test_identifier_sets() {
         ("g[foo]", &["g"]),
     ];
 
-    let dimensions: &[Dimension] = &[Dimension {
-        name: "dim1".to_string(),
-        elements: vec!["foo".to_owned()],
-    }];
+    let dimensions: &[Dimension] = &[Dimension::Named("dim1".to_string(), vec!["foo".to_owned()])];
 
     let module_inputs: &[ModuleInput] = &[ModuleInput {
         src: "whatever".to_string(),

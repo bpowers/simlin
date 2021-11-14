@@ -443,19 +443,39 @@ pub struct SimSpecs {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Dimension {
-    pub name: String,
-    pub elements: Vec<String>,
+pub enum Dimension {
+    Indexed(String, u32),
+    Named(String, Vec<String>),
 }
 
 impl Dimension {
     pub fn get_offset(&self, subscript: &str) -> Option<usize> {
-        for (i, element) in self.elements.iter().enumerate() {
-            if element == subscript {
-                return Some(i);
+        if let Dimension::Named(_, elements) = self {
+            for (i, element) in elements.iter().enumerate() {
+                if element == subscript {
+                    return Some(i);
+                }
             }
         }
         None
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Dimension::Indexed(name, _) => name,
+            Dimension::Named(name, _) => name,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Dimension::Indexed(_, size) => *size as usize,
+            Dimension::Named(_, elements) => elements.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

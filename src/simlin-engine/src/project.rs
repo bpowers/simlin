@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use prost::alloc::rc::Rc;
 
 use crate::common::{Error, Ident};
+use crate::dimensions::DimensionsContext;
 use crate::model::{ModelStage0, ModelStage1};
 use crate::units::Context;
 use crate::{datamodel, model};
@@ -80,6 +81,8 @@ impl Project {
                 Default::default()
             }
         };
+
+        let _dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
 
         // next, pull in all the models from the stdlib
         let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES

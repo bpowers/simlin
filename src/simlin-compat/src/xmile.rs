@@ -577,30 +577,34 @@ impl ToXml<XmlWriter> for Dimension {
 
 impl From<Dimension> for datamodel::Dimension {
     fn from(dimension: Dimension) -> Self {
-        datamodel::Dimension {
-            name: canonicalize(&dimension.name),
-            elements: dimension
-                .elements
-                .unwrap_or_default()
-                .into_iter()
-                .map(|i| canonicalize(&i.name))
-                .collect(),
+        let name = canonicalize(&dimension.name);
+        if let Some(elements) = dimension.elements {
+            datamodel::Dimension::Named(
+                name,
+                elements
+                    .into_iter()
+                    .map(|i| canonicalize(&i.name))
+                    .collect(),
+            )
+        } else {
+            datamodel::Dimension::Indexed(name, dimension.size.unwrap_or_default())
         }
     }
 }
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dimension: datamodel::Dimension) -> Self {
-        Dimension {
-            name: dimension.name,
-            size: None,
-            elements: Some(
-                dimension
-                    .elements
-                    .into_iter()
-                    .map(|i| Index { name: i })
-                    .collect(),
-            ),
+        match dimension {
+            datamodel::Dimension::Indexed(name, size) => Dimension {
+                name,
+                size: Some(size),
+                elements: None,
+            },
+            datamodel::Dimension::Named(name, elements) => Dimension {
+                name,
+                size: None,
+                elements: Some(elements.into_iter().map(|i| Index { name: i }).collect()),
+            },
         }
     }
 }
