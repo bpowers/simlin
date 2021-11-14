@@ -20,6 +20,7 @@ mod equation {
 pub mod builtins;
 mod builtins_visitor;
 mod compiler;
+mod dimensions;
 mod model;
 mod token;
 mod variable;

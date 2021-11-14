@@ -323,7 +323,6 @@ fn simulates_step_into_smth1() {
 }
 
 #[test]
-#[ignore]
 fn simulates_subscript_index_name_values() {
     simulate_path("../../test/subscript_index_name_values/model.stmx");
 }
