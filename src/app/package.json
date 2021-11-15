@@ -51,7 +51,7 @@
     "prompts": "^2.4.1",
     "react-app-polyfill": "^3.0.0-next.75+749a76d2",
     "react-dev-utils": "^12.0.0-next.31+749a76d2",
-    "react-refresh": "^0.10.0",
+    "react-refresh": "^0.11.0",
     "resolve": "^1.19.0",
     "resolve-url-loader": "^4.0.0",
     "source-map-explorer": "^2.5.2",
