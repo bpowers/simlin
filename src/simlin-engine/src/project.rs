@@ -8,7 +8,7 @@ use prost::alloc::rc::Rc;
 
 use crate::common::{Error, Ident};
 use crate::dimensions::DimensionsContext;
-use crate::model::{ModelStage0, ModelStage1};
+use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
 use crate::{datamodel, model};
 
@@ -82,8 +82,6 @@ impl Project {
             }
         };
 
-        let _dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
-
         // next, pull in all the models from the stdlib
         let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES
             .iter()
@@ -107,9 +105,16 @@ impl Project {
             .map(|m| (m.ident.clone(), m))
             .collect();
 
+        let dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
+        let scope = ScopeStage0 {
+            units: &units_ctx,
+            models: &models,
+            dimensions: &dims_ctx,
+        };
+
         let mut models_list: Vec<ModelStage1> = models_list
             .into_iter()
-            .map(|model| ModelStage1::new(&units_ctx, &models, &model))
+            .map(|model| ModelStage1::new(&scope, &model))
             .collect();
 
         let model_order = {

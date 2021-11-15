@@ -11,6 +11,8 @@ use crate::builtins::{walk_builtin_expr, BuiltinContents, BuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, UnitError};
 use crate::datamodel::Dimension;
+#[cfg(test)]
+use crate::model::ScopeStage0;
 use crate::token::LexerType;
 use crate::units::parse_units;
 use crate::{datamodel, eqn_err, units, ErrorCode};
@@ -569,7 +571,12 @@ fn test_identifier_sets() {
         let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
-        let ast = lower_ast(ast.unwrap()).unwrap();
+        let scope = ScopeStage0 {
+            units: &Default::default(),
+            models: &Default::default(),
+            dimensions: &Default::default(),
+        };
+        let ast = lower_ast(&scope, ast.unwrap()).unwrap();
         let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
         let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
         let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));

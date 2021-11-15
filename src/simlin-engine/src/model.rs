@@ -11,9 +11,10 @@ use crate::common::{
     topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, UnitError,
 };
 use crate::datamodel::{Dimension, UnitMap};
+use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
-use crate::units::Context;
+use crate::units::{self, Context};
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::vm::StepPart;
 use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
@@ -455,8 +456,10 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
     }
 }
 
-pub(crate) fn resolve_module_inputs(
-    models: &HashMap<Ident, ModelStage0>,
+/// lower_variable takes a stage 0 variable and turns it into a stage 1 variable.
+/// This involves resolving both module inputs and dimension indexes.
+pub(crate) fn lower_variable(
+    scope: &ScopeStage0,
     parent_module_name: &str,
     var_s0: &VariableStage0,
 ) -> Variable {
@@ -475,7 +478,7 @@ pub(crate) fn resolve_module_inputs(
             let mut errors = errors.clone();
             let ast = ast
                 .as_ref()
-                .map(|ast| match lower_ast(ast.clone()) {
+                .map(|ast| match lower_ast(scope, ast.clone()) {
                     Ok(ast) => Some(ast),
                     Err(err) => {
                         errors.push(err);
@@ -510,7 +513,7 @@ pub(crate) fn resolve_module_inputs(
             let mut errors = errors.clone();
             let ast = ast
                 .as_ref()
-                .map(|ast| match lower_ast(ast.clone()) {
+                .map(|ast| match lower_ast(scope, ast.clone()) {
                     Ok(ast) => Some(ast),
                     Err(err) => {
                         errors.push(err);
@@ -542,7 +545,7 @@ pub(crate) fn resolve_module_inputs(
             let var_errors = errors;
 
             let inputs = inputs.iter().map(|mi| {
-                resolve_module_input(models, parent_module_name, ident, &mi.src, &mi.dst)
+                resolve_module_input(scope.models, parent_module_name, ident, &mi.src, &mi.dst)
             });
 
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
@@ -726,12 +729,16 @@ impl ModelStage0 {
     }
 }
 
+pub(crate) struct ScopeStage0<'a> {
+    #[allow(dead_code)]
+    pub units: &'a units::Context,
+    pub models: &'a HashMap<Ident, ModelStage0>,
+    #[allow(dead_code)]
+    pub dimensions: &'a DimensionsContext,
+}
+
 impl ModelStage1 {
-    pub fn new(
-        _units_ctx: &Context,
-        models: &HashMap<Ident, ModelStage0>,
-        model_s0: &ModelStage0,
-    ) -> Self {
+    pub(crate) fn new(scope: &ScopeStage0, model_s0: &ModelStage0) -> Self {
         let model_deps = model_s0
             .variables
             .values()
@@ -751,12 +758,7 @@ impl ModelStage1 {
             variables: model_s0
                 .variables
                 .iter()
-                .map(|(ident, v)| {
-                    (
-                        ident.clone(),
-                        resolve_module_inputs(models, &model_s0.ident, v),
-                    )
-                })
+                .map(|(ident, v)| (ident.clone(), lower_variable(scope, &model_s0.ident, v)))
                 .collect(),
             errors: model_s0.errors.clone(),
             model_deps: Some(model_deps),
@@ -1094,7 +1096,12 @@ fn test_errors() {
     let model = {
         let no_module_inputs: ModuleInputSet = BTreeSet::new();
         let default_instantiation = [no_module_inputs].iter().cloned().collect();
-        let mut model = ModelStage1::new(&Context::default(), &models, &models["main"]);
+        let scope = ScopeStage0 {
+            units: &Default::default(),
+            models: &models,
+            dimensions: &Default::default(),
+        };
+        let mut model = ModelStage1::new(&scope, &models["main"]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1221,7 +1228,12 @@ fn test_all_deps() {
         .into_iter()
         .map(|name| {
             let model_s0 = &x_models[name];
-            ModelStage1::new(&Context::default(), &x_models, model_s0)
+            let scope = ScopeStage0 {
+                units: &Default::default(),
+                models: &x_models,
+                dimensions: &Default::default(),
+            };
+            ModelStage1::new(&scope, model_s0)
         })
         .collect::<Vec<_>>();
 
@@ -1251,7 +1263,12 @@ fn test_all_deps() {
     let mod_1 = parse_var(&[], mod_1_orig, &mut implicit_vars, &unit_ctx, |mi| {
         Ok(Some(mi.clone()))
     });
-    let mod_1 = resolve_module_inputs(&x_models, "main", &mod_1);
+    let scope = ScopeStage0 {
+        units: &Default::default(),
+        models: &x_models,
+        dimensions: &Default::default(),
+    };
+    let mod_1 = lower_variable(&scope, "main", &mod_1);
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
     let aux_4 = aux("aux_4", "mod_1.output");

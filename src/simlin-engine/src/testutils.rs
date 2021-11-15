@@ -2,10 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
-
 use crate::datamodel::{self, ModuleReference};
-use crate::model::resolve_module_inputs;
+use crate::model::{lower_variable, ScopeStage0};
 use crate::variable::{parse_var, Variable};
 
 #[cfg(test)]
@@ -37,7 +35,12 @@ pub(crate) fn aux(ident: &str, eqn: &str) -> Variable {
     });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
-    resolve_module_inputs(&HashMap::new(), "main", &var)
+    let scope = ScopeStage0 {
+        units: &Default::default(),
+        models: &Default::default(),
+        dimensions: &Default::default(),
+    };
+    lower_variable(&scope, "main", &var)
 }
 
 #[cfg(test)]
@@ -72,7 +75,12 @@ pub(crate) fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str])
     });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
-    resolve_module_inputs(&HashMap::new(), "main", &var)
+    let scope = ScopeStage0 {
+        units: &Default::default(),
+        models: &Default::default(),
+        dimensions: &Default::default(),
+    };
+    lower_variable(&scope, "main", &var)
 }
 
 #[cfg(test)]
@@ -150,7 +158,12 @@ pub(crate) fn flow(ident: &str, eqn: &str) -> Variable {
     });
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
-    resolve_module_inputs(&HashMap::new(), "main", &var)
+    let scope = ScopeStage0 {
+        units: &Default::default(),
+        models: &Default::default(),
+        dimensions: &Default::default(),
+    };
+    lower_variable(&scope, "main", &var)
 }
 
 #[cfg(test)]

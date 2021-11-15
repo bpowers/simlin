@@ -15,6 +15,7 @@ use crate::builtins::{
 use crate::common::{ElementName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;
 use crate::eqn_err;
+use crate::model::ScopeStage0;
 use crate::token::LexerType;
 
 /// Expr0 represents a parsed equation, before any calls to
@@ -207,7 +208,7 @@ pub enum Expr {
 }
 
 impl Expr {
-    pub fn from(expr: Expr0) -> EquationResult<Self> {
+    pub(crate) fn from(expr: Expr0) -> EquationResult<Self> {
         let expr = match expr {
             Expr0::Const(s, n, loc) => Expr::Const(s, n, loc),
             Expr0::Var(id, loc) => Expr::Var(id, loc),
@@ -334,6 +335,101 @@ impl Expr {
             ),
         };
         Ok(expr)
+    }
+
+    pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
+        match self {
+            Expr::Const(s, n, loc) => Expr::Const(s, n, loc),
+            Expr::Var(id, loc) => {
+                // TODO: check if id is a valid subscript element
+                Expr::Var(id, loc)
+            }
+            Expr::App(func, loc) => {
+                let func = match func {
+                    BuiltinFn::Inf => BuiltinFn::Inf,
+                    BuiltinFn::Pi => BuiltinFn::Pi,
+                    BuiltinFn::Time => BuiltinFn::Time,
+                    BuiltinFn::TimeStep => BuiltinFn::TimeStep,
+                    BuiltinFn::StartTime => BuiltinFn::StartTime,
+                    BuiltinFn::FinalTime => BuiltinFn::FinalTime,
+                    BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Arccos(a) => {
+                        BuiltinFn::Arccos(Box::new(a.constify_dimensions(scope)))
+                    }
+                    BuiltinFn::Arcsin(a) => {
+                        BuiltinFn::Arcsin(Box::new(a.constify_dimensions(scope)))
+                    }
+                    BuiltinFn::Arctan(a) => {
+                        BuiltinFn::Arctan(Box::new(a.constify_dimensions(scope)))
+                    }
+                    BuiltinFn::Cos(a) => BuiltinFn::Cos(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Exp(a) => BuiltinFn::Exp(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Int(a) => BuiltinFn::Int(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Ln(a) => BuiltinFn::Ln(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Log10(a) => BuiltinFn::Log10(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Sin(a) => BuiltinFn::Sin(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Tan(a) => BuiltinFn::Tan(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Mean(args) => BuiltinFn::Mean(
+                        args.into_iter()
+                            .map(|arg| arg.constify_dimensions(scope))
+                            .collect(),
+                    ),
+                    BuiltinFn::Max(a, b) => BuiltinFn::Max(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::Min(a, b) => BuiltinFn::Min(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::Step(a, b) => BuiltinFn::Step(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                    ),
+                    BuiltinFn::IsModuleInput(id, loc) => BuiltinFn::IsModuleInput(id, loc),
+                    BuiltinFn::Lookup(id, arg, loc) => {
+                        BuiltinFn::Lookup(id, Box::new(arg.constify_dimensions(scope)), loc)
+                    }
+                    BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        c.map(|arg| Box::new(arg.constify_dimensions(scope))),
+                    ),
+                    BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        c.map(|arg| Box::new(arg.constify_dimensions(scope))),
+                    ),
+                    BuiltinFn::SafeDiv(a, b, c) => BuiltinFn::SafeDiv(
+                        Box::new(a.constify_dimensions(scope)),
+                        Box::new(b.constify_dimensions(scope)),
+                        c.map(|arg| Box::new(arg.constify_dimensions(scope))),
+                    ),
+                };
+                Expr::App(func, loc)
+            }
+            Expr::Subscript(id, args, loc) => Expr::Subscript(
+                id,
+                args.into_iter()
+                    .map(|arg| arg.constify_dimensions(scope))
+                    .collect(),
+                loc,
+            ),
+            Expr::Op1(op, l, loc) => Expr::Op1(op, Box::new(l.constify_dimensions(scope)), loc),
+            Expr::Op2(op, l, r, loc) => Expr::Op2(
+                op,
+                Box::new(l.constify_dimensions(scope)),
+                Box::new(r.constify_dimensions(scope)),
+                loc,
+            ),
+            Expr::If(cond, l, r, loc) => Expr::If(
+                Box::new(cond.constify_dimensions(scope)),
+                Box::new(l.constify_dimensions(scope)),
+                Box::new(r.constify_dimensions(scope)),
+                loc,
+            ),
+        }
     }
 
     pub(crate) fn get_loc(&self) -> Loc {
@@ -617,16 +713,22 @@ impl Ast<Expr> {
     }
 }
 
-pub(crate) fn lower_ast(ast: Ast<Expr0>) -> EquationResult<Ast<Expr>> {
+pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr>> {
     match ast {
-        Ast::Scalar(expr) => Expr::from(expr).map(Ast::Scalar),
-        Ast::ApplyToAll(dims, expr) => Expr::from(expr).map(|expr| Ast::ApplyToAll(dims, expr)),
+        Ast::Scalar(expr) => Expr::from(expr)
+            .map(|expr| expr.constify_dimensions(scope))
+            .map(Ast::Scalar),
+        Ast::ApplyToAll(dims, expr) => Expr::from(expr)
+            .map(|expr| expr.constify_dimensions(scope))
+            .map(|expr| Ast::ApplyToAll(dims, expr)),
         Ast::Arrayed(dims, elements) => {
             let elements: EquationResult<HashMap<ElementName, Expr>> = elements
                 .into_iter()
-                .map(|(id, expr)| match Expr::from(expr) {
-                    Ok(expr) => Ok((id, expr)),
-                    Err(err) => Err(err),
+                .map(|(id, expr)| {
+                    match Expr::from(expr).map(|expr| expr.constify_dimensions(scope)) {
+                        Ok(expr) => Ok((id, expr)),
+                        Err(err) => Err(err),
+                    }
                 })
                 .collect();
             match elements {

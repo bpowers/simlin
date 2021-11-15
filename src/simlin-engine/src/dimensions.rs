@@ -38,7 +38,7 @@ impl From<datamodel::Dimension> for Dimension {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct DimensionsContext {
     dimensions: HashMap<Ident, Dimension>,
 }
