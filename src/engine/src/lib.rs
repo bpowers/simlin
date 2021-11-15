@@ -255,7 +255,7 @@ impl Engine {
         let var = match kind {
             "aux" => datamodel::Variable::Aux(datamodel::Aux {
                 ident,
-                equation: datamodel::Equation::Scalar("".to_owned()),
+                equation: datamodel::Equation::Scalar("".to_owned(), None),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -264,7 +264,7 @@ impl Engine {
             }),
             "flow" => datamodel::Variable::Flow(datamodel::Flow {
                 ident,
-                equation: datamodel::Equation::Scalar("".to_owned()),
+                equation: datamodel::Equation::Scalar("".to_owned(), None),
                 documentation: "".to_string(),
                 units: None,
                 gf: None,
@@ -274,7 +274,7 @@ impl Engine {
             }),
             "stock" => datamodel::Variable::Stock(datamodel::Stock {
                 ident,
-                equation: datamodel::Equation::Scalar("".to_owned()),
+                equation: datamodel::Equation::Scalar("".to_owned(), None),
                 documentation: "".to_string(),
                 units: None,
                 inflows: vec![],

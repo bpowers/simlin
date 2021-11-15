@@ -292,14 +292,20 @@ impl From<Equation> for project_io::variable::Equation {
     fn from(eqn: Equation) -> Self {
         project_io::variable::Equation {
             equation: Some(match eqn {
-                Equation::Scalar(equation) => project_io::variable::equation::Equation::Scalar(
-                    project_io::variable::ScalarEquation { equation },
-                ),
-                Equation::ApplyToAll(dimension_names, equation) => {
+                Equation::Scalar(equation, initial_equation) => {
+                    project_io::variable::equation::Equation::Scalar(
+                        project_io::variable::ScalarEquation {
+                            equation,
+                            initial_equation,
+                        },
+                    )
+                }
+                Equation::ApplyToAll(dimension_names, equation, initial_equation) => {
                     project_io::variable::equation::Equation::ApplyToAll(
                         project_io::variable::ApplyToAllEquation {
                             dimension_names,
                             equation,
+                            initial_equation,
                         },
                     )
                 }
@@ -309,10 +315,11 @@ impl From<Equation> for project_io::variable::Equation {
                             dimension_names,
                             elements: elements
                                 .into_iter()
-                                .map(|(subscript, equation)| {
+                                .map(|(subscript, equation, initial_equation)| {
                                     project_io::variable::arrayed_equation::Element {
                                         subscript,
                                         equation,
+                                        initial_equation,
                                     }
                                 })
                                 .collect(),
@@ -328,17 +335,17 @@ impl From<project_io::variable::Equation> for Equation {
     fn from(eqn: project_io::variable::Equation) -> Self {
         match eqn.equation.unwrap() {
             project_io::variable::equation::Equation::Scalar(scalar) => {
-                Equation::Scalar(scalar.equation)
+                Equation::Scalar(scalar.equation, scalar.initial_equation)
             }
             project_io::variable::equation::Equation::ApplyToAll(a2a) => {
-                Equation::ApplyToAll(a2a.dimension_names, a2a.equation)
+                Equation::ApplyToAll(a2a.dimension_names, a2a.equation, a2a.initial_equation)
             }
             project_io::variable::equation::Equation::Arrayed(arrayed) => Equation::Arrayed(
                 arrayed.dimension_names,
                 arrayed
                     .elements
                     .into_iter()
-                    .map(|e| (e.subscript, e.equation))
+                    .map(|e| (e.subscript, e.equation, e.initial_equation))
                     .collect(),
             ),
         }
@@ -348,13 +355,23 @@ impl From<project_io::variable::Equation> for Equation {
 #[test]
 fn test_equation_roundtrip() {
     let cases: &[_] = &[
-        Equation::Scalar("a+1".to_string()),
-        Equation::ApplyToAll(vec!["a".to_string(), "b".to_string()], "c+2".to_string()),
+        Equation::Scalar("a+1".to_string(), None),
+        Equation::Scalar("a+1".to_string(), Some("392".to_string())),
+        Equation::ApplyToAll(
+            vec!["a".to_string(), "b".to_string()],
+            "c+2".to_string(),
+            None,
+        ),
+        Equation::ApplyToAll(
+            vec!["a".to_string(), "b".to_string()],
+            "c+2".to_string(),
+            Some("33".to_string()),
+        ),
         Equation::Arrayed(
             vec!["d".to_string()],
             vec![
-                ("e".to_string(), "3".to_string()),
-                ("f".to_string(), "7+1".to_string()),
+                ("e".to_string(), "3".to_string(), None),
+                ("f".to_string(), "7+1".to_string(), Some("l".to_string())),
             ],
         ),
     ];
@@ -449,7 +466,7 @@ fn test_stock_roundtrip() {
     let cases: &[Stock] = &[
         Stock {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string()),
+            equation: Equation::Scalar("1+3".to_string(), None),
             documentation: "this is deep stuff".to_string(),
             units: None,
             inflows: vec!["inflow".to_string()],
@@ -460,7 +477,7 @@ fn test_stock_roundtrip() {
         },
         Stock {
             ident: "blerg2".to_string(),
-            equation: Equation::Scalar("1+3".to_string()),
+            equation: Equation::Scalar("1+3".to_string(), None),
             documentation: "this is deep stuff".to_string(),
             units: Some("flarbles".to_string()),
             inflows: vec!["inflow".to_string()],
@@ -516,7 +533,7 @@ fn test_flow_roundtrip() {
     let cases: &[Flow] = &[
         Flow {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string()),
+            equation: Equation::Scalar("1+3".to_string(), None),
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
@@ -526,7 +543,7 @@ fn test_flow_roundtrip() {
         },
         Flow {
             ident: "blerg2".to_string(),
-            equation: Equation::Scalar("1+3".to_string()),
+            equation: Equation::Scalar("1+3".to_string(), Some("66".to_string())),
             documentation: "this is deep stuff".to_string(),
             units: Some("flarbles".to_string()),
             gf: Some(GraphicalFunction {
@@ -591,7 +608,7 @@ fn test_aux_roundtrip() {
     let cases: &[Aux] = &[
         Aux {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string()),
+            equation: Equation::Scalar("1+3".to_string(), Some("11".to_string())),
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,
@@ -600,7 +617,7 @@ fn test_aux_roundtrip() {
         },
         Aux {
             ident: "blerg2".to_string(),
-            equation: Equation::Scalar("1+3".to_string()),
+            equation: Equation::Scalar("1+3".to_string(), None),
             documentation: "this is deep stuff".to_string(),
             units: Some("flarbles".to_string()),
             gf: Some(GraphicalFunction {
@@ -768,7 +785,7 @@ fn test_variable_roundtrip() {
     let cases: &[Variable] = &[
         Variable::Aux(Aux {
             ident: "blerg".to_string(),
-            equation: Equation::Scalar("1+3".to_string()),
+            equation: Equation::Scalar("1+3".to_string(), None),
             documentation: "this is deep stuff".to_string(),
             units: None,
             gf: None,

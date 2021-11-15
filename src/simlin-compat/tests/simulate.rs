@@ -328,13 +328,12 @@ fn simulates_subscript_index_name_values() {
 }
 
 #[test]
-#[ignore]
-fn simulates_sdeverywhere_sir() {
-    simulate_path("../../test/sdeverywhere/models/sir/sir.xmile");
+fn simulates_active_initial() {
+    simulate_path("../../test/sdeverywhere/models/active_initial/active_initial.xmile");
 }
 
 // #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
-// fn simulates_vensim(resource: &str) {
+// fn simulates_sdeverywhere(resource: &str) {
 //     let resource = format!("../../{}", resource);
 //     simulate_path(&resource);
 // }

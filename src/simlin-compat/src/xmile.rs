@@ -2682,12 +2682,6 @@ fn test_view_roundtrip() {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
-pub struct ArrayElement {
-    pub subscript: String,
-    pub eqn: String,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Module {
     pub name: String,
     #[serde(rename = "simlin:model_name")]
@@ -2849,6 +2843,8 @@ pub struct NonNegative {}
 pub struct VarElement {
     pub subscript: String,
     pub eqn: String,
+    #[serde(rename = "init_eqn")]
+    pub initial_eqn: Option<String>,
 }
 
 impl ToXml<XmlWriter> for VarElement {
@@ -2856,6 +2852,9 @@ impl ToXml<XmlWriter> for VarElement {
         let attrs = &[("subscript", self.subscript.as_str())];
         write_tag_start_with_attrs(writer, "element", attrs)?;
         write_tag(writer, "eqn", self.eqn.as_str())?;
+        if let Some(init_eqn) = &self.initial_eqn {
+            write_tag(writer, "init_eqn", init_eqn.as_str())?;
+        }
         write_tag_end(writer, "element")
     }
 }
@@ -2942,14 +2941,36 @@ macro_rules! convert_equation(
             };
             let elements = elements.into_iter().map(|e| {
                 let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim())).collect();
-                (canonical_subscripts.join(","), e.eqn)
+                (canonical_subscripts.join(","), e.eqn, e.initial_eqn)
             }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
             let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name)).collect();
-            datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default())
+            datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), $var.initial_eqn)
         } else {
-            datamodel::Equation::Scalar($var.eqn.unwrap_or_default())
+            datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), $var.initial_eqn)
+        }
+    }}
+);
+
+// TODO: forked the above function because stocks don't have `init_eqn` fields.  Probably a macro-ish way to fix this.
+macro_rules! convert_stock_equation(
+    ($var:expr) => {{
+        if let Some(elements) = $var.elements {
+            let dimensions = match $var.dimensions {
+                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name)).collect(),
+                None => vec![],
+            };
+            let elements = elements.into_iter().map(|e| {
+                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim())).collect();
+                (canonical_subscripts.join(","), e.eqn, e.initial_eqn)
+            }).collect();
+            datamodel::Equation::Arrayed(dimensions, elements)
+        } else if let Some(dimensions) = $var.dimensions {
+            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name)).collect();
+            datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), None)
+        } else {
+            datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), None)
         }
     }}
 );
@@ -2970,7 +2991,7 @@ impl From<Stock> for datamodel::Stock {
             .collect();
         datamodel::Stock {
             ident: canonicalize(&stock.name),
-            equation: convert_equation!(stock),
+            equation: convert_stock_equation!(stock),
             documentation: stock.doc.unwrap_or_default(),
             units: stock.units,
             inflows,
@@ -2987,21 +3008,21 @@ impl From<datamodel::Stock> for Stock {
         Stock {
             name: stock.ident,
             eqn: match &stock.equation {
-                Equation::Scalar(eqn) => {
+                Equation::Scalar(eqn, ..) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
-                Equation::ApplyToAll(_, eqn) => {
+                Equation::ApplyToAll(_, eqn, ..) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
-                Equation::Arrayed(_, _) => None,
+                Equation::Arrayed(..) => None,
             },
             doc: if stock.documentation.is_empty() {
                 None
@@ -3025,8 +3046,8 @@ impl From<datamodel::Stock> for Stock {
                 None
             },
             dimensions: match &stock.equation {
-                Equation::Scalar(_) => None,
-                Equation::ApplyToAll(dims, _) => Some(VarDimensions {
+                Equation::Scalar(..) => None,
+                Equation::ApplyToAll(dims, ..) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -3042,12 +3063,16 @@ impl From<datamodel::Stock> for Stock {
                 }),
             },
             elements: match stock.equation {
-                Equation::Scalar(_) => None,
-                Equation::ApplyToAll(_, _) => None,
+                Equation::Scalar(..) => None,
+                Equation::ApplyToAll(..) => None,
                 Equation::Arrayed(_, elements) => Some(
                     elements
                         .into_iter()
-                        .map(|(subscript, eqn)| VarElement { subscript, eqn })
+                        .map(|(subscript, eqn, ..)| VarElement {
+                            subscript,
+                            eqn,
+                            initial_eqn: None,
+                        })
                         .collect(),
                 ),
             },
@@ -3060,6 +3085,8 @@ impl From<datamodel::Stock> for Stock {
 pub struct Flow {
     pub name: String,
     pub eqn: Option<String>,
+    #[serde(rename = "init_eqn")]
+    pub initial_eqn: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
     pub gf: Option<Gf>,
@@ -3099,6 +3126,9 @@ impl ToXml<XmlWriter> for Flow {
         if let Some(ref eqn) = self.eqn {
             write_tag(writer, "eqn", eqn)?;
         }
+        if let Some(ref eqn) = self.initial_eqn {
+            write_tag(writer, "init_eqn", eqn)?;
+        }
         if let Some(ref doc) = self.doc {
             write_tag(writer, "doc", doc)?;
         }
@@ -3137,20 +3167,25 @@ impl From<datamodel::Flow> for Flow {
         Flow {
             name: flow.ident,
             eqn: match &flow.equation {
-                Equation::Scalar(eqn) => {
+                Equation::Scalar(eqn, ..) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
-                Equation::ApplyToAll(_, eqn) => {
+                Equation::ApplyToAll(_, eqn, ..) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
+                Equation::Arrayed(_, _) => None,
+            },
+            initial_eqn: match &flow.equation {
+                Equation::Scalar(.., initial_eqn) => initial_eqn.clone(),
+                Equation::ApplyToAll(_, .., initial_eqn) => initial_eqn.clone(),
                 Equation::Arrayed(_, _) => None,
             },
             doc: if flow.documentation.is_empty() {
@@ -3166,8 +3201,8 @@ impl From<datamodel::Flow> for Flow {
                 None
             },
             dimensions: match &flow.equation {
-                Equation::Scalar(_) => None,
-                Equation::ApplyToAll(dims, _) => Some(VarDimensions {
+                Equation::Scalar(..) => None,
+                Equation::ApplyToAll(dims, ..) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -3183,12 +3218,16 @@ impl From<datamodel::Flow> for Flow {
                 }),
             },
             elements: match flow.equation {
-                Equation::Scalar(_) => None,
-                Equation::ApplyToAll(_, _) => None,
+                Equation::Scalar(..) => None,
+                Equation::ApplyToAll(..) => None,
                 Equation::Arrayed(_, elements) => Some(
                     elements
                         .into_iter()
-                        .map(|(subscript, eqn)| VarElement { subscript, eqn })
+                        .map(|(subscript, eqn, initial_eqn)| VarElement {
+                            subscript,
+                            eqn,
+                            initial_eqn,
+                        })
                         .collect(),
                 ),
             },
@@ -3201,6 +3240,8 @@ impl From<datamodel::Flow> for Flow {
 pub struct Aux {
     pub name: String,
     pub eqn: Option<String>,
+    #[serde(rename = "init_eqn")]
+    pub initial_eqn: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
     pub gf: Option<Gf>,
@@ -3239,6 +3280,9 @@ impl ToXml<XmlWriter> for Aux {
         if let Some(ref eqn) = self.eqn {
             write_tag(writer, "eqn", eqn)?;
         }
+        if let Some(ref eqn) = self.initial_eqn {
+            write_tag(writer, "init_eqn", eqn)?;
+        }
         if let Some(ref doc) = self.doc {
             write_tag(writer, "doc", doc)?;
         }
@@ -3273,20 +3317,25 @@ impl From<datamodel::Aux> for Aux {
         Aux {
             name: aux.ident,
             eqn: match &aux.equation {
-                Equation::Scalar(eqn) => {
+                Equation::Scalar(eqn, ..) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
-                Equation::ApplyToAll(_, eqn) => {
+                Equation::ApplyToAll(_, eqn, ..) => {
                     if eqn.is_empty() {
                         None
                     } else {
                         Some(eqn.clone())
                     }
                 }
+                Equation::Arrayed(_, _) => None,
+            },
+            initial_eqn: match &aux.equation {
+                Equation::Scalar(.., initial_eqn) => initial_eqn.clone(),
+                Equation::ApplyToAll(_, .., initial_eqn) => initial_eqn.clone(),
                 Equation::Arrayed(_, _) => None,
             },
             doc: if aux.documentation.is_empty() {
@@ -3297,8 +3346,8 @@ impl From<datamodel::Aux> for Aux {
             units: aux.units,
             gf: aux.gf.map(Gf::from),
             dimensions: match &aux.equation {
-                Equation::Scalar(_) => None,
-                Equation::ApplyToAll(dims, _) => Some(VarDimensions {
+                Equation::Scalar(..) => None,
+                Equation::ApplyToAll(dims, ..) => Some(VarDimensions {
                     dimensions: Some(
                         dims.iter()
                             .map(|name| VarDimension { name: name.clone() })
@@ -3314,12 +3363,16 @@ impl From<datamodel::Aux> for Aux {
                 }),
             },
             elements: match aux.equation {
-                Equation::Scalar(_) => None,
-                Equation::ApplyToAll(_, _) => None,
+                Equation::Scalar(..) => None,
+                Equation::ApplyToAll(..) => None,
                 Equation::Arrayed(_, elements) => Some(
                     elements
                         .into_iter()
-                        .map(|(subscript, eqn)| VarElement { subscript, eqn })
+                        .map(|(subscript, eqn, initial_eqn)| VarElement {
+                            subscript,
+                            eqn,
+                            initial_eqn,
+                        })
                         .collect(),
                 ),
             },
@@ -3409,7 +3462,7 @@ fn test_canonicalize_stock_inflows() {
 
     let expected = datamodel::Variable::Stock(datamodel::Stock {
         ident: "heat_loss_to_room".to_string(),
-        equation: Equation::Scalar("total_population".to_string()),
+        equation: Equation::Scalar("total_population".to_string(), None),
         documentation: "People who can contract the disease.".to_string(),
         units: Some("people".to_string()),
         inflows: vec!["solar_radiation".to_string()],
@@ -3520,6 +3573,7 @@ fn test_xml_gt_parsing() {
     let expected = Aux {
         name: "test_gt".to_string(),
         eqn: Some("( IF Time > 25 THEN 5 ELSE 0 )".to_string()),
+        initial_eqn: None,
         doc: None,
         units: None,
         gf: None,
@@ -3542,6 +3596,7 @@ fn test_xml_gt_parsing() {
 fn test_xml_gf_parsing() {
     let input = "            <aux name=\"lookup function table\" access=\"input\">
                 <eqn>0</eqn>
+                <init_eqn>55</init_eqn>
                 <gf>
                     <yscale min=\"-1\" max=\"1\"/>
                     <xpts>0,5,10,15,20,25,30,35,40,45</xpts>
@@ -3552,6 +3607,7 @@ fn test_xml_gf_parsing() {
     let expected = Aux {
         name: "lookup function table".to_string(),
         eqn: Some("0".to_string()),
+        initial_eqn: Some("55".to_string()),
         doc: None,
         units: None,
         gf: Some(Gf {

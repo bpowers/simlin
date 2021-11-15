@@ -142,7 +142,7 @@ fn simulate(project: &DatamodelProject) -> Results {
             found_var_error = true;
             for error in errors {
                 eprintln!();
-                if let Some(Equation::Scalar(eqn)) = var.get_equation() {
+                if let Some(Equation::Scalar(eqn, ..)) = var.get_equation() {
                     eprintln!("    {}", eqn);
                     let space = " ".repeat(error.start as usize);
                     let underline = "~".repeat((error.end - error.start) as usize);
@@ -174,7 +174,7 @@ fn simulate(project: &DatamodelProject) -> Results {
                     }
                     UnitError::ConsistencyError(code, loc, details) => {
                         let (eqn, loc, code) =
-                            if let Some(Equation::Scalar(eqn)) = var.get_equation() {
+                            if let Some(Equation::Scalar(eqn, ..)) = var.get_equation() {
                                 (Some(eqn), loc, code)
                             } else {
                                 (None, loc, code)

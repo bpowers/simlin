@@ -43,9 +43,12 @@ pub struct GraphicalFunction {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Equation {
-    Scalar(String),
-    ApplyToAll(Vec<DimensionName>, String),
-    Arrayed(Vec<DimensionName>, Vec<(ElementName, String)>),
+    Scalar(String, Option<String>),
+    ApplyToAll(Vec<DimensionName>, String, Option<String>),
+    Arrayed(
+        Vec<DimensionName>,
+        Vec<(ElementName, String, Option<String>)>,
+    ),
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -154,9 +157,9 @@ impl Variable {
 
     pub fn set_scalar_equation(&mut self, equation: &str) {
         match self {
-            Variable::Stock(stock) => stock.equation = Equation::Scalar(equation.to_string()),
-            Variable::Flow(flow) => flow.equation = Equation::Scalar(equation.to_string()),
-            Variable::Aux(aux) => aux.equation = Equation::Scalar(equation.to_string()),
+            Variable::Stock(stock) => stock.equation = Equation::Scalar(equation.to_string(), None),
+            Variable::Flow(flow) => flow.equation = Equation::Scalar(equation.to_string(), None),
+            Variable::Aux(aux) => aux.equation = Equation::Scalar(equation.to_string(), None),
             Variable::Module(_module) => {}
         }
     }

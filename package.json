@@ -45,7 +45,7 @@
     "start:firestore": "(gcloud beta emulators firestore start --host-port=127.0.0.1:8092 &) && yarn workspace @system-dynamics/app run firebase emulators:start",
     "start:backend": "yarn workspace @system-dynamics/server start:backend",
     "start:frontend": "yarn workspace @system-dynamics/app start:frontend",
-    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src -name '*.proto') && sed -i 's/goog.object.extend(exports, proto);/goog.object.extend(exports, proto.project_io);/g' src/simlin-engine/src/project_io_pb.js && mv src/simlin-engine/src/*.[jt]s src/core/pb/ && yarn format",
+    "build:gen-protobufs": "protoc --plugin='protoc-gen-ts=node_modules/.bin/protoc-gen-ts' --js_out='import_style=commonjs_strict,binary:.' --ts_out=. $(find src -name '*.proto') && gsed -i 's/goog.object.extend(exports, proto);/goog.object.extend(exports, proto.project_io);/g' src/simlin-engine/src/project_io_pb.js && mv src/simlin-engine/src/*.[jt]s src/core/pb/ && yarn format",
     "rebuild-stdlib": "cargo build && for input in stdlib/*.stmx; do model=\"$(basename $input | cut -d '.' -f 1)\"; target/debug/simlin convert --model-only \"$input\" --output src/simlin-engine/src/stdlib/\"$model\".pb; done",
     "build": "yarn workspaces run build",
     "clean": "yarn workspaces run clean",

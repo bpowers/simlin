@@ -123,6 +123,11 @@ export namespace Variable {
     getEquation(): string;
     setEquation(value: string): void;
 
+    hasInitialEquation(): boolean;
+    clearInitialEquation(): void;
+    getInitialEquation(): string;
+    setInitialEquation(value: string): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): ScalarEquation.AsObject;
     static toObject(includeInstance: boolean, msg: ScalarEquation): ScalarEquation.AsObject;
@@ -136,6 +141,7 @@ export namespace Variable {
   export namespace ScalarEquation {
     export type AsObject = {
       equation: string;
+      initialEquation: string;
     };
   }
 
@@ -147,6 +153,11 @@ export namespace Variable {
 
     getEquation(): string;
     setEquation(value: string): void;
+
+    hasInitialEquation(): boolean;
+    clearInitialEquation(): void;
+    getInitialEquation(): string;
+    setInitialEquation(value: string): void;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): ApplyToAllEquation.AsObject;
@@ -162,6 +173,7 @@ export namespace Variable {
     export type AsObject = {
       dimensionNamesList: Array<string>;
       equation: string;
+      initialEquation: string;
     };
   }
 
@@ -199,6 +211,11 @@ export namespace Variable {
       getEquation(): string;
       setEquation(value: string): void;
 
+      hasInitialEquation(): boolean;
+      clearInitialEquation(): void;
+      getInitialEquation(): string;
+      setInitialEquation(value: string): void;
+
       serializeBinary(): Uint8Array;
       toObject(includeInstance?: boolean): Element.AsObject;
       static toObject(includeInstance: boolean, msg: Element): Element.AsObject;
@@ -213,6 +230,7 @@ export namespace Variable {
       export type AsObject = {
         subscript: string;
         equation: string;
+        initialEquation: string;
       };
     }
   }
@@ -1083,11 +1101,22 @@ export class Dimension extends jspb.Message {
   getName(): string;
   setName(value: string): void;
 
-  clearElementsList(): void;
-  getElementsList(): Array<string>;
-  setElementsList(value: Array<string>): void;
-  addElements(value: string, index?: number): string;
+  clearObsoleteElementsList(): void;
+  getObsoleteElementsList(): Array<string>;
+  setObsoleteElementsList(value: Array<string>): void;
+  addObsoleteElements(value: string, index?: number): string;
 
+  hasElements(): boolean;
+  clearElements(): void;
+  getElements(): Dimension.DimensionElements | undefined;
+  setElements(value?: Dimension.DimensionElements): void;
+
+  hasSize(): boolean;
+  clearSize(): void;
+  getSize(): Dimension.DimensionSize | undefined;
+  setSize(value?: Dimension.DimensionSize): void;
+
+  getDimensionCase(): Dimension.DimensionCase;
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Dimension.AsObject;
   static toObject(includeInstance: boolean, msg: Dimension): Dimension.AsObject;
@@ -1101,8 +1130,58 @@ export class Dimension extends jspb.Message {
 export namespace Dimension {
   export type AsObject = {
     name: string;
-    elementsList: Array<string>;
+    obsoleteElementsList: Array<string>;
+    elements?: Dimension.DimensionElements.AsObject;
+    size?: Dimension.DimensionSize.AsObject;
   };
+
+  export class DimensionElements extends jspb.Message {
+    clearElementsList(): void;
+    getElementsList(): Array<string>;
+    setElementsList(value: Array<string>): void;
+    addElements(value: string, index?: number): string;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): DimensionElements.AsObject;
+    static toObject(includeInstance: boolean, msg: DimensionElements): DimensionElements.AsObject;
+    static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+    static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+    static serializeBinaryToWriter(message: DimensionElements, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): DimensionElements;
+    static deserializeBinaryFromReader(message: DimensionElements, reader: jspb.BinaryReader): DimensionElements;
+  }
+
+  export namespace DimensionElements {
+    export type AsObject = {
+      elementsList: Array<string>;
+    };
+  }
+
+  export class DimensionSize extends jspb.Message {
+    getSize(): number;
+    setSize(value: number): void;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): DimensionSize.AsObject;
+    static toObject(includeInstance: boolean, msg: DimensionSize): DimensionSize.AsObject;
+    static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+    static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+    static serializeBinaryToWriter(message: DimensionSize, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): DimensionSize;
+    static deserializeBinaryFromReader(message: DimensionSize, reader: jspb.BinaryReader): DimensionSize;
+  }
+
+  export namespace DimensionSize {
+    export type AsObject = {
+      size: number;
+    };
+  }
+
+  export enum DimensionCase {
+    DIMENSION_NOT_SET = 0,
+    ELEMENTS = 3,
+    SIZE = 4,
+  }
 }
 
 export class Unit extends jspb.Message {

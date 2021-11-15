@@ -90,11 +90,11 @@ impl<MI, E> Variable<MI, E> {
     pub fn scalar_equation(&self) -> Option<&String> {
         match self {
             Variable::Stock {
-                eqn: Some(datamodel::Equation::Scalar(s)),
+                eqn: Some(datamodel::Equation::Scalar(s, ..)),
                 ..
             }
             | Variable::Var {
-                eqn: Some(datamodel::Equation::Scalar(s)),
+                eqn: Some(datamodel::Equation::Scalar(s, ..)),
                 ..
             } => Some(s),
             _ => None,
@@ -247,11 +247,11 @@ fn parse_equation(
         }
     }
     match eqn {
-        datamodel::Equation::Scalar(eqn) => {
+        datamodel::Equation::Scalar(eqn, ..) => {
             let (ast, errors) = parse_inner(eqn);
             (ast.map(Ast::Scalar), errors)
         }
-        datamodel::Equation::ApplyToAll(dimension_names, eqn) => {
+        datamodel::Equation::ApplyToAll(dimension_names, eqn, ..) => {
             let (ast, mut errors) = parse_inner(eqn);
 
             match get_dimensions(dimensions, dimension_names) {
@@ -266,7 +266,7 @@ fn parse_equation(
             let mut errors: Vec<EquationError> = vec![];
             let elements: Vec<_> = elements
                 .iter()
-                .map(|(subscript, eqn)| {
+                .map(|(subscript, eqn, _initial_eqn)| {
                     let (ast, single_errors) = parse_inner(eqn);
                     errors.extend(single_errors);
                     (subscript.clone(), ast)
@@ -568,7 +568,7 @@ fn test_identifier_sets() {
     use crate::ast::lower_ast;
 
     for (eqn, id_list) in cases.iter() {
-        let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned()), &[]);
+        let (ast, err) = parse_equation(&datamodel::Equation::Scalar((*eqn).to_owned(), None), &[]);
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let scope = ScopeStage0 {
@@ -589,7 +589,7 @@ fn test_tables() {
     use crate::common::canonicalize;
     let input = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize("lookup function table"),
-        equation: datamodel::Equation::Scalar("0".to_string()),
+        equation: datamodel::Equation::Scalar("0".to_string(), None),
         documentation: "".to_string(),
         units: None,
         gf: Some(datamodel::GraphicalFunction {
@@ -616,7 +616,7 @@ fn test_tables() {
             0.0,
             Loc::new(0, 1),
         ))),
-        eqn: Some(datamodel::Equation::Scalar("0".to_string())),
+        eqn: Some(datamodel::Equation::Scalar("0".to_string(), None)),
         units: None,
         table: Some(Table {
             x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],

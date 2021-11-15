@@ -2340,9 +2340,9 @@ fn test_arrays() {
                         equation: Equation::Arrayed(
                             vec!["letters".to_owned()],
                             vec![
-                                ("a".to_owned(), "9".to_owned()),
-                                ("b".to_owned(), "7".to_owned()),
-                                ("c".to_owned(), "5".to_owned()),
+                                ("a".to_owned(), "9".to_owned(), None),
+                                ("b".to_owned(), "7".to_owned(), None),
+                                ("c".to_owned(), "5".to_owned(), None),
                             ],
                         ),
                         documentation: "".to_owned(),
@@ -2353,7 +2353,7 @@ fn test_arrays() {
                     }),
                     Variable::Aux(Aux {
                         ident: "picked".to_owned(),
-                        equation: Equation::Scalar("aux[INT(TIME MOD 5) + 1]".to_owned()),
+                        equation: Equation::Scalar("aux[INT(TIME MOD 5) + 1]".to_owned(), None),
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,
@@ -2365,6 +2365,7 @@ fn test_arrays() {
                         equation: Equation::ApplyToAll(
                             vec!["letters".to_owned()],
                             "constants".to_owned(),
+                            None,
                         ),
                         documentation: "".to_owned(),
                         units: None,
@@ -2374,7 +2375,7 @@ fn test_arrays() {
                     }),
                     Variable::Aux(Aux {
                         ident: "picked2".to_owned(),
-                        equation: Equation::Scalar("aux[b]".to_owned()),
+                        equation: Equation::Scalar("aux[b]".to_owned(), None),
                         documentation: "".to_owned(),
                         units: None,
                         gf: None,

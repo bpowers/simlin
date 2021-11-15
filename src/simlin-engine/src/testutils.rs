@@ -16,7 +16,7 @@ pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::V
     use datamodel::{Aux, Equation, Variable, Visibility};
     Variable::Aux(Aux {
         ident: ident.to_string(),
-        equation: Equation::Scalar(eqn.to_string()),
+        equation: Equation::Scalar(eqn.to_string(), None),
         documentation: "".to_string(),
         units: units.map(|s| s.to_owned()),
         gf: None,
@@ -54,7 +54,7 @@ pub(crate) fn x_stock(
     use datamodel::{Equation, Stock, Variable, Visibility};
     Variable::Stock(Stock {
         ident: ident.to_string(),
-        equation: Equation::Scalar(eqn.to_string()),
+        equation: Equation::Scalar(eqn.to_string(), None),
         documentation: "".to_string(),
         units: units.map(|s| s.to_owned()),
         inflows: optional_vec(inflows),
@@ -138,7 +138,7 @@ pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::
     use datamodel::{Equation, Flow, Variable, Visibility};
     Variable::Flow(Flow {
         ident: ident.to_string(),
-        equation: Equation::Scalar(eqn.to_string()),
+        equation: Equation::Scalar(eqn.to_string(), None),
         documentation: "".to_string(),
         units: units.map(|s| s.to_owned()),
         gf: None,

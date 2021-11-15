@@ -32,17 +32,20 @@ message Variable {
 
   message ScalarEquation {
     string equation = 1;
+    optional string initial_equation = 2;
   };
 
   message ApplyToAllEquation {
     repeated string dimension_names = 1;
     string equation = 2;
+    optional string initial_equation = 3;
   };
 
   message ArrayedEquation {
     message Element {
       string subscript = 1;
       string equation = 2;
+      optional string initial_equation = 3;
     };
 
     repeated string dimension_names = 1;
