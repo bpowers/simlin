@@ -341,8 +341,11 @@ impl Expr {
         match self {
             Expr::Const(s, n, loc) => Expr::Const(s, n, loc),
             Expr::Var(id, loc) => {
-                // TODO: check if id is a valid subscript element
-                Expr::Var(id, loc)
+                if let Some(off) = scope.dimensions.lookup(&id) {
+                    Expr::Const(id, off as f64, loc)
+                } else {
+                    Expr::Var(id, loc)
+                }
             }
             Expr::App(func, loc) => {
                 let func = match func {

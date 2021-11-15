@@ -29,7 +29,8 @@ impl From<datamodel::Dimension> for Dimension {
                     indexed_elements: elements
                         .iter()
                         .enumerate()
-                        .map(|(i, elem)| (elem.clone(), i))
+                        // system dynamic indexes are 1-indexed
+                        .map(|(i, elem)| (elem.clone(), i + 1))
                         .collect(),
                     elements,
                 },
@@ -44,12 +45,25 @@ pub struct DimensionsContext {
 }
 
 impl DimensionsContext {
-    pub fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
+    pub(crate) fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
         DimensionsContext {
             dimensions: dimensions
                 .iter()
                 .map(|dim| (dim.name().to_owned(), Dimension::from(dim.clone())))
                 .collect(),
         }
+    }
+
+    pub(crate) fn lookup(&self, element: &str) -> Option<u32> {
+        if let Some(pos) = element.find('·') {
+            let dimension_name = &element[..pos];
+            let element_name = &element[pos + '·'.len_utf8()..];
+            if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(dimension_name) {
+                if let Some(off) = dimension.indexed_elements.get(element_name) {
+                    return Some(*off as u32);
+                }
+            }
+        }
+        None
     }
 }

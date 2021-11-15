@@ -733,7 +733,6 @@ pub(crate) struct ScopeStage0<'a> {
     #[allow(dead_code)]
     pub units: &'a units::Context,
     pub models: &'a HashMap<Ident, ModelStage0>,
-    #[allow(dead_code)]
     pub dimensions: &'a DimensionsContext,
 }
 
