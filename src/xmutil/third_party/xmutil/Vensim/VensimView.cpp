@@ -23,10 +23,6 @@ VensimVariableElement::VensimVariableElement(VensimView *view, char *curpos, cha
     _ghost = false;
   else
     _ghost = true;
-#ifndef NDEBUG
-  if (name == "P100")
-    curpos = curpos;
-#endif
 
   // try to find the variable
   _variable = parser->FindVariable(name);
@@ -46,10 +42,6 @@ VensimVariableElement::VensimVariableElement(VensimView *view, Variable *var, in
   _ghost = var->GetView() != NULL;
   _variable = var;
   _variable->SetView(view);
-#ifndef NDEBUG
-  if (var->GetName() == "P100")
-    x = x;
-#endif
 }
 
 VensimCommentElement::VensimCommentElement(char *curpos, char *buf, VensimParse *parser) {
