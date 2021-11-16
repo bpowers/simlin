@@ -1261,13 +1261,13 @@ export class Dimension extends Record(dimensionDefaults) {
   static fromPb(dim: PbDimension): Dimension {
     return new Dimension({
       name: dim.getName(),
-      subscripts: List(dim.getElementsList()),
+      subscripts: List(dim.getObsoleteElementsList()),
     });
   }
   toPb(): PbDimension {
     const dim = new PbDimension();
     dim.setName(this.name);
-    dim.setElementsList(this.subscripts.toArray());
+    dim.setObsoleteElementsList(this.subscripts.toArray());
     return dim;
   }
 }
