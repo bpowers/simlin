@@ -3,17 +3,16 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::rc::Rc;
+use std::result::Result as StdResult;
 
 use pico_args::Arguments;
 
 use simlin_compat::engine::builtins::Loc;
-use simlin_compat::engine::common::UnitError;
+use simlin_compat::engine::common::{ErrorKind, UnitError};
 use simlin_compat::engine::datamodel::{Equation, Project as DatamodelProject};
-use simlin_compat::engine::{
-    eprintln, serde, ErrorCode, Project, Results, Simulation, Variable, Vm,
-};
+use simlin_compat::engine::{eprintln, serde, Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, project_io, datamodel};
 use simlin_compat::prost::Message;
 use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
 
@@ -43,6 +42,7 @@ fn usage() -> ! {
          OPTIONS:\n",
             "    -h, --help       show this message\n",
             "    --vensim         model is a Vensim .mdl file\n",
+            "    --pb-input       input is binary protobuf project\n",
             "    --to-xmile       output should be XMILE not protobuf\n",
             "    --model-only     for conversion, only output model instead of project\n",
             "    --output FILE    path to write output file\n",
@@ -66,6 +66,7 @@ struct Args {
     output: Option<String>,
     reference: Option<String>,
     is_vensim: bool,
+    is_pb_input: bool,
     is_to_xmile: bool,
     is_convert: bool,
     is_model_only: bool,
@@ -74,7 +75,7 @@ struct Args {
     is_debug: bool,
 }
 
-fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
+fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
     let mut parsed = Arguments::from_env();
     if parsed.contains(["-h", "--help"]) {
         usage();
@@ -107,6 +108,7 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     args.is_model_only = parsed.contains("--model-only");
     args.is_to_xmile = parsed.contains("--to-xmile");
     args.is_vensim = parsed.contains("--vensim");
+    args.is_pb_input = parsed.contains("--pb-input");
 
     let free_arguments = parsed.finish();
     if free_arguments.is_empty() {
@@ -117,6 +119,21 @@ fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
     args.path = free_arguments[0].to_str().map(|s| s.to_owned());
 
     Ok(args)
+}
+
+fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
+    let mut contents_buf: Vec<u8> = vec![];
+    reader
+        .read_until(0, &mut contents_buf)
+        .map_err(|_err| Error::new(ErrorKind::Import, ErrorCode::VensimConversion, Some("1".to_owned())))?;
+
+    let project = match project_io::Project::decode(&*contents_buf) {
+        Ok(project) => serde::deserialize(project),
+        Err(err) => {
+            return Err(Error::new(ErrorKind::Import, ErrorCode::VensimConversion, Some(format!("{}", err))));
+        }
+    };
+    Ok(project)
 }
 
 fn simulate(project: &DatamodelProject) -> Results {
@@ -237,6 +254,8 @@ fn main() {
 
     let project = if args.is_vensim {
         open_vensim(&mut reader)
+    } else if args.is_pb_input {
+        open_binary(&mut reader)
     } else {
         open_xmile(&mut reader)
     };
