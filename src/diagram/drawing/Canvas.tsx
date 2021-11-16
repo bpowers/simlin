@@ -227,7 +227,13 @@ export const Canvas = styled(
     cloud(element: CloudViewElement): React.ReactElement | undefined {
       const isSelected = this.isSelected(element);
 
-      const flow = this.getElementByUid(defined(element.flowUid)) as FlowViewElement;
+      // TODO: fix this -- we apparently can get in the state where a flow doesn't exist but we haven't deleted the cloud
+      let flow: FlowViewElement;
+      try {
+        flow = this.getElementByUid(defined(element.flowUid)) as FlowViewElement;
+      } catch (err) {
+        return;
+      }
 
       if (this.state.isMovingArrow && this.isSelected(flow)) {
         if (defined(flow.points.last()).attachedToUid === element.uid) {
