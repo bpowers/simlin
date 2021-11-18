@@ -51,6 +51,10 @@
     "typescript": "^4.1.3"
   },
   "resolutions": {
+    "firebase-tools/cli-table": "0.3.6",
+    "firebase-tools/**/cli-table": "0.3.6",
+    "marked-terminal/cli-table": "0.3.6",
+    "cli-table": "0.3.6",
     "immer": "9.0.6"
   },
   "scripts": {
