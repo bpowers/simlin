@@ -5,6 +5,7 @@ sidebar_label: The Simlin App
 slug: /
 ---
 
+```
 import { open } from '@system-dynamics/engine';
 import { toUint8Array } from 'js-base64';
 
@@ -13,6 +14,7 @@ export const serializedProject = toUint8Array(logisticGrowthProject);
 export const engine = await open(serializedProject);
 
 console.log(engine);
+```
 
 Simlin enables you to build [system dynamics](https://systemdynamics.org/what-is-system-dynamics/) models.
 System dynamics models are explicit, formal representations of our assumptions about how a system works.
