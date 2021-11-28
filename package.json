@@ -30,11 +30,7 @@
     "ts-protoc-gen": "^0.15.0"
   },
   "resolutions": {
-    "firebase-tools/cli-table": "0.3.6",
-    "firebase-tools/**/cli-table": "0.3.6",
-    "marked-terminal/cli-table": "0.3.6",
-    "cli-table": "0.3.6",
-    "immer": "9.0.6"
+    "immer": "9.0.7"
   },
   "scripts": {
     "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier -l",
