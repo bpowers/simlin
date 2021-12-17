@@ -178,8 +178,10 @@ struct VariableMetadata {
 
 #[derive(Clone, Debug)]
 struct Context<'a> {
+    #[allow(dead_code)]
     dimensions: &'a [datamodel::Dimension],
     model_name: &'a str,
+    #[allow(dead_code)]
     ident: &'a str,
     active_dimension: Option<Vec<datamodel::Dimension>>,
     active_subscript: Option<Vec<&'a str>>,
@@ -1981,7 +1983,7 @@ pub fn pretty(expr: &Expr) -> String {
         Expr::Const(n, _) => format!("{}", n),
         Expr::Var(off, _) => format!("curr[{}]", off),
         Expr::Subscript(off, args, bounds, _) => {
-            let args: Vec<_> = args.iter().map(|arg| pretty(arg)).collect();
+            let args: Vec<_> = args.iter().map(pretty).collect();
             let string_args = args.join(", ");
             let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{}", bounds)).collect();
             let string_bounds = bounds.join(", ");
@@ -2010,7 +2012,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
             BuiltinFn::Max(l, r) => format!("max({}, {})", pretty(l), pretty(r)),
             BuiltinFn::Mean(args) => {
-                let args: Vec<_> = args.iter().map(|arg| pretty(arg)).collect();
+                let args: Vec<_> = args.iter().map(pretty).collect();
                 let string_args = args.join(", ");
                 format!("mean({})", string_args)
             }
@@ -2046,7 +2048,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Tan(l) => format!("tan({})", pretty(l)),
         },
         Expr::EvalModule(module, model_name, args) => {
-            let args: Vec<_> = args.iter().map(|arg| pretty(arg)).collect();
+            let args: Vec<_> = args.iter().map(pretty).collect();
             let string_args = args.join(", ");
             format!("eval<{}::{}>({})", module, model_name, string_args)
         }

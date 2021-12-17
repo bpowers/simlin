@@ -232,6 +232,7 @@ impl Stack {
 
 #[derive(Clone, Debug)]
 struct CompiledModuleSlice {
+    #[allow(dead_code)]
     ident: Ident,
     context: Rc<ByteCodeContext>,
     bytecode: Rc<ByteCode>,

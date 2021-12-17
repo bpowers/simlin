@@ -3185,8 +3185,8 @@ impl From<datamodel::Flow> for Flow {
             },
             initial_eqn: match &flow.equation {
                 Equation::Scalar(.., initial_eqn) => initial_eqn.clone(),
-                Equation::ApplyToAll(_, .., initial_eqn) => initial_eqn.clone(),
-                Equation::Arrayed(_, _) => None,
+                Equation::ApplyToAll(.., initial_eqn) => initial_eqn.clone(),
+                Equation::Arrayed(..) => None,
             },
             doc: if flow.documentation.is_empty() {
                 None
@@ -3335,8 +3335,8 @@ impl From<datamodel::Aux> for Aux {
             },
             initial_eqn: match &aux.equation {
                 Equation::Scalar(.., initial_eqn) => initial_eqn.clone(),
-                Equation::ApplyToAll(_, .., initial_eqn) => initial_eqn.clone(),
-                Equation::Arrayed(_, _) => None,
+                Equation::ApplyToAll(.., initial_eqn) => initial_eqn.clone(),
+                Equation::Arrayed(..) => None,
             },
             doc: if aux.documentation.is_empty() {
                 None
