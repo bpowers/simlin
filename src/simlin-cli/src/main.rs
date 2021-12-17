@@ -12,7 +12,10 @@ use pico_args::Arguments;
 use simlin_compat::engine::builtins::Loc;
 use simlin_compat::engine::common::{ErrorKind, UnitError};
 use simlin_compat::engine::datamodel::{Equation, Project as DatamodelProject};
-use simlin_compat::engine::{eprintln, serde, Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, project_io, datamodel};
+use simlin_compat::engine::{
+    datamodel, eprintln, project_io, serde, Error, ErrorCode, Project, Result, Results, Simulation,
+    Variable, Vm,
+};
 use simlin_compat::prost::Message;
 use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
 
@@ -123,14 +126,22 @@ fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
 
 fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
     let mut contents_buf: Vec<u8> = vec![];
-    reader
-        .read_until(0, &mut contents_buf)
-        .map_err(|_err| Error::new(ErrorKind::Import, ErrorCode::VensimConversion, Some("1".to_owned())))?;
+    reader.read_until(0, &mut contents_buf).map_err(|_err| {
+        Error::new(
+            ErrorKind::Import,
+            ErrorCode::VensimConversion,
+            Some("1".to_owned()),
+        )
+    })?;
 
     let project = match project_io::Project::decode(&*contents_buf) {
         Ok(project) => serde::deserialize(project),
         Err(err) => {
-            return Err(Error::new(ErrorKind::Import, ErrorCode::VensimConversion, Some(format!("{}", err))));
+            return Err(Error::new(
+                ErrorKind::Import,
+                ErrorCode::VensimConversion,
+                Some(format!("{}", err)),
+            ));
         }
     };
     Ok(project)
