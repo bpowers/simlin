@@ -8,7 +8,7 @@
   "private": true,
   "main": "lib",
   "dependencies": {
-    "@google-cloud/firestore": "^4.1.1",
+    "@google-cloud/firestore": "^5.0.1",
     "@google-cloud/trace-agent": "^5.0.0",
     "@iarna/toml": "^2.2.3",
     "@system-dynamics/core": "^1.0.0",
@@ -35,7 +35,7 @@
     "@types/cors": "^2.8.9",
     "@types/express": "^4.17.1",
     "@types/google-protobuf": "^3.7.2",
-    "@types/node": "^16.0.0",
+    "@types/node": "^17.0.0",
     "@types/passport": "^1.0.1",
     "@types/passport-strategy": "^0.2.35",
     "@types/serve-favicon": "^2.2.31",
