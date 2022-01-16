@@ -64,7 +64,7 @@
     "webpack-manifest-plugin": "^4.0.2"
   },
   "resolutions": {
-    "immer": "9.0.7"
+    "immer": "9.0.12"
   },
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
