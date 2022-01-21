@@ -16,7 +16,7 @@ wasm = ["wasm-bindgen"]
 lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
-lalrpop-util = "0.19.6"
+lalrpop-util = { version = "0.19", git = "https://github.com/bpowers/lalrpop", rev = "271ae7f182ebf8b44c3d242a06a46cfb024cd612" }
 prost = "0.9"
 float-cmp = "0.8"
 ordered-float = "2"
@@ -29,5 +29,5 @@ getrandom = { version = "0.2", features = [ "js" ] }
 rand = "0.8"
 
 [build-dependencies]
-lalrpop = "0.19.6"
+lalrpop = { version = "0.19", git = "https://github.com/bpowers/lalrpop", rev = "271ae7f182ebf8b44c3d242a06a46cfb024cd612" }
 prost-build = "0.9"

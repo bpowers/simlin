@@ -29,5 +29,6 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/bpowers/console_error_panic_hook",
+    "https://github.com/bpowers/lalrpop",
     "https://github.com/bpowers/test-generator",
 ]
