@@ -11447,9 +11447,9 @@ restore-cursor@^3.1.0:
     signal-exit "^3.0.2"
 
 resvg-wasm@^0.3.0:
-  version "0.3.0"
-  resolved "https://registry.yarnpkg.com/resvg-wasm/-/resvg-wasm-0.3.0.tgz#344c57e18b4c1bf03b20461ab23f82a2677b62c2"
-  integrity sha512-sZCQeuiEze6uHtCFRFYsjZDWASAVCrKoX6G0qbRQwyVgQgq5Ai2jJBFtDpiGHhggNVlZsmVv1T+rtcMdPkwEyQ==
+  version "0.3.1"
+  resolved "https://registry.yarnpkg.com/resvg-wasm/-/resvg-wasm-0.3.1.tgz#a91ba4ed53b2c2fc178e95ea1080c5c4910c112b"
+  integrity sha512-Hr0qap0be+eG5yI18bjER4hVev+k+enZDHabYdXrU0oymx+IGlA3zQBQLXa4e0sI0gar/6NhkzPCgeNpdOLHug==
 
 retry-request@^4.0.0, retry-request@^4.2.2:
   version "4.2.2"
