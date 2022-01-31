@@ -661,7 +661,7 @@ export const Canvas = styled(
       if (this.props.embedded) {
         return;
       }
-      if (!this.pointerId || this.pointerId !== e.pointerId) {
+      if (this.pointerId === undefined || this.pointerId !== e.pointerId) {
         return;
       }
       e.preventDefault();
