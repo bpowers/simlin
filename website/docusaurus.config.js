@@ -14,10 +14,6 @@ module.exports = {
   projectName: 'simlin', // Usually your repo name.
   trailingSlash: false,
   themeConfig: {
-    gtag: {
-      trackingID: 'G-DYC89XS4YM',
-      anonymizeIP: true,
-    },
     colorMode: {
       defaultMode: 'light',
       disableSwitch: true,
@@ -124,6 +120,10 @@ module.exports = {
         },
         sitemap: {
           changefreq: 'daily',
+        },
+        gtag: {
+          trackingID: 'G-DYC89XS4YM',
+          anonymizeIP: true,
         },
       },
     ],
