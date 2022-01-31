@@ -47,6 +47,7 @@ export const ModelPropertiesDrawer = styled(
     render() {
       const { className } = this.props;
       const { modelName, open } = this.props;
+      debugger;
       return (
         <SwipeableDrawer
           disableBackdropTransition={false}
