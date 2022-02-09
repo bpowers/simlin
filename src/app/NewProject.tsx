@@ -37,7 +37,7 @@ interface NewProjectState {
   isPublic?: boolean;
 }
 
-const readFile = (file: any): Promise<string> => {
+const readFile = (file: Blob): Promise<string> => {
   const reader = new FileReader();
 
   return new Promise((resolve, reject) => {
