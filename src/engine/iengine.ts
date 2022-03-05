@@ -12,7 +12,7 @@ export interface Engine {
    * @param {Function} callback
    * @returns {number}
    */
-  onChange(callback: Function): number;
+  onChange(callback: () => undefined): number;
   /**
    * @param {number} callback_id
    */

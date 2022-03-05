@@ -990,7 +990,9 @@ export const Editor = styled(
           window.URL.revokeObjectURL(url);
         })
         .catch((err) => {
-          this.appendModelError(err.msg);
+          if (err && err.hasOwnProperty('msg')) {
+            this.appendModelError(err.msg);
+          }
         });
     };
 
