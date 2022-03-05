@@ -234,6 +234,7 @@ export const NewProject = styled(
                         accept=".stmx,.itmx,.xmile,.mdl"
                         id="xmile-model-file"
                         type="file"
+                        /* eslint-disable-next-line @typescript-eslint/no-misused-promises */
                         onChange={this.uploadModel}
                       />
                     </Button>
