@@ -478,14 +478,13 @@ pub(crate) fn lower_variable(
             let mut errors = errors.clone();
             let ast = ast
                 .as_ref()
-                .map(|ast| match lower_ast(scope, ast.clone()) {
+                .and_then(|ast| match lower_ast(scope, ast.clone()) {
                     Ok(ast) => Some(ast),
                     Err(err) => {
                         errors.push(err);
                         None
                     }
-                })
-                .flatten();
+                });
             Variable::Stock {
                 ident: ident.clone(),
                 ast,
@@ -513,14 +512,13 @@ pub(crate) fn lower_variable(
             let mut errors = errors.clone();
             let ast = ast
                 .as_ref()
-                .map(|ast| match lower_ast(scope, ast.clone()) {
+                .and_then(|ast| match lower_ast(scope, ast.clone()) {
                     Ok(ast) => Some(ast),
                     Err(err) => {
                         errors.push(err);
                         None
                     }
-                })
-                .flatten();
+                });
             Variable::Var {
                 ident: ident.clone(),
                 ast,

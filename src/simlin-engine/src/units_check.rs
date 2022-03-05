@@ -40,8 +40,7 @@ impl<'a> UnitEvaluator<'a> {
                     self.model
                         .variables
                         .get(ident)
-                        .map(|var| var.units())
-                        .flatten()
+                        .and_then(|var| var.units())
                         .or_else(|| self.inferred_units.get(ident))
                         .ok_or_else(|| {
                             ConsistencyError(
@@ -72,8 +71,7 @@ impl<'a> UnitEvaluator<'a> {
                         .model
                         .variables
                         .get(ident)
-                        .map(|var| var.units())
-                        .flatten()
+                        .and_then(|var| var.units())
                         .or_else(|| self.inferred_units.get(ident))
                     {
                         Ok(Units::Explicit(units.clone()))

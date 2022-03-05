@@ -2,6 +2,9 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+// FIXME: remove when wasm-bindgen is updated past 0.2.79
+#![allow(clippy::unused_unit)]
+
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::{error, result};
@@ -329,7 +332,7 @@ pub fn canonicalize(name: &str) -> String {
         let part = if quoted {
             Cow::Borrowed(&part[1..bytes.len() - 1])
         } else {
-            Cow::Owned(part.replace(".", "·"))
+            Cow::Owned(part.replace('.', "·"))
         };
 
         let part = part.replace("\\\\", "\\");

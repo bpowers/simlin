@@ -2,9 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use wasm_bindgen::prelude::*;
+// FIXME: remove when wasm-bindgen is updated past 0.2.79
+#![allow(clippy::unused_unit)]
 
 use std::io::BufReader;
+
+use wasm_bindgen::prelude::*;
 
 use simlin_compat::engine::{self, project_io, serde};
 use simlin_compat::{open_xmile, prost, to_xmile as compat_to_xmile};
