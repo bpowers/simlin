@@ -1666,7 +1666,7 @@ export const Editor = styled(
       const { modelName } = this.state;
 
       const [svg, viewbox] = renderSvgToString(project, modelName);
-      const osCanvas = new globalThis.HTMLCanvasElement();
+      const osCanvas = document.createElement('canvas');
       osCanvas.width = viewbox.width * 4;
       osCanvas.height = viewbox.height * 4;
       const ctx = exists(osCanvas.getContext('2d'));
