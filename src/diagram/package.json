@@ -34,9 +34,9 @@
     "react-dom": "^17.0.1",
     "react-router": "^5.2.1",
     "react-router-dom": "^5.3.0",
-    "slate": "^0.73.1",
+    "slate": "^0.76.0",
     "slate-history": "^0.66.0",
-    "slate-react": "^0.74.0"
+    "slate-react": "^0.76.0"
   },
   "resolutions": {
     "@types/slate*/**/immutable": "4.0.0",
