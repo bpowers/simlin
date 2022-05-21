@@ -112,8 +112,10 @@ export const Sparkline = styled(
       const { className } = this.props;
       return (
         <g className={className}>
-          <path key="$axis" d={this.pAxis} className="simlin-sparkline-axis" />
-          {this.sparklines}
+          <>
+            <path key="$axis" d={this.pAxis} className="simlin-sparkline-axis" />
+            {this.sparklines}
+          </>
         </g>
       );
     }

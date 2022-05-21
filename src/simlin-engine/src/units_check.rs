@@ -108,9 +108,8 @@ impl<'a> UnitEvaluator<'a> {
                     // find the first non-constant argument
                     let arg0 = args
                         .iter()
-                        .filter(|arg| matches!(arg, Units::Explicit(_)))
-                        .cloned()
-                        .next();
+                        .find(|arg| matches!(arg, Units::Explicit(_)))
+                        .cloned();
                     match arg0 {
                         Some(arg0) => {
                             if args.iter().all(|arg| arg0.equals(arg)) {

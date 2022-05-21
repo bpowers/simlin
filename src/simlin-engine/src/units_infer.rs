@@ -145,9 +145,8 @@ impl<'a> UnitInferer<'a> {
                     // find the first non-constant argument
                     let arg0 = args
                         .iter()
-                        .filter(|arg| matches!(arg, Units::Explicit(_)))
-                        .cloned()
-                        .next();
+                        .find(|arg| matches!(arg, Units::Explicit(_)))
+                        .cloned();
                     match arg0 {
                         Some(Units::Explicit(arg0)) => {
                             for arg in args.iter() {

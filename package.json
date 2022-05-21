@@ -30,7 +30,7 @@
     "ts-protoc-gen": "^0.15.0"
   },
   "resolutions": {
-    "immer": "9.0.12"
+    "immer": "9.0.14"
   },
   "scripts": {
     "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier -l",

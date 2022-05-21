@@ -24,8 +24,8 @@
     "@babel/preset-typescript": "^7.12.7",
     "@pmmmwh/react-refresh-webpack-plugin": "^0.5.1",
     "@types/node": "^17.0.0",
-    "@types/react": "^17.0.0",
-    "@types/react-dom": "^17.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
     "@typescript-eslint/eslint-plugin": "^5.11.0",
     "@typescript-eslint/parser": "^5.11.0",
     "babel-loader": "^8.2.2",
@@ -64,7 +64,7 @@
     "webpack-manifest-plugin": "^5.0.0"
   },
   "resolutions": {
-    "immer": "9.0.12"
+    "immer": "9.0.14"
   },
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
