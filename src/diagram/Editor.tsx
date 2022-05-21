@@ -64,7 +64,6 @@ import { FlowIcon } from './FlowIcon';
 import { LinkIcon } from './LinkIcon';
 import { ModelPropertiesDrawer } from './ModelPropertiesDrawer';
 import { renderSvgToString } from './render-common';
-import { Snapshotter } from './Snapshotter';
 import { Status } from './Status';
 import { StockIcon } from './StockIcon';
 import { UndoRedoBar } from './UndoRedoBar';
@@ -1719,7 +1718,7 @@ export const Editor = styled(
       return (
         <div className="simlin-editor-undoredobar">
           <UndoRedoBar undoEnabled={undoEnabled} redoEnabled={redoEnabled} onUndoRedo={this.handleUndoRedo} />
-          <Snapshotter onSnapshot={this.handleSnapshot} />
+          {/*<Snapshotter onSnapshot={this.handleSnapshot} />*/}
           <ZoomBar zoom={zoom} onChangeZoom={this.handleZoomChange} />
         </div>
       );
