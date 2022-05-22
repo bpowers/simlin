@@ -252,7 +252,7 @@ export const Login = styled(
                     <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
                       Cancel
                     </Button>
-                    { /* eslint-disable-next-line @typescript-eslint/no-misused-promises */ }
+                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
                     <Button type="submit" variant="contained" onClick={this.onSubmitEmail}>
                       Next
                     </Button>
@@ -304,7 +304,7 @@ export const Login = styled(
                         Trouble signing in?
                       </Link>
                     </Typography>
-                    { /* eslint-disable-next-line @typescript-eslint/no-misused-promises */ }
+                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
                     <Button type="submit" variant="contained" onClick={this.onEmailLogin}>
                       Sign in
                     </Button>
@@ -364,7 +364,7 @@ export const Login = styled(
                     <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
                       Cancel
                     </Button>
-                    { /* eslint-disable-next-line @typescript-eslint/no-misused-promises */ }
+                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
                     <Button type="submit" variant="contained" onClick={this.onSubmitNewUser}>
                       Save
                     </Button>
@@ -437,7 +437,7 @@ export const Login = styled(
                     <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
                       Cancel
                     </Button>
-                    { /* eslint-disable-next-line @typescript-eslint/no-misused-promises */ }
+                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
                     <Button type="submit" variant="contained" onClick={this.onSubmitRecovery}>
                       Send
                     </Button>
