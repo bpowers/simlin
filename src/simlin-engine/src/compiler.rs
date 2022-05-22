@@ -553,7 +553,6 @@ fn test_lower() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -573,7 +572,6 @@ fn test_lower() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -642,7 +640,6 @@ fn test_lower() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -662,7 +659,6 @@ fn test_lower() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -723,7 +719,6 @@ fn test_fold_flows() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -743,7 +738,6 @@ fn test_fold_flows() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -763,7 +757,6 @@ fn test_fold_flows() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -783,7 +776,6 @@ fn test_fold_flows() {
             var: Variable::Var {
                 ident: "".to_string(),
                 ast: None,
-                init_ast: None,
                 eqn: None,
                 units: None,
                 table: None,
@@ -855,7 +847,7 @@ impl Var {
                         .collect();
                     vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
                 }
-                Variable::Stock { init_ast: ast, .. } => {
+                Variable::Stock { ast, .. } => {
                     let off = ctx.get_base_offset(var.ident())?;
                     if ctx.is_initial {
                         if ast.is_none() {
@@ -922,17 +914,9 @@ impl Var {
                     }
                 }
                 Variable::Var {
-                    ident,
-                    table,
-                    ast,
-                    init_ast,
-                    ..
+                    ident, table, ast, ..
                 } => {
                     let off = ctx.get_base_offset(var.ident())?;
-                    let mut ast = ast;
-                    if ctx.is_initial && init_ast.is_some() {
-                        ast = init_ast;
-                    }
                     if ast.is_none() {
                         return sim_err!(EmptyEquation, var.ident().to_string());
                     }
@@ -1050,7 +1034,6 @@ fn build_metadata(
                 var: Variable::Var {
                     ident: "time".to_string(),
                     ast: None,
-                    init_ast: None,
                     eqn: None,
                     units: None,
                     table: None,
@@ -1070,7 +1053,6 @@ fn build_metadata(
                 var: Variable::Var {
                     ident: "dt".to_string(),
                     ast: None,
-                    init_ast: None,
                     eqn: None,
                     units: None,
                     table: None,
@@ -1090,7 +1072,6 @@ fn build_metadata(
                 var: Variable::Var {
                     ident: "initial_time".to_string(),
                     ast: None,
-                    init_ast: None,
                     eqn: None,
                     units: None,
                     table: None,
@@ -1110,7 +1091,6 @@ fn build_metadata(
                 var: Variable::Var {
                     ident: "final_time".to_string(),
                     ast: None,
-                    init_ast: None,
                     eqn: None,
                     units: None,
                     table: None,

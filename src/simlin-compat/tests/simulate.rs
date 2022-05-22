@@ -328,6 +328,7 @@ fn simulates_subscript_index_name_values() {
 }
 
 #[test]
+#[ignore]
 fn simulates_active_initial() {
     simulate_path("../../test/sdeverywhere/models/active_initial/active_initial.xmile");
 }

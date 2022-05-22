@@ -208,12 +208,7 @@ fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
     if var.is_module() {
         module_deps(ctx, var, &is_stock)
     } else {
-        let ast = if ctx.is_initial {
-            var.init_ast()
-        } else {
-            var.ast()
-        };
-        match ast {
+        match var.ast() {
             Some(ast) => identifier_set(ast, ctx.dimensions, ctx.module_inputs)
                 .into_iter()
                 .collect(),
@@ -471,7 +466,7 @@ pub(crate) fn lower_variable(
     match var_s0 {
         Variable::Stock {
             ident,
-            init_ast: ast,
+            ast,
             eqn,
             units,
             inflows,
@@ -492,7 +487,7 @@ pub(crate) fn lower_variable(
                 });
             Variable::Stock {
                 ident: ident.clone(),
-                init_ast: ast,
+                ast,
                 eqn: eqn.clone(),
                 units: units.clone(),
                 inflows: inflows.clone(),
@@ -505,7 +500,6 @@ pub(crate) fn lower_variable(
         Variable::Var {
             ident,
             ast,
-            init_ast,
             eqn,
             units,
             table,
@@ -525,19 +519,9 @@ pub(crate) fn lower_variable(
                         None
                     }
                 });
-            let init_ast = init_ast
-                .as_ref()
-                .and_then(|ast| match lower_ast(scope, ast.clone()) {
-                    Ok(ast) => Some(ast),
-                    Err(err) => {
-                        errors.push(err);
-                        None
-                    }
-                });
             Variable::Var {
                 ident: ident.clone(),
                 ast,
-                init_ast,
                 eqn: eqn.clone(),
                 units: units.clone(),
                 table: table.clone(),

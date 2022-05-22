@@ -600,7 +600,6 @@ pub(crate) fn infer(
         time: Variable::Var {
             ident: "time".to_string(),
             ast: None,
-            init_ast: None,
             eqn: None,
             units: Some([(time_units, 1)].iter().cloned().collect()),
             table: None,
