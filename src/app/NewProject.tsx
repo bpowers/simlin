@@ -242,7 +242,7 @@ export const NewProject = styled(
                   <Grid item xs={12}>
                     <Typography>
                       <Checkbox checked={this.state.isPublic} onChange={this.handlePublicChecked} />
-                      Publically accessible
+                      Publicly accessible
                     </Typography>
                   </Grid>
                 </Grid>
