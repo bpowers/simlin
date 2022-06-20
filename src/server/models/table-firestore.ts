@@ -18,7 +18,7 @@ interface Schema {
   // with Firestore, you specify the document name separately from the contents
   // _id: string;
   // additional stuff
-  value: any;
+  [x: string]: any;
 }
 
 export class FirestoreTable<T extends Message> implements Table<T> {
