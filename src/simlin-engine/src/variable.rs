@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
@@ -292,7 +292,7 @@ fn parse_equation(
         }
         datamodel::Equation::Arrayed(dimension_names, elements) => {
             let mut errors: Vec<EquationError> = vec![];
-            let elements: Vec<_> = elements
+            let elements: HashMap<_, _> = elements
                 .iter()
                 .map(|(subscript, eqn, init_eqn)| {
                     let (ast, single_errors) = if !is_initial {
@@ -310,10 +310,13 @@ fn parse_equation(
                 .collect();
 
             match get_dimensions(dimensions, dimension_names) {
-                Ok(dims) => (
-                    Some(Ast::Arrayed(dims, elements.iter().cloned().collect())),
-                    errors,
-                ),
+                Ok(dims) => {
+                    if elements.is_empty() {
+                        (None, errors)
+                    } else {
+                        (Some(Ast::Arrayed(dims, elements)), errors)
+                    }
+                }
                 Err(err) => {
                     errors.push(err);
                     (None, errors)

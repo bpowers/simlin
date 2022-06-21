@@ -921,18 +921,13 @@ impl Var {
                         }
                     }
                 }
-                Variable::Var {
-                    ident,
-                    table,
-                    ast,
-                    init_ast,
-                    ..
-                } => {
+                Variable::Var { ident, table, .. } => {
                     let off = ctx.get_base_offset(var.ident())?;
-                    let mut ast = ast;
-                    if ctx.is_initial && init_ast.is_some() {
-                        ast = init_ast;
-                    }
+                    let ast = if ctx.is_initial {
+                        var.init_ast()
+                    } else {
+                        var.ast()
+                    };
                     if ast.is_none() {
                         return sim_err!(EmptyEquation, var.ident().to_string());
                     }
