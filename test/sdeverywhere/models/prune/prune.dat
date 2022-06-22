@@ -230,6 +230,26 @@ Test 12 Result
 10	1
 Test 12 T
 0	1
+Test 13 Cond
+0	1
+Test 13 F
+0	2
+Test 13 Result
+0	80
+1	80
+2	80
+3	80
+4	80
+5	80
+6	80
+7	80
+8	80
+9	80
+10	80
+Test 13 T1
+0	1
+Test 13 T2
+0	7
 Test 2 F
 0	2
 Test 2 Result

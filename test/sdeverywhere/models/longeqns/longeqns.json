@@ -1,0 +1,5 @@
+{
+  "name": "longeqns",
+  "inputVars": [],
+  "outputVars": ["_time", "_result"]
+}

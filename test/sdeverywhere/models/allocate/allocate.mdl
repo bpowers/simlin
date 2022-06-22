@@ -1,0 +1,248 @@
+{UTF-8}
+shipments[region]=
+	ALLOCATE AVAILABLE(demand[region], priority vector[region,ptype], total supply available)
+	~	Widget/Month
+	~		|
+
+total supply available=
+	IF THEN ELSE(integer supply
+	,INTEGER(Initial Supply
+	+ (Final Supply-Initial Supply) * (Time-INITIAL TIME)/(FINAL TIME-INITIAL TIME))
+	,Initial Supply + (Final Supply-Initial Supply) * (Time-INITIAL TIME)/(FINAL TIME-INITIAL TIME\
+		))
+	~	Widget/Month
+	~	Test input for total supply - creates a ramp over time.
+	|
+
+integer supply=
+	0
+	~	dmnl [0,1,1]
+	~		|
+
+total demand=
+	SUM(demand[region!])
+	~	Widget/Month
+	~		|
+
+total shipments=
+	SUM(shipments[region!])
+	~	Widget/Month
+	~		|
+
+extra=
+	1
+	~	dmnl [0.2,5]
+	~	Extra parameter - used for elasticity when allocation is CES (ptype=5)
+	|
+
+priority[region]=
+	1,2,3
+	~	dmnl
+	~		|
+
+Final Supply=
+	10
+	~	Widget/Month
+	~		|
+
+Initial Supply=
+	0
+	~	Widget/Month
+	~		|
+
+integer type=
+	0
+	~	dmnl [0,10,10]
+	~	Set to 10 for integer allocations; otherwise 0.
+	|
+
+region:
+	Boston,Dayton,Fresno
+	~
+	~		|
+
+XPriority : ptype, ppriority, pwidth, pextra
+	~
+	~		|
+
+demand[region]=
+	3,2,4
+	~	Widget/Month
+	~		|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+priority vector[region,ptype]=
+	priority type+integer type ~~|
+priority vector[region,ppriority]=
+	priority[region] ~~|
+priority vector[region,pwidth]=
+	priority width ~~|
+priority vector[region,pextra]=
+	extra
+	~	dmnl
+	~		|
+
+priority width=
+	1
+	~	dmnl [0.01,5]
+	~		|
+
+priority type=
+	3
+	~	dmnl [0,5,1]
+	~	ptype 0 - Fixed Quantity
+		ptype 1 - Rectangular
+		ptype 2 - Triangular
+		ptype 3 - Normal
+		ptype 4 - Exponential
+		ptype 5 - Constant Elasticity
+	|
+
+FINAL TIME  = 12
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.125
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
+12,1,0,441,50,94,52,8,135,0,18,-1,0,0,0,-1--1--1,0-0-0,|12|B|128-0-0,0,0,0,0,0,0
+ALLOCATE AVAILABLE - one-sided market allocating a total quantity to multiple suppliers or demanders
+10,2,demand,222,166,28,17,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|U|0-0-0,0,0,0,0,0,0
+10,3,priority vector,240,275,46,17,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|U|0-0-0,0,0,0,0,0,0
+10,4,shipments,363,207,36,17,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|BU|0-0-0,0,0,0,0,0,0
+1,5,2,4,0,0,0,0,0,0,0,-1--1--1,,1|(281,183)|
+1,6,3,4,0,0,0,0,0,0,0,-1--1--1,,1|(294,244)|
+10,7,total supply available,534,201,66,17,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,8,7,4,0,0,0,0,0,0,0,-1--1--1,,1|(440,203)|
+10,9,extra,118,376,20,17,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,10,9,3,0,0,0,0,0,64,0,-1--1--1,,1|(173,330)|
+10,11,priority,117,324,27,17,8,3,0,16,-1,0,0,0,0-0-0,0-0-0,|12|U|0-0-0,0,0,0,0,0,0
+1,12,11,3,0,0,0,0,0,64,0,-1--1--1,,1|(164,305)|
+10,13,priority width,112,273,44,17,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,14,13,3,0,0,0,0,0,64,0,-1--1--1,,1|(168,273)|
+10,15,priority type,118,226,41,17,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,16,15,3,0,0,0,0,0,64,0,-1--1--1,,1|(171,247)|
+10,17,Final Supply,698,341,42,17,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,18,17,7,0,0,0,0,0,64,0,-1--1--1,,1|(621,275)|
+10,19,FINAL TIME,714,291,53,17,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128,0,0,0,0,0,0
+1,20,19,7,0,0,0,0,0,64,0,-1--1--1,,1|(630,249)|
+10,21,Initial Supply,716,198,44,17,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,22,21,7,0,0,0,0,0,64,0,-1--1--1,,1|(642,198)|
+10,23,INITIAL TIME,698,144,58,17,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128,0,0,0,0,0,0
+1,24,23,7,0,0,0,0,0,64,0,-1--1--1,,1|(622,170)|
+10,25,Time,707,245,28,17,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12||128-128-128,0,0,0,0,0,0
+1,26,25,7,0,0,0,0,0,64,0,-1--1--1,,1|(646,229)|
+12,27,0,221,576,196,155,3,188,0,0,1,0,0,0,0,0,0,0,0,0
+Allocation
+10,28,integer type,118,181,39,17,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,29,28,3,0,0,0,0,0,64,0,-1--1--1,,1|(172,223)|
+10,30,total shipments,380,150,48,17,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,31,4,30,0,0,0,0,0,64,0,-1--1--1,,1|(369,185)|
+12,32,0,425,350,127,63,8,135,0,4,-1,0,0,0,-1--1--1,255-255-128,|12||0-0-0,0,0,0,0,0,0
+Underlined variables are subscripted by Region (priority type, width, and extra could also be subscripted, but normally it makes sense to use the same shape for each entity).
+10,33,integer supply,609,113,46,17,8,3,0,0,-1,0,0,0,0,0,0,0,0,0
+1,34,33,7,0,0,0,0,0,64,0,-1--1--1,,1|(576,151)|
+12,35,0,631,576,206,155,3,188,0,0,2,0,0,0,0,0,0,0,0,0
+shipments[region],graph
+10,36,total demand,284,105,42,17,8,3,0,0,0,0,0,0,0,0,0,0,0,0
+1,37,2,36,0,0,0,0,0,64,0,-1--1--1,,1|(247,140)|
+///---\\\
+:GRAPH Allocation
+:TITLE Allocation
+:X-AXIS total supply available
+:SCALE
+:VAR Shipments[region]
+:L<%^E!@
+1:allocate.vdfx
+1:SalesData.vdfx
+4:Time
+5:priority type
+6:Boston
+6:Dayton
+6:Fresno
+6:ptype
+9:allocate
+19:100,0
+24:0
+25:12
+26:12
+57:1
+54:0
+55:0
+82:0
+86:0
+59:0
+56:0
+58:0
+71:0
+44:65001
+46:0
+45:0
+49:0
+50:0
+51:
+52:
+53:
+43:allocate
+47:allocate
+48:
+22:$,Dollar,Dollars,$s
+22:Hour,Hours
+22:Month,Months
+22:Person,People,Persons
+22:Unit,Units
+22:Week,Weeks
+22:Year,Years
+22:Day,Days
+31:1,SalesData
+32:11,Boston
+33:(0,0),(1,2),(2,0),(3,0),(4,1),(5,3),(6,7),(7,4),(8,0),(9,0),(10,0),
+15:0,0,0,0,0,0
+27:0,
+34:0,
+42:0
+72:0
+73:0
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+95:0
+96:0
+97:0
+77:0
+78:0
+93:0
+94:0
+92:0
+91:0
+90:0
+87:0
+75:
+43:allocate

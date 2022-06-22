@@ -1,0 +1,131 @@
+{UTF-8}
+
+" quotes 2 with extra whitespace "  = 1
+	~ dmnl
+	~ Comment
+	|
+
+"Quotes 1"  = 1
+	~ dmnl
+	~ Comment
+	|
+
+apple 3  = 1
+	~ dmnl
+	~ Comment
+	|
+
+banana 3  =   	
+  Banana 1
+    * Banana 2
+	~ dmnl
+	~ Comment
+	|
+
+carrot 2  = 1  
+	~ dmnl  
+	~ Comment
+	|
+
+Look2((0,0),(1,1),(2,2))
+	~~|
+
+Look1((0,0),(1,1),(2,2))
+	~~|
+
+Apple 2  = 1   
+	~ dmnl
+	~ Comment
+	|
+
+carrot 1  = 1
+	~ dmnl
+	~ Comment
+	|
+
+Banana 2  = 1
+	~ dmnl
+	~ Comment
+	|
+
+Banana 1  = 1
+	~ dmnl
+	~ Comment
+	|
+
+Apple 1  = 1
+	~ dmnl
+	~ Comment
+	|
+
+dimB: B1, B2, B3
+  ~~|
+
+DimA: A1, A2, A3
+  ~~|
+
+DimAExceptA1: A2, A3
+  ~~|
+
+Equation with backslashes[DimAExceptA1\
+  ] = \
+  1
+  ~ dmnl
+  ~ Comment \
+    x = 1 y = 2
+  |
+
+Equation with backslashes[A1\
+  ] = \
+  2
+  ~ dmnl
+  ~ Comment \
+    x = 1 y = 2
+  |
+
+Equation without backslashes[DimAExceptA1
+  ] = 
+  1
+  ~ dmnl
+  ~ Comment
+    x = 1 y = 2
+  |
+
+Equation without backslashes[A1
+  ] = 
+  2
+  ~ dmnl
+  ~ Comment
+    x = 1 y = 2
+  |
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Parameters
+	|
+
+FINAL TIME  = 10
+	~	Month
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Month
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  =
+        TIME STEP
+	~	Month [0,?]
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 1
+	~	Month [0,?]
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1

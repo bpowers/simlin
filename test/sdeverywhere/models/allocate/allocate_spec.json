@@ -1,0 +1,4 @@
+{
+  "name": "ALLOCATE AVAILABLE test model",
+  "outputVars": ["_time", "_shipments[0]", "_shipments[1]", "_shipments[2]", "_total_supply_available"]
+}

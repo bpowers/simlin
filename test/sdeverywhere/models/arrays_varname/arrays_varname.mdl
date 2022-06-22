@@ -2,6 +2,7 @@
 DimA: A1, A2, A3 -> DimB ~~|
 DimB: B1, B2, B3 ~~|
 DimC: C1, C2, C3 ~~|
+DimC': DimC ~~|
 DimD: D1, D2, D3, D4 ~~|
 SubA: A2, A3 ~~|
 DimX: SubA, A1 ~~|
@@ -93,6 +94,14 @@ s[DimA,DimD]=
 	~	2D constant array
 	|
 
+sc[DimC,DimC']=
+	11,12,13;
+	21,22,23;
+	31,32,33;
+	~
+	~	2D constant array where dimensions have matching subscript names
+	|
+
 s1d[DimA] = 1 ~~|
 s1i[A1] = 1 ~~|
 
@@ -125,7 +134,52 @@ y[DimD,DimA]=
 	~	2D constant array with dimensions not in normal order
 	|
 
+z[C1, DimA, DimB]=
+  110, 111, 112;
+  120, 121, 122;
+  130, 131, 132;
+	~
+	~	2D constant array with additional index subscript (1/2)
+	|
+
+z[C2, DimA, DimB]=
+  210, 211, 212;
+  220, 221, 222;
+  230, 231, 232;
+	~
+	~	2D constant array with additional index subscript (2/2)
+	|
+
+ndim4[DimA, DimB, DimC, DimD] = 4
+	~
+	~	4D constant array
+	|
+
 INITIAL TIME = 0 ~~|
 FINAL TIME = 1 ~~|
 TIME STEP = 1 ~~|
 SAVEPER = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:arrays_varname
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

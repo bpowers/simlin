@@ -1,5 +1,5 @@
 {
   "name": "Arrays test model (where the spec file contains Vensim variable names)",
   "inputVarNames": ["inputA[A1]", "inputA[A2]", "inputA[A3]"],
-  "outputVarNames": ["Time", "a[A1]", "a[A2]", "a[A3]", "f[A1,B1]", "f[A1,B2]", "f[A1,B3]", "h"]
+  "outputVarNames": ["Time", "a[A1]", "a[A2]", "a[A3]", "f[A1,B1]", "f[A1,B2]", "f[A1,B3]", "h", "ndim4[A3,B3,C3,D4]"]
 }

@@ -1,5 +1,9 @@
 {UTF-8}
 DimA: A1, A2 ~~|
+DimB: B1, B2 ~~|
+DimC <-> DimM ~~|
+DimM: M1, M2, M3 ~~|
+SubM: M2, M3 ~~|
 
 a[DimA] := GET DIRECT DATA('?data', 'A Data', 'A', 'B2') ~~|
 b[DimA] = a[DimA] * 10 ~~~:SUPPLEMENTARY|
@@ -13,46 +17,60 @@ f[DimA] = e[DimA] * 10 ~~~:SUPPLEMENTARY|
 g:= GET DIRECT DATA('g_data.csv', ',', 'A', 'B2') ~~|
 h = g * 10 ~~~:SUPPLEMENTARY|
 
+i[A1, DimB] = GET DIRECT DATA('e_data.csv', ',', 'A', 'B2')
+~
+~ multiple LHS subscripts
+|
+j[A1, DimB] = i[A1, DimB] ~~~:SUPPLEMENTARY|
+
+k[A1, DimB] = GET DIRECT DATA('e_data.csv', ',', 'A', 'B2') ~~|
+k[A2, DimB] = 0 ~~|
+l[DimA, DimB] = k[DimA, DimB] ~~|
+
+m[DimM] = GET DIRECT DATA( 'm.csv', ',', '1', 'B2' ) ~~|
+n = m[M2] ~~|
+
+o[DimM] = GET DIRECT DATA( 'mt.csv', ',', 'A', 'B2' ) ~~|
+p = o[M2] ~~|
+
+q[SubM] = GET DIRECT DATA('e_data.csv', ',', 'A', 'B2')
+~
+~ CSV table mapped to a subdimension
+|
+r = q[M3] ~~|
+
 ********************************************************
 	.Control
 ********************************************************~
 		Simulation Control Parameters
 	|
 
-FINAL TIME = 2050 ~~|
 INITIAL TIME = 1990 ~~|
-SAVEPER = TIME STEP ~~|
+FINAL TIME = 2050 ~~|
 TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
 
 \\\---/// Sketch information - do not modify anything except names
 V300  Do not put anything below this section - it will be ignored
 *View 1
-$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|0,0,100,0
+$192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|96,96,100,0
 ///---\\\
 :L<%^E!@
-1:directdata.vdf
-9:directdata
-30:?data=data.xlsx
-15:0,0,0,0,0,0
-19:100,0
-27:0,
-34:0,
+1:directdata.vdfx
 4:Time
 5:FINAL TIME
-35:Date
-36:YYYY-MM-DD
-37:2000
-38:1
-39:1
-40:2
-41:0
-42:0
+6:A1
+6:B1
+9:directdata
+19:100,0
 24:1990
 25:2050
 26:2050
 57:1
 54:0
 55:0
+82:0
+86:0
 59:0
 56:0
 58:0
@@ -68,4 +86,30 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|0,0,100
 43:directdata
 47:directdata
 48:
-6:A1
+30:?data=data.xlsx
+15:0,0,0,0,0,0
+27:0,
+34:0,
+42:0
+72:0
+73:0
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+95:0
+96:0
+97:0
+77:0
+78:0
+93:0
+94:0
+92:0
+91:0
+90:0
+87:0
+75:
+43:directdata

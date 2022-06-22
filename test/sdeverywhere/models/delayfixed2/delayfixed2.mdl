@@ -1,0 +1,35 @@
+{UTF-8}
+input1 = 10 * TIME + 10 ~~|
+output1 = DELAY FIXED(input1, 1, 0) ~~|
+
+input2 = 10 * TIME + 10 ~~|
+output2 = DELAY FIXED(input2, 5, 0) ~~|
+
+INITIAL TIME = 10 ~~|
+FINAL TIME = 20 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:delayfixed2
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

@@ -18,7 +18,69 @@ j[DimA] = a[DimA] / SUM(b[DimA!]) ~~|
 k[SubA] = SUM(b 2[SubA!]) ~~|
 l[SubA] = a 2[SubA] / SUM(b 2[SubA!]) ~~|
 
+DimD: D1, D2 ~~|
+DimE: E1, E2 ~~|
+DimF: F1, F2 ~~|
+
+m[D1, E1] = 11 ~~|
+m[D1, E2] = 12 ~~|
+m[D2, E1] = 21 ~~|
+m[D2, E2] = 22 ~~|
+msum[DimD] = SUM(m[DimD, DimE!])
+~
+~
+2 separated dimensions
+|
+
+n[D1, E1, F1] = 111 ~~|
+n[D1, E1, F2] = 112 ~~|
+n[D1, E2, F1] = 121 ~~|
+n[D1, E2, F2] = 122 ~~|
+n[D2, E1, F1] = 211 ~~|
+n[D2, E1, F2] = 212 ~~|
+n[D2, E2, F1] = 221 ~~|
+n[D2, E2, F2] = 222 ~~|
+nsum[DimD, DimE] = SUM(n[DimD, DimE, DimF!])
+~
+~
+3 separated dimensions
+|
+
+o[D1, DimE, F1] = 111 ~~|
+o[D1, DimE, F2] = 112 ~~|
+o[D2, DimE, F1] = 211 ~~|
+o[D2, DimE, F2] = 212 ~~|
+osum[DimD, DimE] = SUM(o[DimD, DimE, DimF!])
+~
+~
+2 separated dimensions with 1 unseparated dimension
+|
+
 INITIAL TIME = 0 ~~|
 FINAL TIME = 1 ~~|
 TIME STEP = 1 ~~|
 SAVEPER = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:sum
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

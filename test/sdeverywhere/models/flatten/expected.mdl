@@ -1,0 +1,84 @@
+{UTF-8}
+
+Apple 1  = 1
+	~~|
+
+Apple 2  = 1
+	~~|
+
+apple 3  = 1
+	~~|
+
+Banana 1  = 1
+	~~|
+
+Banana 2  = 1
+	~~|
+
+banana 3  =
+  Banana 1
+    * Banana 2
+	~~|
+
+carrot 1  = 1
+	~~|
+
+carrot 2  = 1
+	~~|
+
+DimA: A1, A2, A3
+	~~|
+
+DimAExceptA1: A2, A3
+	~~|
+
+dimB: B1, B2, B3
+	~~|
+
+Equation with backslashes[A1] = 2
+	~~|
+
+Equation with backslashes[DimAExceptA1] = 1
+	~~|
+
+Equation without backslashes[A1
+  ] =
+  2
+	~~|
+
+Equation without backslashes[DimAExceptA1
+  ] =
+  1
+	~~|
+
+FINAL TIME  = 10
+	~~|
+
+INITIAL TIME  = 0
+	~~|
+
+Look1((0,0),(1,1),(2,2))
+	~~|
+
+Look2((0,0),(1,1),(2,2))
+	~~|
+
+"Quotes 1"  = 1
+	~~|
+
+" quotes 2 with extra whitespace "  = 1
+	~~|
+
+SAVEPER  =
+        TIME STEP
+	~~|
+
+TIME STEP  = 1
+	~~|
+
+Using equation with backslashes[DimA] = Equation with backslashes[DimA] * 2
+	~~|
+
+Using equation without backslashes[DimA] = Equation without backslashes[DimA] * 2
+	~~|
+

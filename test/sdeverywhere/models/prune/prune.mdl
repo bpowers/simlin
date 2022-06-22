@@ -362,6 +362,28 @@ Test 12 Result = IF THEN ELSE(Test 12 Cond :OR: ABS(Test 12 Cond), Test 12 T, Te
 	~	:SUPPLEMENTARY 
 	|
 
+Test 13 Cond = 1
+	~	dmnl
+	~		|
+
+Test 13 T1 = 1
+	~	dmnl
+	~		|
+
+Test 13 T2 = 7
+	~	dmnl
+	~		|
+
+Test 13 F = 2
+	~	dmnl
+	~		|
+
+Test 13 Result = IF THEN ELSE(Test 13 Cond, Test 13 T1 + Test 13 T2, Test 13 F) * 10.0
+	~	dmnl
+	~	Should generate "(Test 13 T1 + Test 13 T2) * 10.0" with parentheses included.
+	~	:SUPPLEMENTARY 
+	|
+
 ********************************************************
 	.Control
 ********************************************************~

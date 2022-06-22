@@ -1,7 +1,7 @@
 #!/bin/bash
 
 MODEL_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-SDE='node ../../src/sde.js'
+SDE='node ../../packages/cli/src/main.js'
 
 cd $MODEL_DIR
 $SDE generate --preprocess comments.mdl

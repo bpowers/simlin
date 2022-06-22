@@ -1,0 +1,43 @@
+{UTF-8}
+
+DimW: W1, W2, W3 ~~|
+DimX: X1, X2, X3 ~~|
+DimY: Y1, Y2, Y3 ~~|
+DimZ: Z1, Z2, Z3 ~~|
+
+EqnA[DimX,DimY] = 1 ~~|
+EqnB[DimX,DimW] = 1 ~~|
+
+EqnC[DimX,DimY\
+		,DimZ]=
+	EqnA[DimX,DimY\
+		]
+	*
+	(
+	  -SUM(EqnB[DimX\
+		,DimW
+!])
+
+	  - (
+	      SUM(EqnB[DimX\
+		,DimW!])
+	      - SUM(EqnB[DimX\
+		,DimW
+!])
+	    )
+	    * EqnA[DimX\
+		,DimY]
+	)
+  ~
+  ~ Based on long equation with multiple line breaks from EPS model.
+    See original equation in this issue:
+      https://github.com/climateinteractive/SDEverywhere/issues/174)
+  |
+
+Result = EqnC[X1, Y1, Z1]
+  ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 1 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|

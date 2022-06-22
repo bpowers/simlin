@@ -1,0 +1,47 @@
+{UTF-8}
+receiving = DELAY FIXED(shipping, shipping time, shipping) ~~|
+shipping = STEP(reference shipping rate, 10) - STEP(reference shipping rate, 20) ~~|
+shipping time = 20 ~~|
+reference shipping rate = 1 ~~|
+shipments in transit = INTEG(shipping - receiving, shipping * shipping time) ~~|
+
+DimA: A1, A2, A3 ~~|
+input[A1] = 10 * TIME ~~|
+input[A2] = 20 * TIME ~~|
+input[A3] = 30 * TIME ~~|
+output[DimA] = DELAY FIXED(input[DimA], 1, 0) ~~|
+
+a delay time = 0 ~~|
+a = DELAY FIXED(input[A1] + 1, a delay time, 0) ~~|
+
+b delay time = 1 ~~|
+b = DELAY FIXED(input[A1] + 1, b delay time, 0) ~~|
+
+INITIAL TIME = 0 ~~|
+FINAL TIME = 50 ~~|
+TIME STEP = 1 ~~|
+SAVEPER = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:delayfixed
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

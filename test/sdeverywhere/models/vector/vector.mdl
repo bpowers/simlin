@@ -46,7 +46,33 @@ v = VMAX(x[SubX!]) ~~|
 w = VMIN(x[DimX!]) ~~|
 x[DimX] = 1, 2, 3, 4, 5 ~~|
 
+y[DimA] = VECTOR ELM MAP(x[three], (DimA - 1)) ~~|
+
 INITIAL TIME  = 0 ~~|
 FINAL TIME  = 1 ~~|
 TIME STEP  = 1 ~~|
 SAVEPER  = TIME STEP ~~|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$0-0-0,0,|0||0-0-0|0-0-0|0-0-0|0-0-0|0-0-0|0,0,100,0
+///---\\\
+:L<%^E!@
+9:vector
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+5:FINAL TIME
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:1
+24:0
+25:0
+26:0

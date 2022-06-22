@@ -1,57 +1,10 @@
-_dima:
-{ modelName: 'DimA',
-  modelValue: [ 'A1', 'A2', 'A3' ],
-  modelMappings: [],
-  name: '_dima',
-  value: [ '_a1', '_a2', '_a3' ],
-  size: 3,
-  family: '_dima',
-  mappings: {} }
-
-_dimc:
-{ modelName: 'DimC',
-  modelValue: [ 'C1', 'C2', 'C3' ],
-  modelMappings: [],
-  name: '_dimc',
-  value: [ '_c1', '_c2', '_c3' ],
-  size: 3,
-  family: '_dimc',
-  mappings: {} }
-
-_suba:
-{ modelName: 'SubA',
-  modelValue: [ 'A2', 'A3' ],
-  modelMappings: [],
-  name: '_suba',
-  value: [ '_a2', '_a3' ],
-  size: 2,
-  family: '_dima',
-  mappings: {} }
-
-_a1:
-{ name: '_a1', value: 0, size: 1, family: '_dima', mappings: {} }
-
-_a2:
-{ name: '_a2', value: 1, size: 1, family: '_dima', mappings: {} }
-
-_a3:
-{ name: '_a3', value: 2, size: 1, family: '_dima', mappings: {} }
-
-_c1:
-{ name: '_c1', value: 0, size: 1, family: '_dimc', mappings: {} }
-
-_c2:
-{ name: '_c2', value: 1, size: 1, family: '_dimc', mappings: {} }
-
-_c3:
-{ name: '_c3', value: 2, size: 1, family: '_dimc', mappings: {} }
-
 a[DimA]: const (non-apply-to-all)
 = 1,2,3
 refId(_a[_a1])
 families(_dima)
 subscripts(_a1)
 separationDims(_dima)
+hasInitValue(false)
 
 a[DimA]: const (non-apply-to-all)
 = 1,2,3
@@ -59,6 +12,7 @@ refId(_a[_a2])
 families(_dima)
 subscripts(_a2)
 separationDims(_dima)
+hasInitValue(false)
 
 a[DimA]: const (non-apply-to-all)
 = 1,2,3
@@ -66,27 +20,7 @@ refId(_a[_a3])
 families(_dima)
 subscripts(_a3)
 separationDims(_dima)
-
-b[DimA]: const (non-apply-to-all)
-= 4,5,6
-refId(_b[_a1])
-families(_dima)
-subscripts(_a1)
-separationDims(_dima)
-
-b[DimA]: const (non-apply-to-all)
-= 4,5,6
-refId(_b[_a2])
-families(_dima)
-subscripts(_a2)
-separationDims(_dima)
-
-b[DimA]: const (non-apply-to-all)
-= 4,5,6
-refId(_b[_a3])
-families(_dima)
-subscripts(_a3)
-separationDims(_dima)
+hasInitValue(false)
 
 a 2[SubA]: const (non-apply-to-all)
 = 1,2
@@ -94,6 +28,7 @@ refId(_a_2[_a2])
 families(_dima)
 subscripts(_a2)
 separationDims(_suba)
+hasInitValue(false)
 
 a 2[SubA]: const (non-apply-to-all)
 = 1,2
@@ -101,6 +36,31 @@ refId(_a_2[_a3])
 families(_dima)
 subscripts(_a3)
 separationDims(_suba)
+hasInitValue(false)
+
+b[DimA]: const (non-apply-to-all)
+= 4,5,6
+refId(_b[_a1])
+families(_dima)
+subscripts(_a1)
+separationDims(_dima)
+hasInitValue(false)
+
+b[DimA]: const (non-apply-to-all)
+= 4,5,6
+refId(_b[_a2])
+families(_dima)
+subscripts(_a2)
+separationDims(_dima)
+hasInitValue(false)
+
+b[DimA]: const (non-apply-to-all)
+= 4,5,6
+refId(_b[_a3])
+families(_dima)
+subscripts(_a3)
+separationDims(_dima)
+hasInitValue(false)
 
 b 2[SubA]: const (non-apply-to-all)
 = 4,5
@@ -108,6 +68,7 @@ refId(_b_2[_a2])
 families(_dima)
 subscripts(_a2)
 separationDims(_suba)
+hasInitValue(false)
 
 b 2[SubA]: const (non-apply-to-all)
 = 4,5
@@ -115,30 +76,45 @@ refId(_b_2[_a3])
 families(_dima)
 subscripts(_a3)
 separationDims(_suba)
+hasInitValue(false)
 
 c: aux
 = SUM(a[DimA!])+1
 refId(_c)
+hasInitValue(false)
+refs(_a[_a1], _a[_a2], _a[_a3])
 
 d: aux
 = SUM(a[DimA!])+SUM(b[DimA!])
 refId(_d)
+hasInitValue(false)
+refs(_a[_a1], _a[_a2], _a[_a3], _b[_a1], _b[_a2], _b[_a3])
 
 e: aux
 = SUM(a[DimA!]*b[DimA!]/TIME STEP)
 refId(_e)
+hasInitValue(false)
+refs(_a[_a1], _a[_a2], _a[_a3], _b[_a1], _b[_a2], _b[_a3], _time_step)
 
 f[DimA,DimC]: const
 = 1
 refId(_f)
 families(_dima, _dimc)
 subscripts(_dima, _dimc)
+hasInitValue(false)
+
+FINAL TIME: const
+= 1
+refId(_final_time)
+hasInitValue(false)
 
 g[DimA,DimC]: aux
 = SUM(f[DimA!,DimC!])
 refId(_g)
 families(_dima, _dimc)
 subscripts(_dima, _dimc)
+hasInitValue(false)
+refs(_f)
 
 h[DimC]: const (non-apply-to-all)
 = 10,20,30
@@ -146,6 +122,7 @@ refId(_h[_c1])
 families(_dimc)
 subscripts(_c1)
 separationDims(_dimc)
+hasInitValue(false)
 
 h[DimC]: const (non-apply-to-all)
 = 10,20,30
@@ -153,6 +130,7 @@ refId(_h[_c2])
 families(_dimc)
 subscripts(_c2)
 separationDims(_dimc)
+hasInitValue(false)
 
 h[DimC]: const (non-apply-to-all)
 = 10,20,30
@@ -160,16 +138,26 @@ refId(_h[_c3])
 families(_dimc)
 subscripts(_c3)
 separationDims(_dimc)
+hasInitValue(false)
 
 i: aux
 = SUM(a[DimA!]+h[DimC!])
 refId(_i)
+hasInitValue(false)
+refs(_a[_a1], _a[_a2], _a[_a3], _h[_c1], _h[_c2], _h[_c3])
+
+INITIAL TIME: const
+= 0
+refId(_initial_time)
+hasInitValue(false)
 
 j[DimA]: aux
 = a[DimA]/SUM(b[DimA!])
 refId(_j)
 families(_dima)
 subscripts(_dima)
+hasInitValue(false)
+refs(_a[_a1], _a[_a2], _a[_a3], _b[_a1], _b[_a2], _b[_a3])
 
 k[SubA]: aux (non-apply-to-all)
 = SUM(b 2[SubA!])
@@ -177,6 +165,8 @@ refId(_k[_a2])
 families(_dima)
 subscripts(_a2)
 separationDims(_suba)
+hasInitValue(false)
+refs(_b_2[_a2], _b_2[_a3])
 
 k[SubA]: aux (non-apply-to-all)
 = SUM(b 2[SubA!])
@@ -184,6 +174,8 @@ refId(_k[_a3])
 families(_dima)
 subscripts(_a3)
 separationDims(_suba)
+hasInitValue(false)
+refs(_b_2[_a2], _b_2[_a3])
 
 l[SubA]: aux (non-apply-to-all)
 = a 2[SubA]/SUM(b 2[SubA!])
@@ -191,6 +183,8 @@ refId(_l[_a2])
 families(_dima)
 subscripts(_a2)
 separationDims(_suba)
+hasInitValue(false)
+refs(_a_2[_a2], _b_2[_a2], _b_2[_a3])
 
 l[SubA]: aux (non-apply-to-all)
 = a 2[SubA]/SUM(b 2[SubA!])
@@ -198,24 +192,158 @@ refId(_l[_a3])
 families(_dima)
 subscripts(_a3)
 separationDims(_suba)
+hasInitValue(false)
+refs(_a_2[_a3], _b_2[_a2], _b_2[_a3])
 
-INITIAL TIME: const
-= 0
-refId(_initial_time)
+m[D1,E1]: const (non-apply-to-all)
+= 11
+refId(_m[_d1,_e1])
+families(_dimd, _dime)
+subscripts(_d1, _e1)
+hasInitValue(false)
 
-FINAL TIME: const
-= 1
-refId(_final_time)
+m[D1,E2]: const (non-apply-to-all)
+= 12
+refId(_m[_d1,_e2])
+families(_dimd, _dime)
+subscripts(_d1, _e2)
+hasInitValue(false)
 
-TIME STEP: const
-= 1
-refId(_time_step)
+m[D2,E1]: const (non-apply-to-all)
+= 21
+refId(_m[_d2,_e1])
+families(_dimd, _dime)
+subscripts(_d2, _e1)
+hasInitValue(false)
+
+m[D2,E2]: const (non-apply-to-all)
+= 22
+refId(_m[_d2,_e2])
+families(_dimd, _dime)
+subscripts(_d2, _e2)
+hasInitValue(false)
+
+msum[DimD]: aux
+= SUM(m[DimD,DimE!])
+refId(_msum)
+families(_dimd)
+subscripts(_dimd)
+hasInitValue(false)
+refs(_m[_d1,_e1], _m[_d1,_e2], _m[_d2,_e1], _m[_d2,_e2])
+
+n[D1,E1,F1]: const (non-apply-to-all)
+= 111
+refId(_n[_d1,_e1,_f1])
+families(_dimd, _dime, _dimf)
+subscripts(_d1, _e1, _f1)
+hasInitValue(false)
+
+n[D1,E1,F2]: const (non-apply-to-all)
+= 112
+refId(_n[_d1,_e1,_f2])
+families(_dimd, _dime, _dimf)
+subscripts(_d1, _e1, _f2)
+hasInitValue(false)
+
+n[D1,E2,F1]: const (non-apply-to-all)
+= 121
+refId(_n[_d1,_e2,_f1])
+families(_dimd, _dime, _dimf)
+subscripts(_d1, _e2, _f1)
+hasInitValue(false)
+
+n[D1,E2,F2]: const (non-apply-to-all)
+= 122
+refId(_n[_d1,_e2,_f2])
+families(_dimd, _dime, _dimf)
+subscripts(_d1, _e2, _f2)
+hasInitValue(false)
+
+n[D2,E1,F1]: const (non-apply-to-all)
+= 211
+refId(_n[_d2,_e1,_f1])
+families(_dimd, _dime, _dimf)
+subscripts(_d2, _e1, _f1)
+hasInitValue(false)
+
+n[D2,E1,F2]: const (non-apply-to-all)
+= 212
+refId(_n[_d2,_e1,_f2])
+families(_dimd, _dime, _dimf)
+subscripts(_d2, _e1, _f2)
+hasInitValue(false)
+
+n[D2,E2,F1]: const (non-apply-to-all)
+= 221
+refId(_n[_d2,_e2,_f1])
+families(_dimd, _dime, _dimf)
+subscripts(_d2, _e2, _f1)
+hasInitValue(false)
+
+n[D2,E2,F2]: const (non-apply-to-all)
+= 222
+refId(_n[_d2,_e2,_f2])
+families(_dimd, _dime, _dimf)
+subscripts(_d2, _e2, _f2)
+hasInitValue(false)
+
+nsum[DimD,DimE]: aux
+= SUM(n[DimD,DimE,DimF!])
+refId(_nsum)
+families(_dimd, _dime)
+subscripts(_dimd, _dime)
+hasInitValue(false)
+refs(_n[_d1,_e1,_f1], _n[_d1,_e1,_f2], _n[_d1,_e2,_f1], _n[_d1,_e2,_f2], _n[_d2,_e1,_f1], _n[_d2,_e1,_f2], _n[_d2,_e2,_f1], _n[_d2,_e2,_f2])
+
+o[D1,DimE,F1]: const (non-apply-to-all)
+= 111
+refId(_o[_d1,_dime,_f1])
+families(_dimd, _dime, _dimf)
+subscripts(_d1, _dime, _f1)
+hasInitValue(false)
+
+o[D1,DimE,F2]: const (non-apply-to-all)
+= 112
+refId(_o[_d1,_dime,_f2])
+families(_dimd, _dime, _dimf)
+subscripts(_d1, _dime, _f2)
+hasInitValue(false)
+
+o[D2,DimE,F1]: const (non-apply-to-all)
+= 211
+refId(_o[_d2,_dime,_f1])
+families(_dimd, _dime, _dimf)
+subscripts(_d2, _dime, _f1)
+hasInitValue(false)
+
+o[D2,DimE,F2]: const (non-apply-to-all)
+= 212
+refId(_o[_d2,_dime,_f2])
+families(_dimd, _dime, _dimf)
+subscripts(_d2, _dime, _f2)
+hasInitValue(false)
+
+osum[DimD,DimE]: aux
+= SUM(o[DimD,DimE,DimF!])
+refId(_osum)
+families(_dimd, _dime)
+subscripts(_dimd, _dime)
+hasInitValue(false)
+refs(_o[_d1,_dime,_f1], _o[_d1,_dime,_f2], _o[_d2,_dime,_f1], _o[_d2,_dime,_f2])
 
 SAVEPER: aux
 = TIME STEP
 refId(_saveper)
+hasInitValue(false)
+refs(_time_step)
 
 Time: const
 = 
 refId(_time)
+hasInitValue(false)
+
+TIME STEP: const
+= 1
+refId(_time_step)
+hasInitValue(false)
 

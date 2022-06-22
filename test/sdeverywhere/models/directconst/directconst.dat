@@ -42,8 +42,28 @@ e[C2,B2]
 0	4
 e[C2,B3]
 0	6
+f[C1,A1]
+0	0
+f[C1,A2]
+0	12
+f[C1,A3]
+0	13
+f[C2,A1]
+0	0
+f[C2,A2]
+0	22
+f[C2,A3]
+0	23
 FINAL TIME
 0	1
+g[C1,C1]
+0	11
+g[C1,C2]
+0	12
+g[C2,C1]
+0	21
+g[C2,C2]
+0	22
 INITIAL TIME
 0	0
 SAVEPER
