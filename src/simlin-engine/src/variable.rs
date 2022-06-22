@@ -308,9 +308,7 @@ fn parse_equation(
                 .collect();
 
             match get_dimensions(dimensions, dimension_names) {
-                Ok(dims) => {
-                    (Some(Ast::Arrayed(dims, elements)), errors)
-                }
+                Ok(dims) => (Some(Ast::Arrayed(dims, elements)), errors),
                 Err(err) => {
                     errors.push(err);
                     (None, errors)
