@@ -295,12 +295,10 @@ fn parse_equation(
             let elements: HashMap<_, _> = elements
                 .iter()
                 .map(|(subscript, eqn, init_eqn)| {
-                    let (ast, single_errors) = if !is_initial {
-                        parse_inner(eqn)
-                    } else if let Some(init_eqn) = init_eqn {
-                        parse_inner(init_eqn)
+                    let (ast, single_errors) = if is_initial && init_eqn.is_some() {
+                        parse_inner(init_eqn.as_ref().unwrap())
                     } else {
-                        (None, vec![])
+                        parse_inner(eqn)
                     };
                     errors.extend(single_errors);
                     (subscript.clone(), ast)
@@ -311,11 +309,7 @@ fn parse_equation(
 
             match get_dimensions(dimensions, dimension_names) {
                 Ok(dims) => {
-                    if elements.is_empty() {
-                        (None, errors)
-                    } else {
-                        (Some(Ast::Arrayed(dims, elements)), errors)
-                    }
+                    (Some(Ast::Arrayed(dims, elements)), errors)
                 }
                 Err(err) => {
                     errors.push(err);
