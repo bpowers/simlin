@@ -89,7 +89,7 @@ static TEST_MODELS: &[&str] = &[
     "test/test-models/tests/unicode_characters/unicode_test_model.xmile",
 ];
 
-fn load_expected_results(xmile_path: &str) -> Results {
+fn load_expected_results(xmile_path: &str) -> Option<Results> {
     let xmile_name = std::path::Path::new(xmile_path).file_name().unwrap();
     let dir_path = &xmile_path[0..(xmile_path.len() - xmile_name.len())];
     let dir_path = std::path::Path::new(dir_path);
@@ -99,16 +99,16 @@ fn load_expected_results(xmile_path: &str) -> Results {
         if !output_path.exists() {
             continue;
         }
-        return load_csv(&output_path.to_string_lossy(), *delimiter).unwrap();
+        return Some(load_csv(&output_path.to_string_lossy(), *delimiter).unwrap());
     }
 
     let dat_file = xmile_path.replace(".xmile", ".dat");
     let dat_path = std::path::Path::new(&dat_file);
     if dat_path.exists() {
-        return load_dat(&dat_file).unwrap();
+        return Some(load_dat(&dat_file).unwrap());
     }
 
-    unreachable!();
+    None
 }
 
 fn ensure_results(expected: &Results, results: &Results) {
@@ -217,7 +217,7 @@ fn simulate_path(xmile_path: &str) {
     ensure_results(&results1, &results2);
 
     // also ensure they match our reference results
-    let expected = load_expected_results(xmile_path);
+    let expected = load_expected_results(xmile_path).unwrap();
     ensure_results(&expected, &results1);
     ensure_results(&expected, &results2);
 
@@ -332,11 +332,16 @@ fn simulates_active_initial() {
     simulate_path("../../test/sdeverywhere/models/active_initial/active_initial.xmile");
 }
 
-// #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
-// fn simulates_sdeverywhere(resource: &str) {
-//     let resource = format!("../../{}", resource);
-//     simulate_path(&resource);
-// }
+#[test]
+fn simulates_except() {
+    simulate_path("../../test/sdeverywhere/models/except/except.xmile");
+}
+
+#[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
+fn simulates_sdeverywhere(resource: &str) {
+    let resource = format!("../../{}", resource);
+    simulate_path(&resource);
+}
 
 #[test]
 fn bad_model_name() {
