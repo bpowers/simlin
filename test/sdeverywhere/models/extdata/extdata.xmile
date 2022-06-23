@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -16,23 +16,23 @@
             <elem name="E1"/>
             <elem name="E2"/>
         </dim>
-        <dim name="DimD">
-            <elem name="D1"/>
-            <elem name="D2"/>
-        </dim>
-        <dim name="DimA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-            <elem name="A3"/>
+        <dim name="DimC">
+            <elem name="C1"/>
+            <elem name="C2"/>
         </dim>
         <dim name="DimB">
             <elem name="B1"/>
             <elem name="B2"/>
             <elem name="B3"/>
         </dim>
-        <dim name="DimC">
-            <elem name="C1"/>
-            <elem name="C2"/>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+        <dim name="DimD">
+            <elem name="D1"/>
+            <elem name="D2"/>
         </dim>
     </dimensions>
     <model>
@@ -43,8 +43,8 @@
                     <dim name="DimE"/>
                 </dimensions>
             </aux>
-            <aux name="VSSUM">
-                <eqn>0</eqn>
+            <aux name="VSERRATLEASTONE">
+                <eqn>1</eqn>
             </aux>
             <aux name="E Selection">
                 <eqn>( IF DimE = Chosen_E THEN 1 ELSE 0 )</eqn>
@@ -52,11 +52,11 @@
                     <dim name="DimE"/>
                 </dimensions>
             </aux>
-            <aux name="Chosen C">
-                <eqn>1</eqn>
-            </aux>
             <aux name="Chosen B">
                 <eqn>3</eqn>
+            </aux>
+            <aux name="E2 Values">
+                <eqn>E_Values[E2]</eqn>
             </aux>
             <aux name="E1 Values">
                 <eqn>E_Values[E1]</eqn>
@@ -64,11 +64,27 @@
             <aux name="B1 Totals">
                 <eqn>SUM(BC_Values[B1, *])</eqn>
             </aux>
-            <aux name="Chosen E">
-                <eqn>2</eqn>
+            <aux name="B Selection">
+                <eqn>( IF DimB = Chosen_B THEN 1 ELSE 0 )</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
             </aux>
-            <aux name="A Totals">
-                <eqn>SUM(A_Values[*])</eqn>
+            <aux name="Simple Totals">
+                <eqn>Simple_1+Simple_2</eqn>
+            </aux>
+            <aux name="EBC Values">
+                <eqn>TIME</eqn>
+                <gf>
+                    <yscale min="1" max="2"/>
+                    <xpts>0,1</xpts>
+                    <ypts>1,1</ypts>
+                </gf>
+                <dimensions>
+                    <dim name="DimE"/>
+                    <dim name="DimB"/>
+                    <dim name="DimC"/>
+                </dimensions>
             </aux>
             <aux name="E Values">
                 <element subscript="E1">
@@ -91,6 +107,13 @@
                     <dim name="DimE"/>
                 </dimensions>
             </aux>
+            <aux name="Total EBC for Selected C">
+                <eqn>VECTOR SELECT(C_Selection[*], EBC_Values[DimE, DimB, *], 0, VSSUM, VSERRATLEASTONE)</eqn>
+                <dimensions>
+                    <dim name="DimE"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
             <aux name="D Values">
                 <eqn>TIME</eqn>
                 <gf>
@@ -101,47 +124,6 @@
                 <dimensions>
                     <dim name="DimD"/>
                 </dimensions>
-            </aux>
-            <aux name="A Values">
-                <eqn>TIME</eqn>
-                <gf>
-                    <yscale min="1" max="2"/>
-                    <xpts>0,1</xpts>
-                    <ypts>1,1</ypts>
-                </gf>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="Total EBC for Selected C">
-                <eqn>VECTOR SELECT(C_Selection[*], EBC_Values[DimE, DimB, *], 0, VSSUM, VSERRATLEASTONE)</eqn>
-                <dimensions>
-                    <dim name="DimE"/>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="B Selection">
-                <eqn>( IF DimB = Chosen_B THEN 1 ELSE 0 )</eqn>
-                <dimensions>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="Total EBC">
-                <eqn>VECTOR SELECT(E_Selection[*], Total_EBC_for_Selected_BC[*], 0, VSSUM, VSERRATLEASTONE)</eqn>
-            </aux>
-            <aux name="Simple 2">
-                <eqn>TIME</eqn>
-                <gf>
-                    <yscale min="1" max="2"/>
-                    <xpts>0,1</xpts>
-                    <ypts>1,1</ypts>
-                </gf>
-            </aux>
-            <aux name="Simple Totals">
-                <eqn>Simple_1+Simple_2</eqn>
-            </aux>
-            <aux name="E2 Values">
-                <eqn>E_Values[E2]</eqn>
             </aux>
             <aux name="BC Values">
                 <eqn>TIME</eqn>
@@ -155,13 +137,7 @@
                     <dim name="DimC"/>
                 </dimensions>
             </aux>
-            <aux name="C Selection">
-                <eqn>( IF DimC = Chosen_C THEN 1 ELSE 0 )</eqn>
-                <dimensions>
-                    <dim name="DimC"/>
-                </dimensions>
-            </aux>
-            <aux name="EBC Values">
+            <aux name="A Values">
                 <eqn>TIME</eqn>
                 <gf>
                     <yscale min="1" max="2"/>
@@ -169,8 +145,35 @@
                     <ypts>1,1</ypts>
                 </gf>
                 <dimensions>
-                    <dim name="DimE"/>
-                    <dim name="DimB"/>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Simple 2">
+                <eqn>TIME</eqn>
+                <gf>
+                    <yscale min="1" max="2"/>
+                    <xpts>0,1</xpts>
+                    <ypts>1,1</ypts>
+                </gf>
+            </aux>
+            <aux name="Total EBC">
+                <eqn>VECTOR SELECT(E_Selection[*], Total_EBC_for_Selected_BC[*], 0, VSSUM, VSERRATLEASTONE)</eqn>
+            </aux>
+            <aux name="VSSUM">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="Chosen C">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="Chosen E">
+                <eqn>2</eqn>
+            </aux>
+            <aux name="D Totals">
+                <eqn>SUM(D_Values[*])</eqn>
+            </aux>
+            <aux name="C Selection">
+                <eqn>( IF DimC = Chosen_C THEN 1 ELSE 0 )</eqn>
+                <dimensions>
                     <dim name="DimC"/>
                 </dimensions>
             </aux>
@@ -182,18 +185,15 @@
                     <ypts>1,1</ypts>
                 </gf>
             </aux>
-            <aux name="D Totals">
-                <eqn>SUM(D_Values[*])</eqn>
-            </aux>
-            <aux name="VSERRATLEASTONE">
-                <eqn>1</eqn>
+            <aux name="A Totals">
+                <eqn>SUM(A_Values[*])</eqn>
             </aux>
         </variables>
         <views>
             <group name="Control">
                 <var>STOPTIME</var>
                 <var>STARTTIME</var>
-                <var>DT</var>
+                <var>SAVEPER</var>
                 <var>DT</var>
             </group>
         </views>

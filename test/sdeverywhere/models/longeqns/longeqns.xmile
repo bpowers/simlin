@@ -1,0 +1,69 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Months" isee:sim_duration="0">
+        <start>0</start>
+        <stop>1</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions>
+        <dim name="DimZ">
+            <elem name="Z1"/>
+            <elem name="Z2"/>
+            <elem name="Z3"/>
+        </dim>
+        <dim name="DimW">
+            <elem name="W1"/>
+            <elem name="W2"/>
+            <elem name="W3"/>
+        </dim>
+        <dim name="DimX">
+            <elem name="X1"/>
+            <elem name="X2"/>
+            <elem name="X3"/>
+        </dim>
+        <dim name="DimY">
+            <elem name="Y1"/>
+            <elem name="Y2"/>
+            <elem name="Y3"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="EqnA">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimX"/>
+                    <dim name="DimY"/>
+                </dimensions>
+            </aux>
+            <aux name="Result">
+                <eqn>EqnC[X1, Y1, Z1]</eqn>
+            </aux>
+            <aux name="EqnB">
+                <eqn>1</eqn>
+                <dimensions>
+                    <dim name="DimX"/>
+                    <dim name="DimW"/>
+                </dimensions>
+            </aux>
+            <aux name="EqnC">
+                <doc> Based on long equation with multiple line breaks from EPS model.
+    See original equation in this issue:
+      https://github.com/climateinteractive/SDEverywhere/issues/174)</doc>
+                <eqn>EqnA[DimX, DimY]*(-SUM(EqnB[DimX, *])-(SUM(EqnB[DimX, *])-SUM(EqnB[DimX, *]))*EqnA[DimX, DimY])</eqn>
+                <dimensions>
+                    <dim name="DimX"/>
+                    <dim name="DimY"/>
+                    <dim name="DimZ"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views/>
+    </model>
+</xmile>

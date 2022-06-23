@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -14,17 +14,25 @@
     <dimensions/>
     <model>
         <variables>
-            <aux name="h">
+            <aux name="e">
                 <doc>~:SUPPLEMENTARY</doc>
-                <eqn>(10)*INT((10)/(10))</eqn>
+                <eqn>(10)*INT((112.3)/(10))</eqn>
+            </aux>
+            <aux name="b">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>(1)*INT((0.9)/(1))</eqn>
             </aux>
             <aux name="f">
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn>(12)*INT((50)/(12))</eqn>
             </aux>
-            <aux name="e">
+            <aux name="c">
                 <doc>~:SUPPLEMENTARY</doc>
-                <eqn>(10)*INT((112.3)/(10))</eqn>
+                <eqn>(1)*INT((-0.9)/(1))</eqn>
+            </aux>
+            <aux name="h">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>(10)*INT((10)/(10))</eqn>
             </aux>
             <aux name="d">
                 <doc>~:SUPPLEMENTARY</doc>
@@ -34,17 +42,9 @@
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn>(1)*INT((1.9)/(1))</eqn>
             </aux>
-            <aux name="b">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>(1)*INT((0.9)/(1))</eqn>
-            </aux>
             <aux name="g">
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn>(63)*INT((423)/(63))</eqn>
-            </aux>
-            <aux name="c">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>(1)*INT((-0.9)/(1))</eqn>
             </aux>
         </variables>
         <views>

@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -14,6 +14,9 @@
     <dimensions/>
     <model>
         <variables>
+            <aux name="last pulse time">
+                <eqn>30</eqn>
+            </aux>
             <aux name="repeat interval">
                 <eqn>5</eqn>
             </aux>
@@ -25,9 +28,6 @@
             </aux>
             <aux name="duration">
                 <eqn>1</eqn>
-            </aux>
-            <aux name="last pulse time">
-                <eqn>30</eqn>
             </aux>
         </variables>
         <views/>

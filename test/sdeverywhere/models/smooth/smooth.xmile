@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -20,76 +20,54 @@
             <elem name="A2"/>
             <elem name="A3"/>
         </dim>
-        <dim name="DimA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-            <elem name="A3"/>
-        </dim>
         <dim name="DimB">
             <elem name="B1"/>
             <elem name="B2"/>
             <elem name="B3"/>
         </dim>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
     </dimensions>
     <model>
         <variables>
-            <aux name="s10">
-                <eqn>SMTH1(input_2[SubA], delay)</eqn>
+            <aux name="s9">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input_2x3[SubA, DimB], delay)</eqn>
                 <dimensions>
                     <dim name="SubA"/>
                     <dim name="DimB"/>
                 </dimensions>
             </aux>
+            <aux name="s5">
+                <isee:delay_aux/>
+                <eqn>SMTH3(input_2[SubA], delay_2[SubA])</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
+            <aux name="s4">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input_2[SubA], delay_2[SubA])</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
             <aux name="s8">
+                <isee:delay_aux/>
                 <eqn>SMTH1(input_3x3[DimA, DimB], delay)</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                     <dim name="DimB"/>
                 </dimensions>
             </aux>
-            <aux name="s7">
-                <eqn>SMTH1(input_2[SubA], delay_2[SubA])</eqn>
-                <dimensions>
-                    <dim name="SubB"/>
-                </dimensions>
-            </aux>
-            <aux name="s5">
-                <eqn>SMTH3(input_2[SubA], delay_2[SubA])</eqn>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="s3">
-                <eqn>SMTH1(input_3[DimA], delay_3[DimA])</eqn>
+            <aux name="s2">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input, delay)</eqn>
                 <dimensions>
                     <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="s1">
-                <eqn>SMTH1(input, delay)</eqn>
-            </aux>
-            <aux name="delay 2">
-                <eqn>2</eqn>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="delay">
-                <eqn>2</eqn>
-            </aux>
-            <aux name="input 2">
-                <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="input">
-                <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
-            </aux>
-            <aux name="s6">
-                <eqn>SMTH1(input_3[DimA], delay_3[DimA])</eqn>
-                <dimensions>
-                    <dim name="DimB"/>
                 </dimensions>
             </aux>
             <aux name="delay 3">
@@ -98,6 +76,13 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
+            <aux name="s1">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input, delay)</eqn>
+            </aux>
+            <aux name="delay">
+                <eqn>2</eqn>
+            </aux>
             <aux name="input 2x3">
                 <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
                 <dimensions>
@@ -105,23 +90,10 @@
                     <dim name="DimB"/>
                 </dimensions>
             </aux>
-            <aux name="s2">
-                <eqn>SMTH1(input, delay)</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="s4">
-                <eqn>SMTH1(input_2[SubA], delay_2[SubA])</eqn>
+            <aux name="delay 2">
+                <eqn>2</eqn>
                 <dimensions>
                     <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="s9">
-                <eqn>SMTH1(input_2x3[SubA, DimB], delay)</eqn>
-                <dimensions>
-                    <dim name="SubA"/>
-                    <dim name="DimB"/>
                 </dimensions>
             </aux>
             <aux name="input 3x3">
@@ -131,10 +103,48 @@
                     <dim name="DimB"/>
                 </dimensions>
             </aux>
+            <aux name="s3">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input_3[DimA], delay_3[DimA])</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
             <aux name="input 3">
                 <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
                 <dimensions>
                     <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="s6">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input_3[DimA], delay_3[DimA])</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s10">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input_2[SubA], delay)</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="s7">
+                <isee:delay_aux/>
+                <eqn>SMTH1(input_2[SubA], delay_2[SubA])</eqn>
+                <dimensions>
+                    <dim name="SubB"/>
+                </dimensions>
+            </aux>
+            <aux name="input">
+                <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
+            </aux>
+            <aux name="input 2">
+                <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
                 </dimensions>
             </aux>
         </variables>

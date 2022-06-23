@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -17,11 +17,11 @@
             <aux name="M&amp;Ms">
                 <eqn>3</eqn>
             </aux>
-            <aux name="DOLLAR SIGN$">
-                <eqn>1</eqn>
-            </aux>
             <aux name="time&apos;s up">
                 <eqn>2</eqn>
+            </aux>
+            <aux name="DOLLAR SIGN$">
+                <eqn>1</eqn>
             </aux>
             <aux name="100% true">
                 <eqn>4</eqn>

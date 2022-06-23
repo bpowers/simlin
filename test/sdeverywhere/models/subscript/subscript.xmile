@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -12,19 +12,48 @@
     </sim_specs>
     <model_units/>
     <dimensions>
-        <dim name="DimA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-            <elem name="A3"/>
-        </dim>
         <dim name="DimB">
             <elem name="B1"/>
             <elem name="B2"/>
             <elem name="B3"/>
         </dim>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
     </dimensions>
     <model>
         <variables>
+            <aux name="r">
+                <doc>	dimension name reference in an expression
+  ~:SUPPLEMENTARY</doc>
+                <eqn>( IF DimA = Selected_A THEN 1 ELSE 0 )</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="e">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>b[B1]</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="b">
+                <element subscript="B1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="B2">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="B3">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
             <aux name="s">
                 <doc>	mapped dimension name reference in an expression
   ~:SUPPLEMENTARY</doc>
@@ -33,12 +62,16 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="p">
+            <aux name="Selected A">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>2</eqn>
+            </aux>
+            <aux name="o">
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn>f[DimA, DimB]</eqn>
                 <dimensions>
-                    <dim name="DimB"/>
                     <dim name="DimA"/>
+                    <dim name="DimB"/>
                 </dimensions>
             </aux>
             <aux name="f">
@@ -74,6 +107,13 @@
                     <dim name="DimB"/>
                 </dimensions>
             </aux>
+            <aux name="c">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>b[DimB]</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
             <aux name="d">
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn>b[B1]</eqn>
@@ -87,47 +127,6 @@
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
-            </aux>
-            <aux name="e">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>b[B1]</eqn>
-                <dimensions>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="b">
-                <element subscript="B1">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="B2">
-                    <eqn>2</eqn>
-                </element>
-                <element subscript="B3">
-                    <eqn>3</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="r">
-                <doc>	dimension name reference in an expression
-  ~:SUPPLEMENTARY</doc>
-                <eqn>( IF DimA = Selected_A THEN 1 ELSE 0 )</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="o">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>f[DimA, DimB]</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="Selected A">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>2</eqn>
             </aux>
             <aux name="g">
                 <doc>~:SUPPLEMENTARY</doc>
@@ -163,11 +162,12 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="c">
+            <aux name="p">
                 <doc>~:SUPPLEMENTARY</doc>
-                <eqn>b[DimB]</eqn>
+                <eqn>f[DimA, DimB]</eqn>
                 <dimensions>
                     <dim name="DimB"/>
+                    <dim name="DimA"/>
                 </dimensions>
             </aux>
         </variables>

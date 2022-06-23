@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -20,18 +20,27 @@
     </dimensions>
     <model>
         <variables>
+            <flow name="S2 Level 1 net flow">
+                <eqn>(input-S2_Level_1)/S2_Delay</eqn>
+            </flow>
             <aux name="S1">
                 <eqn>scale*SMTH3(input, delay)</eqn>
             </aux>
             <aux name="delay">
                 <eqn>2</eqn>
             </aux>
-            <stock name="S2 Level 3">
-                <inflow>S2_Level_3_net_flow</inflow>
+            <stock name="S2 Level 2">
+                <inflow>S2_Level_2_net_flow</inflow>
                 <eqn>input</eqn>
             </stock>
-            <aux name="input">
-                <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
+            <flow name="S2 Level 2 net flow">
+                <eqn>(S2_Level_1-S2_Level_2)/S2_Delay</eqn>
+            </flow>
+            <aux name="scale">
+                <eqn>6</eqn>
+            </aux>
+            <aux name="S2">
+                <eqn>scale*S2_Level_3</eqn>
             </aux>
             <aux name="cs">
                 <eqn>MIN(SMTH3(sr, apt), ca[DimA]/DT)</eqn>
@@ -39,10 +48,6 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <stock name="S2 Level 1">
-                <inflow>S2_Level_1_net_flow</inflow>
-                <eqn>input</eqn>
-            </stock>
             <aux name="ca">
                 <element subscript="A1">
                     <eqn>1000+RAMP(100, 1, 10)</eqn>
@@ -57,45 +62,41 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="S3">
-                <eqn>SMTH3(s3_input, MAX(a, b))</eqn>
-            </aux>
-            <aux name="a">
-                <eqn>1</eqn>
-            </aux>
-            <stock name="S2 Level 2">
-                <inflow>S2_Level_2_net_flow</inflow>
-                <eqn>input</eqn>
-            </stock>
-            <aux name="scale">
-                <eqn>6</eqn>
-            </aux>
             <aux name="b">
                 <eqn>2</eqn>
             </aux>
-            <flow name="S2 Level 2 net flow">
-                <eqn>(S2_Level_1-S2_Level_2)/S2_Delay</eqn>
-            </flow>
-            <aux name="S2">
-                <eqn>scale*S2_Level_3</eqn>
-            </aux>
-            <flow name="S2 Level 1 net flow">
-                <eqn>(input-S2_Level_1)/S2_Delay</eqn>
-            </flow>
-            <aux name="sr">
-                <eqn>COS(Time/5)</eqn>
-            </aux>
-            <aux name="S2 Delay">
-                <eqn>delay/3</eqn>
+            <aux name="S3">
+                <isee:delay_aux/>
+                <eqn>SMTH3(s3_input, MAX(a, b))</eqn>
             </aux>
             <flow name="S2 Level 3 net flow">
                 <eqn>(S2_Level_2-S2_Level_3)/S2_Delay</eqn>
             </flow>
+            <aux name="S2 Delay">
+                <eqn>delay/3</eqn>
+            </aux>
+            <aux name="a">
+                <eqn>1</eqn>
+            </aux>
+            <stock name="S2 Level 3">
+                <inflow>S2_Level_3_net_flow</inflow>
+                <eqn>input</eqn>
+            </stock>
+            <aux name="apt">
+                <eqn>1</eqn>
+            </aux>
             <aux name="s3 input">
                 <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
             </aux>
-            <aux name="apt">
-                <eqn>1</eqn>
+            <stock name="S2 Level 1">
+                <inflow>S2_Level_1_net_flow</inflow>
+                <eqn>input</eqn>
+            </stock>
+            <aux name="sr">
+                <eqn>COS(Time/5)</eqn>
+            </aux>
+            <aux name="input">
+                <eqn>3+( IF TIME &gt;= (10) AND TIME &lt; ((10) + MAX(DT,10)) THEN 1 ELSE 0 )</eqn>
             </aux>
         </variables>
         <views>
@@ -150,15 +151,11 @@
                     <to>cs</to>
                 </connector>
                 <connector uid="32" angle="66.067598205179166">
-                    <from>
-                        <alias uid="31"/>
-                    </from>
+                    <from>DT</from>
                     <to>cs</to>
                 </connector>
                 <connector uid="34" angle="45.880294667373789">
-                    <from>
-                        <alias uid="33"/>
-                    </from>
+                    <from>Time</from>
                     <to>sr</to>
                 </connector>
                 <aux name="S3" x="768" y="368"/>

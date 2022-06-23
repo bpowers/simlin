@@ -6,30 +6,31 @@
         <product lang="en">Vensim, xmutil</product>
     </header>
     <sim_specs method="Euler" time_units="Months" isee:sim_duration="0">
-        <start>0</start>
-        <stop>1</stop>
+        <start>10</start>
+        <stop>20</stop>
         <dt>1</dt>
     </sim_specs>
     <model_units/>
-    <dimensions>
-        <dim name="DimA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-            <elem name="A3"/>
-        </dim>
-    </dimensions>
+    <dimensions/>
     <model>
         <variables>
-            <aux name="b">
-                <eqn>10*SIZE(DimA)+a</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
+            <aux name="output1">
+                <isee:delay_aux/>
+                <eqn>DELAY(input1, 1, 0)</eqn>
             </aux>
-            <aux name="a">
-                <eqn>SIZE(DimA)</eqn>
+            <aux name="input1">
+                <eqn>10*TIME+10</eqn>
+            </aux>
+            <aux name="output2">
+                <isee:delay_aux/>
+                <eqn>DELAY(input2, 5, 0)</eqn>
+            </aux>
+            <aux name="input2">
+                <eqn>10*TIME+10</eqn>
             </aux>
         </variables>
-        <views/>
+        <views>
+            <view/>
+        </views>
     </model>
 </xmile>

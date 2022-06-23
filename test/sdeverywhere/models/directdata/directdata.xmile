@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -12,36 +12,70 @@
     </sim_specs>
     <model_units/>
     <dimensions>
+        <dim name="DimC">
+            <elem name="M1"/>
+            <elem name="M2"/>
+            <elem name="M3"/>
+        </dim>
+        <dim name="DimM">
+            <elem name="M1"/>
+            <elem name="M2"/>
+            <elem name="M3"/>
+        </dim>
+        <dim name="DimB">
+            <elem name="B1"/>
+            <elem name="B2"/>
+        </dim>
         <dim name="DimA">
             <elem name="A1"/>
             <elem name="A2"/>
         </dim>
+        <dim name="SubM">
+            <elem name="M2"/>
+            <elem name="M3"/>
+        </dim>
     </dimensions>
     <model>
         <variables>
-            <aux name="h">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>g*10</eqn>
+            <aux name="r">
+                <eqn>q[M3]</eqn>
             </aux>
-            <aux name="f">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>e[DimA]*10</eqn>
+            <aux name="q">
+                <doc> CSV table mapped to a subdimension</doc>
+                <eqn>0{GET_DIRECT_DATA('e_data.csv',_',',_'A',_'B2')}</eqn>
+                <dimensions>
+                    <dim name="SubM"/>
+                </dimensions>
+            </aux>
+            <aux name="p">
+                <eqn>o[M2]</eqn>
+            </aux>
+            <aux name="o">
+                <eqn>0{GET_DIRECT_DATA(_'mt.csv',_',',_'A',_'B2'_)}</eqn>
+                <dimensions>
+                    <dim name="DimM"/>
+                </dimensions>
+            </aux>
+            <aux name="n">
+                <eqn>m[M2]</eqn>
+            </aux>
+            <aux name="l">
+                <eqn>k[DimA, DimB]</eqn>
                 <dimensions>
                     <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="j">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>i[A1, DimB]</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
                 </dimensions>
             </aux>
             <aux name="e">
                 <eqn>0{GET_DIRECT_DATA('e_data.csv',_',',_'A',_'B2')}</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="d">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>c*10</eqn>
-            </aux>
-            <aux name="a">
-                <eqn>0{GET_DIRECT_DATA('?data',_'A_Data',_'A',_'B2')}</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
@@ -53,11 +87,64 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="g">
-                <eqn>0{GET_DIRECT_DATA('g_data.csv',_',',_'A',_'B2')}</eqn>
+            <aux name="f">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>e[DimA]*10</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
             </aux>
             <aux name="c">
                 <eqn>0{GET_DIRECT_DATA('?data',_'C_Data',_'A',_'B2')}</eqn>
+            </aux>
+            <aux name="h">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>g*10</eqn>
+            </aux>
+            <aux name="d">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>c*10</eqn>
+            </aux>
+            <aux name="a">
+                <eqn>0{GET_DIRECT_DATA('?data',_'A_Data',_'A',_'B2')}</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="k">
+                <element subscript="A1, B1">
+                    <eqn>0{GET_DIRECT_DATA('e_data.csv',_',',_'A',_'B2')}</eqn>
+                </element>
+                <element subscript="A1, B2">
+                    <eqn>0{GET_DIRECT_DATA('e_data.csv',_',',_'A',_'B2')}</eqn>
+                </element>
+                <element subscript="A2, B1">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="A2, B2">
+                    <eqn>0</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="g">
+                <eqn>0{GET_DIRECT_DATA('g_data.csv',_',',_'A',_'B2')}</eqn>
+            </aux>
+            <aux name="m">
+                <eqn>0{GET_DIRECT_DATA(_'m.csv',_',',_'1',_'B2'_)}</eqn>
+                <dimensions>
+                    <dim name="DimM"/>
+                </dimensions>
+            </aux>
+            <aux name="i">
+                <doc> multiple LHS subscripts</doc>
+                <eqn>0{GET_DIRECT_DATA('e_data.csv',_',',_'A',_'B2')}</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
             </aux>
         </variables>
         <views>

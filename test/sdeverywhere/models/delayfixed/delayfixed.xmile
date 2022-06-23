@@ -1,0 +1,80 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Months" isee:sim_duration="0">
+        <start>0</start>
+        <stop>50</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="b delay time">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="b">
+                <isee:delay_aux/>
+                <eqn>DELAY(input[A1]+1, b_delay_time, 0)</eqn>
+            </aux>
+            <stock name="shipments in transit">
+                <inflow>shipping</inflow>
+                <outflow>receiving</outflow>
+                <eqn>shipping*shipping_time</eqn>
+            </stock>
+            <aux name="reference shipping rate">
+                <eqn>1</eqn>
+            </aux>
+            <flow name="receiving">
+                <eqn>DELAY(shipping, shipping_time, shipping)</eqn>
+            </flow>
+            <flow name="shipping">
+                <eqn>step(reference_shipping_rate, 10)-step(reference_shipping_rate, 20)</eqn>
+            </flow>
+            <aux name="a delay time">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="a">
+                <isee:delay_aux/>
+                <eqn>DELAY(input[A1]+1, a_delay_time, 0)</eqn>
+            </aux>
+            <aux name="shipping time">
+                <eqn>20</eqn>
+            </aux>
+            <aux name="input">
+                <element subscript="A1">
+                    <eqn>10*TIME</eqn>
+                </element>
+                <element subscript="A2">
+                    <eqn>20*TIME</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>30*TIME</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="output">
+                <isee:delay_aux/>
+                <eqn>DELAY(input[DimA], 1, 0)</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+        </variables>
+        <views>
+            <view/>
+        </views>
+    </model>
+</xmile>

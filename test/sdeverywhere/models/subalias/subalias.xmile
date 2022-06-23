@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -25,21 +25,6 @@
     </dimensions>
     <model>
         <variables>
-            <aux name="f">
-                <doc>~:SUPPLEMENTARY</doc>
-                <element subscript="F1">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="F2">
-                    <eqn>2</eqn>
-                </element>
-                <element subscript="F3">
-                    <eqn>3</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimE"/>
-                </dimensions>
-            </aux>
             <aux name="e">
                 <doc>~:SUPPLEMENTARY</doc>
                 <element subscript="F1">
@@ -50,6 +35,21 @@
                 </element>
                 <element subscript="F3">
                     <eqn>30</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimE"/>
+                </dimensions>
+            </aux>
+            <aux name="f">
+                <doc>~:SUPPLEMENTARY</doc>
+                <element subscript="F1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="F2">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="F3">
+                    <eqn>3</eqn>
                 </element>
                 <dimensions>
                     <dim name="DimE"/>

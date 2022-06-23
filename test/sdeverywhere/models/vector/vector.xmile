@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -12,15 +12,15 @@
     </sim_specs>
     <model_units/>
     <dimensions>
-        <dim name="DimA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-            <elem name="A3"/>
-        </dim>
         <dim name="SubX">
             <elem name="two"/>
             <elem name="three"/>
             <elem name="four"/>
+        </dim>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
         </dim>
         <dim name="DimB">
             <elem name="B1"/>
@@ -36,11 +36,161 @@
     </dimensions>
     <model>
         <variables>
+            <aux name="y">
+                <eqn>VECTOR ELM MAP(x[three], (DimA-1))</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
             <aux name="w">
                 <eqn>MIN(x[*])</eqn>
             </aux>
             <aux name="v">
                 <eqn>MAX(x[*:SubX])</eqn>
+            </aux>
+            <aux name="u">
+                <eqn>MAX(x[*])</eqn>
+            </aux>
+            <aux name="s">
+                <eqn>SUM(c[*]*e[*, DimB])</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="r">
+                <eqn>VECTOR SELECT(e[DimA, *], d[DimA, *], -1e+38, VSMAX, VSERRNONE)</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="q">
+                <eqn>VECTOR SELECT(e[*, DimB], c[*], 0, VSSUM, VSERRNONE)</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="p">
+                <eqn>VECTOR SORT ORDER(o[DimA, DimB], ASCENDING)</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="o">
+                <element subscript="A1, B1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A1, B2">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="A2, B1">
+                    <eqn>4</eqn>
+                </element>
+                <element subscript="A2, B2">
+                    <eqn>3</eqn>
+                </element>
+                <element subscript="A3, B1">
+                    <eqn>5</eqn>
+                </element>
+                <element subscript="A3, B2">
+                    <eqn>5</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="m">
+                <eqn>VECTOR SORT ORDER(h[DimA], 0)</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="l">
+                <eqn>VECTOR SORT ORDER(h[DimA], ASCENDING)</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="e">
+                <element subscript="A1, B1">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="A2, B1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A3, B1">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="A1, B2">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A2, B2">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="A3, B2">
+                    <eqn>1</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="b">
+                <element subscript="B1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="B2">
+                    <eqn>2</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="VSERRATLEASTONE">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="VSERRNONE">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="DESCENDING">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="ASCENDING">
+                <eqn>1</eqn>
+            </aux>
+            <aux name="VSMAX">
+                <eqn>3</eqn>
+            </aux>
+            <aux name="f">
+                <eqn>VECTOR ELM MAP(d[DimA, B1], a[DimA])</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="VSSUM">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="c">
+                <eqn>10+VECTOR ELM MAP(b[B1], a[DimA])</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="h">
+                <element subscript="A1">
+                    <eqn>2100</eqn>
+                </element>
+                <element subscript="A2">
+                    <eqn>2010</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>2020</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
             </aux>
             <aux name="x">
                 <element subscript="one">
@@ -60,55 +210,6 @@
                 </element>
                 <dimensions>
                     <dim name="DimX"/>
-                </dimensions>
-            </aux>
-            <aux name="u">
-                <eqn>MAX(x[*])</eqn>
-            </aux>
-            <aux name="q">
-                <eqn>VECTOR SELECT(e[*, DimB], c[*], 0, VSSUM, VSERRNONE)</eqn>
-                <dimensions>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="p">
-                <eqn>VECTOR SORT ORDER(o[DimA, DimB], ASCENDING)</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="l">
-                <eqn>VECTOR SORT ORDER(h[DimA], ASCENDING)</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="s">
-                <eqn>SUM(c[*]*e[*, DimB])</eqn>
-                <dimensions>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="h">
-                <element subscript="A1">
-                    <eqn>2100</eqn>
-                </element>
-                <element subscript="A2">
-                    <eqn>2010</eqn>
-                </element>
-                <element subscript="A3">
-                    <eqn>2020</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="f">
-                <eqn>VECTOR ELM MAP(d[DimA, B1], a[DimA])</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                    <dim name="DimB"/>
                 </dimensions>
             </aux>
             <aux name="d">
@@ -149,92 +250,6 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="VSERRNONE">
-                <eqn>0</eqn>
-            </aux>
-            <aux name="VSSUM">
-                <eqn>0</eqn>
-            </aux>
-            <aux name="e">
-                <element subscript="A1, B1">
-                    <eqn>0</eqn>
-                </element>
-                <element subscript="A2, B1">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="A3, B1">
-                    <eqn>0</eqn>
-                </element>
-                <element subscript="A1, B2">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="A2, B2">
-                    <eqn>0</eqn>
-                </element>
-                <element subscript="A3, B2">
-                    <eqn>1</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimA"/>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="DESCENDING">
-                <eqn>0</eqn>
-            </aux>
-            <aux name="VSMAX">
-                <eqn>3</eqn>
-            </aux>
-            <aux name="b">
-                <element subscript="B1">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="B2">
-                    <eqn>2</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="r">
-                <eqn>VECTOR SELECT(e[DimA, *], d[DimA, *], -1e+38, VSMAX, VSERRNONE)</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="o">
-                <element subscript="A1, B1">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="A1, B2">
-                    <eqn>2</eqn>
-                </element>
-                <element subscript="A2, B1">
-                    <eqn>4</eqn>
-                </element>
-                <element subscript="A2, B2">
-                    <eqn>3</eqn>
-                </element>
-                <element subscript="A3, B1">
-                    <eqn>5</eqn>
-                </element>
-                <element subscript="A3, B2">
-                    <eqn>5</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimA"/>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="m">
-                <eqn>VECTOR SORT ORDER(h[DimA], 0)</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="ASCENDING">
-                <eqn>1</eqn>
-            </aux>
             <aux name="g">
                 <eqn>VECTOR ELM MAP(d[DimA, B1], e[DimA, DimB])</eqn>
                 <dimensions>
@@ -242,16 +257,9 @@
                     <dim name="DimB"/>
                 </dimensions>
             </aux>
-            <aux name="VSERRATLEASTONE">
-                <eqn>1</eqn>
-            </aux>
-            <aux name="c">
-                <eqn>10+VECTOR ELM MAP(b[B1], a[DimA])</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
         </variables>
-        <views/>
+        <views>
+            <view/>
+        </views>
     </model>
 </xmile>

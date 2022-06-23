@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -12,18 +12,35 @@
     </sim_specs>
     <model_units/>
     <dimensions>
-        <dim name="DimD">
-            <elem name="D1"/>
-            <elem name="D2"/>
+        <dim name="DimC">
+            <elem name="C1"/>
+            <elem name="C2"/>
         </dim>
         <dim name="DimB">
             <elem name="B1"/>
             <elem name="B2"/>
             <elem name="B3"/>
         </dim>
-        <dim name="DimC">
+        <dim name="SubA">
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+        <dim name="From DimC">
             <elem name="C1"/>
             <elem name="C2"/>
+        </dim>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+        <dim name="To DimC">
+            <elem name="C1"/>
+            <elem name="C2"/>
+        </dim>
+        <dim name="DimD">
+            <elem name="D1"/>
+            <elem name="D2"/>
         </dim>
     </dimensions>
     <model>
@@ -38,6 +55,82 @@ __)}</eqn>
                 <dimensions>
                     <dim name="DimC"/>
                     <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="b">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>0{GET_DIRECT_CONSTANTS(
+____'data/b.csv',
+____',',
+____'B2*'
+__)}</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                </dimensions>
+            </aux>
+            <aux name="f">
+                <doc>~:SUPPLEMENTARY</doc>
+                <element subscript="C1, A2">
+                    <eqn>0{GET_DIRECT_CONSTANTS(
+____'data/f.csv',
+____',',
+____'B2'
+__)}</eqn>
+                </element>
+                <element subscript="C1, A3">
+                    <eqn>0{GET_DIRECT_CONSTANTS(
+____'data/f.csv',
+____',',
+____'B2'
+__)}</eqn>
+                </element>
+                <element subscript="C2, A2">
+                    <eqn>0{GET_DIRECT_CONSTANTS(
+____'data/f.csv',
+____',',
+____'B2'
+__)}</eqn>
+                </element>
+                <element subscript="C2, A3">
+                    <eqn>0{GET_DIRECT_CONSTANTS(
+____'data/f.csv',
+____',',
+____'B2'
+__)}</eqn>
+                </element>
+                <element subscript="C1, A1">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="C1, A2">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="C1, A3">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="C2, A1">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="C2, A2">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="C2, A3">
+                    <eqn>0</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimC"/>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="c">
+                <doc>~:SUPPLEMENTARY</doc>
+                <eqn>0{GET_DIRECT_CONSTANTS(
+____'data/c.csv',
+____',',
+____'B2'
+__)}</eqn>
+                <dimensions>
+                    <dim name="DimB"/>
+                    <dim name="DimC"/>
                 </dimensions>
             </aux>
             <aux name="d">
@@ -61,27 +154,16 @@ ____',',
 ____'B2'
 __)}</eqn>
             </aux>
-            <aux name="b">
+            <aux name="g">
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn>0{GET_DIRECT_CONSTANTS(
-____'data/b.csv',
-____',',
-____'B2*'
-__)}</eqn>
-                <dimensions>
-                    <dim name="DimB"/>
-                </dimensions>
-            </aux>
-            <aux name="c">
-                <doc>~:SUPPLEMENTARY</doc>
-                <eqn>0{GET_DIRECT_CONSTANTS(
-____'data/c.csv',
+____'data/g.csv',
 ____',',
 ____'B2'
 __)}</eqn>
                 <dimensions>
-                    <dim name="DimB"/>
-                    <dim name="DimC"/>
+                    <dim name="From DimC"/>
+                    <dim name="To DimC"/>
                 </dimensions>
             </aux>
         </variables>

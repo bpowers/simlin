@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -23,6 +23,12 @@
             <aux name="e">
                 <eqn>41+1</eqn>
             </aux>
+            <aux name="b">
+                <eqn>3</eqn>
+            </aux>
+            <aux name="c">
+                <eqn>4</eqn>
+            </aux>
             <aux name="d">
                 <eqn>8760</eqn>
             </aux>
@@ -39,12 +45,6 @@
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
-            </aux>
-            <aux name="b">
-                <eqn>3</eqn>
-            </aux>
-            <aux name="c">
-                <eqn>4</eqn>
             </aux>
         </variables>
         <views/>

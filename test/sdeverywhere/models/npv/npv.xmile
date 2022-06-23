@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -15,14 +15,21 @@
     <model>
         <variables>
             <aux name="NPV vs initial time">
+                <isee:delay_aux/>
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn>NPV(stream, discount_rate, init_val, factor)</eqn>
+            </aux>
+            <aux name="factor">
+                <eqn>1</eqn>
             </aux>
             <aux name="init val">
                 <eqn>0</eqn>
             </aux>
-            <aux name="stream">
-                <eqn>-investment/DT*( IF TIME &gt;= (start_time) AND TIME &lt; ((start_time) + MAX(DT,DT)) THEN 1 ELSE 0 )+step(revenue, start_time)</eqn>
+            <aux name="investment">
+                <eqn>100</eqn>
+            </aux>
+            <aux name="discount rate">
+                <eqn>interest_rate/12/100</eqn>
             </aux>
             <aux name="revenue">
                 <eqn>3</eqn>
@@ -30,14 +37,8 @@
             <aux name="start time">
                 <eqn>12</eqn>
             </aux>
-            <aux name="investment">
-                <eqn>100</eqn>
-            </aux>
-            <aux name="factor">
-                <eqn>1</eqn>
-            </aux>
-            <aux name="discount rate">
-                <eqn>interest_rate/12/100</eqn>
+            <aux name="stream">
+                <eqn>-investment/DT*( IF TIME &gt;= (start_time) AND TIME &lt; ((start_time) + MAX(DT,DT)) THEN 1 ELSE 0 )+step(revenue, start_time)</eqn>
             </aux>
             <aux name="interest rate">
                 <eqn>10</eqn>

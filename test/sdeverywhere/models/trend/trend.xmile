@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -14,34 +14,35 @@
     <dimensions/>
     <model>
         <variables>
-            <stock name="average value">
-                <inflow>average_value_net_flow</inflow>
-                <eqn>input/(1+initial_trend*average_time)</eqn>
-            </stock>
-            <aux name="TREND of input">
-                <eqn>TREND(input, average_time, initial_trend)</eqn>
-            </aux>
-            <aux name="initial trend">
-                <eqn>10</eqn>
-            </aux>
+            <flow name="average value net flow">
+                <eqn>(input-average_value)/average_time</eqn>
+            </flow>
             <aux name="average time">
                 <eqn>6</eqn>
             </aux>
-            <aux name="input">
-                <eqn>1+0.5*SIN(2*3.14159*Time/period)</eqn>
+            <aux name="period">
+                <eqn>20</eqn>
             </aux>
             <aux name="description">
                 <doc> Demonstrate TREND function equivalence with the expansion from the Vensim documentation.</doc>
                 <eqn>0</eqn>
             </aux>
+            <aux name="TREND of input">
+                <isee:delay_aux/>
+                <eqn>TREND(input, average_time, initial_trend)</eqn>
+            </aux>
+            <aux name="initial trend">
+                <eqn>10</eqn>
+            </aux>
             <aux name="trend1">
                 <eqn>SAFEDIV(input-average_value, average_time*ABS(average_value))</eqn>
             </aux>
-            <flow name="average value net flow">
-                <eqn>(input-average_value)/average_time</eqn>
-            </flow>
-            <aux name="period">
-                <eqn>20</eqn>
+            <stock name="average value">
+                <inflow>average_value_net_flow</inflow>
+                <eqn>input/(1+initial_trend*average_time)</eqn>
+            </stock>
+            <aux name="input">
+                <eqn>1+0.5*SIN(2*3.14159*Time/period)</eqn>
             </aux>
         </variables>
         <views/>

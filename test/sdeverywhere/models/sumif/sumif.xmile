@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -20,12 +20,12 @@
     </dimensions>
     <model>
         <variables>
+            <aux name="A Values Total">
+                <eqn>SUM(A_Values[*])</eqn>
+            </aux>
             <aux name="A Values Avg">
                 <doc> Note that we omit `A Values[A2]` in the dat file to test the case where data is missing in a sparse matrix, and in this case the LOOKUP call should generate :NA:.</doc>
                 <eqn>SAFEDIV(SUM(( IF A_Values[*] = -1e+38 THEN 0 ELSE A_Values[*] )), SUM(( IF A_Values[*] = -1e+38 THEN 0 ELSE 1 )))</eqn>
-            </aux>
-            <aux name="A Values Total">
-                <eqn>SUM(A_Values[*])</eqn>
             </aux>
             <aux name="A Values">
                 <eqn>TIME</eqn>
@@ -43,7 +43,7 @@
             <group name="Control">
                 <var>STOPTIME</var>
                 <var>STARTTIME</var>
-                <var>DT</var>
+                <var>SAVEPER</var>
                 <var>DT</var>
             </group>
         </views>

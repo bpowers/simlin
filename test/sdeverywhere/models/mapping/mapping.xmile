@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -12,50 +12,36 @@
     </sim_specs>
     <model_units/>
     <dimensions>
-        <dim name="DimD">
-            <elem name="D1"/>
-            <elem name="D2"/>
-            <elem name="D3"/>
-        </dim>
         <dim name="SubC">
             <elem name="C1"/>
             <elem name="C2"/>
-        </dim>
-        <dim name="SubA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-        </dim>
-        <dim name="DimA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-            <elem name="A3"/>
-        </dim>
-        <dim name="DimB">
-            <elem name="B1"/>
-            <elem name="B2"/>
         </dim>
         <dim name="DimC">
             <elem name="C1"/>
             <elem name="C2"/>
             <elem name="C3"/>
         </dim>
+        <dim name="SubA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+        </dim>
+        <dim name="DimB">
+            <elem name="B1"/>
+            <elem name="B2"/>
+        </dim>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+        <dim name="DimD">
+            <elem name="D1"/>
+            <elem name="D2"/>
+            <elem name="D3"/>
+        </dim>
     </dimensions>
     <model>
         <variables>
-            <aux name="d">
-                <doc>	mapping a subdimension to an index</doc>
-                <eqn>c[DimC]*10</eqn>
-                <dimensions>
-                    <dim name="DimD"/>
-                </dimensions>
-            </aux>
-            <aux name="a">
-                <doc>	mapping an index to a subdimension</doc>
-                <eqn>b[DimB]*10</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
             <aux name="b">
                 <element subscript="B1">
                     <eqn>1</eqn>
@@ -80,6 +66,20 @@
                 </element>
                 <dimensions>
                     <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="d">
+                <doc>	mapping a subdimension to an index</doc>
+                <eqn>c[DimC]*10</eqn>
+                <dimensions>
+                    <dim name="DimD"/>
+                </dimensions>
+            </aux>
+            <aux name="a">
+                <doc>	mapping an index to a subdimension</doc>
+                <eqn>b[DimB]*10</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
                 </dimensions>
             </aux>
         </variables>

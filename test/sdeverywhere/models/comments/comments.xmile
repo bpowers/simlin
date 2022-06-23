@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -20,6 +20,18 @@
     </dimensions>
     <model>
         <variables>
+            <aux name="e">
+                <doc>  ~  :SUPPLEMENTARY</doc>
+                <eqn>41+1</eqn>
+            </aux>
+            <aux name="b">
+                <doc>  ~  :SUPPLEMENTARY</doc>
+                <eqn>3</eqn>
+            </aux>
+            <aux name="c">
+                <doc>  ~  :SUPPLEMENTARY</doc>
+                <eqn>4</eqn>
+            </aux>
             <aux name="d">
                 <doc>  Calculates the number of hours in the year, ignoring leap years.
   ~  :SUPPLEMENTARY</doc>
@@ -40,18 +52,6 @@
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
-            </aux>
-            <aux name="e">
-                <doc>  ~  :SUPPLEMENTARY</doc>
-                <eqn>41+1</eqn>
-            </aux>
-            <aux name="b">
-                <doc>  ~  :SUPPLEMENTARY</doc>
-                <eqn>3</eqn>
-            </aux>
-            <aux name="c">
-                <doc>  ~  :SUPPLEMENTARY</doc>
-                <eqn>4</eqn>
             </aux>
         </variables>
         <views/>

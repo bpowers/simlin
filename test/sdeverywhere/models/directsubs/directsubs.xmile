@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -12,10 +12,14 @@
     </sim_specs>
     <model_units/>
     <dimensions>
-        <dim name="DimA">
-            <elem name="A1"/>
-            <elem name="A2"/>
-            <elem name="A3"/>
+        <dim name="DimC">
+            <elem name="0{GET DIRECT SUBSCRIPT(
+	   &apos;c_subs.csv&apos;,
+	   &apos;,&apos;,
+	   &apos;A2&apos;,
+	   &apos;2&apos;,
+	   &apos;&apos;
+	)}"/>
         </dim>
         <dim name="DimB">
             <elem name="0{GET DIRECT SUBSCRIPT(
@@ -26,32 +30,14 @@
 	   &apos;&apos;
 	)}"/>
         </dim>
-        <dim name="DimC">
-            <elem name="0{GET DIRECT SUBSCRIPT(
-	   &apos;c_subs.csv&apos;,
-	   &apos;,&apos;,
-	   &apos;A2&apos;,
-	   &apos;2&apos;,
-	   &apos;&apos;
-	)}"/>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
         </dim>
     </dimensions>
     <model>
         <variables>
-            <aux name="a">
-                <element subscript="A1">
-                    <eqn>10</eqn>
-                </element>
-                <element subscript="A2">
-                    <eqn>20</eqn>
-                </element>
-                <element subscript="A3">
-                    <eqn>30</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
             <aux name="b">
                 <doc>~:SUPPLEMENTARY</doc>
                 <eqn> ??? </eqn>
@@ -64,6 +50,20 @@
                 <eqn>a[DimA]+1</eqn>
                 <dimensions>
                     <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="a">
+                <element subscript="A1">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="A2">
+                    <eqn>20</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>30</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
                 </dimensions>
             </aux>
         </variables>

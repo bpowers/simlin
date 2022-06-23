@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -44,12 +44,12 @@
             <elem name="t1"/>
             <elem name="t2"/>
         </dim>
-        <dim name="tNext">
+        <dim name="Target">
+            <elem name="t1"/>
             <elem name="t2"/>
             <elem name="t3"/>
         </dim>
-        <dim name="Target">
-            <elem name="t1"/>
+        <dim name="tNext">
             <elem name="t2"/>
             <elem name="t3"/>
         </dim>

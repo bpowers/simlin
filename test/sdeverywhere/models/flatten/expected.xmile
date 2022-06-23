@@ -17,6 +17,10 @@
             <elem name="B2"/>
             <elem name="B3"/>
         </dim>
+        <dim name="DimAExceptA1">
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
         <dim name="DimA">
             <elem name="A1"/>
             <elem name="A2"/>
@@ -25,6 +29,12 @@
     </dimensions>
     <model>
         <variables>
+            <aux name="Using equation without backslashes">
+                <eqn>Equation_without_backslashes[DimA]*2</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
             <aux name=" quotes 2 with extra whitespace ">
                 <eqn>1</eqn>
             </aux>
@@ -36,20 +46,46 @@
                     <ypts>0,1,2</ypts>
                 </gf>
             </aux>
+            <aux name="Equation without backslashes">
+                <element subscript="A1">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="A2">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>1</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Equation with backslashes">
+                <element subscript="A1">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="A2">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>1</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="Using equation with backslashes">
+                <eqn>Equation_with_backslashes[DimA]*2</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
             <aux name="Look2">
                 <eqn>0+0</eqn>
                 <gf>
                     <yscale min="0" max="2"/>
                     <xpts>0,1,2</xpts>
                     <ypts>0,1,2</ypts>
-                </gf>
-            </aux>
-            <aux name="carrot 3 Data 1">
-                <eqn>TIME</eqn>
-                <gf>
-                    <yscale min="1" max="2"/>
-                    <xpts>0,1</xpts>
-                    <ypts>1,1</ypts>
                 </gf>
             </aux>
             <aux name="carrot 2">
@@ -72,14 +108,6 @@
             </aux>
             <aux name="Apple 1">
                 <eqn>1</eqn>
-            </aux>
-            <aux name="Carrot 3 Data 2">
-                <eqn>TIME</eqn>
-                <gf>
-                    <yscale min="1" max="2"/>
-                    <xpts>0,1</xpts>
-                    <ypts>1,1</ypts>
-                </gf>
             </aux>
             <aux name="banana 3">
                 <eqn>Banana_1*Banana_2</eqn>

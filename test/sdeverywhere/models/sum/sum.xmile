@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -12,12 +12,15 @@
     </sim_specs>
     <model_units/>
     <dimensions>
-        <dim name="SubA">
-            <elem name="A2"/>
-            <elem name="A3"/>
+        <dim name="DimF">
+            <elem name="F1"/>
+            <elem name="F2"/>
         </dim>
-        <dim name="DimA">
-            <elem name="A1"/>
+        <dim name="DimE">
+            <elem name="E1"/>
+            <elem name="E2"/>
+        </dim>
+        <dim name="SubA">
             <elem name="A2"/>
             <elem name="A3"/>
         </dim>
@@ -26,17 +29,108 @@
             <elem name="C2"/>
             <elem name="C3"/>
         </dim>
+        <dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
+        <dim name="DimD">
+            <elem name="D1"/>
+            <elem name="D2"/>
+        </dim>
     </dimensions>
     <model>
         <variables>
-            <aux name="l">
-                <eqn>a_2[SubA]/SUM(b_2[*:SubA])</eqn>
+            <aux name="o">
+                <element subscript="D1, E1, F1">
+                    <eqn>111</eqn>
+                </element>
+                <element subscript="D1, E2, F1">
+                    <eqn>111</eqn>
+                </element>
+                <element subscript="D1, E1, F2">
+                    <eqn>112</eqn>
+                </element>
+                <element subscript="D1, E2, F2">
+                    <eqn>112</eqn>
+                </element>
+                <element subscript="D2, E1, F1">
+                    <eqn>211</eqn>
+                </element>
+                <element subscript="D2, E2, F1">
+                    <eqn>211</eqn>
+                </element>
+                <element subscript="D2, E1, F2">
+                    <eqn>212</eqn>
+                </element>
+                <element subscript="D2, E2, F2">
+                    <eqn>212</eqn>
+                </element>
                 <dimensions>
-                    <dim name="SubA"/>
+                    <dim name="DimD"/>
+                    <dim name="DimE"/>
+                    <dim name="DimF"/>
                 </dimensions>
             </aux>
-            <aux name="k">
-                <eqn>SUM(b_2[*:SubA])</eqn>
+            <aux name="n">
+                <element subscript="D1, E1, F1">
+                    <eqn>111</eqn>
+                </element>
+                <element subscript="D1, E1, F2">
+                    <eqn>112</eqn>
+                </element>
+                <element subscript="D1, E2, F1">
+                    <eqn>121</eqn>
+                </element>
+                <element subscript="D1, E2, F2">
+                    <eqn>122</eqn>
+                </element>
+                <element subscript="D2, E1, F1">
+                    <eqn>211</eqn>
+                </element>
+                <element subscript="D2, E1, F2">
+                    <eqn>212</eqn>
+                </element>
+                <element subscript="D2, E2, F1">
+                    <eqn>221</eqn>
+                </element>
+                <element subscript="D2, E2, F2">
+                    <eqn>222</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimD"/>
+                    <dim name="DimE"/>
+                    <dim name="DimF"/>
+                </dimensions>
+            </aux>
+            <aux name="msum">
+                <doc>
+2 separated dimensions</doc>
+                <eqn>SUM(m[DimD, *])</eqn>
+                <dimensions>
+                    <dim name="DimD"/>
+                </dimensions>
+            </aux>
+            <aux name="m">
+                <element subscript="D1, E1">
+                    <eqn>11</eqn>
+                </element>
+                <element subscript="D1, E2">
+                    <eqn>12</eqn>
+                </element>
+                <element subscript="D2, E1">
+                    <eqn>21</eqn>
+                </element>
+                <element subscript="D2, E2">
+                    <eqn>22</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimD"/>
+                    <dim name="DimE"/>
+                </dimensions>
+            </aux>
+            <aux name="l">
+                <eqn>a_2[SubA]/SUM(b_2[*:SubA])</eqn>
                 <dimensions>
                     <dim name="SubA"/>
                 </dimensions>
@@ -46,58 +140,6 @@
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
-            </aux>
-            <aux name="h">
-                <element subscript="C1">
-                    <eqn>10</eqn>
-                </element>
-                <element subscript="C2">
-                    <eqn>20</eqn>
-                </element>
-                <element subscript="C3">
-                    <eqn>30</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimC"/>
-                </dimensions>
-            </aux>
-            <aux name="f">
-                <eqn>1</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                    <dim name="DimC"/>
-                </dimensions>
-            </aux>
-            <aux name="d">
-                <eqn>SUM(a[*])+SUM(b[*])</eqn>
-            </aux>
-            <aux name="b 2">
-                <element subscript="A2">
-                    <eqn>4</eqn>
-                </element>
-                <element subscript="A3">
-                    <eqn>5</eqn>
-                </element>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="a">
-                <element subscript="A1">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="A2">
-                    <eqn>2</eqn>
-                </element>
-                <element subscript="A3">
-                    <eqn>3</eqn>
-                </element>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="e">
-                <eqn>SUM(a[*]*b[*]/DT)</eqn>
             </aux>
             <aux name="b">
                 <element subscript="A1">
@@ -113,14 +155,25 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="i">
-                <eqn>SUM(a[*]+h[*])</eqn>
+            <aux name="e">
+                <eqn>SUM(a[*]*b[*]/DT)</eqn>
             </aux>
-            <aux name="g">
-                <eqn>SUM(f[*, *])</eqn>
+            <aux name="f">
+                <eqn>1</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                     <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="b 2">
+                <element subscript="A2">
+                    <eqn>4</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>5</eqn>
+                </element>
+                <dimensions>
+                    <dim name="SubA"/>
                 </dimensions>
             </aux>
             <aux name="a 2">
@@ -137,7 +190,74 @@
             <aux name="c">
                 <eqn>SUM(a[*])+1</eqn>
             </aux>
+            <aux name="h">
+                <element subscript="C1">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="C2">
+                    <eqn>20</eqn>
+                </element>
+                <element subscript="C3">
+                    <eqn>30</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="d">
+                <eqn>SUM(a[*])+SUM(b[*])</eqn>
+            </aux>
+            <aux name="osum">
+                <doc>
+2 separated dimensions with 1 unseparated dimension</doc>
+                <eqn>SUM(o[DimD, DimE, *])</eqn>
+                <dimensions>
+                    <dim name="DimD"/>
+                    <dim name="DimE"/>
+                </dimensions>
+            </aux>
+            <aux name="a">
+                <element subscript="A1">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="A2">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="k">
+                <eqn>SUM(b_2[*:SubA])</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
+            <aux name="nsum">
+                <doc>
+3 separated dimensions</doc>
+                <eqn>SUM(n[DimD, DimE, *])</eqn>
+                <dimensions>
+                    <dim name="DimD"/>
+                    <dim name="DimE"/>
+                </dimensions>
+            </aux>
+            <aux name="g">
+                <eqn>SUM(f[*, *])</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                    <dim name="DimC"/>
+                </dimensions>
+            </aux>
+            <aux name="i">
+                <eqn>SUM(a[*]+h[*])</eqn>
+            </aux>
         </variables>
-        <views/>
+        <views>
+            <view/>
+        </views>
     </model>
 </xmile>

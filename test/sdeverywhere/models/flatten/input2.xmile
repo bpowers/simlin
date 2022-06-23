@@ -7,11 +7,15 @@
     </header>
     <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
         <start>0</start>
-        <stop>1</stop>
+        <stop>10</stop>
         <dt>1</dt>
     </sim_specs>
     <model_units/>
     <dimensions>
+        <dim name="DimAExceptA1">
+            <elem name="A2"/>
+            <elem name="A3"/>
+        </dim>
         <dim name="DimA">
             <elem name="A1"/>
             <elem name="A2"/>
@@ -20,34 +24,41 @@
     </dimensions>
     <model>
         <variables>
-            <aux name="b">
-                <element subscript="A1">
-                    <eqn>1</eqn>
-                </element>
-                <element subscript="A2">
-                    <eqn>2</eqn>
-                </element>
-                <element subscript="A3">
-                    <eqn>3</eqn>
-                </element>
+            <aux name="Using equation without backslashes">
+                <eqn>Equation_without_backslashes[DimA]*2</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="c">
-                <eqn>b[A1]+1</eqn>
+            <aux name="Equation without backslashes">
+                <doc> Comment
+    x = 1 y = 2</doc>
+                <eqn>TIME</eqn>
+                <gf>
+                    <yscale min="1" max="2"/>
+                    <xpts>0,1</xpts>
+                    <ypts>1,1</ypts>
+                </gf>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
+                <units>dmnl</units>
             </aux>
-            <aux name="d">
-                <eqn>b[A1]+b[DimA]</eqn>
+            <aux name="Equation with backslashes">
+                <doc> Comment x = 1 y = 2</doc>
+                <eqn>TIME</eqn>
+                <gf>
+                    <yscale min="1" max="2"/>
+                    <xpts>0,1</xpts>
+                    <ypts>1,1</ypts>
+                </gf>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
+                <units>dmnl</units>
             </aux>
-            <aux name="a">
-                <eqn>b[DimA]+10</eqn>
+            <aux name="Using equation with backslashes">
+                <eqn>Equation_with_backslashes[DimA]*2</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>

@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -20,35 +20,33 @@
                 <eqn>0</eqn>
                 <units>People</units>
             </stock>
-            <aux name="Total Population P">
-                <doc>	The total population is constant</doc>
-                <eqn>10000</eqn>
-                <units>People</units>
-            </aux>
             <aux name="Average Duration of Illness d">
                 <doc>	The average length of time that a person is infectious.</doc>
                 <eqn>2</eqn>
                 <units>Day</units>
             </aux>
-            <stock name="Susceptible Population S">
-                <doc>	The susceptible population, as in the simple logistic epidemic model, is reduced by the infection rate.  The initial susceptible population is the total population less the initial number of infectives and any initially recovered individuals.</doc>
-                <outflow>Infection_Rate</outflow>
-                <eqn>Total_Population_P-Infectious_Population_I-Recovered_Population_R</eqn>
-                <units>People</units>
-            </stock>
             <aux name="Infectivity i">
                 <doc>	The infectivity (i) of the disease is the probability that a person will become infected after exposure to someone with the disease.</doc>
                 <eqn>0.25</eqn>
                 <units>Dimensionless</units>
             </aux>
-            <aux name="Contact Rate c">
-                <doc>	People in the community interact at a certain rate (the Contact Rate, c, measured in people contacted per person per time period, or 1/time periods).  The contact rate rises at the Ramp Slope starting in day 1.</doc>
-                <eqn>Initial_Contact_Rate</eqn>
-                <units>1/Day</units>
+            <aux name="Reproduction Rate">
+                <eqn>Contact_Rate_c*Infectivity_i*Average_Duration_of_Illness_d*Susceptible_Population_S/Total_Population_P</eqn>
+                <units>Dimensionless</units>
             </aux>
+            <flow name="Infection Rate">
+                <doc>	The infection rate is the total number of encounters Sc multiplied by the probability that any of those encounters is with an infectious individual I/N, and finally multiplied by the probability that an encounter with an infectious person results in infection i.</doc>
+                <eqn>Contact_Rate_c*Infectivity_i*Susceptible_Population_S*Infectious_Population_I/Total_Population_P</eqn>
+                <units>People/Day</units>
+            </flow>
             <aux name="Initial Contact Rate">
                 <doc>	The initial contact rate; the actual contact rate rises at a slope determined by the user.</doc>
                 <eqn>2.5</eqn>
+                <units>1/Day</units>
+            </aux>
+            <aux name="Contact Rate c">
+                <doc>	People in the community interact at a certain rate (the Contact Rate, c, measured in people contacted per person per time period, or 1/time periods).  The contact rate rises at the Ramp Slope starting in day 1.</doc>
+                <eqn>Initial_Contact_Rate</eqn>
                 <units>1/Day</units>
             </aux>
             <flow name="Recovery Rate">
@@ -56,20 +54,22 @@
                 <eqn>Infectious_Population_I/Average_Duration_of_Illness_d</eqn>
                 <units>People/Day</units>
             </flow>
-            <flow name="Infection Rate">
-                <doc>	The infection rate is the total number of encounters Sc multiplied by the probability that any of those encounters is with an infectious individual I/N, and finally multiplied by the probability that an encounter with an infectious person results in infection i.</doc>
-                <eqn>Contact_Rate_c*Infectivity_i*Susceptible_Population_S*Infectious_Population_I/Total_Population_P</eqn>
-                <units>People/Day</units>
-            </flow>
-            <aux name="Reproduction Rate">
-                <eqn>Contact_Rate_c*Infectivity_i*Average_Duration_of_Illness_d*Susceptible_Population_S/Total_Population_P</eqn>
-                <units>Dimensionless</units>
-            </aux>
             <stock name="Infectious Population I">
                 <doc>	The infectious population accumulates the infection rate and the inmigration of infectious rate less the recovery rate.</doc>
                 <inflow>Infection_Rate</inflow>
                 <outflow>Recovery_Rate</outflow>
                 <eqn>1</eqn>
+                <units>People</units>
+            </stock>
+            <aux name="Total Population P">
+                <doc>	The total population is constant</doc>
+                <eqn>10000</eqn>
+                <units>People</units>
+            </aux>
+            <stock name="Susceptible Population S">
+                <doc>	The susceptible population, as in the simple logistic epidemic model, is reduced by the infection rate.  The initial susceptible population is the total population less the initial number of infectives and any initially recovered individuals.</doc>
+                <outflow>Infection_Rate</outflow>
+                <eqn>Total_Population_P-Infectious_Population_I-Recovered_Population_R</eqn>
                 <units>People</units>
             </stock>
         </variables>
@@ -79,8 +79,8 @@
                 <stock name="Infectious_Population_I" x="470" y="120"/>
                 <flow name="Infection_Rate" x="337" y="121">
                     <pts>
-                        <pt x="204" y="122"/>
-                        <pt x="470" y="120"/>
+                        <pt x="204" y="121"/>
+                        <pt x="470" y="121"/>
                     </pts>
                 </flow>
                 <connector uid="7" angle="-88.272624086845525">

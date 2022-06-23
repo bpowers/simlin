@@ -1,0 +1,270 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0</start>
+        <stop>12</stop>
+        <dt>0.125</dt>
+    </sim_specs>
+    <model_units>
+        <unit name="Dollar">
+            <eqn>$</eqn>
+            <alias>Dollars</alias>
+            <alias>$s</alias>
+        </unit>
+        <unit name="Hour">
+            <alias>Hours</alias>
+        </unit>
+        <unit name="Month">
+            <alias>Months</alias>
+        </unit>
+        <unit name="Person">
+            <alias>People</alias>
+            <alias>Persons</alias>
+        </unit>
+        <unit name="Unit">
+            <alias>Units</alias>
+        </unit>
+        <unit name="Week">
+            <alias>Weeks</alias>
+        </unit>
+        <unit name="Year">
+            <alias>Years</alias>
+        </unit>
+        <unit name="Day">
+            <alias>Days</alias>
+        </unit>
+    </model_units>
+    <dimensions>
+        <dim name="XPriority">
+            <elem name="ptype"/>
+            <elem name="ppriority"/>
+            <elem name="pwidth"/>
+            <elem name="pextra"/>
+        </dim>
+        <dim name="region">
+            <elem name="Boston"/>
+            <elem name="Dayton"/>
+            <elem name="Fresno"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="total shipments">
+                <eqn>SUM(shipments[*])</eqn>
+                <units>Widget/Month</units>
+            </aux>
+            <aux name="total demand">
+                <eqn>SUM(demand[*])</eqn>
+                <units>Widget/Month</units>
+            </aux>
+            <aux name="priority width">
+                <eqn>1</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="Initial Supply">
+                <eqn>0</eqn>
+                <units>Widget/Month</units>
+            </aux>
+            <aux name="integer type">
+                <doc>	Set to 10 for integer allocations; otherwise 0.</doc>
+                <eqn>0</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="shipments">
+                <eqn>{Untranslated function used}ALLOCATE AVAILABLE(demand[region], priority_vector[region, ptype], total_supply_available)</eqn>
+                <dimensions>
+                    <dim name="region"/>
+                </dimensions>
+                <units>Widget/Month</units>
+            </aux>
+            <aux name="priority type">
+                <doc>	ptype 0 - Fixed Quantity
+		ptype 1 - Rectangular
+		ptype 2 - Triangular
+		ptype 3 - Normal
+		ptype 4 - Exponential
+		ptype 5 - Constant Elasticity</doc>
+                <eqn>3</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="Final Supply">
+                <eqn>10</eqn>
+                <units>Widget/Month</units>
+            </aux>
+            <aux name="total supply available">
+                <doc>	Test input for total supply - creates a ramp over time.</doc>
+                <eqn>( IF integer_supply THEN INT(Initial_Supply+(Final_Supply-Initial_Supply)*(Time-STARTTIME)/(STOPTIME-STARTTIME)) ELSE Initial_Supply+(Final_Supply-Initial_Supply)*(Time-STARTTIME)/(STOPTIME-STARTTIME) )</eqn>
+                <units>Widget/Month</units>
+            </aux>
+            <aux name="priority">
+                <element subscript="Boston">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="Dayton">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="Fresno">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="region"/>
+                </dimensions>
+                <units>dmnl</units>
+            </aux>
+            <aux name="integer supply">
+                <eqn>0</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="extra">
+                <doc>	Extra parameter - used for elasticity when allocation is CES (ptype=5)</doc>
+                <eqn>1</eqn>
+                <units>dmnl</units>
+            </aux>
+            <aux name="demand">
+                <element subscript="Boston">
+                    <eqn>3</eqn>
+                </element>
+                <element subscript="Dayton">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="Fresno">
+                    <eqn>4</eqn>
+                </element>
+                <dimensions>
+                    <dim name="region"/>
+                </dimensions>
+                <units>Widget/Month</units>
+            </aux>
+            <aux name="priority vector">
+                <element subscript="Boston, ptype">
+                    <eqn>priority_type+integer_type</eqn>
+                </element>
+                <element subscript="Dayton, ptype">
+                    <eqn>priority_type+integer_type</eqn>
+                </element>
+                <element subscript="Fresno, ptype">
+                    <eqn>priority_type+integer_type</eqn>
+                </element>
+                <element subscript="Boston, ppriority">
+                    <eqn>priority[Boston]</eqn>
+                </element>
+                <element subscript="Dayton, ppriority">
+                    <eqn>priority[Dayton]</eqn>
+                </element>
+                <element subscript="Fresno, ppriority">
+                    <eqn>priority[Fresno]</eqn>
+                </element>
+                <element subscript="Boston, pwidth">
+                    <eqn>priority_width</eqn>
+                </element>
+                <element subscript="Dayton, pwidth">
+                    <eqn>priority_width</eqn>
+                </element>
+                <element subscript="Fresno, pwidth">
+                    <eqn>priority_width</eqn>
+                </element>
+                <element subscript="Boston, pextra">
+                    <eqn>extra</eqn>
+                </element>
+                <element subscript="Dayton, pextra">
+                    <eqn>extra</eqn>
+                </element>
+                <element subscript="Fresno, pextra">
+                    <eqn>extra</eqn>
+                </element>
+                <dimensions>
+                    <dim name="region"/>
+                    <dim name="XPriority"/>
+                </dimensions>
+                <units>dmnl</units>
+            </aux>
+        </variables>
+        <views>
+            <view>
+                <aux name="demand" x="210" y="236"/>
+                <aux name="priority_vector" x="228" y="345"/>
+                <aux name="shipments" x="351" y="277"/>
+                <connector uid="5" angle="-15.973103428471717">
+                    <from>demand</from>
+                    <to>shipments</to>
+                </connector>
+                <connector uid="6" angle="30.593203453556882">
+                    <from>priority_vector</from>
+                    <to>shipments</to>
+                </connector>
+                <aux name="total_supply_available" x="522" y="271"/>
+                <connector uid="8" angle="180.25469796567242">
+                    <from>total_supply_available</from>
+                    <to>shipments</to>
+                </connector>
+                <aux name="extra" x="106" y="446"/>
+                <connector uid="10" angle="40.145763866502591">
+                    <from>extra</from>
+                    <to>priority_vector</to>
+                </connector>
+                <aux name="priority" x="105" y="394"/>
+                <connector uid="12" angle="22.191358081378354">
+                    <from>priority</from>
+                    <to>priority_vector</to>
+                </connector>
+                <aux name="priority_width" x="100" y="343"/>
+                <connector uid="14" angle="0.69596656098362075">
+                    <from>priority_width</from>
+                    <to>priority_vector</to>
+                </connector>
+                <aux name="priority_type" x="106" y="296"/>
+                <connector uid="16" angle="-21.409943014345032">
+                    <from>priority_type</from>
+                    <to>priority_vector</to>
+                </connector>
+                <aux name="Final_Supply" x="686" y="411"/>
+                <connector uid="18" angle="139.29634171944582">
+                    <from>Final_Supply</from>
+                    <to>total_supply_available</to>
+                </connector>
+                <connector uid="20" angle="153.43494882292197">
+                    <from>STOPTIME</from>
+                    <to>total_supply_available</to>
+                </connector>
+                <aux name="Initial_Supply" x="704" y="268"/>
+                <connector uid="22" angle="179.35321013238513">
+                    <from>Initial_Supply</from>
+                    <to>total_supply_available</to>
+                </connector>
+                <connector uid="24" angle="198.6455731328991">
+                    <from>STARTTIME</from>
+                    <to>total_supply_available</to>
+                </connector>
+                <connector uid="26" angle="165.0691394343348">
+                    <from>Time</from>
+                    <to>total_supply_available</to>
+                </connector>
+                <aux name="integer_type" x="106" y="251"/>
+                <connector uid="29" angle="-38.083583868422522">
+                    <from>integer_type</from>
+                    <to>priority_vector</to>
+                </connector>
+                <aux name="total_shipments" x="368" y="220"/>
+                <connector uid="31" angle="75.585089141607597">
+                    <from>shipments</from>
+                    <to>total_shipments</to>
+                </connector>
+                <aux name="integer_supply" x="597" y="183"/>
+                <connector uid="34" angle="228.61847302578681">
+                    <from>integer_supply</from>
+                    <to>total_supply_available</to>
+                </connector>
+                <aux name="total_demand" x="272" y="175"/>
+                <connector uid="37" angle="47.248633902505162">
+                    <from>demand</from>
+                    <to>total_demand</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -20,6 +20,15 @@
     </dimensions>
     <model>
         <variables>
+            <aux name="withlookup at 2pt5">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>2.5</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
             <aux name="withlookup at 2pt0">
                 <doc>		~	:SUPPLEMENTARY</doc>
                 <eqn>2</eqn>
@@ -47,13 +56,66 @@
                     <ypts>0,1,2</ypts>
                 </gf>
             </aux>
-            <aux name="g at 2pt0 backward">
+            <aux name="withlookup at minus 1">
                 <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 2)</eqn>
+                <eqn>-1</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
             </aux>
             <aux name="g at 1pt5 backward">
                 <doc>		~	:SUPPLEMENTARY</doc>
                 <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 1.5)</eqn>
+            </aux>
+            <aux name="withlookup at 0">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>0</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="g at 1pt0 backward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 1)</eqn>
+            </aux>
+            <aux name="g at minus 1 backward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, -1)</eqn>
+            </aux>
+            <aux name="g at 2pt5 forward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 2.5)</eqn>
+            </aux>
+            <aux name="g at 2pt0 forward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 2)</eqn>
+            </aux>
+            <aux name="g at 1pt5 forward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 1.5)</eqn>
+            </aux>
+            <aux name="g at 0 backward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 0)</eqn>
+            </aux>
+            <aux name="g at 0pt5 forward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 0.5)</eqn>
+            </aux>
+            <aux name="e">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>LOOKUP(c[DimA], i)</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="g at 0pt5 backward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 0.5)</eqn>
             </aux>
             <aux name="withlookup at 1pt5">
                 <doc>		~	:SUPPLEMENTARY</doc>
@@ -64,126 +126,22 @@
                     <ypts>0,1,2</ypts>
                 </gf>
             </aux>
-            <aux name="g at 2pt5 forward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 2.5)</eqn>
-            </aux>
-            <aux name="g at 1pt5 forward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 1.5)</eqn>
-            </aux>
-            <aux name="g at 1pt0 forward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 1)</eqn>
-            </aux>
-            <aux name="withlookup at 2pt5">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>2.5</eqn>
-                <gf>
-                    <yscale min="0" max="2"/>
-                    <xpts>0,1,2</xpts>
-                    <ypts>0,1,2</ypts>
-                </gf>
-            </aux>
-            <aux name="f">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>LOOKUP(c[A1], i)</eqn>
-            </aux>
-            <aux name="d">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>i</eqn>
-                <gf>
-                    <yscale min="0" max="1.3"/>
-                    <xpts>0,0.1,0.5,1,1.5,2</xpts>
-                    <ypts>0,0.01,0.7,1,1.2,1.3</ypts>
-                </gf>
-            </aux>
-            <aux name="a">
-                <doc>	lookup definition</doc>
-                <eqn>0+0</eqn>
-                <gf>
-                    <yscale min="-1" max="1"/>
-                    <xpts>0,0.7,0.8,0.9,1,2</xpts>
-                    <ypts>0,0,0.1,0.9,-1,1</ypts>
-                </gf>
-            </aux>
-            <aux name="g at 1pt0 backward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 1)</eqn>
-            </aux>
-            <aux name="e">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>LOOKUP(c[DimA], i)</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="g at 2pt5 backward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 2.5)</eqn>
-            </aux>
-            <aux name="g at minus 1 backward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, -1)</eqn>
-            </aux>
             <aux name="b">
                 <doc>	lookup
 	~	:SUPPLEMENTARY</doc>
                 <eqn>LOOKUP(a, i)</eqn>
             </aux>
-            <aux name="g at 0 forward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 0)</eqn>
-            </aux>
-            <aux name="g at 0 backward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 0)</eqn>
-            </aux>
-            <aux name="withlookup at minus 1">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>-1</eqn>
-                <gf>
-                    <yscale min="0" max="2"/>
-                    <xpts>0,1,2</xpts>
-                    <ypts>0,1,2</ypts>
-                </gf>
-            </aux>
             <aux name="g at minus 1 forward">
                 <doc>		~	:SUPPLEMENTARY</doc>
                 <eqn>{Untranslated function used}LOOKUP FORWARD(g, -1)</eqn>
             </aux>
-            <aux name="i">
-                <eqn>Time/10</eqn>
-            </aux>
-            <aux name="g at 0pt5 backward">
+            <aux name="g at 0 forward">
                 <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 0.5)</eqn>
+                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 0)</eqn>
             </aux>
-            <aux name="g">
-                <doc>	lookup definition</doc>
-                <eqn>0+0</eqn>
-                <gf>
-                    <yscale min="0" max="2"/>
-                    <xpts>0,1,2</xpts>
-                    <ypts>0,1,2</ypts>
-                </gf>
-            </aux>
-            <aux name="g at 0pt5 forward">
+            <aux name="f">
                 <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 0.5)</eqn>
-            </aux>
-            <aux name="g at 2pt0 forward">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 2)</eqn>
-            </aux>
-            <aux name="withlookup at 0">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>0</eqn>
-                <gf>
-                    <yscale min="0" max="2"/>
-                    <xpts>0,1,2</xpts>
-                    <ypts>0,1,2</ypts>
-                </gf>
+                <eqn>LOOKUP(c[A1], i)</eqn>
             </aux>
             <aux name="c">
                 <doc>		~	:SUPPLEMENTARY</doc>
@@ -214,6 +172,48 @@
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
+            </aux>
+            <aux name="g at 2pt5 backward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 2.5)</eqn>
+            </aux>
+            <aux name="d">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>i</eqn>
+                <gf>
+                    <yscale min="0" max="1.3"/>
+                    <xpts>0,0.1,0.5,1,1.5,2</xpts>
+                    <ypts>0,0.01,0.7,1,1.2,1.3</ypts>
+                </gf>
+            </aux>
+            <aux name="a">
+                <doc>	lookup definition</doc>
+                <eqn>0+0</eqn>
+                <gf>
+                    <yscale min="-1" max="1"/>
+                    <xpts>0,0.7,0.8,0.9,1,2</xpts>
+                    <ypts>0,0,0.1,0.9,-1,1</ypts>
+                </gf>
+            </aux>
+            <aux name="g at 1pt0 forward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP FORWARD(g, 1)</eqn>
+            </aux>
+            <aux name="g">
+                <doc>	lookup definition</doc>
+                <eqn>0+0</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="i">
+                <eqn>Time/10</eqn>
+            </aux>
+            <aux name="g at 2pt0 backward">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>{Untranslated function used}LOOKUP BACKWARD(g, 2)</eqn>
             </aux>
         </variables>
         <views>

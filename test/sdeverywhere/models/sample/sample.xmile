@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -14,11 +14,18 @@
     <dimensions/>
     <model>
         <variables>
+            <aux name="scale">
+                <eqn>1</eqn>
+            </aux>
             <flow name="rate">
                 <eqn>step(10, 10)</eqn>
             </flow>
             <aux name="switch">
                 <eqn>1</eqn>
+            </aux>
+            <aux name="b">
+                <doc>		~	:SUPPLEMENTARY</doc>
+                <eqn>a</eqn>
             </aux>
             <aux name="F">
                 <doc>		~	:SUPPLEMENTARY</doc>
@@ -26,13 +33,6 @@
             </aux>
             <aux name="a">
                 <eqn>( IF MODULO(Time, 5) = 0 THEN Time ELSE PREVIOUS(SELF, 0) )</eqn>
-            </aux>
-            <aux name="scale">
-                <eqn>1</eqn>
-            </aux>
-            <aux name="b">
-                <doc>		~	:SUPPLEMENTARY</doc>
-                <eqn>a</eqn>
             </aux>
             <stock name="G">
                 <doc>		~	:SUPPLEMENTARY</doc>
@@ -44,9 +44,7 @@
             <view>
                 <aux name="F" x="232" y="120"/>
                 <connector uid="3" angle="-269.61691650155382">
-                    <from>
-                        <alias uid="2"/>
-                    </from>
+                    <from>Time</from>
                     <to>F</to>
                 </connector>
                 <aux name="switch" x="100" y="189"/>

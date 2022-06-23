@@ -1,4 +1,4 @@
-<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" version="1.0">
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
     <isee:prefs show_module_prefix="true" layer="model"/>
     <header>
         <options namespace="std"/>
@@ -24,53 +24,47 @@
     </dimensions>
     <model>
         <variables>
-            <aux name="d11">
-                <eqn>k*DELAY3(input, delay_a[DimA])</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="d10">
-                <eqn>k*DELAY3(input, delay)</eqn>
-            </aux>
             <aux name="d9">
+                <isee:delay_aux/>
                 <eqn>DELAY3(input_2[SubA], delay_2, init_2[SubA])</eqn>
                 <dimensions>
                     <dim name="SubA"/>
                 </dimensions>
             </aux>
             <aux name="d8">
+                <isee:delay_aux/>
                 <eqn>DELAY3(input, delay_a[DimA])</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="d4">
-                <eqn>DELAY1(input, delay, init_a[DimA])</eqn>
+            <aux name="d7">
+                <isee:delay_aux/>
+                <eqn>DELAY3(input, delay)</eqn>
+            </aux>
+            <aux name="d10">
+                <eqn>k*DELAY3(input, delay)</eqn>
+            </aux>
+            <aux name="d5">
+                <isee:delay_aux/>
+                <eqn>DELAY1(input_a[DimA], delay_a[DimA], init_a[DimA])</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
-            <aux name="d2">
-                <eqn>DELAY1(input_a[DimA], delay, init_1)</eqn>
+            <aux name="d3">
+                <isee:delay_aux/>
+                <eqn>DELAY1(input, delay_a[DimA], init_1)</eqn>
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
-            </aux>
-            <aux name="d1">
-                <eqn>DELAY1(input, delay)</eqn>
-            </aux>
-            <aux name="k">
-                <eqn>42</eqn>
             </aux>
             <aux name="delay 2">
                 <eqn>5</eqn>
             </aux>
-            <aux name="init a">
-                <eqn>0</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
+            <aux name="d1">
+                <isee:delay_aux/>
+                <eqn>DELAY1(input, delay)</eqn>
             </aux>
             <aux name="delay a">
                 <element subscript="A1">
@@ -86,6 +80,74 @@
                     <dim name="DimA"/>
                 </dimensions>
             </aux>
+            <aux name="init 1">
+                <eqn>0</eqn>
+            </aux>
+            <aux name="d12">
+                <eqn>k*DELAY3(input_2[SubA], delay_2, init_2[SubA])</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
+            <aux name="d2">
+                <isee:delay_aux/>
+                <eqn>DELAY1(input_a[DimA], delay, init_1)</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="delay">
+                <eqn>5</eqn>
+            </aux>
+            <aux name="init 2">
+                <eqn>0</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
+            <aux name="d11">
+                <eqn>k*DELAY3(input, delay_a[DimA])</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="init a">
+                <eqn>0</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="k">
+                <eqn>42</eqn>
+            </aux>
+            <aux name="input">
+                <eqn>step(10, 0)-step(10, 4)</eqn>
+            </aux>
+            <aux name="input 2">
+                <element subscript="A2">
+                    <eqn>20</eqn>
+                </element>
+                <element subscript="A3">
+                    <eqn>30</eqn>
+                </element>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
+            <aux name="d4">
+                <isee:delay_aux/>
+                <eqn>DELAY1(input, delay, init_a[DimA])</eqn>
+                <dimensions>
+                    <dim name="DimA"/>
+                </dimensions>
+            </aux>
+            <aux name="d6">
+                <isee:delay_aux/>
+                <eqn>DELAY1(input_2[SubA], delay_2, init_2[SubA])</eqn>
+                <dimensions>
+                    <dim name="SubA"/>
+                </dimensions>
+            </aux>
             <aux name="input a">
                 <element subscript="A1">
                     <eqn>10</eqn>
@@ -99,59 +161,6 @@
                 <dimensions>
                     <dim name="DimA"/>
                 </dimensions>
-            </aux>
-            <aux name="input 2">
-                <element subscript="A2">
-                    <eqn>20</eqn>
-                </element>
-                <element subscript="A3">
-                    <eqn>30</eqn>
-                </element>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="init 1">
-                <eqn>0</eqn>
-            </aux>
-            <aux name="delay">
-                <eqn>5</eqn>
-            </aux>
-            <aux name="input">
-                <eqn>step(10, 0)-step(10, 4)</eqn>
-            </aux>
-            <aux name="init 2">
-                <eqn>0</eqn>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="d3">
-                <eqn>DELAY1(input, delay_a[DimA], init_1)</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="d5">
-                <eqn>DELAY1(input_a[DimA], delay_a[DimA], init_a[DimA])</eqn>
-                <dimensions>
-                    <dim name="DimA"/>
-                </dimensions>
-            </aux>
-            <aux name="d6">
-                <eqn>DELAY1(input_2[SubA], delay_2, init_2[SubA])</eqn>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="d12">
-                <eqn>k*DELAY3(input_2[SubA], delay_2, init_2[SubA])</eqn>
-                <dimensions>
-                    <dim name="SubA"/>
-                </dimensions>
-            </aux>
-            <aux name="d7">
-                <eqn>DELAY3(input, delay)</eqn>
             </aux>
         </variables>
         <views/>
