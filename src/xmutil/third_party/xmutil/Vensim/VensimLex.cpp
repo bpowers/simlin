@@ -149,8 +149,15 @@ int VensimLex::NextToken()  // also sets token type
   do {
     c = GetNextChar(false);
   } while (c == ' ' || c == '\t' || c == '\n' || c == '\r');  // consume whitespace
-  if (!c)
-    return 0;
+  if (!c) {
+    if (sawExplicitEqEnd) {
+      return 0;
+    }
+    // if we're at the end of the buffer and we didn't see the marker for equations ending,
+    // pretend we did (a bunch of mdl files from e.g. sdeverywhere and pysd are hand-written
+    // as just-the-equation/no diagram files).
+    return GetEndToken();
+  }
   sToken.clear();
   PushBack(c, false);
   c = GetNextChar(true);
@@ -199,7 +206,8 @@ int VensimLex::NextToken()  // also sets token type
     if (TestTokenMatch("//---\\\\", false)) {
       assert(!sBuffer.length());
       sBuffer = "///---\\\\";
-      iCurPos--;          // back up - wont be a problem with continuation lines in this case
+      iCurPos--;  // back up - wont be a problem with continuation lines in this case
+      sawExplicitEqEnd = true;
       return VPTT_eqend;  // finished normal parse
     }
     break;
@@ -366,11 +374,17 @@ int VensimLex::NextToken()  // also sets token type
     if (TestTokenMatch("\\\\---///", false)) {
       assert(!sBuffer.length());
       sBuffer = "\\\\\\---///";
-      iCurPos--;          // back up - wont be a problem with continuation lines in this case
+      iCurPos--;  // back up - wont be a problem with continuation lines in this case
+      sawExplicitEqEnd = true;
       return VPTT_eqend;  // finished normal parse
     }
     break;
-  default:                                                                // a variable name or an unrecognizable token
+  default:  // a variable name or an unrecognizable token
+    if (c == 'G' || c == 'g') {
+      // the GET XLS functins don't really translat so we return 0 and the entire expression as a comment
+      if (IsGetXLSorVDF())
+        return VPTT_symbol;
+    }
     if (isalpha(c) || c > 127 || ((iInUnitsComment == 1) && c == '$')) {  // a variable
       while ((c = GetNextChar(true))) {
         if (!isalnum(c) && c != ' ' && c != '_' && c != '$' && c != '\t' && c != '\'' && c < 128) {
@@ -422,10 +436,42 @@ int VensimLex::TestColonKeyword() {
   PushBack(c, true);
   return ':';
 }
+
+// treat the GET XLS functions as varialbles to make it easier to figure out what to do on the other side
+bool VensimLex::IsGetXLSorVDF() {
+  // Vensim has a bunch of GET functions that use strings and aren't worth translating
+  if (KeywordMatch("ET 123"))
+    sToken = "0{GET 123";
+  else if (KeywordMatch("ET DATA"))
+    sToken = "0{GET DATA";
+  else if (KeywordMatch("ET DIRECT"))
+    sToken = "0{GET DIRECT";
+  else if (KeywordMatch("ET VDF"))
+    sToken = "0{GET VDF";
+  else if (KeywordMatch("ET XLS"))
+    sToken = "0{GET XLS";
+  else
+    return false;
+  char c;
+  while ((c = GetNextChar(true))) {
+    if (c == '(')
+      break;
+  }
+  int nesting = 1;
+  while (nesting && (c = GetNextChar(true))) {
+    if (c == '(')
+      nesting++;
+    else if (c == ')')
+      nesting--;
+  }
+  sToken.push_back('}');
+  return true;
+}
+
 // target assumed upper case
 bool VensimLex::KeywordMatch(const char *target) {
   std::string buffer;
-  char c = 0;
+  char c;
   int i;
   for (i = 0; target[i]; i++) {
     c = GetNextChar(true);
@@ -568,24 +614,24 @@ bool VensimLex::ReadLine(char *buf, size_t buflen) {
     c = ucContent[iCurPos++];
     if (off >= buflen) {
       iCurPos--;
-      buf[off] = 0;
+      buf[off] = '\0';
       return true;
     }
     if (c == '\n') {
-      buf[off] = 0;
+      buf[off] = '\0';
       if (iCurPos < iFileLength && ucContent[iCurPos] == '\r')
         iCurPos++;
       return true;
     }
     if (c == '\r') {
-      buf[off] = 0;
+      buf[off] = '\0';
       if (iCurPos < iFileLength && ucContent[iCurPos] == '\n')
         iCurPos++;
       return true;
     }
     buf[off++] = c;
   }
-  buf[0] = 0;
+  buf[0] = '\0';
   return false;
 }
 

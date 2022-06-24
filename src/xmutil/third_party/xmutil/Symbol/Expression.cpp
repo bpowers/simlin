@@ -34,12 +34,14 @@ void ExpressionFunction::CheckPlaceholderVars(Model *m, bool isfirst) {
 }
 
 void ExpressionFunction::GetVarsUsed(std::vector<Variable *> &vars) {
-  if (!pArgs)
+  if (!pArgs) {
     return;
+  }
 
   int n = pArgs->Length();
-  for (int i = 0; i < n; i++)
+  for (int i = 0; i < n; i++) {
     pArgs->GetExp(i)->GetVarsUsed(vars);
+  }
 }
 
 void ExpressionFunctionMemory::CheckPlaceholderVars(Model *m, bool isfirst) {
@@ -55,10 +57,22 @@ static void is_all_plus_minus(Expression *e, FlowList *fl, bool neg) {
     fl->SetValid(false);
   else if (e->GetType() == EXPTYPE_Variable) {
     ExpressionVariable *ev = static_cast<ExpressionVariable *>(e);
-    if (neg)
-      fl->AddOutflow(ev->GetVariable());
-    else
-      fl->AddInflow(ev->GetVariable());
+    Variable *var = ev->GetVariable();
+    if (neg) {
+      if (var->HasUpstream())
+        fl->SetValid(false);
+      else {
+        fl->AddOutflow(var);
+        var->SetHasUpstream(true);
+      }
+    } else {
+      if (var->HasDownstream())
+        fl->SetValid(false);
+      else {
+        fl->AddInflow(var);
+        var->SetHasDownstream(true);
+      }
+    }
   } else if (e->GetType() == EXPTYPE_Operator) {
     const char *op = e->GetOperator();
     if (op) {

@@ -50,12 +50,14 @@ private:
   int iLineNumber;
   off_t iFileLength;
   int NextToken(void);
+  bool IsGetXLSorVDF(void);
   bool KeywordMatch(const char *target);
   void GetDigits(void);
   int iInUnitsComment;  // 0 no, 1 units, 2 comment
   int TestColonKeyword(void);
   int ReadTabbedArray(void);
   bool bInUnits;
+  bool sawExplicitEqEnd = false;
 };
 
 #endif

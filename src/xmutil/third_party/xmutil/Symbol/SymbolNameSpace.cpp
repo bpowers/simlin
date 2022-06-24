@@ -1,10 +1,9 @@
 #include "SymbolNameSpace.h"
 
 #include <assert.h>
+#include <string.h>
 
-#include <cstring>
-
-#include "../XMUtil.h"
+#include "../Unicode.h"
 #include "Symbol.h"
 
 SymbolNameSpace::SymbolNameSpace(void) {
@@ -14,7 +13,7 @@ SymbolNameSpace::SymbolNameSpace(void) {
 SymbolNameSpace::~SymbolNameSpace(void) {
   /* delete the symbols which will in turn delete equations etc */
   // for (iterator node: mHashTable) {
-  //    delete SNSitToSymbol(node);
+  //    delete SNSitToSymbol(node) ;
   // }
 }
 
@@ -67,7 +66,10 @@ bool SymbolNameSpace::Rename(Symbol *sym, const std::string &newname) {
   return false;
 }
 
-// note that this works on escaped strings - but does not validate
+// Note GlobalUCaseMap has to have been set for this to wok -
+// not sure if that is thread safe
+//
+// also note that this works on escaped strings - but does not validate
 // escaping beyond stripping a leading " matched to a terminal " (that is
 // "this is "not a good" string" would become
 // this is "not a good" string
@@ -75,14 +77,13 @@ bool SymbolNameSpace::Rename(Symbol *sym, const std::string &newname) {
 //
 std::string *SymbolNameSpace::ToLowerSpace(const std::string &sin) {
   int n = sin.length();
-  char *ws = new char[n + 2];
-  memset(ws, 0, n + 2);
+  char *ws = new char[2 * n + 2];
   memcpy(ws, sin.c_str(), n);
   if (*ws == '\"' && ws[n - 1] == '\"' && n > 1) {
     memcpy(ws, sin.c_str() + 1, n - 2);
     n -= 2;
   }
-  ws[n] = 0;
+  ws[n] = '\0';
 
   int i, j;
   for (i = j = 0; i < n; i++)  // remove leading blanks
@@ -107,8 +108,11 @@ std::string *SymbolNameSpace::ToLowerSpace(const std::string &sin) {
     if (ws[j - 1] != ' ' && ws[j - 1] != '_' && ws[j - 1] != '\t' && ws[j - 1] != '\n' && ws[j - 1] != '\r')
       break;
   }
-  ws[j] = 0;
+  ws[j] = '\0';
   char *ws2 = utf8ToLower(ws, j);
+  if (ws2 == nullptr) {
+    throw "Bad unicode string";
+  }
   std::string *s = new std::string(ws2);
   delete[] ws;
   delete[] ws2;

@@ -40,11 +40,11 @@ void Symbol::SetOwner(Symbol *var) {
   // else if (pOwner == var)
   //{
   //	if (f)fprintf(f, "   already\n");
-  //}
+  // }
   // else
   //{
   //	if(f)fprintf(f,"   skipped\n");
-  //}
+  // }
 }
 
 void Symbol::AddSubrange(Symbol *sub, Symbol *oldowner) {

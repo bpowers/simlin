@@ -2,18 +2,23 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::str;
 use std::sync::Mutex;
 
 use lazy_static::lazy_static;
 
 extern "C" {
-    fn _convert_mdl_to_xmile(
+    fn xmutil_convert_mdl_to_xmile(
         mdl_source: *const u8,
         mdl_source_len: u32,
+        file_name: *const u8,
         is_compact: bool,
-    ) -> *const i8;
+        is_long_name: bool,
+        is_as_sectors: bool,
+    ) -> *mut i8;
+    fn xmutil_get_log() -> *const i8;
+    fn xmutil_clear_log();
 }
 
 // xmutil isn't thread-safe, so we need to synchronize calls into it.
@@ -21,7 +26,7 @@ lazy_static! {
     static ref LOCK: Mutex<()> = Mutex::new(());
 }
 
-pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> Option<String> {
+pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> (Option<String>, Option<String>) {
     // always grab the lock guard before calling in to _convert_mdl_to_xmile
     let _guard = LOCK.lock().unwrap();
 
@@ -29,18 +34,43 @@ pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> Option<String> 
     let str_len = mdl_source.len() as u32;
 
     unsafe {
-        let result_buf = _convert_mdl_to_xmile(str_ptr, str_len, is_compact);
-        if result_buf.is_null() {
-            return None;
-        }
-        // TODO: I think we might be leaking this
-        let c_str: &CStr = CStr::from_ptr(result_buf);
-        let str_slice: &str = c_str.to_str().unwrap();
-        if str_slice.is_empty() {
-            None
+        // ensure the log starts empty
+        xmutil_clear_log();
+
+        let result_buf = xmutil_convert_mdl_to_xmile(
+            str_ptr,
+            str_len,
+            std::ptr::null(),
+            is_compact,
+            false,
+            false,
+        );
+
+        let log_buf = xmutil_get_log();
+        let log = if !log_buf.is_null() {
+            // a reference to non-owned data
+            let c_str: &CStr = CStr::from_ptr(log_buf);
+            let str_slice: &str = c_str.to_str().unwrap();
+            if str_slice.is_empty() {
+                None
+            } else {
+                Some(str_slice.to_owned())
+            }
         } else {
-            Some(str_slice.to_owned())
-        }
+            None
+        };
+
+        let model = if !result_buf.is_null() {
+            // take ownership of the returned string
+            CString::from_raw(result_buf)
+            .into_string()
+            .ok()
+            .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+
+        (model, log)
     }
 }
 
@@ -159,13 +189,18 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,1
 26:10
 ";
 
-        let actual = crate::convert_vensim_mdl(mdl_source, false).unwrap();
+        let (actual, logs) = crate::convert_vensim_mdl(mdl_source, false);
+        let actual = actual.unwrap();
         assert!(actual.starts_with("<xmile "));
         assert!(actual.ends_with("</xmile>\n"));
     }
 
     #[test]
     fn failure_is_none() {
-        assert!(crate::convert_vensim_mdl(":ohno:", true).is_none())
+        let (xmile, logs) = crate::convert_vensim_mdl(":ohno:", true);
+
+        println!("{}", logs.unwrap());
+
+        assert!(xmile.is_none())
     }
 }

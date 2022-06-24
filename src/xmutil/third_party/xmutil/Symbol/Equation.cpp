@@ -58,6 +58,13 @@ void Equation::GetSubscriptElements(std::vector<Symbol *> &vals, Symbol *s) {
   {
     assert(eqs.size() == 1);
     Expression *exp = eqs[0]->GetExpression();
+    if (exp->GetType() == EXPTYPE_Variable) {
+      // equivalent - just make the right hand side the same
+      v = static_cast<ExpressionVariable *>(exp)->GetVariable();
+      eqs = v->GetAllEquations();
+      assert(eqs.size() == 1);
+      exp = eqs[0]->GetExpression();
+    }
     assert(exp->GetType() == EXPTYPE_Symlist);
     if (exp->GetType() == EXPTYPE_Symlist) {
       SymbolList *symlist = static_cast<ExpressionSymbolList *>(exp)->SymList();

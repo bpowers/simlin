@@ -52,6 +52,7 @@ void SymbolList::SetOwner(Variable *var) {
 void SymbolList::OutputComputable(ContextInfo *info) {
   if (vSymbols.empty())
     return;
+  info->SetInSubList(true);
   *info << "[";
   for (size_t i = 0; i < vSymbols.size(); i++) {
     if (i)
@@ -96,14 +97,15 @@ void SymbolList::OutputComputable(ContextInfo *info) {
         //	if (i == n)
         //	{
         //		*info << SpaceToUnderBar(elms.front()->GetName()) << ":" <<
-        // SpaceToUnderBar(elms.back()->GetName());
+        //SpaceToUnderBar(elms.back()->GetName());
         //	}
         //	else
         //		*info << "*" << SpaceToUnderBar(s->GetName());
-        //}
+        // }
       } else
         *info << "*";  // normally this is all
     }
   }
   *info << "]";
+  info->SetInSubList(false);
 }

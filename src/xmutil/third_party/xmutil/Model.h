@@ -12,6 +12,7 @@ public:
   virtual bool AddFlowDefinition(Variable *var, Variable *in, Variable *out) = 0;
   virtual bool AddVarDefinition(Variable *var, int x, int y) = 0;
   virtual void CheckLinksIn() = 0;
+  virtual void CheckGhostOwners() = 0;
   // just a placeholder to derive from
 };
 class Model {
@@ -22,6 +23,7 @@ public:
     return false;
   }
   bool AnalyzeEquations(void);
+  bool Simulate(void);
   SymbolNameSpace *GetNameSpace(void) {
     return &mSymbolNameSpace;
   }
@@ -31,7 +33,9 @@ public:
   void GenerateShortNames(void);
   bool OutputComputable(bool wantshort);
   bool MarkVariableTypes(SymbolNameSpace *ns);
+  void CheckGhostOwners();
   void AttachStragglers();  // try to get diagramatic stuff right
+  void MakeViewNamesUnique();
   std::string PrintXMILE(bool isCompact, std::vector<std::string> &errs);
 
   double GetConstanValue(const char *var, double defval);
@@ -64,6 +68,13 @@ public:
     return vGroups;
   }
 
+  void SetAsSectors(bool set) {
+    bAsSectors = set;
+  }
+  bool AsSectors() const {
+    return bAsSectors;
+  }
+
 private:
   bool OrderEquations(ContextInfo *info, bool tonly);
   bool SetupVariableStates(int pass);
@@ -91,6 +102,7 @@ private:
   double *dLevel;
   double *dRate;
   double *dAux;
+  bool bAsSectors;
 };
 
 #endif

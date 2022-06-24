@@ -34,6 +34,18 @@ void Function::OutputComputable(ContextInfo *info, ExpressionList *arg) {
   }
 }
 
+void UnknownFunction::OutputComputable(ContextInfo *info, ExpressionList *arg) {
+  *info << "{Untranslated function used}";
+  *info << sName;
+  Function::OutputComputable(info, arg);
+}
+
+void FunctionVectorLookup::OutputComputable(ContextInfo *info, ExpressionList *arg) {
+  // could try to figure this one out -
+  *info << "{try INTERPORATE or just used arrays with variable arguments for indices}";
+  Function::OutputComputable(info, arg);
+}
+
 void FunctionTimeBase::OutputComputable(ContextInfo *info, ExpressionList *arg) {
   if (arg->Length() == 2) {
     Expression *exp1 = arg->GetExp(0);
@@ -97,6 +109,20 @@ void FunctionSampleIfTrue::OutputComputable(ContextInfo *info, ExpressionList *a
     *info << " ELSE PREVIOUS(SELF, ";
     const_cast<Expression *>((*arg)[2])->OutputComputable(info);  // OutputComputable should really be const
     *info << ") )";
+    return;
+  }
+  Function::OutputComputable(info, arg);
+}
+
+void FunctionPulse::OutputComputable(ContextInfo *info, ExpressionList *arg) {
+  if (arg->Length() == 2) {
+    *info << "( IF TIME >= (";
+    const_cast<Expression *>((*arg)[0])->OutputComputable(info);  // OutputComputable should really be const
+    *info << ") AND TIME < ((";
+    const_cast<Expression *>((*arg)[0])->OutputComputable(info);  // OutputComputable should really be const
+    *info << ") + MAX(DT,";
+    const_cast<Expression *>((*arg)[1])->OutputComputable(info);  // OutputComputable should really be const
+    *info << ")) THEN 1 ELSE 0 )";
     return;
   }
   Function::OutputComputable(info, arg);

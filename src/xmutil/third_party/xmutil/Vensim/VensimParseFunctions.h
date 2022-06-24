@@ -19,7 +19,7 @@ ExpressionVariable *vpyy_var_expression(Variable *var, SymbolList *subs);
 ExpressionSymbolList *vpyy_symlist_expression(SymbolList *subs, SymbolList *map);
 Expression *vpyy_operator_expression(int oper, Expression *exp1, Expression *exp2);
 Expression *vpyy_function_expression(Function *func, ExpressionList *args);
-Expression *vpyy_lookup_expression(ExpressionVariable *var, Expression *exp);
+Expression *vpyy_lookup_expression(ExpressionVariable *var, ExpressionList *args);
 ExpressionTable *vpyy_tablepair(ExpressionTable *table, double x, double y);
 ExpressionTable *vpyy_tablevec(ExpressionTable *table, double val);
 ExpressionTable *vpyy_tablerange(ExpressionTable *table, double x1, double y1, double x2, double y2);

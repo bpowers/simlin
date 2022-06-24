@@ -5,11 +5,13 @@
 #include "Symbol/Equation.h"
 #include "Symbol/LeftHandSide.h"
 #include "Symbol/Symbol.h"
+#include "Vensim/VensimView.h"
 #include "XMUtil.h"
 #include "Xmile/XMILEGenerator.h"
 
 Model::Model(void) {
   dLevel = dRate = dAux = NULL;
+  bAsSectors = false;
   iIntegrationType = Integration_Type_EULER;
 }
 
@@ -26,7 +28,7 @@ Equation *Model::AddUnnamedVariable(ExpressionFunctionMemory *e) {
   LeftHandSide *lhs = new LeftHandSide(&mSymbolNameSpace, ev, NULL, NULL, 0);
   e2 = new ExpressionFunction(&mSymbolNameSpace, e->GetFunction(), e->GetArgs());
   Equation *eq = new Equation(&mSymbolNameSpace, lhs, e2, '=');
-  // printf("Adding in a placeholder from function %s\n",e->GetFunction()->GetName().c_str()) ;
+  // log("Adding in a placeholder from function %s\n",e->GetFunction()->GetName().c_str()) ;
   var->AddEq(eq);
   vUnamedVars.push_back(var);
   return eq;
@@ -73,7 +75,8 @@ bool Model::OrganizeSubscripts(void) {
     SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
     for (const SymbolNameSpace::iterator &it : *ht) {
       siwc.v = static_cast<Variable *> SNSitToSymbol(it);
-      if ((siwc.count = siwc.v->SubscriptCountVars(subelm))) {
+      siwc.count = siwc.v->SubscriptCountVars(subelm);
+      if (siwc.count > 0) {
         sublist.push_back(siwc);
       }
     }
@@ -89,7 +92,7 @@ bool Model::ValidatePlaceholderVars(void) {
   try {
     SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
     for (const SymbolNameSpace::iterator &it : *ht) {
-      // printf("Checking placeholders out %s\n",SNSitToSymbol(it)->GetName().c_str()) ;
+      // log("Checking placeholders out %s\n",SNSitToSymbol(it)->GetName().c_str()) ;
       SNSitToSymbol(it)->CheckPlaceholderVars(this);
     }
     mSymbolNameSpace.ConfirmAllAllocations();
@@ -181,7 +184,7 @@ bool Model::OrderEquations(ContextInfo *info, bool tonly) {
         haserr = true;
     } else {
       for (const SymbolNameSpace::iterator &it : *ht) {
-        // printf("Looping to: %s\n",SNSitToSymbol(it)->GetName().c_str()) ;
+        // log("Looping to: %s\n",SNSitToSymbol(it)->GetName().c_str()) ;
         if (!SNSitToSymbol(it)->CheckComputed(info, true))
           haserr = true;  // continue looking for simultaneous even when false
       }
@@ -227,32 +230,116 @@ bool Model::AnalyzeEquations(void) {
   //
 
   // before the passes initialize time, then dt
-  // fprintf(stderr, "\nInitial time \n");
+  log("\nInitial time \n");
   info.iComputeType = CF_initial;
   info.pEquations = &vInitialTimeComps;
   if (!OrderEquations(&info, true))
     return false;
 
-  // fprintf(stderr, "\nInitial equations \n");
+  log("\nInitial equations \n");
   info.iComputeType = CF_initial;
   info.pEquations = &vInitialComps;
   if (!OrderEquations(&info, false))
     return false;
-  // fprintf(stderr, "\n\nActive equations \n");
+  log("\n\nActive equations \n");
   info.iComputeType = CF_active;
   info.pEquations = &vActiveComps;
   if (!OrderEquations(&info, false))
     return false;
-  // fprintf(stderr, "\n\nUnchanging equations \n");
+  log("\n\nUnchanging equations \n");
   info.iComputeType = CF_unchanging;
   info.pEquations = &vUnchangingComps;
   if (!OrderEquations(&info, false))
     return false;
-  // fprintf(stderr, "\n\nRate equations \n");
+  log("\n\nRate equations \n");
   info.iComputeType = CF_rate;
   info.pEquations = &vRateComps;
   if (!OrderEquations(&info, false))
     return false;
+  return true;
+}
+
+bool Model::Simulate(void) {
+  ContextInfo info;
+  try {
+    double t, s, e, dt;
+    int i, n;
+    Variable *time = static_cast<Variable *>(mSymbolNameSpace.Find("Time"));
+    Variable *start = static_cast<Variable *>(mSymbolNameSpace.Find("INITIAL TIME"));
+    Variable *end = static_cast<Variable *>(mSymbolNameSpace.Find("FINAL TIME"));
+    Variable *step = static_cast<Variable *>(mSymbolNameSpace.Find("TIME STEP"));
+    n = iNLevel;
+
+    info.iComputeType = CF_initial;
+    for (Equation *e : vInitialTimeComps) {
+      e->Execute(&info);
+      // log("%s = %g\n",e->GetVariable()->GetName().c_str(),e->GetVariable()->Eval(&info)) ;
+    }
+    if (start)
+      s = start->Eval(&info);
+    else
+      s = 0;
+    if (step)
+      dt = step->Eval(&info);
+    else
+      dt = 1;
+    info.dTime = s;
+    info.dDT = dt;
+    for (Equation *e : vInitialComps) {
+      e->Execute(&info);
+      // log("%s = %g\n",e->GetVariable()->GetName().c_str(),e->GetVariable()->Eval(&info)) ;
+    }
+    // now the active equations
+    info.iComputeType = CF_active;
+    // first the unchanging variables
+    // log("\n Unchanging\n") ;
+    for (Equation *e : vUnchangingComps) {
+      e->Execute(&info);
+      // log("%s = %g\n",e->GetVariable()->GetName().c_str(),e->GetVariable()->Eval(&info)) ;
+    }
+
+    // now over time
+    if (end)
+      e = end->Eval(&info);
+    else
+      e = 100;
+    log("Time");
+    for (Equation *e : vActiveComps) {
+      log("\t%s", e->GetVariable()->GetName().c_str());
+    };
+    for (Equation *e : vRateComps) {
+      log("\t%s", e->GetVariable()->GetName().c_str());
+    }
+    log("\n");
+
+    for (t = s; t <= e; t += dt) {
+      info.dTime = t;
+      // log("\n\nAt time %g\n",t) ;
+      if (time)
+        time->SetActiveValue(0, t);
+      log("%g", t);
+      for (Equation *e : vActiveComps) {
+        e->Execute(&info);
+        log("\t%g", e->GetVariable()->Eval(&info));
+      }
+      for (Equation *e : vRateComps) {
+        e->Execute(&info);
+        log("\t%g", e->GetVariable()->Eval(&info));
+      }
+      log("\n");
+      if (step)
+        info.dDT = dt = step->Eval(&info);
+      // update states
+      for (i = 0; i < n; i++) {
+        dLevel[i] += dt * this->dRate[i];
+      }
+      if (end)
+        e = end->Eval(&info);
+    }
+  } catch (...) {
+    log("Error of some sort");
+    return false;
+  }
   return true;
 }
 
@@ -264,31 +351,31 @@ bool Model::OutputComputable(bool wantshort) {
     else
       GenerateCanonicalNames();
     info.iComputeType = CF_initial;
-    // fprintf(stderr, "------------- initial time -----------------\n");
+    log("------------- initial time -----------------\n");
     for (Equation *e : vInitialTimeComps) {
       e->OutputComputable(&info);
     }
-    // fprintf(stderr, "------------- initialization -----------------\n");
+    log("------------- initialization -----------------\n");
     for (Equation *e : vInitialComps) {
       e->OutputComputable(&info);
     }
     info.iComputeType = CF_active;
-    // fprintf(stderr, "------------- Unchanging -----------------\n");
+    log("------------- Unchanging -----------------\n");
     info.iComputeType = CF_active;
     for (Equation *e : vUnchangingComps) {
       e->OutputComputable(&info);
     }
-    // fprintf(stderr, "------------- active -----------------\n");
+    log("------------- active -----------------\n");
     for (Equation *e : vActiveComps) {
       e->OutputComputable(&info);
     }
     info.iComputeType = CF_rate;
-    // fprintf(stderr, "------------- rates -----------------\n");
+    log("------------- rates -----------------\n");
     for (Equation *e : vRateComps) {
       e->OutputComputable(&info);
     }
   } catch (...) {
-    // std::cerr << "Error of some sort" << std::endl;
+    log("Error of some sort");
     return false;
   }
   return true;
@@ -312,6 +399,7 @@ bool Model::MarkVariableTypes(SymbolNameSpace *ns) {
     }
     //
     for (Variable *var : vars) {
+      var->PurgeAFOEq();
       var->MarkFlows(ns);  // may change number of entries so can't be in above loop
     }
     // don't do this - we have broken the allocation setup mSymbolNameSpace.ConfirmAllAllocations();
@@ -341,6 +429,13 @@ bool Model::MarkVariableTypes(SymbolNameSpace *ns) {
 #endif
 
   return true;
+}
+
+void Model::CheckGhostOwners() {
+  // now everything is defined (and only defined once) - we need to make sure there are no missing connectors
+  for (View *view : vViews) {
+    view->CheckGhostOwners();
+  }
 }
 
 void Model::AttachStragglers() {
@@ -411,6 +506,29 @@ void Model::AttachStragglers() {
   }
 }
 
+void Model::MakeViewNamesUnique() {
+  std::vector<View *> &views = Views();
+  std::set<std::string> names;
+  for (View *gview : views) {
+    VensimView *view = static_cast<VensimView *>(gview);
+    std::string name;
+    // get rid of . and - in the name
+    for (char c : view->Title()) {
+      if (c == '.' || c == '-' || c == '+' || c == ',' || c == '/' || c == '*' || c == '^')
+        c = ' ';
+      if (c != ' ' || (!name.empty() && name.back() != ' '))
+        name.push_back(c);
+    }
+    if (name.empty())
+      name = "Module ";
+    while (GetNameSpace()->Find(name) || names.find(name) != names.end()) {
+      name += "1";  // not very original
+    }
+    names.insert(name);
+    view->SetTitle(name);
+  }
+}
+
 bool Model::RenameVariable(Variable *v, const std::string &newname) {
   assert(!newname.empty());
   if (mSymbolNameSpace.Find(newname)) {
@@ -430,17 +548,18 @@ void Model::GenerateCanonicalNames(void) {
 }
 
 void Model::GenerateShortNames(void) {
-  size_t i = 0;
+  int i = 0;
   SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
   for (const SymbolNameSpace::iterator &it : *ht) {
-    Variable *v = static_cast<Variable *>(SNSitToSymbol(it));
+    Variable *v = static_cast<Variable *> SNSitToSymbol(it);
     if (v->isType() == Symtype_Variable) {
       std::string s = "v" + std::to_string(i);
       i++;
       v->SetAlternateName(s);
+      // v->SetAlternateName(v->GetName()) ;
     }
   }
-  for (auto v : vUnamedVars) {
+  for (Variable *v : vUnamedVars) {
     std::string s = "v" + std::to_string(i);
     i++;
     v->SetAlternateName(s);
@@ -496,5 +615,5 @@ std::vector<Variable *> Model::GetVariables(SymbolNameSpace *ns) {
 
 std::string Model::PrintXMILE(bool isCompact, std::vector<std::string> &errs) {
   XMILEGenerator generator(this);
-  return generator.Print(isCompact, errs);
+  return generator.Print(isCompact, errs, bAsSectors);
 }

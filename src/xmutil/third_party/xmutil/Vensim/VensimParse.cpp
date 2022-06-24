@@ -1,11 +1,9 @@
 // VensimParse.cpp : Read an mdl file into an XModel object
-// we use a mapped file via boost to simplify look ahead/back
-// we include the tokenizer here because it is as easy as settinig
+// we use an in-memory string to simplify look ahead/back
+// we include the tokenizer here because it is as easy as setting
 // up regular expressions for Flex and more easily understood
 
 #include "VensimParse.h"
-
-#include <cstring>
 
 #include "../Symbol/ExpressionList.h"
 #include "../Symbol/LeftHandSide.h"
@@ -50,6 +48,7 @@ void VensimParse::ReadyFunctions() {
     new FunctionLog(pSymbolNameSpace);
     new FunctionZidz(pSymbolNameSpace);
     new FunctionXidz(pSymbolNameSpace);
+    new FunctionLookupInv(pSymbolNameSpace);
     new FunctionWithLookup(pSymbolNameSpace);  // but WITH_LOOKUP is treated specially by parser
     new FunctionStep(pSymbolNameSpace);
     new FunctionTabbedArray(pSymbolNameSpace);
@@ -58,6 +57,7 @@ void VensimParse::ReadyFunctions() {
     new FunctionSmooth(pSymbolNameSpace);
     new FunctionSmoothI(pSymbolNameSpace);
     new FunctionSmooth3(pSymbolNameSpace);
+    new FunctionSmooth3I(pSymbolNameSpace);
     new FunctionTrend(pSymbolNameSpace);
     new FunctionDelay1(pSymbolNameSpace);
     new FunctionDelay1I(pSymbolNameSpace);
@@ -68,6 +68,8 @@ void VensimParse::ReadyFunctions() {
     new FunctionSmoothN(pSymbolNameSpace);
     new FunctionDelayConveyor(pSymbolNameSpace);
     new FunctionVectorReorder(pSymbolNameSpace);
+    new FunctionVectorLookup(pSymbolNameSpace);
+    new FunctionElmCount(pSymbolNameSpace);
     new FunctionRandomNormal(pSymbolNameSpace);
     new FunctionRandomPoisson(pSymbolNameSpace);
     new FunctionLookupArea(pSymbolNameSpace);
@@ -78,6 +80,8 @@ void VensimParse::ReadyFunctions() {
     new FunctionNPV(pSymbolNameSpace);
     new FunctionSum(pSymbolNameSpace);
     new FunctionProd(pSymbolNameSpace);
+    new FunctionVMax(pSymbolNameSpace);
+    new FunctionVMin(pSymbolNameSpace);
     new FunctionTimeBase(pSymbolNameSpace);
     new FunctionVectorSelect(pSymbolNameSpace);
     new FunctionVectorElmMap(pSymbolNameSpace);
@@ -88,6 +92,7 @@ void VensimParse::ReadyFunctions() {
     new FunctionAbs(pSymbolNameSpace);
     new FunctionExp(pSymbolNameSpace);
     new FunctionSqrt(pSymbolNameSpace);
+    new FunctionNAN(pSymbolNameSpace);
 
     new FunctionCosine(pSymbolNameSpace);
     new FunctionSine(pSymbolNameSpace);
@@ -102,8 +107,7 @@ void VensimParse::ReadyFunctions() {
 
     pSymbolNameSpace->ConfirmAllAllocations();
   } catch (...) {
-    // std::cerr << "Failed to initialize symbol table" << std::endl;
-    assert(false);
+    log("Failed to initialize symbol table");
   }
 }
 Equation *VensimParse::AddEq(LeftHandSide *lhs, Expression *ex, ExpressionList *exl, int tok) {
@@ -204,140 +208,144 @@ static std::string compress_whitespace(const std::string &s) {
 bool VensimParse::ProcessFile(const std::string &filename, const char *contents, size_t contentsLen) {
   sFilename = filename;
 
-  bool is_ok = true;
+  if (true) {
+    bool noerr = true;
+    mVensimLex.Initialize(contents, contentsLen);
+    int endtok = mVensimLex.GetEndToken();
+    // now we call the bison built parser which will call back to VensimLex
+    // for the tokenizing -
+    int rval;
+    do {
+      rval = 0;
+      try {
+        mVensimLex.GetReady();
+        rval = vpyyparse();
+        if (rval == '~') {  // comment follows
+          if (!FindNextEq(true))
+            break;
+        } else if (rval == '|') {
+        } else if (rval == VPTT_groupstar) {
+          // log("%s\n", mVensimLex.CurToken()->c_str());
+          //  only change this if a new number
+          std::string group_owner;
+          char c = mVensimLex.CurToken()->at(0);
+          if (_model->Groups().empty() || (_model->Groups().back().sName[0] != c && c >= '0' && c <= '9'))
+            group_owner = *mVensimLex.CurToken();
+          else
+            group_owner = _model->Groups().back().sOwner;
+          { _model->Groups().push_back(ModelGroup(*mVensimLex.CurToken(), group_owner)); }
+        } else if (rval != endtok) {
+          log("Unknown terminal token %d\n", rval);
+          if (!FindNextEq(false))
+            break;
+        }
 
-  mVensimLex.Initialize(contents, contentsLen);
-  int endtok = mVensimLex.GetEndToken();
-  // now we call the bison built parser which will call back to VensimLex
-  // for the tokenizing -
-  int rval;
-  do {
-    rval = 0;
-    try {
-      mVensimLex.GetReady();
-      rval = vpyyparse();
-      if (rval == '~') {  // comment follows
-        if (!FindNextEq(true))
+      } catch (VensimParseSyntaxError &e) {
+        log("%s\n", e.str.c_str());
+        log("Error at line %d position %d in file %s\n", mVensimLex.LineNumber(), mVensimLex.Position(),
+            sFilename.c_str());
+        log(".... skipping the associated variable and looking for the next usable content.\n");
+        pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
+        noerr = false;
+        if (!FindNextEq(false))
           break;
-      } else if (rval == '|') {
-      } else if (rval == VPTT_groupstar) {
-        // fprintf(stderr, "%s\n", mVensimLex.CurToken()->c_str());
-        // only change this if a new number
-        std::string group_owner;
-        char c = mVensimLex.CurToken()->at(0);
-        if (_model->Groups().empty() || (_model->Groups().back().sName[0] != c && c >= '0' && c <= '9'))
-          group_owner = *mVensimLex.CurToken();
-        else
-          group_owner = _model->Groups().back().sOwner;
-        { _model->Groups().push_back(ModelGroup(*mVensimLex.CurToken(), group_owner)); }
-      } else if (rval != endtok) {
-        // std::cerr << "Unknown terminal token " << rval << std::endl;
+
+      } catch (...) {
+        pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
+        noerr = false;
         if (!FindNextEq(false))
           break;
       }
-
-    } catch (VensimParseSyntaxError &e) {
-      // std::cerr << e.str << std::endl;
-      // std::cerr << "Error at line " << mVensimLex.LineNumber() << " position " << mVensimLex.Position() << " in file
-      // "
-      //           << sFilename << std::endl;
-      // std::cerr << "(skipping the associated variable and looking for the next usable content)" << std::endl;
-      is_ok = false;
-      pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
-      if (!FindNextEq(false))
+    } while (rval != endtok);
+    char buf[BUFLEN];  // plenty big for sketch info
+    if (rval == endtok)
+      this->mVensimLex.BufferReadLine(buf, BUFLEN);  // get the marker line
+    while (true) {                                   // read in the sketch information
+      if (strncmp(buf, "\\\\\\---///", 9) != 0)
         break;
-
-    } catch (...) {
-      is_ok = false;
-      pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
-      if (!FindNextEq(false))
+      this->mVensimLex.ReadLine(buf, BUFLEN);  // version line
+      if (strncmp(buf, "V300 ", 5) && strncmp(buf, "V364 ", 5)) {
+        log("Unrecognized version - can't read sketch info\n");
+        noerr = false;
         break;
-    }
-  } while (rval != endtok);
-  char buf[BUFLEN];  // plenty big for sketch info
-  if (rval == endtok)
-    this->mVensimLex.BufferReadLine(buf, BUFLEN);  // get the marker line
-  while (true) {                                   // read in the sketch information
-    if (strncmp(buf, "\\\\\\---///", 9) != 0)
-      break;
-    this->mVensimLex.ReadLine(buf, BUFLEN);  // version line
-    if (strncmp(buf, "V300 ", 5)) {
-      // fprintf(stderr, "Unrecognized version - can't read sketch info\n");
-      break;
-    }
-    VensimView *view = new VensimView;
-    // VensimViewElements &elements = view->Elements();  // we populate this directly
+      }
+      VensimView *view = new VensimView;
 
-    _model->AddView(view);
-    // next the title
-    this->mVensimLex.ReadLine(buf, BUFLEN);
-    view->SetTitle(buf +
-                   1);  // skip the star - we can try to name modules with this eventually subject to name collisions
-    this->mVensimLex.ReadLine(buf, BUFLEN);  // default font info - we can try to grab this later
-    view->ReadView(this, buf);               // will return with buf populated at next view
-  }
-  // there may be options at the end
-  if (strncmp(buf, "///---\\\\\\", 9) == 0) {
-    while (this->mVensimLex.ReadLine(buf, BUFLEN))  // looking for settings maker
-    {
-      if (strncmp(buf, ":L\177<%^E!@", 9) == 0) {
-        while (this->mVensimLex.ReadLine(buf, BUFLEN)) {
-          int type;
-          char *curpos = GetIntChar(buf, type, ':');
-          if (type == 15)  // fourth entry is integration type
-          {
-            int im;
-            for (int i = 0; i < 4; i++)
-              curpos = GetInt(curpos, im);
-            Integration_Type it = Integration_Type_EULER;
-            switch (im) {
-            case 0:
-            case 2:
-            default:
-              it = Integration_Type_EULER;
-              break;
-            case 1:
-            case 5:
-              it = Integration_Type_RK4;
-              break;
-            case 3:
-            case 4:
-              it = Integration_Type_RK2;
-              break;
+      _model->AddView(view);
+      // next the title
+      this->mVensimLex.ReadLine(buf, BUFLEN);
+      view->SetTitle(buf +
+                     1);  // skip the star - we can try to name modules with this eventually subject to name collisions
+      this->mVensimLex.ReadLine(buf, BUFLEN);  // default font info - we can try to grab this later
+      view->ReadView(this, buf);               // will return with buf populated at next view
+    }
+    // there may be options at the end
+    if (strncmp(buf, "///---\\\\\\", 9) == 0) {
+      while (this->mVensimLex.ReadLine(buf, BUFLEN))  // looking for settings maker
+      {
+        if (strncmp(buf, ":L\177<%^E!@", 9) == 0) {
+          while (this->mVensimLex.ReadLine(buf, BUFLEN)) {
+            int type;
+            char *curpos = GetIntChar(buf, type, ':');
+            if (type == 15)  // fourth entry is integration type
+            {
+              int im;
+              for (int i = 0; i < 4; i++)
+                curpos = GetInt(curpos, im);
+              Integration_Type it = Integration_Type_EULER;
+              switch (im) {
+              case 0:
+              case 2:
+              default:
+                it = Integration_Type_EULER;
+                break;
+              case 1:
+              case 5:
+                it = Integration_Type_RK4;
+                break;
+              case 3:
+              case 4:
+                it = Integration_Type_RK2;
+                break;
+              }
+              _model->SetIntegrationType(it);
+            } else if (type == 22)  // units equialences
+            {
+              _model->UnitEquivs().push_back(curpos);
             }
-            _model->SetIntegrationType(it);
-          } else if (type == 22)  // units equialences
-          {
-            _model->UnitEquivs().push_back(curpos);
           }
+          break;
         }
-        break;
       }
     }
-  }
-  _model->SetMacroFunctions(mMacroFunctions);
+    _model->SetMacroFunctions(mMacroFunctions);
 
-  if (bLongName) {
-    // try to replace variable names with long names from the documentaion
-    std::vector<Variable *> vars = _model->GetVariables(NULL);  // all symbols that are variables
-    for (Variable *var : vars) {
-      std::string alt = compress_whitespace(var->Comment());
-      if (alt == "Backlog") {
-        bLongName = true;
-      }
-      if (!alt.empty() && alt.size() < 80 && pSymbolNameSpace->Rename(var, alt)) {
-        var->SetAlternateName(alt);
+    if (bLongName) {
+      // try to replace variable names with long names from the documentaion
+      std::vector<Variable *> vars = _model->GetVariables(NULL);  // all symbols that are variables
+      for (Variable *var : vars) {
+        std::string alt = compress_whitespace(var->Comment());
+        if (alt == "Backlog") {
+          bLongName = true;
+        }
+        if (!alt.empty() && alt.size() < 80 && pSymbolNameSpace->Rename(var, alt)) {
+          var->SetAlternateName(alt);
+        }
       }
     }
-  }
-  return is_ok;  // got something - try to put something out
+    if (!noerr) {
+      log("warning: writing output file, but we had errors. check the result carefully.\n");
+    }
+    return true;  // got something - try to put something out
+  } else
+    return false;
 }
 
 char *VensimParse::GetIntChar(char *s, int &val, char c) {
   char *tv;
   for (tv = s; *tv; tv++) {
     if (*tv == c) {
-      *tv++ = 0;
+      *tv++ = '\0';
       break;
     }
   }
@@ -348,7 +356,7 @@ char *VensimParse::GetInt(char *s, int &val) {
   char *tv;
   for (tv = s; *tv; tv++) {
     if (*tv == ',') {
-      *tv++ = 0;
+      *tv++ = '\0';
       break;
     }
   }
@@ -362,7 +370,7 @@ char *VensimParse::GetString(char *s, std::string &name) {
       if (*tv == '\"') {
         tv++;
         assert(*tv == ',');
-        *tv++ = 0;
+        *tv++ = '\0';
         break;
       } else if (*tv == '\\' && tv[1] == '\"')
         tv++;
@@ -370,7 +378,7 @@ char *VensimParse::GetString(char *s, std::string &name) {
   } else {
     for (tv = s; *tv; tv++) {
       if (*tv == ',') {
-        *tv++ = 0;
+        *tv++ = '\0';
         break;
       }
     }
@@ -557,7 +565,8 @@ Expression *VensimParse::OperatorExpression(int oper, Expression *exp1, Expressi
   }
 }
 Expression *VensimParse::FunctionExpression(Function *func, ExpressionList *eargs) {
-  if ((!eargs && func->NumberArgs() > 0) || (eargs && func->NumberArgs() != eargs->Length())) {
+  if (func->NumberArgs() >= 0 &&
+      ((!eargs && func->NumberArgs() > 0) || (eargs && func->NumberArgs() != eargs->Length()))) {
     mSyntaxError.str = "Argument count mismatch for ";
     mSyntaxError.str.append(func->GetName());
     throw mSyntaxError;
@@ -566,8 +575,13 @@ Expression *VensimParse::FunctionExpression(Function *func, ExpressionList *earg
     return new ExpressionFunction(pSymbolNameSpace, func, eargs);
   return new ExpressionFunctionMemory(pSymbolNameSpace, func, eargs);
 }
-Expression *VensimParse::LookupExpression(ExpressionVariable *var, Expression *exp) {
-  return new ExpressionLookup(pSymbolNameSpace, var, exp);
+Expression *VensimParse::LookupExpression(ExpressionVariable *var, ExpressionList *args) {
+  if (args->Length() == 1)
+    return new ExpressionLookup(pSymbolNameSpace, var, args->GetExp(0));
+  // really an error so we use uknown function
+  const std::string &name = var->GetVariable()->GetName();
+  Function *f = new UnknownFunction(new SymbolNameSpace(), name, args->Length());
+  return new ExpressionFunction(pSymbolNameSpace, f, args);
 }
 
 ExpressionTable *VensimParse::TablePairs(ExpressionTable *table, double x, double y) {

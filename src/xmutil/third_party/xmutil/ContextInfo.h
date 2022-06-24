@@ -1,7 +1,6 @@
 #ifndef _XMUTIL_CONTEXTINFO_H
 #define _XMUTIL_CONTEXTINFO_H
-#include <assert.h>
-
+#include <cassert>
 #include <sstream>
 #include <vector>
 /* a utility class helpfu in sorting and evaluating equations
@@ -36,6 +35,7 @@ public:
   ContextInfo(void) {
     iComputeType = 0;
     bInitEqn = false;
+    bInSubList = false;
     pEquations = NULL;
   }
   ~ContextInfo(void) {
@@ -99,6 +99,12 @@ public:
     pLHSElmsSpecific = specific;
   }
   Symbol *GetLHSSpecific(Symbol *generic);
+  bool InSubList() const {
+    return bInSubList;
+  }
+  void SetInSubList(bool set) {
+    bInSubList = set;
+  }
 
 private:
   double dTime, dDT;
@@ -112,6 +118,7 @@ private:
   int iComputeType;                               // CF_... as above
   unsigned char cDynamicDependencyFlag;           // DDF_... as above
   bool bInitEqn;                                  // for xmile
+  bool bInSubList;
 };
 
 #endif

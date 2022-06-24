@@ -290,11 +290,11 @@ public:
   virtual ExpressionList *GetArgs(void) {
     return pArgs;
   }
-  void CheckPlaceholderVars(Model *m, bool isfirst) override;
-  bool CheckComputed(ContextInfo *info) override {
+  virtual void CheckPlaceholderVars(Model *m, bool isfirst) override;
+  virtual bool CheckComputed(ContextInfo *info) override {
     return pFunction->CheckComputed(info, pArgs);
   }
-  void RemoveFunctionArgs(void) override {
+  virtual void RemoveFunctionArgs(void) override {
     pArgs = NULL;
   }
   virtual void OutputComputable(ContextInfo *info) override {
@@ -477,44 +477,46 @@ public:
         delete pE2;
     }
   }
-  virtual EXPTYPE GetType(void) override {
+  virtual EXPTYPE GetType(void) {
     return EXPTYPE_Operator;
   }
-  void CheckPlaceholderVars(Model *m, bool isfirst) override {
+  void CheckPlaceholderVars(Model *m, bool isfirst) {
     if (pE1)
       pE1->CheckPlaceholderVars(m, false);
     if (pE2)
       pE2->CheckPlaceholderVars(m, false);
   }
-  bool CheckComputed(ContextInfo *info) override {
+  bool CheckComputed(ContextInfo *info) {
     if (pE1 && !pE1->CheckComputed(info))
       return false;
     if (pE2 && !pE2->CheckComputed(info))
       return false;
     return true;
   }
-  virtual void OutputComputable(ContextInfo *info) override {
+  virtual void OutputComputable(ContextInfo *info) {
   }
-  virtual bool TestMarkFlows(SymbolNameSpace *sns, FlowList *fl, Equation *eq) override {
-    if (pE1 && pE1->TestMarkFlows(sns, fl, eq))
+  virtual bool TestMarkFlows(SymbolNameSpace *sns, FlowList *fl, Equation *eq) {
+    if (pE1 && pE1->TestMarkFlows(sns, fl, eq)) {
       return true;
-    if (pE2)
+    }
+    if (pE2) {
       return pE2->TestMarkFlows(sns, fl, eq);
+    }
     return false;
   }
-  virtual void GetVarsUsed(std::vector<Variable *> &vars) override {
+  virtual void GetVarsUsed(std::vector<Variable *> &vars) {
     if (pE1)
       pE1->GetVarsUsed(vars);
     if (pE2)
       pE2->GetVarsUsed(vars);
   }  // list of variables used
-  virtual void MarkType(XMILE_Type type) override {
+  virtual void MarkType(XMILE_Type type) {
     if (pE1)
       pE1->MarkType(type);
     if (pE2)
       pE2->MarkType(type);
   }
-  virtual Expression *GetArg(int pos) override {
+  virtual Expression *GetArg(int pos) {
     return pos == 0 ? pE1 : pos == 1 ? pE2 : NULL;
   }
 
@@ -583,10 +585,12 @@ public:
   }
   void OutputComputable(ContextInfo *info);
   virtual bool TestMarkFlows(SymbolNameSpace *sns, FlowList *fl, Equation *eq) {
-    if (pE1 && pE1->TestMarkFlows(sns, fl, eq))
+    if (pE1 && pE1->TestMarkFlows(sns, fl, eq)) {
       return true;
-    if (pE2)
+    }
+    if (pE2) {
       return pE2->TestMarkFlows(sns, fl, eq);
+    }
     return false;
   }
   virtual void GetVarsUsed(std::vector<Variable *> &vars) {

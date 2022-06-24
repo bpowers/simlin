@@ -55,8 +55,8 @@ Expression *vpyy_operator_expression(int oper, Expression *exp1, Expression *exp
 Expression *vpyy_function_expression(Function *func, ExpressionList *eargs) {
   return VPObject->FunctionExpression(func, eargs);
 }
-Expression *vpyy_lookup_expression(ExpressionVariable *var, Expression *exp) {
-  return VPObject->LookupExpression(var, exp);
+Expression *vpyy_lookup_expression(ExpressionVariable *var, ExpressionList *args) {
+  return VPObject->LookupExpression(var, args);
 }
 ExpressionTable *vpyy_tablepair(ExpressionTable *table, double x, double y) {
   return VPObject->TablePairs(table, x, y);

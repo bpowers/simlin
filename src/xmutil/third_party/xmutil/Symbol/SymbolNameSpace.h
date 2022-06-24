@@ -30,7 +30,7 @@ public:
     sUnconfirmedAllocations.insert(s);
   }
   typedef std::unordered_map<std::string, Symbol *> HashTable;
-  typedef HashTable::value_type iterator;  // allows iterator type to be used directly with c++11 for loops
+  typedef HashTable::value_type iterator;  // allows iterator type to be used directly with C++11 range-based for loops
   inline HashTable *GetHashTable(void) {
     return &mHashTable;
   }

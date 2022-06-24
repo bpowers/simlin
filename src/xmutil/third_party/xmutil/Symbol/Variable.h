@@ -1,5 +1,6 @@
 #ifndef _XMUTIL_SYMBOL_VARIABLE_H
 #define _XMUTIL_SYMBOL_VARIABLE_H
+#include <cstddef>
 #include <vector>
 
 #include "../Function/Function.h"
@@ -23,6 +24,7 @@ class View;
 enum XMILE_Type {
   XMILE_Type_UNKNOWN,
   XMILE_Type_AUX,
+  XMILE_Type_DELAYAUX,
   XMILE_Type_STOCK,
   XMILE_Type_FLOW,
   XMILE_Type_ARRAY,
@@ -55,6 +57,8 @@ public:
   }
   virtual std::vector<Equation *> GetAllEquations() {
     return std::vector<Equation *>();
+  }
+  virtual void DropEquation(int pos) {
   }
   virtual void SetAllEquations(std::vector<Equation *> set) {
     assert(false);
@@ -134,6 +138,9 @@ public:
   }
   virtual std::vector<Equation *> GetAllEquations() {
     return vEquations;
+  }
+  virtual void DropEquation(int pos) {
+    vEquations.erase(vEquations.begin() + pos);
   }
   virtual void SetAllEquations(std::vector<Equation *> set) {
     vEquations = set;
@@ -230,12 +237,7 @@ public:
   UnitExpression *Units() {
     return pVariableContent ? pVariableContent->Units() : NULL;
   }
-  inline void OutputComputable(ContextInfo *info) {
-    if (pVariableContent)
-      pVariableContent->OutputComputable(info);
-    else
-      *info << SpaceToUnderBar(GetName());
-  }
+  void OutputComputable(ContextInfo *info);
   inline double Eval(ContextInfo *info) {
     return pVariableContent->Eval(info);
   }
@@ -253,6 +255,7 @@ public:
   }
   std::string GetAlternateName(void);
 
+  void PurgeAFOEq();
   XMILE_Type MarkFlows(SymbolNameSpace *sns);  // mark the variableType of inflows/outflows
   XMILE_Type VariableType() {
     return mVariableType;
@@ -261,11 +264,38 @@ public:
     mVariableType = t;
   }
 
-  int Nelm() const {
+  void MarkAsFlow() {
+    bAsFlow = true;
+  }
+  bool AsFlow() const {
+    return bAsFlow;
+  }
+  void MarkUsesMemory() {
+    bUsesMemory = true;
+  }
+  bool UsesMemory() const {
+    return bUsesMemory;
+  }
+
+  size_t Nelm() const {
     return iNelm;
   }
-  void SetNelm(int set) {
+  void SetNelm(size_t set) {
     iNelm = set;
+  }
+
+  // for flowing
+  bool HasUpstream() const {
+    return _hasUpstream;
+  }
+  void SetHasUpstream(bool set) {
+    _hasUpstream = set;
+  }
+  bool HasDownstream() const {
+    return _hasDownstream;
+  }
+  void SetHasDownstream(bool set) {
+    _hasDownstream = set;
   }
 
   // for other function calles
@@ -288,9 +318,13 @@ private:
   std::vector<Variable *> mOutflows;
   VariableContent *pVariableContent;  // dependent on variable type which is not known on instantiation
   XMILE_Type mVariableType;
-  int iNelm;    // used for subscript owners
-  View *_view;  // view defined in
+  size_t iNelm;  // used for subscript owners
+  View *_view;   // view defined in
   bool _unwanted;
+  bool _hasUpstream;
+  bool _hasDownstream;
+  bool bAsFlow;
+  bool bUsesMemory;
 };
 
 #endif

@@ -23,25 +23,38 @@ VensimVariableElement::VensimVariableElement(VensimView *view, char *curpos, cha
     _ghost = false;
   else
     _ghost = true;
+  _cross_level = false;
+
+#ifndef NDEBUG
+  if (name == "P100")
+    curpos = curpos;
+#endif
 
   // try to find the variable
   _variable = parser->FindVariable(name);
   if (_variable) {
     if (_variable->GetView())
       _ghost = true;  // only allow 1 definition
-    else if (!_ghost)
+    else if (!_ghost) {
       _variable->SetView(view);
-  } else {
-    // fprintf(stderr, "Can't find - %s\n", name.c_str());
-  }
+      if (_attached)
+        _variable->MarkAsFlow();
+    }
+  } else
+    log("Can't find - %s\n", name.c_str());
 }
 VensimVariableElement::VensimVariableElement(VensimView *view, Variable *var, int x, int y) {
   _x = x;
   _y = y;
   _width = _height = 0;
   _ghost = var->GetView() != NULL;
+  _cross_level = false;
   _variable = var;
   _variable->SetView(view);
+#ifndef NDEBUG
+  if (var->GetName() == "P100")
+    x = x;
+#endif
 }
 
 VensimCommentElement::VensimCommentElement(char *curpos, char *buf, VensimParse *parser) {
@@ -78,6 +91,21 @@ VensimValveElement::VensimValveElement(char *curpos, char *buf, VensimParse *par
     _attached = true;
   else
     _attached = false;
+}
+
+bool VensimVariableElement::Ghost(std::set<Variable *> *adds) {
+  if (_ghost && !_cross_level) {
+    if (adds) {
+      std::set<Variable *>::iterator it = adds->find(this->GetVariable());
+      if (it != adds->end()) {
+        adds->erase(it);
+        _cross_level = true;  // so it will continue to return false
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 VensimConnectorElement::VensimConnectorElement(char *curpos, char *buf, VensimParse *parser) {
@@ -214,7 +242,7 @@ bool VensimView::UpgradeGhost(Variable *var) {
     if (ele && ele->Type() == VensimViewElement::ElementTypeVARIABLE) {
       VensimVariableElement *vele = static_cast<VensimVariableElement *>(ele);
       if (vele->GetVariable() == var) {
-        assert(vele->Ghost());
+        assert(vele->Ghost(NULL));
         vele->SetGhost(false);
         var->SetView(this);  // now done
         return true;
@@ -275,6 +303,23 @@ bool VensimView::AddVarDefinition(Variable *var, int x, int y) {
 }
 
 // add if msising - if extra just ignore
+void VensimView::CheckGhostOwners() {
+  int uid;
+  int n = vElements.size();
+  for (uid = 0; uid < n; uid++) {
+    VensimViewElement *ele = vElements[uid];
+    if (ele && ele->Type() == VensimViewElement::ElementTypeVARIABLE) {
+      VensimVariableElement *vele = static_cast<VensimVariableElement *>(ele);
+      Variable *var = vele->GetVariable();
+      if (var && var->GetView() == NULL) {
+        var->SetView(this);
+        vele->SetGhost(false);
+      }
+    }
+  }
+}
+
+// add if msising - if extra just ignore
 void VensimView::CheckLinksIn() {
   int uid;
   int n = vElements.size();
@@ -283,7 +328,7 @@ void VensimView::CheckLinksIn() {
     if (ele && ele->Type() == VensimViewElement::ElementTypeVARIABLE) {
       VensimVariableElement *vele = static_cast<VensimVariableElement *>(ele);
       Variable *var = vele->GetVariable();
-      if (var && var->VariableType() != XMILE_Type_STOCK && !vele->Ghost()) {
+      if (var && var->VariableType() != XMILE_Type_STOCK && !vele->Ghost(NULL)) {
         std::vector<Variable *> ins = var->GetInputVars();
         for (Variable *in : ins) {
           if (!this->FindInArrow(in, uid) && in->VariableType() != XMILE_Type_ARRAY &&

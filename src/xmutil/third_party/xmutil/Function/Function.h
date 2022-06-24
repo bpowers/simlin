@@ -1,6 +1,5 @@
 #ifndef _XMUTIL_SYMBOL_FUNCTION_H
 #define _XMUTIL_SYMBOL_FUNCTION_H
-
 #include "../Symbol/Symbol.h"
 #include "State.h"
 
@@ -24,6 +23,9 @@ public:
   }  // for the parser - treats name as keyword not function
   virtual bool IsMemoryless(void) {
     return true;
+  }
+  virtual bool IsDelay(void) {
+    return false;
   }
   virtual bool IsTimeDependent(void) {
     return false;
@@ -50,6 +52,27 @@ protected:
   int iNumberArgs;
 };
 
+class DFunction : public Function {
+public:
+  DFunction(SymbolNameSpace *sns, const std::string &name, int narg) : Function(sns, name, narg) {
+  }
+  virtual bool IsDelay(void) override {
+    return true;
+  }
+};
+
+class UnknownFunction : public Function {
+public:
+  UnknownFunction(SymbolNameSpace *sns, const std::string &name, int narg) : Function(sns, name, narg), sName(name) {
+  }
+  ~UnknownFunction() {
+  }
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+
+private:
+  std::string sName;
+};
+
 class FunctionMemoryBase : public Function {
 public:
   FunctionMemoryBase(SymbolNameSpace *sns, const std::string &name, int narg, unsigned actarg, unsigned iniarg)
@@ -60,11 +83,14 @@ public:
   ~FunctionMemoryBase(void) {
   }
   unsigned BitFlip(unsigned bits);
-  bool IsMemoryless(void) {
+  virtual bool IsMemoryless(void) override {
     return false;
   }
-  bool CheckComputedList(ContextInfo *info, ExpressionList *arg);
-  void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual bool IsDelay(void) override {
+    return true;
+  }
+  virtual bool CheckComputedList(ContextInfo *info, ExpressionList *arg) override;
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
   unsigned iInitArgMark;
@@ -137,6 +163,25 @@ private:
   }                                         \
   ;
 
+#define DFSubclassStart(name, xname, narg, cname)              \
+  class name : public DFunction {                              \
+  public:                                                      \
+    name(SymbolNameSpace *sns) : DFunction(sns, xname, narg) { \
+      ;                                                        \
+    }                                                          \
+    ~name(void) {                                              \
+    }                                                          \
+    std::string ComputableName(void) {                         \
+      return cname;                                            \
+    }                                                          \
+                                                               \
+  private:
+
+#define DFSubclass(name, xname, narg, cname) \
+  DFSubclassStart(name, xname, narg, cname)  \
+  }                                          \
+  ;
+
 #define FSubclassMemoryStart(name, xname, narg, actarg, iniarg, cnamea, cnamei)         \
   class name : public FunctionMemoryBase {                                              \
   public:                                                                               \
@@ -190,9 +235,12 @@ FSubclass(FunctionAbs, "ABS", 1, "ABS") FSubclass(FunctionExp, "EXP", 1, "EXP")
 
                         FSubclass(FunctionMax, "MAX", 2, "MAX") FSubclass(FunctionMin, "MIN", 2, "MIN")
                             FSubclass(FunctionZidz, "ZIDZ", 2, "SAFEDIV") FSubclass(FunctionXidz, "XIDZ", 3, "SAFEDIV")
-                                FSubclass(FunctionWithLookup, "WITH LOOKUP", 3, "WITH_LOOKUP")
-                                    FSubclass(FunctionSum, "SUM", 1, "SUM");
+                                FSubclass(FunctionLookupInv, "LOOKUP INVERT", 2, "LOOKUPINV")
+                                    FSubclass(FunctionWithLookup, "WITH LOOKUP", 3, "WITH_LOOKUP")
+                                        FSubclass(FunctionSum, "SUM", 1, "SUM");
 FSubclass(FunctionProd, "PROD", 1, "PROD");
+FSubclass(FunctionVMax, "VMAX", 1, "MAX");
+FSubclass(FunctionVMin, "VMIN", 1, "MIN");
 FSubclass(FunctionVectorSelect, "VECTOR SELECT", 5, "VECTOR SELECT");
 FSubclass(FunctionVectorElmMap, "VECTOR ELM MAP", 2, "VECTOR ELM MAP");
 FSubclass(FunctionVectorSortOrder, "VECTOR SORT ORDER", 2, "VECTOR SORT ORDER");
@@ -200,22 +248,39 @@ FSubclass(FunctionGame, "GAME", 1, "");  // don't need this
 FSubclass(FunctionRandom01, "RANDOM 0 1", 0, "UNIFORM(0,1)");
 FSubclass(FunctionRandomUniform, "RANDOM UNIFORM", 3, "UNIFORM");
 
+FSubclass(FunctionNAN, "A FUNCTION OF", -1, "NAN");
+
 // actually memory but no init - or init - does not matter for translation
-FSubclass(FunctionSmooth, "SMOOTH", 2, "SMTH1") FSubclass(FunctionSmoothI, "SMOOTHI", 3, "SMTH1")
-    FSubclass(FunctionSmooth3, "SMOOTH3", 2, "SMTH3") FSubclass(FunctionTrend, "TREND", 3, "TREND")
-        FSubclass(FunctionDelay1, "DELAY1", 2, "DELAY1") FSubclass(FunctionDelay1I, "DELAY1I", 3, "DELAY1")
-            FSubclass(FunctionDelay3, "DELAY3", 2, "DELAY3") FSubclass(FunctionDelay3I, "DELAY3I", 3, "DELAY3")
-                FSubclass(FunctionDelay, "DELAY FIXED", 3, "DELAY") FSubclass(FunctionNPV, "NPV", 4, "NPV")
+DFSubclass(FunctionSmooth, "SMOOTH", 2, "SMTH1") DFSubclass(FunctionSmoothI, "SMOOTHI", 3, "SMTH1")
+    DFSubclass(FunctionSmooth3, "SMOOTH3", 2, "SMTH3") DFSubclass(FunctionSmooth3I, "SMOOTH3I", 3, "SMTH3")
+        DFSubclass(FunctionTrend, "TREND", 3, "TREND") DFSubclass(FunctionDelay1, "DELAY1", 2, "DELAY1")
+            DFSubclass(FunctionDelay1I, "DELAY1I", 3, "DELAY1") DFSubclass(FunctionDelay3, "DELAY3", 2, "DELAY3")
+                DFSubclass(FunctionDelay3I, "DELAY3I", 3, "DELAY3") DFSubclass(FunctionDelay, "DELAY FIXED", 3, "DELAY")
+                    DFSubclass(FunctionNPV, "NPV", 4, "NPV")
 
     // done as macros
     FSubclass(FunctionDelayConveyor, "DELAY CONVEYOR", 6, "DELAY_CONVEYOR")
     // - this one is fake - return NaN
-    FSubclass(FunctionVectorReorder, "VECTOR REORDER", 2, "VECTOR_REORDER")
-        FSubclass(FunctionModulo, "MODULO", 2, "MODULO") FSubclass(FunctionGetDataAtTime, "GET DATA AT TIME", 2,
-                                                                   "GET_DATA_AT_TIME")
-            FSubclass(FunctionGetDataLastTime, "GET DATA LAST TIME", 1, "GET_DATA_LAST_TIME")
-                FSubclass(FunctionLookupArea, "LOOKUP AREA", 3, "LOOKUP_AREA")
-                    FSubclass(FunctionLookupExtrapolate, "LOOKUP EXTRAPOLATE", 2, "LOOKUP")  // changes the graphical
+    FSubclass(FunctionVectorReorder, "VECTOR REORDER", 2, "VECTOR_REORDER") class FunctionVectorLookup
+    : public Function {
+public:
+  FunctionVectorLookup(SymbolNameSpace *sns) : Function(sns, "VECTOR LOOKUP", 5) {
+  }
+  ~FunctionVectorLookup(void) {
+  }
+  std::string ComputableName(void) {
+    return "VECTOR LOOKUP";
+  }
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+
+private:
+};
+FSubclass(FunctionElmCount, "ELMCOUNT", 1, "SIZE");
+FSubclass(FunctionModulo, "MODULO", 2, "MODULO")
+    FSubclass(FunctionGetDataAtTime, "GET DATA AT TIME", 2, "GET_DATA_AT_TIME")
+        FSubclass(FunctionGetDataLastTime, "GET DATA LAST TIME", 1, "GET_DATA_LAST_TIME")
+            FSubclass(FunctionLookupArea, "LOOKUP AREA", 3, "LOOKUP_AREA")
+                FSubclass(FunctionLookupExtrapolate, "LOOKUP EXTRAPOLATE", 2, "LOOKUP")  // changes the graphical
     FSubclassStart(FunctionTimeBase, "TIME BASE", 2, "TIME_BASE") virtual void OutputComputable(ContextInfo *info,
                                                                                                 ExpressionList *arg);
 }
@@ -240,7 +305,7 @@ FSubclassMemory(FunctionInteg, "INTEG", 2, 0b10, 0b01, "integ_active", "integ_in
 FSubclass(FunctionInitial, "INITIAL", 1, "INIT") FSubclass(FunctionReInitial, "REINITIAL", 1, "INIT")
 
     FSubclassTime(FunctionRamp, "RAMP", 3, "RAMP") FSubclass(FunctionLn, "LN", 1, "LN")
-        FSubclassTime(FunctionPulse, "PULSE", 2, "pulse") FSubclassTime(FunctionStep, "STEP", 2, "step")
+        FSubclassTime(FunctionStep, "STEP", 2, "step")
 
             FSubclassKeyword(FunctionTabbedArray, "TABBED ARRAY", 1)
 
@@ -274,6 +339,19 @@ public:
 private:
 };
 
+class FunctionPulse : public Function {
+public:
+  FunctionPulse(SymbolNameSpace *sns) : Function(sns, "PULSE", 2) {
+  }
+  ~FunctionPulse(void) {
+  }
+  std::string ComputableName(void) {
+    return "Pulse";
+  }
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+
+private:
+};
 class FunctionPulseTrain : public Function {
 public:
   FunctionPulseTrain(SymbolNameSpace *sns) : Function(sns, "PULSE TRAIN", 4) {

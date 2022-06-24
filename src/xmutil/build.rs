@@ -19,6 +19,7 @@ fn main() {
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unknown-pragmas")
         .flag_if_supported("-Wno-parentheses")
+        .define("NDEBUG", None)
         .file("./third_party/xmutil/Function/TableFunction.cpp")
         .file("./third_party/xmutil/Function/Level.cpp")
         .file("./third_party/xmutil/Function/State.cpp")
@@ -30,6 +31,8 @@ fn main() {
         .file("./third_party/xmutil/Vensim/VensimLex.cpp")
         .file("./third_party/xmutil/Vensim/VensimParse.cpp")
         .file("./third_party/xmutil/Model.cpp")
+        .file("./third_party/xmutil/Log.cpp")
+        .file("./third_party/xmutil/Unicode.cpp")
         .file("./third_party/xmutil/ContextInfo.cpp")
         .file("./third_party/xmutil/XMUtil.cpp")
         .file("./third_party/xmutil/Symbol/Symbol.cpp")
@@ -120,6 +123,7 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/Level.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/State.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/TableFunction.cpp");
+    println!("cargo:rerun-if-changed=third_party/xmutil/Log.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Model.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Equation.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Expression.cpp");
@@ -134,6 +138,7 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/UnitExpression.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Units.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Variable.cpp");
+    println!("cargo:rerun-if-changed=third_party/xmutil/Unicode.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimLex.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParse.cpp");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParseFunctions.cpp");
@@ -152,6 +157,7 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/Level.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/State.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Function/TableFunction.h");
+    println!("cargo:rerun-if-changed=third_party/xmutil/Log.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Model.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Equation.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Expression.h");
@@ -167,6 +173,7 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/UnitExpression.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Units.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Symbol/Variable.h");
+    println!("cargo:rerun-if-changed=third_party/xmutil/Unicode.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimLex.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParseFunctions.h");
     println!("cargo:rerun-if-changed=third_party/xmutil/Vensim/VensimParse.h");

@@ -52,7 +52,7 @@ public:
   ExpressionSymbolList *SymlistExpression(SymbolList *sym, SymbolList *map);
   Expression *OperatorExpression(int oper, Expression *exp1, Expression *exp2);
   Expression *FunctionExpression(Function *func, ExpressionList *eargs);
-  Expression *LookupExpression(ExpressionVariable *var, Expression *exp);
+  Expression *LookupExpression(ExpressionVariable *var, ExpressionList *args);
   ExpressionTable *TablePairs(ExpressionTable *table, double x, double y);
   ExpressionTable *XYTableVec(ExpressionTable *table, double val);
   ExpressionTable *TableRange(ExpressionTable *table, double x1, double y1, double x2, double y2);
@@ -83,8 +83,8 @@ private:
   SymbolNameSpace *pSymbolNameSpace;
   SymbolNameSpace *pMainSymbolNameSpace;
   Variable *pActiveVar;
-  bool mInMacro = false;
-  bool bLongName = false;
+  bool mInMacro;
+  bool bLongName;
   std::vector<MacroFunction *> mMacroFunctions;
 };
 

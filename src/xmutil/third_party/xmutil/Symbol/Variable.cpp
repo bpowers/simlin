@@ -2,6 +2,8 @@
 
 #include <assert.h>
 
+#include <iostream>
+
 #include "../Symbol/Expression.h"
 #include "../Symbol/LeftHandSide.h"
 #include "../XMUtil.h"
@@ -16,6 +18,9 @@ Variable::Variable(SymbolNameSpace *sns, const std::string &name) : Symbol(sns, 
   mVariableType = XMILE_Type_UNKNOWN;  // till typed
   iNelm = 0;
   _unwanted = false;
+  _hasUpstream = _hasDownstream = false;
+  bAsFlow = false;
+  bUsesMemory = false;
 }
 
 Variable::~Variable(void) {
@@ -33,6 +38,22 @@ std::string Variable::GetAlternateName(void) {
   if (name.size() > 2 && name[0] == '\"' && name.back() == '\"')
     name = name.substr(1, name.size() - 2);
   return name;
+}
+
+void Variable::PurgeAFOEq() {
+  if (!pVariableContent)
+    return;
+  std::vector<Equation *> equations = pVariableContent->GetAllEquations();
+  if (equations.size() <= 1)
+    return;
+  // if the first equation is an A FUNCTION OF equation then delete it
+  Equation *eq = equations[0];
+  Expression *exp = eq->GetExpression();
+  if (exp->GetType() == EXPTYPE_Function) {
+    Function *f = exp->GetFunction();
+    if (f->GetName() == "A FUNCTION OF")
+      pVariableContent->DropEquation(0);
+  }
 }
 
 XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
@@ -65,6 +86,16 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
       std::string name = this->GetName();
       symlist->SetOwner(this);  // this can recur
       mVariableType = XMILE_Type_ARRAY;
+      // anything untyped in the symlist should be marked an elm - may contain other arrays
+      int n = symlist->Length();
+      for (int i = 0; i < n; i++) {
+        const SymbolList::SymbolListEntry &sle = (*symlist)[i];
+        if (sle.eType == SymbolList::EntryType_SYMBOL) {
+          const Variable *elm = static_cast<const Variable *>(sle.u.pSymbol);
+          if (elm->mVariableType == XMILE_Type_UNKNOWN)
+            const_cast<Variable *>(elm)->mVariableType = XMILE_Type_ARRAY_ELM;
+        }
+      }
       return mVariableType;
     }
     if (exp->GetType() == EXPTYPE_NumberTable) {
@@ -77,8 +108,9 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
       {
         ExpressionNumberTable *t = static_cast<ExpressionNumberTable *>(exp);
         const std::vector<double> &vals = t->GetVals();
-        assert(vals.size() == elms.size());
-        if (vals.size() == elms.size()) {
+        if (vals.size() != elms.size()) {
+          log("Error the number of entries does not match array size for \"%s\"\n", this->GetName().c_str());
+        } else {
           equations.erase(equations.begin() + i);
           size_t n2 = vals.size();
           for (size_t j = 0; j < n2; j++) {
@@ -98,6 +130,9 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
     }
     if (exp->GetType() == EXPTYPE_Function) {
       Function *function = static_cast<ExpressionFunction *>(exp)->GetFunction();
+      bool mrl = function->IsMemoryless();
+      if (function->IsDelay())
+        this->MarkUsesMemory();
       std::string name = function->GetName();
       if (name == "LOOKUP EXTRAPOLATE") {
         // if we get a LOOKUP_EXTRAPOLATE then try to mark the associated lookup - assume all will extrapolate
@@ -118,8 +153,15 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
     }
   }
   if (!gotone) {
-    if (mVariableType == XMILE_Type_UNKNOWN)
-      mVariableType = XMILE_Type_AUX;
+    if (mVariableType == XMILE_Type_UNKNOWN) {
+      // check to see if this is decorated as a flow
+      if (this->AsFlow())
+        mVariableType = XMILE_Type_FLOW;
+      else if (this->UsesMemory())
+        mVariableType = XMILE_Type_DELAYAUX;
+      else
+        mVariableType = XMILE_Type_AUX;
+    }
     return mVariableType;
   }
   mVariableType = XMILE_Type_STOCK;
@@ -161,6 +203,7 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
   }
   Variable *v = new Variable(sns, name);
   v->SetVariableType(XMILE_Type_FLOW);
+  v->SetView(this->GetView());
   mInflows.push_back(v);
 
   // now we swap the active part of the INTEG equation for v and set v's equation to
@@ -220,6 +263,24 @@ void Variable::AddEq(Equation *eq) {
   pVariableContent->AddEq(eq);
 }
 
+void Variable::OutputComputable(ContextInfo *info) {
+  if (this->mVariableType == XMILE_Type_ARRAY) {
+    Symbol *s = info->GetLHSSpecific(this);
+    if (s && s != this) {
+      *info << SpaceToUnderBar(this->GetName()) << ".";
+      *info << SpaceToUnderBar(s->GetName());
+      return;
+    }
+  }
+  if (pVariableContent)
+    pVariableContent->OutputComputable(info);
+  else {
+    if (mVariableType == XMILE_Type_ARRAY_ELM && !info->InSubList())
+      *info << SpaceToUnderBar(this->Owner()->GetName()) << ".";
+    *info << SpaceToUnderBar(GetName());
+  }
+}
+
 VariableContent::VariableContent(void) {
   pState = NULL;
 }
@@ -234,9 +295,9 @@ void VariableContentVar::CheckPlaceholderVars(Model *m) {
 }
 
 bool VariableContentVar::CheckComputed(Symbol *parent, ContextInfo *info, bool first) {
-  // printf("Checking out %s\n",GetName().c_str()) ;
+  // log("Checking out %s\n",GetName().c_str()) ;
   if (!pState) {
-    // printf("   - not computable ignoring\n") ;
+    // log("   - not computable ignoring\n") ;
     return true;
   }
   if (pState->cComputeFlag & info->GetComputeType()) {
@@ -250,21 +311,21 @@ bool VariableContentVar::CheckComputed(Symbol *parent, ContextInfo *info, bool f
   }
   int intype = info->GetComputeType() << 1;
   if (pState->cComputeFlag & intype) {
-    if (info->GetComputeType() == CF_initial) {
-      // std::cerr << "Simultaneous initial equations found " << std::endl;
-    } else {
+    if (info->GetComputeType() == CF_initial)
+      log("Simultaneous initial equations found \n");
+    else {
       if (pState->HasMemory()) {  // first call was for rates - now for level
         assert(!first);
         info->AddDDF(DDF_level);
         return true;
       }
-      // std::cerr << "Simultaneous active equations found " << std::endl;
+      log("Simultaneous active equations found \n");
     }
-    // std::cerr << "     " << parent->GetName() << std::endl;
+    log("     %s\n", parent->GetName().c_str());
     pState->cComputeFlag &= ~intype;
     return false;
   } else if (!first && (info->GetComputeType() != CF_initial) && pState->HasMemory()) {
-    // printf("Not tracing further for level  %s\n",GetName().c_str()) ;
+    // log("Not tracing further for level  %s\n",GetName().c_str()) ;
     info->AddDDF(
         DDF_level);  // this is the level - even if the rate is a constant (only a 0 rate would really be unchanging)
     return true;
@@ -280,7 +341,7 @@ bool VariableContentVar::CheckComputed(Symbol *parent, ContextInfo *info, bool f
     pState->cComputeFlag |= intype;
     for (Equation *e : vEquations) {
       if (!e->GetExpression()->CheckComputed(info)) {
-        // std::cerr << "     " << parent->GetName() << std::endl;
+        log("     %s\n", parent->GetName().c_str());
         pState->cComputeFlag &= ~intype;
         pState->cComputeFlag |= info->GetComputeType();  // don't reenter
         return false;
@@ -305,7 +366,7 @@ bool VariableContentVar::CheckComputed(Symbol *parent, ContextInfo *info, bool f
     if (!pState->HasMemory())
       return true;
   }
-  // fprintf(stderr, "Outputting equations for  %s\n", parent->GetName().c_str());
+  log("Outputting equations for  %s\n", parent->GetName().c_str());
   for (Equation *e : vEquations) {
     info->PushEquation(e);
   }
@@ -360,10 +421,10 @@ void VariableContentVar::SetupState(ContextInfo *info) {
 }
 
 int VariableContentVar::SubscriptCount(std::vector<Variable *> &elmlist) {
-  int count;
   if (vEquations.empty())
     return 0;
-  if ((count = vEquations[0]->SubscriptCount(elmlist))) {
+  int count = vEquations[0]->SubscriptCount(elmlist);
+  if (count > 0) {
     if (vEquations.size() != 1) {
       for (size_t i = 1; i < vEquations.size(); i++) {
         std::vector<Variable *> other;

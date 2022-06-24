@@ -1,49 +1,69 @@
 // XMUtil.cpp : Defines the entry point for the console application.
 //
-
 #include "XMUtil.h"
 
-#include <algorithm>
-#include <cstring>
-
 #include "Model.h"
+#include "Unicode.h"
 #include "Vensim/VensimParse.h"
-#include "libutf/utf.h"
+
+#ifdef WITH_UI
+#include <QApplication>
+
+#include "UI/Main_Window.h"
+#endif
+
+std::string StringFromDouble(double val) {
+  char buf[128];
+  sprintf(buf, "%g", val);
+  return std::string(buf);
+}
 
 std::string SpaceToUnderBar(const std::string &s) {
-  std::string rval{s};
-  std::replace(rval.begin(), rval.end(), ' ', '_');
+  std::string rval;
+  for (const char *tv = s.c_str(); *tv; tv++) {
+    if (*tv == ' ')
+      rval.push_back('_');
+    else
+      rval.push_back(*tv);
+  }
+  return rval;
+}
+
+std::string QuotedSpaceToUnderBar(const std::string &s) {
+  std::string rval;
+  bool needquote = false;
+  for (const char *tv = s.c_str(); *tv; tv++) {
+    if (*tv == ' ')
+      rval.push_back('_');
+    else {
+      if (*tv == '.')
+        needquote = true;
+      rval.push_back(*tv);
+    }
+  }
+  if (needquote)
+    rval = "\"" + rval + "\"";
   return rval;
 }
 
 bool StringMatch(const std::string &f, const std::string &s) {
-  if (f.size() != s.size()) {
+  if (f.size() != s.size())
     return false;
+  const char *tv1 = f.c_str();
+  const char *tv2 = s.c_str();
+  char c1, c2;
+  for (; (c1 = *tv1); tv1++, tv2++) {
+    c2 = *tv2;
+    if (c1 != c2) {
+      if (c1 >= 'A' && c1 <= 'Z')
+        c1 += ('a' - 'A');
+      if (c2 >= 'A' && c2 <= 'Z')
+        c2 += ('a' - 'A');
+      if (c1 != c2)
+        return false;
+    }
   }
-  return strncasecmp(f.c_str(), s.c_str(), f.size()) == 0;
-}
-
-char *utf8ToLower(const char *src, size_t srcLen) {
-  int n;
-  Rune u;
-
-  size_t dstLen = 0;
-  for (size_t srcOff = 0; srcOff<srcLen && * src> 0 && (n = chartorune(&u, &src[srcOff])); srcOff += n) {
-    const Rune l = tolowerrune(u);
-    dstLen += runelen(l);
-  }
-
-  char *dst = new char[dstLen + 1];
-  memset(dst, 0, dstLen + 1);
-
-  size_t dstOff = 0;
-  for (size_t srcOff = 0; srcOff<srcLen && * src> 0 && (n = chartorune(&u, &src[srcOff])); srcOff += n) {
-    Rune l = tolowerrune(u);
-    const int size = runetochar(&dst[dstOff], &l);
-    dstOff += size;
-  }
-
-  return dst;
+  return true;
 }
 
 double AngleFromPoints(double startx, double starty, double pointx, double pointy, double endx, double endy) {
@@ -227,13 +247,20 @@ double AngleFromPoints(double startx, double starty, double pointx, double point
 
 extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
-char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool isCompact) {
+char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, const char *fileName, bool isCompact,
+                                  bool isLongName, bool isAsSectors) {
   Model m{};
+
+  if (fileName == nullptr) {
+    fileName = "<in memory>";
+  }
 
   // parse the input
   {
     VensimParse vp{&m};
-    if (!vp.ProcessFile("<in memory>", mdlSource, mdlSourceLen)) {
+    vp.SetLongName(isLongName);
+    m.SetAsSectors(isAsSectors);
+    if (!vp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
       return nullptr;
     }
   }
@@ -252,11 +279,17 @@ char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool i
     m.MarkVariableTypes(mf->NameSpace());
   }
 
+  // any ghosts that are never defined make the first appearance not a ghost
+  m.CheckGhostOwners();
+
   // if there is a view then try to make sure everything is defined in
   // the views put unknowns in a heap in the first view at 20,20 but
   // for things that have connections try to put them in the right
   // place
-  m.AttachStragglers();
+  bool want_complete = false;  // could pass this as an option - but let the reader handle this stuff
+  if (want_complete) {
+    m.AttachStragglers();
+  }
 
   // TODO: expose errs
   std::vector<std::string> errs;
@@ -270,4 +303,4 @@ char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool i
 
   return result;
 }
-}
+}  // extern "C"

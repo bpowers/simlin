@@ -26,6 +26,12 @@ public:
   void SetY(int y) {
     _y = y;
   }
+  int Width() const {
+    return _width;
+  }
+  int Height() const {
+    return _height;
+  }
 
 protected:
   int _x;
@@ -44,8 +50,9 @@ public:
   Variable *GetVariable() {
     return _variable;
   }
-  bool Ghost() {
-    return _ghost;
+  bool Ghost(std::set<Variable *> *adds);
+  bool CrossLevel() {
+    return _cross_level;
   }
   void SetGhost(bool set) {
     _ghost = set;
@@ -57,6 +64,7 @@ public:
 protected:
   Variable *_variable;
   bool _ghost;
+  bool _cross_level;
   bool _attached;  // to a valve for flows
 };
 class VensimValveElement : public VensimViewElement {
@@ -116,10 +124,11 @@ public:
     return vElements;
   }
 
-  bool UpgradeGhost(Variable *var);
-  bool AddFlowDefinition(Variable *var, Variable *upstream, Variable *downstream);
-  bool AddVarDefinition(Variable *var, int x, int y);
-  void CheckLinksIn();
+  bool UpgradeGhost(Variable *var) override;
+  bool AddFlowDefinition(Variable *var, Variable *upstream, Variable *downstream) override;
+  bool AddVarDefinition(Variable *var, int x, int y) override;
+  virtual void CheckGhostOwners() override;
+  virtual void CheckLinksIn() override;
   bool FindInArrow(Variable *source, int target);
   void RemoveExtraArrowsIn(std::vector<Variable *> ins, int target);
   int FindVariable(Variable *in, int x, int y);  // add if necessary - returns UID

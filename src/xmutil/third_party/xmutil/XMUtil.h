@@ -3,6 +3,8 @@
 
 #include <string>
 
+#include "Log.h"
+
 #ifdef WIN32
 // XMUtil.h - globally included - generally for help with
 // memory leak detection
@@ -57,19 +59,26 @@ inline void __cdecl operator delete[](void *p) {
 #endif
 #endif
 
+#ifdef WIN32
+#define XMUTIL_EXPORT
+#else
 #define XMUTIL_EXPORT __attribute__((visibility("default")))
+#endif
 
 extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
-XMUTIL_EXPORT char *_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, bool isCompact);
+XMUTIL_EXPORT char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, const char *fileName,
+                                                bool isCompact, bool isLongName, bool isAsSectors);
+// returns a non-owned, null-terminated C-string with any log output from
+// previous xmutil_convert_mdl_to_xmile invocations
+XMUTIL_EXPORT const char *xmutil_get_log(void);
+XMUTIL_EXPORT void xmutil_clear_log(void);
 }
 
-char *utf8ToLower(const char *src, size_t srcLen);
-
 // utility functions
+std::string StringFromDouble(double val);
 std::string SpaceToUnderBar(const std::string &s);
-// ascii only
-bool StringMatch(const std::string &f, const std::string &s);
+std::string QuotedSpaceToUnderBar(const std::string &s);
+bool StringMatch(const std::string &f, const std::string &s);  // asciii only;
 double AngleFromPoints(double startx, double starty, double pointx, double pointy, double endx, double endy);
-std::string ReadFile(FILE *file, int &error);
 #endif
