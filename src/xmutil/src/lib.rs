@@ -193,14 +193,14 @@ $192-192-192,0,Times New Roman|12||0-0-0|0-0-0|0-0-255|-1--1--1|-1--1--1|72,72,1
         let actual = actual.unwrap();
         assert!(actual.starts_with("<xmile "));
         assert!(actual.ends_with("</xmile>\n"));
+        assert!(logs.is_none());
     }
 
     #[test]
     fn failure_is_none() {
         let (xmile, logs) = crate::convert_vensim_mdl(":ohno:", true);
 
-        println!("{}", logs.unwrap());
-
-        assert!(xmile.is_none())
+        assert!(xmile.is_none());
+        assert!(logs.is_some());
     }
 }
