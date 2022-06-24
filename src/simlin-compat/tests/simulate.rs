@@ -333,15 +333,16 @@ fn simulates_active_initial() {
 }
 
 #[test]
+#[ignore]
 fn simulates_except() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
 }
 
-#[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
-fn simulates_sdeverywhere(resource: &str) {
-    let resource = format!("../../{}", resource);
-    simulate_path(&resource);
-}
+// #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
+// fn simulates_sdeverywhere(resource: &str) {
+//     let resource = format!("../../{}", resource);
+//     simulate_path(&resource);
+// }
 
 #[test]
 fn bad_model_name() {
