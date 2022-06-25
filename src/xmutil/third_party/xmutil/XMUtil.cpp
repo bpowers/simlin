@@ -1,5 +1,7 @@
 // XMUtil.cpp : Defines the entry point for the console application.
 //
+#include <cstring>
+
 #include "XMUtil.h"
 
 #include "Model.h"
