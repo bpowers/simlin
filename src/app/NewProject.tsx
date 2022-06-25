@@ -146,10 +146,11 @@ export const NewProject = styled(
       }
       const file = event.target.files[0];
       let contents = await readFile(file);
+      let logs: string | undefined;
 
       // convert vensim files to xmile
       if (file.name.endsWith('.mdl')) {
-        contents = await convertMdlToXmile(contents, false);
+        [contents, logs] = await convertMdlToXmile(contents, false);
       }
 
       try {
@@ -166,7 +167,7 @@ export const NewProject = styled(
         this.setState({ projectPB });
       } catch (e) {
         this.setState({
-          errorMsg: `importer: ${e}`,
+          errorMsg: `importer: ${e}\n${logs}`,
         });
         return;
       }
