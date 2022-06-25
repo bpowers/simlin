@@ -63,9 +63,9 @@ pub fn convert_vensim_mdl(mdl_source: &str, is_compact: bool) -> (Option<String>
         let model = if !result_buf.is_null() {
             // take ownership of the returned string
             CString::from_raw(result_buf)
-            .into_string()
-            .ok()
-            .filter(|s| !s.is_empty())
+                .into_string()
+                .ok()
+                .filter(|s| !s.is_empty())
         } else {
             None
         };
