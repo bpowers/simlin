@@ -146,14 +146,17 @@ export const NewProject = styled(
       }
       const file = event.target.files[0];
       let contents = await readFile(file);
-      let logs: string | undefined;
-
-      // convert vensim files to xmile
-      if (file.name.endsWith('.mdl')) {
-        [contents, logs] = await convertMdlToXmile(contents, false);
-      }
 
       try {
+        // convert vensim files to xmile
+        if (file.name.endsWith('.mdl')) {
+          let logs: string | undefined;
+          [contents, logs] = await convertMdlToXmile(contents, false);
+          if (contents.length === 0) {
+              throw new Error('Vensim converter: ' + (logs || 'unknown error'));
+          }
+        }
+
         const projectPB: Uint8Array = await fromXmile(contents);
         const activeProject = ProjectDM.deserializeBinary(projectPB);
         const views = activeProject.models.get('main')?.views;
@@ -164,10 +167,13 @@ export const NewProject = styled(
           return;
         }
 
-        this.setState({ projectPB });
+        this.setState({
+            projectPB,
+            errorMsg: undefined,
+        });
       } catch (e) {
         this.setState({
-          errorMsg: `importer: ${e}\n${logs}`,
+          errorMsg: `${e}`,
         });
         return;
       }
@@ -254,8 +260,8 @@ export const NewProject = styled(
           <br />
           <br />
           <br />
-          <Typography variant="subtitle2">
-            <b>&nbsp;{warningText}</b>
+          <Typography variant="subtitle2" style={{whiteSpace: "pre-wrap"}}>
+            <b>{warningText || '\xa0'}</b>
           </Typography>
           <Typography align="right">
             <Button onClick={this.handleClose} color="primary">
