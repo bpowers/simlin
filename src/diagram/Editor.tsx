@@ -785,10 +785,6 @@ export const Editor = styled(
 
     handleSelectionMove = (delta: Point, arcPoint?: Point) => {
       const view = defined(this.getView());
-      const origElements = view.elements;
-      const origNamedElements = Map<string, ViewElement>(
-        origElements.filter((e) => e.isNamed()).map((e) => [defined(e.ident), e]),
-      );
       const selection = this.state.selection;
 
       const getName = (ident: string) => {
@@ -867,39 +863,42 @@ export const Editor = styled(
       });
 
       let namedElements = Map<string, ViewElement>();
-      let selectedElements = Map<string, ViewElement>();
+      let nonSelectedElements = Map<number, ViewElement>();
+      let selectedElements = Map<number, ViewElement>();
       for (const e of elements) {
-        if (!e.isNamed()) {
-          continue;
-        }
-        const ident = defined(e.ident);
         if (selection.has(e.uid)) {
-          selectedElements = selectedElements.set(ident, e);
+          selectedElements = selectedElements.set(e.uid, e);
+        } else {
+          nonSelectedElements = nonSelectedElements.set(e.uid, e);
         }
-        namedElements = namedElements.set(ident, selectedElements.get(ident, e));
+        if (e.isNamed()) {
+          const ident = defined(e.ident);
+          namedElements = namedElements.set(ident, selectedElements.get(e.uid, e));
+        }
       }
 
       elements = elements.map((element: ViewElement) => {
         if (!(element instanceof LinkViewElement)) {
           return element.isNamed() ? defined(namedElements.get(defined(element.ident))) : element;
         }
-        const fromName = defined(getUid(element.fromUid).ident);
-        const toName = defined(getUid(element.toUid).ident);
+        // TODO: this could be an alias, which doesn't have a name.  Why are we doing this by name anyway?
+        // const fromName = defined(getUid(element.fromUid).ident);
+        // const toName = defined(getUid(element.toUid).ident);
         // if it hasn't been updated, nothing to do
-        if (!(selectedElements.has(fromName) || selectedElements.has(toName))) {
+        if (!(selectedElements.has(element.fromUid) || selectedElements.has(element.toUid))) {
           return element;
         }
-        const from = selectedElements.get(fromName) || namedElements.get(fromName);
+        const from = selectedElements.get(element.fromUid) || nonSelectedElements.get(element.fromUid);
         if (!from) {
           return element;
         }
-        const to = selectedElements.get(toName) || namedElements.get(toName);
+        const to = selectedElements.get(element.toUid) || nonSelectedElements.get(element.toUid);
         if (!to) {
           return element;
         }
         const atan2 = Math.atan2;
-        const oldTo = defined(origNamedElements.get(toName));
-        const oldFrom = defined(origNamedElements.get(fromName));
+        const oldTo = defined(getUid(element.toUid));
+        const oldFrom = defined(getUid(element.fromUid));
         const oldθ = atan2(oldTo.cy - oldFrom.cy, oldTo.cx - oldFrom.cx);
         const newθ = atan2(to.cy - from.cy, to.cx - from.cx);
         const diffθ = oldθ - newθ;
