@@ -1,0 +1,20 @@
+--- a/node_modules/@webassemblyjs/wasm-parser/lib/decoder.js
++++ b/node_modules/@webassemblyjs/wasm-parser/lib/decoder.js
+@@ -1691,7 +1691,16 @@
+         }
+     }
+ 
+-    throw new _helperApiError.CompileError("Unexpected section: " + toHex(sectionId));
++    dumpSep("section " + toHex(sectionId));
++    dump([sectionId], "section code");
++    dump([sectionSizeInBytes], "section size");
++    eatBytes(sectionSizeInBytes);
++    dumpSep("ignoring (" + sectionSizeInBytes + " bytes)");
++    return {
++      nodes: [],
++      metadata: [],
++      nextSectionIndex: 0,
++    };
+   }
+ 
+   parseModuleHeader();

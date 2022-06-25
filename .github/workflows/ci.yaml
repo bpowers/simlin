@@ -108,4 +108,5 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           yarn install
+          patch -p1 <decoder.patch
           DISABLE_WASM_OPT=1 yarn build
