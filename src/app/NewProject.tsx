@@ -146,12 +146,12 @@ export const NewProject = styled(
       }
       const file = event.target.files[0];
       let contents = await readFile(file);
+      let logs: string | undefined;
 
       try {
         // convert vensim files to xmile
         if (file.name.endsWith('.mdl')) {
-          let logs: string | undefined;
-          [contents, logs] = await convertMdlToXmile(contents, false);
+          [contents, logs] = await convertMdlToXmile(contents, true);
           if (contents.length === 0) {
               throw new Error('Vensim converter: ' + (logs || 'unknown error'));
           }
@@ -161,8 +161,12 @@ export const NewProject = styled(
         const activeProject = ProjectDM.deserializeBinary(projectPB);
         const views = activeProject.models.get('main')?.views;
         if (!views || views.isEmpty()) {
+          let errorMsg = `can't import model with no view at this time.`;
+          if (logs && logs.length !== 0) {
+              errorMsg = logs;
+          }
           this.setState({
-            errorMsg: `can't import model with no view at this time.`,
+            errorMsg,
           });
           return;
         }
