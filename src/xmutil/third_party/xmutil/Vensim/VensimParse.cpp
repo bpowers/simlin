@@ -2,6 +2,7 @@
 // we use an in-memory string to simplify look ahead/back
 // we include the tokenizer here because it is as easy as setting
 // up regular expressions for Flex and more easily understood
+#include <cstring>
 
 #include "VensimParse.h"
 
