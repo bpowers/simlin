@@ -70,7 +70,7 @@ export async function convertMdlToXmile(mdlSource: string | Readonly<Uint8Array>
       0,
       !pretty,
       false,
-      false,
+      true,
   );
   const result = getStringFromWasm(resultPtr);
   wasm.free(resultPtr);
