@@ -38,30 +38,50 @@ function getUint8Memory0() {
   return cachegetUint8Memory0;
 }
 
-function getStringFromWasm(ptr: number) {
+function getStringFromWasm(ptr: number): string {
+  if (ptr === 0) {
+    return "";
+  }
   const mem = getUint8Memory0();
   let off = 0;
   while (mem[ptr + off] !== 0) {
     off++;
   }
-  return getUint8Memory0().subarray(ptr / 1, ptr / 1 + off);
+  return cachedTextDecoder.decode(getUint8Memory0().subarray(ptr, ptr + off));
 }
 
-export async function convertMdlToXmile(mdlSource: string | Readonly<Uint8Array>, pretty = true): Promise<string> {
+export async function convertMdlToXmile(mdlSource: string | Readonly<Uint8Array>, pretty = true): Promise<[string, string?]> {
   if (typeof mdlSource === 'string') {
     mdlSource = cachedTextEncoder.encode(mdlSource);
   }
 
   const wasm = await getWasmModule();
 
+  wasm.xmutil_clear_log();
+
   const mdlSourcePtr = wasm.malloc(mdlSource.length);
   getUint8Memory0()
     .subarray(mdlSourcePtr, mdlSourcePtr + mdlSource.length)
     .set(mdlSource);
 
-  const resultPtr = wasm._convert_mdl_to_xmile(mdlSourcePtr, mdlSource.length, !pretty);
-  const resultBuf = getStringFromWasm(resultPtr);
+  const resultPtr = wasm.xmutil_convert_mdl_to_xmile(
+      mdlSourcePtr,
+      mdlSource.length,
+      0,
+      !pretty,
+      false,
+      false,
+  );
+  const result = getStringFromWasm(resultPtr);
   wasm.free(resultPtr);
 
-  return cachedTextDecoder.decode(resultBuf);
+  const logPtr = wasm.xmutil_get_log();
+  let log: string | undefined = getStringFromWasm(logPtr);
+  if (!log) {
+    log = undefined;
+  }
+
+  wasm.xmutil_clear_log();
+
+  return [result, log];
 }
