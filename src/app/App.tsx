@@ -45,7 +45,7 @@ const theme = createTheme({
 });
 
 class UserInfoSingleton {
-  private resultPromise?: Promise<Response>;
+  private resultPromise?: Promise<[User | undefined, number]>;
   private result?: [User | undefined, number];
   constructor() {
     // store this promise; we might race calling get() below, but all racers will
@@ -54,17 +54,21 @@ class UserInfoSingleton {
   }
 
   private fetch(): void {
-    this.resultPromise = fetch('/api/user', { credentials: 'same-origin' });
-  }
-
-  async get(): Promise<[User | undefined, number]> {
-    if (this.resultPromise) {
-      const response = await this.resultPromise;
+    const resultPromise = fetch('/api/user', { credentials: 'same-origin' });
+    const worker = async (): Promise<[User | undefined, number]> => {
+      const response = await resultPromise;
       const status = response.status;
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const user = status >= 200 && status < 400 ? await response.json() : undefined;
 
-      this.result = [user, status];
+      return [user, status];
+    };
+    this.resultPromise = worker();
+  }
+
+  async get(): Promise<[User | undefined, number]> {
+    if (this.resultPromise) {
+      this.result = await this.resultPromise;
       this.resultPromise = undefined;
     }
 
@@ -267,9 +271,11 @@ const InnerApp = styled(
 export class App extends React.PureComponent {
   render(): JSX.Element {
     return (
-      <ThemeProvider theme={theme}>
-        <InnerApp />
-      </ThemeProvider>
+      <React.StrictMode>
+        <ThemeProvider theme={theme}>
+          <InnerApp />
+        </ThemeProvider>
+      </React.StrictMode>
     );
   }
 }
