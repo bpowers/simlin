@@ -153,7 +153,7 @@ export const NewProject = styled(
         if (file.name.endsWith('.mdl')) {
           [contents, logs] = await convertMdlToXmile(contents, true);
           if (contents.length === 0) {
-              throw new Error('Vensim converter: ' + (logs || 'unknown error'));
+            throw new Error('Vensim converter: ' + (logs || 'unknown error'));
           }
         }
 
@@ -163,7 +163,7 @@ export const NewProject = styled(
         if (!views || views.isEmpty()) {
           let errorMsg = `can't import model with no view at this time.`;
           if (logs && logs.length !== 0) {
-              errorMsg = logs;
+            errorMsg = logs;
           }
           this.setState({
             errorMsg,
@@ -172,8 +172,8 @@ export const NewProject = styled(
         }
 
         this.setState({
-            projectPB,
-            errorMsg: undefined,
+          projectPB,
+          errorMsg: undefined,
         });
       } catch (e) {
         this.setState({
@@ -264,7 +264,7 @@ export const NewProject = styled(
           <br />
           <br />
           <br />
-          <Typography variant="subtitle2" style={{whiteSpace: "pre-wrap"}}>
+          <Typography variant="subtitle2" style={{ whiteSpace: 'pre-wrap' }}>
             <b>{warningText || '\xa0'}</b>
           </Typography>
           <Typography align="right">
