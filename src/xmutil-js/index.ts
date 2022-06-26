@@ -40,7 +40,7 @@ function getUint8Memory0() {
 
 function getStringFromWasm(ptr: number): string {
   if (ptr === 0) {
-    return "";
+    return '';
   }
   const mem = getUint8Memory0();
   let off = 0;
@@ -50,7 +50,10 @@ function getStringFromWasm(ptr: number): string {
   return cachedTextDecoder.decode(getUint8Memory0().subarray(ptr, ptr + off));
 }
 
-export async function convertMdlToXmile(mdlSource: string | Readonly<Uint8Array>, pretty = true): Promise<[string, string?]> {
+export async function convertMdlToXmile(
+  mdlSource: string | Readonly<Uint8Array>,
+  pretty = true,
+): Promise<[string, string?]> {
   if (typeof mdlSource === 'string') {
     mdlSource = cachedTextEncoder.encode(mdlSource);
   }
@@ -64,14 +67,7 @@ export async function convertMdlToXmile(mdlSource: string | Readonly<Uint8Array>
     .subarray(mdlSourcePtr, mdlSourcePtr + mdlSource.length)
     .set(mdlSource);
 
-  const resultPtr = wasm.xmutil_convert_mdl_to_xmile(
-      mdlSourcePtr,
-      mdlSource.length,
-      0,
-      !pretty,
-      false,
-      true,
-  );
+  const resultPtr = wasm.xmutil_convert_mdl_to_xmile(mdlSourcePtr, mdlSource.length, 0, !pretty, false, true);
   const result = getStringFromWasm(resultPtr);
   wasm.free(resultPtr);
 
