@@ -24,7 +24,7 @@ struct UnitInferer<'a> {
 
 fn single_fv(units: &UnitMap) -> Option<&str> {
     let mut result = None;
-    for (unit, _) in units.iter() {
+    for (unit, _) in units.map.iter() {
         if unit.starts_with('@') {
             if result.is_none() {
                 result = Some(unit.as_str())
@@ -44,15 +44,15 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
     // so if $var is in the numerator (has a value > 0) we want the
     // inverse of $lhs; otherwise (value < 0) just delete $var from $lhs
 
-    let inverse = if let Some(exponent) = lhs.remove(var) {
+    let inverse = if let Some(exponent) = lhs.map.remove(var) {
+        // TODO: we seem to be expecting this to be 1 -- what if it is > 1?
         exponent > 0
     } else {
         false
     };
 
     if inverse {
-        let unit_unit = UnitMap::new();
-        combine(UnitOp::Div, unit_unit, lhs)
+        lhs.reciprocal()
     } else {
         lhs
     }
@@ -62,7 +62,7 @@ fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<Unit
     constraints
         .into_iter()
         .map(|mut l| {
-            if let Some(exponent) = l.remove(var) {
+            if let Some(exponent) = l.map.remove(var) {
                 let op = if exponent > 0 {
                     UnitOp::Mul
                 } else {
@@ -374,7 +374,6 @@ impl<'a> UnitInferer<'a> {
                 if c.is_empty() {
                     continue;
                 }
-                use crate::units::pretty_print_unit;
                 if let Some(var) = single_fv(&c) {
                     let var = var.to_owned();
                     let units = solve_for(&var, c);
@@ -386,9 +385,7 @@ impl<'a> UnitInferer<'a> {
                                 UnitMismatch,
                                 format!(
                                     "units for {} don't match ({} != {}); this should be Result",
-                                    var,
-                                    pretty_print_unit(existing_units),
-                                    pretty_print_unit(&units),
+                                    var, existing_units, units,
                                 )
                             );
                         }
@@ -421,8 +418,6 @@ impl<'a> UnitInferer<'a> {
         // use rand::seq::SliceRandom;
         // use rand::thread_rng;
 
-        use crate::units::pretty_print_unit;
-
         let mut constraints = vec![];
         self.gen_all_constraints(model, "", &mut constraints);
         // mostly for robustness: ensure we don't inadvertently depend on
@@ -437,7 +432,7 @@ impl<'a> UnitInferer<'a> {
             let mut s = prefix.to_owned();
             for c in constraints.iter() {
                 let delim = if s.len() == prefix.len() { "" } else { "; " };
-                write!(s, "{}1 == {}", delim, pretty_print_unit(c)).unwrap();
+                write!(s, "{}1 == {}", delim, c).unwrap();
             }
             model_err!(UnitMismatch, s)
         } else {

@@ -41,25 +41,13 @@ pub(crate) enum UnitOp {
 }
 
 pub(crate) fn combine(op: UnitOp, l: UnitMap, r: UnitMap) -> UnitMap {
-    let mut l = l;
+    let mut l = match op {
+        UnitOp::Mul => l * r,
+        UnitOp::Div => l / r,
+    };
 
-    for (unit, power) in r.into_iter() {
-        let lhs = l.get(unit.as_str()).copied().unwrap_or_default();
-        let result = {
-            match op {
-                UnitOp::Mul => lhs + power,
-                UnitOp::Div => lhs - power,
-            }
-        };
-        if result == 0 {
-            l.remove(&unit);
-        } else {
-            *l.entry(unit).or_default() = result;
-        }
-    }
-
-    if l.contains_key("dmnl") {
-        l.remove("dmnl");
+    if l.map.contains_key("dmnl") {
+        l.map.remove("dmnl");
     }
 
     l
@@ -329,24 +317,9 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
         Expr0::Op2(op, l, r, loc) => match op {
             BinaryOp::Exp => {
                 let exp = const_int_eval(r)?;
-                let mut unit_map = build_unit_components(ctx, l)?;
-                unit_map.iter_mut().for_each(|(_name, unit)| {
-                    *unit *= exp;
-                });
-                unit_map
+                build_unit_components(ctx, l)?.exp(exp)
             }
-            BinaryOp::Mul => {
-                let mut unit_map = build_unit_components(ctx, l)?;
-                let r = build_unit_components(ctx, r)?;
-                for (unit, n) in r.into_iter() {
-                    let new_value = match unit_map.get(&unit) {
-                        None => n,
-                        Some(m) => n + *m,
-                    };
-                    unit_map.insert(unit, new_value);
-                }
-                unit_map
-            }
+            BinaryOp::Mul => build_unit_components(ctx, l)? * build_unit_components(ctx, r)?,
             BinaryOp::Div => {
                 // check first for the reciprocal case -- 1/blah
                 if let Ok(i) = const_int_eval(l) {
@@ -354,26 +327,9 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
                         let loc = l.get_loc();
                         return eqn_err!(ExpectedIntegerOne, loc.start, loc.end);
                     }
-                    let mut unit_map = build_unit_components(ctx, r)?;
-                    unit_map.iter_mut().for_each(|(_name, unit)| {
-                        *unit *= -1;
-                    });
-                    unit_map
+                    build_unit_components(ctx, r)?.reciprocal()
                 } else {
-                    let mut unit_map = build_unit_components(ctx, l)?;
-                    let r = build_unit_components(ctx, r)?;
-                    for (unit, n) in r.into_iter() {
-                        let new_value = match unit_map.get(&unit) {
-                            None => -n,
-                            Some(m) => *m - n,
-                        };
-                        if new_value == 0 {
-                            unit_map.remove(&unit);
-                        } else {
-                            unit_map.insert(unit, new_value);
-                        }
-                    }
-                    unit_map
+                    build_unit_components(ctx, l)? / build_unit_components(ctx, r)?
                 }
             }
             _ => {
@@ -410,60 +366,6 @@ pub fn parse_units(
     }
 }
 
-#[allow(dead_code)]
-pub fn pretty_print_unit(units: &UnitMap) -> String {
-    let unit_names = {
-        let mut unit_names = units.keys().map(|unit| unit.as_str()).collect::<Vec<_>>();
-        unit_names.sort_unstable();
-        unit_names
-    };
-
-    let mut result = "".to_owned();
-
-    let mut first = true;
-    for (unit, exp) in unit_names
-        .iter()
-        .map(|unit| (unit, units[*unit]))
-        .filter(|(_, exp)| *exp > 0)
-    {
-        if !first {
-            result.push('*');
-        }
-        first = false;
-        result.push_str(unit);
-        if exp.abs() > 1 {
-            result.push_str(format!("^{}", exp.abs()).as_str())
-        }
-    }
-
-    let mut first = true;
-    for (unit, exp) in unit_names
-        .iter()
-        .map(|unit| (unit, units[*unit]))
-        .filter(|(_, exp)| *exp < 0)
-    {
-        if first {
-            if result.is_empty() {
-                result.push('1');
-            }
-            result.push('/');
-            first = false;
-        } else {
-            result.push('*');
-        }
-        result.push_str(unit);
-        if exp.abs() > 1 {
-            result.push_str(format!("^{}", exp.abs()).as_str())
-        }
-    }
-
-    if result.is_empty() {
-        "dmnl".to_string()
-    } else {
-        result
-    }
-}
-
 #[test]
 fn test_pretty_print_unit() {
     let context = Context::new(
@@ -497,7 +399,7 @@ fn test_pretty_print_unit() {
     )
     .unwrap();
 
-    let positive_cases: &[(&str, &str); 8] = &[
+    let positive_cases: &[(&str, &str); 9] = &[
         ("m^2/s", "meter^2/second"),
         ("person * people * persons", "people^3"),
         ("m^2/meters", "meter"),
@@ -506,12 +408,13 @@ fn test_pretty_print_unit() {
         ("1", "dmnl"),
         ("1/dmnl", "dmnl"),
         ("1/s", "1/second"),
+        ("1/s/m", "1/meter/second"),
     ];
 
     for (input, output) in positive_cases {
         let expr = Expr0::new(input, LexerType::Units).unwrap().unwrap();
         let result = build_unit_components(&context, &expr).unwrap();
-        let pretty = pretty_print_unit(&result);
+        let pretty = result.pretty_print();
         assert_eq!(*output, pretty);
     }
 }
@@ -661,8 +564,8 @@ fn test_basic_unit_parsing() {
             "time * people / time",
             [("people".to_owned(), 1)].iter().cloned().collect(),
         ),
-        ("1", std::collections::BTreeMap::new()),
-        ("dmnl", std::collections::BTreeMap::new()),
+        ("1", UnitMap::new()),
+        ("dmnl", UnitMap::new()),
     ];
 
     for (input, output) in positive_cases {

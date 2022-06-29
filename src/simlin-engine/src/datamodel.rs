@@ -3,17 +3,149 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
+use std::iter::Iterator;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 use crate::common::{DimensionName, ElementName};
 
-pub type UnitMap = BTreeMap<String, i32>;
+#[derive(Debug, Default, Eq, PartialEq, Clone)]
+pub struct UnitMap {
+    pub map: BTreeMap<String, i32>,
+    pub ctx: Option<Vec<String>>,
+}
 
-pub fn invert_units(units: &mut UnitMap) {
-    for (_id, exp) in units.iter_mut() {
-        *exp *= -1;
+impl UnitMap {
+    pub fn new() -> UnitMap {
+        Default::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub fn reciprocal(mut self) -> Self {
+        for (_id, exp) in self.map.iter_mut() {
+            *exp *= -1;
+        }
+        self
+    }
+
+    pub fn exp(mut self, exp: i32) -> Self {
+        for (_id, unit) in self.map.iter_mut() {
+            *unit *= exp;
+        }
+
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn pretty_print(&self) -> String {
+        format!("{}", self)
+    }
+}
+
+impl std::ops::Div for UnitMap {
+    type Output = Self;
+
+    #[allow(clippy::suspicious_arithmetic_impl)]
+    fn div(self, rhs: Self) -> Self::Output {
+        self * rhs.reciprocal()
+    }
+}
+
+impl std::ops::Mul for UnitMap {
+    type Output = Self;
+
+    fn mul(mut self, rhs: Self) -> Self::Output {
+        let mut rhs = rhs;
+        for (unit, n) in rhs.map.into_iter() {
+            let new_value = match self.map.get(&unit) {
+                None => n,
+                Some(m) => n + *m,
+            };
+
+            if new_value == 0 {
+                self.map.remove(&unit);
+            } else {
+                self.map.insert(unit, new_value);
+            }
+        }
+
+        if let Some(rctx) = rhs.ctx.take() {
+            if !rctx.is_empty() {
+                let mut ctx = self.ctx.take().unwrap_or_default();
+                ctx.extend(rctx);
+                self.ctx = Some(ctx);
+            }
+        }
+
+        self
+    }
+}
+
+impl Display for UnitMap {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let unit_names = {
+            let mut unit_names = self
+                .map
+                .keys()
+                .map(|unit| unit.as_str())
+                .collect::<Vec<&str>>();
+            unit_names.sort_unstable();
+            unit_names
+        };
+
+        let mut written = false;
+        let mut first = true;
+        for (unit, exp) in unit_names
+            .iter()
+            .map(|unit| (unit, self.map[*unit]))
+            .filter(|(_, exp)| *exp > 0)
+        {
+            if !first {
+                write!(f, "*")?;
+            }
+            first = false;
+            write!(f, "{}", unit)?;
+            if exp.abs() > 1 {
+                write!(f, "^{}", exp.abs())?;
+            }
+            written = true;
+        }
+
+        for (unit, exp) in unit_names
+            .iter()
+            .map(|unit| (unit, self.map[*unit]))
+            .filter(|(_, exp)| *exp < 0)
+        {
+            if !written {
+                write!(f, "1")?;
+                written = true;
+            }
+            write!(f, "/")?;
+            write!(f, "{}", unit)?;
+            if exp.abs() > 1 {
+                write!(f, "^{}", exp.abs())?;
+            }
+        }
+
+        if !written {
+            write!(f, "dmnl")?;
+        }
+
+        Ok(())
+    }
+}
+
+impl FromIterator<(String, i32)> for UnitMap {
+    fn from_iter<I: IntoIterator<Item = (String, i32)>>(iter: I) -> Self {
+        UnitMap {
+            map: iter.into_iter().collect(),
+            ctx: None,
+        }
     }
 }
 

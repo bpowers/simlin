@@ -10,7 +10,7 @@ use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{canonicalize, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
-use crate::units::{combine, pretty_print_unit, Context, UnitOp, Units};
+use crate::units::{combine, Context, UnitOp, Units};
 use crate::variable::Variable;
 
 struct UnitEvaluator<'a> {
@@ -124,7 +124,7 @@ impl<'a> UnitEvaluator<'a> {
                                     expr.get_loc(),
                                     Some(format!(
                                         "expected all arguments to mean() to have the same units '{}'",
-                                        pretty_print_unit(&expected),
+                                        expected,
                                     )),
                                 ))
                             }
@@ -151,8 +151,8 @@ impl<'a> UnitEvaluator<'a> {
                             loc,
                             Some(format!(
                                 "expected left and right argument units to match, but '{}' and '{}' don't",
-                                pretty_print_unit(&a_units),
-                                pretty_print_unit(&b_units),
+                                a_units,
+                                b_units,
                             )),
                         ))
                     } else {
@@ -196,8 +196,8 @@ impl<'a> UnitEvaluator<'a> {
                             if lunits != runits {
                                 let details = Some(format!(
                                     "expected left and right argument units to match, but '{}' and '{}' don't",
-                                    pretty_print_unit(&lunits),
-                                    pretty_print_unit(&runits),
+                                    lunits,
+                                    runits,
                                 ));
                                 let loc = l.get_loc().union(&r.get_loc());
                                 Err(ConsistencyError(ErrorCode::UnitMismatch, loc, details))
@@ -320,7 +320,7 @@ pub fn check(
                         if let Some(var) = model.variables.get(ident) {
                             if let Some(units) = var.units() {
                                 if expected_flow_units != *units {
-                                    let details = format!("expected units '{}' to match the units expected by the attached stock {} ({})", pretty_print_unit(units), stock_ident, pretty_print_unit(&expected_flow_units));
+                                    let details = format!("expected units '{}' to match the units expected by the attached stock {} ({})", units, stock_ident, expected_flow_units);
                                     errors.push((
                                         var.ident().to_owned(),
                                         DefinitionError(
@@ -347,7 +347,7 @@ pub fn check(
                             if actual != *expected {
                                 let details = format!(
                                     "computed units '{}' don't match specified units",
-                                    pretty_print_unit(&actual),
+                                    &actual,
                                 );
                                 let loc = expr.get_loc();
                                 errors.push((
