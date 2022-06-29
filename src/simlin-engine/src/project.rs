@@ -33,14 +33,14 @@ impl From<datamodel::Project> for Project {
         Self::base_from(project_datamodel, |models, units_ctx, model| {
             let inferred_units = match crate::units_infer::infer(models, units_ctx, model) {
                 Ok(units) => units,
-                Err(_err) => {
+                Err(err) => {
                     // XXX: for now, ignore inference errors.  They aren't
                     // understandable for anyone but me - we need to thread
                     // location information through at a minimum.
 
-                    // let mut errors = model.errors.take().unwrap_or_default();
-                    // errors.push(err);
-                    // model.errors = Some(errors);
+                    let mut errors = model.errors.take().unwrap_or_default();
+                    errors.push(err);
+                    model.errors = Some(errors);
                     Default::default()
                 }
             };

@@ -41,6 +41,14 @@ impl UnitMap {
         self
     }
 
+    pub fn push_ctx(mut self, ctx: String) -> Self {
+        let mut full_ctx = self.ctx.take().unwrap_or_default();
+        full_ctx.push(ctx);
+        self.ctx = Some(full_ctx);
+
+        self
+    }
+
     #[allow(dead_code)]
     pub fn pretty_print(&self) -> String {
         format!("{}", self)
@@ -135,6 +143,18 @@ impl Display for UnitMap {
         if !written {
             write!(f, "dmnl")?;
         }
+
+        // if let Some(ctxs) = &self.ctx {
+        //     write!(f, " (")?;
+        //     for (i, ctx) in ctxs.iter().enumerate() {
+        //         if i == 0 {
+        //             write!(f, "{}", ctx)?;
+        //         } else {
+        //             write!(f, " ,{}", ctx)?;
+        //         }
+        //     }
+        //     write!(f, ")")?;
+        // }
 
         Ok(())
     }

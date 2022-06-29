@@ -46,6 +46,9 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
 
     let inverse = if let Some(exponent) = lhs.map.remove(var) {
         // TODO: we seem to be expecting this to be 1 -- what if it is > 1?
+        if exponent.abs() != 1 {
+            println!("oh no!  solve_for removed {} with exp {}", var, exponent);
+        }
         exponent > 0
     } else {
         false
@@ -63,6 +66,10 @@ fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<Unit
         .into_iter()
         .map(|mut l| {
             if let Some(exponent) = l.map.remove(var) {
+                if exponent.abs() != 1 {
+                    println!("oh no!  subst removed {} with exp {}", var, exponent);
+                }
+
                 let op = if exponent > 0 {
                     UnitOp::Mul
                 } else {
@@ -286,20 +293,25 @@ impl<'a> UnitInferer<'a> {
             } = var
             {
                 let stock_ident = ident;
-                let expected: UnitMap = [
+                let expected = [
                     (format!("@{}{}", prefix, stock_ident), 1),
                     (time_units.clone(), -1),
                 ]
                 .iter()
                 .cloned()
-                .collect();
+                .collect::<UnitMap>()
+                .push_ctx(format!("stock@{}{}", prefix, stock_ident));
                 let mut check_flows = |flows: &Vec<Ident>| {
                     for ident in flows.iter() {
                         let flow_units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
                             .iter()
                             .cloned()
                             .collect();
-                        constraints.push(combine(UnitOp::Div, flow_units, expected.clone()));
+                        constraints.push(combine(
+                            UnitOp::Div,
+                            flow_units.push_ctx(format!("stock-flow@{}{}", prefix, ident)),
+                            expected.clone(),
+                        ));
                     }
                 };
                 check_flows(inflows);
@@ -317,41 +329,52 @@ impl<'a> UnitInferer<'a> {
                     let src = format!("@{}{}", prefix, input.src);
                     let dst = format!("@{}{}", subprefix, input.dst);
                     // src = dst === 1 = src/dst
-                    let units: UnitMap = [(src, 1), (dst, -1)].iter().cloned().collect();
+                    let units = [(src.clone(), 1), (dst.clone(), -1)]
+                        .iter()
+                        .cloned()
+                        .collect::<UnitMap>()
+                        .push_ctx(format!("module-input{}{}", src, dst));
                     constraints.push(units);
                 }
                 self.gen_all_constraints(submodel, &subprefix, constraints);
             }
-            let var_units = match var.ast() {
-                Some(Ast::Scalar(ast)) => self.gen_constraints(ast, prefix, constraints),
-                Some(Ast::ApplyToAll(_, ast)) => self.gen_constraints(ast, prefix, constraints),
-                Some(Ast::Arrayed(_, _asts)) => {
-                    // todo!();
-                    Ok(Units::Constant)
+            // we only should be adding constraints based on the equation if
+            // the variable _doesn't_ have an associated lookup table/graphical
+            // function.
+            if var.table().is_none() {
+                let var_units = match var.ast() {
+                    Some(Ast::Scalar(ast)) => self.gen_constraints(ast, prefix, constraints),
+                    Some(Ast::ApplyToAll(_, ast)) => self.gen_constraints(ast, prefix, constraints),
+                    Some(Ast::Arrayed(_, _asts)) => {
+                        // todo!();
+                        Ok(Units::Constant)
+                    }
+                    None => {
+                        // TODO: maybe we should bail early?  If there is no equation we will fail
+                        continue;
+                    }
                 }
-                None => {
-                    // TODO: maybe we should bail early?  If there is no equation we will fail
-                    continue;
-                }
+                .unwrap();
+                match var_units {
+                    Units::Constant => {
+                        // TODO: constant means ~ unconstrained I think
+                    }
+                    Units::Explicit(units) => {
+                        let mv = [(format!("@{}{}", prefix, id), 1)]
+                            .iter()
+                            .cloned()
+                            .collect::<UnitMap>()
+                            .push_ctx(format!("computed-mv@{}{}", prefix, id));
+                        constraints.push(combine(UnitOp::Div, mv, units));
+                    }
+                };
             }
-            .unwrap();
-            match var_units {
-                Units::Constant => {
-                    // TODO: constant means ~ unconstrained I think
-                }
-                Units::Explicit(units) => {
-                    let mv = [(format!("@{}{}", prefix, id), 1)]
-                        .iter()
-                        .cloned()
-                        .collect();
-                    constraints.push(combine(UnitOp::Div, mv, units));
-                }
-            };
             if let Some(units) = var.units() {
                 let mv = [(format!("@{}{}", prefix, id), 1)]
                     .iter()
                     .cloned()
-                    .collect();
+                    .collect::<UnitMap>()
+                    .push_ctx(format!("userdef-mv@{}{}", prefix, id));
                 constraints.push(combine(UnitOp::Div, mv, units.clone()));
             }
         }
@@ -428,11 +451,11 @@ impl<'a> UnitInferer<'a> {
 
         if let Some(constraints) = constraints {
             use std::fmt::Write;
-            let prefix = "unit checking failed; couldn't resolve: ";
+            let prefix = "unit checking failed; couldn't resolve: \n";
             let mut s = prefix.to_owned();
             for c in constraints.iter() {
                 let delim = if s.len() == prefix.len() { "" } else { "; " };
-                write!(s, "{}1 == {}", delim, c).unwrap();
+                write!(s, "{}\n    1 == {}", delim, c).unwrap();
             }
             model_err!(UnitMismatch, s)
         } else {
