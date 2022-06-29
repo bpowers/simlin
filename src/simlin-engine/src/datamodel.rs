@@ -11,10 +11,16 @@ use wasm_bindgen::prelude::*;
 
 use crate::common::{DimensionName, ElementName};
 
-#[derive(Debug, Default, Eq, PartialEq, Clone)]
+#[derive(Debug, Default, Eq, Clone)]
 pub struct UnitMap {
     pub map: BTreeMap<String, i32>,
     pub ctx: Option<Vec<String>>,
+}
+
+impl PartialEq for UnitMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.map == other.map
+    }
 }
 
 impl UnitMap {
