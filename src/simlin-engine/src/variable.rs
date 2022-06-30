@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{Ast, Expr, Expr0};
+use crate::ast::{Ast, Expr, Expr0, IndexExpr};
 use crate::builtins::{walk_builtin_expr, BuiltinContents, BuiltinFn};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, UnitError};
@@ -502,6 +502,35 @@ struct IdentifierSetVisitor<'a> {
 }
 
 impl<'a> IdentifierSetVisitor<'a> {
+    fn walk_index(&mut self, e: &IndexExpr) {
+        match e {
+            IndexExpr::Wildcard(_) => {}
+            IndexExpr::StarRange(_, _) => {}
+            IndexExpr::Range(_, _, _) => {}
+            IndexExpr::Expr(expr) => {
+                if let Expr::Var(arg_ident, _) = expr {
+                    let mut is_subscript_or_dimension = false;
+                    // TODO: this should be optimized
+                    for dim in self.dimensions.iter() {
+                        if arg_ident == dim.name() {
+                            is_subscript_or_dimension = true;
+                        } else if let Dimension::Named(_, elements) = dim {
+                            is_subscript_or_dimension |= elements.contains(arg_ident);
+                        }
+                        if is_subscript_or_dimension {
+                            break;
+                        }
+                    }
+                    if !is_subscript_or_dimension {
+                        self.walk(expr);
+                    }
+                } else {
+                    self.walk(expr)
+                }
+            }
+        }
+    }
+
     fn walk(&mut self, e: &Expr) {
         match e {
             Expr::Const(_, _, _) => (),
@@ -518,27 +547,7 @@ impl<'a> IdentifierSetVisitor<'a> {
             }
             Expr::Subscript(id, args, _) => {
                 self.identifiers.insert(id.clone());
-                for arg in args.iter() {
-                    if let Expr::Var(arg_ident, _) = arg {
-                        let mut is_subscript_or_dimension = false;
-                        // TODO: this should be optimized
-                        for dim in self.dimensions.iter() {
-                            if arg_ident == dim.name() {
-                                is_subscript_or_dimension = true;
-                            } else if let Dimension::Named(_, elements) = dim {
-                                is_subscript_or_dimension |= elements.contains(arg_ident);
-                            }
-                            if is_subscript_or_dimension {
-                                break;
-                            }
-                        }
-                        if !is_subscript_or_dimension {
-                            self.walk(arg);
-                        }
-                    } else {
-                        self.walk(arg)
-                    }
-                }
+                args.iter().for_each(|arg| self.walk_index(arg));
             }
             Expr::Op2(_, l, r, _) => {
                 self.walk(l);

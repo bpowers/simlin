@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::ast::{self, Ast, BinaryOp, Loc};
+use crate::ast::{self, Ast, BinaryOp, IndexExpr, Loc};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
@@ -396,31 +396,39 @@ impl<'a> Context<'a> {
                 if args.len() != dims.len() {
                     return sim_err!(MismatchedDimensions, id.clone());
                 }
-                let args = args
+                let args: Result<Vec<_>> = args
                     .iter()
                     .enumerate()
                     .map(|(i, arg)| {
-                        if let ast::Expr::Var(ident, loc) = arg {
-                            let dim = &dims[i];
-                            // we need to check to make sure that any explicit subscript names are
-                            // converted to offsets here and not passed to self.lower
-                            if let Some(subscript_off) = dim.get_offset(ident) {
-                                Expr::Const((subscript_off + 1) as f64, *loc)
-                            } else if let Some(subscript_off) =
-                                self.get_dimension_name_subscript(ident)
-                            {
-                                // some modelers do `Variable[SubscriptName]` in their A2A equations
-                                Expr::Const((subscript_off + 1) as f64, *loc)
-                            } else {
-                                self.lower(&args[0]).unwrap()
+                        match arg {
+                            IndexExpr::Wildcard(_loc) => sim_err!(TodoWildcard, id.clone()),
+                            IndexExpr::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
+                            IndexExpr::Range(_l, _r, _loc) => sim_err!(TodoRange, id.clone()),
+                            IndexExpr::Expr(arg) => {
+                                let expr = if let ast::Expr::Var(ident, loc) = arg {
+                                    let dim = &dims[i];
+                                    // we need to check to make sure that any explicit subscript names are
+                                    // converted to offsets here and not passed to self.lower
+                                    if let Some(subscript_off) = dim.get_offset(ident) {
+                                        Expr::Const((subscript_off + 1) as f64, *loc)
+                                    } else if let Some(subscript_off) =
+                                        self.get_dimension_name_subscript(ident)
+                                    {
+                                        // some modelers do `Variable[SubscriptName]` in their A2A equations
+                                        Expr::Const((subscript_off + 1) as f64, *loc)
+                                    } else {
+                                        self.lower(arg)?
+                                    }
+                                } else {
+                                    self.lower(arg)?
+                                };
+                                Ok(expr)
                             }
-                        } else {
-                            self.lower(&args[0]).unwrap()
                         }
                     })
                     .collect();
                 let bounds = dims.iter().map(|dim| dim.len()).collect();
-                Expr::Subscript(off, args, bounds, *loc)
+                Expr::Subscript(off, args?, bounds, *loc)
             }
             ast::Expr::Op1(op, l, loc) => {
                 let l = self.lower(l)?;

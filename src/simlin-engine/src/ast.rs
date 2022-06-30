@@ -25,10 +25,40 @@ pub enum Expr0 {
     Const(String, f64, Loc),
     Var(Ident, Loc),
     App(UntypedBuiltinFn<Expr0>, Loc),
-    Subscript(Ident, Vec<Expr0>, Loc),
+    Subscript(Ident, Vec<IndexExpr0>, Loc),
     Op1(UnaryOp, Box<Expr0>, Loc),
     Op2(BinaryOp, Box<Expr0>, Box<Expr0>, Loc),
     If(Box<Expr0>, Box<Expr0>, Box<Expr0>, Loc),
+}
+
+#[derive(PartialEq, Clone, Debug)]
+pub enum IndexExpr0 {
+    Wildcard(Loc),
+    StarRange(Ident, Loc),
+    Range(Expr0, Expr0, Loc),
+    Expr(Expr0),
+}
+
+impl IndexExpr0 {
+    fn reify_0_arity_builtins(self) -> Self {
+        match self {
+            IndexExpr0::Wildcard(_) => self,
+            IndexExpr0::StarRange(_, _) => self,
+            IndexExpr0::Range(_, _, _) => self,
+            IndexExpr0::Expr(expr) => IndexExpr0::Expr(expr.reify_0_arity_builtins()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn strip_loc(self) -> Self {
+        let loc = Loc::default();
+        match self {
+            IndexExpr0::Wildcard(_loc) => IndexExpr0::Wildcard(loc),
+            IndexExpr0::StarRange(d, _loc) => IndexExpr0::StarRange(d, loc),
+            IndexExpr0::Range(l, r, _loc) => IndexExpr0::Range(l, r, loc),
+            IndexExpr0::Expr(e) => IndexExpr0::Expr(e.strip_loc()),
+        }
+    }
 }
 
 impl Expr0 {
@@ -188,6 +218,63 @@ impl Expr0 {
     }
 }
 
+/// Expr represents a parsed equation, after calls to
+/// builtin functions have been checked/resolved.
+#[derive(PartialEq, Clone, Debug)]
+pub enum IndexExpr {
+    Wildcard(Loc),
+    // *:dimension_name
+    StarRange(Ident, Loc),
+    Range(Expr, Expr, Loc),
+    Expr(Expr),
+}
+
+impl IndexExpr {
+    pub(crate) fn from(expr: IndexExpr0) -> EquationResult<Self> {
+        let expr = match expr {
+            IndexExpr0::Wildcard(loc) => IndexExpr::Wildcard(loc),
+            IndexExpr0::StarRange(ident, loc) => IndexExpr::StarRange(ident, loc),
+            IndexExpr0::Range(l, r, loc) => IndexExpr::Range(Expr::from(l)?, Expr::from(r)?, loc),
+            IndexExpr0::Expr(e) => IndexExpr::Expr(Expr::from(e)?),
+        };
+
+        Ok(expr)
+    }
+
+    pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
+        match self {
+            IndexExpr::Wildcard(loc) => IndexExpr::Wildcard(loc),
+            IndexExpr::StarRange(id, loc) => IndexExpr::StarRange(id, loc),
+            IndexExpr::Range(l, r, loc) => IndexExpr::Range(
+                l.constify_dimensions(scope),
+                r.constify_dimensions(scope),
+                loc,
+            ),
+            IndexExpr::Expr(e) => IndexExpr::Expr(e.constify_dimensions(scope)),
+        }
+    }
+
+    pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
+        match self {
+            IndexExpr::Wildcard(_) => None,
+            IndexExpr::StarRange(v, loc) => {
+                if v == ident {
+                    Some(*loc)
+                } else {
+                    None
+                }
+            }
+            IndexExpr::Range(l, r, _) => {
+                if let Some(loc) = l.get_var_loc(ident) {
+                    return Some(loc);
+                }
+                r.get_var_loc(ident)
+            }
+            IndexExpr::Expr(e) => e.get_var_loc(ident),
+        }
+    }
+}
+
 impl Default for Expr0 {
     fn default() -> Self {
         Expr0::Const("0.0".to_string(), 0.0, Loc::default())
@@ -201,7 +288,7 @@ pub enum Expr {
     Const(String, f64, Loc),
     Var(Ident, Loc),
     App(BuiltinFn<Expr>, Loc),
-    Subscript(Ident, Vec<Expr>, Loc),
+    Subscript(Ident, Vec<IndexExpr>, Loc),
     Op1(UnaryOp, Box<Expr>, Loc),
     Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
     If(Box<Expr>, Box<Expr>, Box<Expr>, Loc),
@@ -317,7 +404,8 @@ impl Expr {
                 Expr::App(builtin, loc)
             }
             Expr0::Subscript(id, args, loc) => {
-                let args: EquationResult<Vec<Expr>> = args.into_iter().map(Expr::from).collect();
+                let args: EquationResult<Vec<IndexExpr>> =
+                    args.into_iter().map(IndexExpr::from).collect();
                 Expr::Subscript(id, args?, loc)
             }
             Expr0::Op1(op, l, loc) => Expr::Op1(op, Box::new(Expr::from(*l)?), loc),
@@ -553,17 +641,17 @@ fn test_parse() {
 
     let subscript1 = Box::new(Subscript(
         "a".to_owned(),
-        vec![Const("1".to_owned(), 1.0, Loc::default())],
+        vec![IndexExpr0::Expr(Const("1".to_owned(), 1.0, Loc::default()))],
         Loc::default(),
     ));
     let subscript2 = Box::new(Subscript(
         "a".to_owned(),
         vec![
-            Const("2".to_owned(), 2.0, Loc::default()),
-            App(
+            IndexExpr0::Expr(Const("2".to_owned(), 2.0, Loc::default())),
+            IndexExpr0::Expr(App(
                 UntypedBuiltinFn("int".to_owned(), vec![Var("b".to_owned(), Loc::default())]),
                 Loc::default(),
-            ),
+            )),
         ],
         Loc::default(),
     ));
@@ -575,7 +663,7 @@ fn test_parse() {
 
     let time2 = Box::new(Subscript(
         "aux".to_owned(),
-        vec![Op2(
+        vec![IndexExpr0::Expr(Op2(
             BinaryOp::Add,
             Box::new(App(
                 UntypedBuiltinFn(
@@ -594,7 +682,7 @@ fn test_parse() {
             )),
             Box::new(Const("1".to_owned(), 1.0, Loc::default())),
             Loc::default(),
-        )],
+        ))],
         Loc::default(),
     ));
 
@@ -744,6 +832,7 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
 
 /// Visitors walk Expr ASTs.
 pub trait Visitor<T> {
+    fn walk_index(&mut self, e: &IndexExpr0) -> T;
     fn walk(&mut self, e: &Expr0) -> T;
 }
 
@@ -844,6 +933,15 @@ pub enum UnaryOp {
 struct PrintVisitor {}
 
 impl Visitor<String> for PrintVisitor {
+    fn walk_index(&mut self, expr: &IndexExpr0) -> String {
+        match expr {
+            IndexExpr0::Wildcard(_) => "*".to_string(),
+            IndexExpr0::StarRange(id, _) => format!("*:{}", id),
+            IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
+            IndexExpr0::Expr(e) => self.walk(e),
+        }
+    }
+
     fn walk(&mut self, expr: &Expr0) -> String {
         match expr {
             Expr0::Const(s, _, _) => s.clone(),
@@ -853,7 +951,7 @@ impl Visitor<String> for PrintVisitor {
                 format!("{}({})", func, args.join(", "))
             }
             Expr0::Subscript(id, args, _) => {
-                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+                let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
                 format!("{}[{}]", id, args.join(", "))
             }
             Expr0::Op1(op, l, _) => {
@@ -986,6 +1084,15 @@ fn test_print_eqn() {
 struct LatexVisitor {}
 
 impl LatexVisitor {
+    fn walk_index(&mut self, expr: &IndexExpr) -> String {
+        match expr {
+            IndexExpr::Wildcard(_) => "*".to_string(),
+            IndexExpr::StarRange(id, _) => format!("*:{}", id),
+            IndexExpr::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
+            IndexExpr::Expr(e) => self.walk(e),
+        }
+    }
+
     fn walk(&mut self, expr: &Expr) -> String {
         match expr {
             Expr::Const(s, n, _) => {
@@ -1012,7 +1119,7 @@ impl LatexVisitor {
                 format!("\\operatorname{{{}}}({})", func, args.join(", "))
             }
             Expr::Subscript(id, args, _) => {
-                let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
+                let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
                 format!("{}[{}]", id, args.join(", "))
             }
             Expr::Op1(op, l, _) => {

@@ -165,6 +165,52 @@ fn subscripts() {
         ("                       ~ ", RBracket),
         ("                        ~", RParen),
     ]);
+
+    test("SUM(z[*])", vec![
+        ("~~~      ", Ident("SUM")),
+        ("   ~     ", LParen),
+        ("    ~    ", Ident("z")),
+        ("     ~   ", LBracket),
+        ("      ~  ", Mul),
+        ("       ~ ", RBracket),
+        ("        ~", RParen),
+    ]);
+
+    test("SUM(z[*:suba])", vec![
+        ("~~~           ", Ident("SUM")),
+        ("   ~          ", LParen),
+        ("    ~         ", Ident("z")),
+        ("     ~        ", LBracket),
+        ("      ~       ", Mul),
+        ("       ~      ", Colon),
+        ("        ~~~~  ", Ident("suba")),
+        ("            ~ ", RBracket),
+        ("             ~", RParen),
+    ]);
+
+    test("SUM(z[3:4])", vec![
+        ("~~~        ", Ident("SUM")),
+        ("   ~       ", LParen),
+        ("    ~      ", Ident("z")),
+        ("     ~     ", LBracket),
+        ("      ~    ", Num("3")),
+        ("       ~   ", Colon),
+        ("        ~  ", Num("4")),
+        ("         ~ ", RBracket),
+        ("          ~", RParen),
+    ]);
+
+    test("SUM(z[y:z])", vec![
+        ("~~~        ", Ident("SUM")),
+        ("   ~       ", LParen),
+        ("    ~      ", Ident("z")),
+        ("     ~     ", LBracket),
+        ("      ~    ", Ident("y")),
+        ("       ~   ", Colon),
+        ("        ~  ", Ident("z")),
+        ("         ~ ", RBracket),
+        ("          ~", RParen),
+    ]);
 }
 
 #[test]

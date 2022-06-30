@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::ast::{Expr0 as Expr, Loc};
+use crate::ast::{IndexExpr0, Expr0 as Expr, Loc};
 use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
 use crate::ast::Expr0::*;
@@ -14,6 +14,14 @@ grammar<'input>(input: &'input str);
 
 pub Equation: Expr = {
     Expr,
+};
+
+// only valid in subscripts
+IndexExpr: IndexExpr0 = {
+    <lpos:@L> "*"  <rpos:@R> => IndexExpr0::Wildcard(Loc::new(lpos, rpos)),
+    <lpos:@L> "*" ":" <id:Ident>  <rpos:@R> => IndexExpr0::StarRange(id, Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Expr> ":" <r:Expr>  <rpos:@R> => IndexExpr0::Range(l, r, Loc::new(lpos, rpos)),
+    <expr:Expr> => IndexExpr0::Expr(expr),
 };
 
 Expr: Expr = {
@@ -73,7 +81,7 @@ App: Expr = {
 };
 
 Subscript: Expr = {
-    <lpos:@L> <id:Ident> "[" <args:Exprs> "]" <rpos:@R> => Subscript(id, args, Loc::new(lpos, rpos)),
+    <lpos:@L> <id:Ident> "[" <args:IndexExprs> "]" <rpos:@R> => Subscript(id, args, Loc::new(lpos, rpos)),
     Atom,
 };
 
@@ -99,6 +107,7 @@ Comma<T>: Vec<T> = {
 };
 
 Exprs = Comma<Expr>;
+IndexExprs = Comma<IndexExpr>;
 
 Ident: common::Ident = {
     <id:"Iden"> => canonicalize(id),
@@ -130,6 +139,7 @@ extern {
         "[" => Token::LBracket,
         "]" => Token::RBracket,
         "^" => Token::Exp,
+        ":" => Token::Colon,
         "&&" => Token::And,
         "||" => Token::Or,
         "Nan" => Token::Nan,

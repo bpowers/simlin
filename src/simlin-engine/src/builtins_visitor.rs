@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{print_eqn, Ast, Expr0};
+use crate::ast::{print_eqn, Ast, Expr0, IndexExpr0};
 use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
 use crate::common::{EquationError, Ident};
 use crate::datamodel::Visibility;
@@ -39,6 +39,18 @@ impl<'a> BuiltinVisitor<'a> {
             n: 0,
             self_allowed: false,
         }
+    }
+
+    fn walk_index(&mut self, expr: IndexExpr0) -> Result<IndexExpr0, EquationError> {
+        use crate::ast::IndexExpr0::*;
+        let result: IndexExpr0 = match expr {
+            Wildcard(_) => expr,
+            StarRange(_, _) => expr,
+            Range(_, _, _) => expr,
+            Expr(expr) => Expr(self.walk(expr)?),
+        };
+
+        Ok(result)
     }
 
     fn walk(&mut self, expr: Expr0) -> std::result::Result<Expr0, EquationError> {
@@ -117,8 +129,8 @@ impl<'a> BuiltinVisitor<'a> {
                 Var(module_output_name, loc)
             }
             Subscript(id, args, loc) => {
-                let args: std::result::Result<Vec<Expr0>, EquationError> =
-                    args.into_iter().map(|e| self.walk(e)).collect();
+                let args: Result<Vec<IndexExpr0>, EquationError> =
+                    args.into_iter().map(|e| self.walk_index(e)).collect();
                 let args = args?;
                 Subscript(id, args, loc)
             }

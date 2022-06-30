@@ -68,6 +68,9 @@ pub enum ErrorCode {
     ExpectedModule,
     ExpectedIdent,
     UnitMismatch,
+    TodoWildcard,
+    TodoStarRange,
+    TodoRange,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -120,6 +123,9 @@ impl fmt::Display for ErrorCode {
             ExpectedModule => "expected_module",
             ExpectedIdent => "expected_ident",
             UnitMismatch => "unit_mismatch",
+            TodoWildcard => "todo_wildcard",
+            TodoStarRange => "todo_star_range",
+            TodoRange => "todo_range",
         };
 
         write!(f, "{}", name)
