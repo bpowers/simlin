@@ -27,6 +27,7 @@ mod variable;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
+mod builder;
 mod bytecode;
 mod interpreter;
 mod project;
@@ -37,6 +38,7 @@ mod units_check;
 mod units_infer;
 mod vm;
 
+pub use self::builder::build_sim_with_stderrors;
 pub use self::common::{canonicalize, quoteize, Error, ErrorCode, Ident, Result};
 pub use self::compiler::Simulation;
 pub use self::project::Project;

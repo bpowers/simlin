@@ -9,12 +9,11 @@ use std::result::Result as StdResult;
 
 use pico_args::Arguments;
 
-use simlin_compat::engine::builtins::Loc;
-use simlin_compat::engine::common::{ErrorKind, UnitError};
-use simlin_compat::engine::datamodel::{Equation, Project as DatamodelProject};
+use simlin_compat::engine::common::ErrorKind;
+use simlin_compat::engine::datamodel::Project as DatamodelProject;
 use simlin_compat::engine::{
-    datamodel, eprintln, project_io, serde, Error, ErrorCode, Project, Result, Results, Simulation,
-    Variable, Vm,
+    build_sim_with_stderrors, datamodel, eprintln, project_io, serde, Error, ErrorCode, Project,
+    Result, Results, Variable, Vm,
 };
 use simlin_compat::prost::Message;
 use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
@@ -148,103 +147,7 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
 }
 
 fn simulate(project: &DatamodelProject) -> Results {
-    let project_datamodel = project.clone();
-    let project = Rc::new(Project::from(project.clone()));
-    if !project.errors.is_empty() {
-        for err in project.errors.iter() {
-            eprintln!("project error: {}", err);
-        }
-    }
-
-    let mut found_model_error = false;
-    for (model_name, model) in project.models.iter() {
-        let model_datamodel = project_datamodel.get_model(model_name);
-        if model_datamodel.is_none() {
-            continue;
-        }
-        let model_datamodel = model_datamodel.unwrap();
-        let mut found_var_error = false;
-        for (ident, errors) in model.get_variable_errors() {
-            assert!(!errors.is_empty());
-            let var = model_datamodel.get_variable(&ident).unwrap();
-            found_var_error = true;
-            for error in errors {
-                eprintln!();
-                if let Some(Equation::Scalar(eqn, ..)) = var.get_equation() {
-                    eprintln!("    {}", eqn);
-                    let space = " ".repeat(error.start as usize);
-                    let underline = "~".repeat((error.end - error.start) as usize);
-                    eprintln!("    {}{}", space, underline);
-                }
-                eprintln!(
-                    "error in model '{}' variable '{}': {}",
-                    model_name, ident, error.code
-                );
-            }
-        }
-        for (ident, errors) in model.get_unit_errors() {
-            assert!(!errors.is_empty());
-            let var = model_datamodel.get_variable(&ident).unwrap();
-            for error in errors {
-                eprintln!();
-                let (eqn, loc, details) = match error {
-                    UnitError::DefinitionError(error, details) => {
-                        let details = if let Some(details) = details {
-                            format!("{} -- {}", error.code, details)
-                        } else {
-                            format!("{}", error.code)
-                        };
-                        (
-                            var.get_units(),
-                            Loc::new(error.start.into(), error.end.into()),
-                            details,
-                        )
-                    }
-                    UnitError::ConsistencyError(code, loc, details) => {
-                        let (eqn, loc, code) =
-                            if let Some(Equation::Scalar(eqn, ..)) = var.get_equation() {
-                                (Some(eqn), loc, code)
-                            } else {
-                                (None, loc, code)
-                            };
-                        let details = match details {
-                            Some(details) => format!("{} -- {}", code, details),
-                            None => format!("{}", code),
-                        };
-                        (eqn, loc, details)
-                    }
-                };
-                if let Some(eqn) = eqn {
-                    eprintln!("    {}", eqn);
-                    let space = " ".repeat(loc.start as usize);
-                    let underline = "~".repeat((loc.end - loc.start) as usize);
-                    eprintln!("    {}{}", space, underline);
-                }
-                eprintln!(
-                    "units error in model '{}' variable '{}': {}",
-                    model_name, ident, details
-                );
-            }
-        }
-        if let Some(errors) = &model.errors {
-            for error in errors.iter() {
-                if error.code == ErrorCode::VariablesHaveErrors && found_var_error {
-                    continue;
-                }
-                eprintln!("error in model {}: {}", model_name, error);
-                found_model_error = true;
-            }
-        }
-    }
-    let sim = match Simulation::new(&project, "main") {
-        Ok(sim) => sim,
-        Err(err) => {
-            if !(err.code == ErrorCode::NotSimulatable && found_model_error) {
-                eprintln!("error: {}", err);
-            }
-            std::process::exit(1);
-        }
-    };
+    let sim = build_sim_with_stderrors(project).unwrap();
     let compiled = sim.compile().unwrap();
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();

@@ -9,8 +9,8 @@ use std::rc::Rc;
 use float_cmp::approx_eq;
 
 use simlin_compat::{load_csv, load_dat, xmile};
-use simlin_engine::project_io;
 use simlin_engine::serde::{deserialize, serialize};
+use simlin_engine::{build_sim_with_stderrors, project_io};
 use simlin_engine::{Project, Results, Simulation, Vm};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
@@ -190,10 +190,8 @@ fn simulate_path(xmile_path: &str) {
             eprintln!("model '{}' error: {}", xmile_path, err);
         }
         let datamodel_project = datamodel_project.unwrap();
-        let project = Project::from(datamodel_project.clone());
+        let sim = build_sim_with_stderrors(&datamodel_project).unwrap();
 
-        let project = Rc::new(project);
-        let sim = Simulation::new(&project, "main").unwrap();
         // sim.debug_print_runlists("main");
         let results = sim.run_to_end();
         assert!(results.is_ok());
