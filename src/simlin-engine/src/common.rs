@@ -200,7 +200,7 @@ macro_rules! eprintln(
 #[macro_export]
 macro_rules! eqn_err(
     ($code:tt, $start:expr, $end:expr) => {{
-        use crate::common::{EquationError, ErrorCode};
+        use $crate::common::{EquationError, ErrorCode};
         Err(EquationError{ start: $start, end: $end, code: ErrorCode::$code})
     }}
 );
@@ -208,7 +208,7 @@ macro_rules! eqn_err(
 #[macro_export]
 macro_rules! var_eqn_err(
     ($ident:expr, $code:tt, $start:expr, $end:expr) => {{
-        use crate::common::{EquationError, ErrorCode};
+        use $crate::common::{EquationError, ErrorCode};
         Err(($ident, EquationError{ start: $start, end: $end, code: ErrorCode::$code}))
     }}
 );
@@ -216,7 +216,7 @@ macro_rules! var_eqn_err(
 #[macro_export]
 macro_rules! model_err(
     ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode, ErrorKind};
+        use $crate::common::{Error, ErrorCode, ErrorKind};
         Err(Error{
             kind: ErrorKind::Model,
             code: ErrorCode::$code,
@@ -228,7 +228,7 @@ macro_rules! model_err(
 #[macro_export]
 macro_rules! sim_err {
     ($code:tt, $str:expr) => {{
-        use crate::common::{Error, ErrorCode, ErrorKind};
+        use $crate::common::{Error, ErrorCode, ErrorKind};
         Err(Error {
             kind: ErrorKind::Simulation,
             code: ErrorCode::$code,
@@ -236,7 +236,7 @@ macro_rules! sim_err {
         })
     }};
     ($code:tt) => {{
-        use crate::common::{Error, ErrorCode, ErrorKind};
+        use $crate::common::{Error, ErrorCode, ErrorKind};
         Err(Error {
             kind: ErrorKind::Simulation,
             code: ErrorCode::$code,
