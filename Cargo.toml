@@ -9,9 +9,6 @@ members = [
     "src/xmutil",
 ]
 
-[patch.crates-io]
-console_error_panic_hook = { git = "https://github.com/bpowers/console_error_panic_hook", version = "0.1.6", rev = "45f72ebad46ef9a026f99b6853aceecbbdf3772c" }
-
 [profile.release]
 opt-level = 3
 lto = false
