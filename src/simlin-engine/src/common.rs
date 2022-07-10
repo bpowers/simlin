@@ -71,6 +71,7 @@ pub enum ErrorCode {
     TodoWildcard,
     TodoStarRange,
     TodoRange,
+    TodoArrayBuiltin,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -126,6 +127,7 @@ impl fmt::Display for ErrorCode {
             TodoWildcard => "todo_wildcard",
             TodoStarRange => "todo_star_range",
             TodoRange => "todo_range",
+            TodoArrayBuiltin => "todo_array_builtin",
         };
 
         write!(f, "{}", name)

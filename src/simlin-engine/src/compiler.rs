@@ -121,10 +121,10 @@ impl Expr {
                     BuiltinFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(a.strip_loc())),
                     BuiltinFn::Tan(a) => BuiltinFn::Tan(Box::new(a.strip_loc())),
                     BuiltinFn::Max(a, b) => {
-                        BuiltinFn::Max(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                        BuiltinFn::Max(Box::new(a.strip_loc()), b.map(|b| Box::new(b.strip_loc())))
                     }
                     BuiltinFn::Min(a, b) => {
-                        BuiltinFn::Min(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                        BuiltinFn::Min(Box::new(a.strip_loc()), b.map(|b| Box::new(b.strip_loc())))
                     }
                     BuiltinFn::Step(a, b) => {
                         BuiltinFn::Step(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
@@ -144,6 +144,15 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         c.map(|expr| Box::new(expr.strip_loc())),
                     ),
+                    BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
+                        Box::new(a.strip_loc()),
+                        rest.map(|(b, c)| {
+                            (Box::new(b.strip_loc()), c.map(|c| Box::new(c.strip_loc())))
+                        }),
+                    ),
+                    BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.strip_loc())),
+                    BuiltinFn::Stddev(a) => BuiltinFn::Stddev(Box::new(a.strip_loc())),
+                    BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.strip_loc())),
                 };
                 Expr::App(builtin, loc)
             }
@@ -342,7 +351,11 @@ impl<'a> Context<'a> {
                     BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower(a)?)),
                     BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower(a)?)),
                     BFn::Max(a, b) => {
-                        BuiltinFn::Max(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
+                        if let Some(b) = b {
+                            BuiltinFn::Max(Box::new(self.lower(a)?), Some(Box::new(self.lower(b)?)))
+                        } else {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_owned());
+                        }
                     }
                     BFn::Mean(args) => {
                         let args = args
@@ -352,7 +365,11 @@ impl<'a> Context<'a> {
                         BuiltinFn::Mean(args?)
                     }
                     BFn::Min(a, b) => {
-                        BuiltinFn::Min(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
+                        if let Some(b) = b {
+                            BuiltinFn::Min(Box::new(self.lower(a)?), Some(Box::new(self.lower(b)?)))
+                        } else {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_owned());
+                        }
                     }
                     BFn::Pi => BuiltinFn::Pi,
                     BFn::Pulse(a, b, c) => {
@@ -386,6 +403,18 @@ impl<'a> Context<'a> {
                     BFn::TimeStep => BuiltinFn::TimeStep,
                     BFn::StartTime => BuiltinFn::StartTime,
                     BFn::FinalTime => BuiltinFn::FinalTime,
+                    BFn::Rank(_, _) => {
+                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    }
+                    BFn::Size(_) => {
+                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    }
+                    BFn::Stddev(_) => {
+                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    }
+                    BFn::Sum(_) => {
+                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    }
                 };
                 Expr::App(builtin, *loc)
             }
@@ -1507,11 +1536,21 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::LoadConstant { id });
                         self.push(Opcode::LoadConstant { id });
                     }
-                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) | BuiltinFn::Step(a, b) => {
+                    BuiltinFn::Step(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
                         let id = self.curr_code.intern_literal(0.0);
                         self.push(Opcode::LoadConstant { id });
+                    }
+                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                        if let Some(b) = b {
+                            self.walk_expr(a)?.unwrap();
+                            self.walk_expr(b)?.unwrap();
+                            let id = self.curr_code.intern_literal(0.0);
+                            self.push(Opcode::LoadConstant { id });
+                        } else {
+                            return sim_err!(BadBuiltinArgs, "".to_owned());
+                        }
                     }
                     BuiltinFn::Pulse(a, b, c) => {
                         self.walk_expr(a)?.unwrap();
@@ -1557,6 +1596,18 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::Op2 { op: Op2::Div });
                         return Ok(Some(()));
                     }
+                    BuiltinFn::Rank(_, _) => {
+                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    }
+                    BuiltinFn::Size(_) => {
+                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    }
+                    BuiltinFn::Stddev(_) => {
+                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    }
+                    BuiltinFn::Sum(_) => {
+                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    }
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _, _) => unreachable!(),
@@ -1587,6 +1638,12 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::TimeStep
                     | BuiltinFn::StartTime
                     | BuiltinFn::FinalTime => unreachable!(),
+                    BuiltinFn::Rank(_, _)
+                    | BuiltinFn::Size(_)
+                    | BuiltinFn::Stddev(_)
+                    | BuiltinFn::Sum(_) => {
+                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    }
                 };
 
                 self.push(Opcode::Apply { func });
@@ -1843,13 +1900,17 @@ impl<'a> ModuleEvaluator<'a> {
                     BuiltinFn::Sqrt(a) => self.eval(a).sqrt(),
                     BuiltinFn::Min(a, b) => {
                         let a = self.eval(a);
-                        let b = self.eval(b);
-                        // we can't use std::cmp::min here, becuase f64 is only
-                        // PartialOrd
-                        if a < b {
-                            a
+                        if let Some(b) = b {
+                            let b = self.eval(b);
+                            // we can't use std::cmp::min here, becuase f64 is only
+                            // PartialOrd
+                            if a < b {
+                                a
+                            } else {
+                                b
+                            }
                         } else {
-                            b
+                            unreachable!();
                         }
                     }
                     BuiltinFn::Mean(args) => {
@@ -1859,13 +1920,17 @@ impl<'a> ModuleEvaluator<'a> {
                     }
                     BuiltinFn::Max(a, b) => {
                         let a = self.eval(a);
-                        let b = self.eval(b);
-                        // we can't use std::cmp::min here, becuase f64 is only
-                        // PartialOrd
-                        if a > b {
-                            a
+                        if let Some(b) = b {
+                            let b = self.eval(b);
+                            // we can't use std::cmp::min here, becuase f64 is only
+                            // PartialOrd
+                            if a > b {
+                                a
+                            } else {
+                                b
+                            }
                         } else {
-                            b
+                            unreachable!();
                         }
                     }
                     BuiltinFn::Lookup(id, index, _) => {
@@ -1950,6 +2015,12 @@ impl<'a> ModuleEvaluator<'a> {
 
                         step(time, dt, height, step_time)
                     }
+                    BuiltinFn::Rank(_, _)
+                    | BuiltinFn::Size(_)
+                    | BuiltinFn::Stddev(_)
+                    | BuiltinFn::Sum(_) => {
+                        unreachable!();
+                    }
                 }
             }
         }
@@ -2033,13 +2104,25 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::IsModuleInput(ident, _loc) => format!("isModuleInput({})", ident),
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
-            BuiltinFn::Max(l, r) => format!("max({}, {})", pretty(l), pretty(r)),
+            BuiltinFn::Max(l, r) => {
+                if let Some(r) = r {
+                    format!("max({}, {})", pretty(l), pretty(r))
+                } else {
+                    format!("max({})", pretty(l))
+                }
+            }
             BuiltinFn::Mean(args) => {
                 let args: Vec<_> = args.iter().map(pretty).collect();
                 let string_args = args.join(", ");
                 format!("mean({})", string_args)
             }
-            BuiltinFn::Min(l, r) => format!("min({}, {})", pretty(l), pretty(r)),
+            BuiltinFn::Min(l, r) => {
+                if let Some(r) = r {
+                    format!("min({}, {})", pretty(l), pretty(r))
+                } else {
+                    format!("min({})", pretty(l))
+                }
+            }
             BuiltinFn::Pi => "𝜋".to_string(),
             BuiltinFn::Pulse(a, b, c) => {
                 let c = match c.as_ref() {
@@ -2069,6 +2152,20 @@ pub fn pretty(expr: &Expr) -> String {
                 format!("step({}, {})", pretty(a), pretty(b))
             }
             BuiltinFn::Tan(l) => format!("tan({})", pretty(l)),
+            BuiltinFn::Rank(a, b) => {
+                if let Some((b, c)) = b {
+                    if let Some(c) = c {
+                        format!("rank({}, {}, {})", pretty(a), pretty(b), pretty(c))
+                    } else {
+                        format!("rank({}, {})", pretty(a), pretty(b))
+                    }
+                } else {
+                    format!("rank({})", pretty(a))
+                }
+            }
+            BuiltinFn::Size(a) => format!("size({})", pretty(a)),
+            BuiltinFn::Stddev(a) => format!("stddev({})", pretty(a)),
+            BuiltinFn::Sum(a) => format!("sum({})", pretty(a)),
         },
         Expr::EvalModule(module, model_name, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();
