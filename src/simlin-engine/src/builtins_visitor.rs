@@ -53,7 +53,7 @@ impl<'a> BuiltinVisitor<'a> {
         Ok(result)
     }
 
-    fn walk(&mut self, expr: Expr0) -> std::result::Result<Expr0, EquationError> {
+    fn walk(&mut self, expr: Expr0) -> Result<Expr0, EquationError> {
         use crate::ast::Expr0::*;
         use std::mem;
         let result: Expr0 = match expr {
@@ -68,7 +68,7 @@ impl<'a> BuiltinVisitor<'a> {
             App(UntypedBuiltinFn(func, args), loc) => {
                 let orig_self_allowed = self.self_allowed;
                 self.self_allowed |= func == "previous" || func == "size";
-                let args: std::result::Result<Vec<Expr0>, EquationError> =
+                let args: Result<Vec<Expr0>, EquationError> =
                     args.into_iter().map(|e| self.walk(e)).collect();
                 self.self_allowed = orig_self_allowed;
                 let args = args?;
@@ -86,7 +86,7 @@ impl<'a> BuiltinVisitor<'a> {
                 let module_name = format!("$⁚{}⁚{}⁚{}", self.variable_name, self.n, func);
 
                 let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
-                    if let Expr0::Var(id, _loc) = arg {
+                    if let Var(id, _loc) = arg {
                         id
                     } else {
                         let id = format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i);
