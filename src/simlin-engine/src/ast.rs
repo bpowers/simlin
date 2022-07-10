@@ -55,7 +55,7 @@ impl IndexExpr0 {
         match self {
             IndexExpr0::Wildcard(_loc) => IndexExpr0::Wildcard(loc),
             IndexExpr0::StarRange(d, _loc) => IndexExpr0::StarRange(d, loc),
-            IndexExpr0::Range(l, r, _loc) => IndexExpr0::Range(l, r, loc),
+            IndexExpr0::Range(l, r, _loc) => IndexExpr0::Range(l.strip_loc(), r.strip_loc(), loc),
             IndexExpr0::Expr(e) => IndexExpr0::Expr(e.strip_loc()),
         }
     }
@@ -656,6 +656,41 @@ fn test_parse() {
         Loc::default(),
     ));
 
+    let subscript3 = Box::new(Subscript(
+        "a".to_string(),
+        vec![
+            IndexExpr0::Wildcard(Loc::default()),
+            IndexExpr0::Wildcard(Loc::default()),
+        ],
+        Loc::default(),
+    ));
+
+    let subscript4 = Box::new(Subscript(
+        "a".to_string(),
+        vec![IndexExpr0::StarRange("d".to_string(), Loc::default())],
+        Loc::default(),
+    ));
+
+    let subscript5 = Box::new(Subscript(
+        "a".to_string(),
+        vec![IndexExpr0::Range(
+            Const("1".to_owned(), 1.0, Loc::default()),
+            Const("2".to_owned(), 2.0, Loc::default()),
+            Loc::default(),
+        )],
+        Loc::default(),
+    ));
+
+    let subscript6 = Box::new(Subscript(
+        "a".to_string(),
+        vec![IndexExpr0::Range(
+            Var("l".to_owned(), Loc::default()),
+            Var("r".to_owned(), Loc::default()),
+            Loc::default(),
+        )],
+        Loc::default(),
+    ));
+
     let time1 = Box::new(App(
         UntypedBuiltinFn("time".to_owned(), vec![]),
         Loc::default(),
@@ -726,6 +761,10 @@ fn test_parse() {
         ("a[1]", subscript1.clone(), "a[1]"),
         ("a[2, INT(b)]", subscript2.clone(), "a[2, int(b)]"),
         ("time", time1.clone(), "time()"),
+        ("a[*, *]", subscript3.clone(), "a[*, *]"),
+        ("a[*:d]", subscript4.clone(), "a[*:d]"),
+        ("a[1:2]", subscript5.clone(), "a[1:2]"),
+        ("a[l:r]", subscript6.clone(), "a[l:r]"),
     ];
 
     for case in cases.iter() {
@@ -764,6 +803,11 @@ fn test_parse_failures() {
         "if 1 then",
         "if then",
         "if 1 then 2 else",
+        "a[*:2]",
+        "a[2:*]",
+        "a[b:*]",
+        "a[*:]",
+        "a[3:]",
     ];
 
     for case in failures {
