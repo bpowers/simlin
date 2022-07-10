@@ -65,9 +65,11 @@ pub enum BuiltinFn<Expr> {
     IsModuleInput(String, Loc),
     Ln(Box<Expr>),
     Log10(Box<Expr>),
-    Max(Box<Expr>, Box<Expr>),
+    // max takes 2 scalar args OR 1-2 args for an array
+    Max(Box<Expr>, Option<Box<Expr>>),
     Mean(Vec<Expr>),
-    Min(Box<Expr>, Box<Expr>),
+    // max takes 2 scalar args OR 1-2 args for an array
+    Min(Box<Expr>, Option<Box<Expr>>),
     Pi,
     Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
@@ -80,38 +82,49 @@ pub enum BuiltinFn<Expr> {
     TimeStep,
     StartTime,
     FinalTime,
+    // array-only builtins
+    Rank(Box<Expr>, Option<(Box<Expr>, Option<Box<Expr>>)>),
+    Size(Box<Expr>),
+    Stddev(Box<Expr>),
+    Sum(Box<Expr>),
 }
 
 impl<Expr> BuiltinFn<Expr> {
     pub fn name(&self) -> &'static str {
+        use BuiltinFn::*;
         match self {
-            BuiltinFn::Lookup(_, _, _) => "lookup",
-            BuiltinFn::Abs(_) => "abs",
-            BuiltinFn::Arccos(_) => "arccos",
-            BuiltinFn::Arcsin(_) => "arcsin",
-            BuiltinFn::Arctan(_) => "arctan",
-            BuiltinFn::Cos(_) => "cos",
-            BuiltinFn::Exp(_) => "exp",
-            BuiltinFn::Inf => "inf",
-            BuiltinFn::Int(_) => "int",
-            BuiltinFn::IsModuleInput(_, _) => "ismoduleinput",
-            BuiltinFn::Ln(_) => "ln",
-            BuiltinFn::Log10(_) => "log10",
-            BuiltinFn::Max(_, _) => "max",
-            BuiltinFn::Mean(_) => "mean",
-            BuiltinFn::Min(_, _) => "min",
-            BuiltinFn::Pi => "pi",
-            BuiltinFn::Pulse(_, _, _) => "pulse",
-            BuiltinFn::Ramp(_, _, _) => "ramp",
-            BuiltinFn::SafeDiv(_, _, _) => "safediv",
-            BuiltinFn::Sin(_) => "sin",
-            BuiltinFn::Sqrt(_) => "sqrt",
-            BuiltinFn::Step(_, _) => "step",
-            BuiltinFn::Tan(_) => "tan",
-            BuiltinFn::Time => "time",
-            BuiltinFn::TimeStep => "time_step",
-            BuiltinFn::StartTime => "initial_time",
-            BuiltinFn::FinalTime => "final_time",
+            Lookup(_, _, _) => "lookup",
+            Abs(_) => "abs",
+            Arccos(_) => "arccos",
+            Arcsin(_) => "arcsin",
+            Arctan(_) => "arctan",
+            Cos(_) => "cos",
+            Exp(_) => "exp",
+            Inf => "inf",
+            Int(_) => "int",
+            IsModuleInput(_, _) => "ismoduleinput",
+            Ln(_) => "ln",
+            Log10(_) => "log10",
+            Max(_, _) => "max",
+            Mean(_) => "mean",
+            Min(_, _) => "min",
+            Pi => "pi",
+            Pulse(_, _, _) => "pulse",
+            Ramp(_, _, _) => "ramp",
+            SafeDiv(_, _, _) => "safediv",
+            Sin(_) => "sin",
+            Sqrt(_) => "sqrt",
+            Step(_, _) => "step",
+            Tan(_) => "tan",
+            Time => "time",
+            TimeStep => "time_step",
+            StartTime => "initial_time",
+            FinalTime => "final_time",
+            // array only builtins
+            Rank(_, _) => "rank",
+            Size(_) => "size",
+            Stddev(_) => "stddev",
+            Sum(_) => "sum",
         }
     }
 }
@@ -127,27 +140,33 @@ pub fn is_builtin_fn(name: &str) -> bool {
     is_0_arity_builtin_fn(name)
         || matches!(
             name,
+            // scalar builtins
             "lookup"
-                | "abs"
-                | "arccos"
-                | "arcsin"
-                | "arctan"
-                | "cos"
-                | "exp"
-                | "int"
-                | "ismoduleinput"
-                | "ln"
-                | "log10"
-                | "max"
-                | "mean"
-                | "min"
-                | "pulse"
-                | "ramp"
-                | "safediv"
-                | "sin"
-                | "sqrt"
-                | "step"
-                | "tan"
+        | "abs"
+        | "arccos"
+        | "arcsin"
+        | "arctan"
+        | "cos"
+        | "exp"
+        | "int"
+        | "ismoduleinput"
+        | "ln"
+        | "log10"
+        | "max"
+        | "mean"
+        | "min"
+        | "pulse"
+        | "ramp"
+        | "safediv"
+        | "sin"
+        | "sqrt"
+        | "step"
+        | "tan"
+        // array-only builtins
+        | "rank"
+        | "size"
+        | "stddev"
+        | "sum"
         )
 }
 
@@ -183,19 +202,37 @@ where
         | BuiltinFn::Log10(a)
         | BuiltinFn::Sin(a)
         | BuiltinFn::Sqrt(a)
-        | BuiltinFn::Tan(a) => cb(BuiltinContents::Expr(a)),
+        | BuiltinFn::Tan(a)
+        | BuiltinFn::Size(a)
+        | BuiltinFn::Stddev(a)
+        | BuiltinFn::Sum(a) => cb(BuiltinContents::Expr(a)),
         BuiltinFn::Mean(args) => {
             args.iter().for_each(|a| cb(BuiltinContents::Expr(a)));
         }
-        BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) | BuiltinFn::Step(a, b) => {
+        BuiltinFn::Step(a, b) => {
             cb(BuiltinContents::Expr(a));
             cb(BuiltinContents::Expr(b));
+        }
+        BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+            cb(BuiltinContents::Expr(a));
+            if let Some(b) = b {
+                cb(BuiltinContents::Expr(b));
+            }
         }
         BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
             cb(BuiltinContents::Expr(a));
             cb(BuiltinContents::Expr(b));
             if let Some(c) = c {
                 cb(BuiltinContents::Expr(c))
+            }
+        }
+        BuiltinFn::Rank(a, rest) => {
+            cb(BuiltinContents::Expr(a));
+            if let Some((b, c)) = rest {
+                cb(BuiltinContents::Expr(b));
+                if let Some(c) = c {
+                    cb(BuiltinContents::Expr(c));
+                }
             }
         }
     }
@@ -206,6 +243,10 @@ fn test_is_builtin_fn() {
     assert!(is_builtin_fn("lookup"));
     assert!(!is_builtin_fn("lookupz"));
     assert!(is_builtin_fn("log10"));
+    assert!(is_builtin_fn("sum"));
+    assert!(is_builtin_fn("rank"));
+    assert!(is_builtin_fn("size"));
+    assert!(is_builtin_fn("stddev"));
 }
 
 #[test]
