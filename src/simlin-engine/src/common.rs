@@ -71,6 +71,7 @@ pub enum ErrorCode {
     TodoWildcard,
     TodoStarRange,
     TodoRange,
+    TodoArrayBuiltin,
 }
 
 impl fmt::Display for ErrorCode {
@@ -125,6 +126,7 @@ impl fmt::Display for ErrorCode {
             TodoWildcard => "todo_wildcard",
             TodoStarRange => "todo_star_range",
             TodoRange => "todo_range",
+            TodoArrayBuiltin => "todo_array_builtin",
         };
 
         write!(f, "{}", name)
