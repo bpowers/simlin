@@ -35,7 +35,7 @@ export function errorCodeDescription(code: ErrorCode): string {
     case ErrorCode.UnknownBuiltin:
       return 'Reference to unknown or unimplemented builtin';
     case ErrorCode.BadBuiltinArgs:
-      return 'Builtin function arguments';
+      return 'Incorrect arguments to a builtin function (e.g. too many, too few)';
     case ErrorCode.EmptyEquation:
       return 'Variable has empty equation';
     case ErrorCode.BadModuleInputDst:
