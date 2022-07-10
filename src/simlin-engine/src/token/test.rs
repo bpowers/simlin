@@ -166,6 +166,7 @@ fn subscripts() {
         ("                        ~", RParen),
     ]);
 
+    #[rustfmt::skip]
     test("SUM(z[*])", vec![
         ("~~~      ", Ident("SUM")),
         ("   ~     ", LParen),
@@ -176,6 +177,7 @@ fn subscripts() {
         ("        ~", RParen),
     ]);
 
+    #[rustfmt::skip]
     test("SUM(z[*:suba])", vec![
         ("~~~           ", Ident("SUM")),
         ("   ~          ", LParen),
@@ -188,6 +190,7 @@ fn subscripts() {
         ("             ~", RParen),
     ]);
 
+    #[rustfmt::skip]
     test("SUM(z[3:4])", vec![
         ("~~~        ", Ident("SUM")),
         ("   ~       ", LParen),
@@ -200,6 +203,7 @@ fn subscripts() {
         ("          ~", RParen),
     ]);
 
+    #[rustfmt::skip]
     test("SUM(z[y:z])", vec![
         ("~~~        ", Ident("SUM")),
         ("   ~       ", LParen),
