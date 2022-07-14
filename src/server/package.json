@@ -60,6 +60,6 @@
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib",
     "build": "tsc -p tsconfig.json",
-    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; export FIREBASE_AUTH_EMULATOR_HOST=localhost:9099; export GCLOUD_PROJECT=simlin; yarn build && exec node lib/index.js"
+    "start:backend": "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8092; export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099; export GCLOUD_PROJECT=simlin; yarn build && exec node lib/index.js"
   }
 }
