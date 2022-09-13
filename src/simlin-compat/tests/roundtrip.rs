@@ -49,7 +49,8 @@ static TEST_MODELS: &[&str] = &[
 fn roundtrips_model() {
     for &path in TEST_MODELS {
         let file_path = format!("../../{}", path);
-        // writeln!(::std::io::stderr(), "model: {}", path).unwrap();
+        use std::io::Write;
+        writeln!(std::io::stderr(), "model: {}", path).unwrap();
 
         let f = File::open(file_path).unwrap();
         let mut f = BufReader::new(f);

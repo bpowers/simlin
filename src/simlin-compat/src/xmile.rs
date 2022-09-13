@@ -292,7 +292,7 @@ fn write_tag_start_with_attrs(
     tag_name: &str,
     attrs: &[(&str, &str)],
 ) -> Result<()> {
-    let mut elem = BytesStart::owned(tag_name.as_bytes().to_vec(), tag_name.len());
+    let mut elem = BytesStart::new(tag_name);
     for attr in attrs.iter() {
         elem.push_attribute(*attr);
     }
@@ -301,13 +301,13 @@ fn write_tag_start_with_attrs(
 
 fn write_tag_end(writer: &mut Writer<XmlWriter>, tag_name: &str) -> Result<()> {
     writer
-        .write_event(Event::End(BytesEnd::borrowed(tag_name.as_bytes())))
+        .write_event(Event::End(BytesEnd::new(tag_name)))
         .map_err(xml_error)
 }
 
 fn write_tag_text(writer: &mut Writer<XmlWriter>, content: &str) -> Result<()> {
     writer
-        .write_event(Event::Text(BytesText::from_plain_str(content)))
+        .write_event(Event::Text(BytesText::new(content)))
         .map_err(xml_error)
 }
 
@@ -434,7 +434,7 @@ pub struct SimSpecs {
 
 impl ToXml<XmlWriter> for SimSpecs {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
-        let mut elem = BytesStart::owned(b"sim_specs".to_vec(), b"sim_specs".len());
+        let mut elem = BytesStart::new("sim_specs");
         if let Some(ref method) = self.method {
             elem.push_attribute(("method", method.as_str()));
         }
@@ -683,7 +683,7 @@ pub struct Gf {
 
 impl ToXml<XmlWriter> for Gf {
     fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
-        let mut elem = BytesStart::owned(b"gf".to_vec(), b"gf".len());
+        let mut elem = BytesStart::new("gf");
         if let Some(ref name) = self.name {
             elem.push_attribute(("name", name.as_str()));
         }
@@ -953,10 +953,7 @@ impl ToXml<XmlWriter> for Model {
 
         write_tag_start(writer, "variables")?;
 
-        if let Some(Variables {
-            variables: Some(ref variables),
-        }) = self.variables
-        {
+        if let Some(Variables { ref variables }) = self.variables {
             for var in variables.iter() {
                 var.write_xml(writer)?;
             }
@@ -1002,8 +999,7 @@ impl From<Model> for datamodel::Model {
             name: canonicalize(model.name.as_deref().unwrap_or("main")),
             variables: match model.variables {
                 Some(Variables {
-                    variables: Some(vars),
-                    ..
+                    variables: vars, ..
                 }) => vars
                     .into_iter()
                     .filter(|v| !matches!(v, Var::Unhandled))
@@ -1026,7 +1022,7 @@ impl From<datamodel::Model> for Model {
             variables: if model.variables.is_empty() {
                 None
             } else {
-                let variables = Some(model.variables.into_iter().map(Var::from).collect());
+                let variables = model.variables.into_iter().map(Var::from).collect();
                 Some(Variables { variables })
             },
             views: if model.views.is_empty() {
@@ -1043,7 +1039,7 @@ impl From<datamodel::Model> for Model {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
     #[serde(rename = "$value")]
-    pub variables: Option<Vec<Var>>,
+    pub variables: Vec<Var>,
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
@@ -1061,15 +1057,7 @@ impl Model {
     pub fn get_var(&self, ident: &str) -> Option<&Var> {
         self.variables.as_ref()?;
 
-        for var in self
-            .variables
-            .as_ref()
-            .unwrap()
-            .variables
-            .as_ref()
-            .unwrap()
-            .iter()
-        {
+        for var in self.variables.as_ref().unwrap().variables.iter() {
             let name = var.get_noncanonical_name();
             if ident == name || ident == canonicalize(name) {
                 return Some(var);
@@ -1684,7 +1672,7 @@ pub mod view_element {
             V: Deserializer<'de>,
         {
             enum Field {
-                Field0,
+                Field0(Option<String>),
                 Field1,
             }
             struct __FieldVisitor;
@@ -1699,7 +1687,7 @@ pub mod view_element {
                     U: de::Error,
                 {
                     match __value {
-                        0u64 => Ok(Field::Field0),
+                        0u64 => Ok(Field::Field0(None)),
                         1u64 => Ok(Field::Field1),
                         _ => Err(de::Error::invalid_value(
                             de::Unexpected::Unsigned(__value),
@@ -1713,7 +1701,9 @@ pub mod view_element {
                 {
                     match __value {
                         "alias" => Ok(Field::Field1),
-                        _ => Ok(Field::Field0),
+                        // by default this is `"$value" => _serde::__private::Ok(__Field::__field0)`
+                        // which is why we've copied and changed this
+                        value => Ok(Field::Field0(Some(value.to_owned()))),
                     }
                 }
 
@@ -1722,12 +1712,13 @@ pub mod view_element {
                     U: de::Error,
                 {
                     match __value {
-                        b"$value" => Ok(Field::Field0),
                         b"alias" => Ok(Field::Field1),
-                        _ => {
-                            let __value = &std::string::String::from_utf8_lossy(__value);
-                            Err(de::Error::unknown_variant(__value, VARIANTS))
-                        }
+                        // by default this is `"$value" => _serde::__private::Ok(__Field::__field0)`
+                        // which is why we've copied and changed this
+                        value => {
+                            let value = String::from_utf8_lossy(value);
+                            Ok(Field::Field0(Some(value.to_string())))
+                        },
                     }
                 }
             }
@@ -1757,16 +1748,19 @@ pub mod view_element {
                 where
                     __A: de::EnumAccess<'de>,
                 {
+                    use serde::de::Error as DeError;
                     match match de::EnumAccess::variant(__data) {
                         Ok(__val) => __val,
                         Err(__err) => {
                             return Err(__err);
                         }
                     } {
-                        (Field::Field0, __variant) => std::result::Result::map(
-                            de::VariantAccess::newtype_variant::<String>(__variant),
-                            LinkEnd::Named,
-                        ),
+                        (Field::Field0(None), __variant) => {
+                            Err(DeError::missing_field("$value"))
+                        }
+                        (Field::Field0(Some(name)), __variant) => {
+                            Ok(LinkEnd::Named(name))
+                        }
                         (Field::Field1, __variant) => std::result::Result::map(
                             de::VariantAccess::newtype_variant::<AliasLinkEnd>(__variant),
                             LinkEnd::Alias,
@@ -3482,11 +3476,7 @@ pub fn project_to_xmile(project: &datamodel::Project) -> Result<String> {
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 4);
 
     writer
-        .write_event(Event::Decl(BytesDecl::new(
-            "1.0".as_bytes(),
-            Some("utf-8".as_bytes()),
-            None,
-        )))
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))
         .unwrap();
     file.write_xml(&mut writer)?;
 
