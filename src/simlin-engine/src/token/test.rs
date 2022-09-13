@@ -16,15 +16,15 @@ fn test_inner(input: &str, expected: Vec<(&str, Token)>, lexer_type: LexerType) 
     // for spans, and because it applies also to r#XXX# style strings:
     // let input = input.replace("$", "\n");
 
-    let tokenizer = Lexer::new(&input, lexer_type);
+    let tokenizer = Lexer::new(input, lexer_type);
     let len = expected.len();
     for (token, (expected_span, expected_tok)) in tokenizer.zip(expected.into_iter()) {
-        let expected_start = expected_span.find("~").unwrap();
-        let expected_end = expected_span.rfind("~").unwrap() + 1;
+        let expected_start = expected_span.find('~').unwrap();
+        let expected_end = expected_span.rfind('~').unwrap() + 1;
         assert_eq!(Ok((expected_start, expected_tok, expected_end)), token);
     }
 
-    let tokenizer = Lexer::new(&input, lexer_type);
+    let tokenizer = Lexer::new(input, lexer_type);
     assert_eq!(None, tokenizer.skip(len).next());
 }
 
@@ -37,11 +37,11 @@ fn test_err_inner(input: &str, expected: (&str, ErrorCode), lexer_type: LexerTyp
     // for spans, and because it applies also to r#XXX# style strings:
     // let input = input.replace("$", "\n");
 
-    let tokenizer = Lexer::new(&input, lexer_type);
+    let tokenizer = Lexer::new(input, lexer_type);
     let token = tokenizer.into_iter().last().unwrap();
     let (expected_span, expected_code) = expected;
-    let expected_start = expected_span.find("~").unwrap();
-    let expected_end = expected_span.rfind("~").unwrap() + 1;
+    let expected_start = expected_span.find('~').unwrap();
+    let expected_end = expected_span.rfind('~').unwrap() + 1;
     let expected_err = EquationError {
         start: expected_start as u16,
         end: expected_end as u16,

@@ -7,13 +7,13 @@ use std::collections::HashMap;
 use crate::common::Ident;
 use crate::datamodel;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NamedDimension {
     elements: Vec<String>,
     indexed_elements: HashMap<Ident, usize>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Dimension {
     Indexed(Ident, u32),
     Named(Ident, NamedDimension),
@@ -39,7 +39,7 @@ impl From<datamodel::Dimension> for Dimension {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct DimensionsContext {
     dimensions: HashMap<Ident, Dimension>,
 }

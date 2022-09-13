@@ -25,7 +25,7 @@ pub struct Table {
     y_range: datamodel::GraphicalFunctionScale,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModuleInput {
     // the Variable identifier in the current model we will use for input
     pub src: Ident,
@@ -634,9 +634,9 @@ fn test_identifier_sets() {
             dimensions: &Default::default(),
         };
         let ast = lower_ast(&scope, ast.unwrap()).unwrap();
-        let id_set_expected: HashSet<Ident> = id_list.into_iter().map(|s| s.to_string()).collect();
+        let id_set_expected: HashSet<Ident> = id_list.iter().map(|s| s.to_string()).collect();
         let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-        let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));
+        let id_set_test = identifier_set(&ast, dimensions, Some(&module_input_names));
         assert_eq!(id_set_expected, id_set_test);
     }
 }
@@ -701,7 +701,7 @@ fn test_tables() {
     {
         assert_eq!(table.x.len(), table.y.len());
     } else {
-        assert!(false);
+        panic!("not eq");
     }
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();

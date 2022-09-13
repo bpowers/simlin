@@ -9,6 +9,7 @@ pub use prost;
 mod ast;
 pub mod common;
 pub mod datamodel;
+#[allow(clippy::derive_partial_eq_without_eq)]
 pub mod project_io {
     include!(concat!(env!("OUT_DIR"), "/project_io.rs"));
 }

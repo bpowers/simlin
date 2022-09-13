@@ -51,7 +51,7 @@ pub struct ModelStage1 {
     pub implicit: bool,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModuleStage2 {
     pub model_ident: Ident,
     /// inputs is the set of variables overridden (provided as input) in this
@@ -1181,7 +1181,7 @@ fn test_all_deps() {
             eprintln!("failed order: {:?}", failed_dep_order);
             for (v, expected) in expected_deps_list.iter() {
                 eprintln!("{}", v.ident());
-                let mut expected: Vec<_> = expected.iter().cloned().collect();
+                let mut expected: Vec<_> = expected.to_vec();
                 expected.sort();
                 eprintln!("  expected: {:?}", expected);
                 let mut actual: Vec<_> = deps[v.ident()].iter().collect();

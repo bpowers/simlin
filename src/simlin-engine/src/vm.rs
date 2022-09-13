@@ -730,7 +730,7 @@ fn test_subscript_offset_iter() {
     );
     let cases: &[(Vec<Dimension>, Vec<Vec<usize>>)] = &[
         (vec![empty_dim.clone()], vec![]),
-        (vec![empty_dim.clone(), empty_dim.clone()], vec![]),
+        (vec![empty_dim.clone(), empty_dim], vec![]),
         (vec![three_dim.clone()], vec![vec![0], vec![1], vec![2]]),
         (
             vec![three_dim.clone(), two_dim.clone()],
@@ -744,7 +744,7 @@ fn test_subscript_offset_iter() {
             ],
         ),
         (
-            vec![three_dim.clone(), one_dim.clone(), two_dim.clone()],
+            vec![three_dim, one_dim, two_dim],
             vec![
                 vec![0, 0, 0],
                 vec![0, 0, 1],
@@ -811,7 +811,7 @@ fn test_subscript_iter() {
     );
     let cases: &[(Vec<Dimension>, Vec<Vec<&str>>)] = &[
         (vec![empty_dim.clone()], vec![]),
-        (vec![empty_dim.clone(), empty_dim.clone()], vec![]),
+        (vec![empty_dim.clone(), empty_dim], vec![]),
         (
             vec![three_dim.clone()],
             vec![vec!["0"], vec!["1"], vec!["2"]],
@@ -828,7 +828,7 @@ fn test_subscript_iter() {
             ],
         ),
         (
-            vec![three_dim.clone(), one_dim.clone(), two_dim.clone()],
+            vec![three_dim, one_dim, two_dim],
             vec![
                 vec!["0", "0", "0"],
                 vec!["0", "0", "1"],

@@ -189,10 +189,9 @@ fn test_graphical_function_kind_roundtrip() {
         GraphicalFunctionKind::Extrapolate,
     ];
     for expected in cases {
-        let expected = expected.clone();
-        let actual = GraphicalFunctionKind::from(project_io::graphical_function::Kind::from(
-            expected.clone(),
-        ));
+        let expected = *expected;
+        let actual =
+            GraphicalFunctionKind::from(project_io::graphical_function::Kind::from(expected));
         assert_eq!(expected, actual);
     }
 
@@ -414,8 +413,8 @@ impl From<i32> for project_io::variable::Visibility {
 fn test_visibility_roundtrip() {
     let cases: &[Visibility] = &[Visibility::Private, Visibility::Public];
     for expected in cases {
-        let expected = expected.clone();
-        let actual = Visibility::from(project_io::variable::Visibility::from(expected.clone()));
+        let expected = *expected;
+        let actual = Visibility::from(project_io::variable::Visibility::from(expected));
         assert_eq!(expected, actual);
     }
 
@@ -856,10 +855,9 @@ fn test_label_side_roundtrip() {
         view_element::LabelSide::Right,
     ];
     for expected in cases {
-        let expected = expected.clone();
-        let actual = view_element::LabelSide::from(project_io::view_element::LabelSide::from(
-            expected.clone(),
-        ));
+        let expected = *expected;
+        let actual =
+            view_element::LabelSide::from(project_io::view_element::LabelSide::from(expected));
         assert_eq!(expected, actual);
     }
 

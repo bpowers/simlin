@@ -17,9 +17,9 @@ lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
 lalrpop-util = "0.19"
-prost = "0.9"
-float-cmp = "0.8"
-ordered-float = "2"
+prost = "0.11"
+float-cmp = "0.9"
+ordered-float = "3"
 # rand = "0.8"
 smallvec = { version = "1", features = [ "union" ] }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -30,4 +30,4 @@ rand = "0.8"
 
 [build-dependencies]
 lalrpop = "0.19"
-prost-build = "0.9"
+prost-build = "0.11"

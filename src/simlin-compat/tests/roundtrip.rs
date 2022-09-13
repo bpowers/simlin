@@ -47,8 +47,6 @@ static TEST_MODELS: &[&str] = &[
 
 #[test]
 fn roundtrips_model() {
-    use std::io::Write;
-
     for &path in TEST_MODELS {
         let file_path = format!("../../{}", path);
         // writeln!(::std::io::stderr(), "model: {}", path).unwrap();
@@ -64,14 +62,7 @@ fn roundtrips_model() {
                 match var.equation_errors() {
                     Some(errors) => {
                         for err in errors {
-                            writeln!(
-                                ::std::io::stderr(),
-                                "  {}.{} error: {}",
-                                model_name,
-                                var_name,
-                                err
-                            )
-                            .unwrap();
+                            eprintln!("  {}.{} error: {}", model_name, var_name, err);
                         }
                     }
                     None => (),

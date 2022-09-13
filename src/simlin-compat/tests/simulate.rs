@@ -13,7 +13,7 @@ use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{build_sim_with_stderrors, project_io};
 use simlin_engine::{Project, Results, Simulation, Vm};
 
-const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", ',' as u8), ("output.tab", '\t' as u8)];
+const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
 // these columns are either Vendor specific or otherwise not important.
 const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
@@ -139,14 +139,12 @@ fn ensure_results(expected: &Results, results: &Results) {
                 {
                     let expected = expected;
                     let actual_int = format!("{}", actual.round() as i64);
-                    let actual_int_len = actual_int
-                        .strip_prefix("-")
-                        .unwrap_or_else(|| &actual_int)
-                        .len() as i64;
+                    let actual_int_len =
+                        actual_int.strip_prefix('-').unwrap_or(&actual_int).len() as i64;
                     let actual = if actual_int == "0" {
                         actual
                     } else {
-                        let precision = std::cmp::max(6 as i64 - actual_int_len, 0) as usize;
+                        let precision = std::cmp::max(6_i64 - actual_int_len, 0) as usize;
                         let formatted = format!("{:.1$}", actual, precision);
                         use std::str::FromStr;
                         f64::from_str(&formatted).unwrap()
@@ -161,7 +159,7 @@ fn ensure_results(expected: &Results, results: &Results) {
                         "step {}: {}: {} (expected) != {} (actual)",
                         step, ident, expected, actual
                     );
-                    assert!(false);
+                    panic!("not equal");
                 }
             }
         }
@@ -230,7 +228,7 @@ fn simulate_path(xmile_path: &str) {
 
         let datamodel_project2 = deserialize(project_io::Project::decode(&*buf).unwrap());
         assert_eq!(datamodel_project, datamodel_project2);
-        let project = Project::from(datamodel_project2.clone());
+        let project = Project::from(datamodel_project2);
         let project = Rc::new(project);
         let sim = Simulation::new(&project, "main").unwrap();
         let compiled_sim = sim.compile().unwrap();

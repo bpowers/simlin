@@ -724,7 +724,7 @@ fn test_parse() {
     let cases = [
         (
             "aux[INT(TIME MOD 5) + 1]",
-            time2.clone(),
+            time2,
             "aux[int(time() mod 5) + 1]",
         ),
         ("if 1 then 2 else 3", if1, "if (1) then (2) else (3)"),
@@ -740,7 +740,7 @@ fn test_parse() {
         ),
         (
             "(IF quotient = quotient_target THEN 1 ELSE 0)",
-            if3.clone(),
+            if3,
             "if (quotient = quotient_target) then (1) else (0)",
         ),
         (
@@ -750,21 +750,17 @@ fn test_parse() {
         ),
         (
             "( IF true_input && false_input THEN 1 ELSE 0 )",
-            if4.clone(),
+            if4,
             "if (true_input && false_input) then (1) else (0)",
         ),
-        (
-            "\"oh dear\" = oh_dear",
-            quoting_eq.clone(),
-            "oh_dear = oh_dear",
-        ),
-        ("a[1]", subscript1.clone(), "a[1]"),
-        ("a[2, INT(b)]", subscript2.clone(), "a[2, int(b)]"),
-        ("time", time1.clone(), "time()"),
-        ("a[*, *]", subscript3.clone(), "a[*, *]"),
-        ("a[*:d]", subscript4.clone(), "a[*:d]"),
-        ("a[1:2]", subscript5.clone(), "a[1:2]"),
-        ("a[l:r]", subscript6.clone(), "a[l:r]"),
+        ("\"oh dear\" = oh_dear", quoting_eq, "oh_dear = oh_dear"),
+        ("a[1]", subscript1, "a[1]"),
+        ("a[2, INT(b)]", subscript2, "a[2, int(b)]"),
+        ("time", time1, "time()"),
+        ("a[*, *]", subscript3, "a[*, *]"),
+        ("a[*:d]", subscript4, "a[*:d]"),
+        ("a[1:2]", subscript5, "a[1:2]"),
+        ("a[l:r]", subscript6, "a[l:r]"),
     ];
 
     for case in cases.iter() {
@@ -812,11 +808,11 @@ fn test_parse_failures() {
 
     for case in failures {
         let err = Expr0::new(case, LexerType::Equation).unwrap_err();
-        assert!(err.len() > 0);
+        assert!(!err.is_empty());
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),

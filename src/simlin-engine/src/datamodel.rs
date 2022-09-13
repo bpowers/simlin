@@ -603,7 +603,7 @@ pub struct SimSpecs {
     pub time_units: Option<String>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Dimension {
     Indexed(String, u32),
     Named(String, Vec<String>),
@@ -640,7 +640,7 @@ impl Dimension {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Unit {
     pub name: String,
     pub equation: Option<String>,
@@ -656,7 +656,7 @@ pub enum Extension {
     Vensim,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Source {
     pub extension: Extension,
     pub content: String,

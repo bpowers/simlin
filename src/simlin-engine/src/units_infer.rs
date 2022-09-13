@@ -501,7 +501,7 @@ fn test_inference() {
         ],
     ];
 
-    for test_case in test_cases.into_iter() {
+    for test_case in test_cases.iter() {
         let expected = test_case
             .iter()
             .map(|(var, units)| (var.get_ident(), *units))
@@ -580,7 +580,7 @@ fn test_inference_negative() {
         ],
     ];
 
-    for test_case in test_cases.into_iter() {
+    for test_case in test_cases.iter() {
         let vars = test_case
             .iter()
             .map(|(var, _unit)| var)

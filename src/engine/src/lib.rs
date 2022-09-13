@@ -21,16 +21,15 @@ use simlin_engine::{canonicalize, datamodel, project_io, prost, serde, Error, Vm
 #[wasm_bindgen]
 pub struct Engine {
     project: engine::Project,
-    sim_vm: Option<engine::Vm>,
-    sim_error: Option<engine::Error>,
+    sim_vm: Option<Vm>,
+    sim_error: Option<Error>,
     results: Option<engine::Results>,
     next_callback_ref: u32,
     on_change_callbacks: HashMap<u32, Function>,
 }
 
 #[wasm_bindgen]
-#[allow(dead_code)]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UnitError {
     pub code: ErrorCode,
     pub is_consistency_error: bool,
@@ -45,6 +44,15 @@ impl UnitError {
         self.details.clone()
     }
 }
+
+//#[wasm_bindgen(typescript_type = "Map<string, EquationError>")]
+type EquationErrorMap = JsValue;
+
+//#[wasm_bindgen(typescript_type = "Array<Error> | undefined")]
+type MaybeErrorArray = Array;
+
+//#[wasm_bindgen(typescript_type = "Array<string>")]
+type StringArray = Array;
 
 impl From<engine::common::UnitError> for UnitError {
     fn from(err: engine::common::UnitError) -> Self {
@@ -188,8 +196,8 @@ impl Engine {
         self.sim_error.is_none()
     }
 
-    #[wasm_bindgen(js_name = getModelVariableErrors, typescript_type = "Map<string, EquationError>")]
-    pub fn get_model_variable_errors(&self, model_name: &str) -> JsValue {
+    #[wasm_bindgen(js_name = getModelVariableErrors)]
+    pub fn get_model_variable_errors(&self, model_name: &str) -> EquationErrorMap {
         let model = &self.project.models.get(model_name).unwrap();
 
         let mut result = Map::new();
@@ -201,8 +209,8 @@ impl Engine {
         result.into()
     }
 
-    #[wasm_bindgen(js_name = getModelVariableUnitErrors, typescript_type = "Map<string, EquationError>")]
-    pub fn get_model_variable_unit_errors(&self, model_name: &str) -> JsValue {
+    #[wasm_bindgen(js_name = getModelVariableUnitErrors)]
+    pub fn get_model_variable_unit_errors(&self, model_name: &str) -> EquationErrorMap {
         let model = &self.project.models.get(model_name).unwrap();
 
         let mut result = Map::new();
@@ -218,8 +226,8 @@ impl Engine {
         result.into()
     }
 
-    #[wasm_bindgen(js_name = getModelErrors, typescript_type = "Array<Error> | undefined")]
-    pub fn get_model_errors(&self, model_name: &str) -> Array {
+    #[wasm_bindgen(js_name = getModelErrors)]
+    pub fn get_model_errors(&self, model_name: &str) -> MaybeErrorArray {
         let model = &self.project.models.get(model_name).unwrap();
 
         if model.errors.is_none() {
@@ -637,8 +645,8 @@ impl Engine {
         }
     }
 
-    #[wasm_bindgen(js_name = simVarNames, typescript_type = "Array<string>")]
-    pub fn sim_var_names(&self) -> Array {
+    #[wasm_bindgen(js_name = simVarNames)]
+    pub fn sim_var_names(&self) -> StringArray {
         if self.results.is_none() {
             let empty: Vec<String> = vec![];
             return empty.into_iter().map(JsValue::from).collect();

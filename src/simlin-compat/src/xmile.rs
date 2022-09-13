@@ -1080,7 +1080,7 @@ impl Model {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewType {
     StockFlow,
@@ -1205,9 +1205,8 @@ pub mod view_element {
             datamodel::view_element::LabelSide::Right,
         ];
         for expected in cases {
-            let expected = expected.clone();
-            let actual =
-                datamodel::view_element::LabelSide::from(LabelSide::from(expected.clone()));
+            let expected = *expected;
+            let actual = datamodel::view_element::LabelSide::from(LabelSide::from(expected));
             assert_eq!(expected, actual);
         }
     }
@@ -1619,7 +1618,7 @@ pub mod view_element {
                 },
             ],
         };
-        let actual_v = datamodel::view_element::Flow::from(Flow::from(input_v.clone()));
+        let actual_v = datamodel::view_element::Flow::from(Flow::from(input_v));
         assert_eq!(expected_v, actual_v);
 
         let input_h = datamodel::view_element::Flow {
@@ -1660,16 +1659,16 @@ pub mod view_element {
                 },
             ],
         };
-        let actual_h = datamodel::view_element::Flow::from(Flow::from(input_h.clone()));
+        let actual_h = datamodel::view_element::Flow::from(Flow::from(input_h));
         assert_eq!(expected_h, actual_h);
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
     pub struct AliasLinkEnd {
         pub uid: i32,
     }
 
-    #[derive(Clone, PartialEq, Debug, Serialize)]
+    #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
     pub enum LinkEnd {
         #[serde(rename = "$value")]
         Named(String),
@@ -1787,7 +1786,7 @@ pub mod view_element {
         }
     }
 
-    #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
     pub struct LinkEndContainer {
         #[serde(rename = "$value")]
         pub end: LinkEnd,
@@ -3561,7 +3560,7 @@ fn test_xml_stock_parsing() {
     if let Var::Stock(stock) = stock {
         assert_eq!(expected, stock);
     } else {
-        assert!(false);
+        panic!("not a stock");
     }
 }
 
@@ -3588,7 +3587,7 @@ fn test_xml_gt_parsing() {
     if let Var::Aux(aux) = aux {
         assert_eq!(expected, aux);
     } else {
-        assert!(false);
+        panic!("not an aux");
     }
 }
 
@@ -3632,7 +3631,7 @@ fn test_xml_gf_parsing() {
     if let Var::Aux(aux) = aux {
         assert_eq!(expected, aux);
     } else {
-        assert!(false);
+        panic!("not an aux");
     }
 }
 
@@ -3707,7 +3706,7 @@ fn test_module_parsing() {
         access: Some("output".to_owned()),
     };
 
-    let roundtripped = Module::from(datamodel::Module::from(actual.clone()));
+    let roundtripped = Module::from(datamodel::Module::from(actual));
     assert_eq!(expected_roundtripped, roundtripped);
 }
 

@@ -48,10 +48,10 @@ fn test_loc_basics() {
     assert_eq!(Loc::new(1, 7), a.union(&c));
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct UntypedBuiltinFn<Expr>(pub String, pub Vec<Expr>);
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub enum BuiltinFn<Expr> {
     Lookup(String, Box<Expr>, Loc),
     Abs(Box<Expr>),
