@@ -178,8 +178,8 @@ export const LookupEditor = styled(
       return gf;
     }
 
-    formatValue = (value: string | number | (string | number)[]): string | (string | number)[] => {
-      return typeof value === 'number' ? value.toFixed(3) : value;
+    formatValue = (value: number | string | Array<number | string>): string => {
+      return typeof value === 'number' ? value.toFixed(3) : value.toString();
     };
 
     handleContainerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {

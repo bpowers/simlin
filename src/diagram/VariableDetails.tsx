@@ -194,8 +194,8 @@ export const VariableDetails = styled(
       }
     };
 
-    formatValue = (value: string | number | (string | number)[]): string | (string | number)[] => {
-      return typeof value === 'number' ? value.toFixed(3) : value;
+    formatValue = (value: number | string | Array<number | string>): string => {
+      return typeof value === 'number' ? value.toFixed(3) : value.toString();
     };
 
     // eslint-disable-next-line @typescript-eslint/ban-types
