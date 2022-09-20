@@ -3,6 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 use std::str;
 use std::sync::Mutex;
 
@@ -16,8 +17,8 @@ extern "C" {
         is_compact: bool,
         is_long_name: bool,
         is_as_sectors: bool,
-    ) -> *mut i8;
-    fn xmutil_get_log() -> *const i8;
+    ) -> *mut c_char;
+    fn xmutil_get_log() -> *const c_char;
     fn xmutil_clear_log();
 }
 
