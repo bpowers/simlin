@@ -1718,7 +1718,7 @@ pub mod view_element {
                         value => {
                             let value = String::from_utf8_lossy(value);
                             Ok(Field::Field0(Some(value.to_string())))
-                        },
+                        }
                     }
                 }
             }
@@ -1755,12 +1755,8 @@ pub mod view_element {
                             return Err(__err);
                         }
                     } {
-                        (Field::Field0(None), __variant) => {
-                            Err(DeError::missing_field("$value"))
-                        }
-                        (Field::Field0(Some(name)), __variant) => {
-                            Ok(LinkEnd::Named(name))
-                        }
+                        (Field::Field0(None), __variant) => Err(DeError::missing_field("$value")),
+                        (Field::Field0(Some(name)), __variant) => Ok(LinkEnd::Named(name)),
                         (Field::Field1, __variant) => std::result::Result::map(
                             de::VariantAccess::newtype_variant::<AliasLinkEnd>(__variant),
                             LinkEnd::Alias,
