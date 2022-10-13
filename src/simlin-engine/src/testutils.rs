@@ -36,7 +36,6 @@ pub(crate) fn aux(ident: &str, eqn: &str) -> Variable {
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     let scope = ScopeStage0 {
-        units: &Default::default(),
         models: &Default::default(),
         dimensions: &Default::default(),
     };
@@ -76,7 +75,6 @@ pub(crate) fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str])
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     let scope = ScopeStage0 {
-        units: &Default::default(),
         models: &Default::default(),
         dimensions: &Default::default(),
     };
@@ -159,7 +157,6 @@ pub(crate) fn flow(ident: &str, eqn: &str) -> Variable {
     assert!(var.equation_errors().is_none());
     assert!(implicit_vars.is_empty());
     let scope = ScopeStage0 {
-        units: &Default::default(),
         models: &Default::default(),
         dimensions: &Default::default(),
     };

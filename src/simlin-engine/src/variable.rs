@@ -629,7 +629,6 @@ fn test_identifier_sets() {
         assert_eq!(err.len(), 0);
         assert!(ast.is_some());
         let scope = ScopeStage0 {
-            units: &Default::default(),
             models: &Default::default(),
             dimensions: &Default::default(),
         };

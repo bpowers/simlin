@@ -546,21 +546,13 @@ pub struct Model {
 
 impl Model {
     pub fn get_variable(&self, ident: &str) -> Option<&Variable> {
-        for var in self.variables.iter() {
-            if var.get_ident() == ident {
-                return Some(var);
-            }
-        }
-        None
+        self.variables.iter().find(|&var| var.get_ident() == ident)
     }
 
     pub fn get_variable_mut(&mut self, ident: &str) -> Option<&mut Variable> {
-        for var in self.variables.iter_mut() {
-            if var.get_ident() == ident {
-                return Some(var);
-            }
-        }
-        None
+        self.variables
+            .iter_mut()
+            .find(|var| var.get_ident() == ident)
     }
 }
 

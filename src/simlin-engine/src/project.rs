@@ -107,7 +107,6 @@ impl Project {
 
         let dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
         let scope = ScopeStage0 {
-            units: &units_ctx,
             models: &models,
             dimensions: &dims_ctx,
         };

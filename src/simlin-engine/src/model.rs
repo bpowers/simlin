@@ -14,7 +14,7 @@ use crate::datamodel::{Dimension, UnitMap};
 use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
-use crate::units::{self, Context};
+use crate::units::Context;
 use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
 use crate::vm::StepPart;
 use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
@@ -295,7 +295,7 @@ where
             let filtered_deps: Vec<Ident> = if dep.contains('·') {
                 // if the dependency was e.g. "submodel.output", do a dataflow analysis to
                 // figure out which of the set of (inputs + module) we depend on
-                let parts = (&dep).splitn(2, '·').collect::<Vec<_>>();
+                let parts = dep.splitn(2, '·').collect::<Vec<_>>();
                 let module_ident = parts[0];
                 let output_ident = parts[1];
 
@@ -615,7 +615,7 @@ pub(crate) fn resolve_module_input<'a>(
 
     // TODO: reevaluate if this is really the best option here
     // if the source is a temporary created by the engine, assume it is OK
-    if (&src).starts_with("$⁚") {
+    if src.starts_with("$⁚") {
         return Ok(Some(ModuleInput { src, dst }));
     }
 
@@ -744,8 +744,6 @@ impl ModelStage0 {
 }
 
 pub(crate) struct ScopeStage0<'a> {
-    #[allow(dead_code)]
-    pub units: &'a units::Context,
     pub models: &'a HashMap<Ident, ModelStage0>,
     pub dimensions: &'a DimensionsContext,
 }
@@ -1110,7 +1108,6 @@ fn test_errors() {
         let no_module_inputs: ModuleInputSet = BTreeSet::new();
         let default_instantiation = [no_module_inputs].iter().cloned().collect();
         let scope = ScopeStage0 {
-            units: &Default::default(),
             models: &models,
             dimensions: &Default::default(),
         };
@@ -1242,7 +1239,6 @@ fn test_all_deps() {
         .map(|name| {
             let model_s0 = &x_models[name];
             let scope = ScopeStage0 {
-                units: &Default::default(),
                 models: &x_models,
                 dimensions: &Default::default(),
             };
@@ -1277,7 +1273,6 @@ fn test_all_deps() {
         Ok(Some(mi.clone()))
     });
     let scope = ScopeStage0 {
-        units: &Default::default(),
         models: &x_models,
         dimensions: &Default::default(),
     };
