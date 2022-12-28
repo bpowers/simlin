@@ -889,15 +889,7 @@ impl From<Unit> for datamodel::Unit {
     fn from(unit: Unit) -> Self {
         datamodel::Unit {
             name: unit.name,
-            equation: if let Some(eqn) = unit.eqn {
-                if eqn.is_empty() {
-                    None
-                } else {
-                    Some(eqn)
-                }
-            } else {
-                None
-            },
+            equation: unit.eqn.filter(|eqn| !eqn.is_empty()),
             disabled: matches!(unit.disabled, Some(true)),
             aliases: if let Some(aliases) = unit.alias {
                 aliases

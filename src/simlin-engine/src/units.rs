@@ -240,13 +240,7 @@ fn const_int_eval(ast: &Expr0) -> EquationResult<i32> {
             let result = match op {
                 UnaryOp::Positive => expr,
                 UnaryOp::Negative => -expr,
-                UnaryOp::Not => {
-                    if expr == 0 {
-                        1
-                    } else {
-                        0
-                    }
-                }
+                UnaryOp::Not => i32::from(expr == 0),
             };
             Ok(result)
         }

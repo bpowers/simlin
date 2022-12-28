@@ -2143,7 +2143,7 @@ impl Simulation {
         };
 
         let module_names: Vec<&str> = {
-            let mut module_names: Vec<&str> = modules.iter().map(|(id, _)| id.as_str()).collect();
+            let mut module_names: Vec<&str> = modules.keys().map(|id| id.as_str()).collect();
             module_names.sort_unstable();
 
             let mut sorted_names = vec![main_model_name];

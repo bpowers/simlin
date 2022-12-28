@@ -183,7 +183,7 @@ fn main() {
 
     if args.is_equations {
         let mut output_file =
-            File::create(&args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
+            File::create(args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
 
         let project = Rc::new(Project::from(project));
         for (model_name, model) in project.models.iter().filter(|(_, model)| !model.implicit) {
@@ -290,7 +290,7 @@ fn main() {
         }
 
         let mut output_file =
-            File::create(&args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
+            File::create(args.output.unwrap_or_else(|| "/dev/stdout".to_string())).unwrap();
         output_file.write_all(&buf).unwrap();
     } else if args.is_debug {
         if args.reference.is_none() {
