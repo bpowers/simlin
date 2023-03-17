@@ -655,7 +655,6 @@ impl Engine {
         results
             .offsets
             .keys()
-            .into_iter()
             .map(JsValue::from)
             .collect()
     }

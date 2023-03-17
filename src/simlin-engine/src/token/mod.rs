@@ -153,7 +153,7 @@ impl<'input> Lexer<'input> {
         let tok = KEYWORDS
             .iter()
             .filter(|&&(w, _)| w == lower_word)
-            .map(|&(_, ref t)| *t)
+            .map(|(_, t)| *t)
             .next()
             .unwrap_or(Ident(word));
 
@@ -292,7 +292,7 @@ fn is_number_start(c: char) -> bool {
 }
 
 fn is_digit(c: char) -> bool {
-    ('0'..='9').contains(&c)
+    c.is_ascii_digit()
 }
 
 fn is_identifier_start(c: char, is_units: bool) -> bool {
