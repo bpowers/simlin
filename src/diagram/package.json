@@ -40,7 +40,7 @@
   },
   "resolutions": {
     "@types/slate*/**/immutable": "4.0.0",
-    "immer": "9.0.15"
+    "immer": "9.0.19"
   },
   "devDependencies": {
     "@babel/core": "^7.13.1",
