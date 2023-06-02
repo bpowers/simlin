@@ -16,7 +16,7 @@ wasm = ["wasm-bindgen"]
 lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
-lalrpop-util = "0.19"
+lalrpop-util = "0.20"
 prost = "0.11"
 float-cmp = "0.9"
 ordered-float = "3"
@@ -29,5 +29,5 @@ getrandom = { version = "0.2", features = [ "js" ] }
 rand = "0.8"
 
 [build-dependencies]
-lalrpop = "0.19"
+lalrpop = "0.20"
 prost-build = "0.11"

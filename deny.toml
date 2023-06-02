@@ -3,9 +3,7 @@ vulnerability = "deny"
 unmaintained = "deny"
 yanked = "deny"
 notice = "deny"
-ignore = [
-    "RUSTSEC-2021-0145",
-]
+ignore = []
 
 [licenses]
 unlicensed = "deny"
@@ -26,6 +24,19 @@ confidence-threshold = 0.9
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+skip = [
+    { name = "windows_x86_64_msvc", version = "0.42.2" },
+    { name = "windows_x86_64_gnullvm", version = "0.42.2" },
+    { name = "windows_x86_64_gnu", version = "0.42.2" },
+    { name = "windows_i686_msvc", version = "0.42.2" },
+    { name = "windows_i686_gnu", version = "0.42.2" },
+    { name = "windows_aarch64_msvc", version = "0.42.2" },
+    { name = "windows_aarch64_gnullvm", version = "0.42.2" },
+    { name = "windows-targets", version = "0.42.2" },
+    { name = "windows-sys", version = "0.45" },
+    { name = "syn", version = "1.0.109" },
+    { name = "redox_syscall", version = "0.2.16" },
+]
 
 [sources]
 unknown-registry = "deny"

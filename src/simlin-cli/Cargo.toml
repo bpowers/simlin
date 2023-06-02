@@ -10,6 +10,6 @@ name = "simlin"
 path = "src/main.rs"
 
 [dependencies]
-pico-args = "0.4"
+pico-args = "0.5"
 stringreader = "0.1"
 simlin-compat = { version = "0.1", path = "../simlin-compat", features=["vensim"] }

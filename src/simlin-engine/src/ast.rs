@@ -86,7 +86,7 @@ impl Expr0 {
                         end: (l + 1) as u16,
                         code: InvalidToken,
                     },
-                    ParseError::UnrecognizedEOF {
+                    ParseError::UnrecognizedEof {
                         location: l,
                         expected: _e,
                     } => {
