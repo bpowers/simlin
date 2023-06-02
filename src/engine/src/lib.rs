@@ -652,11 +652,7 @@ impl Engine {
             return empty.into_iter().map(JsValue::from).collect();
         }
         let results = self.results.as_ref().unwrap();
-        results
-            .offsets
-            .keys()
-            .map(JsValue::from)
-            .collect()
+        results.offsets.keys().map(JsValue::from).collect()
     }
 
     #[wasm_bindgen(js_name = simSeries)]
