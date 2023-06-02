@@ -13,6 +13,7 @@ Model::Model(void) {
   dLevel = dRate = dAux = NULL;
   bAsSectors = false;
   iIntegrationType = Integration_Type_EULER;
+  bLetterPolarity = false;
 }
 
 Model::~Model(void) {
@@ -104,7 +105,7 @@ bool Model::ValidatePlaceholderVars(void) {
 }
 
 bool Model::SetupVariableStates(int pass /* 0 just assign, 1 determine sizes, 2 pass pointers for computation*/) {
-  ContextInfo info;
+  ContextInfo info(NULL);
   info.pSymbolNameSpace = &mSymbolNameSpace;
   SymbolNameSpace::HashTable *ht = mSymbolNameSpace.GetHashTable();
   info.iComputeType = pass;  // flag to skip empty or count sizes
@@ -203,7 +204,7 @@ bool Model::OrderEquations(ContextInfo *info, bool tonly) {
 }
 
 bool Model::AnalyzeEquations(void) {
-  ContextInfo info;
+  ContextInfo info(NULL);
 
   ClearCompEquations();  // will also reset comp flag and delete placeholder vars
   /* ValidatePlaceholderVars will create the variables required for functions that either
@@ -260,7 +261,7 @@ bool Model::AnalyzeEquations(void) {
 }
 
 bool Model::Simulate(void) {
-  ContextInfo info;
+  ContextInfo info(NULL);
   try {
     double t, s, e, dt;
     int i, n;
@@ -344,7 +345,7 @@ bool Model::Simulate(void) {
 }
 
 bool Model::OutputComputable(bool wantshort) {
-  ContextInfo info;
+  ContextInfo info(NULL);
   try {
     if (wantshort)
       GenerateShortNames();
@@ -400,7 +401,11 @@ bool Model::MarkVariableTypes(SymbolNameSpace *ns) {
     //
     for (Variable *var : vars) {
       var->PurgeAFOEq();
-      var->MarkFlows(ns);  // may change number of entries so can't be in above loop
+      var->MarkTypes(ns);  // may change number of entries so can't be in above loop
+    }
+    // repeat this for flows after all stocks marked
+    for (Variable *var : vars) {
+      var->MarkStockFlows(ns);  // may change number of entries so can't be in above loop
     }
     // don't do this - we have broken the allocation setup mSymbolNameSpace.ConfirmAllAllocations();
   } catch (...) {
@@ -613,7 +618,7 @@ std::vector<Variable *> Model::GetVariables(SymbolNameSpace *ns) {
   return vars;
 }
 
-std::string Model::PrintXMILE(bool isCompact, std::vector<std::string> &errs) {
-  XMILEGenerator generator(this);
+std::string Model::PrintXMILE(bool isCompact, std::vector<std::string> &errs, double xscale, double yscale) {
+  XMILEGenerator generator(this, xscale, yscale);
   return generator.Print(isCompact, errs, bAsSectors);
 }

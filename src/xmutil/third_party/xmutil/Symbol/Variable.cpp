@@ -32,10 +32,44 @@ Variable::~Variable(void) {
   }
 }
 
+void Variable::SetViewOfCauses() {
+  if (_view == NULL || pVariableContent == NULL || _unwanted)
+    return;  // nothing useful to do with this
+  std::vector<Equation *> eqns = pVariableContent->GetAllEquations();
+  for (Equation *eqn : eqns) {
+    std::vector<Variable *> vars;
+    eqn->GetVarsUsed(vars);
+    for (Variable *var : vars) {
+      if (var->_view == NULL) {
+        var->_view = _view;
+        var->SetViewOfCauses();  // recur
+      }
+    }
+  }
+}
+
+void Variable::SetViewToCause(int depth) {
+  if (_view != NULL || pVariableContent == NULL || _unwanted || depth == 0)
+    return;  // nothing useful to do with this
+  depth--;
+  std::vector<Equation *> eqns = pVariableContent->GetAllEquations();
+  for (Equation *eqn : eqns) {
+    std::vector<Variable *> vars;
+    eqn->GetVarsUsed(vars);
+    for (Variable *var : vars) {
+      var->SetViewToCause(depth);  // recur
+      if (var->_view != NULL) {
+        _view = var->_view;
+        return;
+      }
+    }
+  }
+}
+
 std::string Variable::GetAlternateName(void) {
   std::string name = pVariableContent ? pVariableContent->GetAlternateName() : GetName();
   // strip out surrounding quotes if they exist - we want to deliver the name without them
-  if (name.size() > 2 && name[0] == '\"' && name.back() == '\"')
+  if (name.size() > 2 && name[0] == '\"' && name.back() == '\"' && name.find('.') == std::string::npos)
     name = name.substr(1, name.size() - 2);
   return name;
 }
@@ -56,7 +90,7 @@ void Variable::PurgeAFOEq() {
   }
 }
 
-XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
+XMILE_Type Variable::MarkTypes(SymbolNameSpace *sns) {
   if (!pVariableContent)
     return mVariableType;
 
@@ -69,7 +103,7 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
 
   /* if the equations are INTEG this is a stock and we need to validate flows - if we need to make
      up flows it has to be done here so that all the equations get the same net flow name
- we make up flows if the active part of INTEG uses something other then +/- of flows or
+     we make up flows if the active part of INTEG uses something other then +/- of flows or
      if there are multiple equations that don't match (even if they all use +/- of flows)
 
      */
@@ -124,7 +158,7 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
           }
           // now reenter with new equations
           pVariableContent->SetAllEquations(equations);
-          return MarkFlows(sns);
+          return MarkTypes(sns);
         }
       }
     }
@@ -165,10 +199,20 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
     return mVariableType;
   }
   mVariableType = XMILE_Type_STOCK;
+  return mVariableType;
+}
 
+void Variable::MarkStockFlows(SymbolNameSpace *sns) {
   // second pass, get the flow lists for everyone -- NOTE there is a bug in this code
   // because we don't check subscripts on the flows list so they may match even though
   // they shouldn't eg STOCK[A]=INTEG(FLOW[B],0) STOCK[B]=INTEG(FLOW[A],0)
+
+  if (mVariableType != XMILE_Type_STOCK)
+    return;
+  std::vector<Equation *> equations = pVariableContent->GetAllEquations();
+  if (equations.empty())
+    return;
+
   std::vector<FlowList> flow_lists;
   flow_lists.resize(equations.size());
   size_t i = 0;
@@ -190,8 +234,12 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
       v->SetVariableType(XMILE_Type_FLOW);
       mOutflows.push_back(v);
     }
-    return mVariableType;  // done
+    return;  // done
   }
+
+  // if no active causes we don't need flows
+  if (flow_lists.size() == 1 && flow_lists[0].Empty())
+    return;
 
   // mismatched for invalid flow equations - create a flow variable and add it to the model
   std::string basename = this->GetName() + " net flow";
@@ -219,8 +267,6 @@ XMILE_Type Variable::MarkFlows(SymbolNameSpace *sns) {
     i++;
   }
   // don't do this - we get some memory leakage but risk a crash otherwise v->MarkGoodAlloc();
-
-  return mVariableType;
 }
 
 void VariableContent::Clear(void) {
@@ -264,6 +310,13 @@ void Variable::AddEq(Equation *eq) {
 }
 
 void Variable::OutputComputable(ContextInfo *info) {
+  if (info->LHS() == this) {
+    if (info->SelfIsPrevious())
+      *info << "PREVIOUS(SELF, NAN)";
+    else
+      *info << "SELF";
+    return;
+  }
   if (this->mVariableType == XMILE_Type_ARRAY) {
     Symbol *s = info->GetLHSSpecific(this);
     if (s && s != this) {

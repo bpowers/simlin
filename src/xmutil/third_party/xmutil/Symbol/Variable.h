@@ -193,6 +193,8 @@ public:
   void SetView(View *view) {
     _view = view;
   }
+  void SetViewOfCauses();
+  void SetViewToCause(int depth);
 
   void SetComment(const std::string &com) {
     _comment = com;
@@ -256,7 +258,8 @@ public:
   std::string GetAlternateName(void);
 
   void PurgeAFOEq();
-  XMILE_Type MarkFlows(SymbolNameSpace *sns);  // mark the variableType of inflows/outflows
+  XMILE_Type MarkTypes(SymbolNameSpace *sns);  // mark the variableType of inflows/outflows
+  void MarkStockFlows(SymbolNameSpace *sns);   // mark the variableType of inflows/outflows
   XMILE_Type VariableType() {
     return mVariableType;
   }

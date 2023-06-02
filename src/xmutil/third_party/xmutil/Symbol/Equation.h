@@ -26,7 +26,7 @@ public:
   void Execute(ContextInfo *info);
   void OutputComputable(ContextInfo *info);
   void CheckPlaceholderVars(Model *m);
-  std::string RHSFormattedXMILE(const std::vector<Symbol *> &subs, const std::vector<Symbol *> &dims,
+  std::string RHSFormattedXMILE(Variable *lhs, const std::vector<Symbol *> &subs, const std::vector<Symbol *> &dims,
                                 bool init);  // need a_b*c
   bool IsActiveInit();                       // true only for active
 private:

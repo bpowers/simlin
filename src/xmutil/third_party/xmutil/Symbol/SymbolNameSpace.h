@@ -34,9 +34,9 @@ public:
   inline HashTable *GetHashTable(void) {
     return &mHashTable;
   }
+  static std::string *ToLowerSpace(const std::string &name);
 
 private:
-  std::string *ToLowerSpace(const std::string &name);
   std::set<SymbolTableBase *> sUnconfirmedAllocations;
   HashTable mHashTable;
 };

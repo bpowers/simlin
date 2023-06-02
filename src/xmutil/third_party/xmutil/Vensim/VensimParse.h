@@ -60,6 +60,12 @@ public:
   void MacroExpression(Variable *macro, ExpressionList *margs);
   void MacroEnd();
 
+  double Xratio() const {
+    return _xratio;
+  }
+  double Yratio() const {
+    return _yratio;
+  }
   VensimLex &Lexer() {
     return mVensimLex;
   }
@@ -74,6 +80,9 @@ public:
     return bLongName;
   }
 
+  bool LetterPolarity() const;
+  void SetLetterPolarity(bool set);
+
 private:
   bool FindNextEq(bool want_comment);
   Model *_model;
@@ -83,6 +92,8 @@ private:
   SymbolNameSpace *pSymbolNameSpace;
   SymbolNameSpace *pMainSymbolNameSpace;
   Variable *pActiveVar;
+  double _xratio;
+  double _yratio;
   bool mInMacro;
   bool bLongName;
   std::vector<MacroFunction *> mMacroFunctions;

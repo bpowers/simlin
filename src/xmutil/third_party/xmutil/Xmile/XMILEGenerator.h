@@ -15,7 +15,7 @@ class Variable;
 
 class XMILEGenerator {
 public:
-  XMILEGenerator(Model *model);
+  XMILEGenerator(Model *model, double xtrario, double yratio);
 
   std::string Print(bool is_compact, std::vector<std::string> &errs, bool as_sectors);
 
@@ -24,7 +24,8 @@ protected:
   void generateSimSpecs(tinyxml2::XMLElement *element, std::vector<std::string> &errs);
   void generateModelUnits(tinyxml2::XMLElement *element, std::vector<std::string> &errs);
   void generateDimensions(tinyxml2::XMLElement *element, std::vector<std::string> &errs);
-  void generateModelAsSectors(tinyxml2::XMLElement *element, std::vector<std::string> &errs, SymbolNameSpace *ns);
+  void generateModelAsSectors(tinyxml2::XMLElement *element, std::vector<std::string> &errs, SymbolNameSpace *ns,
+                              bool wantDiagram);
   void generateEquations(std::set<Variable *> &included, tinyxml2::XMLDocument *doc, tinyxml2::XMLElement *variables);
   void generateModelAsModules(tinyxml2::XMLElement *element, std::vector<std::string> &errs, SymbolNameSpace *ns);
   void generateSectorViews(tinyxml2::XMLElement *views, tinyxml2::XMLElement *vars, std::vector<std::string> &errs,
@@ -34,6 +35,8 @@ protected:
 
 private:
   Model *_model;
+  double _xratio;
+  double _yratio;
 };
 
 #endif

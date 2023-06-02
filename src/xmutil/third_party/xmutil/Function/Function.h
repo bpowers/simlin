@@ -142,7 +142,7 @@ private:
     bool AsKeyword(void) {                                    \
       return true;                                            \
     }                                                         \
-  };
+  }
 
 #define FSubclassStart(name, xname, narg, cname)              \
   class name : public Function {                              \
@@ -160,8 +160,7 @@ private:
 
 #define FSubclass(name, xname, narg, cname) \
   FSubclassStart(name, xname, narg, cname)  \
-  }                                         \
-  ;
+  }
 
 #define DFSubclassStart(name, xname, narg, cname)              \
   class name : public DFunction {                              \
@@ -179,8 +178,7 @@ private:
 
 #define DFSubclass(name, xname, narg, cname) \
   DFSubclassStart(name, xname, narg, cname)  \
-  }                                          \
-  ;
+  }
 
 #define FSubclassMemoryStart(name, xname, narg, actarg, iniarg, cnamea, cnamei)         \
   class name : public FunctionMemoryBase {                                              \
@@ -189,10 +187,10 @@ private:
     }                                                                                   \
     ~name(void) {                                                                       \
     }                                                                                   \
-    std::string ComputableName(void) override {                                         \
+    virtual std::string ComputableName(void) override {                                 \
       return cnamea;                                                                    \
     }                                                                                   \
-    std::string ComputableNameInit(void) override {                                     \
+    virtual std::string ComputableNameInit(void) override {                             \
       return cnamei;                                                                    \
     }                                                                                   \
                                                                                         \
@@ -225,19 +223,25 @@ private:
   }                                             \
   ;
 
-FSubclass(FunctionAbs, "ABS", 1, "ABS") FSubclass(FunctionExp, "EXP", 1, "EXP")
-    FSubclass(FunctionSqrt, "SQRT", 1, "SQRT")
+FSubclass(FunctionAbs, "ABS", 1, "ABS");
+FSubclass(FunctionExp, "EXP", 1, "EXP");
+FSubclass(FunctionSqrt, "SQRT", 1, "SQRT");
 
-        FSubclass(FunctionCosine, "COS", 1, "COS") FSubclass(FunctionTangent, "TAN", 1, "TAN")
-            FSubclass(FunctionSine, "SIN", 1, "SIN") FSubclass(FunctionArcCosine, "ARCCOS", 1, "ARCCOS")
-                FSubclass(FunctionArcSine, "ARCSIN", 1, "ARCSIN") FSubclass(FunctionArcTangent, "ARCTAN", 1, "ARCTAN")
-                    FSubclass(FunctionInterger, "INTEGER", 1, "INT")
+FSubclass(FunctionCosine, "COS", 1, "COS");
+FSubclass(FunctionTangent, "TAN", 1, "TAN");
+FSubclass(FunctionSine, "SIN", 1, "SIN");
+FSubclass(FunctionArcCosine, "ARCCOS", 1, "ARCCOS");
+FSubclass(FunctionArcSine, "ARCSIN", 1, "ARCSIN");
+FSubclass(FunctionArcTangent, "ARCTAN", 1, "ARCTAN");
+FSubclass(FunctionInterger, "INTEGER", 1, "INT");
 
-                        FSubclass(FunctionMax, "MAX", 2, "MAX") FSubclass(FunctionMin, "MIN", 2, "MIN")
-                            FSubclass(FunctionZidz, "ZIDZ", 2, "SAFEDIV") FSubclass(FunctionXidz, "XIDZ", 3, "SAFEDIV")
-                                FSubclass(FunctionLookupInv, "LOOKUP INVERT", 2, "LOOKUPINV")
-                                    FSubclass(FunctionWithLookup, "WITH LOOKUP", 3, "WITH_LOOKUP")
-                                        FSubclass(FunctionSum, "SUM", 1, "SUM");
+FSubclass(FunctionMax, "MAX", 2, "MAX");
+FSubclass(FunctionMin, "MIN", 2, "MIN");
+FSubclass(FunctionZidz, "ZIDZ", 2, "SAFEDIV");
+FSubclass(FunctionXidz, "XIDZ", 3, "SAFEDIV");
+FSubclass(FunctionLookupInv, "LOOKUP INVERT", 2, "LOOKUPINV");
+FSubclass(FunctionWithLookup, "WITH LOOKUP", 3, "WITH_LOOKUP");
+FSubclass(FunctionSum, "SUM", 1, "SUM");
 FSubclass(FunctionProd, "PROD", 1, "PROD");
 FSubclass(FunctionVMax, "VMAX", 1, "MAX");
 FSubclass(FunctionVMin, "VMIN", 1, "MIN");
@@ -247,22 +251,29 @@ FSubclass(FunctionVectorSortOrder, "VECTOR SORT ORDER", 2, "VECTOR SORT ORDER");
 FSubclass(FunctionGame, "GAME", 1, "");  // don't need this
 FSubclass(FunctionRandom01, "RANDOM 0 1", 0, "UNIFORM(0,1)");
 FSubclass(FunctionRandomUniform, "RANDOM UNIFORM", 3, "UNIFORM");
+FSubclass(FunctionRandomPink, "RANDOM PINK NOISE", 4, "NORMALPINK");
 
 FSubclass(FunctionNAN, "A FUNCTION OF", -1, "NAN");
 
 // actually memory but no init - or init - does not matter for translation
-DFSubclass(FunctionSmooth, "SMOOTH", 2, "SMTH1") DFSubclass(FunctionSmoothI, "SMOOTHI", 3, "SMTH1")
-    DFSubclass(FunctionSmooth3, "SMOOTH3", 2, "SMTH3") DFSubclass(FunctionSmooth3I, "SMOOTH3I", 3, "SMTH3")
-        DFSubclass(FunctionTrend, "TREND", 3, "TREND") DFSubclass(FunctionDelay1, "DELAY1", 2, "DELAY1")
-            DFSubclass(FunctionDelay1I, "DELAY1I", 3, "DELAY1") DFSubclass(FunctionDelay3, "DELAY3", 2, "DELAY3")
-                DFSubclass(FunctionDelay3I, "DELAY3I", 3, "DELAY3") DFSubclass(FunctionDelay, "DELAY FIXED", 3, "DELAY")
-                    DFSubclass(FunctionNPV, "NPV", 4, "NPV")
+DFSubclass(FunctionSmooth, "SMOOTH", 2, "SMTH1");
+DFSubclass(FunctionSmoothI, "SMOOTHI", 3, "SMTH1");
+DFSubclass(FunctionSmooth3, "SMOOTH3", 2, "SMTH3");
+DFSubclass(FunctionSmooth3I, "SMOOTH3I", 3, "SMTH3");
+DFSubclass(FunctionTrend, "TREND", 3, "TREND");
+DFSubclass(FunctionFrcst, "FORECAST", 3, "FORCST");
+DFSubclass(FunctionDelay1, "DELAY1", 2, "DELAY1");
+DFSubclass(FunctionDelay1I, "DELAY1I", 3, "DELAY1");
+DFSubclass(FunctionDelay3, "DELAY3", 2, "DELAY3");
+DFSubclass(FunctionDelay3I, "DELAY3I", 3, "DELAY3");
+DFSubclass(FunctionDelay, "DELAY FIXED", 3, "DELAY");
+DFSubclass(FunctionNPV, "NPV", 4, "NPV");
 
-    // done as macros
-    FSubclass(FunctionDelayConveyor, "DELAY CONVEYOR", 6, "DELAY_CONVEYOR")
-    // - this one is fake - return NaN
-    FSubclass(FunctionVectorReorder, "VECTOR REORDER", 2, "VECTOR_REORDER") class FunctionVectorLookup
-    : public Function {
+// done as macros
+FSubclass(FunctionDelayConveyor, "DELAY CONVEYOR", 6, "DELAY_CONVEYOR");
+// - this one is fake - return NaN
+FSubclass(FunctionVectorReorder, "VECTOR REORDER", 2, "VECTOR_REORDER");
+class FunctionVectorLookup : public Function {
 public:
   FunctionVectorLookup(SymbolNameSpace *sns) : Function(sns, "VECTOR LOOKUP", 5) {
   }
@@ -276,22 +287,26 @@ public:
 private:
 };
 FSubclass(FunctionElmCount, "ELMCOUNT", 1, "SIZE");
-FSubclass(FunctionModulo, "MODULO", 2, "MODULO")
-    FSubclass(FunctionGetDataAtTime, "GET DATA AT TIME", 2, "GET_DATA_AT_TIME")
-        FSubclass(FunctionGetDataLastTime, "GET DATA LAST TIME", 1, "GET_DATA_LAST_TIME")
-            FSubclass(FunctionLookupArea, "LOOKUP AREA", 3, "LOOKUP_AREA")
-                FSubclass(FunctionLookupExtrapolate, "LOOKUP EXTRAPOLATE", 2, "LOOKUP")  // changes the graphical
-    FSubclassStart(FunctionTimeBase, "TIME BASE", 2, "TIME_BASE") virtual void OutputComputable(ContextInfo *info,
-                                                                                                ExpressionList *arg);
+FSubclass(FunctionModulo, "MODULO", 2, "MODULO");
+FSubclass(FunctionGetDataAtTime, "GET DATA AT TIME", 2, "GET_DATA_AT_TIME");
+FSubclass(FunctionGetDataLastTime, "GET DATA LAST TIME", 1, "GET_DATA_LAST_TIME");
+FSubclass(FunctionLookupArea, "LOOKUP AREA", 3, "LOOKUP_AREA");
+FSubclass(FunctionLookupExtrapolate, "LOOKUP EXTRAPOLATE", 2, "LOOKUP");  // changes the graphical
+FSubclassStart(FunctionTimeBase, "TIME BASE", 2, "TIME_BASE");
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
 }
 ;
 
-FSubclassStart(FunctionDelayN, "DELAY N", 4, "DELAYN") public
-    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+FSubclassStart(FunctionDelayN, "DELAY N", 4, "DELAYN");
+
+public:
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
 }
 ;
-FSubclassStart(FunctionSmoothN, "SMOOTH N", 4, "SMTHN") public
-    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+FSubclassStart(FunctionSmoothN, "SMOOTH N", 4, "SMTHN");
+
+public:
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
 }
 ;
 
@@ -302,30 +317,32 @@ FSubclassMemory(FunctionInteg, "INTEG", 2, 0b10, 0b01, "integ_active", "integ_in
 }
 }
 ;
-FSubclass(FunctionInitial, "INITIAL", 1, "INIT") FSubclass(FunctionReInitial, "REINITIAL", 1, "INIT")
+FSubclass(FunctionInitial, "INITIAL", 1, "INIT");
+FSubclass(FunctionReInitial, "REINITIAL", 1, "INIT");
 
-    FSubclassTime(FunctionRamp, "RAMP", 3, "RAMP") FSubclass(FunctionLn, "LN", 1, "LN")
-        FSubclassTime(FunctionStep, "STEP", 2, "step")
+FSubclassTime(FunctionRamp, "RAMP", 3, "RAMP");
+FSubclass(FunctionLn, "LN", 1, "LN");
+FSubclassTime(FunctionStep, "STEP", 2, "step");
 
-            FSubclassKeyword(FunctionTabbedArray, "TABBED ARRAY", 1)
+FSubclassKeyword(FunctionTabbedArray, "TABBED ARRAY", 1);
 
-    // functions that will never translate - but easier to catch error on other side
-    FSubclass(FunctionGetDirectData, "GET DIRECT DATA", 4, "GET_DIRECT_DATA")
-        FSubclass(FunctionGetDataMean, "GET DATA MEAN", 3, "GET_DATA_MEAN")
+// functions that will never translate - but easier to catch error on other side
+FSubclass(FunctionGetDirectData, "GET DIRECT DATA", 4, "GET_DIRECT_DATA");
+FSubclass(FunctionGetDataMean, "GET DATA MEAN", 3, "GET_DATA_MEAN");
 
-    /*
-    class FunctionMin :
-       public Function
-    {
-    public :
-       FunctionMin(SymbolNameSpace *sns) : Function(sal,"MIN",2) { ; }
-       ~FunctionMin(void) { }
-       inline double Eval(Expression *,ExpressionList *arg) ;
-    } ;
+/*
+class FunctionMin :
+   public Function
+{
+public :
+   FunctionMin(SymbolNameSpace *sns) : Function(sal,"MIN",2) { ; }
+   ~FunctionMin(void) { }
+   inline double Eval(Expression *,ExpressionList *arg) ;
+} ;
 
-    */
+*/
 
-    class FunctionSampleIfTrue : public Function {
+class FunctionSampleIfTrue : public Function {
 public:
   FunctionSampleIfTrue(SymbolNameSpace *sns) : Function(sns, "SAMPLE IF TRUE", 3) {
   }

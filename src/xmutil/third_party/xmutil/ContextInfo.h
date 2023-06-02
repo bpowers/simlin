@@ -29,13 +29,16 @@ class Model;
 class SymbolNameSpace;
 class Equation;  // forward
 class Symbol;
+class Variable;
 
 class ContextInfo : public std::ostringstream {
 public:
-  ContextInfo(void) {
+  ContextInfo(Variable *lhs) {
+    pLHS = lhs;
     iComputeType = 0;
     bInitEqn = false;
     bInSubList = false;
+    bSelfIsPrevious = false;
     pEquations = NULL;
   }
   ~ContextInfo(void) {
@@ -105,6 +108,15 @@ public:
   void SetInSubList(bool set) {
     bInSubList = set;
   }
+  bool SelfIsPrevious() const {
+    return bSelfIsPrevious;
+  }
+  void SetSelfIsPrevious(bool set) {
+    bSelfIsPrevious = set;
+  }
+  Variable *LHS() {
+    return pLHS;
+  }
 
 private:
   double dTime, dDT;
@@ -115,10 +127,12 @@ private:
   const std::vector<Symbol *> *pLHSElmsGeneric;   // left hand side current settings of subscripts
   const std::vector<Symbol *> *pLHSElmsSpecific;  // left hand side current settings of subscripts
   std::vector<Equation *> *pEquations;            /* passed from model - active or initial or... */
-  int iComputeType;                               // CF_... as above
-  unsigned char cDynamicDependencyFlag;           // DDF_... as above
-  bool bInitEqn;                                  // for xmile
+  Variable *pLHS;
+  int iComputeType;                      // CF_... as above
+  unsigned char cDynamicDependencyFlag;  // DDF_... as above
+  bool bInitEqn;                         // for xmile
   bool bInSubList;
+  bool bSelfIsPrevious;
 };
 
 #endif

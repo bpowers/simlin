@@ -1,8 +1,8 @@
 // XMUtil.cpp : Defines the entry point for the console application.
 //
-#include <cstring>
-
 #include "XMUtil.h"
+
+#include <cstring>
 
 #include "Model.h"
 #include "Unicode.h"
@@ -15,8 +15,8 @@
 #endif
 
 std::string StringFromDouble(double val) {
-  char buf[128];
-  sprintf(buf, "%g", val);
+  char buf[128] = {0};
+  snprintf(buf, 128, "%g", val);
   return std::string(buf);
 }
 
@@ -78,7 +78,9 @@ double AngleFromPoints(double startx, double starty, double pointx, double point
     thetax = 270;
   else
     thetax = 90;
-  // straight line connector- use this is geometry fails
+  // straight line connector- use this if geometry fails
+  if (pointx == 0 && pointy == 0)
+    return thetax;
 
   // first take the start and end point - the center of the circle is on a line perpindicular
   // to the line between them and intersects it at its midpoint
@@ -150,7 +152,7 @@ double AngleFromPoints(double startx, double starty, double pointx, double point
   // arc tan of slope perpeindicular to center start line
   if (abs(centery - starty) < 1e-6) {
     if (pointy > starty)
-      return 99;
+      return 90;
     return 270;
   }
   if (abs(centerx - startx) < 1e-6) {
@@ -161,6 +163,7 @@ double AngleFromPoints(double startx, double starty, double pointx, double point
   thetax = atan2(-(starty - centery), (startx - centerx)) * 180 / 3.14159265358979;
   // this needs to go through the point - so add or subtract 90 to get o
   // find the angle closest to the angle from start to point
+
   double direct = atan2(-(pointy - starty), (pointx - startx)) * 180 / 3.14159265358979;
   double diff1 = direct - (thetax - 90);
   while (diff1 < 0)
@@ -258,6 +261,8 @@ char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, 
   }
 
   // parse the input
+  double xscale = 1.0;
+  double yscale = 1.0;
   {
     VensimParse vp{&m};
     vp.SetLongName(isLongName);
@@ -265,6 +270,8 @@ char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, 
     if (!vp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
       return nullptr;
     }
+    xscale = vp.Xratio();
+    yscale = vp.Yratio();
   }
 
   // if(m->AnalyzeEquations()) {
@@ -295,7 +302,7 @@ char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, 
 
   // TODO: expose errs
   std::vector<std::string> errs;
-  std::string xmile = m.PrintXMILE(isCompact, errs);
+  std::string xmile = m.PrintXMILE(isCompact, errs, xscale, yscale);
 
   if (errs.size() != 0) {
     return nullptr;

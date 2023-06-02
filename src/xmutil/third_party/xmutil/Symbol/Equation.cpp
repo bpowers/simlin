@@ -29,11 +29,11 @@ void Equation::CheckPlaceholderVars(Model *m) {
   pExpression->CheckPlaceholderVars(m, true);
 }
 
-std::string Equation::RHSFormattedXMILE(const std::vector<Symbol *> &subs, const std::vector<Symbol *> &dims,
-                                        bool init) {
+std::string Equation::RHSFormattedXMILE(Variable *lhs, const std::vector<Symbol *> &subs,
+                                        const std::vector<Symbol *> &dims, bool init) {
   if (!pExpression)
     return "{empty}";
-  ContextInfo info;
+  ContextInfo info(lhs);
   if (init)
     info.SetInitEqn(true);
 

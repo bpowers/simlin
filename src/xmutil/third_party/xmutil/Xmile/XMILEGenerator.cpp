@@ -7,8 +7,10 @@
 #include "../Vensim/VensimView.h"
 #include "../XMUtil.h"
 
-XMILEGenerator::XMILEGenerator(Model *model) {
+XMILEGenerator::XMILEGenerator(Model *model, double xratio, double yratio) {
   _model = model;
+  _xratio = xratio;
+  _yratio = yratio;
 }
 
 std::string XMILEGenerator::Print(bool is_compact, std::vector<std::string> &errs, bool as_sectors) {
@@ -44,7 +46,7 @@ std::string XMILEGenerator::Print(bool is_compact, std::vector<std::string> &err
   _model->MakeViewNamesUnique();
   if (as_sectors) {
     tinyxml2::XMLElement *model = doc.NewElement("model");
-    this->generateModelAsSectors(model, errs, NULL);
+    this->generateModelAsSectors(model, errs, NULL, true);
     root->InsertEndChild(model);
   } else
     this->generateModelAsModules(root, errs, NULL);
@@ -65,12 +67,12 @@ std::string XMILEGenerator::Print(bool is_compact, std::vector<std::string> &err
       tinyxml2::XMLElement *xparm = doc.NewElement("parm");
       macro->InsertEndChild(xparm);
       Expression *pexp = args->GetExp(i);
-      ContextInfo info;
+      ContextInfo info(NULL);
       pexp->OutputComputable(&info);
       xparm->SetText(info.str().c_str());
     }
 
-    this->generateModelAsSectors(macro, errs, mf->NameSpace());  // not really a secotr - only a root module here
+    this->generateModelAsSectors(macro, errs, mf->NameSpace(), false);  // not really a secotr - only a root module here
     root->InsertEndChild(macro);
   }
 
@@ -149,8 +151,8 @@ void XMILEGenerator::generateSimSpecs(tinyxml2::XMLElement *element, std::vector
 
   if (speed > 0) {
     double duration = (stop - start) / saveper * speed;
-    char dur[32];
-    sprintf(dur, "%g", duration);
+    char dur[32] = {0};
+    snprintf(dur, 32, "%g", duration);
     element->SetAttribute("isee:sim_duration", dur);
   } else
     element->SetAttribute("isee:sim_duration", "0");
@@ -272,7 +274,7 @@ void XMILEGenerator::generateDimensions(tinyxml2::XMLElement *element, std::vect
 
 // first pass if flat - we probably want to do this differently when we break up into modules
 void XMILEGenerator::generateModelAsSectors(tinyxml2::XMLElement *element, std::vector<std::string> &errs,
-                                            SymbolNameSpace *ns) {
+                                            SymbolNameSpace *ns, bool want_diagram) {
   tinyxml2::XMLDocument *doc = element->GetDocument();
   tinyxml2::XMLElement *variables = doc->NewElement("variables");
   element->InsertEndChild(variables);
@@ -378,7 +380,7 @@ void XMILEGenerator::generateModelAsSectors(tinyxml2::XMLElement *element, std::
         }
       }
       // skip it altogether if it is an A FUNCTION OF equation
-      std::string rhs = eqn->RHSFormattedXMILE(subs, dims, false);
+      std::string rhs = eqn->RHSFormattedXMILE(var, subs, dims, false);
       if (eq_count <= 1 || rhs.size() < 42 || rhs.substr(28, 13) != "A FUNCTION OF") {
         tinyxml2::XMLElement *xeqn = doc->NewElement("eqn");
         xelement->InsertEndChild(xeqn);
@@ -388,7 +390,7 @@ void XMILEGenerator::generateModelAsSectors(tinyxml2::XMLElement *element, std::
         if (eqn->IsActiveInit()) {
           tinyxml2::XMLElement *xieqn = doc->NewElement("init_eqn");
           xelement->InsertEndChild(xieqn);
-          xieqn->SetText(eqn->RHSFormattedXMILE(subs, dims, true).c_str());
+          xieqn->SetText(eqn->RHSFormattedXMILE(var, subs, dims, true).c_str());
         }
 
         // if it has a lookup we need to store that separately
@@ -500,9 +502,11 @@ void XMILEGenerator::generateModelAsSectors(tinyxml2::XMLElement *element, std::
       units->SetText(un->GetEquationString().c_str());
     }
   }
-  tinyxml2::XMLElement *views = doc->NewElement("views");
-  this->generateSectorViews(views, variables, errs, ns == NULL);
-  element->InsertEndChild(views);
+  if (want_diagram) {
+    tinyxml2::XMLElement *views = doc->NewElement("views");
+    this->generateSectorViews(views, variables, errs, ns == NULL);
+    element->InsertEndChild(views);
+  }
 }
 
 void XMILEGenerator::generateEquations(std::set<Variable *> &included, tinyxml2::XMLDocument *doc,
@@ -605,7 +609,7 @@ void XMILEGenerator::generateEquations(std::set<Variable *> &included, tinyxml2:
         }
       }
       // skip it altogether if it is an A FUNCTION OF equation
-      std::string rhs = eqn->RHSFormattedXMILE(subs, dims, false);
+      std::string rhs = eqn->RHSFormattedXMILE(var, subs, dims, false);
       if (eq_count <= 1 || rhs.size() < 42 || rhs.substr(28, 13) != "A FUNCTION OF") {
         tinyxml2::XMLElement *xeqn = doc->NewElement("eqn");
         xelement->InsertEndChild(xeqn);
@@ -615,7 +619,7 @@ void XMILEGenerator::generateEquations(std::set<Variable *> &included, tinyxml2:
         if (eqn->IsActiveInit()) {
           tinyxml2::XMLElement *xieqn = doc->NewElement("init_eqn");
           xelement->InsertEndChild(xieqn);
-          xieqn->SetText(eqn->RHSFormattedXMILE(subs, dims, true).c_str());
+          xieqn->SetText(eqn->RHSFormattedXMILE(var, subs, dims, true).c_str());
         }
 
         // if it has a lookup we need to store that separately
@@ -729,25 +733,35 @@ void XMILEGenerator::generateEquations(std::set<Variable *> &included, tinyxml2:
   }
 }
 
-// first pass if flat - we probably want to do this differently when we break up into modules
 void XMILEGenerator::generateModelAsModules(tinyxml2::XMLElement *element, std::vector<std::string> &errs,
                                             SymbolNameSpace *ns) {
   // we will leave the base model completely empty and only generate the modules - letting the opening software
   // lay out the modules and mark the connections between them
+  // we will also leave in anything that does not exist in any view at a reasonable level of
+  // attachment
   std::vector<View *> &views = _model->Views();
   tinyxml2::XMLDocument *doc = element->GetDocument();
   if (views.size() < 2) {
     tinyxml2::XMLElement *model = doc->NewElement("model");
-    generateModelAsSectors(model, errs, ns);
+    generateModelAsSectors(model, errs, ns, true);
     element->InsertEndChild(model);
     return;
   }
   std::vector<Variable *> vars = _model->GetVariables(ns);  // all symbols that are variables
+  // for every variable in a view, put its causes into the same view if they are not in any view
+  // otherwise we let the go cross level
+  for (Variable *var : vars) {
+    var->SetViewOfCauses();
+  }
+  // and now for any variables still not assigned a view we do essentially the opposite
+  for (Variable *var : vars) {
+    var->SetViewToCause(5);
+  }
+
   tinyxml2::XMLElement *mainmodel = doc->NewElement("model");
   element->InsertEndChild(mainmodel);
   tinyxml2::XMLElement *modules = doc->NewElement("variables");
   mainmodel->InsertEndChild(modules);
-  std::set<Variable *> remnant;
   int uid_off = 0;
 
   for (View *gview : views) {
@@ -792,8 +806,6 @@ void XMILEGenerator::generateModelAsModules(tinyxml2::XMLElement *element, std::
       std::string from;
       if (var->GetView())
         from = static_cast<VensimView *>(var->GetView())->Title();
-      else
-        remnant.insert(var);
       from += "." + var->GetAlternateName();
       connect->SetAttribute("from", SpaceToUnderBar(from).c_str());
       module->InsertEndChild(connect);
@@ -815,9 +827,16 @@ void XMILEGenerator::generateModelAsModules(tinyxml2::XMLElement *element, std::
     tinyxml2::XMLElement *xviews = doc->NewElement("views");
     submodel->InsertEndChild(xviews);
     tinyxml2::XMLElement *xview = doc->NewElement("view");
+    if (_model->LetterPolarity())
+      xview->SetAttribute("isee:use_lettered_polarity", "true");
     xviews->InsertEndChild(xview);
-    uid_off = view->SetViewStart(100, 100, uid_off);
+    uid_off = view->SetViewStart(100, 100, _xratio, _yratio, uid_off);
     this->generateView(view, xview, errs, &needed);
+  }
+  std::set<Variable *> remnant;
+  for (Variable *var : vars) {
+    if (var->GetView() == NULL && !var->Unwanted())
+      remnant.insert(var);
   }
   generateEquations(remnant, doc, modules);
   // tinyxml2::XMLElement* views = doc->NewElement("views");
@@ -855,12 +874,14 @@ void XMILEGenerator::generateSectorViews(tinyxml2::XMLElement *element, tinyxml2
   y = 100;
   // all the views against a single xmile view - or break up into modules - need vector of models as input to do that
   tinyxml2::XMLElement *xview = doc->NewElement("view");
+  if (_model->LetterPolarity())
+    xview->SetAttribute("isee:use_lettered_polarity", "true");
   element->InsertEndChild(xview);
   int uid_off = 0;
   for (View *gview : views) {
     VensimView *view = static_cast<VensimView *>(gview);
     // first update geometry - we put views one after another along the y axix - could lay out in pages or something
-    uid_off = view->SetViewStart(x, y + 20, uid_off);
+    uid_off = view->SetViewStart(x, y + 20, _xratio, _yratio, uid_off);
     int width = view->GetViewMaxX(100);
     int height = view->GetViewMaxY(y + 80) - y;
     // add a surrounding sector to contain this view - call it the view name
@@ -895,6 +916,7 @@ void XMILEGenerator::generateView(VensimView *view, tinyxml2::XMLElement *elemen
   for (VensimViewElement *ele : elements) {
     if (ele) {
       if (ele->Type() == VensimViewElement::ElementTypeVARIABLE) {
+        assert(ele->X() > 0 && ele->Y() > 0);
         VensimVariableElement *vele = static_cast<VensimVariableElement *>(ele);
         Variable *var = vele->GetVariable();
         // skip time altogether - this never shows up under xmil
@@ -906,6 +928,15 @@ void XMILEGenerator::generateView(VensimView *view, tinyxml2::XMLElement *elemen
           element->InsertEndChild(xghost);
           xghost->SetAttribute("x", vele->X());
           xghost->SetAttribute("y", vele->Y());
+          if (vele->GetVariable() && vele->GetVariable()->VariableType() == XMILE_Type_STOCK) {
+            xghost->SetAttribute("x", vele->X() - 22);
+            xghost->SetAttribute("y", vele->Y() - 17);
+            xghost->SetAttribute("width", 45);
+            xghost->SetAttribute("height", 35);
+          } else {
+            xghost->SetAttribute("x", vele->X());
+            xghost->SetAttribute("y", vele->Y());
+          }
           xghost->SetAttribute("uid", uid);
           tinyxml2::XMLElement *xof = doc->NewElement("of");
           xghost->InsertEndChild(xof);
@@ -939,13 +970,15 @@ void XMILEGenerator::generateView(VensimView *view, tinyxml2::XMLElement *elemen
               elements[local_uid - 1]->Type() == VensimViewElement::ElementTypeVALVE) {
             xvar->SetAttribute("x", elements[local_uid - 1]->X());
             xvar->SetAttribute("y", elements[local_uid - 1]->Y());
-
           } else {
-            if (type == XMILE_Type_STOCK && !vele->CrossLevel() && (vele->Width() > 60 || vele->Height() > 40)) {
+            // pretty big things - Vensim's default size is 80x40 - width and height are half vals so a fair bit bigger
+            // 90x50 then bring size across
+            if (type == XMILE_Type_STOCK && !vele->CrossLevel() && !vele->Ghost(NULL) &&
+                (vele->Width() > 45 || vele->Height() > 25)) {
               int x = vele->X();
               int y = vele->Y();
-              int width = vele->Width();
-              int height = vele->Height();
+              int width = 2 * vele->Width();
+              int height = 2 * vele->Height();
               if (width < 60)
                 width = 60;
               if (height < 40)
@@ -1053,37 +1086,50 @@ void XMILEGenerator::generateView(VensimView *view, tinyxml2::XMLElement *elemen
         VensimConnectorElement *cele = static_cast<VensimConnectorElement *>(ele);
         if (cele->From() > 0 && cele->To() > 0) {
           VensimVariableElement *from = static_cast<VensimVariableElement *>(elements[cele->From()]);
-          // if from is a valve we switch it to the next element in the list which should be a var
-          if (from->Type() == VensimViewElement::ElementTypeVALVE &&
-              static_cast<VensimValveElement *>(elements[cele->From()])->Attached()) {
-            from = static_cast<VensimVariableElement *>(elements[cele->From() + 1]);
-          }
           VensimVariableElement *to = static_cast<VensimVariableElement *>(elements[cele->To()]);
-          if (to->Type() == VensimViewElement::ElementTypeVALVE &&
-              static_cast<VensimValveElement *>(elements[cele->To()])->Attached())
-            to = static_cast<VensimVariableElement *>(elements[cele->To() + 1]);
-          if (from && from->Type() == VensimViewElement::ElementTypeVARIABLE && to &&
-              to->Type() == VensimViewElement::ElementTypeVARIABLE && to->GetVariable() &&
-              to->GetVariable()->VariableType() != XMILE_Type_STOCK) {
-            // valid xmile connector
-            tinyxml2::XMLElement *xconnector = doc->NewElement("connector");
-            element->InsertEndChild(xconnector);
-            xconnector->SetAttribute("uid", uid);
-            // try to figure out the angle based on the 3 points -
-            xconnector->SetAttribute("angle",
-                                     AngleFromPoints(from->X(), from->Y(), cele->X(), cele->Y(), to->X(), to->Y()));
-            tinyxml2::XMLElement *xfrom = doc->NewElement("from");
-            xconnector->InsertEndChild(xfrom);
-            if (from->Ghost(NULL)) {
-              tinyxml2::XMLElement *xalias = doc->NewElement("alias");
-              xfrom->InsertEndChild(xalias);
-              xalias->SetAttribute("uid", view->UIDOffset() + cele->From());
-            } else if (from->GetVariable()) {
-              xfrom->SetText(QuotedSpaceToUnderBar(from->GetVariable()->GetAlternateName()).c_str());
+          if (from && to) {
+            // if from is a valve we switch it to the next element in the list which should be a var
+            if (from->Type() == VensimViewElement::ElementTypeVALVE &&
+                static_cast<VensimValveElement *>(elements[cele->From()])->Attached()) {
+              from = static_cast<VensimVariableElement *>(elements[cele->From() + 1]);
             }
-            tinyxml2::XMLElement *xto = doc->NewElement("to");
-            xconnector->InsertEndChild(xto);
-            xto->SetText(QuotedSpaceToUnderBar(to->GetVariable()->GetAlternateName()).c_str());
+            if (to->Type() == VensimViewElement::ElementTypeVALVE &&
+                static_cast<VensimValveElement *>(elements[cele->To()])->Attached())
+              to = static_cast<VensimVariableElement *>(elements[cele->To() + 1]);
+            if (from->Type() == VensimViewElement::ElementTypeVARIABLE && to &&
+                to->Type() == VensimViewElement::ElementTypeVARIABLE && to->GetVariable() &&
+                to->GetVariable()->VariableType() != XMILE_Type_STOCK) {
+              // valid xmile connector
+              tinyxml2::XMLElement *xconnector = doc->NewElement("connector");
+              element->InsertEndChild(xconnector);
+              xconnector->SetAttribute("uid", uid);
+              // try to figure out the angle based on the 3 points -
+#ifndef NDEBUG
+              double thetax = 999;
+              if (to->GetVariable()->GetName() == "US crude death rate")
+                thetax = AngleFromPoints(from->X(), from->Y(), cele->X(), cele->Y(), to->X(), to->Y());
+#endif
+              xconnector->SetAttribute("angle",
+                                       AngleFromPoints(from->X(), from->Y(), cele->X(), cele->Y(), to->X(), to->Y()));
+              if (cele->Polarity()) {
+                char cbuf[2];
+                cbuf[0] = cele->Polarity();
+                cbuf[1] = 0;
+                xconnector->SetAttribute("polarity", cbuf);
+              }
+              tinyxml2::XMLElement *xfrom = doc->NewElement("from");
+              xconnector->InsertEndChild(xfrom);
+              if (from->Ghost(NULL)) {
+                tinyxml2::XMLElement *xalias = doc->NewElement("alias");
+                xfrom->InsertEndChild(xalias);
+                xalias->SetAttribute("uid", view->UIDOffset() + cele->From());
+              } else if (from->GetVariable()) {
+                xfrom->SetText(QuotedSpaceToUnderBar(from->GetVariable()->GetAlternateName()).c_str());
+              }
+              tinyxml2::XMLElement *xto = doc->NewElement("to");
+              xconnector->InsertEndChild(xto);
+              xto->SetText(QuotedSpaceToUnderBar(to->GetVariable()->GetAlternateName()).c_str());
+            }
           }
         }
       }

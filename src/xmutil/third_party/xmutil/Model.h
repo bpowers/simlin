@@ -36,7 +36,7 @@ public:
   void CheckGhostOwners();
   void AttachStragglers();  // try to get diagramatic stuff right
   void MakeViewNamesUnique();
-  std::string PrintXMILE(bool isCompact, std::vector<std::string> &errs);
+  std::string PrintXMILE(bool isCompact, std::vector<std::string> &errs, double xscale, double yscale);
 
   double GetConstanValue(const char *var, double defval);
   UnitExpression *GetUnits(const char *var);
@@ -75,6 +75,13 @@ public:
     return bAsSectors;
   }
 
+  void SetLetterPolarity(bool set) {
+    bLetterPolarity = set;
+  }
+  bool LetterPolarity() const {
+    return bLetterPolarity;
+  }
+
 private:
   bool OrderEquations(ContextInfo *info, bool tonly);
   bool SetupVariableStates(int pass);
@@ -103,6 +110,7 @@ private:
   double *dRate;
   double *dAux;
   bool bAsSectors;
+  bool bLetterPolarity;
 };
 
 #endif

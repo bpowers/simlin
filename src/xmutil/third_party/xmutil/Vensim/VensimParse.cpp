@@ -2,9 +2,10 @@
 // we use an in-memory string to simplify look ahead/back
 // we include the tokenizer here because it is as easy as setting
 // up regular expressions for Flex and more easily understood
-#include <cstring>
 
 #include "VensimParse.h"
+
+#include <cstring>
 
 #include "../Symbol/ExpressionList.h"
 #include "../Symbol/LeftHandSide.h"
@@ -60,6 +61,7 @@ void VensimParse::ReadyFunctions() {
     new FunctionSmooth3(pSymbolNameSpace);
     new FunctionSmooth3I(pSymbolNameSpace);
     new FunctionTrend(pSymbolNameSpace);
+    new FunctionFrcst(pSymbolNameSpace);
     new FunctionDelay1(pSymbolNameSpace);
     new FunctionDelay1I(pSymbolNameSpace);
     new FunctionDelay3(pSymbolNameSpace);
@@ -90,6 +92,7 @@ void VensimParse::ReadyFunctions() {
     new FunctionGame(pSymbolNameSpace);
     new FunctionRandom01(pSymbolNameSpace);
     new FunctionRandomUniform(pSymbolNameSpace);
+    new FunctionRandomPink(pSymbolNameSpace);
     new FunctionAbs(pSymbolNameSpace);
     new FunctionExp(pSymbolNameSpace);
     new FunctionSqrt(pSymbolNameSpace);
@@ -277,7 +280,30 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
     view->SetTitle(buf +
                    1);  // skip the star - we can try to name modules with this eventually subject to name collisions
     this->mVensimLex.ReadLine(buf, BUFLEN);  // default font info - we can try to grab this later
-    view->ReadView(this, buf);               // will return with buf populated at next view
+    int pos = 0;
+    char *tv = buf;
+    for (; pos < 8; pos++) {
+      tv = strchr(tv, '|');
+      if (tv)
+        tv++;
+      else
+        break;
+    }
+    // the following does not really help
+    // if (tv)
+    //{
+    // int ppix = 72;
+    // int ppiy = 72;
+    // sscanf(tv,"%d,%d",&ppix,&ppiy);
+    // _xratio = 72.0 / (double)ppix;
+    // _yratio = 72.0 / (double)ppiy;
+    //}
+    // else
+    {
+      _xratio = 1.0;
+      _yratio = 1.0;
+    }
+    view->ReadView(this, buf);  // will return with buf populated at next view
   }
   // there may be options at the end
   if (strncmp(buf, "///---\\\\\\", 9) == 0) {
@@ -614,4 +640,11 @@ void VensimParse::MacroExpression(Variable *name, ExpressionList *margs) {
 void VensimParse::MacroEnd() {
   pSymbolNameSpace = pMainSymbolNameSpace;
   mInMacro = false;
+}
+
+bool VensimParse::LetterPolarity() const {
+  return _model->LetterPolarity();
+}
+void VensimParse::SetLetterPolarity(bool set) {
+  _model->SetLetterPolarity(set);
 }

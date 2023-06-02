@@ -40,8 +40,12 @@ VensimVariableElement::VensimVariableElement(VensimView *view, char *curpos, cha
       if (_attached)
         _variable->MarkAsFlow();
     }
-  } else
-    log("Can't find - %s\n", name.c_str());
+  } else {
+    std::string *nname = SymbolNameSpace::ToLowerSpace(name);
+    if (*nname != "time")  // any others?
+      log("Can't find - %s\n", name.c_str());
+    delete nname;
+  }
 }
 VensimVariableElement::VensimVariableElement(VensimView *view, Variable *var, int x, int y) {
   _x = x;
@@ -114,7 +118,16 @@ VensimConnectorElement::VensimConnectorElement(char *curpos, char *buf, VensimPa
   std::string ignore;
   curpos = parser->GetString(curpos, ignore);
   curpos = parser->GetString(curpos, ignore);
-  curpos = parser->GetString(curpos, ignore);
+  int polarity_ascii;
+  curpos = parser->GetInt(curpos, polarity_ascii);
+  if (polarity_ascii == 'S' || polarity_ascii == 's') {
+    parser->SetLetterPolarity(true);
+    _polarity = '+';
+  } else if (polarity_ascii == 'O' || polarity_ascii == '0') {
+    parser->SetLetterPolarity(true);
+    _polarity = '-';
+  } else
+    _polarity = polarity_ascii;  // might be invalid
   curpos = parser->GetString(curpos, ignore);
   curpos = parser->GetString(curpos, ignore);
   curpos = parser->GetString(curpos, ignore);
@@ -138,6 +151,15 @@ VensimConnectorElement::VensimConnectorElement(int from, int to, int x, int y) {
   _y = y;
 }
 
+bool VensimConnectorElement::ScalePoints(double xs, double ys, int xo, int yo) {
+  if (_x != 0 || _y != 0)  // invalide leave it alone
+  {
+    _x = _x * xs + xo;
+    _y = _y * ys + yo;
+  }
+  return true;
+}
+
 void VensimView::ReadView(VensimParse *parser, char *buf) {
   VensimLex &lexer = parser->Lexer();
   while (true) {
@@ -155,6 +177,7 @@ void VensimView::ReadView(VensimParse *parser, char *buf) {
         len = uid + 25;
         vElements.resize(len + 1, NULL);
       }
+      assert(vElements[uid] == NULL);
       switch (type) {
       case 10:  // a variable
         vElements[uid] = new VensimVariableElement(this, curpos, buf, parser);
@@ -187,7 +210,7 @@ int VensimView::GetNextUID() {
   return GetNextUID();
 }
 
-int VensimView::SetViewStart(int startx, int starty, int uid_start) {
+int VensimView::SetViewStart(int startx, int starty, double xratio, double yratio, int uid_start) {
   _uid_offset = uid_start;
   if (this->vElements.empty())
     return _uid_offset;
@@ -201,12 +224,16 @@ int VensimView::SetViewStart(int startx, int starty, int uid_start) {
         min_y = ele->Y();
     }
   }
-  int off_x = startx - min_x;
-  int off_y = starty - min_y;
+  int off_x = std::round(startx - min_x * xratio);
+  int off_y = std::round(starty - min_y * yratio);
   for (VensimViewElement *ele : vElements) {
     if (ele) {
-      ele->SetX(ele->X() + off_x);
-      ele->SetY(ele->Y() + off_y);
+      if (!ele->ScalePoints(xratio, yratio, off_x, off_y)) {
+        ele->SetX(std::round(ele->X() * xratio + off_x));
+        ele->SetY(std::round(ele->Y() * yratio + off_y));
+        ele->SetWidth(std::round(ele->Width() * xratio));
+        ele->SetHeight(std::round(ele->Height() * yratio));
+      }
     }
   }
   return _uid_offset + vElements.size();

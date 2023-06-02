@@ -14,6 +14,9 @@ class VensimViewElement {
 public:
   enum ElementType { ElementTypeVARIABLE, ElementTypeVALVE, ElementTypeCOMMENT, ElementTypeCONNECTOR };
   virtual ElementType Type() = 0;
+  virtual bool ScalePoints(double xratio, double yratio, int offx, int offy) {
+    return false;
+  }
   int X() {
     return _x;
   }
@@ -29,8 +32,14 @@ public:
   int Width() const {
     return _width;
   }
+  void SetWidth(int w) {
+    _width = w;
+  }
   int Height() const {
     return _height;
+  }
+  void SetHeight(int h) {
+    _height = h;
   }
 
 protected:
@@ -89,11 +98,12 @@ public:
 };
 class VensimConnectorElement : public VensimViewElement {
 public:
-  ElementType Type() {
+  ElementType Type() override {
     return ElementTypeCONNECTOR;
   }
   VensimConnectorElement(char *curpos, char *buf, VensimParse *parser);
   VensimConnectorElement(int from, int to, int x, int y);
+  virtual bool ScalePoints(double xratio, double yratio, int offx, int offy) override;
   int From() {
     return _from;
   }
@@ -104,10 +114,15 @@ public:
     _to = _from = 0;
   }
   bool FromAsAlias();  // in this case From will send back a number
+  char Polarity() const {
+    return _polarity;
+  }
+
 private:
   int _from;
   int _to;
   int _npoints;
+  char _polarity;
 };
 
 class VensimView : public View {
@@ -124,16 +139,16 @@ public:
     return vElements;
   }
 
-  bool UpgradeGhost(Variable *var) override;
-  bool AddFlowDefinition(Variable *var, Variable *upstream, Variable *downstream) override;
-  bool AddVarDefinition(Variable *var, int x, int y) override;
+  virtual bool UpgradeGhost(Variable *var) override;
+  virtual bool AddFlowDefinition(Variable *var, Variable *upstream, Variable *downstream) override;
+  virtual bool AddVarDefinition(Variable *var, int x, int y) override;
   virtual void CheckGhostOwners() override;
   virtual void CheckLinksIn() override;
   bool FindInArrow(Variable *source, int target);
   void RemoveExtraArrowsIn(std::vector<Variable *> ins, int target);
   int FindVariable(Variable *in, int x, int y);  // add if necessary - returns UID
 
-  int SetViewStart(int x, int y, int uid);  // returns last uid val + 1
+  int SetViewStart(int x, int y, double xratio, double yratio, int uid);  // returns last uid val + 1
   int GetViewMaxX(int defval);
   int GetViewMaxY(int defval);
   int UIDOffset() {
