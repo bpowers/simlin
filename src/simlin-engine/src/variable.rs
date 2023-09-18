@@ -393,7 +393,7 @@ where
 
             let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(&ident, &v.equation, true);
-            errors.extend(init_errors.into_iter());
+            errors.extend(init_errors);
 
             let mut unit_errors: Vec<UnitError> = vec![];
             let units = match parse_units(units_ctx, v.units.as_deref()) {
@@ -432,7 +432,7 @@ where
 
             let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(&ident, &v.equation, true);
-            errors.extend(init_errors.into_iter());
+            errors.extend(init_errors);
 
             let mut unit_errors: Vec<UnitError> = vec![];
             let units = match parse_units(units_ctx, v.units.as_deref()) {
