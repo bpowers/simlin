@@ -80,11 +80,17 @@ pub struct ModuleDeclaration {
     pub(crate) off: usize, // offset within the parent module
 }
 
+#[derive(Clone, Debug)]
+pub struct ArrayDefinition {
+    pub(crate) dimensions: Vec<usize>,
+}
+
 // these are things that will be shared across bytecode runlists
 #[derive(Clone, Debug)]
 pub struct ByteCodeContext {
     pub(crate) graphical_functions: Vec<Vec<(f64, f64)>>,
     pub(crate) modules: Vec<ModuleDeclaration>,
+    pub(crate) arrays: Vec<ArrayDefinition>,
 }
 
 #[derive(Clone, Debug, Default)]
