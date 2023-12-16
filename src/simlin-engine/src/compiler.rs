@@ -1745,6 +1745,7 @@ impl<'module> Compiler<'module> {
             context: Rc::new(ByteCodeContext {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
+                arrays: vec![],
             }),
             compiled_initials,
             compiled_flows,
