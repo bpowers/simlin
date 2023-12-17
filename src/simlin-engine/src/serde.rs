@@ -46,16 +46,6 @@ fn test_dt_roundtrip() {
     }
 }
 
-impl From<i32> for project_io::SimMethod {
-    fn from(value: i32) -> Self {
-        match value {
-            0 => project_io::SimMethod::Euler,
-            1 => project_io::SimMethod::RungeKutta4,
-            _ => project_io::SimMethod::Euler,
-        }
-    }
-}
-
 impl From<SimMethod> for project_io::SimMethod {
     fn from(sim_method: SimMethod) -> Self {
         match sim_method {
@@ -79,14 +69,15 @@ fn test_sim_method_roundtrip() {
     let cases: &[SimMethod] = &[SimMethod::Euler, SimMethod::RungeKutta4];
     for expected in cases {
         let expected = expected.clone();
-        let actual = SimMethod::from(project_io::SimMethod::from(expected.clone()));
+        let actual =
+            SimMethod::from(project_io::SimMethod::try_from(expected.clone()).unwrap_or_default());
         assert_eq!(expected, actual);
     }
 
     // protobuf enums are open, which we should just treat as Euler
     assert_eq!(
         SimMethod::Euler,
-        SimMethod::from(project_io::SimMethod::from(666))
+        SimMethod::from(project_io::SimMethod::try_from(666).unwrap_or_default())
     );
 }
 
@@ -113,7 +104,9 @@ impl From<project_io::SimSpecs> for SimSpecs {
                 is_reciprocal: false,
             })),
             save_step: sim_specs.save_step.map(Dt::from),
-            sim_method: SimMethod::from(project_io::SimMethod::from(sim_specs.sim_method)),
+            sim_method: SimMethod::from(
+                project_io::SimMethod::try_from(sim_specs.sim_method).unwrap_or_default(),
+            ),
             time_units: if sim_specs.time_units.is_empty() {
                 None
             } else {
@@ -170,17 +163,6 @@ impl From<project_io::graphical_function::Kind> for GraphicalFunctionKind {
     }
 }
 
-impl From<i32> for project_io::graphical_function::Kind {
-    fn from(value: i32) -> Self {
-        match value {
-            0 => project_io::graphical_function::Kind::Continuous,
-            1 => project_io::graphical_function::Kind::Discrete,
-            2 => project_io::graphical_function::Kind::Extrapolate,
-            _ => project_io::graphical_function::Kind::Continuous,
-        }
-    }
-}
-
 #[test]
 fn test_graphical_function_kind_roundtrip() {
     let cases: &[GraphicalFunctionKind] = &[
@@ -190,14 +172,15 @@ fn test_graphical_function_kind_roundtrip() {
     ];
     for expected in cases {
         let expected = *expected;
-        let actual =
-            GraphicalFunctionKind::from(project_io::graphical_function::Kind::from(expected));
+        let actual = GraphicalFunctionKind::from(
+            project_io::graphical_function::Kind::try_from(expected).unwrap_or_default(),
+        );
         assert_eq!(expected, actual);
     }
 
     assert_eq!(
         project_io::graphical_function::Kind::Continuous,
-        project_io::graphical_function::Kind::from(666)
+        project_io::graphical_function::Kind::try_from(666).unwrap_or_default()
     );
 }
 
@@ -249,7 +232,9 @@ impl From<GraphicalFunction> for project_io::GraphicalFunction {
 impl From<project_io::GraphicalFunction> for GraphicalFunction {
     fn from(gf: project_io::GraphicalFunction) -> Self {
         GraphicalFunction {
-            kind: GraphicalFunctionKind::from(project_io::graphical_function::Kind::from(gf.kind)),
+            kind: GraphicalFunctionKind::from(
+                project_io::graphical_function::Kind::try_from(gf.kind).unwrap_or_default(),
+            ),
             x_points: if gf.x_points.is_empty() {
                 None
             } else {
@@ -399,28 +384,20 @@ impl From<project_io::variable::Visibility> for Visibility {
     }
 }
 
-impl From<i32> for project_io::variable::Visibility {
-    fn from(value: i32) -> Self {
-        match value {
-            0 => project_io::variable::Visibility::Private,
-            1 => project_io::variable::Visibility::Public,
-            _ => project_io::variable::Visibility::Private,
-        }
-    }
-}
-
 #[test]
 fn test_visibility_roundtrip() {
     let cases: &[Visibility] = &[Visibility::Private, Visibility::Public];
     for expected in cases {
         let expected = *expected;
-        let actual = Visibility::from(project_io::variable::Visibility::from(expected));
+        let actual = Visibility::from(
+            project_io::variable::Visibility::try_from(expected).unwrap_or_default(),
+        );
         assert_eq!(expected, actual);
     }
 
     assert_eq!(
         project_io::variable::Visibility::Private,
-        project_io::variable::Visibility::from(666)
+        project_io::variable::Visibility::try_from(666).unwrap_or_default()
     );
 }
 
@@ -455,7 +432,9 @@ impl From<project_io::variable::Stock> for Stock {
             outflows: stock.outflows,
             non_negative: stock.non_negative,
             can_be_module_input: stock.can_be_module_input,
-            visibility: Visibility::from(project_io::variable::Visibility::from(stock.visibility)),
+            visibility: Visibility::from(
+                project_io::variable::Visibility::try_from(stock.visibility).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -522,7 +501,9 @@ impl From<project_io::variable::Flow> for Flow {
             gf: flow.gf.map(GraphicalFunction::from),
             non_negative: flow.non_negative,
             can_be_module_input: flow.can_be_module_input,
-            visibility: Visibility::from(project_io::variable::Visibility::from(flow.visibility)),
+            visibility: Visibility::from(
+                project_io::variable::Visibility::try_from(flow.visibility).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -597,7 +578,9 @@ impl From<project_io::variable::Aux> for Aux {
             },
             gf: aux.gf.map(GraphicalFunction::from),
             can_be_module_input: aux.can_be_module_input,
-            visibility: Visibility::from(project_io::variable::Visibility::from(aux.visibility)),
+            visibility: Visibility::from(
+                project_io::variable::Visibility::try_from(aux.visibility).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -711,7 +694,9 @@ impl From<project_io::variable::Module> for Module {
                 .map(ModuleReference::from)
                 .collect(),
             can_be_module_input: module.can_be_module_input,
-            visibility: Visibility::from(project_io::variable::Visibility::from(module.visibility)),
+            visibility: Visibility::from(
+                project_io::variable::Visibility::try_from(module.visibility).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -820,19 +805,6 @@ impl From<project_io::view_element::LabelSide> for view_element::LabelSide {
     }
 }
 
-impl From<i32> for project_io::view_element::LabelSide {
-    fn from(value: i32) -> Self {
-        match value {
-            0 => project_io::view_element::LabelSide::Top,
-            1 => project_io::view_element::LabelSide::Left,
-            2 => project_io::view_element::LabelSide::Center,
-            3 => project_io::view_element::LabelSide::Bottom,
-            4 => project_io::view_element::LabelSide::Right,
-            _ => project_io::view_element::LabelSide::Top,
-        }
-    }
-}
-
 impl From<view_element::LabelSide> for project_io::view_element::LabelSide {
     fn from(label_side: view_element::LabelSide) -> Self {
         match label_side {
@@ -856,14 +828,15 @@ fn test_label_side_roundtrip() {
     ];
     for expected in cases {
         let expected = *expected;
-        let actual =
-            view_element::LabelSide::from(project_io::view_element::LabelSide::from(expected));
+        let actual = view_element::LabelSide::from(
+            project_io::view_element::LabelSide::try_from(expected).unwrap_or_default(),
+        );
         assert_eq!(expected, actual);
     }
 
     assert_eq!(
         project_io::view_element::LabelSide::Top,
-        project_io::view_element::LabelSide::from(666)
+        project_io::view_element::LabelSide::try_from(666).unwrap_or_default()
     );
 }
 
@@ -874,9 +847,9 @@ impl From<project_io::view_element::Aux> for view_element::Aux {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
-                v.label_side,
-            )),
+            label_side: view_element::LabelSide::from(
+                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -888,7 +861,8 @@ impl From<view_element::Aux> for project_io::view_element::Aux {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            label_side: project_io::view_element::LabelSide::try_from(v.label_side)
+                .unwrap_or_default() as i32,
         }
     }
 }
@@ -916,9 +890,9 @@ impl From<project_io::view_element::Stock> for view_element::Stock {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
-                v.label_side,
-            )),
+            label_side: view_element::LabelSide::from(
+                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -930,7 +904,8 @@ impl From<view_element::Stock> for project_io::view_element::Stock {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            label_side: project_io::view_element::LabelSide::try_from(v.label_side)
+                .unwrap_or_default() as i32,
         }
     }
 }
@@ -1043,9 +1018,9 @@ impl From<project_io::view_element::Flow> for view_element::Flow {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
-                v.label_side,
-            )),
+            label_side: view_element::LabelSide::from(
+                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
+            ),
             points: v
                 .points
                 .into_iter()
@@ -1207,9 +1182,9 @@ impl From<project_io::view_element::Module> for view_element::Module {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
-                v.label_side,
-            )),
+            label_side: view_element::LabelSide::from(
+                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -1250,9 +1225,9 @@ impl From<project_io::view_element::Alias> for view_element::Alias {
             alias_of_uid: v.alias_of_uid,
             x: v.x,
             y: v.y,
-            label_side: view_element::LabelSide::from(project_io::view_element::LabelSide::from(
-                v.label_side,
-            )),
+            label_side: view_element::LabelSide::from(
+                project_io::view_element::LabelSide::try_from(v.label_side).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -1264,7 +1239,8 @@ impl From<view_element::Alias> for project_io::view_element::Alias {
             alias_of_uid: v.alias_of_uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
+            label_side: project_io::view_element::LabelSide::try_from(v.label_side)
+                .unwrap_or_default() as i32,
         }
     }
 }
@@ -1515,17 +1491,6 @@ impl From<Extension> for project_io::source::Extension {
     }
 }
 
-impl From<i32> for project_io::source::Extension {
-    fn from(value: i32) -> Self {
-        match value {
-            0 => project_io::source::Extension::Unspecified,
-            1 => project_io::source::Extension::Xmile,
-            2 => project_io::source::Extension::Vensim,
-            _ => project_io::source::Extension::Unspecified,
-        }
-    }
-}
-
 impl From<Source> for project_io::Source {
     fn from(source: Source) -> Self {
         project_io::Source {
@@ -1538,7 +1503,9 @@ impl From<Source> for project_io::Source {
 impl From<project_io::Source> for Source {
     fn from(source: project_io::Source) -> Self {
         Source {
-            extension: project_io::source::Extension::from(source.extension).into(),
+            extension: project_io::source::Extension::try_from(source.extension)
+                .unwrap_or_default()
+                .into(),
             content: source.content,
         }
     }

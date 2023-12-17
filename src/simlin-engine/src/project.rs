@@ -31,19 +31,16 @@ impl Project {
 impl From<datamodel::Project> for Project {
     fn from(project_datamodel: datamodel::Project) -> Self {
         Self::base_from(project_datamodel, |models, units_ctx, model| {
-            let inferred_units = match crate::units_infer::infer(models, units_ctx, model) {
-                Ok(units) => units,
-                Err(_err) => {
-                    // XXX: for now, ignore inference errors.  They aren't
-                    // understandable for anyone but me - we need to thread
-                    // location information through at a minimum.
+            let inferred_units = crate::units_infer::infer(models, units_ctx, model).unwrap_or_else(|_err| {
+                // XXX: for now, ignore inference errors.  They aren't
+                // understandable for anyone but me - we need to thread
+                // location information through at a minimum.
 
-                    // let mut errors = model.errors.take().unwrap_or_default();
-                    // errors.push(err);
-                    // model.errors = Some(errors);
-                    Default::default()
-                }
-            };
+                // let mut errors = model.errors.take().unwrap_or_default();
+                // errors.push(err);
+                // model.errors = Some(errors);
+                Default::default()
+            });
             model.check_units(units_ctx, &inferred_units)
         })
     }
@@ -63,24 +60,21 @@ impl Project {
 
         let mut project_errors = vec![];
 
-        let units_ctx = match Context::new_with_builtins(
+        let units_ctx = Context::new_with_builtins(
             &project_datamodel.units,
             &project_datamodel.sim_specs,
-        ) {
-            Ok(ctx) => ctx,
-            Err(errs) => {
-                for (unit_name, unit_errs) in errs {
-                    for err in unit_errs {
-                        project_errors.push(Error {
-                            kind: ErrorKind::Model,
-                            code: ErrorCode::UnitDefinitionErrors,
-                            details: Some(format!("{}: {}", unit_name, err)),
-                        });
-                    }
+        ).unwrap_or_else(|errs| {
+            for (unit_name, unit_errs) in errs {
+                for err in unit_errs {
+                    project_errors.push(Error {
+                        kind: ErrorKind::Model,
+                        code: ErrorCode::UnitDefinitionErrors,
+                        details: Some(format!("{}: {}", unit_name, err)),
+                    });
                 }
-                Default::default()
             }
-        };
+            Default::default()
+        });
 
         // next, pull in all the models from the stdlib
         let mut models_list: Vec<ModelStage0> = crate::stdlib::MODEL_NAMES

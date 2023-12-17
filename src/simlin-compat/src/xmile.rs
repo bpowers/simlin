@@ -238,6 +238,7 @@ pub struct VarDimensions {
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct VarDimension {
+    #[serde(rename = "@name")]
     pub name: String,
 }
 
@@ -426,9 +427,11 @@ pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
     pub dt: Option<Dt>,
-    #[serde(rename = "isee:save_interval")]
+    #[serde(rename = "@save_interval")]
     pub save_step: Option<f64>,
+    #[serde(rename = "@method")]
     pub method: Option<String>,
+    #[serde(rename = "@time_units")]
     pub time_units: Option<String>,
 }
 
@@ -516,6 +519,7 @@ impl From<datamodel::SimSpecs> for SimSpecs {
 pub struct Dt {
     #[serde(rename = "$value")]
     pub value: f64,
+    #[serde(rename = "@reciprocal")]
     pub reciprocal: Option<bool>,
 }
 
@@ -546,7 +550,9 @@ impl From<datamodel::Dt> for Dt {
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Dimension {
+    #[serde(rename = "@name")]
     pub name: String,
+    #[serde(rename = "@size")]
     pub size: Option<u32>,
     #[serde(rename = "elem")]
     pub elements: Option<Vec<Index>>,
@@ -611,12 +617,15 @@ impl From<datamodel::Dimension> for Dimension {
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Index {
+    #[serde(rename = "@name")]
     pub name: String,
 }
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct GraphicalFunctionScale {
+    #[serde(rename = "@min")]
     pub min: f64,
+    #[serde(rename = "@max")]
     pub max: f64,
 }
 
@@ -842,6 +851,7 @@ pub struct Units {
 }
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Unit {
+    #[serde(rename = "@name")]
     pub name: String,
     pub eqn: Option<String>,
     pub alias: Option<Vec<String>>,
@@ -925,6 +935,7 @@ fn test_unit_roundtrip() {
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Model {
+    #[serde(rename = "@name", default)]
     pub name: Option<String>,
     #[serde(rename = "namespace")]
     pub namespaces: Option<String>, // comma separated list of namespaces
@@ -1089,7 +1100,7 @@ pub mod view_element {
         write_tag_with_attrs, ToXml, XmlWriter, STOCK_HEIGHT, STOCK_WIDTH,
     };
     use quick_xml::Writer;
-    use serde::{de, Deserialize, Deserializer, Serialize};
+    use serde::{Deserialize, Deserializer, Serialize};
     use simlin_engine::common::Result;
     use simlin_engine::datamodel::view_element::LinkShape;
 
@@ -1193,13 +1204,21 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Aux {
+        #[serde(rename = "@name")]
         pub name: String,
+        #[serde(rename = "@uid")]
         pub uid: Option<i32>,
+        #[serde(rename = "@x")]
         pub x: f64,
+        #[serde(rename = "@y")]
         pub y: f64,
+        #[serde(rename = "@width")]
         pub width: Option<f64>,
+        #[serde(rename = "@height")]
         pub height: Option<f64>,
+        #[serde(rename = "@label_side")]
         pub label_side: Option<LabelSide>,
+        #[serde(rename = "@label_angle")]
         pub label_angle: Option<f64>,
     }
 
@@ -1268,13 +1287,21 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Stock {
+        #[serde(rename = "@name")]
         pub name: String,
+        #[serde(rename = "@uid")]
         pub uid: Option<i32>,
+        #[serde(rename = "@x")]
         pub x: f64,
+        #[serde(rename = "@y")]
         pub y: f64,
+        #[serde(rename = "@width")]
         pub width: Option<f64>,
+        #[serde(rename = "@height")]
         pub height: Option<f64>,
+        #[serde(rename = "@label_side")]
         pub label_side: Option<LabelSide>,
+        #[serde(rename = "@label_angle")]
         pub label_angle: Option<f64>,
     }
 
@@ -1367,8 +1394,11 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Point {
+        #[serde(rename = "@x")]
         pub x: f64,
+        #[serde(rename = "@y")]
         pub y: f64,
+        #[serde(rename = "@uid")]
         pub uid: Option<i32>,
     }
 
@@ -1421,13 +1451,21 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Flow {
+        #[serde(rename = "@name")]
         pub name: String,
+        #[serde(rename = "@uid")]
         pub uid: Option<i32>,
+        #[serde(rename = "@x")]
         pub x: f64,
+        #[serde(rename = "@y")]
         pub y: f64,
+        #[serde(rename = "@width")]
         pub width: Option<f64>,
+        #[serde(rename = "@height")]
         pub height: Option<f64>,
+        #[serde(rename = "@label_side")]
         pub label_side: Option<LabelSide>,
+        #[serde(rename = "@label_angle")]
         pub label_angle: Option<f64>,
         #[serde(rename = "pts")]
         pub points: Option<Points>,
@@ -1645,6 +1683,7 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
     pub struct AliasLinkEnd {
+        #[serde(rename = "@uid")]
         pub uid: i32,
     }
 
@@ -1656,136 +1695,42 @@ pub mod view_element {
         Alias(AliasLinkEnd),
     }
 
-    // this is hacked up from the derived Deserialize method, but now works with the
-    // bad way 'from' tags are done for Connectors that start on an alias.
-    impl<'de> Deserialize<'de> for LinkEnd {
-        fn deserialize<V>(__deserializer: V) -> std::result::Result<Self, V::Error>
-        where
-            V: Deserializer<'de>,
-        {
-            enum Field {
-                Field0(Option<String>),
-                Field1,
-            }
-            struct __FieldVisitor;
-            impl<'de> de::Visitor<'de> for __FieldVisitor {
-                type Value = Field;
-                fn expecting(&self, __formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    __formatter.write_str("variant identifier")
-                }
-
-                fn visit_u64<U>(self, __value: u64) -> std::result::Result<Self::Value, U>
-                where
-                    U: de::Error,
-                {
-                    match __value {
-                        0u64 => Ok(Field::Field0(None)),
-                        1u64 => Ok(Field::Field1),
-                        _ => Err(de::Error::invalid_value(
-                            de::Unexpected::Unsigned(__value),
-                            &"variant index 0 <= i < 2",
-                        )),
-                    }
-                }
-                fn visit_str<U>(self, __value: &str) -> std::result::Result<Self::Value, U>
-                where
-                    U: de::Error,
-                {
-                    match __value {
-                        "alias" => Ok(Field::Field1),
-                        // by default this is `"$value" => _serde::__private::Ok(__Field::__field0)`
-                        // which is why we've copied and changed this
-                        value => Ok(Field::Field0(Some(value.to_owned()))),
-                    }
-                }
-
-                fn visit_bytes<U>(self, __value: &[u8]) -> std::result::Result<Self::Value, U>
-                where
-                    U: de::Error,
-                {
-                    match __value {
-                        b"alias" => Ok(Field::Field1),
-                        // by default this is `"$value" => _serde::__private::Ok(__Field::__field0)`
-                        // which is why we've copied and changed this
-                        value => {
-                            let value = String::from_utf8_lossy(value);
-                            Ok(Field::Field0(Some(value.to_string())))
-                        }
-                    }
-                }
-            }
-
-            impl<'de> Deserialize<'de> for Field {
-                #[inline]
-                fn deserialize<V>(__deserializer: V) -> std::result::Result<Self, V::Error>
-                where
-                    V: Deserializer<'de>,
-                {
-                    Deserializer::deserialize_identifier(__deserializer, __FieldVisitor)
-                }
-            }
-            struct __Visitor<'de> {
-                marker: std::marker::PhantomData<LinkEnd>,
-                lifetime: std::marker::PhantomData<&'de ()>,
-            }
-            impl<'de> de::Visitor<'de> for __Visitor<'de> {
-                type Value = LinkEnd;
-                fn expecting(&self, __formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    __formatter.write_str("enum LinkEnd")
-                }
-                fn visit_enum<__A>(
-                    self,
-                    __data: __A,
-                ) -> std::result::Result<Self::Value, __A::Error>
-                where
-                    __A: de::EnumAccess<'de>,
-                {
-                    use serde::de::Error as DeError;
-                    match match de::EnumAccess::variant(__data) {
-                        Ok(__val) => __val,
-                        Err(__err) => {
-                            return Err(__err);
-                        }
-                    } {
-                        (Field::Field0(None), __variant) => Err(DeError::missing_field("$value")),
-                        (Field::Field0(Some(name)), __variant) => Ok(LinkEnd::Named(name)),
-                        (Field::Field1, __variant) => std::result::Result::map(
-                            de::VariantAccess::newtype_variant::<AliasLinkEnd>(__variant),
-                            LinkEnd::Alias,
-                        ),
-                    }
-                }
-            }
-            const VARIANTS: &[&str] = &["$value", "alias"];
-            __deserializer.deserialize_enum(
-                "LinkEnd",
-                VARIANTS,
-                __Visitor {
-                    marker: std::marker::PhantomData::<LinkEnd>,
-                    lifetime: std::marker::PhantomData,
-                },
-            )
-        }
-    }
-
-    #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
-    pub struct LinkEndContainer {
-        #[serde(rename = "$value")]
-        pub end: LinkEnd,
-    }
-
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Link {
+        #[serde(rename = "@uid")]
         pub uid: Option<i32>,
-        pub from: LinkEndContainer,
+        #[serde(deserialize_with = "deserialize_link_end")]
+        pub from: LinkEnd,
+        #[serde(rename = "@from_uid")]
         pub from_uid: Option<i32>,
-        #[serde(rename = "to")]
-        pub to: LinkEndContainer,
+        #[serde(deserialize_with = "deserialize_link_end")]
+        pub to: LinkEnd,
+        #[serde(rename = "@to_uid")]
         pub to_uid: Option<i32>,
+        #[serde(rename = "@angle")]
         pub angle: Option<f64>,
+        #[serde(rename = "@is_straight")]
         pub is_straight: Option<bool>,
         #[serde(rename = "pts")]
         pub points: Option<Points>, // for multi-point connectors
+    }
+
+    fn deserialize_link_end<'de, D>(deserializer: D) -> std::result::Result<LinkEnd, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct LinkEndInner {
+            #[serde(rename = "$value", default)]
+            named: String,
+            alias: Option<AliasLinkEnd>,
+        }
+        let inner = LinkEndInner::deserialize(deserializer)?;
+        if let Some(alias) = inner.alias {
+            Ok(LinkEnd::Alias(alias))
+        } else {
+            Ok(LinkEnd::Named(inner.named))
+        }
     }
 
     impl ToXml<XmlWriter> for Link {
@@ -1800,14 +1745,10 @@ pub mod view_element {
 
             write_tag_start(writer, "from")?;
             match self.from {
-                LinkEndContainer {
-                    end: LinkEnd::Named(ref name),
-                } => {
+                LinkEnd::Named(ref name) => {
                     write_tag_text(writer, name)?;
                 }
-                LinkEndContainer {
-                    end: LinkEnd::Alias(ref uid),
-                } => {
+                LinkEnd::Alias(ref uid) => {
                     let uid = format!("{}", uid.uid);
                     let attrs = &[("uid", uid.as_str())];
                     write_tag_with_attrs(writer, "alias", "", attrs)?;
@@ -1817,14 +1758,10 @@ pub mod view_element {
 
             write_tag_start(writer, "to")?;
             match self.to {
-                LinkEndContainer {
-                    end: LinkEnd::Named(ref name),
-                } => {
+                LinkEnd::Named(ref name) => {
                     write_tag_text(writer, name)?;
                 }
-                LinkEndContainer {
-                    end: LinkEnd::Alias(ref uid),
-                } => {
+                LinkEnd::Alias(ref uid) => {
                     let uid = format!("{}", uid.uid);
                     let attrs = &[("uid", uid.as_str())];
                     write_tag_with_attrs(writer, "alias", "", attrs)?;
@@ -1893,20 +1830,16 @@ pub mod view_element {
             let to_name = view.get_variable_name(v.to_uid).unwrap_or("");
             Link {
                 uid: Some(v.uid),
-                from: LinkEndContainer {
-                    end: if from_name.is_empty() {
-                        LinkEnd::Alias(AliasLinkEnd { uid: v.from_uid })
-                    } else {
-                        LinkEnd::Named(from_name.to_owned())
-                    },
+                from: if from_name.is_empty() {
+                    LinkEnd::Alias(AliasLinkEnd { uid: v.from_uid })
+                } else {
+                    LinkEnd::Named(from_name.to_owned())
                 },
                 from_uid: Some(v.from_uid),
-                to: LinkEndContainer {
-                    end: if to_name.is_empty() {
-                        LinkEnd::Alias(AliasLinkEnd { uid: v.to_uid })
-                    } else {
-                        LinkEnd::Named(to_name.to_owned())
-                    },
+                to: if to_name.is_empty() {
+                    LinkEnd::Alias(AliasLinkEnd { uid: v.to_uid })
+                } else {
+                    LinkEnd::Named(to_name.to_owned())
                 },
                 to_uid: Some(v.to_uid),
                 angle,
@@ -1956,10 +1889,15 @@ pub mod view_element {
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Module {
+        #[serde(rename = "@name")]
         pub name: String,
+        #[serde(rename = "@uid")]
         pub uid: Option<i32>,
+        #[serde(rename = "@x")]
         pub x: f64,
+        #[serde(rename = "@y")]
         pub y: f64,
+        #[serde(rename = "@label_side")]
         pub label_side: Option<LabelSide>,
     }
 
@@ -2026,10 +1964,15 @@ pub mod view_element {
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
     pub struct Alias {
         pub of: String,
+        #[serde(rename = "@of_uid")]
         pub of_uid: Option<i32>,
+        #[serde(rename = "@uid")]
         pub uid: Option<i32>,
+        #[serde(rename = "@x")]
         pub x: f64,
+        #[serde(rename = "@y")]
         pub y: f64,
+        #[serde(rename = "@label_side")]
         pub label_side: Option<LabelSide>,
     }
 
@@ -2279,19 +2222,29 @@ impl ViewObject {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct View {
+    #[serde(rename = "@next_uid")]
     pub next_uid: Option<i32>, // used internally
-    #[serde(rename = "type")]
+    #[serde(rename = "@type")]
     pub kind: Option<ViewType>,
+    #[serde(rename = "@background")]
     pub background: Option<String>,
+    #[serde(rename = "@page_width")]
     pub page_width: Option<String>,
+    #[serde(rename = "@page_height")]
     pub page_height: Option<String>,
+    #[serde(rename = "@show_pages")]
     pub show_pages: Option<bool>,
     #[serde(rename = "$value", default)]
     pub objects: Vec<ViewObject>,
+    #[serde(rename = "@zoom")]
     pub zoom: Option<f64>,
+    #[serde(rename = "@offset_x")]
     pub offset_x: Option<f64>,
+    #[serde(rename = "@offset_y")]
     pub offset_y: Option<f64>,
+    #[serde(rename = "@width")]
     pub width: Option<f64>,
+    #[serde(rename = "@height")]
     pub height: Option<f64>,
 }
 
@@ -2365,11 +2318,11 @@ impl View {
         }
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
-                link.from_uid = match &link.from.end {
+                link.from_uid = match &link.from {
                     LinkEnd::Named(name) => uid_map.get(&canonicalize(name)).cloned(),
                     LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
                 };
-                link.to_uid = match &link.to.end {
+                link.to_uid = match &link.to {
                     LinkEnd::Named(name) => uid_map.get(&canonicalize(name)).cloned(),
                     LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
                 };
@@ -2664,13 +2617,15 @@ fn test_view_roundtrip() {
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Module {
+    #[serde(rename = "@name")]
     pub name: String,
-    #[serde(rename = "simlin:model_name")]
+    #[serde(rename = "@model_name")]
     pub model_name: Option<String>,
     pub doc: Option<String>,
     pub units: Option<String>,
     #[serde(rename = "$value", default)]
     pub refs: Vec<Reference>,
+    #[serde(rename = "@access")]
     pub access: Option<String>,
 }
 
@@ -2811,9 +2766,9 @@ pub enum Reference {
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Connect {
-    #[serde(rename = "from")]
+    #[serde(rename = "@from")]
     pub src: String,
-    #[serde(rename = "to")]
+    #[serde(rename = "@to")]
     pub dst: String,
 }
 
@@ -2822,6 +2777,7 @@ pub struct NonNegative {}
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct VarElement {
+    #[serde(rename = "@subscript")]
     pub subscript: String,
     pub eqn: String,
     #[serde(rename = "init_eqn")]
@@ -2842,6 +2798,7 @@ impl ToXml<XmlWriter> for VarElement {
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct Stock {
+    #[serde(rename = "@name")]
     pub name: String,
     pub eqn: Option<String>,
     pub doc: Option<String>,
@@ -2854,6 +2811,7 @@ pub struct Stock {
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
+    #[serde(rename = "@access")]
     pub access: Option<String>,
 }
 
@@ -3064,6 +3022,7 @@ impl From<datamodel::Stock> for Stock {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Flow {
+    #[serde(rename = "@name")]
     pub name: String,
     pub eqn: Option<String>,
     #[serde(rename = "init_eqn")]
@@ -3075,6 +3034,7 @@ pub struct Flow {
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
+    #[serde(rename = "@access")]
     pub access: Option<String>,
 }
 
@@ -3219,6 +3179,7 @@ impl From<datamodel::Flow> for Flow {
 
 #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Aux {
+    #[serde(rename = "@name")]
     pub name: String,
     pub eqn: Option<String>,
     #[serde(rename = "init_eqn")]
@@ -3229,6 +3190,7 @@ pub struct Aux {
     pub dimensions: Option<VarDimensions>,
     #[serde(rename = "element", default)]
     pub elements: Option<Vec<VarElement>>,
+    #[serde(rename = "@access")]
     pub access: Option<String>,
 }
 
