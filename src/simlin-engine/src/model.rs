@@ -681,10 +681,7 @@ where
                     enumerate_modules_inner(models, model_name, mapper, modules)?;
                 }
 
-                modules
-                    .entry(key)
-                    .or_default()
-                    .insert(inputs);
+                modules.entry(key).or_default().insert(inputs);
             } else {
                 return model_err!(BadModelName, model_name.clone());
             }
@@ -833,10 +830,7 @@ impl ModelStage1 {
                 let dt_deps = match all_deps(&ctx, self.variables.values()) {
                     Ok(deps) => Some(deps),
                     Err((ident, err)) => {
-                        var_errors
-                            .entry(ident)
-                            .or_default()
-                            .insert(err);
+                        var_errors.entry(ident).or_default().insert(err);
                         None
                     }
                 };
@@ -846,10 +840,7 @@ impl ModelStage1 {
                 let initial_deps = match all_deps(&ctx, self.variables.values()) {
                     Ok(deps) => Some(deps),
                     Err((ident, err)) => {
-                        var_errors
-                            .entry(ident)
-                            .or_default()
-                            .insert(err);
+                        var_errors.entry(ident).or_default().insert(err);
                         None
                     }
                 };

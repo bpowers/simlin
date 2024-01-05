@@ -2416,26 +2416,20 @@ impl View {
 
         for flow in display_flows {
             let ends = &flow_ends[&flow.uid().unwrap()];
-            let source_uid = match ends.0 {
-                None => {
-                    let uid = self.next_uid.unwrap();
-                    self.next_uid = Some(uid + 1);
-                    let cloud = cloud_for(flow, CloudPosition::Source, uid);
-                    clouds.push(cloud);
-                    uid
-                }
-                Some(uid) => uid,
-            };
-            let sink_uid = match ends.1 {
-                None => {
-                    let uid = self.next_uid.unwrap();
-                    self.next_uid = Some(uid + 1);
-                    let cloud = cloud_for(flow, CloudPosition::Sink, uid);
-                    clouds.push(cloud);
-                    uid
-                }
-                Some(uid) => uid,
-            };
+            let source_uid = ends.0.unwrap_or_else(|| {
+                let uid = self.next_uid.unwrap();
+                self.next_uid = Some(uid + 1);
+                let cloud = cloud_for(flow, CloudPosition::Source, uid);
+                clouds.push(cloud);
+                uid
+            });
+            let sink_uid = ends.1.unwrap_or_else(|| {
+                let uid = self.next_uid.unwrap();
+                self.next_uid = Some(uid + 1);
+                let cloud = cloud_for(flow, CloudPosition::Sink, uid);
+                clouds.push(cloud);
+                uid
+            });
 
             if let ViewObject::Flow(flow) = flow {
                 if flow.points.is_some() && !flow.points.as_ref().unwrap().points.is_empty() {
