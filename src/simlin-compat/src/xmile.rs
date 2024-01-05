@@ -2337,18 +2337,13 @@ impl View {
         }
 
         // if there were links we couldn't resolve, dump them
-        self.objects = self
-            .objects
-            .iter()
-            .cloned()
-            .filter(|o| {
-                if let ViewObject::Link(link) = o {
-                    link.from_uid.is_some() && link.to_uid.is_some()
-                } else {
-                    true
-                }
-            })
-            .collect();
+        self.objects.retain(|o| {
+            if let ViewObject::Link(link) = o {
+                link.from_uid.is_some() && link.to_uid.is_some()
+            } else {
+                true
+            }
+        });
 
         self.next_uid = Some(next_uid);
         uid_map

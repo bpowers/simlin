@@ -357,7 +357,7 @@ impl Expr {
 
                 let builtin = match id.as_str() {
                     "lookup" => {
-                        if let Some(Expr::Var(ident, loc)) = args.get(0) {
+                        if let Some(Expr::Var(ident, loc)) = args.first() {
                             BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()), *loc)
                         } else {
                             return eqn_err!(BadTable, loc.start, loc.end);
@@ -373,7 +373,7 @@ impl Expr {
                     "inf" => check_arity!(Inf, 0),
                     "int" => check_arity!(Int, 1),
                     "ismoduleinput" => {
-                        if let Some(Expr::Var(ident, loc)) = args.get(0) {
+                        if let Some(Expr::Var(ident, loc)) = args.first() {
                             BuiltinFn::IsModuleInput(ident.clone(), *loc)
                         } else {
                             return eqn_err!(ExpectedIdent, loc.start, loc.end);

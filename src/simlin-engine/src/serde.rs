@@ -861,8 +861,7 @@ impl From<view_element::Aux> for project_io::view_element::Aux {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::try_from(v.label_side)
-                .unwrap_or_default() as i32,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
         }
     }
 }
@@ -904,8 +903,7 @@ impl From<view_element::Stock> for project_io::view_element::Stock {
             uid: v.uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::try_from(v.label_side)
-                .unwrap_or_default() as i32,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
         }
     }
 }
@@ -1239,8 +1237,7 @@ impl From<view_element::Alias> for project_io::view_element::Alias {
             alias_of_uid: v.alias_of_uid,
             x: v.x,
             y: v.y,
-            label_side: project_io::view_element::LabelSide::try_from(v.label_side)
-                .unwrap_or_default() as i32,
+            label_side: project_io::view_element::LabelSide::from(v.label_side) as i32,
         }
     }
 }

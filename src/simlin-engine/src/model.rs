@@ -683,7 +683,7 @@ where
 
                 modules
                     .entry(key)
-                    .or_insert_with(BTreeSet::new)
+                    .or_default()
                     .insert(inputs);
             } else {
                 return model_err!(BadModelName, model_name.clone());
@@ -835,7 +835,7 @@ impl ModelStage1 {
                     Err((ident, err)) => {
                         var_errors
                             .entry(ident)
-                            .or_insert_with(HashSet::new)
+                            .or_default()
                             .insert(err);
                         None
                     }
@@ -848,7 +848,7 @@ impl ModelStage1 {
                     Err((ident, err)) => {
                         var_errors
                             .entry(ident)
-                            .or_insert_with(HashSet::new)
+                            .or_default()
                             .insert(err);
                         None
                     }
