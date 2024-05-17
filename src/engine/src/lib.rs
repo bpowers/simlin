@@ -550,12 +550,12 @@ impl Engine {
                 if let Variable::Stock(stock) = var {
                     for inflow in stock.inflows.iter_mut() {
                         if inflow == &old_ident {
-                            *inflow = new_ident.clone();
+                            inflow.clone_from(&new_ident);
                         }
                     }
                     for outflow in stock.outflows.iter_mut() {
                         if outflow == &old_ident {
-                            *outflow = new_ident.clone();
+                            outflow.clone_from(&new_ident);
                         }
                     }
                 }

@@ -338,10 +338,10 @@ impl Variable {
 
     pub fn set_documentation(&mut self, doc: &str) {
         match self {
-            Variable::Stock(stock) => stock.documentation = doc.to_owned(),
-            Variable::Flow(flow) => flow.documentation = doc.to_owned(),
-            Variable::Aux(aux) => aux.documentation = doc.to_owned(),
-            Variable::Module(module) => module.documentation = doc.to_owned(),
+            Variable::Stock(stock) => doc.clone_into(&mut stock.documentation),
+            Variable::Flow(flow) => doc.clone_into(&mut flow.documentation),
+            Variable::Aux(aux) => doc.clone_into(&mut aux.documentation),
+            Variable::Module(module) => doc.clone_into(&mut module.documentation),
         }
     }
 

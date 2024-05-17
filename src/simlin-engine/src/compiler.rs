@@ -1240,7 +1240,7 @@ fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
 
     for ident in module.runlist_order.iter() {
         // FIXME: this isnt' quite right (assumes no regular var has same name as module)
-        if sim.modules.get(ident).is_some() {
+        if sim.modules.contains_key(ident) {
             let sub_var_names = calc_flattened_order(sim, ident);
             for sub_name in sub_var_names.iter() {
                 offsets.push(format!("{}.{}", quoteize(ident), quoteize(sub_name)));
