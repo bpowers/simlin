@@ -20,7 +20,7 @@ export function errorCodeDescription(code: ErrorCode): string {
       return 'Internal error (protocol buffer decoding)';
     case ErrorCode.InvalidToken:
       return 'Invalid input in equation';
-    case ErrorCode.UnrecognizedEOF:
+    case ErrorCode.UnrecognizedEof:
       return 'Unexpectedly reached the end of the equation';
     case ErrorCode.UnrecognizedToken:
       return 'Unrecognized input in equation';
