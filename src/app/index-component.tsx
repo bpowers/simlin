@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 import * as React from 'react';
-import * as ReactDOM from 'react-dom';
+import { createRoot } from 'react-dom/client';
 
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 
@@ -32,7 +32,8 @@ class SDModel extends HTMLElement {
 
     const username = this.getAttribute('username') || '';
     const projectName = this.getAttribute('projectName') || '';
-    ReactDOM.render(
+    const root = createRoot(mountPoint);
+    root.render(
       <div className="model-Editor-full">
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,500" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto+Mono&display=swap" />
@@ -40,7 +41,6 @@ class SDModel extends HTMLElement {
           <HostedWebEditor username={username} projectName={projectName} embedded={true} baseURL={base} />
         </ThemeProvider>
       </div>,
-      mountPoint,
     );
   }
 }
