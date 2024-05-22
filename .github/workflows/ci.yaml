@@ -91,7 +91,9 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run cargo-tarpaulin
-        uses: actions-rs/tarpaulin@v0.1
+        run: |
+          cargo install cargo-tarpaulin
+          cargo tarpaulin --out Xml
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v1
