@@ -94,7 +94,10 @@ impl<'a> UnitEvaluator<'a> {
                 | BuiltinFn::Log10(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Sqrt(a)
-                | BuiltinFn::Tan(a) => self.check(a),
+                | BuiltinFn::Tan(a)
+                | BuiltinFn::Size(a)
+                | BuiltinFn::Stddev(a)
+                | BuiltinFn::Sum(a) => self.check(a),
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
@@ -135,29 +138,30 @@ impl<'a> UnitEvaluator<'a> {
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
                     let a_units = self.check(a)?;
-                    let b_units = self.check(b)?;
-                    if !a_units.equals(&b_units) {
-                        let a_units = match a_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        let b_units = match b_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        let loc = a.get_loc().union(&b.get_loc());
-                        Err(ConsistencyError (
-                            ErrorCode::UnitDefinitionErrors,
-                            loc,
-                            Some(format!(
-                                "expected left and right argument units to match, but '{}' and '{}' don't",
-                                a_units,
-                                b_units,
-                            )),
-                        ))
-                    } else {
-                        Ok(a_units)
+                    if let Some(b) = b {
+                        let b_units = self.check(b)?;
+                        if !a_units.equals(&b_units) {
+                            let a_units = match a_units {
+                                Units::Explicit(units) => units,
+                                Units::Constant => Default::default(),
+                            };
+                            let b_units = match b_units {
+                                Units::Explicit(units) => units,
+                                Units::Constant => Default::default(),
+                            };
+                            let loc = a.get_loc().union(&b.get_loc());
+                            return Err(ConsistencyError(
+                                ErrorCode::UnitDefinitionErrors,
+                                loc,
+                                Some(format!(
+                                    "expected left and right argument units to match, but '{}' and '{}' don't",
+                                    a_units,
+                                    b_units,
+                                )),
+                            ));
+                        }
                     }
+                    Ok(a_units)
                 }
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Ok(Units::Constant)
@@ -180,6 +184,7 @@ impl<'a> UnitEvaluator<'a> {
 
                     Ok(units)
                 }
+                BuiltinFn::Rank(a, _rest) => self.check(a),
             },
             Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
             Expr::Op1(_, l, _) => self.check(l),
