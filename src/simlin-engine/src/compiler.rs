@@ -1482,7 +1482,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Lookup(_, _, _) | BuiltinFn::IsModuleInput(_, _) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         let lit = match builtin {
-                            BuiltinFn::Inf => std::f64::INFINITY,
+                            BuiltinFn::Inf => f64::INFINITY,
                             BuiltinFn::Pi => std::f64::consts::PI,
                             _ => unreachable!(),
                         };
@@ -1820,7 +1820,7 @@ impl<'a> ModuleEvaluator<'a> {
                     BuiltinFn::Arcsin(a) => self.eval(a).asin(),
                     BuiltinFn::Arctan(a) => self.eval(a).atan(),
                     BuiltinFn::Exp(a) => self.eval(a).exp(),
-                    BuiltinFn::Inf => std::f64::INFINITY,
+                    BuiltinFn::Inf => f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
                     BuiltinFn::IsModuleInput(ident, _) => {

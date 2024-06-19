@@ -585,7 +585,7 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
         BuiltinId::Arctan => a.atan(),
         BuiltinId::Cos => a.cos(),
         BuiltinId::Exp => a.exp(),
-        BuiltinId::Inf => std::f64::INFINITY,
+        BuiltinId::Inf => f64::INFINITY,
         BuiltinId::Int => a.floor(),
         BuiltinId::Ln => a.ln(),
         BuiltinId::Log10 => a.log10(),

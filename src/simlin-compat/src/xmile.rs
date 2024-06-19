@@ -901,11 +901,7 @@ impl From<Unit> for datamodel::Unit {
             name: unit.name,
             equation: unit.eqn.filter(|eqn| !eqn.is_empty()),
             disabled: matches!(unit.disabled, Some(true)),
-            aliases: if let Some(aliases) = unit.alias {
-                aliases
-            } else {
-                vec![]
-            },
+            aliases: unit.alias.unwrap_or_default(),
         }
     }
 }
