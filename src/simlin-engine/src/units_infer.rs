@@ -138,7 +138,10 @@ impl<'a> UnitInferer<'a> {
                 | BuiltinFn::Log10(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Sqrt(a)
-                | BuiltinFn::Tan(a) => self.gen_constraints(a, prefix, constraints),
+                | BuiltinFn::Tan(a)
+                | BuiltinFn::Size(a)
+                | BuiltinFn::Stddev(a)
+                | BuiltinFn::Sum(a) => self.gen_constraints(a, prefix, constraints),
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
@@ -173,16 +176,17 @@ impl<'a> UnitInferer<'a> {
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
                     let a_units = self.gen_constraints(a, prefix, constraints)?;
-                    let b_units = self.gen_constraints(b, prefix, constraints)?;
+                    if let Some(b) = b {
+                        let b_units = self.gen_constraints(b, prefix, constraints)?;
 
-                    if let Units::Explicit(ref lunits) = a_units {
-                        if let Units::Explicit(runits) = b_units {
-                            constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
+                        if let Units::Explicit(ref lunits) = a_units {
+                            if let Units::Explicit(runits) = b_units {
+                                constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
+                            }
                         }
                     }
                     Ok(a_units)
                 }
-
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Ok(Units::Constant)
                 }
@@ -211,6 +215,15 @@ impl<'a> UnitInferer<'a> {
                     }
 
                     Ok(units)
+                }
+                BuiltinFn::Rank(a, _rest) => {
+                    let a_units = self.gen_constraints(a, prefix, constraints)?;
+
+                    // from the spec, I don't think there are any constraints on the optional args:
+                    // RANK(A, SIZE) gives index of MAX value in array A (i.e., final ranked, ascending order)
+                    // RANK(A, 3, B) gives index of third smallest value in array A, breaking any ties between same-valued elements in A by comparing the corresponding elements in array B
+
+                    Ok(a_units)
                 }
             },
             Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
