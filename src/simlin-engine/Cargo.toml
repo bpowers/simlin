@@ -16,9 +16,9 @@ wasm = ["wasm-bindgen"]
 lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
-lalrpop-util = "0.20"
-prost = "0.12"
-float-cmp = "0.9"
+lalrpop-util = "0.22"
+prost = "0.13"
+float-cmp = "0.10"
 ordered-float = "4"
 # rand = "0.8"
 smallvec = { version = "1", features = [ "union" ] }
@@ -29,5 +29,5 @@ getrandom = { version = "0.2", features = [ "js" ] }
 rand = "0.8"
 
 [build-dependencies]
-lalrpop = "0.20"
-prost-build = "0.12"
+lalrpop = "0.22"
+prost-build = "0.13"
