@@ -194,9 +194,8 @@ where
         BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
             cb(BuiltinContents::Expr(a));
             cb(BuiltinContents::Expr(b));
-            match c {
-                Some(c) => cb(BuiltinContents::Expr(c)),
-                None => {}
+            if let Some(c) = c {
+                cb(BuiltinContents::Expr(c))
             }
         }
     }

@@ -747,19 +747,13 @@ impl From<Gf> for datamodel::GraphicalFunction {
             None => Ok(vec![]),
             Some(x_pts) => x_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
         };
-        let x_points: Vec<f64> = match x_points {
-            Ok(pts) => pts,
-            Err(_) => vec![],
-        };
+        let x_points: Vec<f64> = x_points.unwrap_or_default();
 
         let y_points: std::result::Result<Vec<f64>, _> = match &gf.y_pts {
             None => Ok(vec![]),
             Some(y_pts) => y_pts.split(',').map(|n| f64::from_str(n.trim())).collect(),
         };
-        let y_points: Vec<f64> = match y_points {
-            Ok(pts) => pts,
-            Err(_) => vec![],
-        };
+        let y_points: Vec<f64> = y_points.unwrap_or_default();
 
         let x_scale = match gf.x_scale {
             Some(x_scale) => datamodel::GraphicalFunctionScale::from(x_scale),
