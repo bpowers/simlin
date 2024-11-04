@@ -53,7 +53,5 @@
     "deploy": "export NODE_ENV=production && yarn clean && yarn build && yarn workspace @system-dynamics/app deploy && gcloud app deploy ./.app.prod.yaml && yarn workspace @system-dynamics/app deploy-clean",
     "start": "node src/server/lib"
   },
-  "dependencies": {
-    "re2": "1.21.4"
-  }
+  "dependencies": {}
 }

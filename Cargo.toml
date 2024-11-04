@@ -15,3 +15,4 @@ opt-level = 3
 lto = false
 debug = 1
 panic = "abort"
+strip = true

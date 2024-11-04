@@ -26,7 +26,7 @@
     "@system-dynamics/core": "^1.3.5",
     "@system-dynamics/engine": "^1.3.1",
     "@system-dynamics/importer": "^1.3.6",
-    "chroma-js": "^2.1.0",
+    "chroma-js": "^3.1.2",
     "google-protobuf": "^3.18.0",
     "immutable": "^4.0.0",
     "js-base64": "^3.6.0",
@@ -45,7 +45,7 @@
   "devDependencies": {
     "@babel/core": "^7.13.1",
     "@mui/icons-material": "^5.0.0",
-    "@types/chroma-js": "^2.1.3",
+    "@types/chroma-js": "^2.4.4",
     "@types/katex": "^0.11.1",
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
@@ -61,7 +61,7 @@
     "eslint-plugin-prettier": "^4.0.0",
     "katex": "^0.13.18",
     "prettier": "^2.0.1",
-    "recharts": "^2.0.3",
+    "recharts": "2.12.7",
     "typescript": "^4.1.3"
   },
   "scripts": {
