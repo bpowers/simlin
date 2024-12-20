@@ -28,8 +28,8 @@
     "@system-dynamics/importer": "^1.3.6",
     "chroma-js": "^3.1.2",
     "google-protobuf": "^3.18.0",
-    "immutable": "^4.0.0",
-    "js-base64": "^3.6.0",
+    "immutable": "^5.0.3",
+    "js-base64": "^3.7.7",
     "react": "^18.1.0",
     "react-dom": "^18.1.0",
     "react-router": "^5.2.1",
@@ -39,7 +39,7 @@
     "slate-react": "^0.88.0"
   },
   "resolutions": {
-    "@types/slate*/**/immutable": "4.0.0",
+    "@types/slate*/**/immutable": "5.0.3",
     "immer": "9.0.19"
   },
   "devDependencies": {

@@ -42,9 +42,9 @@
   },
   "sideEffects": false,
   "dependencies": {
-    "immutable": "^4.0.0",
-    "js-base64": "^3.6.0",
-    "google-protobuf": "^3.18.0"
+    "immutable": "^5.0.3",
+    "js-base64": "^3.7.7",
+    "google-protobuf": "^3.21.4"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^5.11.0",

@@ -128,10 +128,13 @@ function adjustFlows(
       }
 
       let compare: IPoint;
+      // we're inside a lambda passed to flow.points.map(), so while
+      // first and last can conceptually return undefined, we know
+      // that can't actually happen here.
       if (i === 0) {
-        compare = flow.points.last();
+        compare = flow.points.last() as IPoint;
       } else {
-        compare = flow.points.first();
+        compare = flow.points.first() as IPoint;
       }
 
       const d = {
