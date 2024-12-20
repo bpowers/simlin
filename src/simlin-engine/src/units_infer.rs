@@ -83,7 +83,7 @@ fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<Unit
         .collect()
 }
 
-impl<'a> UnitInferer<'a> {
+impl UnitInferer<'_> {
     /// gen_constraints generates a set of equality constraints for a given expression,
     /// storing those constraints in the mutable `constraints` argument. This is
     /// right out of Hindley-Milner type inference/Algorithm W, but because we are

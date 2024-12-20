@@ -501,7 +501,7 @@ struct IdentifierSetVisitor<'a> {
     module_inputs: Option<&'a BTreeSet<Ident>>,
 }
 
-impl<'a> IdentifierSetVisitor<'a> {
+impl IdentifierSetVisitor<'_> {
     fn walk_index(&mut self, e: &IndexExpr) {
         match e {
             IndexExpr::Wildcard(_) => {}

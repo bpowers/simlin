@@ -191,7 +191,7 @@ struct Context<'a> {
     inputs: &'a BTreeSet<Ident>,
 }
 
-impl<'a> Context<'a> {
+impl Context<'_> {
     fn get_offset(&self, ident: &str) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, false)
     }
@@ -1391,7 +1391,7 @@ struct Compiler<'module> {
 }
 
 impl<'module> Compiler<'module> {
-    fn new(module: &'module Module) -> Compiler {
+    fn new(module: &'module Module) -> Compiler<'module> {
         Compiler {
             module,
             module_decls: vec![],
@@ -1706,7 +1706,7 @@ pub struct ModuleEvaluator<'a> {
     sim: &'a Simulation,
 }
 
-impl<'a> ModuleEvaluator<'a> {
+impl ModuleEvaluator<'_> {
     fn eval(&mut self, expr: &Expr) -> f64 {
         match expr {
             Expr::Const(n, _) => *n,

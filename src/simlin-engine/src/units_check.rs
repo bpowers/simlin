@@ -22,7 +22,7 @@ struct UnitEvaluator<'a> {
     time: Variable,
 }
 
-impl<'a> UnitEvaluator<'a> {
+impl UnitEvaluator<'_> {
     fn check(&self, expr: &Expr) -> UnitResult<Units> {
         use UnitError::ConsistencyError;
         match expr {
