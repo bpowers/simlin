@@ -20,7 +20,6 @@
     "skipLibCheck": true,
     "strict": true,
     "strictNullChecks": true,
-    "suppressImplicitAnyIndexErrors": true,
     "noUnusedLocals": true,
     "paths": {
       "@system-dynamics/*": [

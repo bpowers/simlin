@@ -99,7 +99,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   private doc(_id: string, pb: T): Schema {
     const serializedPb = pb.serializeBinary();
-    const doc = pb.toObject();
+    const doc: {[key: string]: any} = pb.toObject();
 
     if (doc.hasOwnProperty('value')) {
       throw new Error('we expect document to not have "value" property');
@@ -113,7 +113,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
       if (key === 'jsonContents') {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        const contents = value as any;
+        const contents = value;
         // if the JSON is too big, don't expose it (as its only for debugging info anyway)
         if (contents.length > 100 * 1024) {
           doc[key] = null;

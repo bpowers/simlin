@@ -43,7 +43,7 @@ const readFile = (file: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
     reader.onerror = (err) => {
       reader.abort();
-      reject(new DOMException(`Problem parsing input file: ${err}`));
+      reject(new DOMException(`Problem parsing input file: ${err.type}`));
     };
 
     reader.onload = () => {

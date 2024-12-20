@@ -56,7 +56,7 @@ export const Sparkline = styled(
   class Sparkline extends React.PureComponent<SparklineProps & { className?: string }> {
     // these should all be 'private', but Typescript can't enforce that with the `styled` above
     pAxis = '';
-    sparklines: Array<React.SVGProps<SVGPathElement>> = [];
+    sparklines: Array<React.ReactNode> = [];
     cachedSeries: List<Series> | unknown;
 
     recache() {
