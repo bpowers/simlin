@@ -11,21 +11,21 @@ module.exports = {
   ],
   plugins: [
     [
-      "@babel/plugin-proposal-class-properties",
+      "@babel/plugin-transform-class-properties",
       {
         "loose": true
       }
     ],
     [
-      "@babel/plugin-proposal-optional-chaining",
+      "@babel/plugin-transform-optional-chaining",
       {}
     ],
     [
-      "@babel/plugin-proposal-nullish-coalescing-operator",
+      "@babel/plugin-transform-nullish-coalescing-operator",
       {}
     ],
     [
-      "@babel/plugin-proposal-private-property-in-object",
+      "@babel/plugin-transform-private-property-in-object",
       {
         "loose": true
       }

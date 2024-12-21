@@ -304,11 +304,11 @@ module.exports = function (webpackEnv) {
                   isEnvDevelopment &&
                     shouldUseReactRefresh &&
                     require.resolve('react-refresh/babel'),
-                  ["@babel/plugin-proposal-private-methods", { "loose": true }],
-                  ["@babel/plugin-proposal-class-properties", { "loose": true }],
-                  ["@babel/plugin-proposal-private-property-in-object", { "loose": true }],
-                  ["@babel/plugin-proposal-optional-chaining", {}],
-                  ["@babel/plugin-proposal-nullish-coalescing-operator", {}],
+                  ["@babel/plugin-transform-private-methods", { "loose": true }],
+                  ["@babel/plugin-transform-class-properties", { "loose": true }],
+                  ["@babel/plugin-transform-private-property-in-object", { "loose": true }],
+                  ["@babel/plugin-transform-optional-chaining", {}],
+                  ["@babel/plugin-transform-nullish-coalescing-operator", {}],
                 ].filter(Boolean),
                 // This is a feature of `babel-loader` for webpack (not Babel itself).
                 // It enables caching results in ./node_modules/.cache/babel-loader/
