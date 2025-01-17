@@ -57,7 +57,7 @@
     "eslint-config-prettier": "^9.0.0",
     "eslint-plugin-import": "^2.20.1",
     "eslint-plugin-prettier": "^5.0.0",
-    "katex": "^0.13.18",
+    "katex": "^0.16.21",
     "prettier": "^3.0.0",
     "recharts": "2.12.7",
     "typescript": "^5.7.2"
