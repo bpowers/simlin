@@ -10,6 +10,8 @@ rm -rf lib lib.browser pkg pkg-node core
 # Get the package name
 PKG_NAME=${PWD##*/}
 
+export RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
+
 cargo build --lib --release --target wasm32-unknown-unknown
 
 echo "running wasm-bindgen"
