@@ -3,7 +3,7 @@ name = "simlin-engine"
 version = "0.1.0"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
-edition = "2021"
+edition = "2024"
 build = "build.rs"
 
 [lib]
@@ -19,7 +19,7 @@ unicode-xid = "0.2"
 lalrpop-util = "0.22"
 prost = "0.13"
 float-cmp = "0.10"
-ordered-float = "4"
+ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
 wasm-bindgen = { version = "0.2", optional = true }
 getrandom = { version = "0.3", features = ["wasm_js"] }

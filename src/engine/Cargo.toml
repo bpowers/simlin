@@ -5,7 +5,7 @@ description = "JavaScript interface to the System Dynamics engine"
 repository = "https://github.com/bpowers/simlin"
 authors = ["Bobby Powers <bobbypowers@gmail.com>"]
 license = "Apache-2.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]

@@ -7,7 +7,7 @@ homepage = "https://github.com/bpowers/xmutil-rs"
 repository = "https://github.com/bpowers/xmutil-rs"
 readme = "README.md"
 license = "Apache-2.0"
-edition = "2021"
+edition = "2024"
 build = "build.rs"
 
 [dependencies]
