@@ -274,7 +274,7 @@ pub struct Header {
     pub includes: Option<Includes>,
 }
 
-fn xml_error(err: quick_xml::Error) -> simlin_engine::common::Error {
+fn xml_error(err: std::io::Error) -> simlin_engine::common::Error {
     use simlin_engine::common::{Error, ErrorCode, ErrorKind};
 
     Error::new(
