@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use lazy_static::lazy_static;
 
-extern "C" {
+unsafe extern "C" {
     fn xmutil_convert_mdl_to_xmile(
         mdl_source: *const u8,
         mdl_source_len: u32,
