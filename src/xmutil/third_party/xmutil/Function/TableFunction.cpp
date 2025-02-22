@@ -2,7 +2,6 @@
 
 #include <assert.h>
 
-#include <cstdint>
 #include <vector>
 
 #include "../Symbol/Expression.h"

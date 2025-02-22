@@ -2,6 +2,7 @@
 #define _XMUTIL_XMUTIL_H
 
 #include <string>
+#include <cstdint>
 
 #include "Log.h"
 
