@@ -6,13 +6,13 @@ use std::collections::HashMap;
 use std::io::{BufRead, Cursor, Write};
 
 use float_cmp::approx_eq;
-use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::datamodel::Visibility;
 use crate::xmile::view_element::LinkEnd;
-use simlin_engine::common::{canonicalize, quoteize, Result};
+use simlin_engine::common::{Result, canonicalize, quoteize};
 use simlin_engine::datamodel;
 use simlin_engine::datamodel::{Equation, Rect, ViewElement};
 
@@ -1086,8 +1086,8 @@ pub mod view_element {
     #[cfg(test)]
     use crate::engine::datamodel::StockFlow;
     use crate::xmile::{
-        write_tag, write_tag_end, write_tag_start, write_tag_start_with_attrs, write_tag_text,
-        write_tag_with_attrs, ToXml, XmlWriter, STOCK_HEIGHT, STOCK_WIDTH,
+        STOCK_HEIGHT, STOCK_WIDTH, ToXml, XmlWriter, write_tag, write_tag_end, write_tag_start,
+        write_tag_start_with_attrs, write_tag_text, write_tag_with_attrs,
     };
     use quick_xml::Writer;
     use serde::{Deserialize, Deserializer, Serialize};

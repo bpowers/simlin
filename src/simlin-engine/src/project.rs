@@ -52,7 +52,7 @@ impl Project {
     where
         F: FnMut(&HashMap<Ident, &ModelStage1>, &Context, &mut ModelStage1),
     {
-        use crate::common::{topo_sort, ErrorCode, ErrorKind};
+        use crate::common::{ErrorCode, ErrorKind, topo_sort};
         use crate::model::enumerate_modules;
 
         // first, build the unit context.

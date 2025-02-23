@@ -7,10 +7,10 @@ use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{canonicalize, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult};
+use crate::common::{EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
-use crate::units::{combine, Context, UnitOp, Units};
+use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::Variable;
 
 struct UnitEvaluator<'a> {
@@ -146,13 +146,12 @@ impl UnitEvaluator<'_> {
                             Units::Constant => Default::default(),
                         };
                         let loc = a.get_loc().union(&b.get_loc());
-                        Err(ConsistencyError (
+                        Err(ConsistencyError(
                             ErrorCode::UnitDefinitionErrors,
                             loc,
                             Some(format!(
                                 "expected left and right argument units to match, but '{}' and '{}' don't",
-                                a_units,
-                                b_units,
+                                a_units, b_units,
                             )),
                         ))
                     } else {
@@ -196,8 +195,7 @@ impl UnitEvaluator<'_> {
                             if lunits != runits {
                                 let details = Some(format!(
                                     "expected left and right argument units to match, but '{}' and '{}' don't",
-                                    lunits,
-                                    runits,
+                                    lunits, runits,
                                 ));
                                 let loc = l.get_loc().union(&r.get_loc());
                                 Err(ConsistencyError(ErrorCode::UnitMismatch, loc, details))
@@ -320,7 +318,10 @@ pub fn check(
                         if let Some(var) = model.variables.get(ident) {
                             if let Some(units) = var.units() {
                                 if expected_flow_units != *units {
-                                    let details = format!("expected units '{}' to match the units expected by the attached stock {} ({})", units, stock_ident, expected_flow_units);
+                                    let details = format!(
+                                        "expected units '{}' to match the units expected by the attached stock {} ({})",
+                                        units, stock_ident, expected_flow_units
+                                    );
                                     errors.push((
                                         var.ident().to_owned(),
                                         DefinitionError(

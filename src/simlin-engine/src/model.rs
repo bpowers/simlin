@@ -6,16 +6,16 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::result::Result as StdResult;
 
-use crate::ast::{lower_ast, Expr0};
+use crate::ast::{Expr0, lower_ast};
 use crate::common::{
-    topo_sort, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, UnitError,
+    EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, UnitError, topo_sort,
 };
 use crate::datamodel::{Dimension, UnitMap};
 use crate::dimensions::DimensionsContext;
 #[cfg(test)]
 use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_stock};
 use crate::units::Context;
-use crate::variable::{identifier_set, parse_var, ModuleInput, Variable};
+use crate::variable::{ModuleInput, Variable, identifier_set, parse_var};
 use crate::vm::StepPart;
 use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
 

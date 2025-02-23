@@ -40,7 +40,7 @@ mod units_infer;
 mod vm;
 
 pub use self::builder::build_sim_with_stderrors;
-pub use self::common::{canonicalize, quoteize, Error, ErrorCode, Ident, Result};
+pub use self::common::{Error, ErrorCode, Ident, Result, canonicalize, quoteize};
 pub use self::compiler::Simulation;
 pub use self::project::Project;
 pub use self::variable::Variable;

@@ -6,13 +6,13 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr};
 use crate::builtins::BuiltinFn;
-use crate::common::{canonicalize, Ident, Result, UnitResult};
+use crate::common::{Ident, Result, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::model_err;
 #[cfg(test)]
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
-use crate::units::{combine, Context, UnitOp, Units};
+use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::Variable;
 
 struct UnitInferer<'a> {
@@ -54,11 +54,7 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
         false
     };
 
-    if inverse {
-        lhs.reciprocal()
-    } else {
-        lhs
-    }
+    if inverse { lhs.reciprocal() } else { lhs }
 }
 
 fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<UnitMap> {

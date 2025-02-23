@@ -5,9 +5,9 @@
 use float_cmp::approx_eq;
 
 use crate::datamodel::{
-    view_element, Aux, Dimension, Dt, Equation, Extension, Flow, GraphicalFunction,
-    GraphicalFunctionKind, GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect,
-    SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility,
+    Aux, Dimension, Dt, Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind,
+    GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect, SimMethod, SimSpecs,
+    Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
 };
 use crate::project_io;
 

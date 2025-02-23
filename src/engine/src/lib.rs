@@ -16,7 +16,7 @@ use prost::Message;
 use simlin_engine as engine;
 use simlin_engine::common::{ErrorCode, ErrorKind};
 use simlin_engine::datamodel::{Extension, GraphicalFunction, Source, Variable, Visibility};
-use simlin_engine::{canonicalize, datamodel, project_io, prost, serde, Error, Vm};
+use simlin_engine::{Error, Vm, canonicalize, datamodel, project_io, prost, serde};
 
 #[wasm_bindgen]
 pub struct Engine {

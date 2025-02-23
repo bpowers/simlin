@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use crate::datamodel::{self, ModuleReference};
-use crate::model::{lower_variable, ScopeStage0};
-use crate::variable::{parse_var, Variable};
+use crate::model::{ScopeStage0, lower_variable};
+use crate::variable::{Variable, parse_var};
 
 #[cfg(test)]
 fn optional_vec(slice: &[&str]) -> Vec<String> {

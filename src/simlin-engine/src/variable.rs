@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 #[cfg(test)]
 use crate::ast::Loc;
 use crate::ast::{Ast, Expr, Expr0, IndexExpr};
-use crate::builtins::{walk_builtin_expr, BuiltinContents, BuiltinFn};
+use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, UnitError};
 use crate::datamodel::Dimension;
@@ -15,7 +15,7 @@ use crate::datamodel::Dimension;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 use crate::units::parse_units;
-use crate::{datamodel, eqn_err, units, ErrorCode};
+use crate::{ErrorCode, datamodel, eqn_err, units};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {

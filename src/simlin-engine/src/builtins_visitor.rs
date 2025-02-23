@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{print_eqn, Ast, Expr0, IndexExpr0};
-use crate::builtins::{is_builtin_fn, UntypedBuiltinFn};
+use crate::ast::{Ast, Expr0, IndexExpr0, print_eqn};
+use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::common::{EquationError, Ident};
 use crate::datamodel::Visibility;
 use crate::{datamodel, eqn_err};

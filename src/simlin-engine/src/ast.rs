@@ -10,7 +10,7 @@ use lalrpop_util::ParseError;
 pub use crate::builtins::Loc;
 
 use crate::builtins::{
-    is_0_arity_builtin_fn, walk_builtin_expr, BuiltinContents, BuiltinFn, UntypedBuiltinFn,
+    BuiltinContents, BuiltinFn, UntypedBuiltinFn, is_0_arity_builtin_fn, walk_builtin_expr,
 };
 use crate::common::{ElementName, EquationError, EquationResult, Ident};
 use crate::datamodel::Dimension;

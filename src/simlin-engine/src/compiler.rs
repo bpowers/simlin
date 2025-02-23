@@ -13,17 +13,17 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{quoteize, ErrorCode, ErrorKind, Ident, Result};
+use crate::common::{ErrorCode, ErrorKind, Ident, Result, quoteize};
 use crate::datamodel::{self, Dimension};
 use crate::interpreter::UnaryOp;
-use crate::model::{enumerate_modules, ModelStage1};
+use crate::model::{ModelStage1, enumerate_modules};
 use crate::project::Project;
 use crate::variable::Variable;
 use crate::vm::{
-    is_truthy, pulse, ramp, step, CompiledSimulation, Results, Specs, StepPart, SubscriptIterator,
-    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+    CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, Results,
+    Specs, StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
 };
-use crate::{sim_err, Error};
+use crate::{Error, sim_err};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -1846,11 +1846,7 @@ impl ModuleEvaluator<'_> {
                         let b = self.eval(b);
                         // we can't use std::cmp::min here, becuase f64 is only
                         // PartialOrd
-                        if a < b {
-                            a
-                        } else {
-                            b
-                        }
+                        if a < b { a } else { b }
                     }
                     BuiltinFn::Mean(args) => {
                         let count = args.len() as f64;
@@ -1862,11 +1858,7 @@ impl ModuleEvaluator<'_> {
                         let b = self.eval(b);
                         // we can't use std::cmp::min here, becuase f64 is only
                         // PartialOrd
-                        if a > b {
-                            a
-                        } else {
-                            b
-                        }
+                        if a > b { a } else { b }
                     }
                     BuiltinFn::Lookup(id, index, _) => {
                         if !self.module.tables.contains_key(id) {

@@ -12,8 +12,8 @@ use pico_args::Arguments;
 use simlin_compat::engine::common::ErrorKind;
 use simlin_compat::engine::datamodel::Project as DatamodelProject;
 use simlin_compat::engine::{
-    build_sim_with_stderrors, datamodel, eprintln, project_io, serde, Error, ErrorCode, Project,
-    Result, Results, Variable, Vm,
+    Error, ErrorCode, Project, Result, Results, Variable, Vm, build_sim_with_stderrors, datamodel,
+    eprintln, project_io, serde,
 };
 use simlin_compat::prost::Message;
 use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};

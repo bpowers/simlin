@@ -9,8 +9,8 @@ use std::io::{BufRead, BufReader};
 use std::result::Result as StdResult;
 
 use simlin_engine::datamodel::Project;
-pub use simlin_engine::{self as engine, prost, Result, Results};
-use simlin_engine::{canonicalize, quoteize, Method, SimSpecs};
+pub use simlin_engine::{self as engine, Result, Results, prost};
+use simlin_engine::{Method, SimSpecs, canonicalize, quoteize};
 
 pub mod xmile;
 
