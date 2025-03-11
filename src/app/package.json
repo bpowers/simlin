@@ -62,7 +62,8 @@
     "url-loader": "^4.1.1",
     "webpack": "^5.49.0",
     "webpack-dev-server": "^4.3.0",
-    "webpack-manifest-plugin": "^5.0.0"
+    "webpack-manifest-plugin": "^5.0.0",
+    "wouter": "^3.6.0"
   },
   "resolutions": {
     "immer": "9.0.19"

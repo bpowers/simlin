@@ -4,7 +4,7 @@
 
 import * as React from 'react';
 
-import { Link } from 'react-router-dom';
+import { Link } from 'wouter';
 import clsx from 'clsx';
 import { styled } from '@mui/material/styles';
 import AppBar from '@mui/material/AppBar';

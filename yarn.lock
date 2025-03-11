@@ -3478,11 +3478,6 @@
   resolved "https://registry.yarnpkg.com/@types/cookie-parser/-/cookie-parser-1.4.8.tgz#d2215e7915f624fbfe4233da8f063f511679f1f3"
   integrity sha512-l37JqFrOJ9yQfRQkljb41l0xVphc7kg5JTjjr+pLRZ0IyZ49V4BQ8vbF4Ut2C2e+WH4al3xD3ZwYwIUfnbT4NQ==
 
-"@types/cookie@^0.6.0":
-  version "0.6.0"
-  resolved "https://registry.yarnpkg.com/@types/cookie/-/cookie-0.6.0.tgz#eac397f28bf1d6ae0ae081363eca2f425bedf0d5"
-  integrity sha512-4Kh9a6B2bQciAhf7FSuMRRkUWecJgJu9nPnx3yzpsfXX/c50REIqpHY4C82bXP90qrLtXtkDxTZosYO3UpOwlA==
-
 "@types/cors@^2.8.9":
   version "2.8.17"
   resolved "https://registry.yarnpkg.com/@types/cors/-/cors-2.8.17.tgz#5d718a5e494a8166f569d986794e49c48b216b2b"
@@ -3845,7 +3840,7 @@
     "@types/react" "*"
     "@types/react-router" "^5.1.0"
 
-"@types/react-router-dom@*", "@types/react-router-dom@^5.1.7":
+"@types/react-router-dom@*":
   version "5.3.3"
   resolved "https://registry.yarnpkg.com/@types/react-router-dom/-/react-router-dom-5.3.3.tgz#e9d6b4a66fcdbd651a5f106c2656a30088cc1e83"
   integrity sha512-kpqnYK4wcdm5UaWI3fLcELopqLrHgLqNsdpHauzlQktfkHL3npOSwtj1Uz9oKBAzs7lFtVkV8j83voAz2D8fhw==
@@ -5812,11 +5807,6 @@ cookie@0.7.2:
   version "0.7.2"
   resolved "https://registry.yarnpkg.com/cookie/-/cookie-0.7.2.tgz#556369c472a2ba910f2979891b526b3436237ed7"
   integrity sha512-yki5XnKuf750l50uGTllt6kKILY4nQ1eNIQatoXEByZ5dWgnKqbnqmTrBE5B4N7lrMJKQ2ytWMiTO2o0v6Ew/w==
-
-cookie@^1.0.1:
-  version "1.0.2"
-  resolved "https://registry.yarnpkg.com/cookie/-/cookie-1.0.2.tgz#27360701532116bd3f1f9416929d176afe1e4610"
-  integrity sha512-9Kr/j4O16ISv8zBBhJoi4bXOYNTkFLOqSL3UDB0njXxCXNezjeyVrJyGOWtgfs/q2km1gwBcfH8q1yEGoMYunA==
 
 copy-text-to-clipboard@^3.2.0:
   version "3.2.0"
@@ -11032,6 +11022,11 @@ minizlib@^2.1.1, minizlib@^2.1.2:
     minipass "^3.0.0"
     yallist "^4.0.0"
 
+mitt@^3.0.1:
+  version "3.0.1"
+  resolved "https://registry.yarnpkg.com/mitt/-/mitt-3.0.1.tgz#ea36cf0cc30403601ae074c8f77b7092cdab36d1"
+  integrity sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw==
+
 mkdirp@^0.5.1, mkdirp@^0.5.6:
   version "0.5.6"
   resolved "https://registry.yarnpkg.com/mkdirp/-/mkdirp-0.5.6.tgz#7def03d2432dcae4ba1d611445c48396062255f6"
@@ -12955,13 +12950,6 @@ react-router-dom@^5.3.4:
     tiny-invariant "^1.0.2"
     tiny-warning "^1.0.0"
 
-react-router-dom@^7.1.0:
-  version "7.1.0"
-  resolved "https://registry.yarnpkg.com/react-router-dom/-/react-router-dom-7.1.0.tgz#5e48f6499a1b788edd5aacb4009d929d5f3dd4e1"
-  integrity sha512-F4/nYBC9e4s0/ZjxM8GkZ9a68DpX76LN1a9W9mfPl2GfbDJ9/vzJro6MThNR5qGBH6KkgcK1BziyEzXhHV46Xw==
-  dependencies:
-    react-router "7.1.0"
-
 react-router@5.3.4, react-router@^5.3.4:
   version "5.3.4"
   resolved "https://registry.yarnpkg.com/react-router/-/react-router-5.3.4.tgz#8ca252d70fcc37841e31473c7a151cf777887bb5"
@@ -12976,16 +12964,6 @@ react-router@5.3.4, react-router@^5.3.4:
     react-is "^16.6.0"
     tiny-invariant "^1.0.2"
     tiny-warning "^1.0.0"
-
-react-router@7.1.0, react-router@^7.1.0:
-  version "7.1.0"
-  resolved "https://registry.yarnpkg.com/react-router/-/react-router-7.1.0.tgz#85911e27aae8c4a57482f2404aef65ac9ca68a10"
-  integrity sha512-VcFhWqkNIcojDRYaUO8qV0Jib52s9ULpCp3nkBbmrvtoCVFRp6tmk3tJ2w9BZauVctA1YRnJlFYDn9iJRuCpGA==
-  dependencies:
-    "@types/cookie" "^0.6.0"
-    cookie "^1.0.1"
-    set-cookie-parser "^2.6.0"
-    turbo-stream "2.4.0"
 
 react-smooth@^4.0.0:
   version "4.0.4"
@@ -13206,6 +13184,11 @@ regexp.prototype.flags@^1.5.3:
     define-properties "^1.2.1"
     es-errors "^1.3.0"
     set-function-name "^2.0.2"
+
+regexparam@^3.0.0:
+  version "3.0.0"
+  resolved "https://registry.yarnpkg.com/regexparam/-/regexparam-3.0.0.tgz#1673e09d41cb7fd41eaafd4040a6aa90daa0a21a"
+  integrity sha512-RSYAtP31mvYLkAHrOlh25pCNQ5hWnT106VukGaaFfuJrZFkGRX5GhUAdPqpSDXxOhA2c4akmRuplv1mRqnBn6Q==
 
 regexpu-core@^6.2.0:
   version "6.2.0"
@@ -13805,11 +13788,6 @@ seshcookie@^1.2.0:
   dependencies:
     cookie-parser "^1.4.3"
     express "^4.16.4"
-
-set-cookie-parser@^2.6.0:
-  version "2.7.1"
-  resolved "https://registry.yarnpkg.com/set-cookie-parser/-/set-cookie-parser-2.7.1.tgz#3016f150072202dfbe90fadee053573cc89d2943"
-  integrity sha512-IOc8uWeOZgnb3ptbCURJWNjWUPcO3ZnTTdzsurqERrP6nPyv+paC55vJM0LpOlT2ne+Ix+9+CRG1MNLlyZ4GjQ==
 
 set-function-length@^1.2.2:
   version "1.2.2"
@@ -14852,11 +14830,6 @@ tsutils@^3.21.0:
   dependencies:
     tslib "^1.8.1"
 
-turbo-stream@2.4.0:
-  version "2.4.0"
-  resolved "https://registry.yarnpkg.com/turbo-stream/-/turbo-stream-2.4.0.tgz#1e4fca6725e90fa14ac4adb782f2d3759a5695f0"
-  integrity sha512-FHncC10WpBd2eOmGwpmQsWLDoK4cqsA/UT/GqNoaKOQnT8uzhtCbg3EoUDMvqpOSAI0S26mr0rkjzbOO6S3v1g==
-
 type-check@^0.4.0, type-check@~0.4.0:
   version "0.4.0"
   resolved "https://registry.yarnpkg.com/type-check/-/type-check-0.4.0.tgz#07b8203bfa7056c0657050e3ccd2c37730bab8f1"
@@ -15202,6 +15175,11 @@ url-template@^2.0.8:
   version "2.0.8"
   resolved "https://registry.yarnpkg.com/url-template/-/url-template-2.0.8.tgz#fc565a3cccbff7730c775f5641f9555791439f21"
   integrity sha512-XdVKMF4SJ0nP/O7XIPB0JwAEuT9lDIYnNsK8yGVe43y0AWoKeJNdv3ZNWh7ksJ6KqQFjOO6ox/VEitLnaVNufw==
+
+use-sync-external-store@^1.0.0:
+  version "1.4.0"
+  resolved "https://registry.yarnpkg.com/use-sync-external-store/-/use-sync-external-store-1.4.0.tgz#adbc795d8eeb47029963016cefdf89dc799fcebc"
+  integrity sha512-9WXSPC5fMv61vaupRkCKCxsPxBocVnwakBEkMIHHpkTTg6icbJtg6jzgtLDm4bl3cSHAca52rYWih0k4K3PfHw==
 
 util-deprecate@^1.0.1, util-deprecate@^1.0.2, util-deprecate@~1.0.1:
   version "1.0.2"
@@ -15650,6 +15628,15 @@ word-wrap@^1.2.5, word-wrap@~1.2.3:
   version "1.2.5"
   resolved "https://registry.yarnpkg.com/word-wrap/-/word-wrap-1.2.5.tgz#d2c45c6dd4fbce621a66f136cbe328afd0410b34"
   integrity sha512-BN22B5eaMMI9UMtjrGd5g5eCYPpCPDUy0FJXbYsaT5zYxjFOckS53SQDE3pWkVoWpHXVb3BrYcEN4Twa55B5cA==
+
+wouter@^3.6.0:
+  version "3.6.0"
+  resolved "https://registry.yarnpkg.com/wouter/-/wouter-3.6.0.tgz#8d89cd9108e9a61d5b288fe95e370c6550565622"
+  integrity sha512-l11eR4urCc+CbY8+pV8HKFHxEqMgffss9aVB1XwiSkLDtH3cI6XpCa50cOzREzL0KwQqrwCVE5dCyeNcCgFpPg==
+  dependencies:
+    mitt "^3.0.1"
+    regexparam "^3.0.0"
+    use-sync-external-store "^1.0.0"
 
 "wrap-ansi-cjs@npm:wrap-ansi@^7.0.0":
   version "7.0.0"

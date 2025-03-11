@@ -13,7 +13,7 @@ import {
   User as FirebaseUser,
 } from 'firebase/auth';
 
-import { BrowserRouter, Route, RouteComponentProps } from 'react-router-dom';
+import { useLocation, Route, RouteComponentProps, Switch } from 'wouter';
 import { styled } from '@mui/material/styles';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
@@ -35,6 +35,8 @@ const firebaseApp = initializeApp(config);
 interface EditorMatchParams {
   username: string;
   projectName: string;
+
+  readonly [paramName: string | number]: string | undefined;
 }
 
 const theme = createTheme({
@@ -219,19 +221,20 @@ const InnerApp = styled(
     }
 
     editor = (props: RouteComponentProps<EditorMatchParams>) => {
-      const { username, projectName } = props.match.params;
+      const { username, projectName } = props.params;
       return (
         <HostedWebEditor
           username={username}
           projectName={projectName}
           baseURL={this.getBaseURL()}
-          history={props.history}
         />
       );
     };
 
-    home = (props: RouteComponentProps) => {
-      const isNewProject = props.location.pathname === '/new';
+    home = (_props: RouteComponentProps) => {
+      const location = useLocation()[0];
+
+      const isNewProject = location === '/new';
       return <Home isNewProject={isNewProject} user={defined(this.state.user)} />;
     };
 
@@ -249,13 +252,13 @@ const InnerApp = styled(
       return (
         <React.Fragment>
           <CssBaseline />
-          <BrowserRouter>
+          <Switch>
             <div className={className}>
-              <Route exact path="/" component={this.home} />
-              <Route exact path="/:username/:projectName" render={this.editor} />
-              <Route exact path="/new" component={this.home} />
+              <Route path="/" component={this.home} />
+              <Route path="/:username/:projectName" component={this.editor} />
+              <Route path="/new" component={this.home} />
             </div>
-          </BrowserRouter>
+          </Switch>
         </React.Fragment>
       );
     }

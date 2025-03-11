@@ -7,7 +7,6 @@ import * as React from 'react';
 import { styled } from '@mui/material/styles';
 import { List } from 'immutable';
 import { fromUint8Array, toUint8Array } from 'js-base64';
-import { History } from 'history';
 
 import { baseURL, defined } from '@system-dynamics/core/common';
 
@@ -26,7 +25,6 @@ interface HostedWebEditorProps {
   projectName: string;
   embedded?: boolean;
   baseURL?: string;
-  history?: History;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
