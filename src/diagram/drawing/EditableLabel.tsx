@@ -35,7 +35,7 @@ export const EditableLabel = styled(
         editor.children = value;
         Transforms.select(editor, {
           anchor: {
-            path: [0],
+            path: [0, 0],
             offset: 0,
           },
           focus: Editor.end(editor, [value.length - 1]),
@@ -146,7 +146,7 @@ export const EditableLabel = styled(
           onPointerDown={this.handlePointerUpDown}
           onPointerUp={this.handlePointerUpDown}
         >
-          <Slate editor={this.state.editor} value={value} onChange={this.handleChange}>
+          <Slate editor={this.state.editor} initialValue={value} onChange={this.handleChange}>
             <Editable autoFocus={true} onKeyUp={this.handleKeyPress} />
           </Slate>
         </div>

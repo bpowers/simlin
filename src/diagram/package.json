@@ -32,14 +32,14 @@
     "js-base64": "^3.7.7",
     "react": "^18.1.0",
     "react-dom": "^18.1.0",
-    "slate": "^0.87.0",
-    "slate-history": "^0.86.0",
-    "slate-react": "^0.88.0",
+    "slate": "^0.112.0",
+    "slate-dom": "^0.112.2",
+    "slate-history": "^0.110.3",
+    "slate-react": "^0.112.1",
     "wouter": "^3.6.0"
   },
   "resolutions": {
-    "@types/slate*/**/immutable": "5.0.3",
-    "immer": "9.0.19"
+    "@types/slate*/**/immutable": "5.0.3"
   },
   "devDependencies": {
     "@babel/core": "^7.13.1",

@@ -49,9 +49,7 @@
     "prettier": "^3.0.0",
     "typescript": "^5.7.2"
   },
-  "resolutions": {
-    "immer": "9.0.19"
-  },
+  "resolutions": {},
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",

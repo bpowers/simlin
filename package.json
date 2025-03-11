@@ -29,9 +29,7 @@
     "npm-run-all": "^4.1.5",
     "ts-protoc-gen": "^0.15.0"
   },
-  "resolutions": {
-    "immer": "9.0.19"
-  },
+  "resolutions": {},
   "scripts": {
     "js-needs-format": "find src -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|core)/' | xargs prettier -l",
     "rust-needs-format": "cargo fmt -- --check",

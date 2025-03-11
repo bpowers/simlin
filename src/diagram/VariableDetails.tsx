@@ -343,7 +343,7 @@ export const VariableDetails = styled(
         <CardContent>
           <Slate
             editor={this.state.equationEditor}
-            value={this.state.equationContents}
+            initialValue={this.state.equationContents}
             onChange={this.handleEquationChange}
           >
             <Editable
@@ -355,7 +355,7 @@ export const VariableDetails = styled(
             />
           </Slate>
 
-          <Slate editor={this.state.unitsEditor} value={this.state.unitsContents} onChange={this.handleUnitsChange}>
+          <Slate editor={this.state.unitsEditor} initialValue={this.state.unitsContents} onChange={this.handleUnitsChange}>
             <Editable
               className="simlin-variabledetails-unitseditor"
               renderLeaf={this.renderLeaf}
@@ -365,7 +365,7 @@ export const VariableDetails = styled(
             />
           </Slate>
 
-          <Slate editor={this.state.notesEditor} value={this.state.notesContents} onChange={this.handleNotesChange}>
+          <Slate editor={this.state.notesEditor} initialValue={this.state.notesContents} onChange={this.handleNotesChange}>
             <Editable
               className="simlin-variabledetails-noteseditor"
               renderLeaf={this.renderLeaf}

@@ -24,9 +24,7 @@
     "react-dom": "^18.1.0",
     "typescript": "^5.7.2"
   },
-  "resolutions": {
-    "immer": "9.0.19"
-  },
+  "resolutions": {},
   "browserslist": {
     "production": [
       "last 2 Chrome versions",
