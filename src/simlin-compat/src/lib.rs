@@ -91,7 +91,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
     let step_size = unprocessed.len();
     let step_count = ((final_time - initial_time) / saveper).ceil() as usize + 1;
     let mut step_data: Vec<f64> = Vec::with_capacity(step_count * step_size);
-    step_data.extend(std::iter::repeat(f64::NAN).take(step_count * step_size));
+    step_data.extend(std::iter::repeat_n(f64::NAN, step_count * step_size));
 
     for (ident, var_off) in offsets.iter() {
         let data = &unprocessed[ident];

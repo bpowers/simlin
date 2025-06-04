@@ -497,7 +497,7 @@ impl Vm {
                 Opcode::EvalModule { id, n_inputs } => {
                     use std::iter;
                     let mut module_inputs: SmallVec<[f64; 16]> =
-                        iter::repeat(0.0).take(n_inputs as usize).collect();
+                        iter::repeat_n(0.0, n_inputs as usize).collect();
                     for j in (0..(n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }

@@ -15,9 +15,7 @@ confidence-threshold = 0.9
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
-skip = [
-    { name = "windows-sys", version = "0.52.0" },
-]
+skip = []
 
 [sources]
 unknown-registry = "deny"
