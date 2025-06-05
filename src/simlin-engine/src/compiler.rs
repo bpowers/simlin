@@ -412,7 +412,8 @@ impl Context<'_> {
                     BFn::Stddev(_) => {
                         return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
                     }
-                    BFn::Sum(_) => {
+                    BFn::Sum(arg) => {
+                        println!("{:?}", arg);
                         return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
                     }
                 };
