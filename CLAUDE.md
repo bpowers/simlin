@@ -33,7 +33,9 @@ yarn start:frontend   # Start frontend dev server (port 3000)
 
 ## Architecture Overview
 
-Simlin is a system dynamics modeling tool.  The simulation engine for simulating stock and flow models is written in Rust, and the interactive model editor (and other components like the web server and model creation/browsing) are written in TypeScript.
+Simlin is a system dynamics modeling tool.  It can be used to build and simulate system dynamics models, including models created in other software like Vensim (from Ventana Systems) and Stella (from isee systems).  There is a model save file/interchange format called XMILE, and the XMILE specification is in `doc/xmile-v1.0.html`.  It covers general concepts like how simulation works and how arrays and subscripting notation work as well as details of the XML structure and equation syntax.  It is a crucial resource to consult when adding functionality to the simulation engine.  
+
+The simulation engine for simulating system dynamics stock and flow models is written in Rust, and the interactive model editor (and other components like the web server and model creation/browsing) are written in TypeScript.
 
 ### Core Components
 
