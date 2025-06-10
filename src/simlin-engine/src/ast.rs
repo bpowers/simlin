@@ -18,6 +18,78 @@ use crate::eqn_err;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 
+/// DimensionInfo represents the array dimensions of an expression.
+/// It uses the existing Dimension enum which already encapsulates
+/// both name and size together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DimensionInfo {
+    dimensions: Vec<Dimension>,
+}
+
+impl DimensionInfo {
+    /// Create dimension info from a vector of dimensions
+    pub fn new(dimensions: Vec<Dimension>) -> Self {
+        DimensionInfo { dimensions }
+    }
+
+    /// Create dimension info for a scalar value (no dimensions)
+    pub fn scalar() -> Self {
+        DimensionInfo { dimensions: vec![] }
+    }
+
+    /// Check if this represents a scalar value
+    pub fn is_scalar(&self) -> bool {
+        self.dimensions.is_empty()
+    }
+
+    /// Get the dimensions
+    pub fn dimensions(&self) -> &[Dimension] {
+        &self.dimensions
+    }
+
+    /// Get the number of dimensions
+    pub fn ndim(&self) -> usize {
+        self.dimensions.len()
+    }
+
+    /// Get the total number of elements
+    pub fn size(&self) -> usize {
+        if self.is_scalar() {
+            1
+        } else {
+            self.dimensions.iter().map(|d| d.len()).product()
+        }
+    }
+
+    /// Get the shape as a vector of sizes
+    pub fn shape(&self) -> Vec<usize> {
+        self.dimensions.iter().map(|d| d.len()).collect()
+    }
+
+    /// Get dimension names
+    pub fn names(&self) -> Vec<&str> {
+        self.dimensions.iter().map(|d| d.name()).collect()
+    }
+
+    /// Create new DimensionInfo with a subset of dimensions (for slicing)
+    pub fn slice(&self, keep_dims: &[bool]) -> Self {
+        assert_eq!(keep_dims.len(), self.dimensions.len());
+        DimensionInfo {
+            dimensions: self
+                .dimensions
+                .iter()
+                .zip(keep_dims.iter())
+                .filter_map(|(dim, &keep)| if keep { Some(dim.clone()) } else { None })
+                .collect(),
+        }
+    }
+
+    /// Check if dimensions are compatible for element-wise operations
+    pub fn is_compatible(&self, other: &Self) -> bool {
+        self.dimensions == other.dimensions
+    }
+}
+
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
 #[derive(PartialEq, Clone, Debug)]
@@ -329,6 +401,18 @@ impl Expr {
                         let a = args.remove(0);
                         BuiltinFn::$builtin_fn(Box::new(a), Box::new(b))
                     }};
+                    ($builtin_fn:tt, 1, 2) => {{
+                        if args.len() == 1 {
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), None)
+                        } else if args.len() == 2 {
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), Some(Box::new(b)))
+                        } else {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+                    }};
                     ($builtin_fn:tt, 3) => {{
                         if args.len() != 3 {
                             return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
@@ -338,6 +422,26 @@ impl Expr {
                         let b = args.remove(1);
                         let a = args.remove(0);
                         BuiltinFn::$builtin_fn(Box::new(a), Box::new(b), Box::new(c))
+                    }};
+                    ($builtin_fn:tt, 1, 3) => {{
+                        if args.len() == 1 {
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), None)
+                        } else if args.len() == 2 {
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(Box::new(a), Some((Box::new(b), None)))
+                        } else if args.len() == 3 {
+                            let c = args.remove(2);
+                            let b = args.remove(1);
+                            let a = args.remove(0);
+                            BuiltinFn::$builtin_fn(
+                                Box::new(a),
+                                Some((Box::new(b), Some(Box::new(c)))),
+                            )
+                        } else {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
                     }};
                     ($builtin_fn:tt, 2, 3) => {{
                         if args.len() == 2 {
@@ -381,8 +485,8 @@ impl Expr {
                     }
                     "ln" => check_arity!(Ln, 1),
                     "log10" => check_arity!(Log10, 1),
-                    "max" => check_arity!(Max, 2),
-                    "min" => check_arity!(Min, 2),
+                    "max" => check_arity!(Max, 1, 2),
+                    "min" => check_arity!(Min, 1, 2),
                     "pi" => check_arity!(Pi, 0),
                     "pulse" => check_arity!(Pulse, 2, 3),
                     "ramp" => check_arity!(Ramp, 2, 3),
@@ -395,6 +499,10 @@ impl Expr {
                     "time_step" | "dt" => check_arity!(TimeStep, 0),
                     "initial_time" => check_arity!(StartTime, 0),
                     "final_time" => check_arity!(FinalTime, 0),
+                    "rank" => check_arity!(Rank, 1, 3),
+                    "size" => check_arity!(Size, 1),
+                    "stddev" => check_arity!(Stddev, 1),
+                    "sum" => check_arity!(Sum, 1),
                     _ => {
                         // TODO: this could be a table reference, array reference,
                         //       or module instantiation according to 3.3.2 of the spec
@@ -468,11 +576,11 @@ impl Expr {
                     ),
                     BuiltinFn::Max(a, b) => BuiltinFn::Max(
                         Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
+                        b.map(|expr| Box::new(expr.constify_dimensions(scope))),
                     ),
                     BuiltinFn::Min(a, b) => BuiltinFn::Min(
                         Box::new(a.constify_dimensions(scope)),
-                        Box::new(b.constify_dimensions(scope)),
+                        b.map(|expr| Box::new(expr.constify_dimensions(scope))),
                     ),
                     BuiltinFn::Step(a, b) => BuiltinFn::Step(
                         Box::new(a.constify_dimensions(scope)),
@@ -497,6 +605,20 @@ impl Expr {
                         Box::new(b.constify_dimensions(scope)),
                         c.map(|arg| Box::new(arg.constify_dimensions(scope))),
                     ),
+                    BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
+                        Box::new(a.constify_dimensions(scope)),
+                        rest.map(|(b, c)| {
+                            (
+                                Box::new(b.constify_dimensions(scope)),
+                                c.map(|c| Box::new(c.constify_dimensions(scope))),
+                            )
+                        }),
+                    ),
+                    BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.constify_dimensions(scope))),
+                    BuiltinFn::Stddev(a) => {
+                        BuiltinFn::Stddev(Box::new(a.constify_dimensions(scope)))
+                    }
+                    BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.constify_dimensions(scope))),
                 };
                 Expr::App(func, loc)
             }
