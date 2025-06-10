@@ -18,6 +18,78 @@ use crate::eqn_err;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 
+/// DimensionInfo represents the array dimensions of an expression.
+/// It uses the existing Dimension enum which already encapsulates
+/// both name and size together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DimensionInfo {
+    dimensions: Vec<Dimension>,
+}
+
+impl DimensionInfo {
+    /// Create dimension info from a vector of dimensions
+    pub fn new(dimensions: Vec<Dimension>) -> Self {
+        DimensionInfo { dimensions }
+    }
+
+    /// Create dimension info for a scalar value (no dimensions)
+    pub fn scalar() -> Self {
+        DimensionInfo { dimensions: vec![] }
+    }
+
+    /// Check if this represents a scalar value
+    pub fn is_scalar(&self) -> bool {
+        self.dimensions.is_empty()
+    }
+
+    /// Get the dimensions
+    pub fn dimensions(&self) -> &[Dimension] {
+        &self.dimensions
+    }
+
+    /// Get the number of dimensions
+    pub fn ndim(&self) -> usize {
+        self.dimensions.len()
+    }
+
+    /// Get the total number of elements
+    pub fn size(&self) -> usize {
+        if self.is_scalar() {
+            1
+        } else {
+            self.dimensions.iter().map(|d| d.len()).product()
+        }
+    }
+
+    /// Get the shape as a vector of sizes
+    pub fn shape(&self) -> Vec<usize> {
+        self.dimensions.iter().map(|d| d.len()).collect()
+    }
+
+    /// Get dimension names
+    pub fn names(&self) -> Vec<&str> {
+        self.dimensions.iter().map(|d| d.name()).collect()
+    }
+
+    /// Create new DimensionInfo with a subset of dimensions (for slicing)
+    pub fn slice(&self, keep_dims: &[bool]) -> Self {
+        assert_eq!(keep_dims.len(), self.dimensions.len());
+        DimensionInfo {
+            dimensions: self
+                .dimensions
+                .iter()
+                .zip(keep_dims.iter())
+                .filter_map(|(dim, &keep)| if keep { Some(dim.clone()) } else { None })
+                .collect(),
+        }
+    }
+
+    /// Check if dimensions are compatible for element-wise operations
+    pub fn is_compatible(&self, other: &Self) -> bool {
+        self.dimensions == other.dimensions
+    }
+}
+
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
 #[derive(PartialEq, Clone, Debug)]
