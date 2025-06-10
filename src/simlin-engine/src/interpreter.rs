@@ -2,12 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use float_cmp::approx_eq;
 use std::rc::Rc;
 use std::borrow::BorrowMut;
-use crate::ast::{Ast, BinaryOp, Loc};
-use crate::compiler::{BuiltinFn, Context, Expr, Module, UnaryOp, Var};
+use crate::ast::{Ast, BinaryOp};
+use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
 use crate::{compiler, quoteize, Ident, Project, Results, Variable};
 use crate::bytecode::CompiledModule;
 use crate::model::enumerate_modules;
@@ -592,6 +592,10 @@ fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
 
 #[test]
 fn test_arrays() {
+    use std::collections::BTreeSet;
+    use crate::compiler::{Var, Context};
+    use crate::ast::{Loc};
+
     let project = {
         use crate::datamodel::*;
         Project {
@@ -852,4 +856,9 @@ fn test_arrays() {
 
     let sim = Simulation::new(&parsed_project, "main");
     assert!(sim.is_ok());
+}
+
+#[test]
+fn nan_is_approx_eq() {
+    assert!(approx_eq!(f64, f64::NAN, f64::NAN));
 }

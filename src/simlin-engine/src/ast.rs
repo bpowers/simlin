@@ -18,6 +18,99 @@ use crate::eqn_err;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DimensionRange {
+    dim: Dimension,
+    start: u32,
+    end: u32,
+}
+
+#[allow(dead_code)]
+impl DimensionRange {
+    pub fn new(dim: Dimension, start: u32, end: u32) -> Self {
+        DimensionRange { dim, start, end }
+    }
+
+    pub fn len(&self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+}
+
+/// DimensionInfo represents the array dimensions of an expression.
+/// It uses the existing Dimension enum which already encapsulates
+/// both name and size together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DimensionVec {
+    dims: Vec<DimensionRange>,
+}
+
+#[allow(dead_code)]
+impl DimensionVec {
+    /// Create dimension info from a vector of dimensions
+    pub fn new(dims: Vec<DimensionRange>) -> Self {
+        DimensionVec { dims }
+    }
+
+    /// Create dimension info for a scalar value (no dimensions)
+    pub fn scalar() -> Self {
+        DimensionVec { dims: vec![] }
+    }
+
+    /// Check if this represents a scalar value
+    pub fn is_scalar(&self) -> bool {
+        self.dims.is_empty()
+    }
+
+    /// Get the dimensions
+    pub fn dimensions(&self) -> &[DimensionRange] {
+        &self.dims
+    }
+
+    /// Get the number of dimensions
+    pub fn ndim(&self) -> usize {
+        self.dims.len()
+    }
+
+    /// Get the total number of elements
+    pub fn size(&self) -> u32 {
+        if self.is_scalar() {
+            1
+        } else {
+            self.dims.iter().map(|d| d.len()).product()
+        }
+    }
+
+    /// Get the shape as a vector of sizes
+    pub fn shape(&self) -> Vec<u32> {
+        self.dims.iter().map(|d| d.len()).collect()
+    }
+
+    /// Get dimension names
+    pub fn names(&self) -> Vec<&str> {
+        self.dims.iter().map(|d| d.dim.name()).collect()
+    }
+
+    /// Create new DimensionInfo with a subset of dimensions (for slicing)
+    pub fn slice(&self, keep_dims: &[bool]) -> Self {
+        assert_eq!(keep_dims.len(), self.dims.len());
+        DimensionVec {
+            dims: self
+                .dims
+                .iter()
+                .zip(keep_dims.iter())
+                .filter_map(|(dim, &keep)| if keep { Some(dim.clone()) } else { None })
+                .collect(),
+        }
+    }
+
+    /// Check if dimensions are compatible for element-wise operations
+    pub fn is_compatible(&self, other: &Self) -> bool {
+        self.dims == other.dims
+    }
+}
+
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.
 #[derive(PartialEq, Clone, Debug)]

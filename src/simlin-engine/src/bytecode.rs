@@ -81,6 +81,7 @@ pub struct ModuleDeclaration {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ArrayDefinition {
     pub(crate) dimensions: Vec<usize>,
 }
@@ -90,6 +91,7 @@ pub struct ArrayDefinition {
 pub struct ByteCodeContext {
     pub(crate) graphical_functions: Vec<Vec<(f64, f64)>>,
     pub(crate) modules: Vec<ModuleDeclaration>,
+    #[allow(dead_code)]
     pub(crate) arrays: Vec<ArrayDefinition>,
 }
 

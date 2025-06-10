@@ -5,7 +5,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use float_cmp::approx_eq;
 
 use crate::ast::{self, Ast, BinaryOp, IndexExpr, Loc};
 use crate::bytecode::{
@@ -13,7 +12,7 @@ use crate::bytecode::{
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{ErrorCode, ErrorKind, Ident, Result};
-use crate::datamodel::{self, Dimension};
+use crate::datamodel::Dimension;
 use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
@@ -185,11 +184,11 @@ pub(crate) struct VariableMetadata {
 #[derive(Clone, Debug)]
 pub(crate) struct Context<'a> {
     #[allow(dead_code)]
-    pub(crate) dimensions: &'a [datamodel::Dimension],
+    pub(crate) dimensions: &'a [Dimension],
     pub(crate) model_name: &'a str,
     #[allow(dead_code)]
     pub(crate) ident: &'a str,
-    pub(crate) active_dimension: Option<Vec<datamodel::Dimension>>,
+    pub(crate) active_dimension: Option<Vec<Dimension>>,
     pub(crate) active_subscript: Option<Vec<&'a str>>,
     pub(crate) metadata: &'a HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     pub(crate) module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
@@ -560,6 +559,7 @@ impl Context<'_> {
 
 #[test]
 fn test_lower() {
+    use crate::datamodel;
     let input = {
         use ast::BinaryOp::*;
         use ast::Expr::*;
@@ -831,7 +831,7 @@ fn test_fold_flows() {
     );
     let mut metadata2 = HashMap::new();
     metadata2.insert("main".to_string(), metadata);
-    let dimensions: Vec<datamodel::Dimension> = vec![];
+    let dimensions: Vec<Dimension> = vec![];
     let ctx = Context {
         dimensions: &dimensions,
         model_name: "main",
@@ -1846,11 +1846,6 @@ pub fn pretty(expr: &Expr) -> String {
         Expr::AssignCurr(off, rhs) => format!("curr[{}] := {}", off, pretty(rhs)),
         Expr::AssignNext(off, rhs) => format!("next[{}] := {}", off, pretty(rhs)),
     }
-}
-
-#[test]
-fn nan_is_approx_eq() {
-    assert!(approx_eq!(f64, f64::NAN, f64::NAN));
 }
 
 // simplified/lowered from ast::UnaryOp version
