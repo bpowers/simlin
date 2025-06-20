@@ -180,7 +180,7 @@ fn simulate_path(xmile_path: &str) {
 
     // first read-in the XMILE model, convert it to our own representation,
     // and simulate it using our tree-walking interpreter
-    let (datamodel_project, sim, results1) = {
+    let (datamodel_project, sim, results_interp) = {
         let f = File::open(xmile_path).unwrap();
         let mut f = BufReader::new(f);
 
@@ -198,7 +198,7 @@ fn simulate_path(xmile_path: &str) {
     };
 
     // next simulate the model using our bytecode VM
-    let results2 = {
+    let results_vm = {
         let compiled = sim.compile();
 
         assert!(compiled.is_ok());
@@ -210,13 +210,14 @@ fn simulate_path(xmile_path: &str) {
         vm.into_results()
     };
 
-    // ensure the two results match each other
-    ensure_results(&results1, &results2);
 
     // also ensure they match our reference results
     let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results1);
-    ensure_results(&expected, &results2);
+    ensure_results(&expected, &results_vm);
+    ensure_results(&expected, &results_interp);
+
+    // ensure the two results match each other
+    ensure_results(&results_interp, &results_vm);
 
     // serialized our project through protobufs and ensure we don't see problems
     let results3 = {
