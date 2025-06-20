@@ -1572,7 +1572,8 @@ impl<'module> Compiler<'module> {
                             self.push(Opcode::LoadConstant { id });
                         } else {
                             // Single-argument array case - use similar logic to SUM
-                            return self.compile_array_minmax(a, matches!(builtin, BuiltinFn::Max(_, _)));
+                            return self
+                                .compile_array_minmax(a, matches!(builtin, BuiltinFn::Max(_, _)));
                         }
                     }
                     BuiltinFn::Pulse(a, b, c) => {
@@ -1640,7 +1641,7 @@ impl<'module> Compiler<'module> {
                         // TODO: For now, just return 1 (scalar case)
                         // In the future, examine expr to determine actual array dimensions
                         // We don't need to evaluate the expression at runtime since SIZE is compile-time constant
-                        
+
                         let size_value = 1.0; // placeholder: always 1 for scalars
                         let id = self.curr_code.intern_literal(size_value);
                         self.push(Opcode::LoadConstant { id });
@@ -1684,7 +1685,7 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::FinalTime => unreachable!(),
                     BuiltinFn::Rank(_, _) => unreachable!(), // handled above
                     // These are handled above in their own match arms
-                    BuiltinFn::Size(_) | BuiltinFn::Sum(_) | BuiltinFn::Stddev(_) => unreachable!()
+                    BuiltinFn::Size(_) | BuiltinFn::Sum(_) | BuiltinFn::Stddev(_) => unreachable!(),
                 };
 
                 self.push(Opcode::Apply { func });
@@ -1776,7 +1777,19 @@ impl<'module> Compiler<'module> {
     }
 
     fn compile_array_sum(&mut self, expr: &Expr) -> Result<Option<()>> {
-        self.compile_array_operation(expr, "sum")
+        match expr {
+            Expr::Subscript(_, _, _, _) => {
+                // This is a simple variable subscript, use array operation
+                self.compile_array_operation(expr, "sum")
+            }
+            _ => {
+                // Complex expressions like a[*]*b[*] not yet supported
+                // Return NaN as placeholder until element-wise operations are implemented
+                let id = self.curr_code.intern_literal(f64::NAN);
+                self.push(Opcode::LoadConstant { id });
+                Ok(Some(()))
+            }
+        }
     }
 
     fn compile_array_minmax(&mut self, expr: &Expr, is_max: bool) -> Result<Option<()>> {
@@ -1813,27 +1826,44 @@ impl<'module> Compiler<'module> {
                     .map(|&pos| bounds[pos])
                     .product::<usize>() as u32;
 
+                // Calculate offset adjustment for resolved (non-wildcard) dimensions
+                let mut offset_adjustment = 0;
+                for (i, idx) in indices.iter().enumerate() {
+                    if !matches!(idx, Expr::Const(val, _) if *val == 0.0) {
+                        // This is a resolved dimension, not a wildcard
+                        if let Expr::Const(dim_value, _) = idx {
+                            // Convert from 1-based to 0-based indexing and calculate offset
+                            let dim_index = (*dim_value as usize).saturating_sub(1);
+                            // Calculate stride for this dimension
+                            let stride: usize = bounds[i + 1..].iter().product();
+                            offset_adjustment += dim_index * stride;
+                        }
+                    }
+                }
+
+                let adjusted_offset = *var_off + offset_adjustment;
+
                 // Generate appropriate opcode based on operation
                 match operation {
-                    "sum" => self.push(Opcode::ArraySum { 
-                        off: *var_off as VariableOffset, 
-                        size: total_size 
+                    "sum" => self.push(Opcode::ArraySum {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
                     }),
-                    "min" => self.push(Opcode::ArrayMin { 
-                        off: *var_off as VariableOffset, 
-                        size: total_size 
+                    "min" => self.push(Opcode::ArrayMin {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
                     }),
-                    "max" => self.push(Opcode::ArrayMax { 
-                        off: *var_off as VariableOffset, 
-                        size: total_size 
+                    "max" => self.push(Opcode::ArrayMax {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
                     }),
-                    "stddev" => self.push(Opcode::ArrayStddev { 
-                        off: *var_off as VariableOffset, 
-                        size: total_size 
+                    "stddev" => self.push(Opcode::ArrayStddev {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
                     }),
                     _ => return sim_err!(TodoArrayBuiltin, operation.to_owned()),
                 }
-                
+
                 Ok(Some(()))
             }
             _ => {
@@ -2010,16 +2040,15 @@ impl ModuleEvaluator<'_> {
                     }
                     BuiltinFn::Sqrt(a) => self.eval(a).sqrt(),
                     BuiltinFn::Min(a, b) => {
-                        let a = self.eval(a);
                         if let Some(b) = b {
+                            let a = self.eval(a);
                             let b = self.eval(b);
                             // we can't use std::cmp::min here, becuase f64 is only
                             // PartialOrd
                             if a < b { a } else { b }
                         } else {
-                            // Single argument array case - for now just return the value
-                            // TODO: Implement proper array min
-                            a
+                            // Single argument array case
+                            self.eval_array_min(a)
                         }
                     }
                     BuiltinFn::Mean(args) => {
@@ -2028,16 +2057,15 @@ impl ModuleEvaluator<'_> {
                         sum / count
                     }
                     BuiltinFn::Max(a, b) => {
-                        let a = self.eval(a);
                         if let Some(b) = b {
+                            let a = self.eval(a);
                             let b = self.eval(b);
                             // we can't use std::cmp::min here, becuase f64 is only
                             // PartialOrd
                             if a > b { a } else { b }
                         } else {
-                            // Single argument array case - for now just return the value
-                            // TODO: Implement proper array max
-                            a
+                            // Single argument array case
+                            self.eval_array_max(a)
                         }
                     }
                     BuiltinFn::Lookup(id, index, _) => {
@@ -2127,20 +2155,151 @@ impl ModuleEvaluator<'_> {
                         1.0
                     }
                     BuiltinFn::Sum(expr) => {
-                        // For interpreter, just evaluate the expression
-                        // TODO: Handle array subscripts properly
-                        self.eval(expr)
+                        // Handle array summation properly
+                        self.eval_sum(expr)
                     }
-                    BuiltinFn::Stddev(_expr) => {
-                        // For scalars, standard deviation is 0
-                        // TODO: Implement proper array standard deviation
-                        0.0
-                    }
+                    BuiltinFn::Stddev(expr) => self.eval_array_stddev(expr),
                     BuiltinFn::Rank(_, _) => {
                         // Not implemented in interpreter yet
                         0.0
                     }
                 }
+            }
+        }
+    }
+
+    fn eval_sum(&mut self, expr: &Expr) -> f64 {
+        self.eval_array_operation(expr, "sum")
+    }
+
+    fn eval_array_min(&mut self, expr: &Expr) -> f64 {
+        self.eval_array_operation(expr, "min")
+    }
+
+    fn eval_array_max(&mut self, expr: &Expr) -> f64 {
+        self.eval_array_operation(expr, "max")
+    }
+
+    fn eval_array_stddev(&mut self, expr: &Expr) -> f64 {
+        self.eval_array_operation(expr, "stddev")
+    }
+
+    fn eval_array_operation(&mut self, expr: &Expr, operation: &str) -> f64 {
+        match expr {
+            Expr::Subscript(off, indices, bounds, _) => {
+                // Check if this is a wildcard subscript like a[*]
+                // In that case, operate over all array elements
+                let has_wildcard = indices
+                    .iter()
+                    .any(|idx| matches!(idx, Expr::Const(val, _) if *val == 0.0));
+
+                if has_wildcard {
+                    // For now, use the same simple approach as the bytecode VM:
+                    // Calculate total size based on bounds for wildcard dimensions
+                    let wildcard_positions: Vec<_> = indices
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, idx)| {
+                            if matches!(idx, Expr::Const(val, _) if *val == 0.0) {
+                                Some(i)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let total_size = wildcard_positions
+                        .iter()
+                        .map(|&pos| bounds[pos])
+                        .product::<usize>();
+
+                    if total_size == 0 {
+                        return match operation {
+                            "sum" => 0.0,
+                            "min" => f64::INFINITY,
+                            "max" => f64::NEG_INFINITY,
+                            "stddev" => 0.0,
+                            _ => 0.0,
+                        };
+                    }
+
+                    // Calculate offset adjustment for resolved (non-wildcard) dimensions
+                    let mut offset_adjustment = 0;
+                    for (i, idx) in indices.iter().enumerate() {
+                        if !matches!(idx, Expr::Const(val, _) if *val == 0.0) {
+                            // This is a resolved dimension, not a wildcard
+                            if let Expr::Const(dim_value, _) = idx {
+                                // Convert from 1-based to 0-based indexing and calculate offset
+                                let dim_index = (*dim_value as usize).saturating_sub(1);
+                                // Calculate stride for this dimension
+                                let stride: usize = bounds[i + 1..].iter().product();
+                                offset_adjustment += dim_index * stride;
+                            }
+                        }
+                    }
+
+                    let adjusted_base = self.off + *off + offset_adjustment;
+
+                    match operation {
+                        "sum" => {
+                            let mut sum = 0.0;
+                            for i in 0..total_size {
+                                sum += self.curr[adjusted_base + i];
+                            }
+                            sum
+                        }
+                        "min" => {
+                            let mut min_val = f64::INFINITY;
+                            for i in 0..total_size {
+                                let val = self.curr[adjusted_base + i];
+                                if val < min_val {
+                                    min_val = val;
+                                }
+                            }
+                            min_val
+                        }
+                        "max" => {
+                            let mut max_val = f64::NEG_INFINITY;
+                            for i in 0..total_size {
+                                let val = self.curr[adjusted_base + i];
+                                if val > max_val {
+                                    max_val = val;
+                                }
+                            }
+                            max_val
+                        }
+                        "stddev" => {
+                            if total_size <= 1 {
+                                return 0.0;
+                            }
+
+                            // First pass: calculate mean
+                            let mut sum = 0.0;
+                            for i in 0..total_size {
+                                sum += self.curr[adjusted_base + i];
+                            }
+                            let mean = sum / total_size as f64;
+
+                            // Second pass: calculate variance
+                            let mut variance_sum = 0.0;
+                            for i in 0..total_size {
+                                let diff = self.curr[adjusted_base + i] - mean;
+                                variance_sum += diff * diff;
+                            }
+                            let variance = variance_sum / (total_size - 1) as f64; // Sample standard deviation
+                            variance.sqrt()
+                        }
+                        _ => 0.0,
+                    }
+                } else {
+                    // Regular subscript, just evaluate normally
+                    self.eval(expr)
+                }
+            }
+            _ => {
+                // For non-subscript expressions, just evaluate normally
+                // This handles scalar cases
+                self.eval(expr)
             }
         }
     }
@@ -2815,6 +2974,171 @@ fn test_arrays() {
 
     let sim = Simulation::new(&parsed_project, "main");
     assert!(sim.is_ok());
+}
+
+#[test]
+fn test_sum_functionality() {
+    use crate::datamodel::*;
+
+    // Create a simple model with an array and a SUM operation
+    let project = Project {
+        name: "sum_test".to_owned(),
+        source: None,
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: Some("time".to_owned()),
+        },
+        dimensions: vec![Dimension::Named(
+            "index".to_owned(),
+            vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+        )],
+        units: vec![],
+        models: vec![Model {
+            name: "main".to_owned(),
+            variables: vec![
+                Variable::Aux(Aux {
+                    ident: "values".to_owned(),
+                    equation: Equation::Arrayed(
+                        vec!["index".to_owned()],
+                        vec![
+                            ("one".to_owned(), "1".to_owned(), None),
+                            ("two".to_owned(), "2".to_owned(), None),
+                            ("three".to_owned(), "3".to_owned(), None),
+                        ],
+                    ),
+                    documentation: "Array of values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+                Variable::Aux(Aux {
+                    ident: "total".to_owned(),
+                    equation: Equation::Scalar("SUM(values[*])".to_owned(), None),
+                    documentation: "Sum of all values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+            ],
+            views: vec![],
+        }],
+    };
+
+    let parsed_project = Rc::new(crate::project::Project::from(project));
+
+    // Test tree-walking interpreter
+    let sim = Simulation::new(&parsed_project, "main");
+    assert!(sim.is_ok());
+    let sim = sim.unwrap();
+
+    let results = sim.run_to_end();
+    assert!(results.is_ok());
+    let results = results.unwrap();
+
+    // The total should be 1 + 2 + 3 = 6
+    let total_offset = results.offsets["total"];
+    let total_value = results.data[total_offset];
+
+    println!("Tree-walking interpreter: SUM(values[*]) = {}", total_value);
+
+    // The correct value should be 6 (1 + 2 + 3)
+    assert_eq!(total_value, 6.0, "SUM(values[*]) should return 6.0");
+}
+
+#[test]
+fn test_sum_with_zero_index() {
+    use crate::datamodel::*;
+
+    // Create a model to test that we don't falsely detect 0 indices as wildcards
+    let project = Project {
+        name: "zero_index_test".to_owned(),
+        source: None,
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: Some("time".to_owned()),
+        },
+        dimensions: vec![Dimension::Named(
+            "index".to_owned(),
+            vec!["zero".to_owned(), "one".to_owned(), "two".to_owned()],
+        )],
+        units: vec![],
+        models: vec![Model {
+            name: "main".to_owned(),
+            variables: vec![
+                Variable::Aux(Aux {
+                    ident: "values".to_owned(),
+                    equation: Equation::Arrayed(
+                        vec!["index".to_owned()],
+                        vec![
+                            ("zero".to_owned(), "10".to_owned(), None),
+                            ("one".to_owned(), "20".to_owned(), None),
+                            ("two".to_owned(), "30".to_owned(), None),
+                        ],
+                    ),
+                    documentation: "Array of values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+                Variable::Aux(Aux {
+                    ident: "first_value".to_owned(),
+                    equation: Equation::Scalar("values[1]".to_owned(), None),
+                    documentation: "First value (should be 10)".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+                Variable::Aux(Aux {
+                    ident: "total".to_owned(),
+                    equation: Equation::Scalar("SUM(values[*])".to_owned(), None),
+                    documentation: "Sum of all values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+            ],
+            views: vec![],
+        }],
+    };
+
+    let parsed_project = Rc::new(crate::project::Project::from(project));
+
+    // Test tree-walking interpreter
+    let sim = Simulation::new(&parsed_project, "main");
+    assert!(sim.is_ok());
+    let sim = sim.unwrap();
+
+    let results = sim.run_to_end();
+    assert!(results.is_ok());
+    let results = results.unwrap();
+
+    // Check the first value (should be 10)
+    let first_value_offset = results.offsets["first_value"];
+    let first_value = results.data[first_value_offset];
+    assert_eq!(first_value, 10.0, "values[1] should return 10.0");
+
+    // The total should be 10 + 20 + 30 = 60
+    let total_offset = results.offsets["total"];
+    let total_value = results.data[total_offset];
+
+    println!(
+        "Tree-walking interpreter: first_value = {}, SUM(values[*]) = {}",
+        first_value, total_value
+    );
+    assert_eq!(total_value, 60.0, "SUM(values[*]) should return 60.0");
 }
 
 #[test]

@@ -210,7 +210,6 @@ fn simulate_path(xmile_path: &str) {
         vm.into_results()
     };
 
-
     // also ensure they match our reference results
     let expected = load_expected_results(xmile_path).unwrap();
     ensure_results(&expected, &results_vm);
