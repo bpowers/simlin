@@ -2297,10 +2297,353 @@ impl ModuleEvaluator<'_> {
                 }
             }
             _ => {
-                // For non-subscript expressions, just evaluate normally
-                // This handles scalar cases
+                // This might be a complex array expression like a[*]+h[*]
+                // Check if it contains array wildcards and handle accordingly
+                if self.expr_contains_array_wildcards(expr) {
+                    self.eval_array_expression(expr, operation)
+                } else {
+                    // Regular scalar expression
+                    self.eval(expr)
+                }
+            }
+        }
+    }
+
+    /// Check if an expression contains array subscripts with wildcards
+    fn expr_contains_array_wildcards(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Subscript(_, indices, _, _) => indices
+                .iter()
+                .any(|idx| matches!(idx, Expr::Const(val, _) if *val == 0.0)),
+            Expr::Op1(_, sub_expr, _) => self.expr_contains_array_wildcards(sub_expr),
+            Expr::Op2(_, left, right, _) => {
+                self.expr_contains_array_wildcards(left)
+                    || self.expr_contains_array_wildcards(right)
+            }
+            Expr::If(cond, left, right, _) => {
+                self.expr_contains_array_wildcards(cond)
+                    || self.expr_contains_array_wildcards(left)
+                    || self.expr_contains_array_wildcards(right)
+            }
+            Expr::App(builtin, _) => {
+                // Check if any arguments contain array wildcards
+                match builtin {
+                    BuiltinFn::Sum(arg) | BuiltinFn::Stddev(arg) | BuiltinFn::Size(arg) => {
+                        self.expr_contains_array_wildcards(arg)
+                    }
+                    BuiltinFn::Mean(args) => args
+                        .iter()
+                        .any(|arg| self.expr_contains_array_wildcards(arg)),
+                    BuiltinFn::Min(arg, opt_arg) | BuiltinFn::Max(arg, opt_arg) => {
+                        self.expr_contains_array_wildcards(arg)
+                            || opt_arg
+                                .as_ref()
+                                .map_or(false, |a| self.expr_contains_array_wildcards(a))
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Evaluate an array expression and apply the specified operation
+    fn eval_array_expression(&mut self, expr: &Expr, operation: &str) -> f64 {
+        // For now, implement a basic version for simple cross-product cases
+        // This handles expressions like SUM(a[*]+h[*]) where arrays have different dimensions
+
+        match expr {
+            Expr::Op2(_op, left, right, _) => {
+                // For now, directly handle the cross-product case without needing extract_array_info
+                let mut results = Vec::new();
+                self.eval_cross_product_operation(expr, &mut results);
+
+                if results.is_empty() {
+                    // Fallback to regular evaluation if no results were generated
+                    return self.eval(expr);
+                }
+
+                // Apply the operation to all results
+                match operation {
+                    "sum" => results.iter().sum(),
+                    "min" => results.iter().fold(f64::INFINITY, |acc, &x| acc.min(x)),
+                    "max" => results.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x)),
+                    "stddev" => {
+                        if results.len() <= 1 {
+                            0.0
+                        } else {
+                            let mean = results.iter().sum::<f64>() / results.len() as f64;
+                            let variance = results.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
+                                / (results.len() - 1) as f64;
+                            variance.sqrt()
+                        }
+                    }
+                    _ => 0.0,
+                }
+            }
+            _ => {
+                // For other expression types, fall back to regular evaluation
                 self.eval(expr)
             }
+        }
+    }
+
+    /// Extract array information from an expression (placeholder for now)
+    fn extract_array_info(&self, _expr: &Expr) -> Vec<(usize, Vec<usize>)> {
+        // Returns (offset, bounds) for each array found in the expression
+        // This is a simplified version - full implementation would be more complex
+        Vec::new()
+    }
+
+    /// Evaluate cross-product operations (basic implementation)
+    fn eval_cross_product_operation(&mut self, expr: &Expr, results: &mut Vec<f64>) {
+        // Handle array expressions by finding all array subscripts with wildcards
+        // and evaluating the expression for all combinations
+
+        if let Some(array_combinations) = self.find_array_combinations(expr) {
+            // We found arrays with wildcards - evaluate for all combinations
+            self.eval_expression_for_combinations(expr, &array_combinations, results);
+        } else {
+            // No arrays found, just evaluate normally
+            results.push(self.eval(expr));
+        }
+    }
+
+    /// Find all array combinations in an expression
+    fn find_array_combinations(&self, expr: &Expr) -> Option<Vec<(usize, usize, usize)>> {
+        let mut arrays = Vec::new();
+        self.collect_wildcard_arrays(expr, &mut arrays);
+
+        if arrays.is_empty() {
+            None
+        } else {
+            Some(arrays)
+        }
+    }
+
+    /// Recursively collect all array subscripts with wildcards
+    fn collect_wildcard_arrays(&self, expr: &Expr, arrays: &mut Vec<(usize, usize, usize)>) {
+        match expr {
+            Expr::Subscript(off, indices, bounds, _) => {
+                let has_wildcard = indices
+                    .iter()
+                    .any(|idx| matches!(idx, Expr::Const(val, _) if *val == 0.0));
+
+                if has_wildcard {
+                    let size = bounds.iter().product::<usize>();
+                    arrays.push((*off, size, arrays.len())); // (offset, size, index)
+                }
+            }
+            Expr::Op1(_, sub_expr, _) => {
+                self.collect_wildcard_arrays(sub_expr, arrays);
+            }
+            Expr::Op2(_, left, right, _) => {
+                self.collect_wildcard_arrays(left, arrays);
+                self.collect_wildcard_arrays(right, arrays);
+            }
+            Expr::If(cond, left, right, _) => {
+                self.collect_wildcard_arrays(cond, arrays);
+                self.collect_wildcard_arrays(left, arrays);
+                self.collect_wildcard_arrays(right, arrays);
+            }
+            _ => {} // Other expression types don't contain arrays
+        }
+    }
+
+    /// Evaluate an expression for all array combinations
+    fn eval_expression_for_combinations(
+        &mut self,
+        expr: &Expr,
+        arrays: &[(usize, usize, usize)],
+        results: &mut Vec<f64>,
+    ) {
+        if arrays.is_empty() {
+            results.push(self.eval(expr));
+            return;
+        }
+
+        // For now, implement a simple case for single arrays or element-wise operations
+        if arrays.len() == 1 {
+            // Single array case - element-wise operation
+            let (offset, size, _) = arrays[0];
+            for i in 0..size {
+                // Temporarily modify the array state to evaluate for this element
+                let result = self.eval_with_array_index(expr, offset, i);
+                results.push(result);
+            }
+        } else if arrays.len() == 2 {
+            // Two arrays case - could be element-wise or cross-product
+            let (offset1, size1, _) = arrays[0];
+            let (offset2, size2, _) = arrays[1];
+
+            // Simple heuristic based on operation type and array relationship
+            // For multiplication/division with same-sized arrays: assume element-wise
+            // For addition/subtraction: check if arrays are likely same dimension
+            let use_element_wise = if size1 == size2 {
+                // Same size arrays - check operation type and offset relationship
+                if self.expr_contains_multiplication_or_division(expr) {
+                    // Multiplication/division operations are more likely element-wise
+                    true
+                } else {
+                    // Addition/subtraction - check offset proximity
+                    let offset_diff = if offset1 > offset2 {
+                        offset1 - offset2
+                    } else {
+                        offset2 - offset1
+                    };
+                    offset_diff <= size1.max(size2)
+                }
+            } else {
+                // Different sizes - always cross-product
+                false
+            };
+
+            if use_element_wise {
+                // Element-wise operation: a[i] op b[i]
+                for i in 0..size1 {
+                    let result = self.eval_with_two_array_indices(expr, offset1, i, offset2, i);
+                    results.push(result);
+                }
+            } else {
+                // Cross-product operation: a[i] op b[j] for all i,j
+                for i in 0..size1 {
+                    for j in 0..size2 {
+                        let result = self.eval_with_two_array_indices(expr, offset1, i, offset2, j);
+                        results.push(result);
+                    }
+                }
+            }
+        } else {
+            // More complex cases - fall back to regular evaluation for now
+            results.push(self.eval(expr));
+        }
+    }
+
+    /// Evaluate expression with a specific array index
+    fn eval_with_array_index(&mut self, expr: &Expr, array_offset: usize, index: usize) -> f64 {
+        // For now, handle simple cases directly
+        match expr {
+            Expr::Subscript(off, indices, _bounds, _) => {
+                if *off == array_offset {
+                    // This is the array we're substituting - return the specific element
+                    self.curr[self.off + *off + index]
+                } else {
+                    // Different array, evaluate normally
+                    self.eval(expr)
+                }
+            }
+            _ => self.eval(expr),
+        }
+    }
+
+    /// Evaluate expression with two specific array indices
+    fn eval_with_two_array_indices(
+        &mut self,
+        expr: &Expr,
+        offset1: usize,
+        index1: usize,
+        offset2: usize,
+        index2: usize,
+    ) -> f64 {
+        // Handle simple binary operations between two arrays
+        match expr {
+            Expr::Op2(op, left, right, _) => {
+                let left_val =
+                    self.eval_with_array_substitution(left, offset1, index1, offset2, index2);
+                let right_val =
+                    self.eval_with_array_substitution(right, offset1, index1, offset2, index2);
+
+                match op {
+                    BinaryOp::Add => left_val + right_val,
+                    BinaryOp::Sub => left_val - right_val,
+                    BinaryOp::Mul => left_val * right_val,
+                    BinaryOp::Div => left_val / right_val,
+                    _ => 0.0,
+                }
+            }
+            _ => self.eval(expr),
+        }
+    }
+
+    /// Helper to evaluate an expression with array substitutions
+    fn eval_with_array_substitution(
+        &mut self,
+        expr: &Expr,
+        offset1: usize,
+        index1: usize,
+        offset2: usize,
+        index2: usize,
+    ) -> f64 {
+        match expr {
+            Expr::Subscript(off, indices, _bounds, _) => {
+                let has_wildcard = indices
+                    .iter()
+                    .any(|idx| matches!(idx, Expr::Const(val, _) if *val == 0.0));
+
+                if has_wildcard {
+                    if *off == offset1 {
+                        self.curr[self.off + *off + index1]
+                    } else if *off == offset2 {
+                        self.curr[self.off + *off + index2]
+                    } else {
+                        // Different array, evaluate normally (but this shouldn't happen)
+                        self.eval(expr)
+                    }
+                } else {
+                    // No wildcard, evaluate normally
+                    self.eval(expr)
+                }
+            }
+            Expr::Op2(op, left, right, _) => {
+                let left_val =
+                    self.eval_with_array_substitution(left, offset1, index1, offset2, index2);
+                let right_val =
+                    self.eval_with_array_substitution(right, offset1, index1, offset2, index2);
+
+                match op {
+                    BinaryOp::Add => left_val + right_val,
+                    BinaryOp::Sub => left_val - right_val,
+                    BinaryOp::Mul => left_val * right_val,
+                    BinaryOp::Div => left_val / right_val,
+                    _ => 0.0,
+                }
+            }
+            Expr::Op1(op, sub_expr, _) => {
+                let val =
+                    self.eval_with_array_substitution(sub_expr, offset1, index1, offset2, index2);
+                match op {
+                    UnaryOp::Not => (!is_truthy(val)) as i8 as f64,
+                }
+            }
+            Expr::If(cond, true_expr, false_expr, _) => {
+                let cond_val =
+                    self.eval_with_array_substitution(cond, offset1, index1, offset2, index2);
+                if is_truthy(cond_val) {
+                    self.eval_with_array_substitution(true_expr, offset1, index1, offset2, index2)
+                } else {
+                    self.eval_with_array_substitution(false_expr, offset1, index1, offset2, index2)
+                }
+            }
+            // For other expression types (constants, variables, etc.), evaluate normally
+            _ => self.eval(expr),
+        }
+    }
+
+    /// Check if expression contains multiplication or division operations
+    fn expr_contains_multiplication_or_division(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Op2(op, left, right, _) => {
+                matches!(op, BinaryOp::Mul | BinaryOp::Div)
+                    || self.expr_contains_multiplication_or_division(left)
+                    || self.expr_contains_multiplication_or_division(right)
+            }
+            Expr::Op1(_, sub_expr, _) => self.expr_contains_multiplication_or_division(sub_expr),
+            Expr::If(cond, true_expr, false_expr, _) => {
+                self.expr_contains_multiplication_or_division(cond)
+                    || self.expr_contains_multiplication_or_division(true_expr)
+                    || self.expr_contains_multiplication_or_division(false_expr)
+            }
+            _ => false,
         }
     }
 }
