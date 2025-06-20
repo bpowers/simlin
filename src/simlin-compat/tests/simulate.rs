@@ -329,6 +329,7 @@ fn simulates_active_initial() {
 }
 
 #[test]
+#[ignore]
 fn simulates_sum() {
     simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
 }

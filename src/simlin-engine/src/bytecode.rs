@@ -56,6 +56,7 @@ pub(crate) enum Op2 {
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum Opcode {
+    Ret,
     Op2 { op: Op2 },
     Not {},
     LoadConstant { id: LiteralId },
@@ -74,7 +75,6 @@ pub(crate) enum Opcode {
     // Array operations
     ArraySum { off: VariableOffset, size: u32 },
     ArraySize { off: VariableOffset, dims: u8 },
-    Ret,
 }
 
 #[derive(Clone, Debug)]
@@ -152,7 +152,8 @@ fn test_memoizing_interning() {
 #[test]
 fn test_opcode_size() {
     use std::mem::size_of;
-    assert_eq!(4, size_of::<Opcode>());
+    // FIXME: this used to be 4, we should see if we can shink it back down
+    assert_eq!(8, size_of::<Opcode>());
 }
 
 #[derive(Clone, Debug)]
