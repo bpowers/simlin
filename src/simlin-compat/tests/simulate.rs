@@ -212,8 +212,8 @@ fn simulate_path(xmile_path: &str) {
 
     // also ensure they match our reference results
     let expected = load_expected_results(xmile_path).unwrap();
-    ensure_results(&expected, &results_vm);
     ensure_results(&expected, &results_interp);
+    ensure_results(&expected, &results_vm);
 
     // ensure the two results match each other
     ensure_results(&results_interp, &results_vm);
