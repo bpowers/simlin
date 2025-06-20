@@ -1603,15 +1603,16 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Rank(_, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
-                    BuiltinFn::Size(expr) => {
-                        // TODO: For now, implement simple array size using ArraySize opcode
-                        // In the future, this should handle the expression argument properly
-                        // and optionally the dimension argument
-                        self.walk_expr(expr)?.unwrap();
+                    BuiltinFn::Size(_expr) => {
+                        // SIZE() always returns a constant that can be determined at compile time
+                        // For scalars, SIZE is 1; for arrays, it's the product of dimension sizes
+                        // TODO: For now, just return 1 (scalar case)
+                        // In the future, examine expr to determine actual array dimensions
+                        // We don't need to evaluate the expression at runtime since SIZE is compile-time constant
                         
-                        // For now, assume we're getting size of a simple array variable
-                        // This is a placeholder implementation that will need refinement
-                        self.push(Opcode::ArraySize { off: 0, dims: 1 });
+                        let size_value = 1.0; // placeholder: always 1 for scalars
+                        let id = self.curr_code.intern_literal(size_value);
+                        self.push(Opcode::LoadConstant { id });
                         return Ok(Some(()));
                     }
                     BuiltinFn::Stddev(_) => {
