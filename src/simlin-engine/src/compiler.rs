@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
-use crate::ast::{self, Ast, BinaryOp, IndexExpr, Loc};
+use crate::ast::{self, Ast, BinaryOp, IndexExpr1, Loc};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
@@ -313,10 +313,10 @@ impl Context<'_> {
         }
     }
 
-    fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
+    fn lower(&self, expr: &ast::Expr1) -> Result<Expr> {
         let expr = match expr {
-            ast::Expr::Const(_, n, loc) => Expr::Const(*n, *loc),
-            ast::Expr::Var(id, loc) => {
+            ast::Expr1::Const(_, n, loc) => Expr::Const(*n, *loc),
+            ast::Expr1::Var(id, loc) => {
                 if let Some((off, _)) = self
                     .inputs
                     .iter()
@@ -333,7 +333,7 @@ impl Context<'_> {
                     }
                 }
             }
-            ast::Expr::App(builtin, loc) => {
+            ast::Expr1::App(builtin, loc) => {
                 use crate::builtins::BuiltinFn as BFn;
                 let builtin: BuiltinFn = match builtin {
                     BFn::Lookup(id, expr, loc) => {
@@ -419,7 +419,7 @@ impl Context<'_> {
                 };
                 Expr::App(builtin, *loc)
             }
-            ast::Expr::Subscript(id, args, loc) => {
+            ast::Expr1::Subscript(id, args, loc) => {
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
@@ -431,11 +431,11 @@ impl Context<'_> {
                     .enumerate()
                     .map(|(i, arg)| {
                         match arg {
-                            IndexExpr::Wildcard(_loc) => sim_err!(TodoWildcard, id.clone()),
-                            IndexExpr::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
-                            IndexExpr::Range(_l, _r, _loc) => sim_err!(TodoRange, id.clone()),
-                            IndexExpr::Expr(arg) => {
-                                let expr = if let ast::Expr::Var(ident, loc) = arg {
+                            IndexExpr1::Wildcard(_loc) => sim_err!(TodoWildcard, id.clone()),
+                            IndexExpr1::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
+                            IndexExpr1::Range(_l, _r, _loc) => sim_err!(TodoRange, id.clone()),
+                            IndexExpr1::Expr(arg) => {
+                                let expr = if let ast::Expr1::Var(ident, loc) = arg {
                                     let dim = &dims[i];
                                     // we need to check to make sure that any explicit subscript names are
                                     // converted to offsets here and not passed to self.lower
@@ -460,7 +460,7 @@ impl Context<'_> {
                 let bounds = dims.iter().map(|dim| dim.len()).collect();
                 Expr::Subscript(off, args?, bounds, *loc)
             }
-            ast::Expr::Op1(op, l, loc) => {
+            ast::Expr1::Op1(op, l, loc) => {
                 let l = self.lower(l)?;
                 match op {
                     ast::UnaryOp::Negative => Expr::Op2(
@@ -473,7 +473,7 @@ impl Context<'_> {
                     ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
                 }
             }
-            ast::Expr::Op2(op, l, r, loc) => {
+            ast::Expr1::Op2(op, l, r, loc) => {
                 let l = self.lower(l)?;
                 let r = self.lower(r)?;
                 let op = match op {
@@ -494,7 +494,7 @@ impl Context<'_> {
                 };
                 Expr::Op2(op, Box::new(l), Box::new(r), *loc)
             }
-            ast::Expr::If(cond, t, f, loc) => {
+            ast::Expr1::If(cond, t, f, loc) => {
                 let cond = self.lower(cond)?;
                 let t = self.lower(t)?;
                 let f = self.lower(f)?;
@@ -566,7 +566,7 @@ impl Context<'_> {
 fn test_lower() {
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr::*;
+        use ast::Expr1::*;
         Box::new(If(
             Box::new(Op2(
                 And,
@@ -655,7 +655,7 @@ fn test_lower() {
 
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr::*;
+        use ast::Expr1::*;
         Box::new(If(
             Box::new(Op2(
                 Or,

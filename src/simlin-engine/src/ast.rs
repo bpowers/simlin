@@ -18,7 +18,6 @@ use crate::eqn_err;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DimensionRange {
     dim: Dimension,
@@ -312,24 +311,26 @@ impl Expr0 {
     }
 }
 
-/// Expr represents a parsed equation, after calls to
+/// IndexExpr1 represents a parsed equation index, after calls to
 /// builtin functions have been checked/resolved.
 #[derive(PartialEq, Clone, Debug)]
-pub enum IndexExpr {
+pub enum IndexExpr1 {
     Wildcard(Loc),
     // *:dimension_name
     StarRange(Ident, Loc),
-    Range(Expr, Expr, Loc),
-    Expr(Expr),
+    Range(Expr1, Expr1, Loc),
+    Expr(Expr1),
 }
 
-impl IndexExpr {
+impl IndexExpr1 {
     pub(crate) fn from(expr: IndexExpr0) -> EquationResult<Self> {
         let expr = match expr {
-            IndexExpr0::Wildcard(loc) => IndexExpr::Wildcard(loc),
-            IndexExpr0::StarRange(ident, loc) => IndexExpr::StarRange(ident, loc),
-            IndexExpr0::Range(l, r, loc) => IndexExpr::Range(Expr::from(l)?, Expr::from(r)?, loc),
-            IndexExpr0::Expr(e) => IndexExpr::Expr(Expr::from(e)?),
+            IndexExpr0::Wildcard(loc) => IndexExpr1::Wildcard(loc),
+            IndexExpr0::StarRange(ident, loc) => IndexExpr1::StarRange(ident, loc),
+            IndexExpr0::Range(l, r, loc) => {
+                IndexExpr1::Range(Expr1::from(l)?, Expr1::from(r)?, loc)
+            }
+            IndexExpr0::Expr(e) => IndexExpr1::Expr(Expr1::from(e)?),
         };
 
         Ok(expr)
@@ -337,34 +338,34 @@ impl IndexExpr {
 
     pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
         match self {
-            IndexExpr::Wildcard(loc) => IndexExpr::Wildcard(loc),
-            IndexExpr::StarRange(id, loc) => IndexExpr::StarRange(id, loc),
-            IndexExpr::Range(l, r, loc) => IndexExpr::Range(
+            IndexExpr1::Wildcard(loc) => IndexExpr1::Wildcard(loc),
+            IndexExpr1::StarRange(id, loc) => IndexExpr1::StarRange(id, loc),
+            IndexExpr1::Range(l, r, loc) => IndexExpr1::Range(
                 l.constify_dimensions(scope),
                 r.constify_dimensions(scope),
                 loc,
             ),
-            IndexExpr::Expr(e) => IndexExpr::Expr(e.constify_dimensions(scope)),
+            IndexExpr1::Expr(e) => IndexExpr1::Expr(e.constify_dimensions(scope)),
         }
     }
 
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
-            IndexExpr::Wildcard(_) => None,
-            IndexExpr::StarRange(v, loc) => {
+            IndexExpr1::Wildcard(_) => None,
+            IndexExpr1::StarRange(v, loc) => {
                 if v == ident {
                     Some(*loc)
                 } else {
                     None
                 }
             }
-            IndexExpr::Range(l, r, _) => {
+            IndexExpr1::Range(l, r, _) => {
                 if let Some(loc) = l.get_var_loc(ident) {
                     return Some(loc);
                 }
                 r.get_var_loc(ident)
             }
-            IndexExpr::Expr(e) => e.get_var_loc(ident),
+            IndexExpr1::Expr(e) => e.get_var_loc(ident),
         }
     }
 }
@@ -375,27 +376,27 @@ impl Default for Expr0 {
     }
 }
 
-/// Expr represents a parsed equation, after calls to
+/// Expr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
 #[derive(PartialEq, Clone, Debug)]
-pub enum Expr {
+pub enum Expr1 {
     Const(String, f64, Loc),
     Var(Ident, Loc),
-    App(BuiltinFn<Expr>, Loc),
-    Subscript(Ident, Vec<IndexExpr>, Loc),
-    Op1(UnaryOp, Box<Expr>, Loc),
-    Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
-    If(Box<Expr>, Box<Expr>, Box<Expr>, Loc),
+    App(BuiltinFn<Expr1>, Loc),
+    Subscript(Ident, Vec<IndexExpr1>, Loc),
+    Op1(UnaryOp, Box<Expr1>, Loc),
+    Op2(BinaryOp, Box<Expr1>, Box<Expr1>, Loc),
+    If(Box<Expr1>, Box<Expr1>, Box<Expr1>, Loc),
 }
 
-impl Expr {
+impl Expr1 {
     pub(crate) fn from(expr: Expr0) -> EquationResult<Self> {
         let expr = match expr {
-            Expr0::Const(s, n, loc) => Expr::Const(s, n, loc),
-            Expr0::Var(id, loc) => Expr::Var(id, loc),
+            Expr0::Const(s, n, loc) => Expr1::Const(s, n, loc),
+            Expr0::Var(id, loc) => Expr1::Var(id, loc),
             Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
-                let args: EquationResult<Vec<Expr>> =
-                    orig_args.into_iter().map(Expr::from).collect();
+                let args: EquationResult<Vec<Expr1>> =
+                    orig_args.into_iter().map(Expr1::from).collect();
                 let mut args = args?;
 
                 macro_rules! check_arity {
@@ -483,7 +484,7 @@ impl Expr {
 
                 let builtin = match id.as_str() {
                     "lookup" => {
-                        if let Some(Expr::Var(ident, loc)) = args.first() {
+                        if let Some(Expr1::Var(ident, loc)) = args.first() {
                             BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()), *loc)
                         } else {
                             return eqn_err!(BadTable, loc.start, loc.end);
@@ -499,7 +500,7 @@ impl Expr {
                     "inf" => check_arity!(Inf, 0),
                     "int" => check_arity!(Int, 1),
                     "ismoduleinput" => {
-                        if let Some(Expr::Var(ident, loc)) = args.first() {
+                        if let Some(Expr1::Var(ident, loc)) = args.first() {
                             BuiltinFn::IsModuleInput(ident.clone(), *loc)
                         } else {
                             return eqn_err!(ExpectedIdent, loc.start, loc.end);
@@ -531,24 +532,24 @@ impl Expr {
                         return eqn_err!(UnknownBuiltin, loc.start, loc.end);
                     }
                 };
-                Expr::App(builtin, loc)
+                Expr1::App(builtin, loc)
             }
             Expr0::Subscript(id, args, loc) => {
-                let args: EquationResult<Vec<IndexExpr>> =
-                    args.into_iter().map(IndexExpr::from).collect();
-                Expr::Subscript(id, args?, loc)
+                let args: EquationResult<Vec<IndexExpr1>> =
+                    args.into_iter().map(IndexExpr1::from).collect();
+                Expr1::Subscript(id, args?, loc)
             }
-            Expr0::Op1(op, l, loc) => Expr::Op1(op, Box::new(Expr::from(*l)?), loc),
-            Expr0::Op2(op, l, r, loc) => Expr::Op2(
+            Expr0::Op1(op, l, loc) => Expr1::Op1(op, Box::new(Expr1::from(*l)?), loc),
+            Expr0::Op2(op, l, r, loc) => Expr1::Op2(
                 op,
-                Box::new(Expr::from(*l)?),
-                Box::new(Expr::from(*r)?),
+                Box::new(Expr1::from(*l)?),
+                Box::new(Expr1::from(*r)?),
                 loc,
             ),
-            Expr0::If(cond, t, f, loc) => Expr::If(
-                Box::new(Expr::from(*cond)?),
-                Box::new(Expr::from(*t)?),
-                Box::new(Expr::from(*f)?),
+            Expr0::If(cond, t, f, loc) => Expr1::If(
+                Box::new(Expr1::from(*cond)?),
+                Box::new(Expr1::from(*t)?),
+                Box::new(Expr1::from(*f)?),
                 loc,
             ),
         };
@@ -557,15 +558,15 @@ impl Expr {
 
     pub(crate) fn constify_dimensions(self, scope: &ScopeStage0) -> Self {
         match self {
-            Expr::Const(s, n, loc) => Expr::Const(s, n, loc),
-            Expr::Var(id, loc) => {
+            Expr1::Const(s, n, loc) => Expr1::Const(s, n, loc),
+            Expr1::Var(id, loc) => {
                 if let Some(off) = scope.dimensions.lookup(&id) {
-                    Expr::Const(id, off as f64, loc)
+                    Expr1::Const(id, off as f64, loc)
                 } else {
-                    Expr::Var(id, loc)
+                    Expr1::Var(id, loc)
                 }
             }
-            Expr::App(func, loc) => {
+            Expr1::App(func, loc) => {
                 let func = match func {
                     BuiltinFn::Inf => BuiltinFn::Inf,
                     BuiltinFn::Pi => BuiltinFn::Pi,
@@ -642,23 +643,23 @@ impl Expr {
                     }
                     BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.constify_dimensions(scope))),
                 };
-                Expr::App(func, loc)
+                Expr1::App(func, loc)
             }
-            Expr::Subscript(id, args, loc) => Expr::Subscript(
+            Expr1::Subscript(id, args, loc) => Expr1::Subscript(
                 id,
                 args.into_iter()
                     .map(|arg| arg.constify_dimensions(scope))
                     .collect(),
                 loc,
             ),
-            Expr::Op1(op, l, loc) => Expr::Op1(op, Box::new(l.constify_dimensions(scope)), loc),
-            Expr::Op2(op, l, r, loc) => Expr::Op2(
+            Expr1::Op1(op, l, loc) => Expr1::Op1(op, Box::new(l.constify_dimensions(scope)), loc),
+            Expr1::Op2(op, l, r, loc) => Expr1::Op2(
                 op,
                 Box::new(l.constify_dimensions(scope)),
                 Box::new(r.constify_dimensions(scope)),
                 loc,
             ),
-            Expr::If(cond, l, r, loc) => Expr::If(
+            Expr1::If(cond, l, r, loc) => Expr1::If(
                 Box::new(cond.constify_dimensions(scope)),
                 Box::new(l.constify_dimensions(scope)),
                 Box::new(r.constify_dimensions(scope)),
@@ -669,22 +670,22 @@ impl Expr {
 
     pub(crate) fn get_loc(&self) -> Loc {
         match self {
-            Expr::Const(_, _, loc) => *loc,
-            Expr::Var(_, loc) => *loc,
-            Expr::App(_, loc) => *loc,
-            Expr::Subscript(_, _, loc) => *loc,
-            Expr::Op1(_, _, loc) => *loc,
-            Expr::Op2(_, _, _, loc) => *loc,
-            Expr::If(_, _, _, loc) => *loc,
+            Expr1::Const(_, _, loc) => *loc,
+            Expr1::Var(_, loc) => *loc,
+            Expr1::App(_, loc) => *loc,
+            Expr1::Subscript(_, _, loc) => *loc,
+            Expr1::Op1(_, _, loc) => *loc,
+            Expr1::Op2(_, _, _, loc) => *loc,
+            Expr1::If(_, _, _, loc) => *loc,
         }
     }
 
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
-            Expr::Const(_s, _n, _loc) => None,
-            Expr::Var(v, loc) if v == ident => Some(*loc),
-            Expr::Var(_v, _loc) => None,
-            Expr::App(builtin, _loc) => {
+            Expr1::Const(_s, _n, _loc) => None,
+            Expr1::Var(v, loc) if v == ident => Some(*loc),
+            Expr1::Var(_v, _loc) => None,
+            Expr1::App(builtin, _loc) => {
                 let mut loc: Option<Loc> = None;
                 walk_builtin_expr(builtin, |contents| match contents {
                     BuiltinContents::Ident(id, id_loc) => {
@@ -700,7 +701,7 @@ impl Expr {
                 });
                 loc
             }
-            Expr::Subscript(id, subscripts, loc) => {
+            Expr1::Subscript(id, subscripts, loc) => {
                 if id == ident {
                     let start = loc.start as usize;
                     return Some(Loc::new(start, start + id.len()));
@@ -712,9 +713,9 @@ impl Expr {
                 }
                 None
             }
-            Expr::Op1(_op, r, _loc) => r.get_var_loc(ident),
-            Expr::Op2(_op, l, r, _loc) => l.get_var_loc(ident).or_else(|| r.get_var_loc(ident)),
-            Expr::If(cond, t, f, _loc) => cond
+            Expr1::Op1(_op, r, _loc) => r.get_var_loc(ident),
+            Expr1::Op2(_op, l, r, _loc) => l.get_var_loc(ident).or_else(|| r.get_var_loc(ident)),
+            Expr1::If(cond, t, f, _loc) => cond
                 .get_var_loc(ident)
                 .or_else(|| t.get_var_loc(ident))
                 .or_else(|| f.get_var_loc(ident)),
@@ -722,9 +723,130 @@ impl Expr {
     }
 }
 
-impl Default for Expr {
+impl Default for Expr1 {
     fn default() -> Self {
-        Expr::Const("0.0".to_string(), 0.0, Loc::default())
+        Expr1::Const("0.0".to_string(), 0.0, Loc::default())
+    }
+}
+
+/// Expr represents a dimension-annotated expression, the final stage
+/// of AST transformation with full dimension information.
+#[derive(PartialEq, Clone, Debug)]
+pub enum Expr {
+    Const(String, f64, DimensionVector, Loc),
+    Var(Ident, DimensionVector, Loc),
+    App(BuiltinFn<Expr>, DimensionVector, Loc),
+    Subscript(Ident, Vec<IndexExpr>, DimensionVector, Loc),
+    Op1(UnaryOp, Box<Expr>, DimensionVector, Loc),
+    Op2(BinaryOp, Box<Expr>, Box<Expr>, DimensionVector, Loc),
+    If(Box<Expr>, Box<Expr>, Box<Expr>, DimensionVector, Loc),
+}
+
+/// IndexExpr represents a dimension-annotated index expression.
+#[derive(PartialEq, Clone, Debug)]
+pub enum IndexExpr {
+    Wildcard(DimensionVector, Loc),
+    StarRange(Ident, DimensionVector, Loc),
+    Range(Expr, Expr, DimensionVector, Loc),
+    Expr(Expr),
+}
+
+impl Expr {
+    /// Get the dimensions of this expression
+    pub fn dims(&self) -> &DimensionVector {
+        match self {
+            Expr::Const(_, _, dims, _) => dims,
+            Expr::Var(_, dims, _) => dims,
+            Expr::App(_, dims, _) => dims,
+            Expr::Subscript(_, _, dims, _) => dims,
+            Expr::Op1(_, _, dims, _) => dims,
+            Expr::Op2(_, _, _, dims, _) => dims,
+            Expr::If(_, _, _, dims, _) => dims,
+        }
+    }
+
+    /// Get the location of this expression
+    pub fn loc(&self) -> Loc {
+        match self {
+            Expr::Const(_, _, _, loc) => *loc,
+            Expr::Var(_, _, loc) => *loc,
+            Expr::App(_, _, loc) => *loc,
+            Expr::Subscript(_, _, _, loc) => *loc,
+            Expr::Op1(_, _, _, loc) => *loc,
+            Expr::Op2(_, _, _, _, loc) => *loc,
+            Expr::If(_, _, _, _, loc) => *loc,
+        }
+    }
+}
+
+impl IndexExpr {
+    /// Get the dimensions of this index expression
+    pub fn dims(&self) -> &DimensionVector {
+        match self {
+            IndexExpr::Wildcard(dims, _) => dims,
+            IndexExpr::StarRange(_, dims, _) => dims,
+            IndexExpr::Range(_, _, dims, _) => dims,
+            IndexExpr::Expr(expr) => expr.dims(),
+        }
+    }
+}
+
+/// Context for dimension inference
+pub struct DimensionContext<'a> {
+    /// Variable dimensions from the model
+    pub var_dims: &'a HashMap<Ident, DimensionVector>,
+}
+
+impl Expr {
+    /// Infer dimensions from an Expr1 to create a dimension-annotated Expr
+    pub fn infer_dimensions(expr: Expr1, ctx: &DimensionContext) -> EquationResult<Self> {
+        // For now, just add scalar dimensions to everything
+        // This is a placeholder implementation
+        let dims = DimensionVector::scalar();
+
+        let result = match expr {
+            Expr1::Const(s, n, loc) => Expr::Const(s, n, dims, loc),
+            Expr1::Var(id, loc) => {
+                let dims = ctx
+                    .var_dims
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(DimensionVector::scalar);
+                Expr::Var(id, dims, loc)
+            }
+            Expr1::App(_builtin, loc) => {
+                // TODO: Implement dimension inference for builtins
+                // For now, create a placeholder
+                Expr::Const("0".to_string(), 0.0, dims, loc)
+            }
+            Expr1::Subscript(id, _indices, loc) => {
+                // TODO: Implement dimension inference for subscripts
+                let index_exprs = vec![]; // Placeholder
+                Expr::Subscript(id, index_exprs, dims, loc)
+            }
+            Expr1::Op1(op, expr, loc) => {
+                let expr = Box::new(Expr::infer_dimensions(*expr, ctx)?);
+                let dims = expr.dims().clone();
+                Expr::Op1(op, expr, dims, loc)
+            }
+            Expr1::Op2(op, l, r, loc) => {
+                let l = Box::new(Expr::infer_dimensions(*l, ctx)?);
+                let r = Box::new(Expr::infer_dimensions(*r, ctx)?);
+                // TODO: Implement proper dimension compatibility checking
+                let dims = l.dims().clone();
+                Expr::Op2(op, l, r, dims, loc)
+            }
+            Expr1::If(cond, t, f, loc) => {
+                let cond = Box::new(Expr::infer_dimensions(*cond, ctx)?);
+                let t = Box::new(Expr::infer_dimensions(*t, ctx)?);
+                let f = Box::new(Expr::infer_dimensions(*f, ctx)?);
+                // TODO: Check that t and f have compatible dimensions
+                let dims = t.dims().clone();
+                Expr::If(cond, t, f, dims, loc)
+            }
+        };
+
+        Ok(result)
     }
 }
 
@@ -957,13 +1079,13 @@ fn test_parse_failures() {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Ast<Expr> {
-    Scalar(Expr),
-    ApplyToAll(Vec<Dimension>, Expr),
-    Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
+pub enum Ast<T> {
+    Scalar(T),
+    ApplyToAll(Vec<Dimension>, T),
+    Arrayed(Vec<Dimension>, HashMap<ElementName, T>),
 }
 
-impl Ast<Expr> {
+impl Ast<Expr1> {
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
@@ -988,19 +1110,19 @@ impl Ast<Expr> {
     }
 }
 
-pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr>> {
+pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr1>> {
     match ast {
-        Ast::Scalar(expr) => Expr::from(expr)
+        Ast::Scalar(expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
             .map(Ast::Scalar),
-        Ast::ApplyToAll(dims, expr) => Expr::from(expr)
+        Ast::ApplyToAll(dims, expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
             .map(|expr| Ast::ApplyToAll(dims, expr)),
         Ast::Arrayed(dims, elements) => {
-            let elements: EquationResult<HashMap<ElementName, Expr>> = elements
+            let elements: EquationResult<HashMap<ElementName, Expr1>> = elements
                 .into_iter()
                 .map(|(id, expr)| {
-                    match Expr::from(expr).map(|expr| expr.constify_dimensions(scope)) {
+                    match Expr1::from(expr).map(|expr| expr.constify_dimensions(scope)) {
                         Ok(expr) => Ok((id, expr)),
                         Err(err) => Err(err),
                     }
@@ -1099,8 +1221,8 @@ fn paren_if_necessary(parent: &Expr0, child: &Expr0, eqn: String) -> String {
     }
 }
 
-fn paren_if_necessary1(parent: &Expr, child: &Expr, eqn: String) -> String {
-    if child_needs_parens!(Expr, parent, child, eqn) {
+fn paren_if_necessary1(parent: &Expr1, child: &Expr1, eqn: String) -> String {
+    if child_needs_parens!(Expr1, parent, child, eqn) {
         format!("({})", eqn)
     } else {
         eqn
@@ -1268,29 +1390,29 @@ fn test_print_eqn() {
 struct LatexVisitor {}
 
 impl LatexVisitor {
-    fn walk_index(&mut self, expr: &IndexExpr) -> String {
+    fn walk_index(&mut self, expr: &IndexExpr1) -> String {
         match expr {
-            IndexExpr::Wildcard(_) => "*".to_string(),
-            IndexExpr::StarRange(id, _) => format!("*:{}", id),
-            IndexExpr::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
-            IndexExpr::Expr(e) => self.walk(e),
+            IndexExpr1::Wildcard(_) => "*".to_string(),
+            IndexExpr1::StarRange(id, _) => format!("*:{}", id),
+            IndexExpr1::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
+            IndexExpr1::Expr(e) => self.walk(e),
         }
     }
 
-    fn walk(&mut self, expr: &Expr) -> String {
+    fn walk(&mut self, expr: &Expr1) -> String {
         match expr {
-            Expr::Const(s, n, _) => {
+            Expr1::Const(s, n, _) => {
                 if n.is_nan() {
                     "\\mathrm{{NaN}}".to_owned()
                 } else {
                     s.clone()
                 }
             }
-            Expr::Var(id, _) => {
+            Expr1::Var(id, _) => {
                 let id = str::replace(id, "_", "\\_");
                 format!("\\mathrm{{{}}}", id)
             }
-            Expr::App(builtin, _) => {
+            Expr1::App(builtin, _) => {
                 let mut args: Vec<String> = vec![];
                 walk_builtin_expr(builtin, |contents| {
                     let arg = match contents {
@@ -1302,11 +1424,11 @@ impl LatexVisitor {
                 let func = builtin.name();
                 format!("\\operatorname{{{}}}({})", func, args.join(", "))
             }
-            Expr::Subscript(id, args, _) => {
+            Expr1::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
                 format!("{}[{}]", id, args.join(", "))
             }
-            Expr::Op1(op, l, _) => {
+            Expr1::Op1(op, l, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));
                 let op: &str = match op {
                     UnaryOp::Positive => "+",
@@ -1315,7 +1437,7 @@ impl LatexVisitor {
                 };
                 format!("{}{}", op, l)
             }
-            Expr::Op2(op, l, r, _) => {
+            Expr1::Op2(op, l, r, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));
                 let r = paren_if_necessary1(expr, r, self.walk(r));
                 let op: &str = match op {
@@ -1340,7 +1462,7 @@ impl LatexVisitor {
                 };
                 format!("{} {} {}", l, op, r)
             }
-            Expr::If(cond, t, f, _) => {
+            Expr1::If(cond, t, f, _) => {
                 let cond = self.walk(cond);
                 let t = self.walk(t);
                 let f = self.walk(f);
@@ -1357,7 +1479,7 @@ impl LatexVisitor {
     }
 }
 
-pub fn latex_eqn(expr: &Expr) -> String {
+pub fn latex_eqn(expr: &Expr1) -> String {
     let mut visitor = LatexVisitor {};
     visitor.walk(expr)
 }
@@ -1366,45 +1488,45 @@ pub fn latex_eqn(expr: &Expr) -> String {
 fn test_latex_eqn() {
     assert_eq!(
         "\\mathrm{a\\_c} + \\mathrm{b}",
-        latex_eqn(&Expr::Op2(
+        latex_eqn(&Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr::Var("a_c".to_string(), Loc::new(1, 2))),
-            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr1::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "\\mathrm{a\\_c} \\cdot \\mathrm{b}",
-        latex_eqn(&Expr::Op2(
+        latex_eqn(&Expr1::Op2(
             BinaryOp::Mul,
-            Box::new(Expr::Var("a_c".to_string(), Loc::new(1, 2))),
-            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr1::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "(\\mathrm{a\\_c} - 1) \\cdot \\mathrm{b}",
-        latex_eqn(&Expr::Op2(
+        latex_eqn(&Expr1::Op2(
             BinaryOp::Mul,
-            Box::new(Expr::Op2(
+            Box::new(Expr1::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr::Var("a_c".to_string(), Loc::new(0, 0))),
-                Box::new(Expr::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr1::Var("a_c".to_string(), Loc::new(0, 0))),
+                Box::new(Expr1::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 Loc::new(0, 0),
             )),
-            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "\\mathrm{b} \\cdot (\\mathrm{a\\_c} - 1)",
-        latex_eqn(&Expr::Op2(
+        latex_eqn(&Expr1::Op2(
             BinaryOp::Mul,
-            Box::new(Expr::Var("b".to_string(), Loc::new(5, 6))),
-            Box::new(Expr::Op2(
+            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr1::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr::Var("a_c".to_string(), Loc::new(0, 0))),
-                Box::new(Expr::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr1::Var("a_c".to_string(), Loc::new(0, 0))),
+                Box::new(Expr1::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 Loc::new(0, 0),
             )),
             Loc::new(0, 7),
@@ -1412,38 +1534,38 @@ fn test_latex_eqn() {
     );
     assert_eq!(
         "-\\mathrm{a}",
-        latex_eqn(&Expr::Op1(
+        latex_eqn(&Expr1::Op1(
             UnaryOp::Negative,
-            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr1::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "\\neg \\mathrm{a}",
-        latex_eqn(&Expr::Op1(
+        latex_eqn(&Expr1::Op1(
             UnaryOp::Not,
-            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr1::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "+\\mathrm{a}",
-        latex_eqn(&Expr::Op1(
+        latex_eqn(&Expr1::Op1(
             UnaryOp::Positive,
-            Box::new(Expr::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr1::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "4.7",
-        latex_eqn(&Expr::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
+        latex_eqn(&Expr1::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
     );
     assert_eq!(
         "\\operatorname{lookup}(\\mathrm{a}, 1.0)",
-        latex_eqn(&Expr::App(
+        latex_eqn(&Expr1::App(
             BuiltinFn::Lookup(
                 "a".to_string(),
-                Box::new(Expr::Const("1.0".to_owned(), 1.0, Default::default())),
+                Box::new(Expr1::Const("1.0".to_owned(), 1.0, Default::default())),
                 Default::default(),
             ),
             Loc::new(0, 14),
