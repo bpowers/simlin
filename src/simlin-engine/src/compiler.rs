@@ -406,15 +406,18 @@ impl Context<'_> {
                     BFn::Rank(_, _) => {
                         return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
                     }
-                    BFn::Size(_) => {
-                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    BFn::Size(arg) => {
+                        // For now, implement SIZE as a simple operation
+                        // This is a placeholder until we have proper array handling
+                        BuiltinFn::Size(Box::new(self.lower(arg)?))
                     }
                     BFn::Stddev(_) => {
                         return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
                     }
                     BFn::Sum(arg) => {
-                        println!("{:?}", arg);
-                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                        // For now, implement SUM as a simple operation
+                        // This is a placeholder until we have proper array handling
+                        BuiltinFn::Sum(Box::new(self.lower(arg)?))
                     }
                 };
                 Expr::App(builtin, *loc)
@@ -1600,14 +1603,30 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Rank(_, _) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
-                    BuiltinFn::Size(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Size(expr) => {
+                        // TODO: For now, implement simple array size using ArraySize opcode
+                        // In the future, this should handle the expression argument properly
+                        // and optionally the dimension argument
+                        self.walk_expr(expr)?.unwrap();
+                        
+                        // For now, assume we're getting size of a simple array variable
+                        // This is a placeholder implementation that will need refinement
+                        self.push(Opcode::ArraySize { off: 0, dims: 1 });
+                        return Ok(Some(()));
                     }
                     BuiltinFn::Stddev(_) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
-                    BuiltinFn::Sum(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Sum(expr) => {
+                        // TODO: For now, implement simple array sum using ArraySum opcode
+                        // In the future, this should handle the expression argument properly
+                        // by examining dimension information to determine array bounds
+                        self.walk_expr(expr)?.unwrap();
+                        
+                        // For now, assume we're summing over a simple array variable
+                        // This is a placeholder implementation that will need refinement
+                        self.push(Opcode::ArraySum { off: 0, size: 1 });
+                        return Ok(Some(()));
                     }
                 };
                 let func = match builtin {
@@ -1640,11 +1659,11 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::StartTime
                     | BuiltinFn::FinalTime => unreachable!(),
                     BuiltinFn::Rank(_, _)
-                    | BuiltinFn::Size(_)
-                    | BuiltinFn::Stddev(_)
-                    | BuiltinFn::Sum(_) => {
+                    | BuiltinFn::Stddev(_) => {
                         return sim_err!(TodoArrayBuiltin, "".to_owned());
                     }
+                    // These are handled above in their own match arms
+                    BuiltinFn::Size(_) | BuiltinFn::Sum(_) => unreachable!()
                 };
 
                 self.push(Opcode::Apply { func });

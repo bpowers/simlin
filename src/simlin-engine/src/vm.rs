@@ -525,6 +525,20 @@ impl Vm {
                     let gf = &module.context.graphical_functions[gf as usize];
                     stack.push(lookup(gf, index));
                 }
+                Opcode::ArraySum { off: _off, size: _size } => {
+                    // TODO: Implement proper array sum
+                    // For now, SUM of a scalar value is just the value itself
+                    // The argument is already on the stack from the expression evaluation
+                    let value = stack.pop();
+                    stack.push(value); // SUM of a scalar is the scalar
+                }
+                Opcode::ArraySize { off: _off, dims } => {
+                    // TODO: Implement proper array size calculation
+                    // For now, SIZE of a scalar is 1
+                    // The argument is already on the stack from the expression evaluation
+                    let _value = stack.pop(); // consume the argument
+                    stack.push(dims as f64); // return the size (1 for scalar)
+                }
                 Opcode::Ret => {
                     break;
                 }

@@ -71,6 +71,9 @@ pub(crate) enum Opcode {
     AssignNext { off: VariableOffset },
     Apply { func: BuiltinId },
     Lookup { gf: GraphicalFunctionId },
+    // Array operations
+    ArraySum { off: VariableOffset, size: u32 },
+    ArraySize { off: VariableOffset, dims: u8 },
     Ret,
 }
 
