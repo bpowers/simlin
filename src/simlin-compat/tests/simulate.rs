@@ -120,7 +120,8 @@ fn ensure_results(expected: &Results, results: &Results) {
     let mut step = 0;
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
         for ident in expected.offsets.keys() {
-            let expected = expected_row[expected.offsets[ident]];
+            let ident_off = expected.offsets[ident];
+            let expected = expected_row[ident_off];
             if !results.offsets.contains_key(ident) && IGNORABLE_COLS.contains(&ident.as_str()) {
                 continue;
             }

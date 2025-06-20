@@ -1571,10 +1571,8 @@ impl<'module> Compiler<'module> {
                             let id = self.curr_code.intern_literal(0.0);
                             self.push(Opcode::LoadConstant { id });
                         } else {
-                            // Single-argument array case
-                            // For now, just evaluate the expression (works for scalars)
-                            // TODO: Implement proper array min/max
-                            self.walk_expr(a)?.unwrap();
+                            // Single-argument array case - use similar logic to SUM
+                            return self.compile_array_minmax(a, matches!(builtin, BuiltinFn::Max(_, _)));
                         }
                     }
                     BuiltinFn::Pulse(a, b, c) => {
@@ -1649,40 +1647,10 @@ impl<'module> Compiler<'module> {
                         return Ok(Some(()));
                     }
                     BuiltinFn::Stddev(expr) => {
-                        // For scalars, STDDEV is 0 (no variation in a single value)
-                        // TODO: Implement proper array standard deviation
-                        self.walk_expr(expr)?.unwrap();
-                        let id = self.curr_code.intern_literal(0.0);
-                        self.push(Opcode::LoadConstant { id });
-                        return Ok(Some(()));
+                        return self.compile_array_operation(expr, "stddev");
                     }
                     BuiltinFn::Sum(expr) => {
-                        // Handle SUM builtin - for now just handle scalar case
-                        // TODO: Detect array subscripts with wildcards and generate proper iteration
-                        match expr.as_ref() {
-                            Expr::Subscript(_var_off, indices, _bounds, _loc) => {
-                                // Check if any indices are wildcards (represented as Const(0.0) for now)
-                                let has_wildcard = indices.iter().any(|idx| {
-                                    matches!(idx, Expr::Const(val, _) if *val == 0.0)
-                                });
-                                
-                                if has_wildcard {
-                                    // TODO: Generate proper array iteration bytecode
-                                    // For now, just return a placeholder value
-                                    let id = self.curr_code.intern_literal(0.0);
-                                    self.push(Opcode::LoadConstant { id });
-                                } else {
-                                    // Regular subscript access
-                                    self.walk_expr(expr)?.unwrap();
-                                }
-                            }
-                            _ => {
-                                // Non-subscripted expression - just evaluate it
-                                // SUM of a scalar is the scalar itself
-                                self.walk_expr(expr)?.unwrap();
-                            }
-                        }
-                        return Ok(Some(()));
+                        return self.compile_array_sum(expr);
                     }
                 };
                 let func = match builtin {
@@ -1805,6 +1773,75 @@ impl<'module> Compiler<'module> {
 
     fn push(&mut self, op: Opcode) {
         self.curr_code.push_opcode(op)
+    }
+
+    fn compile_array_sum(&mut self, expr: &Expr) -> Result<Option<()>> {
+        self.compile_array_operation(expr, "sum")
+    }
+
+    fn compile_array_minmax(&mut self, expr: &Expr, is_max: bool) -> Result<Option<()>> {
+        let op_name = if is_max { "max" } else { "min" };
+        self.compile_array_operation(expr, op_name)
+    }
+
+    fn compile_array_operation(&mut self, expr: &Expr, operation: &str) -> Result<Option<()>> {
+        match expr {
+            Expr::Subscript(var_off, indices, bounds, _loc) => {
+                // Check if any indices are wildcards (represented as Const(0.0) for now)
+                let wildcard_positions: Vec<_> = indices
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, idx)| {
+                        if matches!(idx, Expr::Const(val, _) if *val == 0.0) {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if wildcard_positions.is_empty() {
+                    // No wildcards - just evaluate the subscript expression
+                    self.walk_expr(expr)?.unwrap();
+                    return Ok(Some(()));
+                }
+
+                // Handle wildcards by generating array operation bytecode
+                // Calculate total size based on bounds for wildcard dimensions
+                let total_size = wildcard_positions
+                    .iter()
+                    .map(|&pos| bounds[pos])
+                    .product::<usize>() as u32;
+
+                // Generate appropriate opcode based on operation
+                match operation {
+                    "sum" => self.push(Opcode::ArraySum { 
+                        off: *var_off as VariableOffset, 
+                        size: total_size 
+                    }),
+                    "min" => self.push(Opcode::ArrayMin { 
+                        off: *var_off as VariableOffset, 
+                        size: total_size 
+                    }),
+                    "max" => self.push(Opcode::ArrayMax { 
+                        off: *var_off as VariableOffset, 
+                        size: total_size 
+                    }),
+                    "stddev" => self.push(Opcode::ArrayStddev { 
+                        off: *var_off as VariableOffset, 
+                        size: total_size 
+                    }),
+                    _ => return sim_err!(TodoArrayBuiltin, operation.to_owned()),
+                }
+                
+                Ok(Some(()))
+            }
+            _ => {
+                // Non-subscripted expression - operation on a scalar is the scalar itself
+                self.walk_expr(expr)?.unwrap();
+                Ok(Some(()))
+            }
+        }
     }
 
     fn compile(mut self) -> Result<CompiledModule> {

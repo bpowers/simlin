@@ -74,6 +74,9 @@ pub(crate) enum Opcode {
     Lookup { gf: GraphicalFunctionId },
     // Array operations
     ArraySum { off: VariableOffset, size: u32 },
+    ArrayMin { off: VariableOffset, size: u32 },
+    ArrayMax { off: VariableOffset, size: u32 },
+    ArrayStddev { off: VariableOffset, size: u32 },
 }
 
 #[derive(Clone, Debug)]
