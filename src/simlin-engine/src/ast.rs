@@ -43,19 +43,19 @@ impl DimensionRange {
 /// It uses the existing Dimension enum which already encapsulates
 /// both name and size together.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DimensionVector {
+pub struct DimensionVec {
     dims: Vec<DimensionRange>,
 }
 
-impl DimensionVector {
+impl DimensionVec {
     /// Create dimension info from a vector of dimensions
     pub fn new(dims: Vec<DimensionRange>) -> Self {
-        DimensionVector { dims }
+        DimensionVec { dims }
     }
 
     /// Create dimension info for a scalar value (no dimensions)
     pub fn scalar() -> Self {
-        DimensionVector { dims: vec![] }
+        DimensionVec { dims: vec![] }
     }
 
     /// Check if this represents a scalar value
@@ -95,7 +95,7 @@ impl DimensionVector {
     /// Create new DimensionInfo with a subset of dimensions (for slicing)
     pub fn slice(&self, keep_dims: &[bool]) -> Self {
         assert_eq!(keep_dims.len(), self.dims.len());
-        DimensionVector {
+        DimensionVec {
             dims: self
                 .dims
                 .iter()
@@ -733,27 +733,27 @@ impl Default for Expr1 {
 /// of AST transformation with full dimension information.
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
-    Const(String, f64, DimensionVector, Loc),
-    Var(Ident, DimensionVector, Loc),
-    App(BuiltinFn<Expr>, DimensionVector, Loc),
-    Subscript(Ident, Vec<IndexExpr>, DimensionVector, Loc),
-    Op1(UnaryOp, Box<Expr>, DimensionVector, Loc),
-    Op2(BinaryOp, Box<Expr>, Box<Expr>, DimensionVector, Loc),
-    If(Box<Expr>, Box<Expr>, Box<Expr>, DimensionVector, Loc),
+    Const(String, f64, DimensionVec, Loc),
+    Var(Ident, DimensionVec, Loc),
+    App(BuiltinFn<Expr>, DimensionVec, Loc),
+    Subscript(Ident, Vec<IndexExpr>, DimensionVec, Loc),
+    Op1(UnaryOp, Box<Expr>, DimensionVec, Loc),
+    Op2(BinaryOp, Box<Expr>, Box<Expr>, DimensionVec, Loc),
+    If(Box<Expr>, Box<Expr>, Box<Expr>, DimensionVec, Loc),
 }
 
 /// IndexExpr represents a dimension-annotated index expression.
 #[derive(PartialEq, Clone, Debug)]
 pub enum IndexExpr {
-    Wildcard(DimensionVector, Loc),
-    StarRange(Ident, DimensionVector, Loc),
-    Range(Expr, Expr, DimensionVector, Loc),
+    Wildcard(DimensionVec, Loc),
+    StarRange(Ident, DimensionVec, Loc),
+    Range(Expr, Expr, DimensionVec, Loc),
     Expr(Expr),
 }
 
 impl Expr {
     /// Get the dimensions of this expression
-    pub fn dims(&self) -> &DimensionVector {
+    pub fn dims(&self) -> &DimensionVec {
         match self {
             Expr::Const(_, _, dims, _) => dims,
             Expr::Var(_, dims, _) => dims,
@@ -781,7 +781,7 @@ impl Expr {
 
 impl IndexExpr {
     /// Get the dimensions of this index expression
-    pub fn dims(&self) -> &DimensionVector {
+    pub fn dims(&self) -> &DimensionVec {
         match self {
             IndexExpr::Wildcard(dims, _) => dims,
             IndexExpr::StarRange(_, dims, _) => dims,
@@ -794,7 +794,7 @@ impl IndexExpr {
 /// Context for dimension inference
 pub struct DimensionContext<'a> {
     /// Variable dimensions from the model
-    pub var_dims: &'a HashMap<Ident, DimensionVector>,
+    pub var_dims: &'a HashMap<Ident, DimensionVec>,
 }
 
 impl Expr {
@@ -802,7 +802,7 @@ impl Expr {
     pub fn infer_dimensions(expr: Expr1, ctx: &DimensionContext) -> EquationResult<Self> {
         // For now, just add scalar dimensions to everything
         // This is a placeholder implementation
-        let dims = DimensionVector::scalar();
+        let dims = DimensionVec::scalar();
 
         let result = match expr {
             Expr1::Const(s, n, loc) => Expr::Const(s, n, dims, loc),
@@ -811,7 +811,7 @@ impl Expr {
                     .var_dims
                     .get(&id)
                     .cloned()
-                    .unwrap_or_else(DimensionVector::scalar);
+                    .unwrap_or_else(DimensionVec::scalar);
                 Expr::Var(id, dims, loc)
             }
             Expr1::App(_builtin, loc) => {
