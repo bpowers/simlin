@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Ast, BinaryOp, Expr};
+use crate::ast::{Ast, BinaryOp, Expr1};
 use crate::builtins::BuiltinFn;
 use crate::common::{Ident, Result, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
@@ -88,13 +88,13 @@ impl UnitInferer<'_> {
     /// leave off the `1 ==` part.
     fn gen_constraints(
         &self,
-        expr: &Expr,
+        expr: &Expr1,
         prefix: &str,
         constraints: &mut Vec<UnitMap>,
     ) -> UnitResult<Units> {
         match expr {
-            Expr::Const(_, _, _) => Ok(Units::Constant),
-            Expr::Var(ident, _loc) => {
+            Expr1::Const(_, _, _) => Ok(Units::Constant),
+            Expr1::Var(ident, _loc) => {
                 let units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
                     .iter()
                     .cloned()
@@ -102,7 +102,7 @@ impl UnitInferer<'_> {
 
                 Ok(Units::Explicit(units))
             }
-            Expr::App(builtin, _) => match builtin {
+            Expr1::App(builtin, _) => match builtin {
                 BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
                 BuiltinFn::Time
                 | BuiltinFn::TimeStep
@@ -187,7 +187,7 @@ impl UnitInferer<'_> {
                     Ok(Units::Constant)
                 }
                 BuiltinFn::SafeDiv(a, b, c) => {
-                    let div = Expr::Op2(
+                    let div = Expr1::Op2(
                         BinaryOp::Div,
                         a.clone(),
                         b.clone(),
@@ -222,9 +222,9 @@ impl UnitInferer<'_> {
                     Ok(a_units)
                 }
             },
-            Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr::Op1(_, l, _) => self.gen_constraints(l, prefix, constraints),
-            Expr::Op2(op, l, r, _) => {
+            Expr1::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr1::Op1(_, l, _) => self.gen_constraints(l, prefix, constraints),
+            Expr1::Op2(op, l, r, _) => {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
                 let runits = self.gen_constraints(r, prefix, constraints)?;
 
@@ -270,7 +270,7 @@ impl UnitInferer<'_> {
                     }
                 }
             }
-            Expr::If(_, l, r, _) => {
+            Expr1::If(_, l, r, _) => {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
                 let runits = self.gen_constraints(r, prefix, constraints)?;
 
