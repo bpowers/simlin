@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use crate::builtins::Loc;
 use crate::common::{ErrorCode, UnitError};
-use crate::compiler::Simulation;
 use crate::datamodel::{Equation, Project as DatamodelProject};
+use crate::interpreter::Simulation;
 use crate::project::Project;
 
 pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation> {

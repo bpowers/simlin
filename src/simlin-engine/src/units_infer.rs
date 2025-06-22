@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Ast, BinaryOp, Expr};
+use crate::ast::{Ast, BinaryOp, Expr1};
 use crate::builtins::BuiltinFn;
 use crate::common::{Ident, Result, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
@@ -88,13 +88,13 @@ impl UnitInferer<'_> {
     /// leave off the `1 ==` part.
     fn gen_constraints(
         &self,
-        expr: &Expr,
+        expr: &Expr1,
         prefix: &str,
         constraints: &mut Vec<UnitMap>,
     ) -> UnitResult<Units> {
         match expr {
-            Expr::Const(_, _, _) => Ok(Units::Constant),
-            Expr::Var(ident, _loc) => {
+            Expr1::Const(_, _, _) => Ok(Units::Constant),
+            Expr1::Var(ident, _loc) => {
                 let units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
                     .iter()
                     .cloned()
@@ -102,7 +102,7 @@ impl UnitInferer<'_> {
 
                 Ok(Units::Explicit(units))
             }
-            Expr::App(builtin, _) => match builtin {
+            Expr1::App(builtin, _) => match builtin {
                 BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
                 BuiltinFn::Time
                 | BuiltinFn::TimeStep
@@ -134,7 +134,10 @@ impl UnitInferer<'_> {
                 | BuiltinFn::Log10(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Sqrt(a)
-                | BuiltinFn::Tan(a) => self.gen_constraints(a, prefix, constraints),
+                | BuiltinFn::Tan(a)
+                | BuiltinFn::Size(a)
+                | BuiltinFn::Stddev(a)
+                | BuiltinFn::Sum(a) => self.gen_constraints(a, prefix, constraints),
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
@@ -169,21 +172,22 @@ impl UnitInferer<'_> {
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
                     let a_units = self.gen_constraints(a, prefix, constraints)?;
-                    let b_units = self.gen_constraints(b, prefix, constraints)?;
+                    if let Some(b) = b {
+                        let b_units = self.gen_constraints(b, prefix, constraints)?;
 
-                    if let Units::Explicit(ref lunits) = a_units {
-                        if let Units::Explicit(runits) = b_units {
-                            constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
+                        if let Units::Explicit(ref lunits) = a_units {
+                            if let Units::Explicit(runits) = b_units {
+                                constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
+                            }
                         }
                     }
                     Ok(a_units)
                 }
-
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Ok(Units::Constant)
                 }
                 BuiltinFn::SafeDiv(a, b, c) => {
-                    let div = Expr::Op2(
+                    let div = Expr1::Op2(
                         BinaryOp::Div,
                         a.clone(),
                         b.clone(),
@@ -208,10 +212,19 @@ impl UnitInferer<'_> {
 
                     Ok(units)
                 }
+                BuiltinFn::Rank(a, _rest) => {
+                    let a_units = self.gen_constraints(a, prefix, constraints)?;
+
+                    // from the spec, I don't think there are any constraints on the optional args:
+                    // RANK(A, SIZE) gives index of MAX value in array A (i.e., final ranked, ascending order)
+                    // RANK(A, 3, B) gives index of third smallest value in array A, breaking any ties between same-valued elements in A by comparing the corresponding elements in array B
+
+                    Ok(a_units)
+                }
             },
-            Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr::Op1(_, l, _) => self.gen_constraints(l, prefix, constraints),
-            Expr::Op2(op, l, r, _) => {
+            Expr1::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr1::Op1(_, l, _) => self.gen_constraints(l, prefix, constraints),
+            Expr1::Op2(op, l, r, _) => {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
                 let runits = self.gen_constraints(r, prefix, constraints)?;
 
@@ -257,7 +270,7 @@ impl UnitInferer<'_> {
                     }
                 }
             }
-            Expr::If(_, l, r, _) => {
+            Expr1::If(_, l, r, _) => {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
                 let runits = self.gen_constraints(r, prefix, constraints)?;
 

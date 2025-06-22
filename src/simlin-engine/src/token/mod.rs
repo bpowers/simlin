@@ -49,6 +49,7 @@ pub enum Token<'input> {
     RBracket,
     Comma,
     Colon,
+    Apostrophe,
     Nan,
     Ident(&'input str),
     Num(&'input str),
@@ -255,6 +256,7 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, '+')) => self.consume(i, Plus, 1),
                 Some((i, '*')) => self.consume(i, Mul, 1),
                 Some((i, ':')) => self.consume(i, Colon, 1),
+                Some((i, '\'')) => self.consume(i, Apostrophe, 1),
                 Some((i, '{')) => match self.comment_end() {
                     Ok(()) => self.next(),
                     Err(_) => Some(error(UnclosedComment, i, self.text.len())),

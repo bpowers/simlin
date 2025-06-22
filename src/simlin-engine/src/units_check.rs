@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::result::Result as StdResult;
 
-use crate::ast::{Ast, BinaryOp, Expr};
+use crate::ast::{Ast, BinaryOp, Expr1};
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
@@ -23,11 +23,11 @@ struct UnitEvaluator<'a> {
 }
 
 impl UnitEvaluator<'_> {
-    fn check(&self, expr: &Expr) -> UnitResult<Units> {
+    fn check(&self, expr: &Expr1) -> UnitResult<Units> {
         use UnitError::ConsistencyError;
         match expr {
-            Expr::Const(_, _, _) => Ok(Units::Constant),
-            Expr::Var(ident, loc) => {
+            Expr1::Const(_, _, _) => Ok(Units::Constant),
+            Expr1::Var(ident, loc) => {
                 let units: &UnitMap = if ident == "time"
                     || ident == "initial_time"
                     || ident == "final_time"
@@ -53,7 +53,7 @@ impl UnitEvaluator<'_> {
 
                 Ok(Units::Explicit(units.clone()))
             }
-            Expr::App(builtin, _) => match builtin {
+            Expr1::App(builtin, _) => match builtin {
                 BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
                 BuiltinFn::Time
                 | BuiltinFn::TimeStep
@@ -94,7 +94,10 @@ impl UnitEvaluator<'_> {
                 | BuiltinFn::Log10(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Sqrt(a)
-                | BuiltinFn::Tan(a) => self.check(a),
+                | BuiltinFn::Tan(a)
+                | BuiltinFn::Size(a)
+                | BuiltinFn::Stddev(a)
+                | BuiltinFn::Sum(a) => self.check(a),
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
@@ -135,34 +138,35 @@ impl UnitEvaluator<'_> {
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
                     let a_units = self.check(a)?;
-                    let b_units = self.check(b)?;
-                    if !a_units.equals(&b_units) {
-                        let a_units = match a_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        let b_units = match b_units {
-                            Units::Explicit(units) => units,
-                            Units::Constant => Default::default(),
-                        };
-                        let loc = a.get_loc().union(&b.get_loc());
-                        Err(ConsistencyError(
-                            ErrorCode::UnitDefinitionErrors,
-                            loc,
-                            Some(format!(
-                                "expected left and right argument units to match, but '{}' and '{}' don't",
-                                a_units, b_units,
-                            )),
-                        ))
-                    } else {
-                        Ok(a_units)
+                    if let Some(b) = b {
+                        let b_units = self.check(b)?;
+                        if !a_units.equals(&b_units) {
+                            let a_units = match a_units {
+                                Units::Explicit(units) => units,
+                                Units::Constant => Default::default(),
+                            };
+                            let b_units = match b_units {
+                                Units::Explicit(units) => units,
+                                Units::Constant => Default::default(),
+                            };
+                            let loc = a.get_loc().union(&b.get_loc());
+                            return Err(ConsistencyError(
+                                ErrorCode::UnitDefinitionErrors,
+                                loc,
+                                Some(format!(
+                                    "expected left and right argument units to match, but '{}' and '{}' don't",
+                                    a_units, b_units,
+                                )),
+                            ));
+                        }
                     }
+                    Ok(a_units)
                 }
                 BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
                     Ok(Units::Constant)
                 }
                 BuiltinFn::SafeDiv(a, b, c) => {
-                    let div = Expr::Op2(
+                    let div = Expr1::Op2(
                         BinaryOp::Div,
                         a.clone(),
                         b.clone(),
@@ -179,10 +183,11 @@ impl UnitEvaluator<'_> {
 
                     Ok(units)
                 }
+                BuiltinFn::Rank(a, _rest) => self.check(a),
             },
-            Expr::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr::Op1(_, l, _) => self.check(l),
-            Expr::Op2(op, l, r, _) => {
+            Expr1::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr1::Op1(_, l, _) => self.check(l),
+            Expr1::Op2(op, l, r, _) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 
@@ -236,7 +241,7 @@ impl UnitEvaluator<'_> {
                     }
                 }
             }
-            Expr::If(_, l, r, _) => {
+            Expr1::If(_, l, r, _) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 

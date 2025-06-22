@@ -56,8 +56,10 @@ pub(crate) enum Op2 {
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum Opcode {
+    Ret,
     Op2 { op: Op2 },
     Not {},
+    Transpose {},
     LoadConstant { id: LiteralId },
     LoadVar { off: VariableOffset },
     LoadGlobalVar { off: VariableOffset },
@@ -71,7 +73,11 @@ pub(crate) enum Opcode {
     AssignNext { off: VariableOffset },
     Apply { func: BuiltinId },
     Lookup { gf: GraphicalFunctionId },
-    Ret,
+    // Array operations
+    ArraySum { off: VariableOffset, size: u32 },
+    ArrayMin { off: VariableOffset, size: u32 },
+    ArrayMax { off: VariableOffset, size: u32 },
+    ArrayStddev { off: VariableOffset, size: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -80,11 +86,17 @@ pub struct ModuleDeclaration {
     pub(crate) off: usize, // offset within the parent module
 }
 
+#[derive(Clone, Debug)]
+pub struct ArrayDefinition {
+    pub(crate) dimensions: Vec<usize>,
+}
+
 // these are things that will be shared across bytecode runlists
 #[derive(Clone, Debug)]
 pub struct ByteCodeContext {
     pub(crate) graphical_functions: Vec<Vec<(f64, f64)>>,
     pub(crate) modules: Vec<ModuleDeclaration>,
+    pub(crate) arrays: Vec<ArrayDefinition>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,7 +155,8 @@ fn test_memoizing_interning() {
 #[test]
 fn test_opcode_size() {
     use std::mem::size_of;
-    assert_eq!(4, size_of::<Opcode>());
+    // FIXME: this used to be 4, we should see if we can shink it back down
+    assert_eq!(8, size_of::<Opcode>());
 }
 
 #[derive(Clone, Debug)]

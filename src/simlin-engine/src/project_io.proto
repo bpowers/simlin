@@ -299,3 +299,29 @@ message Project {
   repeated Model models = 3;
   Source source = 5;
 };
+
+// the following are for serializing and deserializing the bytecode/data sent to the engine for a model
+
+enum BuiltinId {
+    UNSPECIFIED = 0;
+    Abs = 1;
+    Arccos = 2;
+    Arcsin = 3;
+    Arctan = 4;
+    Cos = 5;
+    Exp = 6;
+    Inf = 7;
+    Int = 8;
+    Ln = 9;
+    Log10 = 10;
+    Max = 11;
+    Min = 12;
+    Pi = 13;
+    Pulse = 14;
+    Ramp = 15;
+    SafeDiv = 16;
+    Sin = 17;
+    Sqrt = 18;
+    Step = 19;
+    Tan = 20;
+};

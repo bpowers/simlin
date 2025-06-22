@@ -447,6 +447,12 @@ impl Vm {
                     let r = stack.pop();
                     stack.push((!is_truthy(r)) as i8 as f64);
                 }
+                Opcode::Transpose {} => {
+                    // For now, transpose is a no-op for scalars
+                    // TODO: Implement proper array transpose when array support is added to VM
+                    let r = stack.pop();
+                    stack.push(r);
+                }
                 Opcode::LoadConstant { id } => {
                     stack.push(bytecode.literals[id as usize]);
                 }
@@ -524,6 +530,91 @@ impl Vm {
                     let index = stack.pop();
                     let gf = &module.context.graphical_functions[gf as usize];
                     stack.push(lookup(gf, index));
+                }
+                Opcode::ArraySum { off, size } => {
+                    // Sum array elements starting from the given offset
+                    let mut sum = 0.0;
+                    let base_offset = module_off + off as usize;
+
+                    for i in 0..size {
+                        let index = base_offset + i as usize;
+                        if index < curr.len() {
+                            sum += curr[index];
+                        }
+                    }
+
+                    stack.push(sum);
+                }
+                Opcode::ArrayMin { off, size } => {
+                    // Find minimum of array elements starting from the given offset
+                    let mut min_val = f64::INFINITY;
+                    let base_offset = module_off + off as usize;
+
+                    for i in 0..size {
+                        let index = base_offset + i as usize;
+                        if index < curr.len() {
+                            let val = curr[index];
+                            if val < min_val {
+                                min_val = val;
+                            }
+                        }
+                    }
+
+                    stack.push(min_val);
+                }
+                Opcode::ArrayMax { off, size } => {
+                    // Find maximum of array elements starting from the given offset
+                    let mut max_val = f64::NEG_INFINITY;
+                    let base_offset = module_off + off as usize;
+
+                    for i in 0..size {
+                        let index = base_offset + i as usize;
+                        if index < curr.len() {
+                            let val = curr[index];
+                            if val > max_val {
+                                max_val = val;
+                            }
+                        }
+                    }
+
+                    stack.push(max_val);
+                }
+                Opcode::ArrayStddev { off, size } => {
+                    // Calculate standard deviation of array elements
+                    let base_offset = module_off + off as usize;
+
+                    if size == 0 {
+                        stack.push(0.0);
+                        return;
+                    }
+                    if size == 1 {
+                        stack.push(0.0);
+                        return;
+                    }
+
+                    // First pass: calculate mean
+                    let mut sum = 0.0;
+                    for i in 0..size {
+                        let index = base_offset + i as usize;
+                        if index < curr.len() {
+                            sum += curr[index];
+                        }
+                    }
+                    let mean = sum / size as f64;
+
+                    // Second pass: calculate variance
+                    let mut variance_sum = 0.0;
+                    for i in 0..size {
+                        let index = base_offset + i as usize;
+                        if index < curr.len() {
+                            let diff = curr[index] - mean;
+                            variance_sum += diff * diff;
+                        }
+                    }
+                    let variance = variance_sum / (size - 1) as f64; // Sample standard deviation
+                    let stddev = variance.sqrt();
+
+                    stack.push(stddev);
                 }
                 Opcode::Ret => {
                     break;

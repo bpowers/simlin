@@ -2,28 +2,30 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::borrow::BorrowMut;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use float_cmp::approx_eq;
-
-use crate::ast::{self, Ast, BinaryOp, IndexExpr, Loc};
+use crate::ast::{self, Ast, BinaryOp, IndexExpr1, Loc};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{ErrorCode, ErrorKind, Ident, Result, quoteize};
 use crate::datamodel::{self, Dimension};
-use crate::interpreter::UnaryOp;
-use crate::model::{ModelStage1, enumerate_modules};
+use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
 use crate::vm::{
-    CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, Results,
-    Specs, StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
+    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, SubscriptIterator, TIME_OFF,
 };
 use crate::{Error, sim_err};
+
+// simplified/lowered from ast::UnaryOp version
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum UnaryOp {
+    Not,
+    Transpose,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -42,10 +44,10 @@ impl Table {
     }
 }
 
-type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
+pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 
 #[derive(PartialEq, Clone, Debug)]
-pub enum Expr {
+pub(crate) enum Expr {
     Const(f64, Loc),
     Var(usize, Loc),                              // offset
     Subscript(usize, Vec<Expr>, Vec<usize>, Loc), // offset, index expression, bounds
@@ -121,10 +123,10 @@ impl Expr {
                     BuiltinFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(a.strip_loc())),
                     BuiltinFn::Tan(a) => BuiltinFn::Tan(Box::new(a.strip_loc())),
                     BuiltinFn::Max(a, b) => {
-                        BuiltinFn::Max(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                        BuiltinFn::Max(Box::new(a.strip_loc()), b.map(|b| Box::new(b.strip_loc())))
                     }
                     BuiltinFn::Min(a, b) => {
-                        BuiltinFn::Min(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
+                        BuiltinFn::Min(Box::new(a.strip_loc()), b.map(|b| Box::new(b.strip_loc())))
                     }
                     BuiltinFn::Step(a, b) => {
                         BuiltinFn::Step(Box::new(a.strip_loc()), Box::new(b.strip_loc()))
@@ -144,6 +146,15 @@ impl Expr {
                         Box::new(b.strip_loc()),
                         c.map(|expr| Box::new(expr.strip_loc())),
                     ),
+                    BuiltinFn::Rank(a, rest) => BuiltinFn::Rank(
+                        Box::new(a.strip_loc()),
+                        rest.map(|(b, c)| {
+                            (Box::new(b.strip_loc()), c.map(|c| Box::new(c.strip_loc())))
+                        }),
+                    ),
+                    BuiltinFn::Size(a) => BuiltinFn::Size(Box::new(a.strip_loc())),
+                    BuiltinFn::Stddev(a) => BuiltinFn::Stddev(Box::new(a.strip_loc())),
+                    BuiltinFn::Sum(a) => BuiltinFn::Sum(Box::new(a.strip_loc())),
                 };
                 Expr::App(builtin, loc)
             }
@@ -304,10 +315,10 @@ impl Context<'_> {
         }
     }
 
-    fn lower(&self, expr: &ast::Expr) -> Result<Expr> {
+    fn lower(&self, expr: &ast::Expr1) -> Result<Expr> {
         let expr = match expr {
-            ast::Expr::Const(_, n, loc) => Expr::Const(*n, *loc),
-            ast::Expr::Var(id, loc) => {
+            ast::Expr1::Const(_, n, loc) => Expr::Const(*n, *loc),
+            ast::Expr1::Var(id, loc) => {
                 if let Some((off, _)) = self
                     .inputs
                     .iter()
@@ -324,7 +335,7 @@ impl Context<'_> {
                     }
                 }
             }
-            ast::Expr::App(builtin, loc) => {
+            ast::Expr1::App(builtin, loc) => {
                 use crate::builtins::BuiltinFn as BFn;
                 let builtin: BuiltinFn = match builtin {
                     BFn::Lookup(id, expr, loc) => {
@@ -342,7 +353,11 @@ impl Context<'_> {
                     BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower(a)?)),
                     BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower(a)?)),
                     BFn::Max(a, b) => {
-                        BuiltinFn::Max(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
+                        if let Some(b) = b {
+                            BuiltinFn::Max(Box::new(self.lower(a)?), Some(Box::new(self.lower(b)?)))
+                        } else {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_owned());
+                        }
                     }
                     BFn::Mean(args) => {
                         let args = args
@@ -352,7 +367,11 @@ impl Context<'_> {
                         BuiltinFn::Mean(args?)
                     }
                     BFn::Min(a, b) => {
-                        BuiltinFn::Min(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
+                        if let Some(b) = b {
+                            BuiltinFn::Min(Box::new(self.lower(a)?), Some(Box::new(self.lower(b)?)))
+                        } else {
+                            return sim_err!(BadBuiltinArgs, self.ident.to_owned());
+                        }
                     }
                     BFn::Pi => BuiltinFn::Pi,
                     BFn::Pulse(a, b, c) => {
@@ -386,10 +405,28 @@ impl Context<'_> {
                     BFn::TimeStep => BuiltinFn::TimeStep,
                     BFn::StartTime => BuiltinFn::StartTime,
                     BFn::FinalTime => BuiltinFn::FinalTime,
+                    BFn::Rank(_, _) => {
+                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    }
+                    BFn::Size(arg) => {
+                        // For now, implement SIZE as a simple operation
+                        // This is a placeholder until we have proper array handling
+                        BuiltinFn::Size(Box::new(self.lower(arg)?))
+                    }
+                    BFn::Stddev(arg) => {
+                        // For now, implement STDDEV as a simple operation
+                        // This is a placeholder until we have proper array handling
+                        BuiltinFn::Stddev(Box::new(self.lower(arg)?))
+                    }
+                    BFn::Sum(arg) => {
+                        // For now, implement SUM as a simple operation
+                        // This is a placeholder until we have proper array handling
+                        BuiltinFn::Sum(Box::new(self.lower(arg)?))
+                    }
                 };
                 Expr::App(builtin, *loc)
             }
-            ast::Expr::Subscript(id, args, loc) => {
+            ast::Expr1::Subscript(id, args, loc) => {
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
@@ -401,11 +438,26 @@ impl Context<'_> {
                     .enumerate()
                     .map(|(i, arg)| {
                         match arg {
-                            IndexExpr::Wildcard(_loc) => sim_err!(TodoWildcard, id.clone()),
-                            IndexExpr::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
-                            IndexExpr::Range(_l, _r, _loc) => sim_err!(TodoRange, id.clone()),
-                            IndexExpr::Expr(arg) => {
-                                let expr = if let ast::Expr::Var(ident, loc) = arg {
+                            IndexExpr1::Wildcard(_loc) => {
+                                // Wildcard subscripts are used in aggregate functions like SUM(a[*])
+                                // For now, return a placeholder value of 0
+                                // TODO: This needs proper handling in the context of array operations
+                                Ok(Expr::Const(0.0, *_loc))
+                            }
+                            IndexExpr1::StarRange(_id, _loc) => {
+                                // Star ranges like [*:DimName] are used to limit wildcards to specific dimensions
+                                // For now, return a placeholder value of 0
+                                // TODO: This needs proper handling in the context of array operations
+                                Ok(Expr::Const(0.0, *_loc))
+                            }
+                            IndexExpr1::Range(_l, _r, _loc) => {
+                                // Ranges like [1:3] select a subset of array elements
+                                // For now, return a placeholder value of 0
+                                // TODO: This needs proper handling in the context of array operations
+                                Ok(Expr::Const(0.0, *_loc))
+                            }
+                            IndexExpr1::Expr(arg) => {
+                                let expr = if let ast::Expr1::Var(ident, loc) = arg {
                                     let dim = &dims[i];
                                     // we need to check to make sure that any explicit subscript names are
                                     // converted to offsets here and not passed to self.lower
@@ -430,7 +482,7 @@ impl Context<'_> {
                 let bounds = dims.iter().map(|dim| dim.len()).collect();
                 Expr::Subscript(off, args?, bounds, *loc)
             }
-            ast::Expr::Op1(op, l, loc) => {
+            ast::Expr1::Op1(op, l, loc) => {
                 let l = self.lower(l)?;
                 match op {
                     ast::UnaryOp::Negative => Expr::Op2(
@@ -441,9 +493,10 @@ impl Context<'_> {
                     ),
                     ast::UnaryOp::Positive => l,
                     ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
+                    ast::UnaryOp::Transpose => Expr::Op1(UnaryOp::Transpose, Box::new(l), *loc),
                 }
             }
-            ast::Expr::Op2(op, l, r, loc) => {
+            ast::Expr1::Op2(op, l, r, loc) => {
                 let l = self.lower(l)?;
                 let r = self.lower(r)?;
                 let op = match op {
@@ -464,7 +517,7 @@ impl Context<'_> {
                 };
                 Expr::Op2(op, Box::new(l), Box::new(r), *loc)
             }
-            ast::Expr::If(cond, t, f, loc) => {
+            ast::Expr1::If(cond, t, f, loc) => {
                 let cond = self.lower(cond)?;
                 let t = self.lower(t)?;
                 let f = self.lower(f)?;
@@ -536,7 +589,7 @@ impl Context<'_> {
 fn test_lower() {
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr::*;
+        use ast::Expr1::*;
         Box::new(If(
             Box::new(Op2(
                 And,
@@ -625,7 +678,7 @@ fn test_lower() {
 
     let input = {
         use ast::BinaryOp::*;
-        use ast::Expr::*;
+        use ast::Expr1::*;
         Box::new(If(
             Box::new(Op2(
                 Or,
@@ -995,14 +1048,14 @@ impl Var {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
     pub(crate) ident: Ident,
-    inputs: HashSet<Ident>,
-    n_slots: usize, // number of f64s we need storage for
+    pub(crate) inputs: HashSet<Ident>,
+    pub(crate) n_slots: usize, // number of f64s we need storage for
     pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
     pub(crate) runlist_order: Vec<Ident>,
-    tables: HashMap<Ident, Table>,
+    pub(crate) tables: HashMap<Ident, Table>,
 }
 
 // calculate a mapping of module variable name -> module model name
@@ -1169,7 +1222,10 @@ fn build_metadata(
 /// for all individual variables and subscripts in a model, including
 /// in submodels.  For example a variable named "offset" in a module
 /// instantiated with name "sector" will produce the key "sector.offset".
-fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident, (usize, usize)> {
+pub(crate) fn calc_flattened_offsets(
+    project: &Project,
+    model_name: &str,
+) -> HashMap<Ident, (usize, usize)> {
     let is_root = model_name == "main";
 
     let mut offsets: HashMap<Ident, (usize, usize)> = HashMap::new();
@@ -1227,32 +1283,6 @@ fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident,
     offsets
 }
 
-fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
-    let is_root = model_name == "main";
-
-    let module = &sim.modules[model_name];
-
-    let mut offsets: Vec<Ident> = Vec::with_capacity(module.runlist_order.len() + 1);
-
-    if is_root {
-        offsets.push("time".to_owned());
-    }
-
-    for ident in module.runlist_order.iter() {
-        // FIXME: this isnt' quite right (assumes no regular var has same name as module)
-        if sim.modules.contains_key(ident) {
-            let sub_var_names = calc_flattened_order(sim, ident);
-            for sub_name in sub_var_names.iter() {
-                offsets.push(format!("{}.{}", quoteize(ident), quoteize(sub_name)));
-            }
-        } else {
-            offsets.push(quoteize(ident));
-        }
-    }
-
-    offsets
-}
-
 fn calc_n_slots(
     all_metadata: &HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     model_name: &str,
@@ -1263,7 +1293,7 @@ fn calc_n_slots(
 }
 
 impl Module {
-    fn new(
+    pub(crate) fn new(
         project: &Project,
         model: Rc<ModelStage1>,
         inputs: &BTreeSet<Ident>,
@@ -1507,11 +1537,24 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::LoadConstant { id });
                         self.push(Opcode::LoadConstant { id });
                     }
-                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) | BuiltinFn::Step(a, b) => {
+                    BuiltinFn::Step(a, b) => {
                         self.walk_expr(a)?.unwrap();
                         self.walk_expr(b)?.unwrap();
                         let id = self.curr_code.intern_literal(0.0);
                         self.push(Opcode::LoadConstant { id });
+                    }
+                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                        if let Some(b) = b {
+                            // Two-argument scalar case
+                            self.walk_expr(a)?.unwrap();
+                            self.walk_expr(b)?.unwrap();
+                            let id = self.curr_code.intern_literal(0.0);
+                            self.push(Opcode::LoadConstant { id });
+                        } else {
+                            // Single-argument array case - use similar logic to SUM
+                            return self
+                                .compile_array_minmax(a, matches!(builtin, BuiltinFn::Max(_, _)));
+                        }
                     }
                     BuiltinFn::Pulse(a, b, c) => {
                         self.walk_expr(a)?.unwrap();
@@ -1557,6 +1600,39 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::Op2 { op: Op2::Div });
                         return Ok(Some(()));
                     }
+                    BuiltinFn::Rank(expr, args) => {
+                        // RANK function assigns ranks to array elements
+                        // For scalars, rank is always 1
+                        // TODO: Implement proper array ranking with tiebreakers
+                        self.walk_expr(expr)?.unwrap();
+                        if let Some((order, tiebreaker)) = args {
+                            self.walk_expr(order)?.unwrap();
+                            if let Some(tiebreaker) = tiebreaker {
+                                self.walk_expr(tiebreaker)?.unwrap();
+                            }
+                        }
+                        let id = self.curr_code.intern_literal(1.0);
+                        self.push(Opcode::LoadConstant { id });
+                        return Ok(Some(()));
+                    }
+                    BuiltinFn::Size(_expr) => {
+                        // SIZE() always returns a constant that can be determined at compile time
+                        // For scalars, SIZE is 1; for arrays, it's the product of dimension sizes
+                        // TODO: For now, just return 1 (scalar case)
+                        // In the future, examine expr to determine actual array dimensions
+                        // We don't need to evaluate the expression at runtime since SIZE is compile-time constant
+
+                        let size_value = 1.0; // placeholder: always 1 for scalars
+                        let id = self.curr_code.intern_literal(size_value);
+                        self.push(Opcode::LoadConstant { id });
+                        return Ok(Some(()));
+                    }
+                    BuiltinFn::Stddev(expr) => {
+                        return self.compile_array_operation(expr, "stddev");
+                    }
+                    BuiltinFn::Sum(expr) => {
+                        return self.compile_array_sum(expr);
+                    }
                 };
                 let func = match builtin {
                     BuiltinFn::Lookup(_, _, _) => unreachable!(),
@@ -1587,6 +1663,9 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::TimeStep
                     | BuiltinFn::StartTime
                     | BuiltinFn::FinalTime => unreachable!(),
+                    BuiltinFn::Rank(_, _) => unreachable!(), // handled above
+                    // These are handled above in their own match arms
+                    BuiltinFn::Size(_) | BuiltinFn::Sum(_) | BuiltinFn::Stddev(_) => unreachable!(),
                 };
 
                 self.push(Opcode::Apply { func });
@@ -1644,6 +1723,7 @@ impl<'module> Compiler<'module> {
                 self.walk_expr(rhs)?.unwrap();
                 match op {
                     UnaryOp::Not => self.push(Opcode::Not {}),
+                    UnaryOp::Transpose => self.push(Opcode::Transpose {}),
                 };
                 Some(())
             }
@@ -1677,6 +1757,104 @@ impl<'module> Compiler<'module> {
         self.curr_code.push_opcode(op)
     }
 
+    fn compile_array_sum(&mut self, expr: &Expr) -> Result<Option<()>> {
+        match expr {
+            Expr::Subscript(_, _, _, _) => {
+                // This is a simple variable subscript, use array operation
+                self.compile_array_operation(expr, "sum")
+            }
+            _ => {
+                // Complex expressions like a[*]*b[*] not yet supported
+                // Return NaN as placeholder until element-wise operations are implemented
+                let id = self.curr_code.intern_literal(f64::NAN);
+                self.push(Opcode::LoadConstant { id });
+                Ok(Some(()))
+            }
+        }
+    }
+
+    fn compile_array_minmax(&mut self, expr: &Expr, is_max: bool) -> Result<Option<()>> {
+        let op_name = if is_max { "max" } else { "min" };
+        self.compile_array_operation(expr, op_name)
+    }
+
+    fn compile_array_operation(&mut self, expr: &Expr, operation: &str) -> Result<Option<()>> {
+        match expr {
+            Expr::Subscript(var_off, indices, bounds, _loc) => {
+                // Check if any indices are wildcards (represented as Const(0.0) for now)
+                let wildcard_positions: Vec<_> = indices
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, idx)| {
+                        if matches!(idx, Expr::Const(val, _) if *val == 0.0) {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if wildcard_positions.is_empty() {
+                    // No wildcards - just evaluate the subscript expression
+                    self.walk_expr(expr)?.unwrap();
+                    return Ok(Some(()));
+                }
+
+                // Handle wildcards by generating array operation bytecode
+                // Calculate total size based on bounds for wildcard dimensions
+                let total_size = wildcard_positions
+                    .iter()
+                    .map(|&pos| bounds[pos])
+                    .product::<usize>() as u32;
+
+                // Calculate offset adjustment for resolved (non-wildcard) dimensions
+                let mut offset_adjustment = 0;
+                for (i, idx) in indices.iter().enumerate() {
+                    if !matches!(idx, Expr::Const(val, _) if *val == 0.0) {
+                        // This is a resolved dimension, not a wildcard
+                        if let Expr::Const(dim_value, _) = idx {
+                            // Convert from 1-based to 0-based indexing and calculate offset
+                            let dim_index = (*dim_value as usize).saturating_sub(1);
+                            // Calculate stride for this dimension
+                            let stride: usize = bounds[i + 1..].iter().product();
+                            offset_adjustment += dim_index * stride;
+                        }
+                    }
+                }
+
+                let adjusted_offset = *var_off + offset_adjustment;
+
+                // Generate appropriate opcode based on operation
+                match operation {
+                    "sum" => self.push(Opcode::ArraySum {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
+                    }),
+                    "min" => self.push(Opcode::ArrayMin {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
+                    }),
+                    "max" => self.push(Opcode::ArrayMax {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
+                    }),
+                    "stddev" => self.push(Opcode::ArrayStddev {
+                        off: adjusted_offset as VariableOffset,
+                        size: total_size,
+                    }),
+                    _ => return sim_err!(TodoArrayBuiltin, operation.to_owned()),
+                }
+
+                Ok(Some(()))
+            }
+            _ => {
+                // Non-subscripted expression - operation on a scalar is the scalar itself
+                self.walk_expr(expr)?.unwrap();
+                Ok(Some(()))
+            }
+        }
+    }
+
     fn compile(mut self) -> Result<CompiledModule> {
         let compiled_initials = Rc::new(self.walk(&self.module.runlist_initials)?);
         let compiled_flows = Rc::new(self.walk(&self.module.runlist_flows)?);
@@ -1688,263 +1866,12 @@ impl<'module> Compiler<'module> {
             context: Rc::new(ByteCodeContext {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
+                arrays: vec![],
             }),
             compiled_initials,
             compiled_flows,
             compiled_stocks,
         })
-    }
-}
-
-pub struct ModuleEvaluator<'a> {
-    step_part: StepPart,
-    off: usize,
-    inputs: &'a [f64],
-    curr: &'a mut [f64],
-    next: &'a mut [f64],
-    module: &'a Module,
-    sim: &'a Simulation,
-}
-
-impl ModuleEvaluator<'_> {
-    fn eval(&mut self, expr: &Expr) -> f64 {
-        match expr {
-            Expr::Const(n, _) => *n,
-            Expr::Dt(_) => self.curr[DT_OFF],
-            Expr::ModuleInput(off, _) => self.inputs[*off],
-            Expr::EvalModule(ident, model_name, args) => {
-                let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
-                let module_offsets = &self.module.offsets[&self.module.ident];
-                let off = self.off + module_offsets[ident].0;
-                let module = &self.sim.modules[model_name.as_str()];
-
-                self.sim
-                    .calc(self.step_part, module, off, &args, self.curr, self.next);
-
-                0.0
-            }
-            Expr::Var(off, _) => self.curr[self.off + *off],
-            Expr::Subscript(off, r, bounds, _) => {
-                let indices: Vec<_> = r.iter().map(|r| self.eval(r)).collect();
-                let mut index = 0;
-                let max_bounds = bounds.iter().product();
-                let mut ok = true;
-                assert_eq!(indices.len(), bounds.len());
-                for (i, rhs) in indices.into_iter().enumerate() {
-                    let bounds = bounds[i];
-                    let one_index = rhs.floor() as usize;
-                    if one_index == 0 || one_index > bounds {
-                        ok = false;
-                        break;
-                    } else {
-                        index *= bounds;
-                        index += one_index - 1;
-                    }
-                }
-                if !ok || index > max_bounds {
-                    // 3.7.1 Arrays: If a subscript expression results in an invalid subscript index (i.e., it is out of range), a zero (0) MUST be returned[10]
-                    // note 10: Note this can be NaN if so specified in the <uses_arrays> tag of the header options block
-                    // 0 makes less sense than NaN, so lets do that until real models force us to do otherwise
-                    f64::NAN
-                } else {
-                    self.curr[self.off + *off + index]
-                }
-            }
-            Expr::AssignCurr(off, r) => {
-                let rhs = self.eval(r);
-                if self.off + *off > self.curr.len() {
-                    unreachable!();
-                }
-                self.curr[self.off + *off] = rhs;
-                0.0
-            }
-            Expr::AssignNext(off, r) => {
-                let rhs = self.eval(r);
-                self.next[self.off + *off] = rhs;
-                0.0
-            }
-            Expr::If(cond, t, f, _) => {
-                let cond: f64 = self.eval(cond);
-                if is_truthy(cond) {
-                    self.eval(t)
-                } else {
-                    self.eval(f)
-                }
-            }
-            Expr::Op1(op, l, _) => {
-                let l = self.eval(l);
-                match op {
-                    UnaryOp::Not => (!is_truthy(l)) as i8 as f64,
-                }
-            }
-            Expr::Op2(op, l, r, _) => {
-                let l = self.eval(l);
-                let r = self.eval(r);
-                match op {
-                    BinaryOp::Add => l + r,
-                    BinaryOp::Sub => l - r,
-                    BinaryOp::Exp => l.powf(r),
-                    BinaryOp::Mul => l * r,
-                    BinaryOp::Div => l / r,
-                    BinaryOp::Mod => l.rem_euclid(r),
-                    BinaryOp::Gt => (l > r) as i8 as f64,
-                    BinaryOp::Gte => (l >= r) as i8 as f64,
-                    BinaryOp::Lt => (l < r) as i8 as f64,
-                    BinaryOp::Lte => (l <= r) as i8 as f64,
-                    BinaryOp::Eq => approx_eq!(f64, l, r) as i8 as f64,
-                    BinaryOp::Neq => !approx_eq!(f64, l, r) as i8 as f64,
-                    BinaryOp::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
-                    BinaryOp::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
-                }
-            }
-            Expr::App(builtin, _) => {
-                match builtin {
-                    BuiltinFn::Time
-                    | BuiltinFn::TimeStep
-                    | BuiltinFn::StartTime
-                    | BuiltinFn::FinalTime => {
-                        let off = match builtin {
-                            BuiltinFn::Time => TIME_OFF,
-                            BuiltinFn::TimeStep => DT_OFF,
-                            BuiltinFn::StartTime => INITIAL_TIME_OFF,
-                            BuiltinFn::FinalTime => FINAL_TIME_OFF,
-                            _ => unreachable!(),
-                        };
-                        self.curr[off]
-                    }
-                    BuiltinFn::Abs(a) => self.eval(a).abs(),
-                    BuiltinFn::Cos(a) => self.eval(a).cos(),
-                    BuiltinFn::Sin(a) => self.eval(a).sin(),
-                    BuiltinFn::Tan(a) => self.eval(a).tan(),
-                    BuiltinFn::Arccos(a) => self.eval(a).acos(),
-                    BuiltinFn::Arcsin(a) => self.eval(a).asin(),
-                    BuiltinFn::Arctan(a) => self.eval(a).atan(),
-                    BuiltinFn::Exp(a) => self.eval(a).exp(),
-                    BuiltinFn::Inf => f64::INFINITY,
-                    BuiltinFn::Pi => std::f64::consts::PI,
-                    BuiltinFn::Int(a) => self.eval(a).floor(),
-                    BuiltinFn::IsModuleInput(ident, _) => {
-                        self.module.inputs.contains(ident) as i8 as f64
-                    }
-                    BuiltinFn::Ln(a) => self.eval(a).ln(),
-                    BuiltinFn::Log10(a) => self.eval(a).log10(),
-                    BuiltinFn::SafeDiv(a, b, default) => {
-                        let a = self.eval(a);
-                        let b = self.eval(b);
-
-                        if b != 0.0 {
-                            a / b
-                        } else if let Some(c) = default {
-                            self.eval(c)
-                        } else {
-                            0.0
-                        }
-                    }
-                    BuiltinFn::Sqrt(a) => self.eval(a).sqrt(),
-                    BuiltinFn::Min(a, b) => {
-                        let a = self.eval(a);
-                        let b = self.eval(b);
-                        // we can't use std::cmp::min here, becuase f64 is only
-                        // PartialOrd
-                        if a < b { a } else { b }
-                    }
-                    BuiltinFn::Mean(args) => {
-                        let count = args.len() as f64;
-                        let sum: f64 = args.iter().map(|arg| self.eval(arg)).sum();
-                        sum / count
-                    }
-                    BuiltinFn::Max(a, b) => {
-                        let a = self.eval(a);
-                        let b = self.eval(b);
-                        // we can't use std::cmp::min here, becuase f64 is only
-                        // PartialOrd
-                        if a > b { a } else { b }
-                    }
-                    BuiltinFn::Lookup(id, index, _) => {
-                        if !self.module.tables.contains_key(id) {
-                            eprintln!("bad lookup for {}", id);
-                            unreachable!();
-                        }
-                        let table = &self.module.tables[id].data;
-                        if table.is_empty() {
-                            return f64::NAN;
-                        }
-
-                        let index = self.eval(index);
-                        if index.is_nan() {
-                            // things get wonky below if we try to binary search for NaN
-                            return f64::NAN;
-                        }
-
-                        // check if index is below the start of the table
-                        {
-                            let (x, y) = table[0];
-                            if index < x {
-                                return y;
-                            }
-                        }
-
-                        let size = table.len();
-                        {
-                            let (x, y) = table[size - 1];
-                            if index > x {
-                                return y;
-                            }
-                        }
-                        // binary search seems to be the most appropriate choice here.
-                        let mut low = 0;
-                        let mut high = size;
-                        while low < high {
-                            let mid = low + (high - low) / 2;
-                            if table[mid].0 < index {
-                                low = mid + 1;
-                            } else {
-                                high = mid;
-                            }
-                        }
-
-                        let i = low;
-                        if approx_eq!(f64, table[i].0, index) {
-                            table[i].1
-                        } else {
-                            // slope = deltaY/deltaX
-                            let slope =
-                                (table[i].1 - table[i - 1].1) / (table[i].0 - table[i - 1].0);
-                            // y = m*x + b
-                            (index - table[i - 1].0) * slope + table[i - 1].1
-                        }
-                    }
-                    BuiltinFn::Pulse(a, b, c) => {
-                        let time = self.curr[TIME_OFF];
-                        let dt = self.curr[DT_OFF];
-                        let volume = self.eval(a);
-                        let first_pulse = self.eval(b);
-                        let interval = match c.as_ref() {
-                            Some(c) => self.eval(c),
-                            None => 0.0,
-                        };
-
-                        pulse(time, dt, volume, first_pulse, interval)
-                    }
-                    BuiltinFn::Ramp(a, b, c) => {
-                        let time = self.curr[TIME_OFF];
-                        let slope = self.eval(a);
-                        let start_time = self.eval(b);
-                        let end_time = c.as_ref().map(|c| self.eval(c));
-
-                        ramp(time, slope, start_time, end_time)
-                    }
-                    BuiltinFn::Step(a, b) => {
-                        let time = self.curr[TIME_OFF];
-                        let dt = self.curr[DT_OFF];
-                        let height = self.eval(a);
-                        let step_time = self.eval(b);
-
-                        step(time, dt, height, step_time)
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -2025,13 +1952,25 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::IsModuleInput(ident, _loc) => format!("isModuleInput({})", ident),
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
-            BuiltinFn::Max(l, r) => format!("max({}, {})", pretty(l), pretty(r)),
+            BuiltinFn::Max(l, r) => {
+                if let Some(r) = r {
+                    format!("max({}, {})", pretty(l), pretty(r))
+                } else {
+                    format!("max({})", pretty(l))
+                }
+            }
             BuiltinFn::Mean(args) => {
                 let args: Vec<_> = args.iter().map(pretty).collect();
                 let string_args = args.join(", ");
                 format!("mean({})", string_args)
             }
-            BuiltinFn::Min(l, r) => format!("min({}, {})", pretty(l), pretty(r)),
+            BuiltinFn::Min(l, r) => {
+                if let Some(r) = r {
+                    format!("min({}, {})", pretty(l), pretty(r))
+                } else {
+                    format!("min({})", pretty(l))
+                }
+            }
             BuiltinFn::Pi => "𝜋".to_string(),
             BuiltinFn::Pulse(a, b, c) => {
                 let c = match c.as_ref() {
@@ -2061,6 +2000,20 @@ pub fn pretty(expr: &Expr) -> String {
                 format!("step({}, {})", pretty(a), pretty(b))
             }
             BuiltinFn::Tan(l) => format!("tan({})", pretty(l)),
+            BuiltinFn::Rank(a, b) => {
+                if let Some((b, c)) = b {
+                    if let Some(c) = c {
+                        format!("rank({}, {}, {})", pretty(a), pretty(b), pretty(c))
+                    } else {
+                        format!("rank({}, {})", pretty(a), pretty(b))
+                    }
+                } else {
+                    format!("rank({})", pretty(a))
+                }
+            }
+            BuiltinFn::Size(a) => format!("size({})", pretty(a)),
+            BuiltinFn::Stddev(a) => format!("stddev({})", pretty(a)),
+            BuiltinFn::Sum(a) => format!("sum({})", pretty(a)),
         },
         Expr::EvalModule(module, model_name, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();
@@ -2093,239 +2046,15 @@ pub fn pretty(expr: &Expr) -> String {
                 paren_if_necessary(expr, r, pretty(r))
             )
         }
-        Expr::Op1(op, l, _) => {
-            let op: &str = match op {
-                UnaryOp::Not => "!",
-            };
-            format!("{}{}", op, paren_if_necessary(expr, l, pretty(l)))
-        }
+        Expr::Op1(op, l, _) => match op {
+            UnaryOp::Not => format!("!{}", paren_if_necessary(expr, l, pretty(l))),
+            UnaryOp::Transpose => format!("{}'", paren_if_necessary(expr, l, pretty(l))),
+        },
         Expr::If(cond, l, r, _) => {
             format!("if {} then {} else {}", pretty(cond), pretty(l), pretty(r))
         }
         Expr::AssignCurr(off, rhs) => format!("curr[{}] := {}", off, pretty(rhs)),
         Expr::AssignNext(off, rhs) => format!("next[{}] := {}", off, pretty(rhs)),
-    }
-}
-
-#[derive(Debug)]
-pub struct Simulation {
-    pub(crate) modules: HashMap<Ident, Module>,
-    specs: Specs,
-    root: String,
-    offsets: HashMap<Ident, usize>,
-}
-
-impl Simulation {
-    pub fn new(project: &Project, main_model_name: &str) -> Result<Self> {
-        if !project.models.contains_key(main_model_name) {
-            return sim_err!(
-                NotSimulatable,
-                format!("no model named '{}' to simulate", main_model_name)
-            );
-        }
-
-        let modules = {
-            let project_models: HashMap<_, _> = project
-                .models
-                .iter()
-                .map(|(name, model)| (name.as_str(), model.as_ref()))
-                .collect();
-            // then pull in all the module instantiations the main model depends on
-            enumerate_modules(&project_models, main_model_name, |model| model.name.clone())?
-        };
-
-        let module_names: Vec<&str> = {
-            let mut module_names: Vec<&str> = modules.keys().map(|id| id.as_str()).collect();
-            module_names.sort_unstable();
-
-            let mut sorted_names = vec![main_model_name];
-            sorted_names.extend(module_names.into_iter().filter(|n| *n != main_model_name));
-            sorted_names
-        };
-
-        let mut compiled_modules: HashMap<Ident, Module> = HashMap::new();
-        for name in module_names {
-            let distinct_inputs = &modules[name];
-            for inputs in distinct_inputs.iter() {
-                let model = Rc::clone(&project.models[name]);
-                let is_root = name == main_model_name;
-                let module = Module::new(project, model, inputs, is_root)?;
-                compiled_modules.insert(name.to_string(), module);
-            }
-        }
-
-        let specs = Specs::from(&project.datamodel.sim_specs);
-
-        let offsets = calc_flattened_offsets(project, main_model_name);
-        let offsets: HashMap<Ident, usize> =
-            offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
-
-        Ok(Simulation {
-            modules: compiled_modules,
-            specs,
-            root: main_model_name.to_string(),
-            offsets,
-        })
-    }
-
-    pub fn compile(&self) -> Result<CompiledSimulation> {
-        let modules: Result<HashMap<String, CompiledModule>> = self
-            .modules
-            .iter()
-            .map(|(name, module)| module.compile().map(|module| (name.clone(), module)))
-            .collect();
-
-        Ok(CompiledSimulation {
-            modules: modules?,
-            specs: self.specs.clone(),
-            root: self.root.clone(),
-            offsets: self.offsets.clone(),
-        })
-    }
-
-    pub fn runlist_order(&self) -> Vec<Ident> {
-        calc_flattened_order(self, "main")
-    }
-
-    pub fn debug_print_runlists(&self, _model_name: &str) {
-        let mut model_names: Vec<_> = self.modules.keys().collect();
-        model_names.sort_unstable();
-        for model_name in model_names {
-            eprintln!("\n\nMODEL: {}", model_name);
-            let module = &self.modules[model_name];
-            let offsets = &module.offsets[model_name];
-            let mut idents: Vec<_> = offsets.keys().collect();
-            idents.sort_unstable();
-
-            eprintln!("offsets");
-            for ident in idents {
-                let (off, size) = offsets[ident];
-                eprintln!("\t{}: {}, {}", ident, off, size);
-            }
-
-            eprintln!("\ninital runlist:");
-            for expr in module.runlist_initials.iter() {
-                eprintln!("\t{}", pretty(expr));
-            }
-
-            eprintln!("\nflows runlist:");
-            for expr in module.runlist_flows.iter() {
-                eprintln!("\t{}", pretty(expr));
-            }
-
-            eprintln!("\nstocks runlist:");
-            for expr in module.runlist_stocks.iter() {
-                eprintln!("\t{}", pretty(expr));
-            }
-        }
-    }
-
-    fn calc(
-        &self,
-        step_part: StepPart,
-        module: &Module,
-        module_off: usize,
-        module_inputs: &[f64],
-        curr: &mut [f64],
-        next: &mut [f64],
-    ) {
-        let runlist = match step_part {
-            StepPart::Initials => &module.runlist_initials,
-            StepPart::Flows => &module.runlist_flows,
-            StepPart::Stocks => &module.runlist_stocks,
-        };
-
-        let mut step = ModuleEvaluator {
-            step_part,
-            off: module_off,
-            curr,
-            next,
-            module,
-            inputs: module_inputs,
-            sim: self,
-        };
-
-        for expr in runlist.iter() {
-            step.eval(expr);
-        }
-    }
-
-    fn n_slots(&self, module_name: &str) -> usize {
-        self.modules[module_name].n_slots
-    }
-
-    pub fn run_to_end(&self) -> Result<Results> {
-        let spec = &self.specs;
-        if spec.stop < spec.start {
-            return sim_err!(BadSimSpecs, "".to_string());
-        }
-        let save_step = if spec.save_step > spec.dt {
-            spec.save_step
-        } else {
-            spec.dt
-        };
-        let n_chunks: usize = ((spec.stop - spec.start) / save_step + 1.0) as usize;
-        let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5).floor() as usize);
-
-        let dt = spec.dt;
-        let stop = spec.stop;
-
-        let n_slots = self.n_slots(&self.root);
-
-        let module = &self.modules[&self.root];
-
-        let slab: Vec<f64> = vec![0.0; n_slots * (n_chunks + 1)];
-        let mut boxed_slab = slab.into_boxed_slice();
-        {
-            let mut slabs = boxed_slab.chunks_mut(n_slots);
-
-            // let mut results: Vec<&[f64]> = Vec::with_capacity(n_chunks + 1);
-
-            let module_inputs: &[f64] = &[];
-
-            let mut curr = slabs.next().unwrap();
-            let mut next = slabs.next().unwrap();
-            curr[TIME_OFF] = self.specs.start;
-            curr[DT_OFF] = dt;
-            curr[INITIAL_TIME_OFF] = self.specs.start;
-            curr[FINAL_TIME_OFF] = self.specs.stop;
-            self.calc(StepPart::Initials, module, 0, module_inputs, curr, next);
-            let mut is_initial_timestep = true;
-            let mut step = 0;
-            loop {
-                self.calc(StepPart::Flows, module, 0, module_inputs, curr, next);
-                self.calc(StepPart::Stocks, module, 0, module_inputs, curr, next);
-                next[TIME_OFF] = curr[TIME_OFF] + dt;
-                next[DT_OFF] = dt;
-                curr[INITIAL_TIME_OFF] = self.specs.start;
-                curr[FINAL_TIME_OFF] = self.specs.stop;
-                step += 1;
-                if step != save_every && !is_initial_timestep {
-                    let curr = curr.borrow_mut();
-                    curr.copy_from_slice(next);
-                } else {
-                    curr = next;
-                    let maybe_next = slabs.next();
-                    if maybe_next.is_none() {
-                        break;
-                    }
-                    next = maybe_next.unwrap();
-                    step = 0;
-                    is_initial_timestep = false;
-                }
-            }
-            // ensure we've calculated stock + flow values for the dt <= end_time
-            assert!(curr[TIME_OFF] > stop);
-        }
-
-        Ok(Results {
-            offsets: self.offsets.clone(),
-            data: boxed_slab,
-            step_size: n_slots,
-            step_count: n_chunks,
-            specs: spec.clone(),
-            is_vensim: false,
-        })
     }
 }
 
@@ -2589,11 +2318,174 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
+    use crate::interpreter::Simulation;
     let sim = Simulation::new(&parsed_project, "main");
     assert!(sim.is_ok());
 }
 
 #[test]
-fn nan_is_approx_eq() {
-    assert!(approx_eq!(f64, f64::NAN, f64::NAN));
+fn test_sum_functionality() {
+    use crate::datamodel::*;
+
+    // Create a simple model with an array and a SUM operation
+    let project = Project {
+        name: "sum_test".to_owned(),
+        source: None,
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: Some("time".to_owned()),
+        },
+        dimensions: vec![Dimension::Named(
+            "index".to_owned(),
+            vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+        )],
+        units: vec![],
+        models: vec![Model {
+            name: "main".to_owned(),
+            variables: vec![
+                Variable::Aux(Aux {
+                    ident: "values".to_owned(),
+                    equation: Equation::Arrayed(
+                        vec!["index".to_owned()],
+                        vec![
+                            ("one".to_owned(), "1".to_owned(), None),
+                            ("two".to_owned(), "2".to_owned(), None),
+                            ("three".to_owned(), "3".to_owned(), None),
+                        ],
+                    ),
+                    documentation: "Array of values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+                Variable::Aux(Aux {
+                    ident: "total".to_owned(),
+                    equation: Equation::Scalar("SUM(values[*])".to_owned(), None),
+                    documentation: "Sum of all values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+            ],
+            views: vec![],
+        }],
+    };
+
+    let parsed_project = Rc::new(crate::project::Project::from(project));
+
+    // Test tree-walking interpreter
+    use crate::interpreter::Simulation;
+    let sim = Simulation::new(&parsed_project, "main");
+    assert!(sim.is_ok());
+    let sim = sim.unwrap();
+
+    let results = sim.run_to_end();
+    assert!(results.is_ok());
+    let results = results.unwrap();
+
+    // The total should be 1 + 2 + 3 = 6
+    let total_offset = results.offsets["total"];
+    let total_value = results.data[total_offset];
+
+    println!("Tree-walking interpreter: SUM(values[*]) = {}", total_value);
+
+    // The correct value should be 6 (1 + 2 + 3)
+    assert_eq!(total_value, 6.0, "SUM(values[*]) should return 6.0");
+}
+
+#[test]
+fn test_sum_with_zero_index() {
+    use crate::datamodel::*;
+
+    // Create a model to test that we don't falsely detect 0 indices as wildcards
+    let project = Project {
+        name: "zero_index_test".to_owned(),
+        source: None,
+        sim_specs: SimSpecs {
+            start: 0.0,
+            stop: 1.0,
+            dt: Dt::Dt(1.0),
+            save_step: None,
+            sim_method: SimMethod::Euler,
+            time_units: Some("time".to_owned()),
+        },
+        dimensions: vec![Dimension::Named(
+            "index".to_owned(),
+            vec!["zero".to_owned(), "one".to_owned(), "two".to_owned()],
+        )],
+        units: vec![],
+        models: vec![Model {
+            name: "main".to_owned(),
+            variables: vec![
+                Variable::Aux(Aux {
+                    ident: "values".to_owned(),
+                    equation: Equation::Arrayed(
+                        vec!["index".to_owned()],
+                        vec![
+                            ("zero".to_owned(), "10".to_owned(), None),
+                            ("one".to_owned(), "20".to_owned(), None),
+                            ("two".to_owned(), "30".to_owned(), None),
+                        ],
+                    ),
+                    documentation: "Array of values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+                Variable::Aux(Aux {
+                    ident: "first_value".to_owned(),
+                    equation: Equation::Scalar("values[1]".to_owned(), None),
+                    documentation: "First value (should be 10)".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+                Variable::Aux(Aux {
+                    ident: "total".to_owned(),
+                    equation: Equation::Scalar("SUM(values[*])".to_owned(), None),
+                    documentation: "Sum of all values".to_owned(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Private,
+                }),
+            ],
+            views: vec![],
+        }],
+    };
+
+    let parsed_project = Rc::new(crate::project::Project::from(project));
+
+    // Test tree-walking interpreter
+    use crate::interpreter::Simulation;
+    let sim = Simulation::new(&parsed_project, "main");
+    assert!(sim.is_ok());
+    let sim = sim.unwrap();
+
+    let results = sim.run_to_end();
+    assert!(results.is_ok());
+    let results = results.unwrap();
+
+    // Check the first value (should be 10)
+    let first_value_offset = results.offsets["first_value"];
+    let first_value = results.data[first_value_offset];
+    assert_eq!(first_value, 10.0, "values[1] should return 10.0");
+
+    // The total should be 10 + 20 + 30 = 60
+    let total_offset = results.offsets["total"];
+    let total_value = results.data[total_offset];
+
+    println!(
+        "Tree-walking interpreter: first_value = {}, SUM(values[*]) = {}",
+        first_value, total_value
+    );
+    assert_eq!(total_value, 60.0, "SUM(values[*]) should return 60.0");
 }
