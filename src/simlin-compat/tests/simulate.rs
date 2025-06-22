@@ -9,9 +9,9 @@ use std::rc::Rc;
 use float_cmp::approx_eq;
 
 use simlin_compat::{load_csv, load_dat, xmile};
-use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Project, Results, Simulation, Vm};
-use simlin_engine::{build_sim_with_stderrors, project_io};
+use simlin_engine::build_sim_with_stderrors;
+use simlin_engine::interpreter::Simulation;
+use simlin_engine::{Project, Results, Vm};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 

@@ -30,7 +30,7 @@ mod stdlib {
 }
 mod builder;
 mod bytecode;
-mod interpreter;
+pub mod interpreter;
 mod project;
 #[cfg(test)]
 mod testutils;
@@ -41,10 +41,10 @@ mod vm;
 
 pub use self::builder::build_sim_with_stderrors;
 pub use self::common::{Error, ErrorCode, Ident, Result, canonicalize, quoteize};
-pub use self::compiler::Simulation;
 pub use self::project::Project;
 pub use self::variable::Variable;
 pub use self::vm::Method;
 pub use self::vm::Results;
 pub use self::vm::Specs as SimSpecs;
 pub use self::vm::Vm;
+pub use interpreter::Simulation;
