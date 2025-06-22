@@ -347,61 +347,61 @@ pub enum UnaryOp {
 /// Expr represents a dimension-annotated expression, the final stage
 /// of AST transformation with full dimension information.
 #[derive(PartialEq, Clone, Debug)]
-pub enum Expr {
+pub enum Expr2 {
     Const(String, f64, DimensionVec, Loc),
     Var(Ident, DimensionVec, Loc),
-    App(BuiltinFn<Expr>, DimensionVec, Loc),
-    Subscript(Ident, Vec<IndexExpr>, DimensionVec, Loc),
-    Op1(UnaryOp, Box<Expr>, DimensionVec, Loc),
-    Op2(BinaryOp, Box<Expr>, Box<Expr>, DimensionVec, Loc),
-    If(Box<Expr>, Box<Expr>, Box<Expr>, DimensionVec, Loc),
+    App(BuiltinFn<Expr2>, DimensionVec, Loc),
+    Subscript(Ident, Vec<IndexExpr2>, DimensionVec, Loc),
+    Op1(UnaryOp, Box<Expr2>, DimensionVec, Loc),
+    Op2(BinaryOp, Box<Expr2>, Box<Expr2>, DimensionVec, Loc),
+    If(Box<Expr2>, Box<Expr2>, Box<Expr2>, DimensionVec, Loc),
 }
 
 /// IndexExpr represents a dimension-annotated index expression.
 #[derive(PartialEq, Clone, Debug)]
-pub enum IndexExpr {
+pub enum IndexExpr2 {
     Wildcard(DimensionVec, Loc),
     StarRange(Ident, DimensionVec, Loc),
-    Range(Expr, Expr, DimensionVec, Loc),
-    Expr(Expr),
+    Range(Expr2, Expr2, DimensionVec, Loc),
+    Expr(Expr2),
 }
 
-impl Expr {
+impl Expr2 {
     /// Get the dimensions of this expression
     pub fn dims(&self) -> &DimensionVec {
         match self {
-            Expr::Const(_, _, dims, _) => dims,
-            Expr::Var(_, dims, _) => dims,
-            Expr::App(_, dims, _) => dims,
-            Expr::Subscript(_, _, dims, _) => dims,
-            Expr::Op1(_, _, dims, _) => dims,
-            Expr::Op2(_, _, _, dims, _) => dims,
-            Expr::If(_, _, _, dims, _) => dims,
+            Expr2::Const(_, _, dims, _) => dims,
+            Expr2::Var(_, dims, _) => dims,
+            Expr2::App(_, dims, _) => dims,
+            Expr2::Subscript(_, _, dims, _) => dims,
+            Expr2::Op1(_, _, dims, _) => dims,
+            Expr2::Op2(_, _, _, dims, _) => dims,
+            Expr2::If(_, _, _, dims, _) => dims,
         }
     }
 
     /// Get the location of this expression
     pub fn loc(&self) -> Loc {
         match self {
-            Expr::Const(_, _, _, loc) => *loc,
-            Expr::Var(_, _, loc) => *loc,
-            Expr::App(_, _, loc) => *loc,
-            Expr::Subscript(_, _, _, loc) => *loc,
-            Expr::Op1(_, _, _, loc) => *loc,
-            Expr::Op2(_, _, _, _, loc) => *loc,
-            Expr::If(_, _, _, _, loc) => *loc,
+            Expr2::Const(_, _, _, loc) => *loc,
+            Expr2::Var(_, _, loc) => *loc,
+            Expr2::App(_, _, loc) => *loc,
+            Expr2::Subscript(_, _, _, loc) => *loc,
+            Expr2::Op1(_, _, _, loc) => *loc,
+            Expr2::Op2(_, _, _, _, loc) => *loc,
+            Expr2::If(_, _, _, _, loc) => *loc,
         }
     }
 }
 
-impl IndexExpr {
+impl IndexExpr2 {
     /// Get the dimensions of this index expression
     pub fn dims(&self) -> &DimensionVec {
         match self {
-            IndexExpr::Wildcard(dims, _) => dims,
-            IndexExpr::StarRange(_, dims, _) => dims,
-            IndexExpr::Range(_, _, dims, _) => dims,
-            IndexExpr::Expr(expr) => expr.dims(),
+            IndexExpr2::Wildcard(dims, _) => dims,
+            IndexExpr2::StarRange(_, dims, _) => dims,
+            IndexExpr2::Range(_, _, dims, _) => dims,
+            IndexExpr2::Expr(expr) => expr.dims(),
         }
     }
 }
@@ -412,34 +412,34 @@ pub struct DimensionContext<'a> {
     pub var_dims: &'a HashMap<Ident, DimensionVec>,
 }
 
-impl IndexExpr {
+impl IndexExpr2 {
     /// Infer dimensions for index expressions
     fn infer_dimensions(expr: IndexExpr1, ctx: &DimensionContext) -> EquationResult<Self> {
         match expr {
-            IndexExpr1::Wildcard(loc) => Ok(IndexExpr::Wildcard(DimensionVec::scalar(), loc)),
+            IndexExpr1::Wildcard(loc) => Ok(IndexExpr2::Wildcard(DimensionVec::scalar(), loc)),
             IndexExpr1::StarRange(ident, loc) => {
-                Ok(IndexExpr::StarRange(ident, DimensionVec::scalar(), loc))
+                Ok(IndexExpr2::StarRange(ident, DimensionVec::scalar(), loc))
             }
             IndexExpr1::Range(start, end, loc) => {
-                let start = Expr::infer_dimensions(start, ctx)?;
-                let end = Expr::infer_dimensions(end, ctx)?;
-                Ok(IndexExpr::Range(start, end, DimensionVec::scalar(), loc))
+                let start = Expr2::infer_dimensions(start, ctx)?;
+                let end = Expr2::infer_dimensions(end, ctx)?;
+                Ok(IndexExpr2::Range(start, end, DimensionVec::scalar(), loc))
             }
             IndexExpr1::Expr(e) => {
-                let e = Expr::infer_dimensions(e, ctx)?;
-                Ok(IndexExpr::Expr(e))
+                let e = Expr2::infer_dimensions(e, ctx)?;
+                Ok(IndexExpr2::Expr(e))
             }
         }
     }
 }
 
-impl Expr {
+impl Expr2 {
     /// Infer dimensions from an Expr1 to create a dimension-annotated Expr
     pub fn infer_dimensions(expr: Expr1, ctx: &DimensionContext) -> EquationResult<Self> {
         let result = match expr {
             Expr1::Const(s, n, loc) => {
                 // Constants are always scalar
-                Expr::Const(s, n, DimensionVec::scalar(), loc)
+                Expr2::Const(s, n, DimensionVec::scalar(), loc)
             }
             Expr1::Var(id, loc) => {
                 // Look up variable dimensions from context
@@ -448,12 +448,12 @@ impl Expr {
                     .get(&id)
                     .cloned()
                     .unwrap_or_else(DimensionVec::scalar);
-                Expr::Var(id, dims, loc)
+                Expr2::Var(id, dims, loc)
             }
             Expr1::App(builtin, loc) => {
                 // Infer dimensions for builtin functions
                 let (builtin, dims) = Self::infer_builtin_dimensions(builtin, ctx)?;
-                Expr::App(builtin, dims, loc)
+                Expr2::App(builtin, dims, loc)
             }
             Expr1::Subscript(id, indices, loc) => {
                 // Get base variable dimensions
@@ -466,14 +466,14 @@ impl Expr {
                 // Convert index expressions
                 let index_exprs: Result<Vec<_>, _> = indices
                     .into_iter()
-                    .map(|idx| IndexExpr::infer_dimensions(idx, ctx))
+                    .map(|idx| IndexExpr2::infer_dimensions(idx, ctx))
                     .collect();
                 let index_exprs = index_exprs?;
 
                 // Calculate resulting dimensions after subscripting
                 let result_dims = Self::apply_subscript_to_dims(&base_dims, &index_exprs, loc)?;
 
-                Expr::Subscript(id, index_exprs, result_dims, loc)
+                Expr2::Subscript(id, index_exprs, result_dims, loc)
             }
             Expr1::Op1(op, expr, loc) => {
                 let expr = Box::new(Self::infer_dimensions(*expr, ctx)?);
@@ -481,7 +481,7 @@ impl Expr {
                     UnaryOp::Transpose => expr.dims().transpose(),
                     _ => expr.dims().clone(), // Other unary ops preserve dimensions
                 };
-                Expr::Op1(op, expr, dims, loc)
+                Expr2::Op1(op, expr, dims, loc)
             }
             Expr1::Op2(op, l, r, loc) => {
                 let l = Box::new(Self::infer_dimensions(*l, ctx)?);
@@ -490,7 +490,7 @@ impl Expr {
                 // Infer dimensions based on operation type
                 let dims = Self::infer_binary_op_dims(op, l.dims(), r.dims(), loc)?;
 
-                Expr::Op2(op, l, r, dims, loc)
+                Expr2::Op2(op, l, r, dims, loc)
             }
             Expr1::If(cond, t, f, loc) => {
                 let cond = Box::new(Self::infer_dimensions(*cond, ctx)?);
@@ -504,7 +504,7 @@ impl Expr {
                     Err(_) => return eqn_err!(MismatchedDimensions, loc.start, loc.end),
                 };
 
-                Expr::If(cond, t, f, dims, loc)
+                Expr2::If(cond, t, f, dims, loc)
             }
         };
 
@@ -515,7 +515,7 @@ impl Expr {
     fn infer_builtin_dimensions(
         builtin: BuiltinFn<Expr1>,
         ctx: &DimensionContext,
-    ) -> EquationResult<(BuiltinFn<Expr>, DimensionVec)> {
+    ) -> EquationResult<(BuiltinFn<Expr2>, DimensionVec)> {
         use BuiltinFn::*;
 
         match builtin {
@@ -529,62 +529,62 @@ impl Expr {
 
             // Single-argument functions that preserve dimensions
             Abs(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Abs(a), dims))
             }
             Arccos(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Arccos(a), dims))
             }
             Arcsin(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Arcsin(a), dims))
             }
             Arctan(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Arctan(a), dims))
             }
             Cos(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Cos(a), dims))
             }
             Exp(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Exp(a), dims))
             }
             Int(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Int(a), dims))
             }
             Ln(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Ln(a), dims))
             }
             Log10(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Log10(a), dims))
             }
             Sin(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Sin(a), dims))
             }
             Sqrt(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Sqrt(a), dims))
             }
             Tan(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let dims = a.dims().clone();
                 Ok((Tan(a), dims))
             }
@@ -593,30 +593,30 @@ impl Expr {
             Mean(args) => {
                 let args: Result<Vec<_>, _> = args
                     .into_iter()
-                    .map(|arg| Expr::infer_dimensions(arg, ctx))
+                    .map(|arg| Expr2::infer_dimensions(arg, ctx))
                     .collect();
                 Ok((Mean(args?), DimensionVec::scalar()))
             }
             Sum(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 Ok((Sum(a), DimensionVec::scalar()))
             }
             Size(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 Ok((Size(a), DimensionVec::scalar()))
             }
             Stddev(a) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 Ok((Stddev(a), DimensionVec::scalar()))
             }
 
             // Min/Max with multiple arguments - result has broadcast shape
             Min(a, b_opt) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let mut dims = a.dims().clone();
 
                 if let Some(b) = b_opt {
-                    let b = Box::new(Expr::infer_dimensions(*b, ctx)?);
+                    let b = Box::new(Expr2::infer_dimensions(*b, ctx)?);
                     dims = match dims.broadcast_shape(b.dims()) {
                         Ok(d) => d,
                         Err(_) => return eqn_err!(MismatchedDimensions, 0, 0),
@@ -628,11 +628,11 @@ impl Expr {
             }
             Max(a, b_opt) => {
                 // Same logic as Min
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let mut dims = a.dims().clone();
 
                 if let Some(b) = b_opt {
-                    let b = Box::new(Expr::infer_dimensions(*b, ctx)?);
+                    let b = Box::new(Expr2::infer_dimensions(*b, ctx)?);
                     dims = match dims.broadcast_shape(b.dims()) {
                         Ok(d) => d,
                         Err(_) => return eqn_err!(MismatchedDimensions, 0, 0),
@@ -645,33 +645,33 @@ impl Expr {
 
             // Other builtins preserve first argument's dimensions or are scalar
             Lookup(id, a, loc) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 Ok((Lookup(id, a, loc), DimensionVec::scalar()))
             }
             IsModuleInput(id, loc) => Ok((IsModuleInput(id, loc), DimensionVec::scalar())),
             Pulse(a, b, c) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
-                let b = Box::new(Expr::infer_dimensions(*b, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
+                let b = Box::new(Expr2::infer_dimensions(*b, ctx)?);
                 let c = match c {
-                    Some(c_expr) => Some(Box::new(Expr::infer_dimensions(*c_expr, ctx)?)),
+                    Some(c_expr) => Some(Box::new(Expr2::infer_dimensions(*c_expr, ctx)?)),
                     None => None,
                 };
                 Ok((Pulse(a, b, c), DimensionVec::scalar()))
             }
             Ramp(a, b, c) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
-                let b = Box::new(Expr::infer_dimensions(*b, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
+                let b = Box::new(Expr2::infer_dimensions(*b, ctx)?);
                 let c = match c {
-                    Some(c_expr) => Some(Box::new(Expr::infer_dimensions(*c_expr, ctx)?)),
+                    Some(c_expr) => Some(Box::new(Expr2::infer_dimensions(*c_expr, ctx)?)),
                     None => None,
                 };
                 Ok((Ramp(a, b, c), DimensionVec::scalar()))
             }
             SafeDiv(a, b, c) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
-                let b = Box::new(Expr::infer_dimensions(*b, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
+                let b = Box::new(Expr2::infer_dimensions(*b, ctx)?);
                 let c = match c {
-                    Some(c_expr) => Some(Box::new(Expr::infer_dimensions(*c_expr, ctx)?)),
+                    Some(c_expr) => Some(Box::new(Expr2::infer_dimensions(*c_expr, ctx)?)),
                     None => None,
                 };
                 // Division result has broadcast shape of a and b
@@ -682,17 +682,17 @@ impl Expr {
                 Ok((SafeDiv(a, b, c), dims))
             }
             Step(a, b) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
-                let b = Box::new(Expr::infer_dimensions(*b, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
+                let b = Box::new(Expr2::infer_dimensions(*b, ctx)?);
                 Ok((Step(a, b), DimensionVec::scalar()))
             }
             Rank(a, bc_opt) => {
-                let a = Box::new(Expr::infer_dimensions(*a, ctx)?);
+                let a = Box::new(Expr2::infer_dimensions(*a, ctx)?);
                 let bc = match bc_opt {
                     Some((b, c_opt)) => {
-                        let b = Box::new(Expr::infer_dimensions(*b, ctx)?);
+                        let b = Box::new(Expr2::infer_dimensions(*b, ctx)?);
                         let c = match c_opt {
-                            Some(c_expr) => Some(Box::new(Expr::infer_dimensions(*c_expr, ctx)?)),
+                            Some(c_expr) => Some(Box::new(Expr2::infer_dimensions(*c_expr, ctx)?)),
                             None => None,
                         };
                         Some((b, c))
@@ -707,7 +707,7 @@ impl Expr {
     /// Apply subscript operations to dimensions
     fn apply_subscript_to_dims(
         base_dims: &DimensionVec,
-        indices: &[IndexExpr],
+        indices: &[IndexExpr2],
         loc: Loc,
     ) -> EquationResult<DimensionVec> {
         if indices.len() > base_dims.ndim() {
@@ -718,14 +718,14 @@ impl Expr {
         let mut slice_specs = Vec::new();
         for idx in indices.iter() {
             let spec = match idx {
-                IndexExpr::Wildcard(_, _) => SliceSpec::Wildcard,
-                IndexExpr::StarRange(name, _, _) => SliceSpec::DimName(name.clone()),
-                IndexExpr::Range(_start, _end, _, _) => {
+                IndexExpr2::Wildcard(_, _) => SliceSpec::Wildcard,
+                IndexExpr2::StarRange(name, _, _) => SliceSpec::DimName(name.clone()),
+                IndexExpr2::Range(_start, _end, _, _) => {
                     // For now, assume constant ranges
                     // In a real implementation, we'd need to evaluate these
                     SliceSpec::Range(0, 10) // Placeholder
                 }
-                IndexExpr::Expr(_) => SliceSpec::Index(0), // Placeholder
+                IndexExpr2::Expr(_) => SliceSpec::Index(0), // Placeholder
             };
             slice_specs.push(spec);
         }
