@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use crate::builtins::Loc;
 use crate::common::{ErrorCode, UnitError};
-use crate::compiler::Simulation;
+use crate::interpreter::Simulation;
 use crate::datamodel::{Equation, Project as DatamodelProject};
 use crate::project::Project;
 
