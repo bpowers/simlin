@@ -465,7 +465,7 @@ impl ModuleEvaluator<'_> {
                         self.expr_contains_array_wildcards(arg)
                             || opt_arg
                                 .as_ref()
-                                .map_or(false, |a| self.expr_contains_array_wildcards(a))
+                                .is_some_and(|a| self.expr_contains_array_wildcards(a))
                     }
                     _ => false,
                 }

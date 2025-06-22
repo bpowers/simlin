@@ -50,7 +50,7 @@ fn roundtrips_model() {
     for &path in TEST_MODELS {
         let file_path = format!("../../{}", path);
         use std::io::Write;
-        writeln!(std::io::stderr(), "model: {}", path).unwrap();
+        eprintln!("model: {}", path);
 
         let f = File::open(file_path).unwrap();
         let mut f = BufReader::new(f);
@@ -60,13 +60,10 @@ fn roundtrips_model() {
 
         for (model_name, model) in project.models.iter() {
             for (var_name, var) in model.variables.iter() {
-                match var.equation_errors() {
-                    Some(errors) => {
-                        for err in errors {
-                            eprintln!("  {}.{} error: {}", model_name, var_name, err);
-                        }
+                if let Some(errors) = var.equation_errors() {
+                    for err in errors {
+                        eprintln!("  {}.{} error: {}", model_name, var_name, err);
                     }
-                    None => (),
                 }
             }
         }

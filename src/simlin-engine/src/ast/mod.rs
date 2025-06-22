@@ -10,7 +10,7 @@ pub mod expr2;
 pub use expr0::{Expr0, IndexExpr0};
 pub use expr1::{Expr1, IndexExpr1};
 pub use expr2::{
-    BinaryOp, DimensionContext, DimensionRange, DimensionVec, Expr, IndexExpr, SliceSpec, UnaryOp,
+    BinaryOp, UnaryOp,
 };
 
 // Re-export Loc for convenience

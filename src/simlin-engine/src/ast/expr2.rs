@@ -36,11 +36,7 @@ impl DimensionRange {
     }
 
     pub fn len(&self) -> u32 {
-        if self.end < self.start {
-            0
-        } else {
-            self.end - self.start
-        }
+        self.end.saturating_sub(self.start)
     }
 }
 
@@ -720,7 +716,7 @@ impl Expr {
 
         // Convert index expressions to SliceSpecs
         let mut slice_specs = Vec::new();
-        for (_i, idx) in indices.iter().enumerate() {
+        for idx in indices.iter() {
             let spec = match idx {
                 IndexExpr::Wildcard(_, _) => SliceSpec::Wildcard,
                 IndexExpr::StarRange(name, _, _) => SliceSpec::DimName(name.clone()),
