@@ -447,6 +447,12 @@ impl Vm {
                     let r = stack.pop();
                     stack.push((!is_truthy(r)) as i8 as f64);
                 }
+                Opcode::Transpose {} => {
+                    // For now, transpose is a no-op for scalars
+                    // TODO: Implement proper array transpose when array support is added to VM
+                    let r = stack.pop();
+                    stack.push(r);
+                }
                 Opcode::LoadConstant { id } => {
                     stack.push(bytecode.literals[id as usize]);
                 }

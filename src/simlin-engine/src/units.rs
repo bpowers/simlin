@@ -241,6 +241,7 @@ fn const_int_eval(ast: &Expr0) -> EquationResult<i32> {
                 UnaryOp::Positive => expr,
                 UnaryOp::Negative => -expr,
                 UnaryOp::Not => i32::from(expr == 0),
+                UnaryOp::Transpose => expr, // Transpose preserves units
             };
             Ok(result)
         }

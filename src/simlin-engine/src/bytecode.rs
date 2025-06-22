@@ -59,6 +59,7 @@ pub(crate) enum Opcode {
     Ret,
     Op2 { op: Op2 },
     Not {},
+    Transpose {},
     LoadConstant { id: LiteralId },
     LoadVar { off: VariableOffset },
     LoadGlobalVar { off: VariableOffset },

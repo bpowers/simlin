@@ -491,6 +491,7 @@ impl Context<'_> {
                     ),
                     ast::UnaryOp::Positive => l,
                     ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
+                    ast::UnaryOp::Transpose => Expr::Op1(UnaryOp::Transpose, Box::new(l), *loc),
                 }
             }
             ast::Expr1::Op2(op, l, r, loc) => {
@@ -1743,6 +1744,7 @@ impl<'module> Compiler<'module> {
                 self.walk_expr(rhs)?.unwrap();
                 match op {
                     UnaryOp::Not => self.push(Opcode::Not {}),
+                    UnaryOp::Transpose => self.push(Opcode::Transpose {}),
                 };
                 Some(())
             }
@@ -1973,6 +1975,10 @@ impl ModuleEvaluator<'_> {
                 let l = self.eval(l);
                 match op {
                     UnaryOp::Not => (!is_truthy(l)) as i8 as f64,
+                    UnaryOp::Transpose => {
+                        // For scalars, transpose is identity
+                        l
+                    }
                 }
             }
             Expr::Op2(op, l, r, _) => {
@@ -2613,6 +2619,10 @@ impl ModuleEvaluator<'_> {
                     self.eval_with_array_substitution(sub_expr, offset1, index1, offset2, index2);
                 match op {
                     UnaryOp::Not => (!is_truthy(val)) as i8 as f64,
+                    UnaryOp::Transpose => {
+                        // For scalars in array context, transpose is identity
+                        val
+                    }
                 }
             }
             Expr::If(cond, true_expr, false_expr, _) => {
@@ -2819,12 +2829,10 @@ pub fn pretty(expr: &Expr) -> String {
                 paren_if_necessary(expr, r, pretty(r))
             )
         }
-        Expr::Op1(op, l, _) => {
-            let op: &str = match op {
-                UnaryOp::Not => "!",
-            };
-            format!("{}{}", op, paren_if_necessary(expr, l, pretty(l)))
-        }
+        Expr::Op1(op, l, _) => match op {
+            UnaryOp::Not => format!("!{}", paren_if_necessary(expr, l, pretty(l))),
+            UnaryOp::Transpose => format!("{}'", paren_if_necessary(expr, l, pretty(l))),
+        },
         Expr::If(cond, l, r, _) => {
             format!("if {} then {} else {}", pretty(cond), pretty(l), pretty(r))
         }

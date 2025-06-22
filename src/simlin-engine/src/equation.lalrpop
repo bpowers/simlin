@@ -71,7 +71,12 @@ Unary: Expr = {
 };
 
 Exp: Expr = {
-    <lpos:@L> <l:Exp> "^" <r:App> <rpos:@R> => Op2(Exp, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    <lpos:@L> <l:Exp> "^" <r:Transpose> <rpos:@R> => Op2(Exp, Box::new(l), Box::new(r), Loc::new(lpos, rpos)),
+    Transpose,
+};
+
+Transpose: Expr = {
+    <lpos:@L> <e:App> "'" <rpos:@R> => Op1(Transpose, Box::new(e), Loc::new(lpos, rpos)),
     App,
 };
 
@@ -140,6 +145,7 @@ extern {
         "]" => Token::RBracket,
         "^" => Token::Exp,
         ":" => Token::Colon,
+        "'" => Token::Apostrophe,
         "&&" => Token::And,
         "||" => Token::Or,
         "Nan" => Token::Nan,

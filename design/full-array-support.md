@@ -311,8 +311,9 @@ impl Vm {
 **Phase 1: AST Refactoring and Dimension Propagation**
 - ✅ Renamed existing types (`Expr` → `Expr1`, etc.) - *Prepared AST structure*
 - ✅ Implemented new dimension-annotated `Expr` and `IndexExpr` enums - *Infrastructure ready*
-- ⚠️ Add dimension inference pass to transform `Expr1` → `Expr` - *Partial: basic type structure exists*
-- ⚠️ Update error messages to include dimension information - *Not implemented yet*
+- ✅ Add dimension inference pass to transform `Expr1` → `Expr` - *Complete with full builtin function support*
+- ✅ Added comprehensive `DimensionVec` operations - *Broadcasting, slicing, assignment checking*
+- ⚠️ Update error messages to include dimension information - *Basic support via MismatchedDimensions error*
 
 **Phase 2: Basic Array Builtins** 
 - ✅ Implement SUM for complete arrays - *Working in tree-walking interpreter*
@@ -350,10 +351,13 @@ impl Vm {
    - Clear messages for dimension mismatches
 
 #### Medium Priority (Robustness)
-4. **Dimension Type System**: Complete the formal dimension propagation system
-   - Implement full `DimensionVector` operations (`is_broadcast_compatible`, `broadcast_shape`)
-   - Add compile-time dimension checking
-   - Support for named dimension validation
+4. **✅ Dimension Type System**: ✅ **COMPLETED** - Complete formal dimension propagation system
+   - ✅ Implemented full `DimensionVec` operations (`is_broadcast_compatible`, `broadcast_shape`, `is_assignable_to`)
+   - ✅ Added `SliceSpec` enum for flexible array slicing (`Index`, `Wildcard`, `Range`, `DimName`)
+   - ✅ Implemented complete dimension inference pass (`Expr1` → `Expr` with dimension annotation)
+   - ✅ Added comprehensive unit tests (19 tests covering broadcasting, slicing, assignments)
+   - ✅ Broadcasting follows XMILE-adapted NumPy rules with named dimension validation
+   - ✅ Compile-time dimension checking with proper error reporting using `MismatchedDimensions`
 
 5. **Array Transposition**: Implement array reshape and transpose operations
    - Support for dimension reordering
@@ -386,15 +390,15 @@ impl Vm {
    - Bytecode VM: Basic array operations only, missing complex expression support
    - **Opportunity**: Extract common array evaluation logic into shared modules
 
-2. **Improve Dimension Detection**: Current heuristics work but are not robust:
-   - Uses operation type (mul/div vs add/sub) to guess element-wise vs cross-product behavior
-   - Uses memory offset proximity to determine if arrays share dimensions
-   - **Opportunity**: Access actual dimension names during expression evaluation for proper type checking
+2. **✅ Improve Dimension Detection**: ✅ **PARTIALLY COMPLETED** - Formal dimension system implemented:
+   - ✅ Implemented proper dimension inference pass with compile-time type checking
+   - ✅ Added broadcasting rules based on actual dimension names, not heuristics
+   - ⚠️ Tree-walking interpreter still uses heuristics; bytecode VM needs updating
 
-3. **Simplify Array Expression AST**: The current approach has multiple expression types:
-   - `Expr0` (parsed) → `Expr1` (typed) → `Expr` (dimension-annotated)
-   - The dimension-annotated `Expr` enum exists but isn't fully utilized
-   - **Opportunity**: Complete the transition to dimension-annotated AST for better type safety
+3. **✅ Simplify Array Expression AST**: ✅ **COMPLETED** - Full dimension-annotated AST implemented:
+   - ✅ Complete `Expr0` (parsed) → `Expr1` (typed) → `Expr` (dimension-annotated) pipeline
+   - ✅ All AST nodes carry dimension information for type safety
+   - ✅ Dimension inference pass handles all builtin functions and operations
 
 ### Performance and Memory Optimizations
 
@@ -412,10 +416,10 @@ impl Vm {
 
 ### Code Quality and Maintainability
 
-7. **Remove Dead Code**: Several methods are marked as unused or placeholder:
-   - `extract_array_info()` method is unused in current implementation
-   - Many `DimensionVector` methods exist but aren't used
-   - **Opportunity**: Clean up unused code and complete partially implemented features
+7. **✅ Remove Dead Code**: ✅ **PARTIALLY COMPLETED** - Added comprehensive dimension functionality:
+   - ✅ Implemented full `DimensionVec` method suite (broadcasting, slicing, assignment checking)
+   - ✅ All dimension-related methods now have proper implementations and tests
+   - ⚠️ Some unused methods remain (tree-walking vs bytecode VM architectural differences)
 
 8. **Improve Error Messages**: Current error handling is basic:
    - Array operations that fail often return NaN without clear error messages
@@ -429,10 +433,10 @@ impl Vm {
 
 ### Testing and Validation Improvements
 
-10. **Expand Test Coverage**: Current tests focus on the `sum` model:
-    - Need tests for edge cases (empty arrays, single-element arrays)
-    - Need tests for error conditions (dimension mismatches, out-of-bounds)
-    - **Opportunity**: Add comprehensive test suite covering all array operation combinations
+10. **✅ Expand Test Coverage**: ✅ **PARTIALLY COMPLETED** - Added comprehensive dimension system tests:
+    - ✅ Added 19 unit tests for dimension system covering broadcasting, slicing, assignment rules
+    - ✅ Tests include error conditions (dimension mismatches, invalid assignments)
+    - ⚠️ Still need more integration tests for array expressions and edge cases in actual models
 
 11. **Add Performance Benchmarks**: No current performance testing for array operations:
     - Need to validate that array operations scale well with array size
@@ -474,6 +478,49 @@ impl Vm {
 3. **Extensions**: Matrix operations beyond element-wise
 4. **Memory**: Efficient storage for sparse arrays
 
+## Recent Updates (2024)
+
+### ✅ Dimension Type System - COMPLETED
+
+**Major achievement**: Successfully implemented the complete formal dimension propagation system as outlined in item #4 of the "What's Left To Do" section.
+
+**Key accomplishments**:
+
+1. **Enhanced DimensionVec Operations**: Implemented full broadcasting semantics with:
+   - `is_broadcast_compatible()` - NumPy-style broadcasting rules adapted for XMILE
+   - `broadcast_shape()` - Dimension inference after broadcasting operations  
+   - `is_assignable_to()` - Assignment compatibility with array-to-scalar restrictions
+   - `slice_with_spec()` - Advanced array slicing with flexible SliceSpec enum
+
+2. **SliceSpec Enum**: Added comprehensive slicing operations:
+   - `Index(usize)` - Single element selection removes dimension
+   - `Wildcard` - Keep entire dimension (*) 
+   - `Range(usize, usize)` - Range selection maintains dimension
+   - `DimName(String)` - Dimension placeholder by name for type safety
+
+3. **Complete Dimension Inference**: Implemented full `Expr1` → `Expr` transformation:
+   - All builtin functions now properly propagate dimensions
+   - Binary operations use broadcasting rules for dimension compatibility
+   - Array subscripting correctly reduces dimensions based on index types
+   - Comprehensive error reporting using `MismatchedDimensions` error code
+
+4. **Comprehensive Testing**: Added 19 unit tests covering:
+   - Scalar and array broadcasting scenarios
+   - Assignment rules (arrays cannot be assigned to scalars)
+   - Slicing operations with all SliceSpec variants
+   - Error conditions and dimension mismatches
+   - Named vs indexed dimension compatibility
+
+**Broadcasting Semantics**: The implementation follows XMILE-adapted broadcasting rules that are stricter than NumPy:
+- Named dimensions must match by name, providing stronger type safety
+- Scalar values broadcast with any array structure
+- Singleton dimensions (size 1) can expand to match larger dimensions
+- Right-to-left dimension comparison like NumPy
+
+This foundation enables compile-time dimension checking and provides the infrastructure for future array operation improvements while maintaining full backward compatibility.
+
 ## Conclusion
 
 This design provides a solid foundation for implementing full array support in simlin-engine. By augmenting the AST with dimension information and implementing systematic dimension propagation, we can provide excellent compile-time checking and clear error messages while maintaining compatibility with the XMILE specification.
+
+**With the recent completion of the Dimension Type System, the project now has robust foundations for type-safe array operations and is well-positioned for the remaining implementation work on bytecode VM improvements and advanced array functionality.**

@@ -296,6 +296,14 @@ impl DimensionVec {
 
         Ok(DimensionVec::new(result_dims))
     }
+
+    /// Transpose (reverse) dimensions
+    /// This implements the XMILE transpose operator (') which reverses all dimensions
+    pub fn transpose(&self) -> Self {
+        let mut dims = self.dims.clone();
+        dims.reverse();
+        DimensionVec::new(dims)
+    }
 }
 
 /// Expr0 represents a parsed equation, before any calls to
@@ -1049,8 +1057,10 @@ impl Expr {
             }
             Expr1::Op1(op, expr, loc) => {
                 let expr = Box::new(Self::infer_dimensions(*expr, ctx)?);
-                // Unary operations preserve dimensions
-                let dims = expr.dims().clone();
+                let dims = match op {
+                    UnaryOp::Transpose => expr.dims().transpose(),
+                    _ => expr.dims().clone(), // Other unary ops preserve dimensions
+                };
                 Expr::Op1(op, expr, dims, loc)
             }
             Expr1::Op2(op, l, r, loc) => {
@@ -1730,6 +1740,7 @@ pub enum UnaryOp {
     Positive,
     Negative,
     Not,
+    Transpose,
 }
 
 struct PrintVisitor {}
@@ -1758,12 +1769,12 @@ impl Visitor<String> for PrintVisitor {
             }
             Expr0::Op1(op, l, _) => {
                 let l = paren_if_necessary(expr, l, self.walk(l));
-                let op: &str = match op {
-                    UnaryOp::Positive => "+",
-                    UnaryOp::Negative => "-",
-                    UnaryOp::Not => "!",
-                };
-                format!("{}{}", op, l)
+                match op {
+                    UnaryOp::Positive => format!("+{}", l),
+                    UnaryOp::Negative => format!("-{}", l),
+                    UnaryOp::Not => format!("!{}", l),
+                    UnaryOp::Transpose => format!("{}'", l),
+                }
             }
             Expr0::Op2(op, l, r, _) => {
                 let l = paren_if_necessary(expr, l, self.walk(l));
@@ -1857,6 +1868,14 @@ fn test_print_eqn() {
         ))
     );
     assert_eq!(
+        "a'",
+        print_eqn(&Expr0::Op1(
+            UnaryOp::Transpose,
+            Box::new(Expr0::Var("a".to_string(), Loc::new(0, 1))),
+            Loc::new(0, 2),
+        ))
+    );
+    assert_eq!(
         "+a",
         print_eqn(&Expr0::Op1(
             UnaryOp::Positive,
@@ -1926,12 +1945,12 @@ impl LatexVisitor {
             }
             Expr1::Op1(op, l, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));
-                let op: &str = match op {
-                    UnaryOp::Positive => "+",
-                    UnaryOp::Negative => "-",
-                    UnaryOp::Not => "\\neg ",
-                };
-                format!("{}{}", op, l)
+                match op {
+                    UnaryOp::Positive => format!("+{}", l),
+                    UnaryOp::Negative => format!("-{}", l),
+                    UnaryOp::Not => format!("\\neg {}", l),
+                    UnaryOp::Transpose => format!("{}'", l),
+                }
             }
             Expr1::Op2(op, l, r, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));
@@ -2041,6 +2060,14 @@ fn test_latex_eqn() {
         latex_eqn(&Expr1::Op1(
             UnaryOp::Not,
             Box::new(Expr1::Var("a".to_string(), Loc::new(1, 2))),
+            Loc::new(0, 2),
+        ))
+    );
+    assert_eq!(
+        "\\mathrm{a}'",
+        latex_eqn(&Expr1::Op1(
+            UnaryOp::Transpose,
+            Box::new(Expr1::Var("a".to_string(), Loc::new(0, 1))),
             Loc::new(0, 2),
         ))
     );
@@ -2373,5 +2400,78 @@ mod dimension_vec_tests {
         assert_eq!(dims.ndim(), 2);
         assert_eq!(dims.size(), 6);
         assert_eq!(dims.names(), vec!["Location", "Product"]);
+    }
+
+    #[test]
+    fn test_transpose_basic() {
+        // Test basic transpose functionality (reverses dimensions)
+        let dims = vec![
+            DimensionRange::new(create_test_dimension("DimA", 3), 0, 3),
+            DimensionRange::new(create_test_dimension("DimB", 4), 0, 4),
+        ];
+        let dim_vec = DimensionVec::new(dims);
+
+        let transposed = dim_vec.transpose();
+
+        // Should reverse the dimension order
+        assert_eq!(transposed.ndim(), 2);
+        assert_eq!(transposed.names(), vec!["DimB", "DimA"]);
+        assert_eq!(transposed.shape(), vec![4, 3]);
+    }
+
+    #[test]
+    fn test_transpose_scalar() {
+        // Test transpose of scalar (should remain scalar)
+        let scalar_dims = DimensionVec::scalar();
+        let transposed = scalar_dims.transpose();
+
+        assert!(transposed.is_scalar());
+        assert_eq!(transposed.ndim(), 0);
+        assert_eq!(transposed.size(), 1);
+    }
+
+    #[test]
+    fn test_transpose_1d() {
+        // Test transpose of 1D array (should reverse to same array)
+        let dims = vec![DimensionRange::new(create_test_dimension("DimA", 5), 0, 5)];
+        let dim_vec = DimensionVec::new(dims);
+
+        let transposed = dim_vec.transpose();
+
+        assert_eq!(transposed.ndim(), 1);
+        assert_eq!(transposed.names(), vec!["DimA"]);
+        assert_eq!(transposed.shape(), vec![5]);
+    }
+
+    #[test]
+    fn test_transpose_3d() {
+        // Test transpose of 3D array
+        let dims = vec![
+            DimensionRange::new(create_test_dimension("DimA", 2), 0, 2),
+            DimensionRange::new(create_test_dimension("DimB", 3), 0, 3),
+            DimensionRange::new(create_test_dimension("DimC", 4), 0, 4),
+        ];
+        let dim_vec = DimensionVec::new(dims);
+
+        let transposed = dim_vec.transpose();
+
+        // Should reverse all dimensions
+        assert_eq!(transposed.ndim(), 3);
+        assert_eq!(transposed.names(), vec!["DimC", "DimB", "DimA"]);
+        assert_eq!(transposed.shape(), vec![4, 3, 2]);
+    }
+
+    #[test]
+    fn test_transpose_double() {
+        // Test double transpose returns to original
+        let dims = vec![
+            DimensionRange::new(create_test_dimension("DimA", 3), 0, 3),
+            DimensionRange::new(create_test_dimension("DimB", 4), 0, 4),
+        ];
+        let original = DimensionVec::new(dims);
+
+        let double_transposed = original.transpose().transpose();
+
+        assert_eq!(original, double_transposed);
     }
 }
