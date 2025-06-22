@@ -42,7 +42,7 @@ impl<'a> BuiltinVisitor<'a> {
     }
 
     fn walk_index(&mut self, expr: IndexExpr0) -> Result<IndexExpr0, EquationError> {
-        use crate::ast::IndexExpr0::*;
+        use IndexExpr0::*;
         let result: IndexExpr0 = match expr {
             Wildcard(_) => expr,
             StarRange(_, _) => expr,
@@ -54,7 +54,7 @@ impl<'a> BuiltinVisitor<'a> {
     }
 
     fn walk(&mut self, expr: Expr0) -> Result<Expr0, EquationError> {
-        use crate::ast::Expr0::*;
+        use Expr0::*;
         use std::mem;
         let result: Expr0 = match expr {
             Const(_, _, _) => expr,

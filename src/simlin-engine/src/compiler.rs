@@ -5,7 +5,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-
 use crate::ast::{self, Ast, BinaryOp, IndexExpr1, Loc};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
@@ -17,9 +16,9 @@ use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
 use crate::vm::{
-    SubscriptIterator, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, SubscriptIterator, TIME_OFF,
 };
-use crate::{sim_err, Error};
+use crate::{Error, sim_err};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {

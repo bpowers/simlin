@@ -2,17 +2,20 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
-use float_cmp::approx_eq;
-use std::rc::Rc;
-use std::borrow::BorrowMut;
 use crate::ast::{Ast, BinaryOp};
-use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
-use crate::{compiler, quoteize, Ident, Project, Results, Variable};
 use crate::bytecode::CompiledModule;
+use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
 use crate::model::enumerate_modules;
-use crate::vm::{is_truthy, pulse, ramp, step, CompiledSimulation, Specs, StepPart, SubscriptIterator, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF};
 use crate::sim_err;
+use crate::vm::{
+    CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, Specs,
+    StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
+};
+use crate::{Ident, Project, Results, Variable, compiler, quoteize};
+use float_cmp::approx_eq;
+use std::borrow::BorrowMut;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 pub struct ModuleEvaluator<'a> {
     step_part: StepPart,
@@ -506,7 +509,10 @@ impl Simulation {
 /// for all individual variables and subscripts in a model, including
 /// in submodels.  For example a variable named "offset" in a module
 /// instantiated with name "sector" will produce the key "sector.offset".
-pub fn calc_flattened_offsets(project: &Project, model_name: &str) -> HashMap<Ident, (usize, usize)> {
+pub fn calc_flattened_offsets(
+    project: &Project,
+    model_name: &str,
+) -> HashMap<Ident, (usize, usize)> {
     let is_root = model_name == "main";
 
     let mut offsets: HashMap<Ident, (usize, usize)> = HashMap::new();
@@ -592,9 +598,9 @@ fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
 
 #[test]
 fn test_arrays() {
+    use crate::ast::Loc;
+    use crate::compiler::{Context, Var};
     use std::collections::BTreeSet;
-    use crate::compiler::{Var, Context};
-    use crate::ast::{Loc};
 
     let project = {
         use crate::datamodel::*;
