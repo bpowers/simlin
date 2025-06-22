@@ -118,3 +118,12 @@ This is a yarn workspace with these packages:
 - Rust: Unit tests in `src/*/tests/` and integration tests in `test/` directory
 - TypeScript: Workspace-level linting and type checking
 - Models: Extensive test suite in `test/` with expected outputs.  This is very important and ensures the engine behavior matches known-good results from other software.
+
+### Development strategy when working in Rust
+
+When asked to perform tasks in Rust crates like `src/simlin-engine`, the following general workflow should be followed:
+* Before starting, run `cargo clippy` and note any existing lints that are failing.
+* At the end of the task:
+  * Run `cargo fmt` to ensure the code is appropriately formatted.
+  * Run `cargo clippy`, and if there are new lints that weren't failing at the start of the task fix them (directly and without shortcuts) so that `cargo clippy` doesn't complain.
+  * Run `cargo test` at the root of the workspace to ensure we haven't regressed on any behavior.
