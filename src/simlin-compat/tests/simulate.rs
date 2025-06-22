@@ -119,6 +119,7 @@ fn ensure_results(expected: &Results, results: &Results) {
 
     let mut step = 0;
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
+        let mut err = false;
         for ident in expected.offsets.keys() {
             let ident_off = expected.offsets[ident];
             let expected = expected_row[ident_off];
@@ -160,9 +161,12 @@ fn ensure_results(expected: &Results, results: &Results) {
                         "step {}: {}: {} (expected) != {} (actual)",
                         step, ident, expected, actual
                     );
-                    panic!("not equal");
+                    err = true;
                 }
             }
+        }
+        if err {
+            panic!("errors in step {}", step);
         }
 
         step += 1;
@@ -334,6 +338,11 @@ fn simulates_active_initial() {
 #[test]
 fn simulates_sum() {
     simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
+}
+
+#[test]
+fn simulates_subscripted_logicals() {
+    simulate_path("../../test/subscripted_logicals/test_subscripted_logicals.xmile");
 }
 
 #[test]

@@ -450,11 +450,26 @@ impl Context<'_> {
                                 // TODO: This needs proper handling in the context of array operations
                                 Ok(Expr::Const(0.0, *_loc))
                             }
-                            IndexExpr1::Range(_l, _r, _loc) => {
+                            IndexExpr1::Range(l, r, _loc) => {
                                 // Ranges like [1:3] select a subset of array elements
-                                // For now, return a placeholder value of 0
-                                // TODO: This needs proper handling in the context of array operations
-                                Ok(Expr::Const(0.0, *_loc))
+                                // For now, we'll evaluate the range bounds and encode them
+                                // We'll use a negative constant to indicate a range:
+                                // -start_value-1000*end_value as a marker
+                                // This is a temporary hack until we properly support range subscripts
+                                let start = self.lower(l)?;
+                                let end = self.lower(r)?;
+
+                                // Try to evaluate constants if possible
+                                if let (Expr::Const(start_val, _), Expr::Const(end_val, _)) =
+                                    (&start, &end)
+                                {
+                                    // Encode range as negative value: -(start + 1000*end)
+                                    let encoded = -(start_val + 1000.0 * end_val);
+                                    Ok(Expr::Const(encoded, *_loc))
+                                } else {
+                                    // Non-constant ranges not supported yet
+                                    Ok(Expr::Const(0.0, *_loc))
+                                }
                             }
                             IndexExpr1::Expr(arg) => {
                                 let expr = if let ast::Expr1::Var(ident, loc) = arg {

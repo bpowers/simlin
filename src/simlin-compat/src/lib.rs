@@ -175,8 +175,17 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
 
         let mut row = vec![0.0; step_size];
         for (i, field) in record.iter().enumerate() {
+            let field = field.trim();
+
+            // vensim data seems to omit data for consts or things that don't change, so copy it forward
+            if field.is_empty() {
+                let prev = &step_data[step_count-1];
+                row[i] = prev[i];
+                continue;
+            }
+
             use std::str::FromStr;
-            row[i] = match f64::from_str(field.trim()) {
+            row[i] = match f64::from_str(field) {
                 Ok(n) => n,
                 Err(err) => {
                     return Err(Box::new(err));

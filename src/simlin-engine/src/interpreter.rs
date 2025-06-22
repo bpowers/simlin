@@ -47,28 +47,69 @@ impl ModuleEvaluator<'_> {
             Expr::Var(off, _) => self.curr[self.off + *off],
             Expr::Subscript(off, r, bounds, _) => {
                 let indices: Vec<_> = r.iter().map(|r| self.eval(r)).collect();
-                let mut index = 0;
-                let max_bounds = bounds.iter().product();
-                let mut ok = true;
-                assert_eq!(indices.len(), bounds.len());
-                for (i, rhs) in indices.into_iter().enumerate() {
-                    let bounds = bounds[i];
-                    let one_index = rhs.floor() as usize;
-                    if one_index == 0 || one_index > bounds {
-                        ok = false;
-                        break;
-                    } else {
-                        index *= bounds;
-                        index += one_index - 1;
+
+                // Check if this is a range subscript by looking for encoded range values
+                let mut has_range = false;
+                let mut range_results = Vec::new();
+
+                for (i, &idx_val) in indices.iter().enumerate() {
+                    if idx_val < 0.0 {
+                        // This is an encoded range: -(start + 1000*end)
+                        has_range = true;
+                        let encoded = -idx_val;
+                        let start = (encoded % 1000.0).floor() as usize;
+                        let end = (encoded / 1000.0).floor() as usize;
+
+                        // Convert from 1-based to 0-based indexing
+                        let start_idx = start.saturating_sub(1);
+                        let end_idx = end.min(bounds[i]);
+
+                        // Collect all values in the range for this dimension
+                        for j in start_idx..end_idx {
+                            if i == 0 {
+                                // First dimension - initialize result vector
+                                range_results.push(self.curr[self.off + *off + j]);
+                            } else {
+                                // Subsequent dimensions - need to handle multi-dimensional ranges
+                                // For now, we'll just handle 1D ranges
+                                // TODO: Support multi-dimensional range subscripts
+                            }
+                        }
+
+                        // For now, return the sum of range values (common use case)
+                        // TODO: This should return an array, not a scalar
+                        return range_results.iter().sum();
                     }
                 }
-                if !ok || index > max_bounds {
-                    // 3.7.1 Arrays: If a subscript expression results in an invalid subscript index (i.e., it is out of range), a zero (0) MUST be returned[10]
-                    // note 10: Note this can be NaN if so specified in the <uses_arrays> tag of the header options block
-                    // 0 makes less sense than NaN, so lets do that until real models force us to do otherwise
-                    f64::NAN
+
+                // If no ranges, handle as normal subscript
+                if !has_range {
+                    let mut index = 0;
+                    let max_bounds = bounds.iter().product();
+                    let mut ok = true;
+                    assert_eq!(indices.len(), bounds.len());
+                    for (i, rhs) in indices.into_iter().enumerate() {
+                        let bounds = bounds[i];
+                        let one_index = rhs.floor() as usize;
+                        if one_index == 0 || one_index > bounds {
+                            ok = false;
+                            break;
+                        } else {
+                            index *= bounds;
+                            index += one_index - 1;
+                        }
+                    }
+                    if !ok || index > max_bounds {
+                        // 3.7.1 Arrays: If a subscript expression results in an invalid subscript index (i.e., it is out of range), a zero (0) MUST be returned[10]
+                        // note 10: Note this can be NaN if so specified in the <uses_arrays> tag of the header options block
+                        // 0 makes less sense than NaN, so lets do that until real models force us to do otherwise
+                        f64::NAN
+                    } else {
+                        self.curr[self.off + *off + index]
+                    }
                 } else {
-                    self.curr[self.off + *off + index]
+                    // Range case already handled above with early return
+                    unreachable!()
                 }
             }
             Expr::AssignCurr(off, r) => {
@@ -480,7 +521,7 @@ impl ModuleEvaluator<'_> {
         // This handles expressions like SUM(a[*]+h[*]) where arrays have different dimensions
 
         match expr {
-            Expr::Op2(_op, left, right, _) => {
+            Expr::Op2(_op, _left, _right, _) => {
                 // For now, directly handle the cross-product case without needing extract_array_info
                 let mut results = Vec::new();
                 self.eval_cross_product_operation(expr, &mut results);
@@ -650,7 +691,7 @@ impl ModuleEvaluator<'_> {
     fn eval_with_array_index(&mut self, expr: &Expr, array_offset: usize, index: usize) -> f64 {
         // For now, handle simple cases directly
         match expr {
-            Expr::Subscript(off, indices, _bounds, _) => {
+            Expr::Subscript(off, _indices, _bounds, _) => {
                 if *off == array_offset {
                     // This is the array we're substituting - return the specific element
                     self.curr[self.off + *off + index]

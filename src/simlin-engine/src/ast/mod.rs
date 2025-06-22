@@ -9,9 +9,7 @@ pub mod expr2;
 // Re-export all public types for backward compatibility
 pub use expr0::{Expr0, IndexExpr0};
 pub use expr1::{Expr1, IndexExpr1};
-pub use expr2::{
-    BinaryOp, UnaryOp,
-};
+pub use expr2::{BinaryOp, UnaryOp};
 
 // Re-export Loc for convenience
 pub use crate::builtins::Loc;

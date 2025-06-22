@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler" time_units="Month">
+        <start>0</start>
+        <stop>10</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="dim1">
+            <elem name="a"></elem>
+            <elem name="b"></elem>
+            <elem name="c"></elem>
+            <elem name="d"></elem>
+        </dim>
+        <dim name="dim2">
+            <elem name="e"></elem>
+            <elem name="f"></elem>
+            <elem name="g"></elem>
+            <elem name="h"></elem>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="scalar_and_scalar">
+                <eqn>( IF Time &gt; 5 and Time &lt; 8 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="scalar_and_array">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                </dimensions>
+                <eqn>( IF Time &gt; 5 and array_1d[dim1]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="not_array">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                </dimensions>
+                <eqn>( IF  not array_1d[dim1]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array1d_or_array2d">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <eqn>( IF array_1d[dim1]*Time &gt; 5 or array_2d[dim1, dim2]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array1d_and_array2d">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <eqn>( IF array_1d[dim1]*Time &gt; 5 and array_2d[dim1, dim2]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array1d_and_array1db">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <eqn>( IF array_1d[dim1]*Time &gt; 5 and array_1db[dim2]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array_2d_or_array_1db">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <eqn>( IF array_2d[dim1, dim2]*Time &gt; 5 or array_1db[dim2]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array_1db">
+                <dimensions>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <element subscript="e">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="f">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="g">
+                    <eqn>20</eqn>
+                </element>
+                <element subscript="h">
+                    <eqn>1</eqn>
+                </element>
+            </aux>
+            <aux name="array_1d_or_array_1d">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                </dimensions>
+                <eqn>( IF array_1d[dim1]*Time &gt; 5 or array_1d[dim1]*Time &lt; 10 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="scalar_or_array">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                </dimensions>
+                <eqn>( IF Time &gt; 5 or array_1d[dim1]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array_2d_and_array_1db">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <eqn>( IF array_2d[dim1, dim2]*Time &gt; 5 and array_1db[dim2]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array_1d_and_array_1d">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                </dimensions>
+                <eqn>( IF array_1d[dim1]*Time &gt; 5 and array_1d[dim1]*Time &lt; 10 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array1d_or_array1db">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <eqn>( IF array_1d[dim1]*Time &gt; 5 or array_1db[dim2]*Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="not_and_or">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <eqn>( IF ( not Time &gt; 5 or array_1d[dim1]*Time &gt; 5) and ( not array_2d[dim1, dim2]*Time &gt; 5 and array_1db[dim2] &gt; 5) THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="scalar_or_scalar">
+                <eqn>( IF Time &lt; 5 or Time &gt; 8 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array_2d">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                    <dim name="dim2"></dim>
+                </dimensions>
+                <element subscript="a,e">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="a,f">
+                    <eqn>6</eqn>
+                </element>
+                <element subscript="a,g">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="a,h">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="b,e">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="b,f">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="b,g">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="b,h">
+                    <eqn>5</eqn>
+                </element>
+                <element subscript="c,e">
+                    <eqn>4</eqn>
+                </element>
+                <element subscript="c,f">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="c,g">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="c,h">
+                    <eqn>7</eqn>
+                </element>
+                <element subscript="d,e">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="d,f">
+                    <eqn>8</eqn>
+                </element>
+                <element subscript="d,g">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="d,h">
+                    <eqn>6</eqn>
+                </element>
+            </aux>
+            <aux name="not_scalar">
+                <eqn>( IF  not Time &gt; 5 THEN 0 ELSE 1 )</eqn>
+            </aux>
+            <aux name="array_1d">
+                <dimensions>
+                    <dim name="dim1"></dim>
+                </dimensions>
+                <element subscript="a">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="b">
+                    <eqn>0</eqn>
+                </element>
+                <element subscript="c">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="d">
+                    <eqn>10</eqn>
+                </element>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <aux name="array_1d" x="246" y="200" label_side="bottom"></aux>
+                <aux name="array_2d" x="248" y="332" label_side="bottom"></aux>
+                <aux name="array_1db" x="240" y="273" label_side="bottom"></aux>
+                <aux name="scalar_or_array" x="396" y="162" label_side="bottom"></aux>
+                <aux name="scalar_or_scalar" x="397" y="134" label_side="bottom"></aux>
+                <aux name="array_1d_or_array_1d" x="396" y="212" label_side="bottom"></aux>
+                <aux name="array1d_or_array1db" x="396" y="263" label_side="bottom"></aux>
+                <aux name="array1d_or_array2d" x="397" y="318" label_side="bottom"></aux>
+                <aux name="array_2d_or_array_1db" x="394" y="378" label_side="bottom"></aux>
+                <connector angle="15.411002346188639">
+                    <from>array_1d</from>
+                    <to>scalar_or_array</to>
+                </connector>
+                <connector angle="-2.8357099649533666">
+                    <from>array_1d</from>
+                    <to>array_1d_or_array_1d</to>
+                </connector>
+                <connector angle="-21.612904876230573">
+                    <from>array_1d</from>
+                    <to>array1d_or_array1db</to>
+                </connector>
+                <connector angle="-37.99331721833346">
+                    <from>array_1d</from>
+                    <to>array1d_or_array2d</to>
+                </connector>
+                <connector angle="4.426000593779861">
+                    <from>array_1db</from>
+                    <to>array1d_or_array1db</to>
+                </connector>
+                <connector angle="-16.514694429413453">
+                    <from>array_2d</from>
+                    <to>array_2d_or_array_1db</to>
+                </connector>
+                <connector angle="-33.9553783505354">
+                    <from>array_1db</from>
+                    <to>array_2d_or_array_1db</to>
+                </connector>
+                <connector angle="5.790888529548283">
+                    <from>array_2d</from>
+                    <to>array1d_or_array2d</to>
+                </connector>
+                <aux name="array_2d_and_array_1db" x="112" y="377" label_side="bottom"></aux>
+                <aux name="array1d_and_array2d" x="100" y="306" label_side="bottom"></aux>
+                <aux name="array1d_and_array1db" x="106" y="251" label_side="bottom"></aux>
+                <aux name="array_1d_and_array_1d" x="111" y="205" label_side="bottom"></aux>
+                <aux name="scalar_and_array" x="115" y="165" label_side="bottom"></aux>
+                <aux name="scalar_and_scalar" x="119" y="132" label_side="bottom"></aux>
+                <connector angle="165.31308984071387">
+                    <from>array_1d</from>
+                    <to>scalar_and_array</to>
+                </connector>
+                <connector angle="-179.69968215344022">
+                    <from>array_1d</from>
+                    <to>array_1d_and_array_1d</to>
+                </connector>
+                <connector angle="-161.66747195119757">
+                    <from>array_1d</from>
+                    <to>array1d_and_array1db</to>
+                </connector>
+                <connector angle="-145.08771866447486">
+                    <from>array_1d</from>
+                    <to>array1d_and_array2d</to>
+                </connector>
+                <connector angle="169.5837402975388">
+                    <from>array_1db</from>
+                    <to>array1d_and_array1db</to>
+                </connector>
+                <connector angle="-141.87554962874162">
+                    <from>array_1db</from>
+                    <to>array_2d_and_array_1db</to>
+                </connector>
+                <connector angle="169.86942668450536">
+                    <from>array_2d</from>
+                    <to>array1d_and_array2d</to>
+                </connector>
+                <connector angle="-163.58482164270657">
+                    <from>array_2d</from>
+                    <to>array_2d_and_array_1db</to>
+                </connector>
+                <aux name="not_scalar" x="147" y="465" label_side="bottom"></aux>
+                <aux name="not_array" x="334" y="463" label_side="bottom"></aux>
+                <connector angle="-71.8854131111176">
+                    <from>array_1d</from>
+                    <to>not_array</to>
+                </connector>
+                <aux name="not_and_or" x="274" y="120" label_side="bottom"></aux>
+                <connector angle="73.06459310772078">
+                    <from>array_1d</from>
+                    <to>not_and_or</to>
+                </connector>
+                <connector angle="79.70919880482893">
+                    <from>array_1db</from>
+                    <to>not_and_or</to>
+                </connector>
+                <connector angle="84.35892583231555">
+                    <from>array_2d</from>
+                    <to>not_and_or</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

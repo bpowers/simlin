@@ -198,12 +198,12 @@ Each array built-in will have:
 
 1. **Dimension Inference Pass**
    ```rust
-   fn infer_dimensions(expr: Expr1, ctx: &DimensionContext) -> Result<Expr>
+   fn infer_dimensions(expr: Expr1, ctx: &DimensionContext) -> Result<Expr2>
    ```
-   - Converts `Expr1` to dimension-annotated `Expr`
+   - Converts `Expr1` to dimension-annotated `Expr2`
    - Propagates dimensions bottom-up through AST
    - Validates dimension compatibility
-   - Similar to existing `Expr::from(Expr0)` transformation
+   - Similar to existing `Expr1::from(Expr0)` transformation
 
 2. **Array Operation Lowering**
    ```rust

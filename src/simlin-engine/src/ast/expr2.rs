@@ -720,10 +720,21 @@ impl Expr2 {
             let spec = match idx {
                 IndexExpr2::Wildcard(_, _) => SliceSpec::Wildcard,
                 IndexExpr2::StarRange(name, _, _) => SliceSpec::DimName(name.clone()),
-                IndexExpr2::Range(_start, _end, _, _) => {
-                    // For now, assume constant ranges
-                    // In a real implementation, we'd need to evaluate these
-                    SliceSpec::Range(0, 10) // Placeholder
+                IndexExpr2::Range(start, end, _, _) => {
+                    // For range subscripts, we keep the dimension but reduce its size
+                    // If we have constant expressions, we can compute the exact range
+                    if let (Expr2::Const(_, start_val, _, _), Expr2::Const(_, end_val, _, _)) =
+                        (start, end)
+                    {
+                        // Convert from 1-based to 0-based indexing
+                        let start_idx = (*start_val as usize).saturating_sub(1);
+                        let end_idx = *end_val as usize;
+                        SliceSpec::Range(start_idx, end_idx)
+                    } else {
+                        // Non-constant ranges: assume full dimension for now
+                        // This is conservative but safe
+                        SliceSpec::Wildcard
+                    }
                 }
                 IndexExpr2::Expr(_) => SliceSpec::Index(0), // Placeholder
             };
