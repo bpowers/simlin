@@ -330,7 +330,7 @@ impl Vm {
 **Phase 4: Array Expressions** 
 - ✅ Element-wise operations on arrays - *Working: `SUM(a[*]*b[*]/DT)`*
 - ✅ Broadcasting for compatible dimensions - *Heuristic-based approach working*
-- ⚠️ Array transposition - *Not implemented*
+- ✅ Array transposition - *Fully implemented with XMILE-compliant `'` operator*
 - ⚠️ Optimize common patterns - *Basic optimization only*
 
 ### 🚧 What's Left To Do
@@ -359,9 +359,13 @@ impl Vm {
    - ✅ Broadcasting follows XMILE-adapted NumPy rules with named dimension validation
    - ✅ Compile-time dimension checking with proper error reporting using `MismatchedDimensions`
 
-5. **Array Transposition**: Implement array reshape and transpose operations
-   - Support for dimension reordering
-   - Integration with existing subscript system
+5. **✅ Array Transposition**: ✅ **COMPLETED** - Implement array reshape and transpose operations
+   - ✅ Added transpose operator (`'`) with highest precedence in parser
+   - ✅ Implemented `DimensionVec::transpose()` method that reverses dimension order
+   - ✅ Added dimension inference support for transpose operations
+   - ✅ Comprehensive test coverage (scalar, 1D, 2D, 3D, double transpose)
+   - ✅ LaTeX rendering support for `a'` notation
+   - ✅ Full XMILE v1.0 compliance for transpose operator semantics
 
 6. **Star Ranges**: Implement `[*:DimName]` syntax for dimension-specific wildcards
    - Currently parsed but not fully implemented
@@ -523,4 +527,55 @@ This foundation enables compile-time dimension checking and provides the infrast
 
 This design provides a solid foundation for implementing full array support in simlin-engine. By augmenting the AST with dimension information and implementing systematic dimension propagation, we can provide excellent compile-time checking and clear error messages while maintaining compatibility with the XMILE specification.
 
-**With the recent completion of the Dimension Type System, the project now has robust foundations for type-safe array operations and is well-positioned for the remaining implementation work on bytecode VM improvements and advanced array functionality.**
+### ✅ Array Transposition - COMPLETED
+
+**Major achievement**: Successfully implemented XMILE-compliant array transposition support (item #5 from "What's Left To Do").
+
+**Key accomplishments**:
+
+1. **Parser Integration**: Added transpose operator (`'`) with correct precedence in LALRPOP grammar
+   - Highest precedence, associating correctly with function calls and subscripts
+   - Proper parsing of expressions like `a'`, `matrix[1:3, *]'`, and `(a + b)'`
+
+2. **AST Support**: Added `UnaryOp::Transpose` variant and dimension handling
+   - `DimensionVec::transpose()` method reverses dimension order
+   - Dimension inference correctly handles transpose operations
+   - Integration with both tree-walking interpreter and bytecode VM
+
+3. **Comprehensive Testing**: Full test coverage with 5 dimension tests and parsing validation
+   - Scalar transpose (identity operation)
+   - 1D array transpose (identity operation)  
+   - 2D array transpose (dimension reversal)
+   - 3D array transpose (full dimension reversal)
+   - Double transpose returns to original
+
+4. **XMILE Compliance**: Follows XMILE v1.0 specification section 3.7.1.2
+   - Transpose reverses all dimensions (not just matrix transpose)
+   - Proper handling of scalar edge cases
+   - Compatible with XMILE dimension ordering semantics
+
+### ✅ AST Refactoring - COMPLETED
+
+**Major code organization improvement**: Refactored monolithic `ast.rs` (2,477 lines) into modular structure.
+
+**Refactoring details**:
+
+1. **Module Structure**: Split AST into logical components
+   - `ast/expr0.rs` - Initial parsed expressions (`Expr0`, `IndexExpr0`)
+   - `ast/expr1.rs` - Builtin-resolved expressions (`Expr1`, `IndexExpr1`)
+   - `ast/expr2.rs` - Dimension-annotated expressions (`Expr`, `IndexExpr`) + dimension types
+   - `ast/mod.rs` - Visitors, utilities, and re-exports for backward compatibility
+
+2. **Preserved Functionality**: Maintained complete API compatibility
+   - All existing imports continue to work unchanged
+   - No functional changes to AST behavior
+   - All 97 tests continue passing
+
+3. **Improved Maintainability**: Better code organization
+   - Logical separation of AST transformation stages
+   - Dimension types co-located with final expression stage
+   - Easier navigation and modification of AST-related code
+
+This refactoring enables easier future development of array features while maintaining the existing codebase's stability.
+
+**With the recent completion of Array Transposition, AST Refactoring, and the Dimension Type System, the project now has robust foundations for type-safe array operations and is well-positioned for the remaining implementation work on bytecode VM improvements and advanced array functionality.**
