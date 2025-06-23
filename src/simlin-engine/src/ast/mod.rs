@@ -15,9 +15,9 @@ mod expr1;
 mod expr2;
 
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
-pub use expr1::{Expr1, IndexExpr1};
+pub use expr1::Expr1;
 #[allow(unused_imports)]
-pub use expr2::Expr2;
+pub use expr2::{Expr2, IndexExpr2};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {
@@ -26,7 +26,7 @@ pub enum Ast<Expr> {
     Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
 }
 
-impl Ast<Expr1> {
+impl Ast<Expr2> {
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Ast::Scalar(expr) => expr.get_var_loc(ident),
@@ -51,19 +51,24 @@ impl Ast<Expr1> {
     }
 }
 
-pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr1>> {
+pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
     match ast {
         Ast::Scalar(expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
+            .and_then(Expr2::from)
             .map(Ast::Scalar),
         Ast::ApplyToAll(dims, expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
+            .and_then(Expr2::from)
             .map(|expr| Ast::ApplyToAll(dims, expr)),
         Ast::Arrayed(dims, elements) => {
-            let elements: EquationResult<HashMap<ElementName, Expr1>> = elements
+            let elements: EquationResult<HashMap<ElementName, Expr2>> = elements
                 .into_iter()
                 .map(|(id, expr)| {
-                    match Expr1::from(expr).map(|expr| expr.constify_dimensions(scope)) {
+                    match Expr1::from(expr)
+                        .map(|expr| expr.constify_dimensions(scope))
+                        .and_then(Expr2::from)
+                    {
                         Ok(expr) => Ok((id, expr)),
                         Err(err) => Err(err),
                     }
@@ -118,8 +123,35 @@ fn paren_if_necessary(parent: &Expr0, child: &Expr0, eqn: String) -> String {
     }
 }
 
-fn paren_if_necessary1(parent: &Expr1, child: &Expr1, eqn: String) -> String {
-    if child_needs_parens!(Expr1, parent, child, eqn) {
+macro_rules! child_needs_parens2(
+    ($expr:tt, $parent:expr, $child:expr, $eqn:expr) => {{
+        match $parent {
+            // no children so doesn't matter
+            $expr::Const(_, _, _) | $expr::Var(_, _, _) => false,
+            // children are comma separated, so no ambiguity possible
+            $expr::App(_, _, _) | $expr::Subscript(_, _, _, _) => false,
+            $expr::Op1(_, _, _, _) => matches!($child, $expr::Op2(_, _, _, _, _)),
+            $expr::Op2(parent_op, _, _, _, _) => match $child {
+                $expr::Const(_, _, _)
+                | $expr::Var(_, _, _)
+                | $expr::App(_, _, _)
+                | $expr::Subscript(_, _, _, _)
+                | $expr::If(_, _, _, _, _)
+                | $expr::Op1(_, _, _, _) => false,
+                // 3 * 2 + 1
+                $expr::Op2(child_op, _, _, _, _) => {
+                    // if we have `3 * (2 + 3)`, the parent's precedence
+                    // is higher than the child and we need enclosing parens
+                    parent_op.precedence() > child_op.precedence()
+                }
+            },
+            $expr::If(_, _, _, _, _) => false,
+        }
+    }}
+);
+
+fn paren_if_necessary1(parent: &Expr2, child: &Expr2, eqn: String) -> String {
+    if child_needs_parens2!(Expr2, parent, child, eqn) {
         format!("({})", eqn)
     } else {
         eqn
@@ -280,29 +312,29 @@ fn test_print_eqn() {
 struct LatexVisitor {}
 
 impl LatexVisitor {
-    fn walk_index(&mut self, expr: &IndexExpr1) -> String {
+    fn walk_index(&mut self, expr: &IndexExpr2) -> String {
         match expr {
-            IndexExpr1::Wildcard(_) => "*".to_string(),
-            IndexExpr1::StarRange(id, _) => format!("*:{}", id),
-            IndexExpr1::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
-            IndexExpr1::Expr(e) => self.walk(e),
+            IndexExpr2::Wildcard(_) => "*".to_string(),
+            IndexExpr2::StarRange(id, _) => format!("*:{}", id),
+            IndexExpr2::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
+            IndexExpr2::Expr(e) => self.walk(e),
         }
     }
 
-    fn walk(&mut self, expr: &Expr1) -> String {
+    fn walk(&mut self, expr: &Expr2) -> String {
         match expr {
-            Expr1::Const(s, n, _) => {
+            Expr2::Const(s, n, _) => {
                 if n.is_nan() {
                     "\\mathrm{{NaN}}".to_owned()
                 } else {
                     s.clone()
                 }
             }
-            Expr1::Var(id, _) => {
+            Expr2::Var(id, _, _) => {
                 let id = str::replace(id, "_", "\\_");
                 format!("\\mathrm{{{}}}", id)
             }
-            Expr1::App(builtin, _) => {
+            Expr2::App(builtin, _, _) => {
                 let mut args: Vec<String> = vec![];
                 walk_builtin_expr(builtin, |contents| {
                     let arg = match contents {
@@ -314,11 +346,11 @@ impl LatexVisitor {
                 let func = builtin.name();
                 format!("\\operatorname{{{}}}({})", func, args.join(", "))
             }
-            Expr1::Subscript(id, args, _) => {
+            Expr2::Subscript(id, args, _, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
                 format!("{}[{}]", id, args.join(", "))
             }
-            Expr1::Op1(op, l, _) => {
+            Expr2::Op1(op, l, _, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));
                 let op: &str = match op {
                     UnaryOp::Positive => "+",
@@ -327,7 +359,7 @@ impl LatexVisitor {
                 };
                 format!("{}{}", op, l)
             }
-            Expr1::Op2(op, l, r, _) => {
+            Expr2::Op2(op, l, r, _, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));
                 let r = paren_if_necessary1(expr, r, self.walk(r));
                 let op: &str = match op {
@@ -352,7 +384,7 @@ impl LatexVisitor {
                 };
                 format!("{} {} {}", l, op, r)
             }
-            Expr1::If(cond, t, f, _) => {
+            Expr2::If(cond, t, f, _, _) => {
                 let cond = self.walk(cond);
                 let t = self.walk(t);
                 let f = self.walk(f);
@@ -369,7 +401,7 @@ impl LatexVisitor {
     }
 }
 
-pub fn latex_eqn(expr: &Expr1) -> String {
+pub fn latex_eqn(expr: &Expr2) -> String {
     let mut visitor = LatexVisitor {};
     visitor.walk(expr)
 }
@@ -378,86 +410,96 @@ pub fn latex_eqn(expr: &Expr1) -> String {
 fn test_latex_eqn() {
     assert_eq!(
         "\\mathrm{a\\_c} + \\mathrm{b}",
-        latex_eqn(&Expr1::Op2(
+        latex_eqn(&Expr2::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var("a_c".to_string(), Loc::new(1, 2))),
-            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(1, 2))),
+            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            None,
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "\\mathrm{a\\_c} \\cdot \\mathrm{b}",
-        latex_eqn(&Expr1::Op2(
+        latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr1::Var("a_c".to_string(), Loc::new(1, 2))),
-            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(1, 2))),
+            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            None,
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "(\\mathrm{a\\_c} - 1) \\cdot \\mathrm{b}",
-        latex_eqn(&Expr1::Op2(
+        latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr1::Op2(
+            Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr1::Var("a_c".to_string(), Loc::new(0, 0))),
-                Box::new(Expr1::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(0, 0))),
+                Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                None,
                 Loc::new(0, 0),
             )),
-            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            None,
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "\\mathrm{b} \\cdot (\\mathrm{a\\_c} - 1)",
-        latex_eqn(&Expr1::Op2(
+        latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr1::Var("b".to_string(), Loc::new(5, 6))),
-            Box::new(Expr1::Op2(
+            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr1::Var("a_c".to_string(), Loc::new(0, 0))),
-                Box::new(Expr1::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(0, 0))),
+                Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
+                None,
                 Loc::new(0, 0),
             )),
+            None,
             Loc::new(0, 7),
         ))
     );
     assert_eq!(
         "-\\mathrm{a}",
-        latex_eqn(&Expr1::Op1(
+        latex_eqn(&Expr2::Op1(
             UnaryOp::Negative,
-            Box::new(Expr1::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
+            None,
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "\\neg \\mathrm{a}",
-        latex_eqn(&Expr1::Op1(
+        latex_eqn(&Expr2::Op1(
             UnaryOp::Not,
-            Box::new(Expr1::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
+            None,
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "+\\mathrm{a}",
-        latex_eqn(&Expr1::Op1(
+        latex_eqn(&Expr2::Op1(
             UnaryOp::Positive,
-            Box::new(Expr1::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
+            None,
             Loc::new(0, 2),
         ))
     );
     assert_eq!(
         "4.7",
-        latex_eqn(&Expr1::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
+        latex_eqn(&Expr2::Const("4.7".to_string(), 4.7, Loc::new(0, 3)))
     );
     assert_eq!(
         "\\operatorname{lookup}(\\mathrm{a}, 1.0)",
-        latex_eqn(&Expr1::App(
+        latex_eqn(&Expr2::App(
             crate::builtins::BuiltinFn::Lookup(
                 "a".to_string(),
-                Box::new(Expr1::Const("1.0".to_owned(), 1.0, Default::default())),
+                Box::new(Expr2::Const("1.0".to_owned(), 1.0, Default::default())),
                 Default::default(),
             ),
+            None,
             Loc::new(0, 14),
         ))
     );

@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(test)]
 use crate::ast::Loc;
-use crate::ast::{Ast, Expr0, Expr1, IndexExpr1};
+use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{DimensionName, EquationError, EquationResult, Ident, UnitError};
@@ -34,7 +34,7 @@ pub struct ModuleInput {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Variable<MI = ModuleInput, E = Expr1> {
+pub enum Variable<MI = ModuleInput, E = Expr2> {
     Stock {
         ident: Ident,
         init_ast: Option<Ast<E>>,
@@ -502,13 +502,13 @@ struct IdentifierSetVisitor<'a> {
 }
 
 impl IdentifierSetVisitor<'_> {
-    fn walk_index(&mut self, e: &IndexExpr1) {
+    fn walk_index(&mut self, e: &IndexExpr2) {
         match e {
-            IndexExpr1::Wildcard(_) => {}
-            IndexExpr1::StarRange(_, _) => {}
-            IndexExpr1::Range(_, _, _) => {}
-            IndexExpr1::Expr(expr) => {
-                if let Expr1::Var(arg_ident, _) = expr {
+            IndexExpr2::Wildcard(_) => {}
+            IndexExpr2::StarRange(_, _) => {}
+            IndexExpr2::Range(_, _, _) => {}
+            IndexExpr2::Expr(expr) => {
+                if let Expr2::Var(arg_ident, _, _) = expr {
                     let mut is_subscript_or_dimension = false;
                     // TODO: this should be optimized
                     for dim in self.dimensions.iter() {
@@ -531,13 +531,13 @@ impl IdentifierSetVisitor<'_> {
         }
     }
 
-    fn walk(&mut self, e: &Expr1) {
+    fn walk(&mut self, e: &Expr2) {
         match e {
-            Expr1::Const(_, _, _) => (),
-            Expr1::Var(id, _) => {
+            Expr2::Const(_, _, _) => (),
+            Expr2::Var(id, _, _) => {
                 self.identifiers.insert(id.clone());
             }
-            Expr1::App(builtin, _) => {
+            Expr2::App(builtin, _, _) => {
                 walk_builtin_expr(builtin, |contents| match contents {
                     BuiltinContents::Ident(id, _loc) => {
                         self.identifiers.insert(id.to_owned());
@@ -545,20 +545,20 @@ impl IdentifierSetVisitor<'_> {
                     BuiltinContents::Expr(expr) => self.walk(expr),
                 });
             }
-            Expr1::Subscript(id, args, _) => {
+            Expr2::Subscript(id, args, _, _) => {
                 self.identifiers.insert(id.clone());
                 args.iter().for_each(|arg| self.walk_index(arg));
             }
-            Expr1::Op2(_, l, r, _) => {
+            Expr2::Op2(_, l, r, _, _) => {
                 self.walk(l);
                 self.walk(r);
             }
-            Expr1::Op1(_, l, _) => {
+            Expr2::Op1(_, l, _, _) => {
                 self.walk(l);
             }
-            Expr1::If(cond, t, f, _) => {
+            Expr2::If(cond, t, f, _, _) => {
                 if let Some(module_inputs) = self.module_inputs {
-                    if let Expr1::App(BuiltinFn::IsModuleInput(ident, _), _) = cond.as_ref() {
+                    if let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref() {
                         if module_inputs.contains(ident) {
                             self.walk(t);
                         } else {
@@ -577,7 +577,7 @@ impl IdentifierSetVisitor<'_> {
 }
 
 pub fn identifier_set(
-    ast: &Ast<Expr1>,
+    ast: &Ast<Expr2>,
     dimensions: &[Dimension],
     module_inputs: Option<&BTreeSet<Ident>>,
 ) -> HashSet<Ident> {

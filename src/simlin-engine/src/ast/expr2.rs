@@ -4,9 +4,9 @@
 
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
-use crate::builtins::{BuiltinFn, Loc};
+use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
 use crate::common::{EquationResult, Ident};
-use crate::dimensions::{DimensionRange};
+use crate::dimensions::DimensionRange;
 
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
@@ -31,6 +31,26 @@ impl IndexExpr2 {
         };
 
         Ok(expr)
+    }
+
+    pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
+        match self {
+            IndexExpr2::Wildcard(_) => None,
+            IndexExpr2::StarRange(v, loc) => {
+                if v == ident {
+                    Some(*loc)
+                } else {
+                    None
+                }
+            }
+            IndexExpr2::Range(l, r, _) => {
+                if let Some(loc) = l.get_var_loc(ident) {
+                    return Some(loc);
+                }
+                r.get_var_loc(ident)
+            }
+            IndexExpr2::Expr(e) => e.get_var_loc(ident),
+        }
     }
 }
 
@@ -156,5 +176,66 @@ impl Expr2 {
             ),
         };
         Ok(expr)
+    }
+
+    pub(crate) fn get_loc(&self) -> Loc {
+        match self {
+            Expr2::Const(_, _, loc) => *loc,
+            Expr2::Var(_, _, loc) => *loc,
+            Expr2::App(_, _, loc) => *loc,
+            Expr2::Subscript(_, _, _, loc) => *loc,
+            Expr2::Op1(_, _, _, loc) => *loc,
+            Expr2::Op2(_, _, _, _, loc) => *loc,
+            Expr2::If(_, _, _, _, loc) => *loc,
+        }
+    }
+
+    pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
+        match self {
+            Expr2::Const(_s, _n, _loc) => None,
+            Expr2::Var(v, _, loc) if v == ident => Some(*loc),
+            Expr2::Var(_v, _, _loc) => None,
+            Expr2::App(builtin, _, _loc) => {
+                let mut loc: Option<Loc> = None;
+                walk_builtin_expr(builtin, |contents| match contents {
+                    BuiltinContents::Ident(id, id_loc) => {
+                        if ident == id {
+                            loc = Some(id_loc);
+                        }
+                    }
+                    BuiltinContents::Expr(expr) => {
+                        if loc.is_none() {
+                            loc = expr.get_var_loc(ident);
+                        }
+                    }
+                });
+                loc
+            }
+            Expr2::Subscript(v, _args, _, loc) if v == ident => Some(*loc),
+            Expr2::Subscript(_v, args, _, _loc) => {
+                for arg in args {
+                    if let Some(loc) = arg.get_var_loc(ident) {
+                        return Some(loc);
+                    }
+                }
+                None
+            }
+            Expr2::Op1(_op, l, _, _loc) => l.get_var_loc(ident),
+            Expr2::Op2(_op, l, r, _, _loc) => {
+                if let Some(loc) = l.get_var_loc(ident) {
+                    return Some(loc);
+                }
+                r.get_var_loc(ident)
+            }
+            Expr2::If(c, t, f, _, _loc) => {
+                if let Some(loc) = c.get_var_loc(ident) {
+                    return Some(loc);
+                }
+                if let Some(loc) = t.get_var_loc(ident) {
+                    return Some(loc);
+                }
+                f.get_var_loc(ident)
+            }
+        }
     }
 }
