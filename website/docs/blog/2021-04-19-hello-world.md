@@ -1,11 +1,13 @@
 ---
-slug: hihi
+date: 2021-04-19
 title: Hi Hi
+tag:
+  - introduction
+  - announcement
 author: Bobby Powers
-author_title: Simlin developer
-author_url: https://bpowers.net
-author_image_url: https://avatars0.githubusercontent.com/u/854918?s=400&v=4
 ---
+
+# Hi Hi
 
 Simlin is an web-first system dynamics modeling editor and engine.
 The goals are to:

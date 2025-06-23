@@ -1,10 +1,4 @@
 import React from 'react';
-import { renderToString } from 'react-dom/server';
-import clsx from 'clsx';
-import Layout from '@theme/Layout';
-import Link from '@docusaurus/Link';
-import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
-import useBaseUrl from '@docusaurus/useBaseUrl';
 import { toUint8Array } from 'js-base64';
 import { Map, Set } from 'immutable';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
@@ -14,9 +8,8 @@ import { UID, ViewElement, Project } from '@system-dynamics/core/datamodel';
 import { Point } from '@system-dynamics/diagram/drawing/common';
 import { Canvas } from '@system-dynamics/diagram/drawing/Canvas';
 
-import styles from './styles.module.css';
-
 const logisticGrowthProject = 'Cg9sb2dpc3RpYy1ncm93dGgSFBEAAAAAAABZQBoJCQAAAAAAAPA/GrYGCgRtYWluGiUKIwoKcG9wdWxhdGlvbioObmV0X2JpcnRoX3JhdGVCBQoDCgE1GjsSOQoObmV0X2JpcnRoX3JhdGVCJwolCiNmcmFjdGlvbmFsX2dyb3d0aF9yYXRlICogcG9wdWxhdGlvbhogGh4KE21heGltdW1fZ3Jvd3RoX3JhdGUyBwoFCgMuMTIaHxodChFjYXJyeWluZ19jYXBhY2l0eTIICgYKBDEwMDAaXhpcChZmcmFjdGlvbmFsX2dyb3d0aF9yYXRlMkIKQAo+bWF4aW11bV9ncm93dGhfcmF0ZSAqICgxIC0gZnJhY3Rpb25fb2ZfY2FycnlpbmdfY2FwYWNpdHlfdXNlZCkaSBpGCiJmcmFjdGlvbl9vZl9jYXJyeWluZ19jYXBhY2l0eV91c2VkMiAKHgoccG9wdWxhdGlvbi9jYXJyeWluZ19jYXBhY2l0eSLcAxoiEiAKClBvcHVsYXRpb24QARkAAABAM9OCQCEAAADgzDxwQBpSGlAKDm5ldCBiaXJ0aCByYXRlEAIZqvbqaC4ygEAhAAAAwJkpcEAyFAkAAADAzIx8QBEAAADAmSlwQBgNMhQJAAAAQDMfgkARAAAAwJkpcEAYARotCisKE21heGltdW0KZ3Jvd3RoIHJhdGUQAxnNzMxMM/N8QCEAAABACgd5QCgBGisKKQoRY2FycnlpbmcgY2FwYWNpdHkQBBmZmZlZuF6EQCFnZmbm1vN4QCgEGjEKLwoXZnJhY3Rpb25hbCAKZ3Jvd3RoIHJhdGUQBRkAAAAAACB/QCEAAABAM4N1QCgBGjwKOgoiZnJhY3Rpb24gb2YgY2FycnlpbmcKY2FwYWNpdHkgdXNlZBAGGQAAAIBmFoNAIQAAAKCZiXVAKAQaESIPCAcQBBgGIWZANqZnymxAGhEiDwgIEAEYBiEgMB5yvNFIQBoRIg8ICRAGGAUhjENNVBh1YEAaESIPCAoQAxgFIbDL4YNiz3JAGhEiDwgLEAUYAiHS1VhKsiVuQBoRIg8IDBABGAIh4KA0JrmkWUAaGDoWCA0QAhkAAADAzIx8QCEAAADAmSlwQCIAKQAAAAAAAPA/';
+
 const logisticGrowthData = Map<string, Series>([
   ["time", { name: "time", time: (new Float64Array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100])) as Readonly<Float64Array>, values: (new Float64Array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100])) as Readonly<Float64Array> } as const ] as const,
   ["carrying_capacity", { name: "carrying_capacity", time: (new Float64Array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100])) as Readonly<Float64Array>, values: (new Float64Array([1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000])) as Readonly<Float64Array> } as const ] as const,
@@ -27,24 +20,15 @@ const logisticGrowthData = Map<string, Series>([
   ["population", { name: "population", time: (new Float64Array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100])) as Readonly<Float64Array>, values: (new Float64Array([5,5.5969999999999995,6.264880830919999,7.011956682811324,7.847491380366088,8.781800371494228,9.826362013941761,10.993938568763287,12.298707194784432,13.756401074319,15.384460574775176,17.20219404848698,19.2309474766956,21.494281652996904,24.018154954103128,26.831108936507587,29.96445300007697,33.45244314685495,37.332448410178316,41.64509681488388,46.43439074202342,51.747779313836276,57.63617291182701,64.1538822498956,71.35846164695506,79.31043343875528,88.07286806913673,97.71079262664232,108.29039986235219,119.87803056155268,132.538905163581,146.33558641737545,161.32616432520643,177.5621682887252,195.086229650485,213.92954076863418,234.10918385125285,255.62543271778324,278.45916122165875,302.56952003206544,327.89206470162117,354.33752773450067,381.791421035321,410.1146288584191,439.14510326498794,468.7007050501925,498.5831475464699,528.5829066499649,558.4848687436577,588.0744111590221,617.1435589309011,645.4968453230214,672.9565254831472,699.3668503182829,724.5971933975829,748.5439254837344,771.1310355363506,792.309590924629,812.0562032910461,830.3707144095554,847.2733373368178,862.8014848378117,877.0064947497492,889.9504270997301,901.7030668282987,912.3392243603874,921.9363880468524,930.5727501798895,938.3256029961926,945.2700828871556,951.4782292814355,957.0183182996234,961.9544291082535,966.3462017595256,970.2487481720613,973.7126819531744,976.7842373479821,979.5054522699625,981.9143948191679,984.045416747097,985.9294208902324,987.5941326398264,989.0643680576522,990.3622933252166,991.5076718793966,992.51809689744,993.409207804863,994.1948902432682,994.8874594981615,995.4978277899362,996.0356561085907,996.5094914528611,996.9268904405276,997.2945303073806,997.618308322544,997.9034306292091,998.1544914813288,998.3755437953663,998.5701618769671,998.7414971192841,998.8923274054299])) as Readonly<Float64Array> } as const ] as const,
 ] as Array<[string, Series]>);
 
-
-
-// const reliabilityProject = 'Eh4RAAAAAAAANEAaCwkAAAAAAAAQQBABMgZNb250aHManBwKBG1haW4aSgpICglpbmNpZGVudHMiCGluY2lkZW50KhJjcmVhdGluZ19pbmNpZGVudHMyFG1pdGlnYXRpbmdfaW5jaWRlbnRzOAFCBQoDCgE5Gk0KSwoJbWl0aWdhdGVkIghpbmNpZGVudCoUbWl0aWdhdGluZ19pbmNpZGVudHMyFXJlbWVkaWF0aW5nX2luY2lkZW50czgBQgUKAwoBMhqBARJ/ChJjcmVhdGluZ19pbmNpZGVudHMiD2luY2lkZW50L01vbnRoczgBQlYKVApSY2hhbmdlcyptYXJnaW5hbF9pbmNpZGVudHNfcGVyX2NoYW5nZSogZWZmZWN0X29mX3JlbWVkaWF0aW9uc19vbl9pbmNpZGVudF9jcmVhdGlvbhpsEmoKFG1pdGlnYXRpbmdfaW5jaWRlbnRzIg9pbmNpZGVudC9Nb250aHM4AUI/Cj0KO2RldmVsb3BlcnNfcmVxdWlyZWRfZm9yX2luY2lkZW50X21pdGlnYXRpb24qbWl0aWdhdGlvbl9yYXRlGisKKQoKZGV2ZWxvcGVycyIJZGV2ZWxvcGVyKgZoaXJpbmc4AUIGCgQKAjEwGiUSIwoGaGlyaW5nIhBkZXZlbG9wZXIvTW9udGhzOAFCBQoDCgE1GnASbgoHY2hhbmdlcyISbGluZXNvZmNvZGUvTW9udGhzOAFCTQpLCklhdmFpbGFibGVfZGV2ZWxvcGVyc19mb3JfcHJvZHVjdF93b3JrKm1hcmdpbmFsX3Byb2R1Y3Rpdml0eV9wZXJfZGV2ZWxvcGVyGjwKOgoZcHJvZHVjdF9jb21wcmVoZW5zaXZlbmVzcyILbGluZXNvZmNvZGUqB2NoYW5nZXM4AUIFCgMKATAaSxpJCiNtYXJnaW5hbF9wcm9kdWN0aXZpdHlfcGVyX2RldmVsb3BlciIbbGluZXNvZmNvZGUvZGV2ZWxvcGVyL21vbnRoMgUKAwoBMhqnARqkAQolYXZhaWxhYmxlX2RldmVsb3BlcnNfZm9yX3Byb2R1Y3Rfd29yayIJZGV2ZWxvcGVyMnAKbgpsTUFYKDAsICBEZXZlbG9wZXJzLWRldmVsb3BlcnNfcmVxdWlyZWRfZm9yX2luY2lkZW50X21pdGlnYXRpb24tZGV2ZWxvcGVyc19yZXF1aXJlZF9mb3JfaW5jaWRlbnRfcmVtZWRpYXRpb24pGkAaPgodbWFyZ2luYWxfaW5jaWRlbnRzX3Blcl9jaGFuZ2UiFGluY2lkZW50L2xpbmVzb2Zjb2RlMgcKBQoDMC4yGjgKNgoKcmVtZWRpYXRlZCIIaW5jaWRlbnQqFXJlbWVkaWF0aW5nX2luY2lkZW50czgBQgUKAwoBMRpvEm0KFXJlbWVkaWF0aW5nX2luY2lkZW50cyIPaW5jaWRlbnQvTW9udGhzOAFCQQo/Cj1kZXZlbG9wZXJzX3JlcXVpcmVkX2Zvcl9pbmNpZGVudF9yZW1lZGlhdGlvbipyZW1lZGlhdGlvbl9yYXRlGjUaMwogcmVtZWRpYXRpb25fZWZmZWN0aXZlbmVzc19mYWN0b3IiCGluY2lkZW50MgUKAwoBMRpzGnEKK2VmZmVjdF9vZl9yZW1lZGlhdGlvbnNfb25faW5jaWRlbnRfY3JlYXRpb24iBGRtbmwyPAo6CjhTQUZFRElWKCByZW1lZGlhdGlvbl9lZmZlY3RpdmVuZXNzX2ZhY3RvciAsIFJlbWVkaWF0ZWQgKRpPGk0KMGF2ZXJhZ2VfZWZmb3J0X3JlcXVpcmVkX3RvX3JlbWVkaWF0ZV9hbl9pbmNpZGVudCISZGV2ZWxvcGVyL2luY2lkZW50MgUKAwoBMRo2GjQKD21pdGlnYXRpb25fcmF0ZSIYaW5jaWRlbnQvZGV2ZWxvcGVyL21vbnRoMgcKBQoDMC4xGnoaeAorZGV2ZWxvcGVyc19yZXF1aXJlZF9mb3JfaW5jaWRlbnRfbWl0aWdhdGlvbiIJZGV2ZWxvcGVyMj4KPAo6SW5jaWRlbnRzKmF2ZXJhZ2VfZWZmb3J0X3JlcXVpcmVkX3RvX3JlbWVkaWF0ZV9hbl9pbmNpZGVudBpOGkwKL2F2ZXJhZ2VfZWZmb3J0X3JlcXVpcmVkX3RvX21pdGlnYXRlX2FuX2luY2lkZW50IhJkZXZlbG9wZXIvaW5jaWRlbnQyBQoDCgE0GnoaeAosZGV2ZWxvcGVyc19yZXF1aXJlZF9mb3JfaW5jaWRlbnRfcmVtZWRpYXRpb24iCWRldmVsb3BlcjI9CjsKOU1pdGlnYXRlZCphdmVyYWdlX2VmZm9ydF9yZXF1aXJlZF90b19t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';
-
-interface DiagramProps {
-  isDarkTheme?: boolean;
-  projectPbBase64: string;
-}
-
 interface DiagramState {
   project: Project;
 }
 
-class Diagram extends React.PureComponent<DiagramProps, DiagramState> {
-  constructor(props: DiagramProps) {
+export default class SimlinDiagram extends React.PureComponent<{}, DiagramState> {
+  constructor(props: {}) {
     super(props);
 
-    const serializedProject = toUint8Array(this.props.projectPbBase64);
+    const serializedProject = toUint8Array(logisticGrowthProject);
     const project = Project.deserializeBinary(serializedProject).attachData(logisticGrowthData, 'main');
 
     this.state = {
@@ -53,19 +37,9 @@ class Diagram extends React.PureComponent<DiagramProps, DiagramState> {
   }
 
   render() {
-    const canUseDOM = !!(
-      typeof window !== 'undefined' &&
-      window.document &&
-      window.document.createElement
-    );
-    const isDarkTheme = this.props.isDarkTheme;
     const theme = createTheme({
       palette: {
-        mode: isDarkTheme ? 'dark' : 'light',
-        common: {
-          white: isDarkTheme ? '#222222' : '#ffffff',
-          black: isDarkTheme ? '#bbbbbb' : '#000000',
-        },
+        mode: 'light',
       },
     });
 
@@ -111,130 +85,10 @@ class Diagram extends React.PureComponent<DiagramProps, DiagramState> {
       />
     );
 
-    const themedCanvas = <ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>;
-
-    if (canUseDOM) {
-      return themedCanvas;
-    } else {
-      renderToString(themedCanvas);
-      return <>
-        {themedCanvas}
-      </>;
-    }
+    return (
+      <div style={{ height: '400px', width: '100%', border: '1px solid #e0e0e0', borderRadius: '8px', overflow: 'hidden' }}>
+        <ThemeProvider theme={theme}>{canvasElement}</ThemeProvider>
+      </div>
+    );
   }
 }
-
-const features = [
-  {
-    title: 'Easy to Use',
-    description: (
-      <>
-        Simlin was designed from the ground up to be easily to use for leaders, managers, and developers. Models are
-        created in a simple visual language that can be picked up in minutes, yet is rich enough to describe domains
-        from the carbon cycle to business dynamics.
-      </>
-    ),
-  },
-  {
-    title: 'Easy to Share',
-    description: (
-      <>
-        Developing the right strategy is the first step; convincing others it is the right strategy is the next. Simlin
-        makes it easy to share models on the web, embed them in blog posts, and print them out.
-      </>
-    ),
-  },
-  {
-    title: 'Easy to Go Deep',
-    description: (
-      <>
-        Simlin works seamlessly with open-source tools like{' '}
-        <a href="https://pysd.readthedocs.io/en/master/index.html">PySD</a>{' '}
-        and proprietary software like{' '}
-        <a href="https://www.iseesystems.com/store/products/stella-architect.aspx">Stella</a>{' '}
-        for more advanced tasks like fitting model parameters,
-        running sensitivity analyses, or working with geographic data.
-      </>
-    ),
-  },
-];
-
-function Feature({ imageUrl, title, description }) {
-  const imgUrl = useBaseUrl(imageUrl);
-  return (
-    <div className={clsx('col col--4', styles.feature)}>
-      {imgUrl && (
-        <div className="text--center">
-          <img className={styles.featureImage} src={imgUrl} alt={title} />
-        </div>
-      )}
-      <h3>{title}</h3>
-      <p>{description}</p>
-    </div>
-  );
-}
-
-function Home() {
-  const context = useDocusaurusContext();
-  const { siteConfig = {} } = context;
-
-  return (
-    <Layout title={`Simlin system dynamics software`} description="System dynamics modeling software">
-      <header className={clsx('hero hero--primary', styles.heroBanner)}>
-        <div className={clsx('container', styles.heroContainer)}>
-          <h1 className="hero__title">{siteConfig.title}</h1>
-          <p className="hero__subtitle">{siteConfig.tagline}</p>
-          <p>
-            Simlin is a tool for simulation modeling, leveling up your ability to learn. With Simlin you can iterate on
-            strategy and policy faster than you can in the real world, with fewer costs and the freedom to fail.
-          </p>
-          <div className={styles.buttons}>
-            <Link
-              className={clsx('button button--outline button--lg', styles.getStarted)}
-              to={'https://app.simlin.com'}
-            >
-              Get Started
-            </Link>
-          </div>
-        </div>
-      </header>
-      <main>
-        <br />
-        <br />
-        <div className="container">
-          We all have mental models of the world around us, and we use these mental models when we create and evaluate plans to achieve our goals.
-          Simlin gives you the power to turn these implicit models explicit, so you can debug and improve them.
-          {/* what you get: simulation modeling to define the _Structure_ of the model you have that generates the behavior you are interested in affecting */}
-          {/* how is this different from machine learning? focus on _causation_ rather than correlation; different domains where $x, $y, $z are best suited for SD */}
-        </div>
-        <br/>
-        <div className="container">
-          Simlin is built around the <a href="https://en.wikipedia.org/wiki/System_dynamics">system dynamics</a> methodology, as introduced by the <a href="https://www.chelseagreen.com/product/thinking-in-systems/">Thinking in Systems</a> book (among others).
-          You can learn more and connect with experts by engaging with the <a href="http://www.systemdynamics.org/">System Dynamics Society</a>.
-          Models are built in a simple, general visual language:
-        </div>
-        <br/>
-        <div className={clsx('container', styles.heroContainer)}>
-          <Diagram projectPbBase64={ logisticGrowthProject } />
-        </div>
-        <div className="container">
-          {/* simlin is built on the back of a 60+ year old field of research started at MIT */}
-        </div>
-        <br />
-        {features && features.length > 0 && (
-          <section className={styles.features}>
-            <div className="container">
-              <div className="row">
-                {features.map((props, idx) => (
-                  <Feature key={idx} {...props} />
-                ))}
-              </div>
-            </div>
-          </section>
-        )}
-      </main>
-    </Layout>
-  );
-}
-
-export default Home;

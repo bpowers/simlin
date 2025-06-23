@@ -1,4 +1,26 @@
 {
-  "extends": "@tsconfig/docusaurus/tsconfig.json",
-  "include": ["src/"]
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM"],
+    "jsx": "react-jsx",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@system-dynamics/core": ["../src/core"],
+      "@system-dynamics/diagram": ["../src/diagram"],
+      "@system-dynamics/engine": ["../src/engine"],
+      "@system-dynamics/importer": ["../src/importer"],
+      "@system-dynamics/xmutil": ["../src/xmutil-js"]
+    }
+  },
+  "include": ["src/", "docs/"],
+  "exclude": ["node_modules", "build"]
 }
