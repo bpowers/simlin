@@ -204,7 +204,6 @@ export const Editor = styled(
         variableDetailsActiveTab: 0,
       };
 
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         await this.openEngine(props.initialProjectBinary, activeProject);
         this.scheduleSimRun();
@@ -289,7 +288,7 @@ export const Editor = styled(
 
     scheduleSave(project: Readonly<Uint8Array>): void {
       const { projectVersion } = this.state;
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+
       setTimeout(async () => {
         await this.save(project, toInt(projectVersion));
       });
@@ -1538,7 +1537,7 @@ export const Editor = styled(
         // scratch on a new model and don't expect it to be running yet.
         if (varErrors.size === model.variables.size && Set(varErrors.keys()).equals(Set(model.variables.keys()))) {
           let foundOtherError = false;
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
           for (const [, errors] of varErrors) {
             if (errors.size !== 1 || defined(errors.first()).code !== ErrorCode.EmptyEquation) {
               foundOtherError = true;
@@ -1626,7 +1625,6 @@ export const Editor = styled(
       const activeProject = Project.deserializeBinary(serializedProject);
       this.setState({ activeProject, projectOffset, projectVersion });
 
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         await this.openEngine(serializedProject, activeProject);
         this.scheduleSimRun();

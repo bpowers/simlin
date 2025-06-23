@@ -158,7 +158,7 @@ export const Label = styled(
         return;
       }
       this.inMove = true;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+
       (e.target as any).setPointerCapture(e.pointerId);
       this.props.onLabelDrag?.(this.props.uid, e);
     };

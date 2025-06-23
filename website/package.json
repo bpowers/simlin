@@ -8,7 +8,7 @@
     "build": "rspress build",
     "preview": "rspress preview",
     "clean": "rm -rf build node_modules/.cache",
-    "lint": "true",
+    "lint": "eslint .",
     "format": "find . -name '*.ts' -o -name '*.tsx' | egrep -v '/(lib(\\.(browser|module))?|importer/core|engine/core)/' | xargs prettier --write"
   },
   "devDependencies": {

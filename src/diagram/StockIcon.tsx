@@ -20,5 +20,5 @@ export const StockIcon: React.FunctionComponent = styled((props) => {
 `);
 
 StockIcon.displayName = 'Stock';
-// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+
 (StockIcon as any).muiName = 'StockIcon';

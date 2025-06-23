@@ -222,13 +222,7 @@ const InnerApp = styled(
 
     editor = (props: RouteComponentProps<EditorMatchParams>) => {
       const { username, projectName } = props.params;
-      return (
-        <HostedWebEditor
-          username={username}
-          projectName={projectName}
-          baseURL={this.getBaseURL()}
-        />
-      );
+      return <HostedWebEditor username={username} projectName={projectName} baseURL={this.getBaseURL()} />;
     };
 
     home = (_props: RouteComponentProps) => {

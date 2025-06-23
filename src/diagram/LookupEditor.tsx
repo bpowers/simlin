@@ -123,7 +123,6 @@ function getAnyElementOfObject(obj: any): any | undefined {
 
   const keys = Object.keys(obj);
   if (keys && keys.length) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     return obj[keys[0]];
   }
 
@@ -204,7 +203,7 @@ export const LookupEditor = styled(
       }
       // ensure we get 'mouse up' events (and friends) even if we leave the
       // confines of the chart
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+
       (e.target as any).setPointerCapture(e.pointerId);
     };
 
@@ -232,7 +231,6 @@ export const LookupEditor = styled(
     }
 
     updatePoint(details: any) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
       if (!details || !details.hasOwnProperty('chartX') || !details.hasOwnProperty('chartY')) {
         return;
       }
@@ -242,9 +240,8 @@ export const LookupEditor = styled(
         return;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const yAxisMap = getAnyElementOfObject((chart.state as unknown as any).yAxisMap);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+
       const yScale = yAxisMap.scale;
       if (!yScale || !yScale.invert) {
         return;
@@ -258,9 +255,8 @@ export const LookupEditor = styled(
       const yMin = defined(gf.yScale).min;
       const yMax = defined(gf.yScale).max;
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const x = details.activePayload[0].payload.x;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-assignment
+
       let y = yScale.invert(details.chartY);
       if (y > yMax) {
         y = yMax;
@@ -281,7 +277,6 @@ export const LookupEditor = styled(
         return;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       newTable.y[off] = y;
       this.setState({
         hasChange: true,

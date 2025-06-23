@@ -99,7 +99,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
 
   private doc(_id: string, pb: T): Schema {
     const serializedPb = pb.serializeBinary();
-    const doc: {[key: string]: any} = pb.toObject();
+    const doc: { [key: string]: any } = pb.toObject();
 
     if (doc.hasOwnProperty('value')) {
       throw new Error('we expect document to not have "value" property');

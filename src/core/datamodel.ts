@@ -85,7 +85,7 @@ const equationErrorDefaults = {
 };
 export class EquationError extends Record(equationErrorDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof equationErrorDefaults) {
     super(props);
   }
@@ -100,7 +100,7 @@ const unitErrorDefaults = {
 };
 export class UnitError extends Record(unitErrorDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof unitErrorDefaults) {
     super(props);
   }
@@ -141,7 +141,7 @@ const graphicalFunctionScaleDefaults = {
 };
 export class GraphicalFunctionScale extends Record(graphicalFunctionScaleDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof graphicalFunctionScaleDefaults) {
     super(props);
   }
@@ -172,7 +172,7 @@ const graphicalFunctionDefaults = {
 
 export class GraphicalFunction extends Record(graphicalFunctionDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof graphicalFunctionDefaults) {
     super(props);
   }
@@ -225,7 +225,7 @@ const scalarEquationDefaults = {
 };
 export class ScalarEquation extends Record(scalarEquationDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof scalarEquationDefaults) {
     super(props);
   }
@@ -252,7 +252,7 @@ const applyToAllEquationDefaults = {
 };
 export class ApplyToAllEquation extends Record(applyToAllEquationDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof applyToAllEquationDefaults) {
     super(props);
   }
@@ -276,7 +276,7 @@ const arrayedEquationDefaults = {
 };
 export class ArrayedEquation extends Record(arrayedEquationDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof arrayedEquationDefaults) {
     super(props);
   }
@@ -344,7 +344,7 @@ const stockDefaults = {
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof stockDefaults) {
     super(props);
   }
@@ -386,7 +386,7 @@ const flowDefaults = {
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof flowDefaults) {
     super(props);
   }
@@ -424,7 +424,7 @@ const auxDefaults = {
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof auxDefaults) {
     super(props);
   }
@@ -474,7 +474,7 @@ const moduleDefaults = {
 };
 export class Module extends Record(moduleDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof moduleDefaults) {
     super(props);
   }
@@ -562,7 +562,7 @@ const auxViewElementDefaults = {
 };
 export class AuxViewElement extends Record(auxViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof auxViewElementDefaults) {
     super(props);
   }
@@ -612,7 +612,7 @@ const stockViewElementDefaults = {
 };
 export class StockViewElement extends Record(stockViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof stockViewElementDefaults) {
     super(props);
   }
@@ -657,7 +657,7 @@ const pointDefaults = {
 };
 export class Point extends Record(pointDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof pointDefaults) {
     super(props);
   }
@@ -693,7 +693,7 @@ const flowViewElementDefaults = {
 };
 export class FlowViewElement extends Record(flowViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof flowViewElementDefaults) {
     super(props);
   }
@@ -741,7 +741,7 @@ const linkViewElementDefaults = {
 };
 export class LinkViewElement extends Record(linkViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof linkViewElementDefaults) {
     super(props);
   }
@@ -824,7 +824,7 @@ const moduleViewElementDefaults = {
 };
 export class ModuleViewElement extends Record(moduleViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof moduleViewElementDefaults) {
     super(props);
   }
@@ -870,7 +870,7 @@ const aliasViewElementDefaults = {
 };
 export class AliasViewElement extends Record(aliasViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof aliasViewElementDefaults) {
     super(props);
   }
@@ -916,7 +916,7 @@ const cloudViewElementDefaults = {
 };
 export class CloudViewElement extends Record(cloudViewElementDefaults) implements ViewElement {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof cloudViewElementDefaults) {
     super(props);
   }
@@ -961,7 +961,7 @@ const rectDefaults = {
 };
 export class Rect extends Record(rectDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof rectDefaults) {
     super(props);
   }
@@ -1000,7 +1000,7 @@ const stockFlowViewDefaults = {
 };
 export class StockFlowView extends Record(stockFlowViewDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof stockFlowViewDefaults) {
     super(props);
   }
@@ -1154,7 +1154,7 @@ const modelDefaults = {
 };
 export class Model extends Record(modelDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof modelDefaults) {
     super(props);
   }
@@ -1201,7 +1201,7 @@ const dtDefaults = {
 };
 export class Dt extends Record(dtDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof dtDefaults) {
     super(props);
   }
@@ -1245,7 +1245,7 @@ const simSpecsDefaults = {
 };
 export class SimSpecs extends Record(simSpecsDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof simSpecsDefaults) {
     super(props);
   }
@@ -1271,7 +1271,7 @@ const dimensionDefaults = {
 };
 export class Dimension extends Record(dimensionDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof dimensionDefaults) {
     super(props);
   }
@@ -1321,7 +1321,7 @@ const sourceDefaults = {
 };
 export class Source extends Record(sourceDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof sourceDefaults) {
     super(props);
   }
@@ -1349,7 +1349,7 @@ const projectDefaults = {
 };
 export class Project extends Record(projectDefaults) {
   // this isn't useless, as it ensures we specify the full object
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+
   constructor(props: typeof projectDefaults) {
     super(props);
   }

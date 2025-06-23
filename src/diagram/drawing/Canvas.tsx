@@ -534,7 +534,7 @@ export const Canvas = styled(
         } else {
           const off = this.selectionCenterOffset;
           const canvasOffset = this.getCanvasOffset();
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-assignment
+
           sink = (sink as unknown as any).merge({
             x: off.x - canvasOffset.x,
             y: off.y - canvasOffset.y,
@@ -594,7 +594,6 @@ export const Canvas = styled(
       this.selectionUpdates = InnerCanvas.buildSelectionMap(this.props, this.elements, this.state.inCreation);
       if (this.state.labelSide) {
         this.selectionUpdates = this.selectionUpdates.map((el) => {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-call
           return (el as AuxViewElement).set('labelSide', defined(this.state.labelSide));
         });
       }
@@ -616,7 +615,6 @@ export const Canvas = styled(
             otherUpdates = otherUpdates.push(updatedFlow);
             return cloud;
           } else if (!(initialEl instanceof LinkViewElement)) {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-call
             return (initialEl as AuxViewElement).merge({
               x: initialEl.cx - x,
               y: initialEl.cy - y,
@@ -987,7 +985,6 @@ export const Canvas = styled(
         this.pointerId = e.pointerId;
         this.selectionCenterOffset = client;
 
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         (e.target as any).setPointerCapture(e.pointerId);
 
         this.setState({
@@ -1103,7 +1100,6 @@ export const Canvas = styled(
       this.selectionCenterOffset = this.getCanvasPoint(e.clientX, e.clientY);
 
       if (!isEditingName) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         (e.target as any).setPointerCapture(e.pointerId);
       }
 
@@ -1202,7 +1198,6 @@ export const Canvas = styled(
       const newName = plainSerialize(defined(this.state.editingName));
 
       if (uid === inCreationUid) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         this.props.onCreateVariable((element as unknown as any).set('name', newName));
       } else {
         this.props.onRenameVariable(oldName, newName);
@@ -1217,7 +1212,7 @@ export const Canvas = styled(
       if (typeof document !== 'undefined' && document && document.activeElement) {
         const e: any = document.activeElement;
         // blur doesn't exist on "Element" but it definitely is a real thing
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+
         e.blur();
       }
     }
@@ -1275,7 +1270,6 @@ export const Canvas = styled(
           continue;
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         zLayers[zOrder].push(component);
       }
 

@@ -91,7 +91,7 @@ export function renderSvgToString(project: Project, modelName: string): [string,
 
   let width = 100;
   let height = 100;
-  // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
+
   const viewboxMatch = svg.match(/viewBox="[^"]*"/);
   if (viewboxMatch) {
     const viewboxStr = viewboxMatch[0].split('"')[1].trim();

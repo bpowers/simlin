@@ -20,5 +20,5 @@ export const AuxIcon: React.FunctionComponent = styled((props) => {
 `);
 
 AuxIcon.displayName = 'Variable';
-// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+
 (AuxIcon as any).muiName = 'AuxIcon';

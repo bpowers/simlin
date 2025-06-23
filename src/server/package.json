@@ -53,7 +53,7 @@
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
-    "lint": "eslint '**/*.ts'",
+    "lint": "eslint .",
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib",
     "build": "tsc -p tsconfig.json",

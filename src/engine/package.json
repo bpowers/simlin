@@ -39,7 +39,7 @@
   "scripts": {
     "needs-format": "prettier -l '*.ts'",
     "format": "prettier --write '*.ts'",
-    "lint": "eslint '*.ts'",
+    "lint": "eslint .",
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib ./lib.browser",
     "build": "./build.sh"

@@ -27,7 +27,6 @@ interface HostedWebEditorProps {
   baseURL?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
 interface HostedWebEditorState {
   serviceErrors: List<Error>;
   projectBinary: Readonly<Uint8Array> | undefined;
@@ -48,7 +47,6 @@ export const HostedWebEditor = styled(
         projectVersion: -1,
       };
 
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         await this.loadProject();
       });
@@ -84,7 +82,6 @@ export const HostedWebEditor = styled(
 
       const status = response.status;
       if (!(status >= 200 && status < 400)) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const body = await response.json();
         const errorMsg =
           body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
@@ -92,7 +89,6 @@ export const HostedWebEditor = styled(
         return undefined;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectResponse = await response.json();
       const projectVersion = defined(projectResponse.version) as number;
 
@@ -110,7 +106,6 @@ export const HostedWebEditor = styled(
         return;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const projectResponse = await response.json();
 
       const projectBinary = toUint8Array(projectResponse.pb);

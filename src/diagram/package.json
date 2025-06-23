@@ -63,7 +63,7 @@
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
-    "lint": "eslint '**/*.ts' '**/*.tsx'",
+    "lint": "eslint .",
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib ./lib.browser",
     "build": "tsc && tsc -p tsconfig.browser.json"
