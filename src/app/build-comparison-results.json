@@ -1,0 +1,21 @@
+{
+  "sizeComparison": {
+    "webpack": 13735322,
+    "rsbuild": 13508455,
+    "difference": -226867,
+    "percentDifference": "-1.65"
+  },
+  "bundleCount": {
+    "webpack": {
+      "js": 4,
+      "css": 0,
+      "wasm": 3
+    },
+    "rsbuild": {
+      "js": 3,
+      "css": 0,
+      "wasm": 3
+    }
+  },
+  "featureParity": true
+}

@@ -199,7 +199,7 @@ const Home = styled(
       );
     }
   },
-)(({ _theme }) => ({
+)(() => ({
   '&.simlin-home-root': {
     flexGrow: 1,
   },

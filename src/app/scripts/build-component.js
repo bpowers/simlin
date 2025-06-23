@@ -14,54 +14,18 @@ process.on('unhandledRejection', err => {
 // Ensure environment variables are read.
 require('../config/env');
 
-
-const path = require('path');
+const { createRsbuild } = require('@rsbuild/core');
+const fs = require('fs-extra');
 const chalk = require('react-dev-utils/chalk');
-const fs = require('fs');
-const bfj = require('bfj');
-const webpack = require('webpack');
-const configFactory = require('../config/webpack.component.config');
-const paths = require('../config/paths');
 const checkRequiredFiles = require('react-dev-utils/checkRequiredFiles');
 const formatWebpackMessages = require('react-dev-utils/formatWebpackMessages');
-const printHostingInstructions = require('react-dev-utils/printHostingInstructions');
 const FileSizeReporter = require('react-dev-utils/FileSizeReporter');
 const printBuildError = require('react-dev-utils/printBuildError');
 
-const emptyDirSync = (dir) => {
-  let items;
-  try {
-    items = fs.readdirSync(dir);
-  } catch {
-    return fs.mkdirSync(dir, {recursive: true});
-  }
-
-  items.forEach((item) => {
-    item = path.join(dir, item);
-    fs.rmSync(item, {recursive: true});
-  });
-};
-
-const copyDirSync = (src, dst) => {
-  if (fs.lstatSync(src).isDirectory()) {
-    if (!fs.existsSync(dst)) {
-      fs.mkdirSync(dst, {recursive: true});
-    }
-    const contents = fs.readdirSync(src);
-    for (const entry of contents) {
-      const entrySrc = path.join(src, entry);
-      const entryDst = path.join(dst, entry);
-      copyDirSync(entrySrc, entryDst);
-    }
-  } else {
-    fs.copyFileSync(src, dst);
-  }
-};
-
-const measureFileSizesBeforeBuild =
-  FileSizeReporter.measureFileSizesBeforeBuild;
+const measureFileSizesBeforeBuild = FileSizeReporter.measureFileSizesBeforeBuild;
 const printFileSizesAfterBuild = FileSizeReporter.printFileSizesAfterBuild;
-const useYarn = fs.existsSync(paths.yarnLockFile);
+
+const paths = require('../config/paths');
 
 // These sizes are pretty large. We'll warn for bundles exceeding them.
 const WARN_AFTER_BUNDLE_GZIP_SIZE = 512 * 1024;
@@ -70,15 +34,13 @@ const WARN_AFTER_CHUNK_GZIP_SIZE = 1024 * 1024;
 const isInteractive = process.stdout.isTTY;
 
 // Warn and crash if required files are missing
-if (!checkRequiredFiles([paths.appHtml, paths.componentIndexJs])) {
+if (!checkRequiredFiles([paths.componentIndexJs])) {
   process.exit(1);
 }
 
+// Process CLI arguments
 const argv = process.argv.slice(2);
 const writeStatsJson = argv.indexOf('--stats') !== -1;
-
-// Generate configuration
-const config = configFactory('production');
 
 // We require that you explicitly set browsers and do not fall back to
 // browserslist defaults.
@@ -92,10 +54,8 @@ checkBrowsers(paths.appPath, isInteractive)
   .then(previousFileSizes => {
     // Remove all content but keep the directory so that
     // if you're in it, you don't end up in Trash
-    emptyDirSync(paths.componentBuild);
-    // Merge with the public folder
-    copyPublicFolder();
-    // Start the webpack build
+    fs.emptyDirSync(paths.componentBuild);
+    // Start the Rsbuild build
     return build(previousFileSizes);
   })
   .then(
@@ -108,13 +68,8 @@ checkBrowsers(paths.appPath, isInteractive)
             chalk.underline(chalk.yellow('keywords')) +
             ' to learn more about each warning.'
         );
-        console.log(
-          'To ignore, add ' +
-            chalk.cyan('// eslint-disable-next-line') +
-            ' to the line before.\n'
-        );
       } else {
-        console.log(chalk.green('Compiled successfully.\n'));
+        console.log(chalk.green('Compiled web component successfully.\n'));
       }
 
       console.log('File sizes after gzip:\n');
@@ -127,16 +82,14 @@ checkBrowsers(paths.appPath, isInteractive)
       );
       console.log();
 
-      const appPackage = require(paths.appPackageJson);
-      const publicUrl = paths.publicUrlOrPath;
-      const publicPath = config.output.publicPath;
-      const buildFolder = path.relative(process.cwd(), paths.componentBuild);
-      printHostingInstructions(
-        appPackage,
-        publicUrl,
-        publicPath,
-        buildFolder,
-        useYarn
+      console.log(
+        chalk.green('The web component bundle is ready to be embedded.\n')
+      );
+      console.log(
+        `Add the following script tag to your HTML:\n` +
+        chalk.cyan(`  <script src="/static/js/sd-component.js"></script>\n`) +
+        `\nThen use the component:\n` +
+        chalk.cyan(`  <sd-model username="..." projectName="..."></sd-model>`)
       );
     },
     err => {
@@ -162,87 +115,63 @@ checkBrowsers(paths.appPath, isInteractive)
     process.exit(1);
   });
 
-// Create the production build and print the deployment instructions.
-function build(previousFileSizes) {
-  console.log('Creating an optimized production build...');
+// Create the production build
+async function build(previousFileSizes) {
+  console.log('Creating an optimized web component build...');
 
-  const compiler = webpack(config);
-  return new Promise((resolve, reject) => {
-    compiler.run((err, stats) => {
-      let messages;
-      if (err) {
-        if (!err.message) {
-          return reject(err);
-        }
-
-        let errMessage = err.message;
-
-        // Add additional information for postcss errors
-        if (Object.prototype.hasOwnProperty.call(err, 'postcssNode')) {
-          errMessage +=
-            '\nCompileError: Begins at CSS selector ' +
-            err['postcssNode'].selector;
-        }
-
-        messages = formatWebpackMessages({
-          errors: [errMessage],
-          warnings: [],
-        });
-      } else {
-        messages = formatWebpackMessages(
-          stats.toJson({ all: false, warnings: true, errors: true })
-        );
-      }
-      if (messages.errors.length) {
-        // Only keep the first error. Others are often indicative
-        // of the same problem, but confuse the reader with noise.
-        if (messages.errors.length > 1) {
-          messages.errors.length = 1;
-        }
-        return reject(new Error(messages.errors.join('\n\n')));
-      }
-      if (
-        process.env.CI &&
-        (typeof process.env.CI !== 'string' ||
-          process.env.CI.toLowerCase() !== 'false') &&
-        messages.warnings.length
-      ) {
-        // Ignore sourcemap warnings in CI builds. See #8227 for more info.
-        const filteredWarnings = messages.warnings.filter(
-          w => !/Failed to parse source map/.test(w)
-        );
-        if (filteredWarnings.length) {
-          console.log(
-            chalk.yellow(
-              '\nTreating warnings as errors because process.env.CI = true.\n' +
-                'Most CI servers set it automatically.\n'
-            )
-          );
-          return reject(new Error(filteredWarnings.join('\n\n')));
-        }
-      }
-
-      const resolveArgs = {
-        stats,
-        previousFileSizes,
-        warnings: messages.warnings,
-      };
-
-      if (writeStatsJson) {
-        return bfj
-          .write(paths.appBuild + '/bundle-stats.json', stats.toJson())
-          .then(() => resolve(resolveArgs))
-          .catch(error => reject(new Error(error)));
-      }
-
-      return resolve(resolveArgs);
+  let rsbuild;
+  try {
+    const configPath = require.resolve('../config/rsbuild/rsbuild.component.config.js');
+    const rsbuildConfig = require(configPath);
+    rsbuild = await createRsbuild({
+      cwd: paths.appPath,
+      rsbuildConfig,
     });
-  });
-}
+  } catch (err) {
+    console.log(chalk.red('Failed to load Rsbuild config.\n'));
+    throw err;
+  }
 
-function copyPublicFolder() {
-  copyDirSync(paths.appPublic, paths.componentBuild, {
-    dereference: true,
-    filter: file => file !== paths.appHtml,
-  });
+  try {
+    const { stats } = await rsbuild.build();
+    
+    // Format messages similar to webpack
+    const messages = formatWebpackMessages({
+      errors: stats.errors || [],
+      warnings: stats.warnings || [],
+    });
+
+    if (messages.errors.length) {
+      // Only keep the first error. Others are often indicative
+      // of the same problem, but confuse the reader with noise.
+      if (messages.errors.length > 1) {
+        messages.errors.length = 1;
+      }
+      return Promise.reject(new Error(messages.errors.join('\n\n')));
+    }
+
+    if (
+      process.env.CI &&
+      (typeof process.env.CI !== 'string' ||
+        process.env.CI.toLowerCase() !== 'false') &&
+      messages.warnings.length
+    ) {
+      console.log(
+        chalk.yellow(
+          '\nTreating warnings as errors because process.env.CI = true.\n' +
+            'Most CI servers set it automatically.\n'
+        )
+      );
+      return Promise.reject(new Error(messages.warnings.join('\n\n')));
+    }
+
+    return {
+      stats,
+      previousFileSizes,
+      warnings: messages.warnings,
+    };
+  } catch (err) {
+    console.log(chalk.red('Failed to compile.\n'));
+    throw err;
+  }
 }

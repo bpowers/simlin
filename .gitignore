@@ -25,6 +25,8 @@ node_modules
 # production
 /build
 /build-component
+/build-rsbuild
+/build-component-rsbuild
 /src/app/build
 /src/app/build-component
 

@@ -21,7 +21,6 @@
       "website"
     ],
     "nohoist": [
-      "**/webpack",
       "**/html-minifier-terser"
     ]
   },
