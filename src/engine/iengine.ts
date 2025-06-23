@@ -269,4 +269,5 @@ export enum ErrorCode {
   TodoWildcard = 45,
   TodoStarRange = 46,
   TodoRange = 47,
+  TodoArrayBuiltin = 48,
 }

@@ -20,8 +20,8 @@ wasm-bindgen ../../target/wasm32-unknown-unknown/release/${PKG_NAME}.wasm --out-
 
 if [ "1" != "${DISABLE_WASM_OPT-0}" ]; then
   echo "running wasm-opt"
-  wasm-opt pkg/engine_bg.wasm -o pkg/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
-  wasm-opt pkg-node/engine_bg.wasm -o pkg-node/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals
+  wasm-opt pkg/engine_bg.wasm -o pkg/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals --enable-bulk-memory-opt --enable-nontrapping-float-to-int
+  wasm-opt pkg-node/engine_bg.wasm -o pkg-node/engine_bg.wasm-opt.wasm -O3 --enable-mutable-globals --enable-bulk-memory-opt --enable-nontrapping-float-to-int
   mv pkg/engine_bg.{wasm-opt.,}wasm
   mv pkg-node/engine_bg.{wasm-opt.,}wasm
 else
