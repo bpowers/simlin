@@ -6,7 +6,7 @@ use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{EquationResult, Ident};
-use crate::dimensions::{DimensionRange, DimensionVec, DimensionsContext};
+use crate::dimensions::{DimensionRange};
 
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
@@ -36,6 +36,7 @@ impl IndexExpr2 {
 
 /// Expr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
+#[allow(dead_code)]
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr2 {
     Const(String, f64, Loc),
@@ -60,45 +61,76 @@ pub enum Expr2 {
 }
 
 impl Expr2 {
+    #[allow(dead_code)]
     pub(crate) fn from(expr: Expr1) -> EquationResult<Self> {
         let expr = match expr {
             Expr1::Const(s, n, loc) => Expr2::Const(s, n, loc),
             Expr1::Var(id, loc) => Expr2::Var(id, None, loc),
             Expr1::App(builtin_fn, loc) => {
+                use BuiltinFn::*;
                 let builtin = match builtin_fn {
-                    BuiltinFn::Lookup(v, e, loc) => {
-                        BuiltinFn::Lookup(v, Box::new(Expr2::from(*e)?), loc)
+                    Lookup(v, e, loc) => Lookup(v, Box::new(Expr2::from(*e)?), loc),
+                    Abs(e) => Abs(Box::new(Expr2::from(*e)?)),
+                    Arccos(e) => Arccos(Box::new(Expr2::from(*e)?)),
+                    Arcsin(e) => Arcsin(Box::new(Expr2::from(*e)?)),
+                    Arctan(e) => Arctan(Box::new(Expr2::from(*e)?)),
+                    Cos(e) => Cos(Box::new(Expr2::from(*e)?)),
+                    Exp(e) => Exp(Box::new(Expr2::from(*e)?)),
+                    Inf => Inf,
+                    Int(e) => Int(Box::new(Expr2::from(*e)?)),
+                    IsModuleInput(s, loc) => IsModuleInput(s, loc),
+                    Ln(e) => Ln(Box::new(Expr2::from(*e)?)),
+                    Log10(e) => Log10(Box::new(Expr2::from(*e)?)),
+                    Max(e1, e2) => Max(
+                        Box::new(Expr2::from(*e1)?),
+                        e2.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                    ),
+                    Mean(exprs) => {
+                        let exprs: EquationResult<Vec<Expr2>> =
+                            exprs.into_iter().map(Expr2::from).collect();
+                        Mean(exprs?)
                     }
-                    BuiltinFn::Abs(e) => BuiltinFn::Abs(Box::new(Expr2::from(*e)?)),
-                    BuiltinFn::Arccos(_) => {}
-                    BuiltinFn::Arcsin(_) => {}
-                    BuiltinFn::Arctan(_) => {}
-                    BuiltinFn::Cos(_) => {}
-                    BuiltinFn::Exp(_) => {}
-                    BuiltinFn::Inf => {}
-                    BuiltinFn::Int(_) => {}
-                    BuiltinFn::IsModuleInput(_, _) => {}
-                    BuiltinFn::Ln(_) => {}
-                    BuiltinFn::Log10(_) => {}
-                    BuiltinFn::Max(_, _) => {}
-                    BuiltinFn::Mean(_) => {}
-                    BuiltinFn::Min(_, _) => {}
-                    BuiltinFn::Pi => {}
-                    BuiltinFn::Pulse(_, _, _) => {}
-                    BuiltinFn::Ramp(_, _, _) => {}
-                    BuiltinFn::SafeDiv(_, _, _) => {}
-                    BuiltinFn::Sin(_) => {}
-                    BuiltinFn::Sqrt(_) => {}
-                    BuiltinFn::Step(_, _) => {}
-                    BuiltinFn::Tan(_) => {}
-                    BuiltinFn::Time => {}
-                    BuiltinFn::TimeStep => {}
-                    BuiltinFn::StartTime => {}
-                    BuiltinFn::FinalTime => {}
-                    BuiltinFn::Rank(_, _) => {}
-                    BuiltinFn::Size(_) => {}
-                    BuiltinFn::Stddev(_) => {}
-                    BuiltinFn::Sum(_) => {}
+                    Min(e1, e2) => Min(
+                        Box::new(Expr2::from(*e1)?),
+                        e2.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                    ),
+                    Pi => Pi,
+                    Pulse(e1, e2, e3) => Pulse(
+                        Box::new(Expr2::from(*e1)?),
+                        Box::new(Expr2::from(*e2)?),
+                        e3.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                    ),
+                    Ramp(e1, e2, e3) => Ramp(
+                        Box::new(Expr2::from(*e1)?),
+                        Box::new(Expr2::from(*e2)?),
+                        e3.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                    ),
+                    SafeDiv(e1, e2, e3) => SafeDiv(
+                        Box::new(Expr2::from(*e1)?),
+                        Box::new(Expr2::from(*e2)?),
+                        e3.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                    ),
+                    Sin(e) => Sin(Box::new(Expr2::from(*e)?)),
+                    Sqrt(e) => Sqrt(Box::new(Expr2::from(*e)?)),
+                    Step(e1, e2) => Step(Box::new(Expr2::from(*e1)?), Box::new(Expr2::from(*e2)?)),
+                    Tan(e) => Tan(Box::new(Expr2::from(*e)?)),
+                    Time => Time,
+                    TimeStep => TimeStep,
+                    StartTime => StartTime,
+                    FinalTime => FinalTime,
+                    Rank(e, opt) => Rank(
+                        Box::new(Expr2::from(*e)?),
+                        opt.map(|(e1, opt_e2)| {
+                            Ok::<_, crate::common::EquationError>((
+                                Box::new(Expr2::from(*e1)?),
+                                opt_e2.map(|e2| Expr2::from(*e2)).transpose()?.map(Box::new),
+                            ))
+                        })
+                        .transpose()?,
+                    ),
+                    Size(e) => Size(Box::new(Expr2::from(*e)?)),
+                    Stddev(e) => Stddev(Box::new(Expr2::from(*e)?)),
+                    Sum(e) => Sum(Box::new(Expr2::from(*e)?)),
                 };
                 Expr2::App(builtin, None, loc)
             }

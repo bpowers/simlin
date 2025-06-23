@@ -16,6 +16,7 @@ mod expr2;
 
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::{Expr1, IndexExpr1};
+#[allow(unused_imports)]
 pub use expr2::Expr2;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
