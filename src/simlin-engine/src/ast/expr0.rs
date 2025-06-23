@@ -1,9 +1,63 @@
+// Copyright 2025 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
 use crate::Ident;
-use crate::ast::{BinaryOp, Loc, UnaryOp};
-use crate::builtins::{UntypedBuiltinFn, is_0_arity_builtin_fn};
+use crate::builtins::{Loc, UntypedBuiltinFn, is_0_arity_builtin_fn};
 use crate::common::EquationError;
 use crate::token::LexerType;
 use std::result::Result as StdResult;
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum UnaryOp {
+    Positive,
+    Negative,
+    Not,
+}
+
+/// BinaryOp enumerates the different operators supported in
+/// system dynamics equations.
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Exp,
+    Mul,
+    Div,
+    Mod,
+    Gt,
+    Lt,
+    Gte,
+    Lte,
+    Eq,
+    Neq,
+    And,
+    Or,
+}
+
+impl BinaryOp {
+    /// higher the precedence, the tighter the binding.
+    /// e.g. Mul.precedence() > Add.precedence()
+    pub(crate) fn precedence(&self) -> u8 {
+        // matches equation.lalrpop
+        match self {
+            BinaryOp::Add => 4,
+            BinaryOp::Sub => 4,
+            BinaryOp::Exp => 6,
+            BinaryOp::Mul => 5,
+            BinaryOp::Div => 5,
+            BinaryOp::Mod => 5,
+            BinaryOp::Gt => 3,
+            BinaryOp::Lt => 3,
+            BinaryOp::Gte => 3,
+            BinaryOp::Lte => 3,
+            BinaryOp::Eq => 2,
+            BinaryOp::Neq => 2,
+            BinaryOp::And => 1,
+            BinaryOp::Or => 1,
+        }
+    }
+}
 
 /// Expr0 represents a parsed equation, before any calls to
 /// builtin functions have been checked/resolved.

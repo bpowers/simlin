@@ -67,3 +67,42 @@ impl DimensionsContext {
         None
     }
 }
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DimensionRange {
+    dim: Option<Dimension>,
+    start: u32,
+    end: u32,
+}
+
+#[allow(dead_code)]
+impl DimensionRange {
+    pub fn new(dim: Dimension, start: u32, end: u32) -> Self {
+        DimensionRange {
+            dim: Some(dim),
+            start,
+            end,
+        }
+    }
+
+    pub fn len(&self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+}
+
+/// DimensionInfo represents the array dimensions of an expression.
+/// It uses the existing Dimension enum which already encapsulates
+/// both name and size together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DimensionVec {
+    dims: Vec<DimensionRange>,
+}
+
+#[allow(dead_code)]
+impl DimensionVec {
+    /// Create dimension info from a vector of dimensions
+    pub fn new(dims: Vec<DimensionRange>) -> Self {
+        DimensionVec { dims }
+    }
+}
