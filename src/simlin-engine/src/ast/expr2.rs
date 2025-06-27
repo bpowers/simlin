@@ -6,7 +6,188 @@ use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
 use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
 use crate::common::{EquationResult, Ident};
-use crate::dimensions::DimensionRange;
+use std::iter::Iterator;
+
+#[derive(PartialEq, Clone, Debug)]
+pub enum ArrayView {
+    /// Simple contiguous array in row-major order
+    Contiguous { shape: Vec<usize> },
+    /// Strided array view (for transposes, slices, etc.)
+    Strided {
+        shape: Vec<usize>,
+        strides: Vec<isize>, // One stride per dimension, isize for negative strides
+        offset: usize,       // Starting offset into the underlying data
+    },
+}
+
+impl ArrayView {
+    /// Returns the total number of elements in the array
+    pub fn size(&self) -> usize {
+        match self {
+            ArrayView::Contiguous { shape } | ArrayView::Strided { shape, .. } => {
+                shape.iter().product()
+            }
+        }
+    }
+
+    /// Creates an iterator over the array elements in logical order
+    pub fn iter<'a>(&self, data: &'a [f64]) -> ArrayIterator<'a> {
+        match self {
+            ArrayView::Contiguous { shape } => ArrayIterator::new_contiguous(data, shape),
+            ArrayView::Strided {
+                shape,
+                strides,
+                offset,
+            } => ArrayIterator::new_strided(data, shape, strides, *offset),
+        }
+    }
+
+    /// Creates a transposed view (reverses dimensions)
+    pub fn transpose(&self) -> Self {
+        match self {
+            ArrayView::Contiguous { shape } => {
+                if shape.is_empty() {
+                    // Scalar case - transpose is identity
+                    return ArrayView::Contiguous {
+                        shape: shape.clone(),
+                    };
+                }
+
+                let mut new_shape = shape.clone();
+                new_shape.reverse();
+
+                // Calculate strides for the original shape in row-major order
+                let mut strides = vec![1isize; shape.len()];
+                for i in (0..shape.len() - 1).rev() {
+                    strides[i] = strides[i + 1] * shape[i + 1] as isize;
+                }
+                // Reverse strides for transpose
+                strides.reverse();
+
+                ArrayView::Strided {
+                    shape: new_shape,
+                    strides,
+                    offset: 0,
+                }
+            }
+            ArrayView::Strided {
+                shape,
+                strides,
+                offset,
+            } => {
+                let mut new_shape = shape.clone();
+                let mut new_strides = strides.clone();
+                new_shape.reverse();
+                new_strides.reverse();
+
+                ArrayView::Strided {
+                    shape: new_shape,
+                    strides: new_strides,
+                    offset: *offset,
+                }
+            }
+        }
+    }
+}
+
+/// Iterator over array elements in logical order
+pub struct ArrayIterator<'a> {
+    data: &'a [f64],
+    shape: Vec<usize>,
+    strides: Vec<isize>,
+    offset: usize,
+    indices: Vec<usize>,
+    done: bool,
+}
+
+impl<'a> ArrayIterator<'a> {
+    fn new_contiguous(data: &'a [f64], shape: &[usize]) -> Self {
+        // Calculate strides for contiguous row-major array
+        let mut strides = Vec::with_capacity(shape.len());
+        let mut stride = 1isize;
+        for &size in shape.iter().rev() {
+            strides.push(stride);
+            stride *= size as isize;
+        }
+        strides.reverse();
+
+        let indices = vec![0; shape.len()];
+        let done = shape.contains(&0); // Only mark done if any dimension is 0
+
+        ArrayIterator {
+            data,
+            shape: shape.to_vec(),
+            strides,
+            offset: 0,
+            indices,
+            done,
+        }
+    }
+
+    fn new_strided(data: &'a [f64], shape: &[usize], strides: &[isize], offset: usize) -> Self {
+        let indices = vec![0; shape.len()];
+        let done = shape.contains(&0); // Only mark done if any dimension is 0
+
+        ArrayIterator {
+            data,
+            shape: shape.to_vec(),
+            strides: strides.to_vec(),
+            offset,
+            indices,
+            done,
+        }
+    }
+
+    fn current_offset(&self) -> usize {
+        let mut offset = self.offset;
+        for (i, &idx) in self.indices.iter().enumerate() {
+            offset = (offset as isize + idx as isize * self.strides[i]) as usize;
+        }
+        offset
+    }
+
+    fn increment(&mut self) {
+        if self.indices.is_empty() {
+            // Scalar case - just mark as done after one iteration
+            self.done = true;
+            return;
+        }
+
+        // Increment indices from right to left (last dimension varies fastest)
+        for i in (0..self.indices.len()).rev() {
+            self.indices[i] += 1;
+            if self.indices[i] < self.shape[i] {
+                return;
+            }
+            self.indices[i] = 0;
+        }
+        // If we get here, we've wrapped around all dimensions
+        self.done = true;
+    }
+}
+
+impl<'a> Iterator for ArrayIterator<'a> {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        let offset = self.current_offset();
+        let value = self.data.get(offset).copied();
+
+        self.increment();
+
+        value
+    }
+}
+
+#[derive(PartialEq, Clone, Debug)]
+pub enum ArraySource {
+    Named(Ident, ArrayView),
+    Temp(u32, ArrayView),
+}
 
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
@@ -60,24 +241,12 @@ impl IndexExpr2 {
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr2 {
     Const(String, f64, Loc),
-    Var(Ident, Option<DimensionRange>, Loc),
-    App(BuiltinFn<Expr2>, Option<DimensionRange>, Loc),
-    Subscript(Ident, Vec<IndexExpr2>, Option<DimensionRange>, Loc),
-    Op1(UnaryOp, Box<Expr2>, Option<DimensionRange>, Loc),
-    Op2(
-        BinaryOp,
-        Box<Expr2>,
-        Box<Expr2>,
-        Option<DimensionRange>,
-        Loc,
-    ),
-    If(
-        Box<Expr2>,
-        Box<Expr2>,
-        Box<Expr2>,
-        Option<DimensionRange>,
-        Loc,
-    ),
+    Var(Ident, Option<ArraySource>, Loc),
+    App(BuiltinFn<Expr2>, Option<ArraySource>, Loc),
+    Subscript(Ident, Vec<IndexExpr2>, Option<ArraySource>, Loc),
+    Op1(UnaryOp, Box<Expr2>, Option<ArraySource>, Loc),
+    Op2(BinaryOp, Box<Expr2>, Box<Expr2>, Option<ArraySource>, Loc),
+    If(Box<Expr2>, Box<Expr2>, Box<Expr2>, Option<ArraySource>, Loc),
 }
 
 impl Expr2 {
@@ -237,5 +406,127 @@ impl Expr2 {
                 f.get_var_loc(ident)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_contiguous_iterator() {
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        let view = ArrayView::Contiguous { shape: vec![3, 4] };
+
+        let values: Vec<f64> = view.iter(&data).collect();
+        assert_eq!(values, data);
+        assert_eq!(view.size(), 12);
+    }
+
+    #[test]
+    fn test_transpose() {
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        let view = ArrayView::Contiguous { shape: vec![3, 4] };
+        let transposed = view.transpose();
+
+        // Original: [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+        // Transposed: [[1, 5, 9], [2, 6, 10], [3, 7, 11], [4, 8, 12]]
+        let expected = vec![
+            1.0, 5.0, 9.0, 2.0, 6.0, 10.0, 3.0, 7.0, 11.0, 4.0, 8.0, 12.0,
+        ];
+        let values: Vec<f64> = transposed.iter(&data).collect();
+        assert_eq!(values, expected);
+
+        // Check shape
+        match transposed {
+            ArrayView::Strided { shape, .. } => assert_eq!(shape, vec![4, 3]),
+            _ => panic!("Expected Strided view after transpose"),
+        }
+    }
+
+    #[test]
+    fn test_row_slice() {
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        // Select row 1 (second row): [5, 6, 7, 8]
+        let view = ArrayView::Strided {
+            shape: vec![4],
+            strides: vec![1],
+            offset: 4, // Skip first row (4 elements)
+        };
+
+        let values: Vec<f64> = view.iter(&data).collect();
+        assert_eq!(values, vec![5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn test_column_slice() {
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        // Select column 1 (second column): [2, 6, 10]
+        let view = ArrayView::Strided {
+            shape: vec![3],
+            strides: vec![4], // Skip 4 elements to get to next row
+            offset: 1,        // Start at second element
+        };
+
+        let values: Vec<f64> = view.iter(&data).collect();
+        assert_eq!(values, vec![2.0, 6.0, 10.0]);
+    }
+
+    #[test]
+    fn test_subarray() {
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        // Select a 2x2 subarray from the middle: [[6, 7], [10, 11]]
+        let view = ArrayView::Strided {
+            shape: vec![2, 2],
+            strides: vec![4, 1], // Same strides as original
+            offset: 5,           // Start at element 6 (index 5)
+        };
+
+        let values: Vec<f64> = view.iter(&data).collect();
+        assert_eq!(values, vec![6.0, 7.0, 10.0, 11.0]);
+    }
+
+    #[test]
+    fn test_empty_array() {
+        let data = vec![1.0, 2.0, 3.0];
+        let view = ArrayView::Contiguous { shape: vec![0, 3] };
+
+        let values: Vec<f64> = view.iter(&data).collect();
+        assert_eq!(values, Vec::<f64>::new());
+        assert_eq!(view.size(), 0);
+    }
+
+    #[test]
+    fn test_scalar() {
+        let data = vec![42.0];
+        let view = ArrayView::Contiguous { shape: vec![] };
+
+        let values: Vec<f64> = view.iter(&data).collect();
+        assert_eq!(values, vec![42.0]);
+        assert_eq!(view.size(), 1);
+    }
+
+    #[test]
+    fn test_3d_array() {
+        let data: Vec<f64> = (1..=24).map(|i| i as f64).collect();
+        let view = ArrayView::Contiguous {
+            shape: vec![2, 3, 4],
+        };
+
+        assert_eq!(view.size(), 24);
+        let values: Vec<f64> = view.iter(&data).collect();
+        assert_eq!(values.len(), 24);
+        assert_eq!(values[0], 1.0);
+        assert_eq!(values[23], 24.0);
     }
 }

@@ -54,15 +54,46 @@ The engine already supports some broadcasting scenarios:
 2. **Dimension position operator** (`@`): References dimensions by position
 3. **Range subscripts**: Selecting subarrays with syntax like `array[1:3, *]`
 
-### 2. Temporary Variables for Array Operations
+### 2. Temporary Array Storage Management
 
-Similar to how SMOOTH creates temporary variables, array operations will generate temporary variables in the AST to handle:
-- Intermediate results from slicing operations
-- Transposed array views
-- Results of dimension reordering
-- Partial array results from range subscripts
+Rather than creating new variables and rewriting ASTs, array operations will use a temporary storage system with unique IDs:
 
-This approach maintains clean data flow and enables optimization opportunities.
+**Key concepts:**
+- **ArrayView**: Describes how to access array data
+  - `Contiguous`: Simple arrays with uniform stride (most common case)
+  - `Strided`: For transposed arrays, slices, and other complex views
+- **ArraySource**: Identifies where array data lives
+  - `Named(Ident, ArrayView)`: References a named variable
+  - `Temp(u32, ArrayView)`: References temporary storage with a unique ID
+
+**ArrayView enum variants:**
+```rust
+enum ArrayView {
+    Contiguous {
+        shape: DimensionVec,  // Shape is all we need for row-major arrays
+    },
+    Strided {
+        shape: DimensionVec,
+        strides: Vec<isize>,  // One stride per dimension
+        offset: usize,        // Starting offset
+    },
+}
+```
+
+For `Contiguous` arrays, strides are implicit and calculated from the shape (row-major order):
+- Last dimension has stride 1
+- Each previous dimension's stride = next dimension's stride × next dimension's size
+- Total elements = product of all dimension sizes
+
+**How it works:**
+- Each AST node that produces an array result gets an `Option<ArraySource>`
+- During compilation, temporary IDs are assigned where needed
+- During evaluation, space is allocated for each temporary ID
+- Subscript operations modify the ArrayView without allocating new storage
+- Transpose creates a `Strided` view with reordered strides (no data copy)
+- Slicing adjusts offset and strides to create sub-array views
+
+This approach avoids AST rewriting while enabling efficient array operations.
 
 ### 3. Array Expression Types
 
@@ -129,9 +160,16 @@ The compiler will:
 
 The existing VM already handles element-wise operations through its Op2 instructions. New functionality needed:
 
-1. **Slice operations**: Generate temporary arrays for range subscripts
-2. **Transpose operations**: Reorder dimensions without copying data (if possible)
-3. **View support**: Track when arrays are views of other arrays to avoid unnecessary copies
+1. **Slice operations**: Create `Strided` views with adjusted offsets and strides
+2. **Transpose operations**: Create `Strided` views with reordered strides
+3. **View-aware iteration**: Handle both `Contiguous` and `Strided` array access patterns
+
+**Example: Transpose Implementation**
+For a 2D array with shape [3, 4] and row-major layout:
+- Original: `Contiguous { shape: [3, 4] }` (implicit strides: [4, 1])
+- After transpose: `Strided { shape: [4, 3], strides: [1, 4], offset: 0 }`
+
+This swaps how we iterate: instead of moving by 4 elements between rows (implicit), we move by 1; instead of moving by 1 between columns (implicit), we move by 4.
 
 Most operations can be implemented through the existing bytecode infrastructure with additional support in the compiler for generating the appropriate instruction sequences.
 
