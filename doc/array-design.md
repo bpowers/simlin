@@ -68,22 +68,27 @@ Rather than creating new variables and rewriting ASTs, array operations will use
 
 **ArrayView enum variants:**
 ```rust
+struct StridedDimension {
+    dimension: Dimension,  // Retains dimension name and size
+    stride: isize,        // Stride for this dimension
+}
+
 enum ArrayView {
     Contiguous {
-        shape: DimensionVec,  // Shape is all we need for row-major arrays
+        dims: Vec<Dimension>,  // Just dimensions for row-major arrays
     },
     Strided {
-        shape: DimensionVec,
-        strides: Vec<isize>,  // One stride per dimension
-        offset: usize,        // Starting offset
+        dims: Vec<StridedDimension>,  // Combined dimension and stride info
+        offset: usize,               // Starting offset
     },
 }
 ```
 
-For `Contiguous` arrays, strides are implicit and calculated from the shape (row-major order):
-- Last dimension has stride 1
-- Each previous dimension's stride = next dimension's stride × next dimension's size
-- Total elements = product of all dimension sizes
+Benefits of this design:
+- **Reduced errors**: Shape and stride information are coupled in a single struct
+- **Better error messages**: Dimension names are preserved for debugging
+- **Cleaner API**: No possibility of shape/stride length mismatch in Strided variant
+- **Implicit strides**: Contiguous arrays calculate strides from dimensions as needed
 
 **How it works:**
 - Each AST node that produces an array result gets an `Option<ArraySource>`

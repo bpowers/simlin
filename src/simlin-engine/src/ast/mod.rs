@@ -17,7 +17,7 @@ mod expr2;
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::Expr1;
 #[allow(unused_imports)]
-pub use expr2::{ArraySource, ArrayView, Expr2, IndexExpr2};
+pub use expr2::{ArraySource, ArrayView, Expr2, IndexExpr2, StridedDimension};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {

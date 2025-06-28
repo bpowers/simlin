@@ -9,14 +9,29 @@ use crate::datamodel;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NamedDimension {
-    elements: Vec<String>,
-    indexed_elements: HashMap<Ident, usize>,
+    pub elements: Vec<String>,
+    pub indexed_elements: HashMap<Ident, usize>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Dimension {
     Indexed(Ident, u32),
     Named(Ident, NamedDimension),
+}
+
+impl Dimension {
+    pub fn len(&self) -> usize {
+        match self {
+            Dimension::Indexed(_, size) => *size as usize,
+            Dimension::Named(_, named) => named.elements.len(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Dimension::Indexed(name, _) | Dimension::Named(name, _) => name,
+        }
+    }
 }
 
 impl From<datamodel::Dimension> for Dimension {
