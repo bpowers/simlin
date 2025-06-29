@@ -45,7 +45,20 @@ impl ArrayView {
     pub fn subscript(&self, indices: &[IndexExpr2]) -> Result<ArrayView, String> {
         match self {
             ArrayView::Contiguous { dims } => {
-                // Calculate original strides for row-major layout
+                // Calculate strides for row-major memory layout.
+                // In row-major layout, the last dimension varies fastest in memory.
+                // For a 3D array with shape [2, 3, 4], elements are stored as:
+                // [0,0,0] [0,0,1] [0,0,2] [0,0,3] [0,1,0] [0,1,1] ... [1,2,3]
+                //
+                // A stride is how many elements to skip to move by 1 in that dimension:
+                // - To go from [0,0,0] to [0,0,1]: skip 1 element (stride = 1)
+                // - To go from [0,0,0] to [0,1,0]: skip 4 elements (stride = 4)
+                // - To go from [0,0,0] to [1,0,0]: skip 12 elements (stride = 12)
+                //
+                // We build strides right-to-left since each dimension's stride depends
+                // on the sizes of all dimensions to its right:
+                // - Last dimension: stride = 1 (always)
+                // - Each previous: stride = next_stride * next_dimension_size
                 let mut original_strides = vec![1isize; dims.len()];
                 for i in (0..dims.len() - 1).rev() {
                     original_strides[i] = original_strides[i + 1] * dims[i + 1].len() as isize;
