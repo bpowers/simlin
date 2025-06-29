@@ -7,6 +7,8 @@ use crate::ast::expr1::{Expr1, IndexExpr1};
 use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
 use crate::common::{EquationResult, Ident};
 use crate::dimensions::Dimension;
+use crate::eqn_err;
+use float_cmp::approx_eq;
 use std::collections::HashMap;
 use std::iter::Iterator;
 
@@ -42,7 +44,7 @@ impl ArrayView {
     }
 
     /// Apply subscript operation to create a new view
-    pub fn subscript(&self, indices: &[IndexExpr2]) -> Result<ArrayView, String> {
+    pub fn subscript(&self, indices: &[IndexExpr2]) -> EquationResult<ArrayView> {
         match self {
             ArrayView::Contiguous { dims } => {
                 // Calculate strides for row-major memory layout.
@@ -69,11 +71,12 @@ impl ArrayView {
 
                 for (i, index_expr) in indices.iter().enumerate() {
                     if i >= dims.len() {
-                        return Err(format!(
-                            "Too many indices: expected {}, got {}",
-                            dims.len(),
-                            indices.len()
-                        ));
+                        // Get location from the first excess index
+                        let loc = indices
+                            .get(dims.len())
+                            .map(|idx| idx.get_loc())
+                            .unwrap_or_else(Loc::default);
+                        return eqn_err!(Generic, loc.start, loc.end);
                     }
 
                     match index_expr {
@@ -85,50 +88,34 @@ impl ArrayView {
                             });
                         }
                         IndexExpr2::Expr(expr) => {
-                            // For now, assume it evaluates to a constant index
-                            // In real implementation, this would need expression evaluation
-                            if let Expr2::Const(_, value, _) = expr {
-                                let idx = *value as usize;
-                                if idx >= dims[i].len() {
-                                    return Err(format!(
-                                        "Index {} out of bounds for dimension {} (size {})",
-                                        idx,
-                                        dims[i].name(),
-                                        dims[i].len()
-                                    ));
-                                }
-                                // Skip this dimension and adjust offset
-                                offset += idx * original_strides[i] as usize;
-                            } else {
-                                return Err("Only constant indices supported for now".to_string());
-                            }
-                        }
-                        IndexExpr2::Range(start, end, _) => {
-                            // Extract start and end values
-                            let start_idx = if let Expr2::Const(_, v, _) = start {
-                                *v as usize
-                            } else {
-                                return Err("Range start must be constant".to_string());
-                            };
+                            let loc = expr.get_loc();
+                            // Evaluate the expression to get an integer index
+                            let idx = const_int_eval(expr)?;
 
-                            let end_idx = if let Expr2::Const(_, v, _) = end {
-                                *v as usize
-                            } else {
-                                return Err("Range end must be constant".to_string());
-                            };
+                            if idx < 0 || idx as usize >= dims[i].len() {
+                                return eqn_err!(Generic, loc.start, loc.end);
+                            }
+                            // Skip this dimension and adjust offset
+                            offset += idx as usize * original_strides[i] as usize;
+                        }
+                        IndexExpr2::Range(start, end, range_loc) => {
+                            // Extract start and end values
+                            let start_idx = const_int_eval(start)?;
+                            let end_idx = const_int_eval(end)?;
+
+                            if start_idx < 0 || end_idx < 0 {
+                                return eqn_err!(Generic, range_loc.start, range_loc.end);
+                            }
+
+                            let start_idx = start_idx as usize;
+                            let end_idx = end_idx as usize;
 
                             if start_idx >= dims[i].len() || end_idx > dims[i].len() {
-                                return Err(format!(
-                                    "Range {}:{} out of bounds for dimension {} (size {})",
-                                    start_idx,
-                                    end_idx,
-                                    dims[i].name(),
-                                    dims[i].len()
-                                ));
+                                return eqn_err!(Generic, range_loc.start, range_loc.end);
                             }
 
                             if start_idx >= end_idx {
-                                return Err(format!("Invalid range {}:{}", start_idx, end_idx));
+                                return eqn_err!(Generic, range_loc.start, range_loc.end);
                             }
 
                             // Create a new dimension for the slice
@@ -162,8 +149,8 @@ impl ArrayView {
                             // Adjust offset for the start of the range
                             offset += start_idx * original_strides[i] as usize;
                         }
-                        IndexExpr2::StarRange(_, _) => {
-                            return Err("StarRange not implemented yet".to_string());
+                        IndexExpr2::StarRange(_, loc) => {
+                            return eqn_err!(TodoStarRange, loc.start, loc.end);
                         }
                     }
                 }
@@ -194,7 +181,8 @@ impl ArrayView {
             }
             ArrayView::Strided { .. } => {
                 // For now, don't support subscripting already strided arrays
-                Err("Subscripting strided arrays not yet implemented".to_string())
+                // Use a default location since we don't have a specific index location here
+                eqn_err!(Generic, 0, 0)
             }
         }
     }
@@ -379,6 +367,15 @@ pub enum IndexExpr2 {
 }
 
 impl IndexExpr2 {
+    pub(crate) fn get_loc(&self) -> Loc {
+        match self {
+            IndexExpr2::Wildcard(loc) => *loc,
+            IndexExpr2::StarRange(_, loc) => *loc,
+            IndexExpr2::Range(_, _, loc) => *loc,
+            IndexExpr2::Expr(e) => e.get_loc(),
+        }
+    }
+
     pub(crate) fn from(expr: IndexExpr1) -> EquationResult<Self> {
         let expr = match expr {
             IndexExpr1::Wildcard(loc) => IndexExpr2::Wildcard(loc),
@@ -583,6 +580,68 @@ impl Expr2 {
                 }
                 f.get_var_loc(ident)
             }
+        }
+    }
+}
+
+/// Evaluate a constant expression to an integer value.
+/// This is used for array subscripts which must be integer constants.
+fn const_int_eval(ast: &Expr2) -> EquationResult<i32> {
+    match ast {
+        Expr2::Const(_, n, loc) => {
+            if approx_eq!(f64, *n, n.round()) {
+                Ok(n.round() as i32)
+            } else {
+                eqn_err!(ExpectedInteger, loc.start, loc.end)
+            }
+        }
+        Expr2::Var(_, _, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
+        }
+        Expr2::App(_, _, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
+        }
+        Expr2::Subscript(_, _, _, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
+        }
+        Expr2::Op1(op, expr, _, _) => {
+            let expr = const_int_eval(expr)?;
+            let result = match op {
+                UnaryOp::Positive => expr,
+                UnaryOp::Negative => -expr,
+                UnaryOp::Not => i32::from(expr == 0),
+            };
+            Ok(result)
+        }
+        Expr2::Op2(op, l, r, _, _) => {
+            let l = const_int_eval(l)?;
+            let r = const_int_eval(r)?;
+            let result = match op {
+                BinaryOp::Add => l + r,
+                BinaryOp::Sub => l - r,
+                BinaryOp::Exp => l.pow(r as u32),
+                BinaryOp::Mul => l * r,
+                BinaryOp::Div => {
+                    if r == 0 {
+                        0
+                    } else {
+                        l / r
+                    }
+                }
+                BinaryOp::Mod => l % r,
+                BinaryOp::Gt => (l > r) as i32,
+                BinaryOp::Lt => (l < r) as i32,
+                BinaryOp::Gte => (l >= r) as i32,
+                BinaryOp::Lte => (l <= r) as i32,
+                BinaryOp::Eq => (l == r) as i32,
+                BinaryOp::Neq => (l != r) as i32,
+                BinaryOp::And => ((l != 0) && (r != 0)) as i32,
+                BinaryOp::Or => ((l != 0) || (r != 0)) as i32,
+            };
+            Ok(result)
+        }
+        Expr2::If(_, _, _, _, loc) => {
+            eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
     }
 }
@@ -922,5 +981,154 @@ mod tests {
             Loc::default(),
         )];
         assert!(view.subscript(&indices).is_err());
+    }
+
+    #[test]
+    fn test_subscript_with_expression_index() {
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        let view = ArrayView::Contiguous {
+            dims: indexed_dims(&[3, 4]),
+        };
+
+        // Select row using an expression: 1 + 0
+        let one_plus_zero = Expr2::Op2(
+            BinaryOp::Add,
+            Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr2::Const("0".to_string(), 0.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        let indices = vec![IndexExpr2::Expr(one_plus_zero)];
+        let subscripted = view.subscript(&indices).unwrap();
+
+        let values: Vec<f64> = subscripted.iter(&data).collect();
+        assert_eq!(values, vec![5.0, 6.0, 7.0, 8.0]); // Second row
+    }
+
+    #[test]
+    fn test_const_int_eval() {
+        // Basic constants
+        assert_eq!(
+            0,
+            const_int_eval(&Expr2::Const("0".to_string(), 0.0, Loc::default())).unwrap()
+        );
+        assert_eq!(
+            1,
+            const_int_eval(&Expr2::Const("1".to_string(), 1.0, Loc::default())).unwrap()
+        );
+        assert_eq!(
+            -1,
+            const_int_eval(&Expr2::Const("-1".to_string(), -1.0, Loc::default())).unwrap()
+        );
+        assert_eq!(
+            42,
+            const_int_eval(&Expr2::Const("42".to_string(), 42.0, Loc::default())).unwrap()
+        );
+
+        // Rounds correctly
+        assert_eq!(
+            3,
+            const_int_eval(&Expr2::Const("3.0".to_string(), 3.0, Loc::default())).unwrap()
+        );
+
+        // Unary operations
+        let neg_five = Expr2::Op1(
+            UnaryOp::Negative,
+            Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(-5, const_int_eval(&neg_five).unwrap());
+
+        // Binary operations
+        let two_plus_three = Expr2::Op2(
+            BinaryOp::Add,
+            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
+            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(5, const_int_eval(&two_plus_three).unwrap());
+
+        let four_minus_one = Expr2::Op2(
+            BinaryOp::Sub,
+            Box::new(Expr2::Const("4".to_string(), 4.0, Loc::default())),
+            Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(3, const_int_eval(&four_minus_one).unwrap());
+
+        // Division truncates
+        let two_div_three = Expr2::Op2(
+            BinaryOp::Div,
+            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
+            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(0, const_int_eval(&two_div_three).unwrap());
+
+        // Division by zero returns 0
+        let seven_div_zero = Expr2::Op2(
+            BinaryOp::Div,
+            Box::new(Expr2::Const("7".to_string(), 7.0, Loc::default())),
+            Box::new(Expr2::Const("0".to_string(), 0.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(0, const_int_eval(&seven_div_zero).unwrap());
+
+        // Modulo
+        let fifteen_mod_seven = Expr2::Op2(
+            BinaryOp::Mod,
+            Box::new(Expr2::Const("15".to_string(), 15.0, Loc::default())),
+            Box::new(Expr2::Const("7".to_string(), 7.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(1, const_int_eval(&fifteen_mod_seven).unwrap());
+
+        // Exponentiation
+        let three_pow_three = Expr2::Op2(
+            BinaryOp::Exp,
+            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
+            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(27, const_int_eval(&three_pow_three).unwrap());
+
+        // Comparison operators
+        let four_gt_two = Expr2::Op2(
+            BinaryOp::Gt,
+            Box::new(Expr2::Const("4".to_string(), 4.0, Loc::default())),
+            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(1, const_int_eval(&four_gt_two).unwrap());
+
+        // Error cases
+        assert!(const_int_eval(&Expr2::Const("3.5".to_string(), 3.5, Loc::default())).is_err());
+        assert!(const_int_eval(&Expr2::Var("foo".to_string(), None, Loc::default())).is_err());
+
+        // Complex expression
+        let complex = Expr2::Op2(
+            BinaryOp::Add,
+            Box::new(Expr2::Op2(
+                BinaryOp::Mul,
+                Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
+                Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
+                None,
+                Loc::default(),
+            )),
+            Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+        assert_eq!(7, const_int_eval(&complex).unwrap());
     }
 }
