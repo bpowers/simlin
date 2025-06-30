@@ -155,9 +155,7 @@ fn ensure_results(expected: &Results, results: &Results) {
                 };
 
                 if !approx_eq!(f64, expected, actual, epsilon = epsilon) {
-                    eprintln!(
-                        "step {step}: {ident}: {expected} (expected) != {actual} (actual)"
-                    );
+                    eprintln!("step {step}: {ident}: {expected} (expected) != {actual} (actual)");
                     panic!("not equal");
                 }
             }

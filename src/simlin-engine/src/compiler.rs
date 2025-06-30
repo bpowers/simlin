@@ -1738,9 +1738,7 @@ pub fn pretty(expr: &Expr) -> String {
             let string_args = args.join(", ");
             let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{bounds}")).collect();
             let string_bounds = bounds.join(", ");
-            format!(
-                "curr[{off} + (({string_args}) - 1); bounds: {string_bounds}]"
-            )
+            format!("curr[{off} + (({string_args}) - 1); bounds: {string_bounds}]")
         }
         Expr::Dt(_) => "dt".to_string(),
         Expr::App(builtin, _) => match builtin {

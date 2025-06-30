@@ -83,9 +83,7 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
                     let underline = "~".repeat((loc.end - loc.start) as usize);
                     eprintln!("    {space}{underline}");
                 }
-                eprintln!(
-                    "units error in model '{model_name}' variable '{ident}': {details}"
-                );
+                eprintln!("units error in model '{model_name}' variable '{ident}': {details}");
             }
         }
         if let Some(errors) = &model.errors {

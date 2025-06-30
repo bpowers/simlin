@@ -95,10 +95,7 @@ impl UnitInferer<'_> {
         match expr {
             Expr2::Const(_, _, _) => Ok(Units::Constant),
             Expr2::Var(ident, _, _loc) => {
-                let units: UnitMap = [(format!("@{prefix}{ident}"), 1)]
-                    .iter()
-                    .cloned()
-                    .collect();
+                let units: UnitMap = [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
 
                 Ok(Units::Explicit(units))
             }
@@ -116,10 +113,8 @@ impl UnitInferer<'_> {
                 }
                 BuiltinFn::Lookup(ident, _, _loc) => {
                     // lookups have the units specified on the table
-                    let units: UnitMap = [(format!("@{prefix}{ident}"), 1)]
-                        .iter()
-                        .cloned()
-                        .collect();
+                    let units: UnitMap =
+                        [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
 
                     Ok(Units::Explicit(units))
                 }
@@ -313,10 +308,8 @@ impl UnitInferer<'_> {
                 .push_ctx(format!("stock@{prefix}{stock_ident}"));
                 let mut check_flows = |flows: &Vec<Ident>| {
                     for ident in flows.iter() {
-                        let flow_units: UnitMap = [(format!("@{prefix}{ident}"), 1)]
-                            .iter()
-                            .cloned()
-                            .collect();
+                        let flow_units: UnitMap =
+                            [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
                         constraints.push(combine(
                             UnitOp::Div,
                             flow_units.push_ctx(format!("stock-flow@{prefix}{ident}")),
