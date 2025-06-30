@@ -12,6 +12,12 @@
     ],
     "noEmit": true
   },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "../**/*.ts",
+    "../**/*.tsx"
+  ],
   "exclude": [
     "lib",
     "lib.browser"

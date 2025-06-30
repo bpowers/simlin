@@ -5,6 +5,10 @@
     "outDir": "lib.module",
     "module": "esnext",
   },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx"
+  ],
   "exclude": [
     "lib",
     "lib.module"

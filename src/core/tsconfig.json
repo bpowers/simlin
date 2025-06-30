@@ -5,6 +5,10 @@
     "outDir": "lib",
     "module": "commonjs",
   },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx"
+  ],
   "exclude": [
     "lib",
     "lib.module"

@@ -11,6 +11,10 @@
       "scripthost"
     ]
   },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx"
+  ],
   "exclude": [
     "lib",
     "lib.browser"
