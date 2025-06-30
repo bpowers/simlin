@@ -152,6 +152,11 @@ impl ArrayView {
                         IndexExpr2::StarRange(_, loc) => {
                             return eqn_err!(TodoStarRange, loc.start, loc.end);
                         }
+                        IndexExpr2::DimPosition(_, loc) => {
+                            // Dimension position operators are not valid in array views
+                            // They should only be used in assignment contexts
+                            return eqn_err!(Generic, loc.start, loc.end);
+                        }
                     }
                 }
 
@@ -363,6 +368,7 @@ pub enum IndexExpr2 {
     // *:dimension_name
     StarRange(Ident, Loc),
     Range(Expr2, Expr2, Loc),
+    DimPosition(u32, Loc),
     Expr(Expr2),
 }
 
@@ -372,6 +378,7 @@ impl IndexExpr2 {
             IndexExpr2::Wildcard(loc) => *loc,
             IndexExpr2::StarRange(_, loc) => *loc,
             IndexExpr2::Range(_, _, loc) => *loc,
+            IndexExpr2::DimPosition(_, loc) => *loc,
             IndexExpr2::Expr(e) => e.get_loc(),
         }
     }
@@ -383,6 +390,7 @@ impl IndexExpr2 {
             IndexExpr1::Range(l, r, loc) => {
                 IndexExpr2::Range(Expr2::from(l)?, Expr2::from(r)?, loc)
             }
+            IndexExpr1::DimPosition(n, loc) => IndexExpr2::DimPosition(n, loc),
             IndexExpr1::Expr(e) => IndexExpr2::Expr(Expr2::from(e)?),
         };
 
@@ -405,6 +413,7 @@ impl IndexExpr2 {
                 }
                 r.get_var_loc(ident)
             }
+            IndexExpr2::DimPosition(_, _) => None,
             IndexExpr2::Expr(e) => e.get_var_loc(ident),
         }
     }

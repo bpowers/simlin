@@ -507,6 +507,7 @@ impl IdentifierSetVisitor<'_> {
             IndexExpr2::Wildcard(_) => {}
             IndexExpr2::StarRange(_, _) => {}
             IndexExpr2::Range(_, _, _) => {}
+            IndexExpr2::DimPosition(_, _) => {}
             IndexExpr2::Expr(expr) => {
                 if let Expr2::Var(arg_ident, _, _) = expr {
                     let mut is_subscript_or_dimension = false;

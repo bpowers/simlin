@@ -21,6 +21,11 @@ IndexExpr: IndexExpr0 = {
     <lpos:@L> "*"  <rpos:@R> => IndexExpr0::Wildcard(Loc::new(lpos, rpos)),
     <lpos:@L> "*" ":" <id:Ident>  <rpos:@R> => IndexExpr0::StarRange(id, Loc::new(lpos, rpos)),
     <lpos:@L> <l:Expr> ":" <r:Expr>  <rpos:@R> => IndexExpr0::Range(l, r, Loc::new(lpos, rpos)),
+    <lpos:@L> "@" <n:"Num"> <rpos:@R> => {
+        use std::str::FromStr;
+        let num = u32::from_str(n).unwrap();
+        IndexExpr0::DimensionPosition(num, Loc::new(lpos, rpos))
+    },
     <expr:Expr> => IndexExpr0::Expr(expr),
 };
 
@@ -146,6 +151,7 @@ extern {
         "^" => Token::Exp,
         ":" => Token::Colon,
         "'" => Token::Apostrophe,
+        "@" => Token::At,
         "&&" => Token::And,
         "||" => Token::Or,
         "Nan" => Token::Nan,

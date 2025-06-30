@@ -47,6 +47,7 @@ impl<'a> BuiltinVisitor<'a> {
             Wildcard(_) => expr,
             StarRange(_, _) => expr,
             Range(_, _, _) => expr,
+            DimPosition(_, _) => expr,
             Expr(expr) => Expr(self.walk(expr)?),
         };
 

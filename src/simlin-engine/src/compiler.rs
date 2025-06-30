@@ -428,6 +428,12 @@ impl Context<'_> {
                             IndexExpr2::Wildcard(_loc) => sim_err!(TodoWildcard, id.clone()),
                             IndexExpr2::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
                             IndexExpr2::Range(_l, _r, _loc) => sim_err!(TodoRange, id.clone()),
+                            IndexExpr2::DimPosition(_pos, _loc) => {
+                                // @1 refers to the first dimension, @2 to the second, etc.
+                                // This is a placeholder for now - proper implementation would need
+                                // to resolve this based on the target variable's dimensions
+                                sim_err!(ArraysNotImplemented, id.clone())
+                            }
                             IndexExpr2::Expr(arg) => {
                                 let expr = if let ast::Expr2::Var(ident, _, loc) = arg {
                                     let dim = &dims[i];

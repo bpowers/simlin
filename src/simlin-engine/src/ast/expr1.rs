@@ -17,6 +17,7 @@ pub enum IndexExpr1 {
     // *:dimension_name
     StarRange(Ident, Loc),
     Range(Expr1, Expr1, Loc),
+    DimPosition(u32, Loc),
     Expr(Expr1),
 }
 
@@ -28,6 +29,7 @@ impl IndexExpr1 {
             IndexExpr0::Range(l, r, loc) => {
                 IndexExpr1::Range(Expr1::from(l)?, Expr1::from(r)?, loc)
             }
+            IndexExpr0::DimPosition(n, loc) => IndexExpr1::DimPosition(n, loc),
             IndexExpr0::Expr(e) => IndexExpr1::Expr(Expr1::from(e)?),
         };
 
@@ -43,6 +45,7 @@ impl IndexExpr1 {
                 r.constify_dimensions(scope),
                 loc,
             ),
+            IndexExpr1::DimPosition(n, loc) => IndexExpr1::DimPosition(n, loc),
             IndexExpr1::Expr(e) => IndexExpr1::Expr(e.constify_dimensions(scope)),
         }
     }

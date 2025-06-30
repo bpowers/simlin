@@ -78,6 +78,7 @@ pub enum IndexExpr0 {
     Wildcard(Loc),
     StarRange(Ident, Loc),
     Range(Expr0, Expr0, Loc),
+    DimPosition(u32, Loc),
     Expr(Expr0),
 }
 
@@ -87,6 +88,7 @@ impl IndexExpr0 {
             IndexExpr0::Wildcard(_) => self,
             IndexExpr0::StarRange(_, _) => self,
             IndexExpr0::Range(_, _, _) => self,
+            IndexExpr0::DimPosition(_, _) => self,
             IndexExpr0::Expr(expr) => IndexExpr0::Expr(expr.reify_0_arity_builtins()),
         }
     }
@@ -98,6 +100,7 @@ impl IndexExpr0 {
             IndexExpr0::Wildcard(_loc) => IndexExpr0::Wildcard(loc),
             IndexExpr0::StarRange(d, _loc) => IndexExpr0::StarRange(d, loc),
             IndexExpr0::Range(l, r, _loc) => IndexExpr0::Range(l.strip_loc(), r.strip_loc(), loc),
+            IndexExpr0::DimPosition(n, _loc) => IndexExpr0::DimPosition(n, loc),
             IndexExpr0::Expr(e) => IndexExpr0::Expr(e.strip_loc()),
         }
     }
@@ -375,6 +378,22 @@ fn test_parse() {
         Loc::default(),
     ));
 
+    let dimension_pos1 = Box::new(Subscript(
+        "a".to_owned(),
+        vec![IndexExpr0::DimPosition(1, Loc::default())],
+        Loc::default(),
+    ));
+
+    let dimension_pos2 = Box::new(Subscript(
+        "a".to_owned(),
+        vec![
+            IndexExpr0::Expr(Var("dimm".to_owned(), Loc::default())),
+            IndexExpr0::DimPosition(1, Loc::default()),
+            IndexExpr0::DimPosition(2, Loc::default()),
+        ],
+        Loc::default(),
+    ));
+
     let time1 = Box::new(App(
         UntypedBuiltinFn("time".to_owned(), vec![]),
         Loc::default(),
@@ -479,6 +498,8 @@ fn test_parse() {
         ("a'", transpose1, "a'"),
         ("matrix[*, 1]'", transpose2, "matrix[*, 1]'"),
         ("a' * b", transpose3, "a' * b"),
+        ("a[@1]", dimension_pos1, "a[@1]"),
+        ("a[DimM, @1, @2]", dimension_pos2, "a[dimm, @1, @2]"),
     ];
 
     for case in cases.iter() {
@@ -501,6 +522,46 @@ fn test_parse() {
     }
     let printed = ast::print_eqn(&ast);
     assert_eq!("NaN", &printed);
+}
+
+#[test]
+fn test_dimension_position() {
+    use crate::ast;
+
+    // Test valid dimension positions
+    let result = Expr0::new("a[@1]", LexerType::Equation);
+    assert!(result.is_ok());
+    let ast = result.unwrap().unwrap();
+    let printed = ast::print_eqn(&ast);
+    assert_eq!("a[@1]", &printed);
+
+    // Test multiple dimension positions
+    let result = Expr0::new("a[@3, @2, @1]", LexerType::Equation);
+    assert!(result.is_ok());
+    let ast = result.unwrap().unwrap();
+    let printed = ast::print_eqn(&ast);
+    assert_eq!("a[@3, @2, @1]", &printed);
+
+    // Test mixed subscripts
+    let result = Expr0::new("a[i, @1, j]", LexerType::Equation);
+    assert!(result.is_ok());
+    let ast = result.unwrap().unwrap();
+    let printed = ast::print_eqn(&ast);
+    assert_eq!("a[i, @1, j]", &printed);
+
+    // Test large dimension position
+    let result = Expr0::new("a[@100]", LexerType::Equation);
+    assert!(result.is_ok());
+    let ast = result.unwrap().unwrap();
+    let printed = ast::print_eqn(&ast);
+    assert_eq!("a[@100]", &printed);
+
+    // Test that @0 parses correctly (validation happens at a later stage)
+    let result = Expr0::new("a[@0]", LexerType::Equation);
+    assert!(result.is_ok());
+    let ast = result.unwrap().unwrap();
+    let printed = ast::print_eqn(&ast);
+    assert_eq!("a[@0]", &printed);
 }
 
 #[test]

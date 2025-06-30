@@ -166,6 +166,7 @@ impl Visitor<String> for PrintVisitor {
             IndexExpr0::Wildcard(_) => "*".to_string(),
             IndexExpr0::StarRange(id, _) => format!("*:{}", id),
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
+            IndexExpr0::DimPosition(n, _) => format!("@{}", n),
             IndexExpr0::Expr(e) => self.walk(e),
         }
     }
@@ -326,6 +327,7 @@ impl LatexVisitor {
             IndexExpr2::Wildcard(_) => "*".to_string(),
             IndexExpr2::StarRange(id, _) => format!("*:{}", id),
             IndexExpr2::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
+            IndexExpr2::DimPosition(n, _) => format!("@{}", n),
             IndexExpr2::Expr(e) => self.walk(e),
         }
     }
