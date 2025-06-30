@@ -573,10 +573,7 @@ impl Context<'_> {
 #[test]
 fn test_lower() {
     use crate::datamodel;
-    // TODO: update this test when the rest of the codebase is migrated to Expr2
-    // For now, skip this test as it depends on Expr1
-    return;
-    #[allow(unreachable_code)]
+
     let input = {
         use ast::BinaryOp::*;
         use ast::Expr2::*;
