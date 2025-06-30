@@ -20,8 +20,8 @@ The engine has substantial array support already implemented:
 
 Key limitations:
 - Limited slicing with range operations (e.g., a[1:3])
-- No transpose operator (')
-- Missing dimension position operator (@)
+- ~~No transpose operator (')~~ **IMPLEMENTED**
+- ~~Missing dimension position operator (@)~~ **IMPLEMENTED**
 - Missing array manipulation functions
 - Incomplete error handling for invalid indices
 - No explicit array constructors
@@ -50,8 +50,8 @@ The engine already supports some broadcasting scenarios:
 - This is implemented through the existing ApplyToAll and expression evaluation
 
 **Required XMILE Features Not Yet Implemented:**
-1. **Transpose operator** (`'`): Reverses array dimensions
-2. **Dimension position operator** (`@`): References dimensions by position
+1. ~~**Transpose operator** (`'`): Reverses array dimensions~~ **IMPLEMENTED** - Parser support added, AST nodes created, awaiting compiler implementation
+2. ~~**Dimension position operator** (`@`): References dimensions by position~~ **IMPLEMENTED** - Parser support added, AST nodes created, awaiting compiler implementation
 3. **Range subscripts**: Selecting subarrays with syntax like `array[1:3, *]`
 
 ### 2. Temporary Array Storage Management
@@ -109,8 +109,8 @@ Current support includes:
 
 Still needed:
 - **Range slicing**: `a[1:3, *]`, `a[DimA.Boston:DimA.LA, *]`
-- **Transpose**: `a'` or `a[DimA, DimB]'`
-- **Dimension position**: `a[@2, @1]` for reordering dimensions
+- ~~**Transpose**: `a'` or `a[DimA, DimB]'`~~ **IMPLEMENTED** in parser
+- ~~**Dimension position**: `a[@2, @1]` for reordering dimensions~~ **IMPLEMENTED** in parser
 
 ### 4. Dimension Context Enhancement
 
@@ -191,23 +191,51 @@ struct ArrayInfo {
 }
 ```
 
+## Current Implementation Status (June 2025)
+
+### Recently Implemented Features
+
+#### 1. Transpose Operator (`'`)
+- **Parser Support**: Full support for parsing transpose operator as a postfix unary operator
+- **AST Representation**: Added `Transpose` variant to `UnaryOp` enum (not a separate `Expr0` variant)
+- **Precedence**: Correctly positioned between subscript and atom level in parser grammar
+- **Tests**: Comprehensive parser tests including `a'`, `matrix[*, 1]'`, and `a' * b`
+- **Compiler**: Returns `ArraysNotImplemented` error - awaiting full array operation support
+
+#### 2. Dimension Position Operator (`@`)
+- **Parser Support**: Full support for parsing `@n` syntax in subscript expressions
+- **AST Representation**: Added `DimensionPosition(u32, Loc)` variant to all `IndexExpr{0,1,2}` enums
+- **Lexer**: Added `At` token and lexer rule for `@` character
+- **Validation**: Parser accepts any u32 value (including `@0`); semantic validation deferred to compiler
+- **Tests**: Comprehensive tests including `a[@1]`, `a[@3, @2, @1]`, and mixed expressions like `a[DimM, @1, @2]`
+- **Compiler**: Returns `ArraysNotImplemented` error - awaiting full array operation support
+
+### Implementation Details
+
+The implementation follows a clean architecture:
+1. **Lexer** recognizes new tokens (`'` as `Apostrophe`, `@` as `At`)
+2. **Parser** constructs appropriate AST nodes with proper precedence
+3. **AST transformations** properly handle new variants through expr0→expr1→expr2 pipeline
+4. **Visitor patterns** updated to handle new AST nodes
+5. **Error handling** returns appropriate error codes when features aren't fully implemented
+
 ## Implementation Phases
 
-### Phase 1: Core XMILE Features
+### Phase 1: Core XMILE Features (Partially Complete)
 1. **Range subscripts**: Implement `array[start:end]` syntax
-   - Extend parser to handle range syntax
-   - Generate temporary arrays for slice results
-   - Handle edge cases and bounds checking
+   - ✓ Parser already supports range syntax
+   - ⏳ Generate temporary arrays for slice results
+   - ⏳ Handle edge cases and bounds checking
 2. **Transpose operator**: Implement `array'` syntax
-   - Add to parser with correct precedence
-   - Implement dimension reversal in compiler
-   - Create efficient view without copying data
+   - ✓ Added to parser with correct precedence
+   - ⏳ Implement dimension reversal in compiler
+   - ⏳ Create efficient view without copying data
 
-### Phase 2: Advanced XMILE Features  
+### Phase 2: Advanced XMILE Features (Partially Complete)
 1. **Dimension position operator**: Implement `@n` syntax
-   - Parse and resolve dimension positions
-   - Support in subscript expressions
-   - Handle dimension reordering
+   - ✓ Parse and resolve dimension positions
+   - ✓ Support in subscript expressions
+   - ⏳ Handle dimension reordering in compiler
 2. **Enhanced error handling**:
    - Configurable invalid index behavior (0 or NaN)
    - Clear shape mismatch error messages
@@ -247,10 +275,12 @@ struct ArrayInfo {
 
 ## Conclusion
 
-This design focuses on implementing the specific array features required by the XMILE specification that are not yet supported in simlin-engine. The engine already has robust support for basic array operations, element-wise arithmetic, and some broadcasting. The main gaps are:
+This design focuses on implementing the specific array features required by the XMILE specification that are not yet supported in simlin-engine. The engine already has robust support for basic array operations, element-wise arithmetic, and some broadcasting. 
 
-1. Range-based subscripting (e.g., `array[1:3]`)
-2. Transpose operator (`'`)
-3. Dimension position operator (`@`)
+**Update (June 2025)**: Significant progress has been made on the main gaps:
 
-By focusing on these specific features rather than reimplementing existing functionality, we can achieve full XMILE compliance efficiently. The phased approach prioritizes the most commonly used features first, with optimizations and extensions following as needed.
+1. **Range-based subscripting** (e.g., `array[1:3]`) - Parser support exists, compiler implementation pending
+2. **Transpose operator** (`'`) - ✅ Parser fully implemented, compiler implementation pending
+3. **Dimension position operator** (`@`) - ✅ Parser fully implemented, compiler implementation pending
+
+The parser now supports all three features, with proper AST representation and comprehensive tests. The next step is to implement the compiler and VM support to make these features fully functional. By focusing on completing the compiler implementation for these already-parsed features, we can achieve full XMILE compliance efficiently.
