@@ -68,6 +68,7 @@ const createConfig = (options = {}) => {
 
   // Add ignore patterns first if provided
   if (options.ignorePatterns) {
+    options.ignorePatterns.push('eslint.*.js');
     configs.push({
       ignores: options.ignorePatterns,
     });
