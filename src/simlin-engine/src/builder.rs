@@ -15,7 +15,7 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
     let project = Rc::new(Project::from(project.clone()));
     if !project.errors.is_empty() {
         for err in project.errors.iter() {
-            eprintln!("project error: {}", err);
+            eprintln!("project error: {err}");
         }
     }
 
@@ -34,10 +34,10 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
             for error in errors {
                 eprintln!();
                 if let Some(Equation::Scalar(eqn, ..)) = var.get_equation() {
-                    eprintln!("    {}", eqn);
+                    eprintln!("    {eqn}");
                     let space = " ".repeat(error.start as usize);
                     let underline = "~".repeat((error.end - error.start) as usize);
-                    eprintln!("    {}{}", space, underline);
+                    eprintln!("    {space}{underline}");
                 }
                 eprintln!(
                     "error in model '{}' variable '{}': {}",
@@ -71,21 +71,20 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
                                 (None, loc, code)
                             };
                         let details = match details {
-                            Some(details) => format!("{} -- {}", code, details),
-                            None => format!("{}", code),
+                            Some(details) => format!("{code} -- {details}"),
+                            None => format!("{code}"),
                         };
                         (eqn, loc, details)
                     }
                 };
                 if let Some(eqn) = eqn {
-                    eprintln!("    {}", eqn);
+                    eprintln!("    {eqn}");
                     let space = " ".repeat(loc.start as usize);
                     let underline = "~".repeat((loc.end - loc.start) as usize);
-                    eprintln!("    {}{}", space, underline);
+                    eprintln!("    {space}{underline}");
                 }
                 eprintln!(
-                    "units error in model '{}' variable '{}': {}",
-                    model_name, ident, details
+                    "units error in model '{model_name}' variable '{ident}': {details}"
                 );
             }
         }
@@ -94,7 +93,7 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
                 if error.code == ErrorCode::VariablesHaveErrors && found_var_error {
                     continue;
                 }
-                eprintln!("error in model {}: {}", model_name, error);
+                eprintln!("error in model {model_name}: {error}");
                 found_model_error = true;
             }
         }
@@ -103,7 +102,7 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
         Ok(sim) => sim,
         Err(err) => {
             if !(err.code == ErrorCode::NotSimulatable && found_model_error) {
-                eprintln!("error: {}", err);
+                eprintln!("error: {err}");
             }
             return None;
         }

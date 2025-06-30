@@ -415,7 +415,7 @@ fn resolve_relative<'a>(
     };
     let model = models.get(model_name)?;
 
-    let input_prefix = format!("{}·", model_name);
+    let input_prefix = format!("{model_name}·");
     // TODO: this is weird to do here and not before we call into this fn
     let ident = ident.strip_prefix(&input_prefix).unwrap_or(ident);
 
@@ -438,7 +438,7 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
         ident
     };
 
-    let input_prefix = format!("{}·", model_name);
+    let input_prefix = format!("{model_name}·");
     // TODO: this is weird to do here and not before we call into this fn
     let ident = ident.strip_prefix(&input_prefix).unwrap_or(ident);
 
@@ -589,7 +589,7 @@ pub(crate) fn resolve_module_input<'a>(
     orig_src: &'a str,
     orig_dst: &'a str,
 ) -> EquationResult<Option<ModuleInput>> {
-    let input_prefix = format!("{}·", ident);
+    let input_prefix = format!("{ident}·");
     let maybe_strip_leading_dot = |s: &'a str| -> &'a str {
         if parent_model_name == "main" && s.starts_with('·') {
             &s['·'.len_utf8()..] // '·' is a 2 byte long unicode character
@@ -662,7 +662,7 @@ where
     let model = *models.get(model_name).ok_or_else(|| Error {
         kind: ErrorKind::Simulation,
         code: ErrorCode::NotSimulatable,
-        details: Some(format!("model for module '{}' not found", model_name)),
+        details: Some(format!("model for module '{model_name}' not found")),
     })?;
     for (_id, v) in model.variables.iter() {
         if let Variable::Module {
@@ -1166,15 +1166,15 @@ fn test_all_deps() {
 
         if expected_deps != deps {
             let failed_dep_order: Vec<_> = all_vars.iter().map(|v| v.ident()).collect();
-            eprintln!("failed order: {:?}", failed_dep_order);
+            eprintln!("failed order: {failed_dep_order:?}");
             for (v, expected) in expected_deps_list.iter() {
                 eprintln!("{}", v.ident());
                 let mut expected: Vec<_> = expected.to_vec();
                 expected.sort();
-                eprintln!("  expected: {:?}", expected);
+                eprintln!("  expected: {expected:?}");
                 let mut actual: Vec<_> = deps[v.ident()].iter().collect();
                 actual.sort();
-                eprintln!("  actual  : {:?}", actual);
+                eprintln!("  actual  : {actual:?}");
             }
         };
         assert_eq!(expected_deps, deps);

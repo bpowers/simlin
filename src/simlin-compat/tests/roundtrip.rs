@@ -48,9 +48,9 @@ static TEST_MODELS: &[&str] = &[
 #[test]
 fn roundtrips_model() {
     for &path in TEST_MODELS {
-        let file_path = format!("../../{}", path);
+        let file_path = format!("../../{path}");
 
-        eprintln!("model: {}", path);
+        eprintln!("model: {path}");
 
         let f = File::open(file_path).unwrap();
         let mut f = BufReader::new(f);
@@ -62,7 +62,7 @@ fn roundtrips_model() {
             for (var_name, var) in model.variables.iter() {
                 if let Some(errors) = var.equation_errors() {
                     for err in errors {
-                        eprintln!("  {}.{} error: {}", model_name, var_name, err);
+                        eprintln!("  {model_name}.{var_name} error: {err}");
                     }
                 }
             }

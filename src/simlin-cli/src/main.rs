@@ -139,7 +139,7 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
             return Err(Error::new(
                 ErrorKind::Import,
                 ErrorCode::VensimConversion,
-                Some(format!("{}", err)),
+                Some(format!("{err}")),
             ));
         }
     };
@@ -188,7 +188,7 @@ fn main() {
         let project = Rc::new(Project::from(project));
         for (model_name, model) in project.models.iter().filter(|(_, model)| !model.implicit) {
             output_file
-                .write_fmt(format_args!("% {}\n", model_name))
+                .write_fmt(format_args!("% {model_name}\n"))
                 .unwrap();
             output_file
                 .write_fmt(format_args!("\\begin{{align*}}\n"))
@@ -209,8 +209,7 @@ fn main() {
                     .unwrap_or_else(|| "\\varnothing".to_owned());
                 output_file
                     .write_fmt(format_args!(
-                        "\\mathrm{{{}}}{} & = {}{}\n",
-                        var_name, subscript, eqn, continuation
+                        "\\mathrm{{{var_name}}}{subscript} & = {eqn}{continuation}\n"
                     ))
                     .unwrap();
 
@@ -243,14 +242,13 @@ fn main() {
                             );
                         }
                         if use_parens {
-                            eqn = format!("({}) ", eqn);
+                            eqn = format!("({eqn}) ");
                         } else {
-                            eqn = format!("{} \\cdot ", eqn);
+                            eqn = format!("{eqn} \\cdot ");
                         }
                         output_file
                             .write_fmt(format_args!(
-                                "\\mathrm{{{}}}(t) & = \\mathrm{{{}}}(t - dt) + {} dt{}\n",
-                                var_name, var_name, eqn, continuation
+                                "\\mathrm{{{var_name}}}(t) & = \\mathrm{{{var_name}}}(t - dt) + {eqn} dt{continuation}\n"
                             ))
                             .unwrap();
                     }

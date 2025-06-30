@@ -57,7 +57,7 @@ impl UnitMap {
 
     #[allow(dead_code)]
     pub fn pretty_print(&self) -> String {
-        format!("{}", self)
+        format!("{self}")
     }
 }
 
@@ -123,7 +123,7 @@ impl Display for UnitMap {
                 write!(f, "*")?;
             }
             first = false;
-            write!(f, "{}", unit)?;
+            write!(f, "{unit}")?;
             if exp.abs() > 1 {
                 write!(f, "^{}", exp.abs())?;
             }
@@ -140,7 +140,7 @@ impl Display for UnitMap {
                 written = true;
             }
             write!(f, "/")?;
-            write!(f, "{}", unit)?;
+            write!(f, "{unit}")?;
             if exp.abs() > 1 {
                 write!(f, "^{}", exp.abs())?;
             }

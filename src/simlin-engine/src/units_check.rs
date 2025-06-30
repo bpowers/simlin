@@ -46,7 +46,7 @@ impl UnitEvaluator<'_> {
                             ConsistencyError(
                                 ErrorCode::DoesNotExist,
                                 *loc,
-                                Some(format!("can't find or no units for dependency '{}'", ident)),
+                                Some(format!("can't find or no units for dependency '{ident}'")),
                             )
                         })?
                 };
@@ -79,7 +79,7 @@ impl UnitEvaluator<'_> {
                         Err(ConsistencyError(
                             ErrorCode::DoesNotExist,
                             *loc,
-                            Some(format!("can't find or no units for dependency '{}'", ident,)),
+                            Some(format!("can't find or no units for dependency '{ident}'",)),
                         ))
                     }
                 }
@@ -126,8 +126,7 @@ impl UnitEvaluator<'_> {
                                     ErrorCode::UnitDefinitionErrors,
                                     expr.get_loc(),
                                     Some(format!(
-                                        "expected all arguments to mean() to have the same units '{}'",
-                                        expected,
+                                        "expected all arguments to mean() to have the same units '{expected}'",
                                     )),
                                 ))
                             }
@@ -154,8 +153,7 @@ impl UnitEvaluator<'_> {
                                 ErrorCode::UnitDefinitionErrors,
                                 loc,
                                 Some(format!(
-                                    "expected left and right argument units to match, but '{}' and '{}' don't",
-                                    a_units, b_units,
+                                    "expected left and right argument units to match, but '{a_units}' and '{b_units}' don't",
                                 )),
                             ));
                         }
@@ -200,8 +198,7 @@ impl UnitEvaluator<'_> {
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
                             if lunits != runits {
                                 let details = Some(format!(
-                                    "expected left and right argument units to match, but '{}' and '{}' don't",
-                                    lunits, runits,
+                                    "expected left and right argument units to match, but '{lunits}' and '{runits}' don't",
                                 ));
                                 let loc = l.get_loc().union(&r.get_loc());
                                 Err(ConsistencyError(ErrorCode::UnitMismatch, loc, details))
@@ -325,8 +322,7 @@ pub fn check(
                             if let Some(units) = var.units() {
                                 if expected_flow_units != *units {
                                     let details = format!(
-                                        "expected units '{}' to match the units expected by the attached stock {} ({})",
-                                        units, stock_ident, expected_flow_units
+                                        "expected units '{units}' to match the units expected by the attached stock {stock_ident} ({expected_flow_units})"
                                     );
                                     errors.push((
                                         var.ident().to_owned(),

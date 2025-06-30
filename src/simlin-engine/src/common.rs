@@ -129,7 +129,7 @@ impl fmt::Display for ErrorCode {
             TodoArrayBuiltin => "todo_array_builtin",
         };
 
-        write!(f, "{}", name)
+        write!(f, "{name}")
     }
 }
 
@@ -168,16 +168,16 @@ impl fmt::Display for UnitError {
         match self {
             UnitError::DefinitionError(err, details) => {
                 if let Some(details) = details {
-                    write!(f, "unit definition:{} -- {}", err, details)
+                    write!(f, "unit definition:{err} -- {details}")
                 } else {
-                    write!(f, "unit definition:{}", err)
+                    write!(f, "unit definition:{err}")
                 }
             }
             UnitError::ConsistencyError(err, loc, details) => {
                 if let Some(details) = details {
-                    write!(f, "unit consistency:{}:{} -- {}", loc, err, details)
+                    write!(f, "unit consistency:{loc}:{err} -- {details}")
                 } else {
-                    write!(f, "unit consistency:{}:{}", loc, err)
+                    write!(f, "unit consistency:{loc}:{err}")
                 }
             }
         }
@@ -404,7 +404,7 @@ pub fn topo_sort<'out>(
                 add(dependencies, result, used, dep)
             }
         } else {
-            panic!("internal compiler error: unknown ident {}", ident);
+            panic!("internal compiler error: unknown ident {ident}");
         }
         result.push(ident);
     }

@@ -133,7 +133,7 @@ impl Results {
 
         // print header
         for (i, id) in var_names.iter().enumerate() {
-            print!("{}", id);
+            print!("{id}");
             if i == var_names.len() - 1 {
                 println!();
             } else {
@@ -152,7 +152,7 @@ impl Results {
                         let var_name = var_names[i];
                         if let Some(off) = reference.offsets.get(var_name) {
                             let val = ref_curr[*off];
-                            print!("{}", val);
+                            print!("{val}");
                         } else {
                             print!("")
                         }
@@ -164,7 +164,7 @@ impl Results {
                     }
                     print!("simlin\t");
                     for (i, val) in curr.iter().enumerate() {
-                        print!("{}", val);
+                        print!("{val}");
                         if i == var_names.len() - 1 {
                             println!();
                         } else {
@@ -179,7 +179,7 @@ impl Results {
                         break;
                     }
                     for (i, val) in curr.iter().enumerate() {
-                        print!("{}", val);
+                        print!("{val}");
                         if i == var_names.len() - 1 {
                             println!();
                         } else {
@@ -537,7 +537,7 @@ impl Vm {
         let mut model_names: Vec<_> = self.sliced_sim.initial_modules.keys().collect();
         model_names.sort_unstable();
         for model_name in model_names {
-            eprintln!("\n\nCOMPILED MODEL: {}", model_name);
+            eprintln!("\n\nCOMPILED MODEL: {model_name}");
 
             let initial_bc = &self.sliced_sim.initial_modules[model_name].bytecode;
             let flows_bc = &self.sliced_sim.flow_modules[model_name].bytecode;
@@ -545,32 +545,32 @@ impl Vm {
 
             eprintln!("\ninitial literals:");
             for (i, lit) in initial_bc.literals.iter().enumerate() {
-                eprintln!("\t{}: {}", i, lit);
+                eprintln!("\t{i}: {lit}");
             }
 
             eprintln!("\ninital bytecode:");
             for op in initial_bc.code.iter() {
-                eprintln!("\t{:?}", op);
+                eprintln!("\t{op:?}");
             }
 
             eprintln!("\nflows literals:");
             for (i, lit) in flows_bc.literals.iter().enumerate() {
-                eprintln!("\t{}: {}", i, lit);
+                eprintln!("\t{i}: {lit}");
             }
 
             eprintln!("\nflows bytecode:");
             for op in flows_bc.code.iter() {
-                eprintln!("\t{:?}", op);
+                eprintln!("\t{op:?}");
             }
 
             eprintln!("\nstocks literals:");
             for (i, lit) in stocks_bc.literals.iter().enumerate() {
-                eprintln!("\t{}: {}", i, lit);
+                eprintln!("\t{i}: {lit}");
             }
 
             eprintln!("\nstocks bytecode:");
             for op in stocks_bc.code.iter() {
-                eprintln!("\t{:?}", op);
+                eprintln!("\t{op:?}");
             }
         }
     }
@@ -843,7 +843,7 @@ fn test_subscript_iter() {
     for (input, expected) in cases {
         for (i, subscripts) in SubscriptIterator::new(input).enumerate() {
             eprintln!("exp: {:?}", expected[i]);
-            eprintln!("got: {:?}", subscripts);
+            eprintln!("got: {subscripts:?}");
             assert_eq!(expected[i], subscripts);
         }
     }

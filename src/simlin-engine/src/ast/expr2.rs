@@ -121,7 +121,7 @@ impl ArrayView {
                             // Create a new dimension for the slice
                             let new_dim = match &dims[i] {
                                 Dimension::Indexed(name, _) => Dimension::Indexed(
-                                    format!("{}[{}:{}]", name, start_idx, end_idx),
+                                    format!("{name}[{start_idx}:{end_idx}]"),
                                     (end_idx - start_idx) as u32,
                                 ),
                                 Dimension::Named(name, named) => {
@@ -132,7 +132,7 @@ impl ArrayView {
                                         indexed_elements.insert(elem.clone(), i + 1);
                                     }
                                     Dimension::Named(
-                                        format!("{}[{}:{}]", name, start_idx, end_idx),
+                                        format!("{name}[{start_idx}:{end_idx}]"),
                                         crate::dimensions::NamedDimension {
                                             elements: new_elements,
                                             indexed_elements,
@@ -668,7 +668,7 @@ mod tests {
         sizes
             .iter()
             .enumerate()
-            .map(|(i, &size)| Dimension::Indexed(format!("dim{}", i), size))
+            .map(|(i, &size)| Dimension::Indexed(format!("dim{i}"), size))
             .collect()
     }
 
@@ -909,9 +909,7 @@ mod tests {
 
     #[test]
     fn test_subscript_scalar() {
-        let _data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-        ];
+        let _data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
         let view = ArrayView::Contiguous {
             dims: indexed_dims(&[3, 4]),
         };

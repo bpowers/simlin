@@ -47,7 +47,7 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
     let inverse = if let Some(exponent) = lhs.map.remove(var) {
         // TODO: we seem to be expecting this to be 1 -- what if it is > 1?
         if exponent.abs() != 1 {
-            println!("oh no!  solve_for removed {} with exp {}", var, exponent);
+            println!("oh no!  solve_for removed {var} with exp {exponent}");
         }
         exponent > 0
     } else {
@@ -63,7 +63,7 @@ fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<Unit
         .map(|mut l| {
             if let Some(exponent) = l.map.remove(var) {
                 if exponent.abs() != 1 {
-                    println!("oh no!  subst removed {} with exp {}", var, exponent);
+                    println!("oh no!  subst removed {var} with exp {exponent}");
                 }
 
                 let op = if exponent > 0 {
@@ -95,7 +95,7 @@ impl UnitInferer<'_> {
         match expr {
             Expr2::Const(_, _, _) => Ok(Units::Constant),
             Expr2::Var(ident, _, _loc) => {
-                let units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
+                let units: UnitMap = [(format!("@{prefix}{ident}"), 1)]
                     .iter()
                     .cloned()
                     .collect();
@@ -116,7 +116,7 @@ impl UnitInferer<'_> {
                 }
                 BuiltinFn::Lookup(ident, _, _loc) => {
                     // lookups have the units specified on the table
-                    let units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
+                    let units: UnitMap = [(format!("@{prefix}{ident}"), 1)]
                         .iter()
                         .cloned()
                         .collect();
@@ -304,22 +304,22 @@ impl UnitInferer<'_> {
             {
                 let stock_ident = ident;
                 let expected = [
-                    (format!("@{}{}", prefix, stock_ident), 1),
+                    (format!("@{prefix}{stock_ident}"), 1),
                     (time_units.clone(), -1),
                 ]
                 .iter()
                 .cloned()
                 .collect::<UnitMap>()
-                .push_ctx(format!("stock@{}{}", prefix, stock_ident));
+                .push_ctx(format!("stock@{prefix}{stock_ident}"));
                 let mut check_flows = |flows: &Vec<Ident>| {
                     for ident in flows.iter() {
-                        let flow_units: UnitMap = [(format!("@{}{}", prefix, ident), 1)]
+                        let flow_units: UnitMap = [(format!("@{prefix}{ident}"), 1)]
                             .iter()
                             .cloned()
                             .collect();
                         constraints.push(combine(
                             UnitOp::Div,
-                            flow_units.push_ctx(format!("stock-flow@{}{}", prefix, ident)),
+                            flow_units.push_ctx(format!("stock-flow@{prefix}{ident}")),
                             expected.clone(),
                         ));
                     }
@@ -334,7 +334,7 @@ impl UnitInferer<'_> {
             } = var
             {
                 let submodel = self.models[model_name];
-                let subprefix = format!("{}{}·", prefix, ident);
+                let subprefix = format!("{prefix}{ident}·");
                 for input in inputs {
                     let src = format!("@{}{}", prefix, input.src);
                     let dst = format!("@{}{}", subprefix, input.dst);
@@ -343,7 +343,7 @@ impl UnitInferer<'_> {
                         .iter()
                         .cloned()
                         .collect::<UnitMap>()
-                        .push_ctx(format!("module-input{}{}", src, dst));
+                        .push_ctx(format!("module-input{src}{dst}"));
                     constraints.push(units);
                 }
                 self.gen_all_constraints(submodel, &subprefix, constraints);
@@ -370,21 +370,21 @@ impl UnitInferer<'_> {
                         // TODO: constant means ~ unconstrained I think
                     }
                     Units::Explicit(units) => {
-                        let mv = [(format!("@{}{}", prefix, id), 1)]
+                        let mv = [(format!("@{prefix}{id}"), 1)]
                             .iter()
                             .cloned()
                             .collect::<UnitMap>()
-                            .push_ctx(format!("computed-mv@{}{}", prefix, id));
+                            .push_ctx(format!("computed-mv@{prefix}{id}"));
                         constraints.push(combine(UnitOp::Div, mv, units));
                     }
                 };
             }
             if let Some(units) = var.units() {
-                let mv = [(format!("@{}{}", prefix, id), 1)]
+                let mv = [(format!("@{prefix}{id}"), 1)]
                     .iter()
                     .cloned()
                     .collect::<UnitMap>()
-                    .push_ctx(format!("userdef-mv@{}{}", prefix, id));
+                    .push_ctx(format!("userdef-mv@{prefix}{id}"));
                 constraints.push(combine(UnitOp::Div, mv, units.clone()));
             }
         }
@@ -465,7 +465,7 @@ impl UnitInferer<'_> {
             let mut s = prefix.to_owned();
             for c in constraints.iter() {
                 let delim = if s.len() == prefix.len() { "" } else { "; " };
-                write!(s, "{}\n    1 == {}", delim, c).unwrap();
+                write!(s, "{delim}\n    1 == {c}").unwrap();
             }
             model_err!(UnitMismatch, s)
         } else {
@@ -544,7 +544,7 @@ fn test_inference() {
                 if let Some(computed_units) = results.get(*ident) {
                     assert_eq!(expected_units, *computed_units);
                 } else {
-                    panic!("inference results don't contain variable '{}'", ident);
+                    panic!("inference results don't contain variable '{ident}'");
                 }
             }
         }

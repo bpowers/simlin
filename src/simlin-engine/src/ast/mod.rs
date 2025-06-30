@@ -117,7 +117,7 @@ macro_rules! child_needs_parens(
 
 fn paren_if_necessary(parent: &Expr0, child: &Expr0, eqn: String) -> String {
     if child_needs_parens!(Expr0, parent, child, eqn) {
-        format!("({})", eqn)
+        format!("({eqn})")
     } else {
         eqn
     }
@@ -152,7 +152,7 @@ macro_rules! child_needs_parens2(
 
 fn paren_if_necessary1(parent: &Expr2, child: &Expr2, eqn: String) -> String {
     if child_needs_parens2!(Expr2, parent, child, eqn) {
-        format!("({})", eqn)
+        format!("({eqn})")
     } else {
         eqn
     }
@@ -164,9 +164,9 @@ impl Visitor<String> for PrintVisitor {
     fn walk_index(&mut self, expr: &IndexExpr0) -> String {
         match expr {
             IndexExpr0::Wildcard(_) => "*".to_string(),
-            IndexExpr0::StarRange(id, _) => format!("*:{}", id),
+            IndexExpr0::StarRange(id, _) => format!("*:{id}"),
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
-            IndexExpr0::DimPosition(n, _) => format!("@{}", n),
+            IndexExpr0::DimPosition(n, _) => format!("@{n}"),
             IndexExpr0::Expr(e) => self.walk(e),
         }
     }
@@ -187,7 +187,7 @@ impl Visitor<String> for PrintVisitor {
                 match op {
                     UnaryOp::Transpose => {
                         let l = self.walk(l);
-                        format!("{}'", l)
+                        format!("{l}'")
                     }
                     _ => {
                         let l = paren_if_necessary(expr, l, self.walk(l));
@@ -197,7 +197,7 @@ impl Visitor<String> for PrintVisitor {
                             UnaryOp::Not => "!",
                             UnaryOp::Transpose => unreachable!(), // handled above
                         };
-                        format!("{}{}", op, l)
+                        format!("{op}{l}")
                     }
                 }
             }
@@ -220,13 +220,13 @@ impl Visitor<String> for PrintVisitor {
                     BinaryOp::And => "&&",
                     BinaryOp::Or => "||",
                 };
-                format!("{} {} {}", l, op, r)
+                format!("{l} {op} {r}")
             }
             Expr0::If(cond, t, f, _) => {
                 let cond = self.walk(cond);
                 let t = self.walk(t);
                 let f = self.walk(f);
-                format!("if ({}) then ({}) else ({})", cond, t, f)
+                format!("if ({cond}) then ({t}) else ({f})")
             }
         }
     }
@@ -325,9 +325,9 @@ impl LatexVisitor {
     fn walk_index(&mut self, expr: &IndexExpr2) -> String {
         match expr {
             IndexExpr2::Wildcard(_) => "*".to_string(),
-            IndexExpr2::StarRange(id, _) => format!("*:{}", id),
+            IndexExpr2::StarRange(id, _) => format!("*:{id}"),
             IndexExpr2::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
-            IndexExpr2::DimPosition(n, _) => format!("@{}", n),
+            IndexExpr2::DimPosition(n, _) => format!("@{n}"),
             IndexExpr2::Expr(e) => self.walk(e),
         }
     }
@@ -343,13 +343,13 @@ impl LatexVisitor {
             }
             Expr2::Var(id, _, _) => {
                 let id = str::replace(id, "_", "\\_");
-                format!("\\mathrm{{{}}}", id)
+                format!("\\mathrm{{{id}}}")
             }
             Expr2::App(builtin, _, _) => {
                 let mut args: Vec<String> = vec![];
                 walk_builtin_expr(builtin, |contents| {
                     let arg = match contents {
-                        BuiltinContents::Ident(id, _loc) => format!("\\mathrm{{{}}}", id),
+                        BuiltinContents::Ident(id, _loc) => format!("\\mathrm{{{id}}}"),
                         BuiltinContents::Expr(expr) => self.walk(expr),
                     };
                     args.push(arg);
@@ -365,7 +365,7 @@ impl LatexVisitor {
                 match op {
                     UnaryOp::Transpose => {
                         let l = self.walk(l);
-                        format!("{}^T", l)
+                        format!("{l}^T")
                     }
                     _ => {
                         let l = paren_if_necessary1(expr, l, self.walk(l));
@@ -375,7 +375,7 @@ impl LatexVisitor {
                             UnaryOp::Not => "\\neg ",
                             UnaryOp::Transpose => unreachable!(), // handled above
                         };
-                        format!("{}{}", op, l)
+                        format!("{op}{l}")
                     }
                 }
             }
@@ -386,11 +386,11 @@ impl LatexVisitor {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
                     BinaryOp::Exp => {
-                        return format!("{}^{{{}}}", l, r);
+                        return format!("{l}^{{{r}}}");
                     }
                     BinaryOp::Mul => "\\cdot",
                     BinaryOp::Div => {
-                        return format!("\\frac{{{}}}{{{}}}", l, r);
+                        return format!("\\frac{{{l}}}{{{r}}}");
                     }
                     BinaryOp::Mod => "%",
                     BinaryOp::Gt => ">",
@@ -402,7 +402,7 @@ impl LatexVisitor {
                     BinaryOp::And => "&&",
                     BinaryOp::Or => "||",
                 };
-                format!("{} {} {}", l, op, r)
+                format!("{l} {op} {r}")
             }
             Expr2::If(cond, t, f, _, _) => {
                 let cond = self.walk(cond);
@@ -411,10 +411,9 @@ impl LatexVisitor {
 
                 format!(
                     "\\begin{{cases}}
-                     {} & \\text{{if }} {} \\\\
-                     {} & \\text{{else}}
-                 \\end{{cases}}",
-                    t, cond, f
+                     {t} & \\text{{if }} {cond} \\\\
+                     {f} & \\text{{else}}
+                 \\end{{cases}}"
                 )
             }
         }

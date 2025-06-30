@@ -126,7 +126,7 @@ fn ensure_results(expected: &Results, results: &Results) {
                 continue;
             }
             if !results.offsets.contains_key(ident) {
-                panic!("output missing variable '{}'", ident);
+                panic!("output missing variable '{ident}'");
             }
             let off = results.offsets[ident];
             let actual = results_row[off];
@@ -138,7 +138,6 @@ fn ensure_results(expected: &Results, results: &Results) {
             if !around_zero {
                 let (expected, actual, epsilon) = if results.is_vensim || expected_results.is_vensim
                 {
-                    let expected = expected;
                     let actual_int = format!("{}", actual.round() as i64);
                     let actual_int_len =
                         actual_int.strip_prefix('-').unwrap_or(&actual_int).len() as i64;
@@ -146,7 +145,7 @@ fn ensure_results(expected: &Results, results: &Results) {
                         actual
                     } else {
                         let precision = std::cmp::max(6_i64 - actual_int_len, 0) as usize;
-                        let formatted = format!("{:.1$}", actual, precision);
+                        let formatted = format!("{actual:.precision$}");
                         use std::str::FromStr;
                         f64::from_str(&formatted).unwrap()
                     };
@@ -157,8 +156,7 @@ fn ensure_results(expected: &Results, results: &Results) {
 
                 if !approx_eq!(f64, expected, actual, epsilon = epsilon) {
                     eprintln!(
-                        "step {}: {}: {} (expected) != {} (actual)",
-                        step, ident, expected, actual
+                        "step {step}: {ident}: {expected} (expected) != {actual} (actual)"
                     );
                     panic!("not equal");
                 }
@@ -176,7 +174,7 @@ fn ensure_results(expected: &Results, results: &Results) {
 }
 
 fn simulate_path(xmile_path: &str) {
-    eprintln!("model: {}", xmile_path);
+    eprintln!("model: {xmile_path}");
 
     // first read-in the XMILE model, convert it to our own representation,
     // and simulate it using our tree-walking interpreter
@@ -186,7 +184,7 @@ fn simulate_path(xmile_path: &str) {
 
         let datamodel_project = xmile::project_from_reader(&mut f);
         if let Err(ref err) = datamodel_project {
-            eprintln!("model '{}' error: {}", xmile_path, err);
+            eprintln!("model '{xmile_path}' error: {err}");
         }
         let datamodel_project = datamodel_project.unwrap();
         let sim = build_sim_with_stderrors(&datamodel_project).unwrap();
@@ -269,7 +267,7 @@ fn simulate_path(xmile_path: &str) {
 #[test]
 fn simulates_models_correctly() {
     for &path in TEST_MODELS {
-        let file_path = format!("../../{}", path);
+        let file_path = format!("../../{path}");
         simulate_path(file_path.as_str());
     }
 }

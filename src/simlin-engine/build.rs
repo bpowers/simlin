@@ -60,7 +60,7 @@ pub const MODEL_NAMES: [&str; {}] = [",
     .unwrap();
 
     for model_name in models.iter() {
-        writeln!(writer, "    \"{}\",", model_name).unwrap();
+        writeln!(writer, "    \"{model_name}\",").unwrap();
     }
 
     writeln!(
@@ -80,8 +80,7 @@ pub fn get(name: &str) -> Option<datamodel::Model> {{
     for model_name in models.iter() {
         writeln!(
             writer,
-            "        \"{}\" => Some(hydrate(include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/stdlib/{}.pb\")))),",
-            model_name, model_name
+            "        \"{model_name}\" => Some(hydrate(include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/stdlib/{model_name}.pb\")))),"
         )
         .unwrap();
     }

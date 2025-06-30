@@ -582,7 +582,7 @@ impl Engine {
                 return Some(Error::new(
                     ErrorKind::Model,
                     ErrorCode::ProtobufDecode,
-                    Some(format!("{}", err)),
+                    Some(format!("{err}")),
                 ));
             }
         };

@@ -191,7 +191,7 @@ impl ModuleEvaluator<'_> {
                     }
                     BuiltinFn::Lookup(id, index, _) => {
                         if !self.module.tables.contains_key(id) {
-                            eprintln!("bad lookup for {}", id);
+                            eprintln!("bad lookup for {id}");
                             unreachable!();
                         }
                         let table = &self.module.tables[id].data;
@@ -367,7 +367,7 @@ impl Simulation {
         let mut model_names: Vec<_> = self.modules.keys().collect();
         model_names.sort_unstable();
         for model_name in model_names {
-            eprintln!("\n\nMODEL: {}", model_name);
+            eprintln!("\n\nMODEL: {model_name}");
             let module = &self.modules[model_name];
             let offsets = &module.offsets[model_name];
             let mut idents: Vec<_> = offsets.keys().collect();
@@ -376,7 +376,7 @@ impl Simulation {
             eprintln!("offsets");
             for ident in idents {
                 let (off, size) = offsets[ident];
-                eprintln!("\t{}: {}, {}", ident, off, size);
+                eprintln!("\t{ident}: {off}, {size}");
             }
 
             eprintln!("\ninital runlist:");

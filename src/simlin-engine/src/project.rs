@@ -69,7 +69,7 @@ impl Project {
                             project_errors.push(Error {
                                 kind: ErrorKind::Model,
                                 code: ErrorCode::UnitDefinitionErrors,
-                                details: Some(format!("{}: {}", unit_name, err)),
+                                details: Some(format!("{unit_name}: {err}")),
                             });
                         }
                     }

@@ -445,7 +445,7 @@ impl ToXml<XmlWriter> for SimSpecs {
             elem.push_attribute(("time_units", time_units.as_str()));
         }
         if let Some(ref save_step) = self.save_step {
-            let save_interval = format!("{}", save_step);
+            let save_interval = format!("{save_step}");
             elem.push_attribute(("isee:save_interval", save_interval.as_str()));
         }
         writer.write_event(Event::Start(elem)).map_err(xml_error)?;
@@ -1725,7 +1725,7 @@ pub mod view_element {
 
     impl ToXml<XmlWriter> for Link {
         fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
-            let angle = self.angle.map(|angle| format!("{}", angle));
+            let angle = self.angle.map(|angle| format!("{angle}"));
 
             let mut attrs = Vec::with_capacity(1);
             if let Some(ref angle) = angle {
@@ -1968,7 +1968,7 @@ pub mod view_element {
 
     impl ToXml<XmlWriter> for Alias {
         fn write_xml(&self, writer: &mut Writer<XmlWriter>) -> Result<()> {
-            let uid = self.uid.map(|uid| format!("{}", uid));
+            let uid = self.uid.map(|uid| format!("{uid}"));
             let x = format!("{}", self.x);
             let y = format!("{}", self.y);
             let label_side = self.label_side.map(|side| side.as_str());

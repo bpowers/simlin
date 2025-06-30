@@ -1722,7 +1722,7 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
 
 fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
     if child_needs_parens(parent, child) {
-        format!("({})", eqn)
+        format!("({eqn})")
     } else {
         eqn
     }
@@ -1731,16 +1731,15 @@ fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
 #[allow(dead_code)]
 pub fn pretty(expr: &Expr) -> String {
     match expr {
-        Expr::Const(n, _) => format!("{}", n),
-        Expr::Var(off, _) => format!("curr[{}]", off),
+        Expr::Const(n, _) => format!("{n}"),
+        Expr::Var(off, _) => format!("curr[{off}]"),
         Expr::Subscript(off, args, bounds, _) => {
             let args: Vec<_> = args.iter().map(pretty).collect();
             let string_args = args.join(", ");
-            let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{}", bounds)).collect();
+            let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{bounds}")).collect();
             let string_bounds = bounds.join(", ");
             format!(
-                "curr[{} + (({}) - 1); bounds: {}]",
-                off, string_args, string_bounds
+                "curr[{off} + (({string_args}) - 1); bounds: {string_bounds}]"
             )
         }
         Expr::Dt(_) => "dt".to_string(),
@@ -1758,7 +1757,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Exp(l) => format!("exp({})", pretty(l)),
             BuiltinFn::Inf => "∞".to_string(),
             BuiltinFn::Int(l) => format!("int({})", pretty(l)),
-            BuiltinFn::IsModuleInput(ident, _loc) => format!("isModuleInput({})", ident),
+            BuiltinFn::IsModuleInput(ident, _loc) => format!("isModuleInput({ident})"),
             BuiltinFn::Ln(l) => format!("ln({})", pretty(l)),
             BuiltinFn::Log10(l) => format!("log10({})", pretty(l)),
             BuiltinFn::Max(l, r) => {
@@ -1771,7 +1770,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Mean(args) => {
                 let args: Vec<_> = args.iter().map(pretty).collect();
                 let string_args = args.join(", ");
-                format!("mean({})", string_args)
+                format!("mean({string_args})")
             }
             BuiltinFn::Min(l, r) => {
                 if let Some(r) = r {
@@ -1827,9 +1826,9 @@ pub fn pretty(expr: &Expr) -> String {
         Expr::EvalModule(module, model_name, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();
             let string_args = args.join(", ");
-            format!("eval<{}::{}>({})", module, model_name, string_args)
+            format!("eval<{module}::{model_name}>({string_args})")
         }
-        Expr::ModuleInput(a, _) => format!("mi<{}>", a),
+        Expr::ModuleInput(a, _) => format!("mi<{a}>"),
         Expr::Op2(op, l, r, _) => {
             let op: &str = match op {
                 BinaryOp::Add => "+",

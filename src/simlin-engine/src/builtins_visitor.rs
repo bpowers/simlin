@@ -116,14 +116,14 @@ impl<'a> BuiltinVisitor<'a> {
                     .collect();
                 let x_module = datamodel::Variable::Module(datamodel::Module {
                     ident: module_name.clone(),
-                    model_name: format!("stdlib⁚{}", func),
+                    model_name: format!("stdlib⁚{func}"),
                     documentation: "".to_string(),
                     units: None,
                     references,
                     can_be_module_input: false,
                     visibility: Visibility::Private,
                 });
-                let module_output_name = format!("{}·output", module_name);
+                let module_output_name = format!("{module_name}·output");
                 self.vars.insert(module_name, x_module);
 
                 self.n += 1;
