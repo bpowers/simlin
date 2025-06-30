@@ -383,15 +383,15 @@ impl IndexExpr2 {
         }
     }
 
-    pub(crate) fn from(expr: IndexExpr1) -> EquationResult<Self> {
+    pub(crate) fn from<C: Expr2Context>(expr: IndexExpr1, ctx: &mut C) -> EquationResult<Self> {
         let expr = match expr {
             IndexExpr1::Wildcard(loc) => IndexExpr2::Wildcard(loc),
             IndexExpr1::StarRange(ident, loc) => IndexExpr2::StarRange(ident, loc),
             IndexExpr1::Range(l, r, loc) => {
-                IndexExpr2::Range(Expr2::from(l)?, Expr2::from(r)?, loc)
+                IndexExpr2::Range(Expr2::from(l, ctx)?, Expr2::from(r, ctx)?, loc)
             }
             IndexExpr1::DimPosition(n, loc) => IndexExpr2::DimPosition(n, loc),
-            IndexExpr1::Expr(e) => IndexExpr2::Expr(Expr2::from(e)?),
+            IndexExpr1::Expr(e) => IndexExpr2::Expr(Expr2::from(e, ctx)?),
         };
 
         Ok(expr)
@@ -433,97 +433,137 @@ pub enum Expr2 {
     If(Box<Expr2>, Box<Expr2>, Box<Expr2>, Option<ArraySource>, Loc),
 }
 
+/// Context trait for converting Expr1 to Expr2
+/// Provides access to variable dimension information and temp ID allocation
+pub trait Expr2Context {
+    /// Get the dimensions of a variable, or None if it's a scalar
+    fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>>;
+
+    /// Allocate a new temp ID for the current equation
+    fn allocate_temp_id(&mut self) -> u32;
+}
+
 impl Expr2 {
     #[allow(dead_code)]
-    pub(crate) fn from(expr: Expr1) -> EquationResult<Self> {
+    pub(crate) fn from<C: Expr2Context>(expr: Expr1, ctx: &mut C) -> EquationResult<Self> {
         let expr = match expr {
             Expr1::Const(s, n, loc) => Expr2::Const(s, n, loc),
-            Expr1::Var(id, loc) => Expr2::Var(id, None, loc),
+            Expr1::Var(id, loc) => {
+                let array_source = if let Some(dims) = ctx.get_dimensions(&id) {
+                    let array_view = ArrayView::Contiguous { dims };
+                    Some(ArraySource::Named(id.clone(), array_view))
+                } else {
+                    None
+                };
+                Expr2::Var(id, array_source, loc)
+            }
             Expr1::App(builtin_fn, loc) => {
                 use BuiltinFn::*;
                 let builtin = match builtin_fn {
-                    Lookup(v, e, loc) => Lookup(v, Box::new(Expr2::from(*e)?), loc),
-                    Abs(e) => Abs(Box::new(Expr2::from(*e)?)),
-                    Arccos(e) => Arccos(Box::new(Expr2::from(*e)?)),
-                    Arcsin(e) => Arcsin(Box::new(Expr2::from(*e)?)),
-                    Arctan(e) => Arctan(Box::new(Expr2::from(*e)?)),
-                    Cos(e) => Cos(Box::new(Expr2::from(*e)?)),
-                    Exp(e) => Exp(Box::new(Expr2::from(*e)?)),
+                    Lookup(v, e, loc) => Lookup(v, Box::new(Expr2::from(*e, ctx)?), loc),
+                    Abs(e) => Abs(Box::new(Expr2::from(*e, ctx)?)),
+                    Arccos(e) => Arccos(Box::new(Expr2::from(*e, ctx)?)),
+                    Arcsin(e) => Arcsin(Box::new(Expr2::from(*e, ctx)?)),
+                    Arctan(e) => Arctan(Box::new(Expr2::from(*e, ctx)?)),
+                    Cos(e) => Cos(Box::new(Expr2::from(*e, ctx)?)),
+                    Exp(e) => Exp(Box::new(Expr2::from(*e, ctx)?)),
                     Inf => Inf,
-                    Int(e) => Int(Box::new(Expr2::from(*e)?)),
+                    Int(e) => Int(Box::new(Expr2::from(*e, ctx)?)),
                     IsModuleInput(s, loc) => IsModuleInput(s, loc),
-                    Ln(e) => Ln(Box::new(Expr2::from(*e)?)),
-                    Log10(e) => Log10(Box::new(Expr2::from(*e)?)),
+                    Ln(e) => Ln(Box::new(Expr2::from(*e, ctx)?)),
+                    Log10(e) => Log10(Box::new(Expr2::from(*e, ctx)?)),
                     Max(e1, e2) => Max(
-                        Box::new(Expr2::from(*e1)?),
-                        e2.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
                     Mean(exprs) => {
                         let exprs: EquationResult<Vec<Expr2>> =
-                            exprs.into_iter().map(Expr2::from).collect();
+                            exprs.into_iter().map(|e| Expr2::from(e, ctx)).collect();
                         Mean(exprs?)
                     }
                     Min(e1, e2) => Min(
-                        Box::new(Expr2::from(*e1)?),
-                        e2.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
                     Pi => Pi,
                     Pulse(e1, e2, e3) => Pulse(
-                        Box::new(Expr2::from(*e1)?),
-                        Box::new(Expr2::from(*e2)?),
-                        e3.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                        e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
                     Ramp(e1, e2, e3) => Ramp(
-                        Box::new(Expr2::from(*e1)?),
-                        Box::new(Expr2::from(*e2)?),
-                        e3.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                        e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
                     SafeDiv(e1, e2, e3) => SafeDiv(
-                        Box::new(Expr2::from(*e1)?),
-                        Box::new(Expr2::from(*e2)?),
-                        e3.map(|e| Expr2::from(*e)).transpose()?.map(Box::new),
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                        e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
-                    Sin(e) => Sin(Box::new(Expr2::from(*e)?)),
-                    Sqrt(e) => Sqrt(Box::new(Expr2::from(*e)?)),
-                    Step(e1, e2) => Step(Box::new(Expr2::from(*e1)?), Box::new(Expr2::from(*e2)?)),
-                    Tan(e) => Tan(Box::new(Expr2::from(*e)?)),
+                    Sin(e) => Sin(Box::new(Expr2::from(*e, ctx)?)),
+                    Sqrt(e) => Sqrt(Box::new(Expr2::from(*e, ctx)?)),
+                    Step(e1, e2) => Step(
+                        Box::new(Expr2::from(*e1, ctx)?),
+                        Box::new(Expr2::from(*e2, ctx)?),
+                    ),
+                    Tan(e) => Tan(Box::new(Expr2::from(*e, ctx)?)),
                     Time => Time,
                     TimeStep => TimeStep,
                     StartTime => StartTime,
                     FinalTime => FinalTime,
                     Rank(e, opt) => Rank(
-                        Box::new(Expr2::from(*e)?),
+                        Box::new(Expr2::from(*e, ctx)?),
                         opt.map(|(e1, opt_e2)| {
                             Ok::<_, crate::common::EquationError>((
-                                Box::new(Expr2::from(*e1)?),
-                                opt_e2.map(|e2| Expr2::from(*e2)).transpose()?.map(Box::new),
+                                Box::new(Expr2::from(*e1, ctx)?),
+                                opt_e2
+                                    .map(|e2| Expr2::from(*e2, ctx))
+                                    .transpose()?
+                                    .map(Box::new),
                             ))
                         })
                         .transpose()?,
                     ),
-                    Size(e) => Size(Box::new(Expr2::from(*e)?)),
-                    Stddev(e) => Stddev(Box::new(Expr2::from(*e)?)),
-                    Sum(e) => Sum(Box::new(Expr2::from(*e)?)),
+                    Size(e) => Size(Box::new(Expr2::from(*e, ctx)?)),
+                    Stddev(e) => Stddev(Box::new(Expr2::from(*e, ctx)?)),
+                    Sum(e) => Sum(Box::new(Expr2::from(*e, ctx)?)),
                 };
                 Expr2::App(builtin, None, loc)
             }
             Expr1::Subscript(id, args, loc) => {
                 let args: EquationResult<Vec<IndexExpr2>> =
-                    args.into_iter().map(IndexExpr2::from).collect();
-                Expr2::Subscript(id, args?, None, loc)
+                    args.into_iter().map(|e| IndexExpr2::from(e, ctx)).collect();
+                let args = args?;
+
+                // Check if the subscripted variable is an array
+                let array_source = if let Some(dims) = ctx.get_dimensions(&id) {
+                    // Create the base array view
+                    let base_view = ArrayView::Contiguous { dims };
+
+                    // Apply subscript operation to get the resulting view
+                    match base_view.subscript(&args) {
+                        Ok(view) => Some(ArraySource::Temp(ctx.allocate_temp_id(), view)),
+                        Err(_) => None, // Invalid subscript, treat as scalar
+                    }
+                } else {
+                    None // Scalar variable or unknown variable
+                };
+
+                Expr2::Subscript(id, args, array_source, loc)
             }
-            Expr1::Op1(op, l, loc) => Expr2::Op1(op, Box::new(Expr2::from(*l)?), None, loc),
+            Expr1::Op1(op, l, loc) => Expr2::Op1(op, Box::new(Expr2::from(*l, ctx)?), None, loc),
             Expr1::Op2(op, l, r, loc) => Expr2::Op2(
                 op,
-                Box::new(Expr2::from(*l)?),
-                Box::new(Expr2::from(*r)?),
+                Box::new(Expr2::from(*l, ctx)?),
+                Box::new(Expr2::from(*r, ctx)?),
                 None,
                 loc,
             ),
             Expr1::If(cond, t, f, loc) => Expr2::If(
-                Box::new(Expr2::from(*cond)?),
-                Box::new(Expr2::from(*t)?),
-                Box::new(Expr2::from(*f)?),
+                Box::new(Expr2::from(*cond, ctx)?),
+                Box::new(Expr2::from(*t, ctx)?),
+                Box::new(Expr2::from(*f, ctx)?),
                 None,
                 loc,
             ),

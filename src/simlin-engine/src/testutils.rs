@@ -38,8 +38,9 @@ pub(crate) fn aux(ident: &str, eqn: &str) -> Variable {
     let scope = ScopeStage0 {
         models: &Default::default(),
         dimensions: &Default::default(),
+        model_name: "main",
     };
-    lower_variable(&scope, "main", &var)
+    lower_variable(&scope, &var)
 }
 
 #[cfg(test)]
@@ -77,8 +78,9 @@ pub(crate) fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str])
     let scope = ScopeStage0 {
         models: &Default::default(),
         dimensions: &Default::default(),
+        model_name: "main",
     };
-    lower_variable(&scope, "main", &var)
+    lower_variable(&scope, &var)
 }
 
 #[cfg(test)]
@@ -159,8 +161,9 @@ pub(crate) fn flow(ident: &str, eqn: &str) -> Variable {
     let scope = ScopeStage0 {
         models: &Default::default(),
         dimensions: &Default::default(),
+        model_name: "main",
     };
-    lower_variable(&scope, "main", &var)
+    lower_variable(&scope, &var)
 }
 
 #[cfg(test)]

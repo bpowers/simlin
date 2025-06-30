@@ -72,6 +72,7 @@ pub enum ErrorCode {
     TodoStarRange,
     TodoRange,
     TodoArrayBuiltin,
+    CantSubscriptScalar,
 }
 
 impl fmt::Display for ErrorCode {
@@ -127,6 +128,7 @@ impl fmt::Display for ErrorCode {
             TodoStarRange => "todo_star_range",
             TodoRange => "todo_range",
             TodoArrayBuiltin => "todo_array_builtin",
+            CantSubscriptScalar => "cant_subscript_scalar",
         };
 
         write!(f, "{name}")

@@ -632,6 +632,7 @@ fn test_identifier_sets() {
         let scope = ScopeStage0 {
             models: &Default::default(),
             dimensions: &Default::default(),
+            model_name: "test_model",
         };
         let ast = lower_ast(&scope, ast.unwrap()).unwrap();
         let id_set_expected: HashSet<Ident> = id_list.iter().map(|s| s.to_string()).collect();

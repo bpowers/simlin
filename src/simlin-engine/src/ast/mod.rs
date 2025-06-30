@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{ElementName, EquationResult};
 use crate::datamodel::Dimension;
-use crate::model::ScopeStage0;
+use crate::model::{ModelStage0, ScopeStage0};
+use crate::variable::Variable;
 
 mod expr0;
 mod expr1;
@@ -17,7 +18,7 @@ mod expr2;
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::Expr1;
 #[allow(unused_imports)]
-pub use expr2::{ArraySource, ArrayView, Expr2, IndexExpr2, StridedDimension};
+pub use expr2::{ArraySource, ArrayView, Expr2, Expr2Context, IndexExpr2, StridedDimension};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {
@@ -51,15 +52,85 @@ impl Ast<Expr2> {
     }
 }
 
+/// Context for AST lowering that provides dimension information from ScopeStage0
+struct ArrayContext<'a> {
+    scope: &'a ScopeStage0<'a>,
+    model_name: &'a str,
+    next_temp_id: u32,
+}
+
+impl<'a> ArrayContext<'a> {
+    fn new(scope: &'a ScopeStage0<'a>, model_name: &'a str) -> Self {
+        Self {
+            scope,
+            model_name,
+            next_temp_id: 0,
+        }
+    }
+
+    fn get_model(&self, model_name: &str) -> Option<&'a ModelStage0> {
+        self.scope.models.get(model_name)
+    }
+
+    fn get_variable(
+        &self,
+        model_name: &str,
+        ident: &str,
+    ) -> Option<&'a Variable<crate::datamodel::ModuleReference, Expr0>> {
+        // Handle dotted notation for submodel variables
+        if let Some(pos) = ident.find('·') {
+            let submodel_module_name = &ident[..pos];
+            let submodel_var = &ident[pos + '·'.len_utf8()..];
+
+            // Get the module variable to find the submodel name
+            let module_var = self
+                .get_model(model_name)?
+                .variables
+                .get(submodel_module_name)?;
+            if let Variable::Module {
+                model_name: submodel_name,
+                ..
+            } = module_var
+            {
+                return self.get_variable(submodel_name, submodel_var);
+            }
+            None
+        } else {
+            self.get_model(model_name)?.variables.get(ident)
+        }
+    }
+}
+
+impl<'a> Expr2Context for ArrayContext<'a> {
+    fn get_dimensions(&self, ident: &str) -> Option<Vec<crate::dimensions::Dimension>> {
+        // During AST lowering, we may encounter variables that don't exist yet
+        // (e.g., in tests or when processing incomplete models)
+        let var = self.get_variable(self.model_name, ident)?;
+        var.get_dimensions().map(|dims| {
+            dims.iter()
+                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .collect()
+        })
+    }
+
+    fn allocate_temp_id(&mut self) -> u32 {
+        let id = self.next_temp_id;
+        self.next_temp_id += 1;
+        id
+    }
+}
+
 pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
+    let mut ctx = ArrayContext::new(scope, scope.model_name);
+
     match ast {
         Ast::Scalar(expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
-            .and_then(Expr2::from)
+            .and_then(|expr| Expr2::from(expr, &mut ctx))
             .map(Ast::Scalar),
         Ast::ApplyToAll(dims, expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
-            .and_then(Expr2::from)
+            .and_then(|expr| Expr2::from(expr, &mut ctx))
             .map(|expr| Ast::ApplyToAll(dims, expr)),
         Ast::Arrayed(dims, elements) => {
             let elements: EquationResult<HashMap<ElementName, Expr2>> = elements
@@ -67,7 +138,7 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
                 .map(|(id, expr)| {
                     match Expr1::from(expr)
                         .map(|expr| expr.constify_dimensions(scope))
-                        .and_then(Expr2::from)
+                        .and_then(|expr| Expr2::from(expr, &mut ctx))
                     {
                         Ok(expr) => Ok((id, expr)),
                         Err(err) => Err(err),
@@ -522,4 +593,190 @@ fn test_latex_eqn() {
             Loc::new(0, 14),
         ))
     );
+}
+
+#[cfg(test)]
+mod ast_tests {
+    use super::*;
+    use crate::common::canonicalize;
+    use crate::datamodel;
+    use crate::model::ModelStage0;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_simple_expr2_context() {
+        // Create a simple model with an array variable
+        let dim = datamodel::Dimension::Named(
+            "region".to_string(),
+            vec!["north".to_string(), "south".to_string()],
+        );
+        let array_var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("population"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["region".to_string()],
+                "100".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+
+        let model_datamodel = datamodel::Model {
+            name: "test_model".to_string(),
+            variables: vec![array_var],
+            views: vec![],
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
+
+        let mut models = HashMap::new();
+        models.insert("test_model".to_string(), model_s0);
+
+        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
+        let scope = ScopeStage0 {
+            models: &models,
+            dimensions: &dims_ctx,
+            model_name: "test_model",
+        };
+
+        let mut ctx = ArrayContext::new(&scope, "test_model");
+
+        // Test that we can get dimensions for the array variable
+        let dims = ctx.get_dimensions("population");
+        assert!(dims.is_some());
+        let dims = dims.unwrap();
+        assert_eq!(dims.len(), 1);
+        assert_eq!(dims[0].name(), "region");
+        assert_eq!(dims[0].len(), 2);
+
+        // Test that scalar variables return None
+        assert!(ctx.get_dimensions("nonexistent").is_none());
+
+        // Test temp ID allocation
+        assert_eq!(ctx.allocate_temp_id(), 0);
+        assert_eq!(ctx.allocate_temp_id(), 1);
+        assert_eq!(ctx.allocate_temp_id(), 2);
+    }
+
+    #[test]
+    fn test_expr2_from_array_source() {
+        use crate::ast::expr1::Expr1;
+        use crate::ast::expr2::{ArraySource, ArrayView};
+
+        // Create a model with array variables
+        let dim = datamodel::Dimension::Named(
+            "product".to_string(),
+            vec!["A".to_string(), "B".to_string()],
+        );
+        let array_var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("sales"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["product".to_string()],
+                "50".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+
+        let model_datamodel = datamodel::Model {
+            name: "test_model".to_string(),
+            variables: vec![array_var],
+            views: vec![],
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
+
+        let mut models = HashMap::new();
+        models.insert("test_model".to_string(), model_s0);
+
+        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
+        let scope = ScopeStage0 {
+            models: &models,
+            dimensions: &dims_ctx,
+            model_name: "test_model",
+        };
+
+        let mut ctx = ArrayContext::new(&scope, "test_model");
+
+        // Test Var expression for array variable
+        let var_expr = Expr1::Var("sales".to_string(), Loc::default());
+        let expr2 = Expr2::from(var_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::Var(id, array_source, _) => {
+                assert_eq!(id, "sales");
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Named(name, view) => {
+                        assert_eq!(name, "sales");
+                        match view {
+                            ArrayView::Contiguous { dims } => {
+                                assert_eq!(dims.len(), 1);
+                                assert_eq!(dims[0].name(), "product");
+                            }
+                            _ => panic!("Expected contiguous array view"),
+                        }
+                    }
+                    _ => panic!("Expected named array source"),
+                }
+            }
+            _ => panic!("Expected Var expression"),
+        }
+
+        // Test Var expression for scalar (non-existent) variable
+        let scalar_expr = Expr1::Var("scalar_var".to_string(), Loc::default());
+        let expr2 = Expr2::from(scalar_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::Var(id, array_source, _) => {
+                assert_eq!(id, "scalar_var");
+                assert!(array_source.is_none());
+            }
+            _ => panic!("Expected Var expression"),
+        }
+
+        // Test Subscript expression for array variable
+        let subscript_expr = Expr1::Subscript(
+            "sales".to_string(),
+            vec![crate::ast::expr1::IndexExpr1::Expr(Expr1::Const(
+                "0".to_string(),
+                0.0,
+                Loc::default(),
+            ))],
+            Loc::default(),
+        );
+        let expr2 = Expr2::from(subscript_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::Subscript(id, args, array_source, _) => {
+                assert_eq!(id, "sales");
+                assert_eq!(args.len(), 1);
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Temp(_id, view) => {
+                        // Temp IDs should be allocated starting from 0
+                        // The view should be the result of subscripting
+                        match view {
+                            ArrayView::Contiguous { dims } => {
+                                // After subscripting with one index, we should have a scalar
+                                assert_eq!(dims.len(), 0);
+                            }
+                            _ => panic!("Expected contiguous array view"),
+                        }
+                    }
+                    _ => panic!("Expected temp array source"),
+                }
+            }
+            _ => panic!("Expected Subscript expression"),
+        }
+    }
 }

@@ -463,11 +463,7 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
 
 /// lower_variable takes a stage 0 variable and turns it into a stage 1 variable.
 /// This involves resolving both module inputs and dimension indexes.
-pub(crate) fn lower_variable(
-    scope: &ScopeStage0,
-    parent_module_name: &str,
-    var_s0: &VariableStage0,
-) -> Variable {
+pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Variable {
     match var_s0 {
         Variable::Stock {
             ident,
@@ -559,7 +555,7 @@ pub(crate) fn lower_variable(
             let var_errors = errors;
 
             let inputs = inputs.iter().map(|mi| {
-                resolve_module_input(scope.models, parent_module_name, ident, &mi.src, &mi.dst)
+                resolve_module_input(scope.models, scope.model_name, ident, &mi.src, &mi.dst)
             });
 
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
@@ -743,6 +739,7 @@ impl ModelStage0 {
 pub(crate) struct ScopeStage0<'a> {
     pub models: &'a HashMap<Ident, ModelStage0>,
     pub dimensions: &'a DimensionsContext,
+    pub model_name: &'a str,
 }
 
 impl ModelStage1 {
@@ -760,13 +757,20 @@ impl ModelStage1 {
             })
             .collect::<BTreeSet<_>>();
 
+        // Create a new scope with the model name for this specific model
+        let model_scope = ScopeStage0 {
+            models: scope.models,
+            dimensions: scope.dimensions,
+            model_name: &model_s0.ident,
+        };
+
         ModelStage1 {
             name: model_s0.ident.clone(),
             display_name: model_s0.display_name.clone(),
             variables: model_s0
                 .variables
                 .iter()
-                .map(|(ident, v)| (ident.clone(), lower_variable(scope, &model_s0.ident, v)))
+                .map(|(ident, v)| (ident.clone(), lower_variable(&model_scope, v)))
                 .collect(),
             errors: model_s0.errors.clone(),
             model_deps: Some(model_deps),
@@ -1101,6 +1105,7 @@ fn test_errors() {
         let scope = ScopeStage0 {
             models: &models,
             dimensions: &Default::default(),
+            model_name: "main",
         };
         let mut model = ModelStage1::new(&scope, &models["main"]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
@@ -1156,7 +1161,7 @@ fn test_all_deps() {
             .collect();
         let ctx = DepContext {
             is_initial,
-            model_name: "main",
+            model_name: "test",
             models,
             sibling_vars: &HashMap::new(),
             module_inputs: Some(module_inputs.unwrap_or(&default_inputs)),
@@ -1186,7 +1191,7 @@ fn test_all_deps() {
             all_vars.shuffle(&mut rng);
             let ctx = DepContext {
                 is_initial,
-                model_name: "main",
+                model_name: "test",
                 models,
                 sibling_vars: &HashMap::new(),
                 module_inputs: Some(module_inputs.unwrap_or(&default_inputs)),
@@ -1232,6 +1237,7 @@ fn test_all_deps() {
             let scope = ScopeStage0 {
                 models: &x_models,
                 dimensions: &Default::default(),
+                model_name: name,
             };
             ModelStage1::new(&scope, model_s0)
         })
@@ -1266,8 +1272,9 @@ fn test_all_deps() {
     let scope = ScopeStage0 {
         models: &x_models,
         dimensions: &Default::default(),
+        model_name: "main",
     };
-    let mod_1 = lower_variable(&scope, "main", &mod_1);
+    let mod_1 = lower_variable(&scope, &mod_1);
     assert!(implicit_vars.is_empty());
     let aux_3 = aux("aux_3", "6");
     let aux_4 = aux("aux_4", "mod_1.output");
@@ -1307,7 +1314,7 @@ fn test_all_deps() {
     let all_vars = vec![aux_a, aux_b];
     let ctx = DepContext {
         is_initial: false,
-        model_name: "main",
+        model_name: "test",
         models: &models,
         sibling_vars: &HashMap::new(),
         module_inputs: None,

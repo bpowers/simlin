@@ -100,14 +100,16 @@ impl Project {
             .collect();
 
         let dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
-        let scope = ScopeStage0 {
-            models: &models,
-            dimensions: &dims_ctx,
-        };
-
         let mut models_list: Vec<ModelStage1> = models_list
             .into_iter()
-            .map(|model| ModelStage1::new(&scope, &model))
+            .map(|model| {
+                let scope = ScopeStage0 {
+                    models: &models,
+                    dimensions: &dims_ctx,
+                    model_name: &model.ident,
+                };
+                ModelStage1::new(&scope, &model)
+            })
             .collect();
 
         let model_order = {

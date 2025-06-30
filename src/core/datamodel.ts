@@ -76,6 +76,7 @@ export enum ErrorCode {
   TodoStarRange = 46,
   TodoRange = 47,
   TodoArrayBuiltin = 48,
+  CantSubscriptScalar = 49,
 }
 
 const equationErrorDefaults = {
