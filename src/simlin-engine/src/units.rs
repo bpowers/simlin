@@ -235,12 +235,16 @@ fn const_int_eval(ast: &Expr0) -> EquationResult<i32> {
         Expr0::Subscript(_, _, loc) => {
             eqn_err!(ExpectedInteger, loc.start, loc.end)
         }
-        Expr0::Op1(op, expr, _) => {
+        Expr0::Op1(op, expr, loc) => {
             let expr = const_int_eval(expr)?;
             let result = match op {
                 UnaryOp::Positive => expr,
                 UnaryOp::Negative => -expr,
                 UnaryOp::Not => i32::from(expr == 0),
+                UnaryOp::Transpose => {
+                    // Transpose doesn't make sense for integer evaluation
+                    return eqn_err!(ExpectedInteger, loc.start, loc.end);
+                }
             };
             Ok(result)
         }

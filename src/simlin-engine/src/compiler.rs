@@ -465,6 +465,14 @@ impl Context<'_> {
                     ),
                     ast::UnaryOp::Positive => l,
                     ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
+                    ast::UnaryOp::Transpose => {
+                        // TODO: Implement transpose operation
+                        return Err(Error::new(
+                            ErrorKind::Variable,
+                            ErrorCode::ArraysNotImplemented,
+                            Some("transpose operator not yet implemented".to_owned()),
+                        ));
+                    }
                 }
             }
             ast::Expr2::Op2(op, l, r, _, loc) => {

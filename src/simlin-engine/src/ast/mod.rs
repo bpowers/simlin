@@ -183,13 +183,22 @@ impl Visitor<String> for PrintVisitor {
                 format!("{}[{}]", id, args.join(", "))
             }
             Expr0::Op1(op, l, _) => {
-                let l = paren_if_necessary(expr, l, self.walk(l));
-                let op: &str = match op {
-                    UnaryOp::Positive => "+",
-                    UnaryOp::Negative => "-",
-                    UnaryOp::Not => "!",
-                };
-                format!("{}{}", op, l)
+                match op {
+                    UnaryOp::Transpose => {
+                        let l = self.walk(l);
+                        format!("{}'", l)
+                    }
+                    _ => {
+                        let l = paren_if_necessary(expr, l, self.walk(l));
+                        let op: &str = match op {
+                            UnaryOp::Positive => "+",
+                            UnaryOp::Negative => "-",
+                            UnaryOp::Not => "!",
+                            UnaryOp::Transpose => unreachable!(), // handled above
+                        };
+                        format!("{}{}", op, l)
+                    }
+                }
             }
             Expr0::Op2(op, l, r, _) => {
                 let l = paren_if_necessary(expr, l, self.walk(l));
@@ -351,13 +360,22 @@ impl LatexVisitor {
                 format!("{}[{}]", id, args.join(", "))
             }
             Expr2::Op1(op, l, _, _) => {
-                let l = paren_if_necessary1(expr, l, self.walk(l));
-                let op: &str = match op {
-                    UnaryOp::Positive => "+",
-                    UnaryOp::Negative => "-",
-                    UnaryOp::Not => "\\neg ",
-                };
-                format!("{}{}", op, l)
+                match op {
+                    UnaryOp::Transpose => {
+                        let l = self.walk(l);
+                        format!("{}^T", l)
+                    }
+                    _ => {
+                        let l = paren_if_necessary1(expr, l, self.walk(l));
+                        let op: &str = match op {
+                            UnaryOp::Positive => "+",
+                            UnaryOp::Negative => "-",
+                            UnaryOp::Not => "\\neg ",
+                            UnaryOp::Transpose => unreachable!(), // handled above
+                        };
+                        format!("{}{}", op, l)
+                    }
+                }
             }
             Expr2::Op2(op, l, r, _, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));

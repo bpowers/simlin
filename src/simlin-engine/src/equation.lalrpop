@@ -77,6 +77,11 @@ Exp: Expr = {
 
 App: Expr = {
     <lpos:@L> <id:Ident> "(" <args:Exprs> ")" <rpos:@R> => App(UntypedBuiltinFn(id, args), Loc::new(lpos, rpos)),
+    Postfix,
+};
+
+Postfix: Expr = {
+    <lpos:@L> <e:Postfix> "'" <rpos:@R> => Op1(Transpose, Box::new(e), Loc::new(lpos, rpos)),
     Subscript,
 };
 
@@ -140,6 +145,7 @@ extern {
         "]" => Token::RBracket,
         "^" => Token::Exp,
         ":" => Token::Colon,
+        "'" => Token::Apostrophe,
         "&&" => Token::And,
         "||" => Token::Or,
         "Nan" => Token::Nan,

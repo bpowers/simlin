@@ -13,6 +13,7 @@ pub enum UnaryOp {
     Positive,
     Negative,
     Not,
+    Transpose,
 }
 
 /// BinaryOp enumerates the different operators supported in
@@ -404,6 +405,37 @@ fn test_parse() {
         Loc::default(),
     ));
 
+    // Test cases for transpose operator
+    let transpose1 = Box::new(Op1(
+        UnaryOp::Transpose,
+        Box::new(Var("a".to_owned(), Loc::default())),
+        Loc::default(),
+    ));
+
+    let transpose2 = Box::new(Op1(
+        UnaryOp::Transpose,
+        Box::new(Subscript(
+            "matrix".to_owned(),
+            vec![
+                IndexExpr0::Wildcard(Loc::default()),
+                IndexExpr0::Expr(Const("1".to_owned(), 1.0, Loc::default())),
+            ],
+            Loc::default(),
+        )),
+        Loc::default(),
+    ));
+
+    let transpose3 = Box::new(Op2(
+        BinaryOp::Mul,
+        Box::new(Op1(
+            UnaryOp::Transpose,
+            Box::new(Var("a".to_owned(), Loc::default())),
+            Loc::default(),
+        )),
+        Box::new(Var("b".to_owned(), Loc::default())),
+        Loc::default(),
+    ));
+
     let cases = [
         (
             "aux[INT(TIME MOD 5) + 1]",
@@ -444,6 +476,9 @@ fn test_parse() {
         ("a[*:d]", subscript4, "a[*:d]"),
         ("a[1:2]", subscript5, "a[1:2]"),
         ("a[l:r]", subscript6, "a[l:r]"),
+        ("a'", transpose1, "a'"),
+        ("matrix[*, 1]'", transpose2, "matrix[*, 1]'"),
+        ("a' * b", transpose3, "a' * b"),
     ];
 
     for case in cases.iter() {

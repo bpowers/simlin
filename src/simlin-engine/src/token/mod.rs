@@ -49,6 +49,7 @@ pub enum Token<'input> {
     RBracket,
     Comma,
     Colon,
+    Apostrophe,
     Nan,
     Ident(&'input str),
     Num(&'input str),
@@ -264,6 +265,7 @@ impl<'input> Iterator for Lexer<'input> {
                 Some((i, '[')) => self.consume(i, LBracket, 1),
                 Some((i, ']')) => self.consume(i, RBracket, 1),
                 Some((i, ',')) => self.consume(i, Comma, 1),
+                Some((i, '\'')) => self.consume(i, Apostrophe, 1),
                 Some((i, '"')) => Some(self.quoted_identifier(i)),
                 Some((i, c)) if is_identifier_start(c, self.is_units) => {
                     Some(Ok(self.identifierish(i)))
