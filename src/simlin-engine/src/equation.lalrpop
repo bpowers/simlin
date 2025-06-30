@@ -24,7 +24,7 @@ IndexExpr: IndexExpr0 = {
     <lpos:@L> "@" <n:"Num"> <rpos:@R> => {
         use std::str::FromStr;
         let num = u32::from_str(n).unwrap();
-        IndexExpr0::DimensionPosition(num, Loc::new(lpos, rpos))
+        IndexExpr0::DimPosition(num, Loc::new(lpos, rpos))
     },
     <expr:Expr> => IndexExpr0::Expr(expr),
 };

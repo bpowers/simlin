@@ -13,6 +13,7 @@
   },
   "exclude": [
     "lib",
-    "lib.browser"
+    "lib.browser",
+    "eslint.config.js"
   ]
 }
