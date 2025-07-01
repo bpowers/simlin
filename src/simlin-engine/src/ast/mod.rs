@@ -779,4 +779,414 @@ mod ast_tests {
             _ => panic!("Expected Subscript expression"),
         }
     }
+
+    #[test]
+    fn test_expr2_op1_array_source() {
+        use crate::ast::expr1::Expr1;
+        use crate::ast::expr2::{ArraySource, ArrayView};
+        use crate::ast::{Expr2, UnaryOp};
+
+        // Create a model with array variables
+        let dim =
+            datamodel::Dimension::Named("dim1".to_string(), vec!["A".to_string(), "B".to_string()]);
+        let array_var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("array_var"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["dim1".to_string()],
+                "10".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+
+        let model_datamodel = datamodel::Model {
+            name: "test_model".to_string(),
+            variables: vec![array_var],
+            views: vec![],
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
+
+        let mut models = HashMap::new();
+        models.insert("test_model".to_string(), model_s0);
+
+        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
+        let scope = ScopeStage0 {
+            models: &models,
+            dimensions: &dims_ctx,
+            model_name: "test_model",
+        };
+
+        let mut ctx = ArrayContext::new(&scope, "test_model");
+
+        // Test unary negative on array
+        let neg_expr = Expr1::Op1(
+            UnaryOp::Negative,
+            Box::new(Expr1::Var("array_var".to_string(), Loc::default())),
+            Loc::default(),
+        );
+        let expr2 = Expr2::from(neg_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::Op1(UnaryOp::Negative, _, array_source, _) => {
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Temp(_, view) => match view {
+                        ArrayView::Contiguous { dims } => {
+                            assert_eq!(dims.len(), 1);
+                            assert_eq!(dims[0].name(), "dim1");
+                        }
+                        _ => panic!("Expected contiguous array view"),
+                    },
+                    _ => panic!("Expected temp array source"),
+                }
+            }
+            _ => panic!("Expected Op1 expression"),
+        }
+
+        // Test transpose on array
+        let transpose_expr = Expr1::Op1(
+            UnaryOp::Transpose,
+            Box::new(Expr1::Var("array_var".to_string(), Loc::default())),
+            Loc::default(),
+        );
+        let expr2 = Expr2::from(transpose_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::Op1(UnaryOp::Transpose, _, array_source, _) => {
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Temp(_, view) => {
+                        // Transpose should create a strided view even for 1D arrays
+                        match view {
+                            ArrayView::Strided { dims, offset } => {
+                                assert_eq!(dims.len(), 1);
+                                assert_eq!(dims[0].dimension.name(), "dim1");
+                                assert_eq!(offset, 0);
+                            }
+                            _ => panic!("Expected strided array view after transpose"),
+                        }
+                    }
+                    _ => panic!("Expected temp array source"),
+                }
+            }
+            _ => panic!("Expected Op1 expression"),
+        }
+    }
+
+    #[test]
+    fn test_expr2_op2_array_source() {
+        use crate::ast::expr1::Expr1;
+        use crate::ast::expr2::{ArraySource, ArrayView};
+        use crate::ast::{BinaryOp, Expr2};
+
+        // Create a model with array variables
+        let dim = datamodel::Dimension::Named(
+            "region".to_string(),
+            vec!["north".to_string(), "south".to_string()],
+        );
+        let array_var1 = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("sales"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["region".to_string()],
+                "100".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+        let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("costs"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["region".to_string()],
+                "50".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+
+        let model_datamodel = datamodel::Model {
+            name: "test_model".to_string(),
+            variables: vec![array_var1, array_var2],
+            views: vec![],
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
+
+        let mut models = HashMap::new();
+        models.insert("test_model".to_string(), model_s0);
+
+        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
+        let scope = ScopeStage0 {
+            models: &models,
+            dimensions: &dims_ctx,
+            model_name: "test_model",
+        };
+
+        let mut ctx = ArrayContext::new(&scope, "test_model");
+
+        // Test array + array (matching dimensions)
+        let add_expr = Expr1::Op2(
+            BinaryOp::Add,
+            Box::new(Expr1::Var("sales".to_string(), Loc::default())),
+            Box::new(Expr1::Var("costs".to_string(), Loc::default())),
+            Loc::default(),
+        );
+        let expr2 = Expr2::from(add_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::Op2(BinaryOp::Add, _, _, array_source, _) => {
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Temp(_, view) => match view {
+                        ArrayView::Contiguous { dims } => {
+                            assert_eq!(dims.len(), 1);
+                            assert_eq!(dims[0].name(), "region");
+                        }
+                        _ => panic!("Expected contiguous array view"),
+                    },
+                    _ => panic!("Expected temp array source"),
+                }
+            }
+            _ => panic!("Expected Op2 expression"),
+        }
+
+        // Test array + scalar (broadcasting)
+        let add_scalar_expr = Expr1::Op2(
+            BinaryOp::Add,
+            Box::new(Expr1::Var("sales".to_string(), Loc::default())),
+            Box::new(Expr1::Const("10".to_string(), 10.0, Loc::default())),
+            Loc::default(),
+        );
+        let expr2 = Expr2::from(add_scalar_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::Op2(BinaryOp::Add, _, _, array_source, _) => {
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Temp(_, view) => match view {
+                        ArrayView::Contiguous { dims } => {
+                            assert_eq!(dims.len(), 1);
+                            assert_eq!(dims[0].name(), "region");
+                        }
+                        _ => panic!("Expected contiguous array view"),
+                    },
+                    _ => panic!("Expected temp array source"),
+                }
+            }
+            _ => panic!("Expected Op2 expression"),
+        }
+    }
+
+    #[test]
+    fn test_expr2_if_array_source() {
+        use crate::ast::Expr2;
+        use crate::ast::expr1::Expr1;
+        use crate::ast::expr2::{ArraySource, ArrayView};
+
+        // Create a model with array variables
+        let dim = datamodel::Dimension::Named(
+            "time_period".to_string(),
+            vec![
+                "Q1".to_string(),
+                "Q2".to_string(),
+                "Q3".to_string(),
+                "Q4".to_string(),
+            ],
+        );
+        let array_var = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("quarterly_data"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["time_period".to_string()],
+                "25".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+
+        let model_datamodel = datamodel::Model {
+            name: "test_model".to_string(),
+            variables: vec![array_var],
+            views: vec![],
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
+
+        let mut models = HashMap::new();
+        models.insert("test_model".to_string(), model_s0);
+
+        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
+        let scope = ScopeStage0 {
+            models: &models,
+            dimensions: &dims_ctx,
+            model_name: "test_model",
+        };
+
+        let mut ctx = ArrayContext::new(&scope, "test_model");
+
+        // Test if expression with array in both branches
+        let if_expr = Expr1::If(
+            Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr1::Var("quarterly_data".to_string(), Loc::default())),
+            Box::new(Expr1::Var("quarterly_data".to_string(), Loc::default())),
+            Loc::default(),
+        );
+        let expr2 = Expr2::from(if_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::If(_, _, _, array_source, _) => {
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Temp(_, view) => match view {
+                        ArrayView::Contiguous { dims } => {
+                            assert_eq!(dims.len(), 1);
+                            assert_eq!(dims[0].name(), "time_period");
+                            assert_eq!(dims[0].len(), 4);
+                        }
+                        _ => panic!("Expected contiguous array view"),
+                    },
+                    _ => panic!("Expected temp array source"),
+                }
+            }
+            _ => panic!("Expected If expression"),
+        }
+
+        // Test if expression with array in one branch, scalar in other
+        let if_mixed_expr = Expr1::If(
+            Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr1::Var("quarterly_data".to_string(), Loc::default())),
+            Box::new(Expr1::Const("0".to_string(), 0.0, Loc::default())),
+            Loc::default(),
+        );
+        let expr2 = Expr2::from(if_mixed_expr, &mut ctx).unwrap();
+
+        match expr2 {
+            Expr2::If(_, _, _, array_source, _) => {
+                assert!(array_source.is_some());
+                match array_source.unwrap() {
+                    ArraySource::Temp(_, view) => match view {
+                        ArrayView::Contiguous { dims } => {
+                            assert_eq!(dims.len(), 1);
+                            assert_eq!(dims[0].name(), "time_period");
+                        }
+                        _ => panic!("Expected contiguous array view"),
+                    },
+                    _ => panic!("Expected temp array source"),
+                }
+            }
+            _ => panic!("Expected If expression"),
+        }
+    }
+
+    #[test]
+    fn test_expr2_dimension_mismatch_errors() {
+        use crate::ast::BinaryOp;
+        use crate::ast::expr1::Expr1;
+        use crate::common::ErrorCode;
+
+        // Create a model with array variables of different dimensions
+        let dim1 = datamodel::Dimension::Named(
+            "region".to_string(),
+            vec!["north".to_string(), "south".to_string()],
+        );
+        let dim2 = datamodel::Dimension::Named(
+            "product".to_string(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+
+        let array_var1 = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("regional_data"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["region".to_string()],
+                "100".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+        let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
+            ident: canonicalize("product_data"),
+            equation: datamodel::Equation::ApplyToAll(
+                vec!["product".to_string()],
+                "50".to_string(),
+                None,
+            ),
+            documentation: "".to_string(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+        });
+
+        let model_datamodel = datamodel::Model {
+            name: "test_model".to_string(),
+            variables: vec![array_var1, array_var2],
+            views: vec![],
+        };
+
+        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
+        let model_s0 = ModelStage0::new(
+            &model_datamodel,
+            &[dim1.clone(), dim2.clone()],
+            &units_ctx,
+            false,
+        );
+
+        let mut models = HashMap::new();
+        models.insert("test_model".to_string(), model_s0);
+
+        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim1, dim2]);
+        let scope = ScopeStage0 {
+            models: &models,
+            dimensions: &dims_ctx,
+            model_name: "test_model",
+        };
+
+        let mut ctx = ArrayContext::new(&scope, "test_model");
+
+        // Test binary op with mismatched dimensions
+        let add_expr = Expr1::Op2(
+            BinaryOp::Add,
+            Box::new(Expr1::Var("regional_data".to_string(), Loc::default())),
+            Box::new(Expr1::Var("product_data".to_string(), Loc::default())),
+            Loc::new(0, 10),
+        );
+        let result = Expr2::from(add_expr, &mut ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::MismatchedDimensions);
+
+        // Test if expression with mismatched dimensions
+        let if_expr = Expr1::If(
+            Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr1::Var("regional_data".to_string(), Loc::default())),
+            Box::new(Expr1::Var("product_data".to_string(), Loc::default())),
+            Loc::new(0, 20),
+        );
+        let result = Expr2::from(if_expr, &mut ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::MismatchedDimensions);
+    }
 }

@@ -444,6 +444,157 @@ pub trait Expr2Context {
 }
 
 impl Expr2 {
+    /// Extract the array source from an expression, if it has one
+    fn get_array_source(&self) -> Option<&ArraySource> {
+        match self {
+            Expr2::Const(_, _, _) => None,
+            Expr2::Var(_, array_source, _) => array_source.as_ref(),
+            Expr2::App(_, array_source, _) => array_source.as_ref(),
+            Expr2::Subscript(_, _, array_source, _) => array_source.as_ref(),
+            Expr2::Op1(_, _, array_source, _) => array_source.as_ref(),
+            Expr2::Op2(_, _, _, array_source, _) => array_source.as_ref(),
+            Expr2::If(_, _, _, array_source, _) => array_source.as_ref(),
+        }
+    }
+
+    fn unify_array_sources<C: Expr2Context>(
+        ctx: &mut C,
+        l: Option<&ArraySource>,
+        r: Option<&ArraySource>,
+        loc: Loc,
+    ) -> EquationResult<Option<ArraySource>> {
+        match (l, r) {
+            // Both sides are arrays - check dimensions match
+            (Some(ArraySource::Named(_, view1)), Some(ArraySource::Named(_, view2)))
+            | (Some(ArraySource::Named(_, view1)), Some(ArraySource::Temp(_, view2)))
+            | (Some(ArraySource::Temp(_, view1)), Some(ArraySource::Named(_, view2)))
+            | (Some(ArraySource::Temp(_, view1)), Some(ArraySource::Temp(_, view2))) => {
+                let view = Self::unify_views(view1, view2, loc)?;
+                Ok(Some(ArraySource::Temp(ctx.allocate_temp_id(), view)))
+            }
+            // Left is array, right is scalar - broadcast
+            (Some(ArraySource::Named(_, view)), None)
+            | (Some(ArraySource::Temp(_, view)), None) => Ok(Some(ArraySource::Temp(
+                ctx.allocate_temp_id(),
+                view.clone(),
+            ))),
+            // Right is array, left is scalar - broadcast
+            (None, Some(ArraySource::Named(_, view)))
+            | (None, Some(ArraySource::Temp(_, view))) => Ok(Some(ArraySource::Temp(
+                ctx.allocate_temp_id(),
+                view.clone(),
+            ))),
+            // Both scalars
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// Check if two array views have compatible dimensions for element-wise operations
+    fn unify_views(a: &ArrayView, b: &ArrayView, loc: Loc) -> EquationResult<ArrayView> {
+        match (a, b) {
+            (ArrayView::Contiguous { dims: dims1 }, ArrayView::Contiguous { dims: dims2 }) => {
+                if dims1.len() != dims2.len() {
+                    return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+                }
+                let dims: EquationResult<Vec<Dimension>> = dims1
+                    .iter()
+                    .zip(dims2.iter())
+                    .map(|(d1, d2)| {
+                        if d1 == d2 {
+                            Ok(d1.clone())
+                        } else if d1.len() == d2.len() {
+                            Ok(Dimension::Indexed("erased".into(), d1.len() as u32))
+                        } else {
+                            eqn_err!(MismatchedDimensions, loc.start, loc.end)
+                        }
+                    })
+                    .collect();
+                let dims = dims?;
+                Ok(ArrayView::Contiguous { dims })
+            }
+            (
+                ArrayView::Strided {
+                    dims: dims1,
+                    offset: off1,
+                },
+                ArrayView::Strided {
+                    dims: dims2,
+                    offset: off2,
+                },
+            ) => {
+                if dims1.len() != dims2.len() || off1 != off2 {
+                    return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+                }
+
+                let dims: EquationResult<Vec<StridedDimension>> = dims1
+                    .iter()
+                    .zip(dims2.iter())
+                    .map(|(d1, d2)| {
+                        if d1 == d2 {
+                            Ok(d1.clone())
+                        } else if d1.dimension.len() == d2.dimension.len() {
+                            Ok(StridedDimension {
+                                dimension: Dimension::Indexed(
+                                    "erased".into(),
+                                    d1.dimension.len() as u32,
+                                ),
+                                stride: d1.stride,
+                            })
+                        } else {
+                            eqn_err!(MismatchedDimensions, loc.start, loc.end)
+                        }
+                    })
+                    .collect();
+                let dims = dims?;
+                Ok(ArrayView::Strided {
+                    dims,
+                    offset: *off1,
+                })
+            }
+            (
+                ArrayView::Contiguous { dims },
+                ArrayView::Strided {
+                    dims: strided_dims,
+                    offset: strided_off,
+                },
+            )
+            | (
+                ArrayView::Strided {
+                    dims: strided_dims,
+                    offset: strided_off,
+                },
+                ArrayView::Contiguous { dims },
+            ) => {
+                // TODO: I don't think strided off needs to strictly be zero
+                if dims.len() != strided_dims.len() || *strided_off != 0 {
+                    return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+                }
+
+                let unified_dims: EquationResult<Vec<StridedDimension>> = dims
+                    .iter()
+                    .zip(strided_dims.iter())
+                    .map(|(d, sd)| {
+                        if d.name() == sd.dimension.name() && d.len() == sd.dimension.len() {
+                            Ok(sd.clone())
+                        } else if d.len() == sd.dimension.len() {
+                            Ok(StridedDimension {
+                                dimension: Dimension::Indexed("erased".into(), d.len() as u32),
+                                stride: sd.stride,
+                            })
+                        } else {
+                            eqn_err!(MismatchedDimensions, loc.start, loc.end)
+                        }
+                    })
+                    .collect();
+                let unified_dims = unified_dims?;
+                Ok(ArrayView::Strided {
+                    dims: unified_dims,
+                    offset: *strided_off,
+                })
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn from<C: Expr2Context>(expr: Expr1, ctx: &mut C) -> EquationResult<Self> {
         let expr = match expr {
@@ -529,6 +680,7 @@ impl Expr2 {
                     Stddev(e) => Stddev(Box::new(Expr2::from(*e, ctx)?)),
                     Sum(e) => Sum(Box::new(Expr2::from(*e, ctx)?)),
                 };
+                // TODO: Handle array sources for builtin functions that return arrays
                 Expr2::App(builtin, None, loc)
             }
             Expr1::Subscript(id, args, loc) => {
@@ -552,21 +704,60 @@ impl Expr2 {
 
                 Expr2::Subscript(id, args, array_source, loc)
             }
-            Expr1::Op1(op, l, loc) => Expr2::Op1(op, Box::new(Expr2::from(*l, ctx)?), None, loc),
-            Expr1::Op2(op, l, r, loc) => Expr2::Op2(
-                op,
-                Box::new(Expr2::from(*l, ctx)?),
-                Box::new(Expr2::from(*r, ctx)?),
-                None,
-                loc,
-            ),
-            Expr1::If(cond, t, f, loc) => Expr2::If(
-                Box::new(Expr2::from(*cond, ctx)?),
-                Box::new(Expr2::from(*t, ctx)?),
-                Box::new(Expr2::from(*f, ctx)?),
-                None,
-                loc,
-            ),
+            Expr1::Op1(op, l, loc) => {
+                let l_expr = Expr2::from(*l, ctx)?;
+
+                // Compute array source for unary operations
+                let array_source = match (&op, l_expr.get_array_source()) {
+                    (UnaryOp::Transpose, Some(ArraySource::Named(_, view)))
+                    | (UnaryOp::Transpose, Some(ArraySource::Temp(_, view))) => {
+                        Some(ArraySource::Temp(ctx.allocate_temp_id(), view.transpose()))
+                    }
+                    (_, Some(ArraySource::Named(_, view)))
+                    | (_, Some(ArraySource::Temp(_, view))) => {
+                        // Other unary ops preserve array structure
+                        Some(ArraySource::Temp(ctx.allocate_temp_id(), view.clone()))
+                    }
+                    _ => None,
+                };
+
+                Expr2::Op1(op, Box::new(l_expr), array_source, loc)
+            }
+            Expr1::Op2(op, l, r, loc) => {
+                let l_expr = Expr2::from(*l, ctx)?;
+                let r_expr = Expr2::from(*r, ctx)?;
+
+                // Compute array source for binary operations
+                let array_source = Self::unify_array_sources(
+                    ctx,
+                    l_expr.get_array_source(),
+                    r_expr.get_array_source(),
+                    loc,
+                )?;
+
+                Expr2::Op2(op, Box::new(l_expr), Box::new(r_expr), array_source, loc)
+            }
+            Expr1::If(cond, t, f, loc) => {
+                let cond_expr = Expr2::from(*cond, ctx)?;
+                let t_expr = Expr2::from(*t, ctx)?;
+                let f_expr = Expr2::from(*f, ctx)?;
+
+                // Compute array source for if expressions
+                let array_source = Self::unify_array_sources(
+                    ctx,
+                    t_expr.get_array_source(),
+                    f_expr.get_array_source(),
+                    loc,
+                )?;
+
+                Expr2::If(
+                    Box::new(cond_expr),
+                    Box::new(t_expr),
+                    Box::new(f_expr),
+                    array_source,
+                    loc,
+                )
+            }
         };
         Ok(expr)
     }
