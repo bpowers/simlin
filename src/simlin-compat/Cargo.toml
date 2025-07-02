@@ -21,3 +21,6 @@ xmutil = { version = "1", path = "../xmutil", optional = true }
 
 [dev-dependencies]
 test-generator = { version = "0.3.0", git = "https://github.com/bpowers/test-generator", rev = "b78145bfb6a6f81425dfd6fbacb9c03624e79b2c" }
+ed25519-dalek = "2"
+ssh-key = "0.6"
+base64 = "0.22"

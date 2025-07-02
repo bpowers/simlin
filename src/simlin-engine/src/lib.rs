@@ -28,6 +28,7 @@ mod variable;
 mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
+pub mod ai_info;
 mod builder;
 mod bytecode;
 pub mod interpreter;

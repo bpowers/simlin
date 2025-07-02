@@ -2,14 +2,14 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::iter::Iterator;
 
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
 use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Default, Eq, Clone)]
 pub struct UnitMap {
@@ -215,6 +215,18 @@ pub enum Visibility {
     Public,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum AiState {
+    A, // No information
+    B, // Human created. Will only occur when a modeler adds content using AI to an existing model. (Depending on the software implementation these may always be reported as F).
+    C, // AI generated, not modified by human
+    D, // Created by a person, edited by AI
+    E, // Edited by a person, unknown creation (shouldn't occur)
+    F, // Created and edited by a person not using AI.
+    G, // Created by AI then edited by a person (though possibly edited again by AI).
+    H, // Created and edited by a person and also edited by AI.
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Stock {
     pub ident: String,
@@ -226,6 +238,7 @@ pub struct Stock {
     pub non_negative: bool,
     pub can_be_module_input: bool,
     pub visibility: Visibility,
+    pub ai_state: Option<AiState>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -238,6 +251,7 @@ pub struct Flow {
     pub non_negative: bool,
     pub can_be_module_input: bool,
     pub visibility: Visibility,
+    pub ai_state: Option<AiState>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -249,6 +263,7 @@ pub struct Aux {
     pub gf: Option<GraphicalFunction>,
     pub can_be_module_input: bool,
     pub visibility: Visibility,
+    pub ai_state: Option<AiState>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -266,6 +281,7 @@ pub struct Module {
     pub references: Vec<ModuleReference>,
     pub can_be_module_input: bool,
     pub visibility: Visibility,
+    pub ai_state: Option<AiState>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -301,6 +317,15 @@ impl Variable {
             Variable::Flow(flow) => flow.units.as_ref(),
             Variable::Aux(aux) => aux.units.as_ref(),
             Variable::Module(module) => module.units.as_ref(),
+        }
+    }
+
+    pub fn get_ai_state(&self) -> Option<AiState> {
+        match self {
+            Variable::Stock(stock) => stock.ai_state,
+            Variable::Flow(flow) => flow.ai_state,
+            Variable::Aux(aux) => aux.ai_state,
+            Variable::Module(module) => module.ai_state,
         }
     }
 
@@ -547,7 +572,9 @@ pub struct Model {
 impl Model {
     pub fn get_variable(&self, ident: &str) -> Option<&Variable> {
         let ident = canonicalize(ident);
-        self.variables.iter().find(|&var| canonicalize(var.get_ident()) == ident)
+        self.variables
+            .iter()
+            .find(|&var| canonicalize(var.get_ident()) == ident)
     }
 
     pub fn get_variable_mut(&mut self, ident: &str) -> Option<&mut Variable> {
@@ -664,6 +691,28 @@ pub struct Project {
     pub units: Vec<Unit>,
     pub models: Vec<Model>,
     pub source: Option<Source>,
+    pub ai_information: Option<AiInformation>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AiInformation {
+    pub status: AiStatus,
+    pub testing: Option<AiTesting>,
+    pub log: Option<String>,
+    // TODO: settings
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AiStatus {
+    pub key_url: String,
+    pub algorithm: String,
+    pub signature: String,
+    pub tags: HashMap<String, String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AiTesting {
+    pub signed_message_body: String,
 }
 
 impl Project {

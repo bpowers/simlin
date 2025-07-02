@@ -272,6 +272,7 @@ impl Engine {
                 gf: None,
                 can_be_module_input: false,
                 visibility: Visibility::Private,
+                ai_state: None,
             }),
             "flow" => datamodel::Variable::Flow(datamodel::Flow {
                 ident,
@@ -282,6 +283,7 @@ impl Engine {
                 non_negative: false,
                 can_be_module_input: false,
                 visibility: Visibility::Private,
+                ai_state: None,
             }),
             "stock" => datamodel::Variable::Stock(datamodel::Stock {
                 ident,
@@ -293,6 +295,7 @@ impl Engine {
                 non_negative: false,
                 can_be_module_input: false,
                 visibility: Visibility::Private,
+                ai_state: None,
             }),
             _ => return None,
         };

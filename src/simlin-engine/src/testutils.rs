@@ -22,6 +22,7 @@ pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::V
         gf: None,
         can_be_module_input: false,
         visibility: Visibility::Private,
+        ai_state: None,
     })
 }
 
@@ -62,6 +63,7 @@ pub(crate) fn x_stock(
         non_negative: false,
         can_be_module_input: false,
         visibility: Visibility::Private,
+        ai_state: None,
     })
 }
 
@@ -104,6 +106,7 @@ pub(crate) fn x_project(
         units: vec![],
         models: models.to_vec(),
         source: Default::default(),
+        ai_information: None,
     }
 }
 
@@ -130,6 +133,7 @@ pub(crate) fn x_module(
         references,
         can_be_module_input: false,
         visibility: Visibility::Private,
+        ai_state: None,
     })
 }
 
@@ -145,6 +149,7 @@ pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::
         non_negative: false,
         can_be_module_input: false,
         visibility: Visibility::Private,
+        ai_state: None,
     })
 }
 

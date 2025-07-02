@@ -622,6 +622,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -684,6 +685,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -801,6 +803,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -902,6 +905,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
         let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
             ident: canonicalize("costs"),
@@ -915,6 +919,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -1019,6 +1024,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -1124,6 +1130,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
         let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
             ident: canonicalize("product_data"),
@@ -1137,6 +1144,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {

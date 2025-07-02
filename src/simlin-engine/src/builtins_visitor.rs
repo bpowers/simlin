@@ -100,6 +100,7 @@ impl<'a> BuiltinVisitor<'a> {
                             gf: None,
                             can_be_module_input: false,
                             visibility: datamodel::Visibility::Private,
+                            ai_state: None,
                         });
                         self.vars.insert(id.clone(), x_var);
                         id
@@ -122,6 +123,7 @@ impl<'a> BuiltinVisitor<'a> {
                     references,
                     can_be_module_input: false,
                     visibility: Visibility::Private,
+                    ai_state: None,
                 });
                 let module_output_name = format!("{module_name}·output");
                 self.vars.insert(module_name, x_module);
