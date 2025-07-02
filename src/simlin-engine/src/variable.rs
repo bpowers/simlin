@@ -15,7 +15,7 @@ use crate::datamodel::Dimension;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 use crate::units::parse_units;
-use crate::{ErrorCode, datamodel, eqn_err, units};
+use crate::{ErrorCode, datamodel, eqn_err, units, canonicalize};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
@@ -377,7 +377,7 @@ where
                 }
             };
             Variable::Stock {
-                ident,
+                ident: canonicalize(&ident),
                 init_ast: ast,
                 eqn: Some(v.equation.clone()),
                 units,
@@ -389,7 +389,7 @@ where
             }
         }
         datamodel::Variable::Flow(v) => {
-            let ident = v.ident.clone();
+            let ident = canonicalize(&v.ident);
 
             let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(&ident, &v.equation, true);
@@ -428,7 +428,7 @@ where
             }
         }
         datamodel::Variable::Aux(v) => {
-            let ident = v.ident.clone();
+            let ident = canonicalize(&v.ident);
 
             let (ast, mut errors) = parse_and_lower_eqn(&ident, &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(&ident, &v.equation, true);
@@ -467,7 +467,7 @@ where
             }
         }
         datamodel::Variable::Module(v) => {
-            let ident = v.ident.clone();
+            let ident = canonicalize(&v.ident);
             let inputs = v.references.iter().map(module_input_mapper);
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
             let inputs: Vec<MI> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();

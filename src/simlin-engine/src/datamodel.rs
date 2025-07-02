@@ -8,7 +8,7 @@ use std::iter::Iterator;
 
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-
+use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
 
 #[derive(Debug, Default, Eq, Clone)]
@@ -546,13 +546,15 @@ pub struct Model {
 
 impl Model {
     pub fn get_variable(&self, ident: &str) -> Option<&Variable> {
-        self.variables.iter().find(|&var| var.get_ident() == ident)
+        let ident = canonicalize(ident);
+        self.variables.iter().find(|&var| canonicalize(var.get_ident()) == ident)
     }
 
     pub fn get_variable_mut(&mut self, ident: &str) -> Option<&mut Variable> {
+        let ident = canonicalize(ident);
         self.variables
             .iter_mut()
-            .find(|var| var.get_ident() == ident)
+            .find(|var| canonicalize(var.get_ident()) == ident)
     }
 }
 

@@ -2675,7 +2675,7 @@ impl ToXml<XmlWriter> for Module {
 
 impl From<Module> for datamodel::Module {
     fn from(module: Module) -> Self {
-        let ident = canonicalize(&module.name);
+        let ident = module.name.clone();
         // TODO: we should filter these to only module inputs, and rewrite
         //       the equations of variables that use module outputs
         let references: Vec<datamodel::ModuleReference> = module
@@ -2908,7 +2908,7 @@ impl From<Stock> for datamodel::Stock {
             .map(|id| canonicalize(&id))
             .collect();
         datamodel::Stock {
-            ident: canonicalize(&stock.name),
+            ident: stock.name.clone(),
             equation: convert_stock_equation!(stock),
             documentation: stock.doc.unwrap_or_default(),
             units: stock.units,
@@ -3070,7 +3070,7 @@ impl ToXml<XmlWriter> for Flow {
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
         datamodel::Flow {
-            ident: canonicalize(&flow.name),
+            ident: flow.name.clone(),
             equation: convert_equation!(flow),
             documentation: flow.doc.unwrap_or_default(),
             units: flow.units,
@@ -3223,7 +3223,7 @@ impl ToXml<XmlWriter> for Aux {
 impl From<Aux> for datamodel::Aux {
     fn from(aux: Aux) -> Self {
         datamodel::Aux {
-            ident: canonicalize(&aux.name),
+            ident: aux.name.clone(),
             equation: convert_equation!(aux),
             documentation: aux.doc.unwrap_or_default(),
             units: aux.units,
@@ -3364,10 +3364,8 @@ impl From<datamodel::Variable> for Var {
 
 #[test]
 fn test_canonicalize_stock_inflows() {
-    use simlin_engine::common::canonicalize;
-
     let input = Var::Stock(Stock {
-        name: canonicalize("Heat Loss To Room"),
+        name: "Heat Loss To Room".to_string(),
         eqn: Some("total_population".to_string()),
         doc: Some("People who can contract the disease.".to_string()),
         units: Some("people".to_string()),
@@ -3383,7 +3381,7 @@ fn test_canonicalize_stock_inflows() {
     });
 
     let expected = datamodel::Variable::Stock(datamodel::Stock {
-        ident: "heat_loss_to_room".to_string(),
+        ident: "Heat Loss To Room".to_string(),
         equation: Equation::Scalar("total_population".to_string(), None),
         documentation: "People who can contract the disease.".to_string(),
         units: Some("people".to_string()),
