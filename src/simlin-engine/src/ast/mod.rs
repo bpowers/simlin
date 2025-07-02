@@ -5,7 +5,7 @@
 pub use crate::builtins::Loc;
 use std::collections::HashMap;
 
-use crate::builtins::{walk_builtin_expr, BuiltinContents, UntypedBuiltinFn};
+use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{ElementName, EquationResult};
 use crate::datamodel::Dimension;
 use crate::model::{ModelStage0, ScopeStage0};
@@ -15,12 +15,12 @@ mod expr0;
 mod expr1;
 mod expr2;
 
+#[allow(unused_imports)]
+pub use crate::dimensions::StridedDimension;
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::Expr1;
 #[allow(unused_imports)]
 pub use expr2::{ArraySource, ArrayView, Expr2, Expr2Context, IndexExpr2};
-#[allow(unused_imports)]
-pub use crate::dimensions::StridedDimension;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {
@@ -624,6 +624,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -686,6 +687,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -803,6 +805,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -904,6 +907,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
         let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
             ident: canonicalize("costs"),
@@ -917,6 +921,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -1021,6 +1026,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {
@@ -1126,6 +1132,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
         let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
             ident: canonicalize("product_data"),
@@ -1139,6 +1146,7 @@ mod ast_tests {
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
+            ai_state: None,
         });
 
         let model_datamodel = datamodel::Model {

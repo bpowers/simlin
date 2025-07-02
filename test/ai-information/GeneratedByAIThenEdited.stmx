@@ -1,0 +1,1750 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+	<header>
+		<smile version="1.0" namespace="std, isee"/>
+		<name>AIThenEdited</name>
+		<uuid>8ec99fd2-782d-4a9c-9168-d51dd80be5b1</uuid>
+		<vendor>isee systems, inc.</vendor>
+		<product version="4.0" isee:build_number="9999" isee:saved_by_v1="true" lang="en">Stella Enterprise</product>
+	</header>
+	<ai_information>
+		<status verified="true" trusted="true" tampered="false" uses="true" analyzed="false" log_truncated="false" timestamp="1751664223" algorithm="ed25519" keyurl="https://iseesystems.com/keys/stella01.txt" want_var_info="true" want_var_status="true" want_log="true" sampling="1" signature="zvHBcUefayM8g5PriFW6A2RRP4s++U1NIvHQYmmhlMQaEheRQamR7zhhPpCmRTCHKudx1tdDyxs+haLONwJDDA=="/>
+		<testing signed_message_body="algorithm=ed25519 analyzed=false keyurl=https://iseesystems.com/keys/stella01.txt logtruncated=false sampling=1 tampered=false timestamp=1751664223 trusted=true uses=true verified=true wantlog=true wantvarinfo=true wantvarstatus=true adoptionfraction=0.01*effectofsatisfactiononwordofmouth attritionfrompressure=effectofworkloadonattrition averagerevenuepercustomer=100 averagetenure=48 baseclosingratio=0.1 BrandReputation=50 budgetforhiringandmarketing=MAX(0,expectedprofit*reinvestmentfraction) casesperstaff=100 Cash=100000 cashinflow=revenue cashoutflow=totalexpenses churnfromdissatisfaction=effectofsatisfactiononchurn closingratio=baseclosingratio*effectofreputationonsales compensationpersalesperson=5000 contactspercustomer=5 costofgoodssold=customeracquisition*unitcost customeracquisition=totalsalescalls*closingratio*marketsaturationeffect customerchurn=Customers*totalchurnrate customerlifetime=24 customersatisfaction=satisfactionfromservicequality*satisfactionfromdeliverydelay customersupportstaff=5 Customers=100 deliverydelay=normaldeliverytime+effectofbacklogondeliverydelay desiredsalesforce=budgetforhiringandmarketing*0.5/compensationpersalesperson effectofbacklogondeliverydelay=ProductBacklog/productioncapacity effectofreputationonsales=BrandReputation effectofsatisfactiononchurn=customersatisfaction effectofsatisfactiononwordofmouth=customersatisfaction effectofworkloadonattrition=workloadpressure expectedprofit=SMTH1(profit,timetoperceiveprofit,revenue*0.2) ExperiencedSalesforce=5 experiencedsalesforceattrition=ExperiencedSalesforce*totalattritionrate gainingexperience=Salesforce/timetogainexperience hiring=MAX(0,salesforcegap)/hiringtime hiringtime=3 marketsaturationeffect=potentialcustomers/totalmarketsize marketingeffectiveness=0.01 marketingleads=marketingspend*marketingeffectiveness marketingspend=budgetforhiringandmarketing*0.5 negativeevents=0 neworders=customeracquisition normalattritionrate=1/averagetenure normalchurnrate=1/customerlifetime normaldeliverytime=0.5 orderfulfillment=MIN(ProductBacklog/0.1,productioncapacity) overheadcosts=20000 potentialcustomers=totalmarketsize-Customers ProductBacklog=10 productioncapacity=150 profit=revenue-totalexpenses reinvestmentfraction=0.5 reputationbuilding=customersatisfaction*reputationgainfactor reputationerosion=BrandReputation*reputationlossfactor+negativeevents reputationgainfactor=0.1 reputationlossfactor=0.02 revenue=Customers*averagerevenuepercustomer Salesforce=10 salesforceattrition=Salesforce*totalattritionrate salesforcegap=desiredsalesforce-totalsalespeople satisfactionfromdeliverydelay=1-deliverydelay/normaldeliverytime satisfactionfromservicequality=servicequality servicequality=supportcapacity//totalsupportcases supportcapacity=customersupportstaff*casesperstaff supportcasespercustomer=0.1 supportstaffsalary=3000 targetworkload=100 timetogainexperience=12 timetoperceiveprofit=6 totalattritionrate=normalattritionrate+attritionfrompressure totalchurnrate=normalchurnrate+churnfromdissatisfaction totalexpenses=totalsalescompensation+marketingspend+overheadcosts+costofgoodssold+totalsupportstaffcost totalleads=wordofmouthleads+marketingleads totalmarketsize=100000 totalsalescalls=totalleads totalsalescompensation=totalsalespeople*compensationpersalesperson totalsalespeople=Salesforce+ExperiencedSalesforce totalsupportcases=Customers*supportcasespercustomer totalsupportstaffcost=customersupportstaff*supportstaffsalary unitcost=20 wordofmouthleads=Customers*contactspercustomer*adoptionfraction workloadpersalesperson=totalsalescalls//totalsalespeople workloadpressure=workloadpersalesperson/targetworkload CCCCCCGCCCCCCCCCCCCCCCCCCCCCCFCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCFCCCCCCCCCCCCCC &lt;h3&gt;Youinstructedmeto...&lt;/h3&gt;&lt;br/&gt;&lt;h3&gt;HereiswhatIhavedone...&lt;/h3&gt;&lt;h3&gt;SalesCompanyGrowthandLimitsModel&lt;/h3&gt;Thismodelsimulatesthegrowthandlimitationsofasalescompany.Itisbuiltaroundseveralcorefeedbackloops.Aprimaryreinforcingloop,a'SuccesstotheSuccessful'archetype,drivesgrowth:morerevenueallowsforhiringmoresalespeople,whointurngeneratemoresalesandrevenue.Thisisamplifiedbya'WordofMouth'loop,wheremoresatisfiedcustomersincreasebrandreputationandattractnewleads.However,thisgrowthisconstrainedbymultiplebalancingloops,creatinga'LimitstoGrowth'structure.Asthesalesforcegrows,workloadpressurecanincrease,leadingtohigherattritionandcappingthesizeofthesalesteam.Similarly,rapidcustomergrowthcanstrainsupportcapacityandincreaseorderbacklogs,whichreducescustomersatisfaction.Lowersatisfactionincreasescustomerchurnanddamagesbrandreputation,slowingdownnewcustomeracquisition.Thesebalancingforcescreateamorerealisticsimulationofbusinessdynamics,whereuncheckedgrowtheventuallyconfrontsinternalandexternallimits.&lt;br/&gt;&lt;h4&gt;1.revenue--&gt;(+)cashinflow&lt;/h4&gt;Revenuefromsalesistheprimarysourceofcashinflowforthecompany.&lt;br/&gt;&lt;h4&gt;2.totalexpenses--&gt;(+)cashoutflow&lt;/h4&gt;Expensessuchassalaries,marketing,andoverheadconstitutethecompany'scashoutflow.&lt;br/&gt;&lt;h4&gt;3.Customers--&gt;(+)revenue&lt;/h4&gt;Totalrevenueiscalculatedbasedonthenumberofcustomers.&lt;br/&gt;&lt;h4&gt;4.averagerevenuepercustomer--&gt;(+)revenue&lt;/h4&gt;Totalrevenueiscalculatedbasedontheaveragerevenuepercustomer.&lt;br/&gt;&lt;h4&gt;5.totalsalescompensation--&gt;(+)totalexpenses&lt;/h4&gt;Salesforcesalariesareamajorcomponentoftotalexpenses.&lt;br/&gt;&lt;h4&gt;6.marketingspend--&gt;(+)totalexpenses&lt;/h4&gt;Marketingbudgetscontributetototalexpenses.&lt;br/&gt;&lt;h4&gt;7.overheadcosts--&gt;(+)totalexpenses&lt;/h4&gt;Fixedoverheadsareacomponentoftotalexpenses.&lt;br/&gt;&lt;h4&gt;8.costofgoodssold--&gt;(+)totalexpenses&lt;/h4&gt;Thedirectcostsassociatedwithsalescontributetototalexpenses.&lt;br/&gt;&lt;h4&gt;9.totalsupportstaffcost--&gt;(+)totalexpenses&lt;/h4&gt;Salariesforsupportstaffareacomponentoftotalexpenses.&lt;br/&gt;&lt;h4&gt;10.Salesforce--&gt;(+)totalsalescompensation&lt;/h4&gt;Totalsalescompensationisthenumberofsalespeoplemultipliedbythecompensationperperson.&lt;br/&gt;&lt;h4&gt;11.compensationpersalesperson--&gt;(+)totalsalescompensation&lt;/h4&gt;Totalsalescompensationisthenumberofsalespeoplemultipliedbythecompensationperperson.&lt;br/&gt;&lt;h4&gt;12.customeracquisition--&gt;(+)costofgoodssold&lt;/h4&gt;Eachnewcustomeracquiredcorrespondstoasale,whichhasanassociatedunitcost.&lt;br/&gt;&lt;h4&gt;13.unitcost--&gt;(+)costofgoodssold&lt;/h4&gt;TotalCOGSisthenumberofunitssoldmultipliedbythecostperunit.&lt;br/&gt;&lt;h4&gt;14.customersupportstaff--&gt;(+)totalsupportstaffcost&lt;/h4&gt;Totalsupportcostisthenumberofstaffmultipliedbytheirsalary.&lt;br/&gt;&lt;h4&gt;15.supportstaffsalary--&gt;(+)totalsupportstaffcost&lt;/h4&gt;Totalsupportcostisthenumberofstaffmultipliedbytheirsalary.&lt;br/&gt;&lt;h4&gt;16.revenue--&gt;(+)profit&lt;/h4&gt;Profitiscalculatedasrevenueminustotalexpenses.&lt;br/&gt;&lt;h4&gt;17.totalexpenses--&gt;(-)profit&lt;/h4&gt;Profitiscalculatedasrevenueminustotalexpenses.&lt;br/&gt;&lt;h4&gt;18.profit--&gt;(+)budgetforhiringandmarketing&lt;/h4&gt;Afractionofprofitsistypicallyreinvestedintogrowthareaslikehiringandmarketing.&lt;br/&gt;&lt;h4&gt;19.reinvestmentfraction--&gt;(+)budgetforhiringandmarketing&lt;/h4&gt;Thebudgetisdeterminedbytheprofitmultipliedbythefractiondesignatedforreinvestment.&lt;br/&gt;&lt;h4&gt;20.budgetforhiringandmarketing--&gt;(+)desiredsalesforce&lt;/h4&gt;Thedesiredsalesforcesizeisdeterminedbywhatthecompanycanaffordbasedonitsbudget.&lt;br/&gt;&lt;h4&gt;21.compensationpersalesperson--&gt;(-)desiredsalesforce&lt;/h4&gt;Thenumberofaffordablesalespeopleisthebudgetdividedbythecostperperson.&lt;br/&gt;&lt;h4&gt;22.desiredsalesforce--&gt;(+)salesforcegap&lt;/h4&gt;Thehiringgapisthedifferencebetweenwhatisdesiredandwhatcurrentlyexists.&lt;br/&gt;&lt;h4&gt;23.Salesforce--&gt;(-)salesforcegap&lt;/h4&gt;Thehiringgapisthedifferencebetweenwhatisdesiredandwhatcurrentlyexists.&lt;br/&gt;&lt;h4&gt;24.salesforcegap--&gt;(+)hiring&lt;/h4&gt;Thecompanyhirestoclosethegapoveracertainperiodoftime.&lt;br/&gt;&lt;h4&gt;25.hiringtime--&gt;(-)hiring&lt;/h4&gt;Thehiringrateisthegapdividedbythetimeittakestofillpositions.&lt;br/&gt;&lt;h4&gt;26.Salesforce--&gt;(+)salesforceattrition&lt;/h4&gt;Totalattritionisthenumberofsalespeoplemultipliedbytheattritionrate.&lt;br/&gt;&lt;h4&gt;27.totalattritionrate--&gt;(+)salesforceattrition&lt;/h4&gt;Totalattritionisthenumberofsalespeoplemultipliedbytheattritionrate.&lt;br/&gt;&lt;h4&gt;28.normalattritionrate--&gt;(+)totalattritionrate&lt;/h4&gt;Totalattritionisthesumofnormalattritionandattritionfromotherpressures.&lt;br/&gt;&lt;h4&gt;29.attritionfrompressure--&gt;(+)totalattritionrate&lt;/h4&gt;Totalattritionisthesumofnormalattritionandattritionfromotherpressures.&lt;br/&gt;&lt;h4&gt;30.averagetenure--&gt;(-)normalattritionrate&lt;/h4&gt;Thenormalattritionrateistheinverseoftheaveragetimeapersonstayswiththecompany.&lt;br/&gt;&lt;h4&gt;31.effectofworkloadonattrition--&gt;(+)attritionfrompressure&lt;/h4&gt;Thisvariablerepresentstheadditionalattritionresultingfromhighworkload.&lt;br/&gt;&lt;h4&gt;32.workloadpressure--&gt;(+)effectofworkloadonattrition&lt;/h4&gt;Thisnon-linearrelationshipcaptureshowincreasingpressuredisproportionatelyincreasesattrition.&lt;br/&gt;&lt;h4&gt;33.workloadpersalesperson--&gt;(+)workloadpressure&lt;/h4&gt;Workloadpressureistheratiooftheactualworkloadtoatargetorsustainableworkload.&lt;br/&gt;&lt;h4&gt;34.targetworkload--&gt;(-)workloadpressure&lt;/h4&gt;Workloadpressureistheratiooftheactualworkloadtoatargetorsustainableworkload.&lt;br/&gt;&lt;h4&gt;35.totalsalescalls--&gt;(+)workloadpersalesperson&lt;/h4&gt;Workloadisthetotalworkdividedbythenumberofpeopleavailabletodoit.&lt;br/&gt;&lt;h4&gt;36.totalsalespeople--&gt;(-)workloadpersalesperson&lt;/h4&gt;Workloadisthetotalworkdividedbythenumberofpeopleavailabletodoit.&lt;br/&gt;&lt;h4&gt;37.Salesforce--&gt;(+)totalsalespeople&lt;/h4&gt;Totalsalespeopleisthesumofnoviceandexperiencedstaff.&lt;br/&gt;&lt;h4&gt;38.ExperiencedSalesforce--&gt;(+)totalsalespeople&lt;/h4&gt;Totalsalespeopleisthesumofnoviceandexperiencedstaff.&lt;br/&gt;&lt;h4&gt;39.totalsalespeople--&gt;(+)totalsalescalls&lt;/h4&gt;Totalcallsistheproductofthenumberofsalespeopleandthecallsmadebyeach.&lt;br/&gt;&lt;h4&gt;40.totalsalescalls--&gt;(+)customeracquisition&lt;/h4&gt;Customeracquisitionisafunctionofsaleseffortandeffectiveness.&lt;br/&gt;&lt;h4&gt;41.closingratio--&gt;(+)customeracquisition&lt;/h4&gt;Theclosingratiorepresentssaleseffectiveness.&lt;br/&gt;&lt;h4&gt;42.marketsaturationeffect--&gt;(+)customeracquisition&lt;/h4&gt;Marketsaturationmakesithardertofindnewcustomers,reducingtheeffectivenessofsalescalls.&lt;br/&gt;&lt;h4&gt;43.Customers--&gt;(+)customerchurn&lt;/h4&gt;Totalchurnisthenumberofcustomersmultipliedbythechurnrate.&lt;br/&gt;&lt;h4&gt;44.totalchurnrate--&gt;(+)customerchurn&lt;/h4&gt;Totalchurnisthenumberofcustomersmultipliedbythechurnrate.&lt;br/&gt;&lt;h4&gt;45.normalchurnrate--&gt;(+)totalchurnrate&lt;/h4&gt;Totalchurnisthesumofnormalchurnandchurnfromdissatisfaction.&lt;br/&gt;&lt;h4&gt;46.churnfromdissatisfaction--&gt;(+)totalchurnrate&lt;/h4&gt;Totalchurnisthesumofnormalchurnandchurnfromdissatisfaction.&lt;br/&gt;&lt;h4&gt;47.customerlifetime--&gt;(-)normalchurnrate&lt;/h4&gt;Thenormalchurnrateistheinverseoftheaveragetimeacustomerstayswiththecompany.&lt;br/&gt;&lt;h4&gt;48.effectofsatisfactiononchurn--&gt;(+)churnfromdissatisfaction&lt;/h4&gt;Thisvariablerepresentstheadditionalchurnresultingfromlowcustomersatisfaction.&lt;br/&gt;&lt;h4&gt;49.customersatisfaction--&gt;(-)effectofsatisfactiononchurn&lt;/h4&gt;Thisnon-linearrelationshipcaptureshowfallingsatisfactiondisproportionatelyincreaseschurn.&lt;br/&gt;&lt;h4&gt;50.satisfactionfromservicequality--&gt;(+)customersatisfaction&lt;/h4&gt;Overallsatisfactionisanaggregationofsatisfactionfromdifferentaspectsofthebusiness.&lt;br/&gt;&lt;h4&gt;51.satisfactionfromdeliverydelay--&gt;(+)customersatisfaction&lt;/h4&gt;Overallsatisfactionisanaggregationofsatisfactionfromdifferentaspectsofthebusiness.&lt;br/&gt;&lt;h4&gt;52.servicequality--&gt;(+)satisfactionfromservicequality&lt;/h4&gt;Customerperceptionofservicequalitydirectlyimpactstheirsatisfaction.&lt;br/&gt;&lt;h4&gt;53.supportcapacity--&gt;(+)servicequality&lt;/h4&gt;Servicequalityisdeterminedbytheratioofavailablecapacitytodemand.&lt;br/&gt;&lt;h4&gt;54.totalsupportcases--&gt;(-)servicequality&lt;/h4&gt;Servicequalityisdeterminedbytheratioofavailablecapacitytodemand.&lt;br/&gt;&lt;h4&gt;55.customersupportstaff--&gt;(+)supportcapacity&lt;/h4&gt;Totalcapacityisthenumberofstaffmultipliedbytheirindividualcapacity.&lt;br/&gt;&lt;h4&gt;56.casesperstaff--&gt;(+)supportcapacity&lt;/h4&gt;Totalcapacityisthenumberofstaffmultipliedbytheirindividualcapacity.&lt;br/&gt;&lt;h4&gt;57.Customers--&gt;(+)totalsupportcases&lt;/h4&gt;Totaldemandforsupportisdrivenbythesizeofthecustomerbase.&lt;br/&gt;&lt;h4&gt;58.supportcasespercustomer--&gt;(+)totalsupportcases&lt;/h4&gt;Totaldemandforsupportisdrivenbythesizeofthecustomerbase.&lt;br/&gt;&lt;h4&gt;59.deliverydelay--&gt;(-)satisfactionfromdeliverydelay&lt;/h4&gt;Customersarelesssatisfiedwhentheyhavetowaitlongerfortheirorders.&lt;br/&gt;&lt;h4&gt;60.effectofbacklogondeliverydelay--&gt;(+)deliverydelay&lt;/h4&gt;Thetimetofulfillanorderisinfluencedbythequeueofexistingorders.&lt;br/&gt;&lt;h4&gt;61.normaldeliverytime--&gt;(+)deliverydelay&lt;/h4&gt;Totaldelayisthenormaltimeplusanyadditionaldelayfrombacklogs.&lt;br/&gt;&lt;h4&gt;62.ProductBacklog--&gt;(+)effectofbacklogondeliverydelay&lt;/h4&gt;Thisnon-linearrelationshipcaptureshowagrowingbacklogcanexponentiallyincreasedelays.&lt;br/&gt;&lt;h4&gt;63.productioncapacity--&gt;(-)effectofbacklogondeliverydelay&lt;/h4&gt;Ahighercapacityallowsthecompanytoworkthroughthebacklogfaster.&lt;br/&gt;&lt;h4&gt;64.customeracquisition--&gt;(+)neworders&lt;/h4&gt;Weassumeeachnewcustomeracquisitioncorrespondstooneneworder.&lt;br/&gt;&lt;h4&gt;65.ProductBacklog--&gt;(+)orderfulfillment&lt;/h4&gt;Thefulfillmentratedependsonboththebacklogsizeandthecapacitytofulfill.&lt;br/&gt;&lt;h4&gt;66.productioncapacity--&gt;(+)orderfulfillment&lt;/h4&gt;Thefulfillmentratedependsonboththebacklogsizeandthecapacitytofulfill.&lt;br/&gt;&lt;h4&gt;67.customersatisfaction--&gt;(+)reputationbuilding&lt;/h4&gt;Reputationisbuiltovertimethroughpositivecustomerexperiences.&lt;br/&gt;&lt;h4&gt;68.reputationgainfactor--&gt;(+)reputationbuilding&lt;/h4&gt;Thisfactormodulatesthespeedatwhichreputationisbuilt.&lt;br/&gt;&lt;h4&gt;69.negativeevents--&gt;(+)reputationerosion&lt;/h4&gt;Reputationcanbedamagedbyspecificnegativeoccurrences.&lt;br/&gt;&lt;h4&gt;70.reputationlossfactor--&gt;(+)reputationerosion&lt;/h4&gt;Thisfactorrepresentsthenaturaldecayorerosionofbrandreputationifnotmaintained.&lt;br/&gt;&lt;h4&gt;71.BrandReputation--&gt;(+)effectofreputationonsales&lt;/h4&gt;Customersaremorelikelytobuyfromacompanytheytrustandviewpositively.&lt;br/&gt;&lt;h4&gt;72.effectofreputationonsales--&gt;(+)closingratio&lt;/h4&gt;Thefinalclosingratioisaproductofabaseratioandseveralinfluencingeffects.&lt;br/&gt;&lt;h4&gt;73.baseclosingratio--&gt;(+)closingratio&lt;/h4&gt;Thefinalclosingratioisaproductofabaseratioandseveralinfluencingeffects.&lt;br/&gt;&lt;h4&gt;74.Salesforce--&gt;(+)gainingexperience&lt;/h4&gt;Therateofgainingexperiencedependsonthenumberofnovicesandthetimeittakes.&lt;br/&gt;&lt;h4&gt;75.timetogainexperience--&gt;(-)gainingexperience&lt;/h4&gt;Therateisthestockofnovicesdividedbythetimetotransition.&lt;br/&gt;&lt;h4&gt;76.ExperiencedSalesforce--&gt;(+)experiencedsalesforceattrition&lt;/h4&gt;Totalattritionisthenumberofstaffmultipliedbytheattritionrate.&lt;br/&gt;&lt;h4&gt;77.totalattritionrate--&gt;(+)experiencedsalesforceattrition&lt;/h4&gt;Weassumethesameoverallattritionrateappliestoexperiencedstaff.&lt;br/&gt;&lt;h4&gt;78.Customers--&gt;(+)wordofmouthleads&lt;/h4&gt;Thecustomerbaseisthesourceofword-of-mouthreferrals.&lt;br/&gt;&lt;h4&gt;79.contactspercustomer--&gt;(+)wordofmouthleads&lt;/h4&gt;Thereachofwordofmouthdependsonthenetworksizeofeachcustomer.&lt;br/&gt;&lt;h4&gt;80.adoptionfraction--&gt;(+)wordofmouthleads&lt;/h4&gt;Thisrepresentstheconversionrateofaword-of-mouthmentionintoanactuallead.&lt;br/&gt;&lt;h4&gt;81.effectofsatisfactiononwordofmouth--&gt;(+)adoptionfraction&lt;/h4&gt;Satisfiedcustomersaremorepersuasive,increasingtheeffectivenessoftheirreferrals.&lt;br/&gt;&lt;h4&gt;82.customersatisfaction--&gt;(+)effectofsatisfactiononwordofmouth&lt;/h4&gt;Happycustomersaremorelikelytogeneratepositiveandeffectivewordofmouth.&lt;br/&gt;&lt;h4&gt;83.marketingspend--&gt;(+)marketingleads&lt;/h4&gt;Marketingleadsareadirectresultofmarketingexpenditure.&lt;br/&gt;&lt;h4&gt;84.marketingeffectiveness--&gt;(+)marketingleads&lt;/h4&gt;Effectivenessisthemultiplierthatconvertsspendintoleads.&lt;br/&gt;&lt;h4&gt;85.wordofmouthleads--&gt;(+)totalleads&lt;/h4&gt;Totalleadsarethesumofleadsfromallsources.&lt;br/&gt;&lt;h4&gt;86.marketingleads--&gt;(+)totalleads&lt;/h4&gt;Totalleadsarethesumofleadsfromallsources.&lt;br/&gt;&lt;h4&gt;87.totalleads--&gt;(+)totalsalescalls&lt;/h4&gt;Salescallsaremadetotheleadsgeneratedbymarketingandwordofmouth.&lt;br/&gt;&lt;h4&gt;88.totalmarketsize--&gt;(+)potentialcustomers&lt;/h4&gt;Potentialcustomersarethoseinthetotalmarketwhoarenotyetcustomers.&lt;br/&gt;&lt;h4&gt;89.Customers--&gt;(-)potentialcustomers&lt;/h4&gt;Potentialcustomersarethoseinthetotalmarketwhoarenotyetcustomers.&lt;br/&gt;&lt;h4&gt;90.potentialcustomers--&gt;(-)marketsaturationeffect&lt;/h4&gt;Themarketsaturationeffectisafunctionoftheremainingmarketshare.&lt;br/&gt;&lt;h4&gt;91.totalmarketsize--&gt;(+)marketsaturationeffect&lt;/h4&gt;Themarketsaturationeffectisafunctionoftheremainingmarketshare.&lt;br/&gt;"/>
+		<log>&lt;h3&gt;You instructed me to...&lt;/h3&gt;&lt;br/&gt;&lt;h3&gt;Here is what I have done...&lt;/h3&gt;&lt;h3&gt;Sales Company Growth and Limits Model&lt;/h3&gt;This model simulates the growth and limitations of a sales company. It is built around several core feedback loops. A primary reinforcing loop, a &apos;Success to the Successful&apos; archetype, drives growth: more revenue allows for hiring more salespeople, who in turn generate more sales and revenue. This is amplified by a &apos;Word of Mouth&apos; loop, where more satisfied customers increase brand reputation and attract new leads. However, this growth is constrained by multiple balancing loops, creating a &apos;Limits to Growth&apos; structure. As the salesforce grows, workload pressure can increase, leading to higher attrition and capping the size of the sales team. Similarly, rapid customer growth can strain support capacity and increase order backlogs, which reduces customer satisfaction. Lower satisfaction increases customer churn and damages brand reputation, slowing down new customer acquisition. These balancing forces create a more realistic simulation of business dynamics, where unchecked growth eventually confronts internal and external limits.&lt;br/&gt;&lt;h4&gt;1. revenue --&gt;(+) cash inflow&lt;/h4&gt;Revenue from sales is the primary source of cash inflow for the company.&lt;br/&gt;&lt;h4&gt;2. total expenses --&gt;(+) cash outflow&lt;/h4&gt;Expenses such as salaries, marketing, and overhead constitute the company&apos;s cash outflow.&lt;br/&gt;&lt;h4&gt;3. Customers --&gt;(+) revenue&lt;/h4&gt;Total revenue is calculated based on the number of customers.&lt;br/&gt;&lt;h4&gt;4. average revenue per customer --&gt;(+) revenue&lt;/h4&gt;Total revenue is calculated based on the average revenue per customer.&lt;br/&gt;&lt;h4&gt;5. total sales compensation --&gt;(+) total expenses&lt;/h4&gt;Salesforce salaries are a major component of total expenses.&lt;br/&gt;&lt;h4&gt;6. marketing spend --&gt;(+) total expenses&lt;/h4&gt;Marketing budgets contribute to total expenses.&lt;br/&gt;&lt;h4&gt;7. overhead costs --&gt;(+) total expenses&lt;/h4&gt;Fixed overheads are a component of total expenses.&lt;br/&gt;&lt;h4&gt;8. cost of goods sold --&gt;(+) total expenses&lt;/h4&gt;The direct costs associated with sales contribute to total expenses.&lt;br/&gt;&lt;h4&gt;9. total support staff cost --&gt;(+) total expenses&lt;/h4&gt;Salaries for support staff are a component of total expenses.&lt;br/&gt;&lt;h4&gt;10. Salesforce --&gt;(+) total sales compensation&lt;/h4&gt;Total sales compensation is the number of salespeople multiplied by the compensation per person.&lt;br/&gt;&lt;h4&gt;11. compensation per salesperson --&gt;(+) total sales compensation&lt;/h4&gt;Total sales compensation is the number of salespeople multiplied by the compensation per person.&lt;br/&gt;&lt;h4&gt;12. customer acquisition --&gt;(+) cost of goods sold&lt;/h4&gt;Each new customer acquired corresponds to a sale, which has an associated unit cost.&lt;br/&gt;&lt;h4&gt;13. unit cost --&gt;(+) cost of goods sold&lt;/h4&gt;Total COGS is the number of units sold multiplied by the cost per unit.&lt;br/&gt;&lt;h4&gt;14. customer support staff --&gt;(+) total support staff cost&lt;/h4&gt;Total support cost is the number of staff multiplied by their salary.&lt;br/&gt;&lt;h4&gt;15. support staff salary --&gt;(+) total support staff cost&lt;/h4&gt;Total support cost is the number of staff multiplied by their salary.&lt;br/&gt;&lt;h4&gt;16. revenue --&gt;(+) profit&lt;/h4&gt;Profit is calculated as revenue minus total expenses.&lt;br/&gt;&lt;h4&gt;17. total expenses --&gt;(-) profit&lt;/h4&gt;Profit is calculated as revenue minus total expenses.&lt;br/&gt;&lt;h4&gt;18. profit --&gt;(+) budget for hiring and marketing&lt;/h4&gt;A fraction of profits is typically reinvested into growth areas like hiring and marketing.&lt;br/&gt;&lt;h4&gt;19. reinvestment fraction --&gt;(+) budget for hiring and marketing&lt;/h4&gt;The budget is determined by the profit multiplied by the fraction designated for reinvestment.&lt;br/&gt;&lt;h4&gt;20. budget for hiring and marketing --&gt;(+) desired salesforce&lt;/h4&gt;The desired salesforce size is determined by what the company can afford based on its budget.&lt;br/&gt;&lt;h4&gt;21. compensation per salesperson --&gt;(-) desired salesforce&lt;/h4&gt;The number of affordable salespeople is the budget divided by the cost per person.&lt;br/&gt;&lt;h4&gt;22. desired salesforce --&gt;(+) salesforce gap&lt;/h4&gt;The hiring gap is the difference between what is desired and what currently exists.&lt;br/&gt;&lt;h4&gt;23. Salesforce --&gt;(-) salesforce gap&lt;/h4&gt;The hiring gap is the difference between what is desired and what currently exists.&lt;br/&gt;&lt;h4&gt;24. salesforce gap --&gt;(+) hiring&lt;/h4&gt;The company hires to close the gap over a certain period of time.&lt;br/&gt;&lt;h4&gt;25. hiring time --&gt;(-) hiring&lt;/h4&gt;The hiring rate is the gap divided by the time it takes to fill positions.&lt;br/&gt;&lt;h4&gt;26. Salesforce --&gt;(+) salesforce attrition&lt;/h4&gt;Total attrition is the number of salespeople multiplied by the attrition rate.&lt;br/&gt;&lt;h4&gt;27. total attrition rate --&gt;(+) salesforce attrition&lt;/h4&gt;Total attrition is the number of salespeople multiplied by the attrition rate.&lt;br/&gt;&lt;h4&gt;28. normal attrition rate --&gt;(+) total attrition rate&lt;/h4&gt;Total attrition is the sum of normal attrition and attrition from other pressures.&lt;br/&gt;&lt;h4&gt;29. attrition from pressure --&gt;(+) total attrition rate&lt;/h4&gt;Total attrition is the sum of normal attrition and attrition from other pressures.&lt;br/&gt;&lt;h4&gt;30. average tenure --&gt;(-) normal attrition rate&lt;/h4&gt;The normal attrition rate is the inverse of the average time a person stays with the company.&lt;br/&gt;&lt;h4&gt;31. effect of workload on attrition --&gt;(+) attrition from pressure&lt;/h4&gt;This variable represents the additional attrition resulting from high workload.&lt;br/&gt;&lt;h4&gt;32. workload pressure --&gt;(+) effect of workload on attrition&lt;/h4&gt;This non-linear relationship captures how increasing pressure disproportionately increases attrition.&lt;br/&gt;&lt;h4&gt;33. workload per salesperson --&gt;(+) workload pressure&lt;/h4&gt;Workload pressure is the ratio of the actual workload to a target or sustainable workload.&lt;br/&gt;&lt;h4&gt;34. target workload --&gt;(-) workload pressure&lt;/h4&gt;Workload pressure is the ratio of the actual workload to a target or sustainable workload.&lt;br/&gt;&lt;h4&gt;35. total sales calls --&gt;(+) workload per salesperson&lt;/h4&gt;Workload is the total work divided by the number of people available to do it.&lt;br/&gt;&lt;h4&gt;36. total salespeople --&gt;(-) workload per salesperson&lt;/h4&gt;Workload is the total work divided by the number of people available to do it.&lt;br/&gt;&lt;h4&gt;37. Salesforce --&gt;(+) total salespeople&lt;/h4&gt;Total salespeople is the sum of novice and experienced staff.&lt;br/&gt;&lt;h4&gt;38. Experienced Salesforce --&gt;(+) total salespeople&lt;/h4&gt;Total salespeople is the sum of novice and experienced staff.&lt;br/&gt;&lt;h4&gt;39. total salespeople --&gt;(+) total sales calls&lt;/h4&gt;Total calls is the product of the number of salespeople and the calls made by each.&lt;br/&gt;&lt;h4&gt;40. total sales calls --&gt;(+) customer acquisition&lt;/h4&gt;Customer acquisition is a function of sales effort and effectiveness.&lt;br/&gt;&lt;h4&gt;41. closing ratio --&gt;(+) customer acquisition&lt;/h4&gt;The closing ratio represents sales effectiveness.&lt;br/&gt;&lt;h4&gt;42. market saturation effect --&gt;(+) customer acquisition&lt;/h4&gt;Market saturation makes it harder to find new customers, reducing the effectiveness of sales calls.&lt;br/&gt;&lt;h4&gt;43. Customers --&gt;(+) customer churn&lt;/h4&gt;Total churn is the number of customers multiplied by the churn rate.&lt;br/&gt;&lt;h4&gt;44. total churn rate --&gt;(+) customer churn&lt;/h4&gt;Total churn is the number of customers multiplied by the churn rate.&lt;br/&gt;&lt;h4&gt;45. normal churn rate --&gt;(+) total churn rate&lt;/h4&gt;Total churn is the sum of normal churn and churn from dissatisfaction.&lt;br/&gt;&lt;h4&gt;46. churn from dissatisfaction --&gt;(+) total churn rate&lt;/h4&gt;Total churn is the sum of normal churn and churn from dissatisfaction.&lt;br/&gt;&lt;h4&gt;47. customer lifetime --&gt;(-) normal churn rate&lt;/h4&gt;The normal churn rate is the inverse of the average time a customer stays with the company.&lt;br/&gt;&lt;h4&gt;48. effect of satisfaction on churn --&gt;(+) churn from dissatisfaction&lt;/h4&gt;This variable represents the additional churn resulting from low customer satisfaction.&lt;br/&gt;&lt;h4&gt;49. customer satisfaction --&gt;(-) effect of satisfaction on churn&lt;/h4&gt;This non-linear relationship captures how falling satisfaction disproportionately increases churn.&lt;br/&gt;&lt;h4&gt;50. satisfaction from service quality --&gt;(+) customer satisfaction&lt;/h4&gt;Overall satisfaction is an aggregation of satisfaction from different aspects of the business.&lt;br/&gt;&lt;h4&gt;51. satisfaction from delivery delay --&gt;(+) customer satisfaction&lt;/h4&gt;Overall satisfaction is an aggregation of satisfaction from different aspects of the business.&lt;br/&gt;&lt;h4&gt;52. service quality --&gt;(+) satisfaction from service quality&lt;/h4&gt;Customer perception of service quality directly impacts their satisfaction.&lt;br/&gt;&lt;h4&gt;53. support capacity --&gt;(+) service quality&lt;/h4&gt;Service quality is determined by the ratio of available capacity to demand.&lt;br/&gt;&lt;h4&gt;54. total support cases --&gt;(-) service quality&lt;/h4&gt;Service quality is determined by the ratio of available capacity to demand.&lt;br/&gt;&lt;h4&gt;55. customer support staff --&gt;(+) support capacity&lt;/h4&gt;Total capacity is the number of staff multiplied by their individual capacity.&lt;br/&gt;&lt;h4&gt;56. cases per staff --&gt;(+) support capacity&lt;/h4&gt;Total capacity is the number of staff multiplied by their individual capacity.&lt;br/&gt;&lt;h4&gt;57. Customers --&gt;(+) total support cases&lt;/h4&gt;Total demand for support is driven by the size of the customer base.&lt;br/&gt;&lt;h4&gt;58. support cases per customer --&gt;(+) total support cases&lt;/h4&gt;Total demand for support is driven by the size of the customer base.&lt;br/&gt;&lt;h4&gt;59. delivery delay --&gt;(-) satisfaction from delivery delay&lt;/h4&gt;Customers are less satisfied when they have to wait longer for their orders.&lt;br/&gt;&lt;h4&gt;60. effect of backlog on delivery delay --&gt;(+) delivery delay&lt;/h4&gt;The time to fulfill an order is influenced by the queue of existing orders.&lt;br/&gt;&lt;h4&gt;61. normal delivery time --&gt;(+) delivery delay&lt;/h4&gt;Total delay is the normal time plus any additional delay from backlogs.&lt;br/&gt;&lt;h4&gt;62. Product Backlog --&gt;(+) effect of backlog on delivery delay&lt;/h4&gt;This non-linear relationship captures how a growing backlog can exponentially increase delays.&lt;br/&gt;&lt;h4&gt;63. production capacity --&gt;(-) effect of backlog on delivery delay&lt;/h4&gt;A higher capacity allows the company to work through the backlog faster.&lt;br/&gt;&lt;h4&gt;64. customer acquisition --&gt;(+) new orders&lt;/h4&gt;We assume each new customer acquisition corresponds to one new order.&lt;br/&gt;&lt;h4&gt;65. Product Backlog --&gt;(+) order fulfillment&lt;/h4&gt;The fulfillment rate depends on both the backlog size and the capacity to fulfill.&lt;br/&gt;&lt;h4&gt;66. production capacity --&gt;(+) order fulfillment&lt;/h4&gt;The fulfillment rate depends on both the backlog size and the capacity to fulfill.&lt;br/&gt;&lt;h4&gt;67. customer satisfaction --&gt;(+) reputation building&lt;/h4&gt;Reputation is built over time through positive customer experiences.&lt;br/&gt;&lt;h4&gt;68. reputation gain factor --&gt;(+) reputation building&lt;/h4&gt;This factor modulates the speed at which reputation is built.&lt;br/&gt;&lt;h4&gt;69. negative events --&gt;(+) reputation erosion&lt;/h4&gt;Reputation can be damaged by specific negative occurrences.&lt;br/&gt;&lt;h4&gt;70. reputation loss factor --&gt;(+) reputation erosion&lt;/h4&gt;This factor represents the natural decay or erosion of brand reputation if not maintained.&lt;br/&gt;&lt;h4&gt;71. Brand Reputation --&gt;(+) effect of reputation on sales&lt;/h4&gt;Customers are more likely to buy from a company they trust and view positively.&lt;br/&gt;&lt;h4&gt;72. effect of reputation on sales --&gt;(+) closing ratio&lt;/h4&gt;The final closing ratio is a product of a base ratio and several influencing effects.&lt;br/&gt;&lt;h4&gt;73. base closing ratio --&gt;(+) closing ratio&lt;/h4&gt;The final closing ratio is a product of a base ratio and several influencing effects.&lt;br/&gt;&lt;h4&gt;74. Salesforce --&gt;(+) gaining experience&lt;/h4&gt;The rate of gaining experience depends on the number of novices and the time it takes.&lt;br/&gt;&lt;h4&gt;75. time to gain experience --&gt;(-) gaining experience&lt;/h4&gt;The rate is the stock of novices divided by the time to transition.&lt;br/&gt;&lt;h4&gt;76. Experienced Salesforce --&gt;(+) experienced salesforce attrition&lt;/h4&gt;Total attrition is the number of staff multiplied by the attrition rate.&lt;br/&gt;&lt;h4&gt;77. total attrition rate --&gt;(+) experienced salesforce attrition&lt;/h4&gt;We assume the same overall attrition rate applies to experienced staff.&lt;br/&gt;&lt;h4&gt;78. Customers --&gt;(+) word of mouth leads&lt;/h4&gt;The customer base is the source of word-of-mouth referrals.&lt;br/&gt;&lt;h4&gt;79. contacts per customer --&gt;(+) word of mouth leads&lt;/h4&gt;The reach of word of mouth depends on the network size of each customer.&lt;br/&gt;&lt;h4&gt;80. adoption fraction --&gt;(+) word of mouth leads&lt;/h4&gt;This represents the conversion rate of a word-of-mouth mention into an actual lead.&lt;br/&gt;&lt;h4&gt;81. effect of satisfaction on word of mouth --&gt;(+) adoption fraction&lt;/h4&gt;Satisfied customers are more persuasive, increasing the effectiveness of their referrals.&lt;br/&gt;&lt;h4&gt;82. customer satisfaction --&gt;(+) effect of satisfaction on word of mouth&lt;/h4&gt;Happy customers are more likely to generate positive and effective word of mouth.&lt;br/&gt;&lt;h4&gt;83. marketing spend --&gt;(+) marketing leads&lt;/h4&gt;Marketing leads are a direct result of marketing expenditure.&lt;br/&gt;&lt;h4&gt;84. marketing effectiveness --&gt;(+) marketing leads&lt;/h4&gt;Effectiveness is the multiplier that converts spend into leads.&lt;br/&gt;&lt;h4&gt;85. word of mouth leads --&gt;(+) total leads&lt;/h4&gt;Total leads are the sum of leads from all sources.&lt;br/&gt;&lt;h4&gt;86. marketing leads --&gt;(+) total leads&lt;/h4&gt;Total leads are the sum of leads from all sources.&lt;br/&gt;&lt;h4&gt;87. total leads --&gt;(+) total sales calls&lt;/h4&gt;Sales calls are made to the leads generated by marketing and word of mouth.&lt;br/&gt;&lt;h4&gt;88. total market size --&gt;(+) potential customers&lt;/h4&gt;Potential customers are those in the total market who are not yet customers.&lt;br/&gt;&lt;h4&gt;89. Customers --&gt;(-) potential customers&lt;/h4&gt;Potential customers are those in the total market who are not yet customers.&lt;br/&gt;&lt;h4&gt;90. potential customers --&gt;(-) market saturation effect&lt;/h4&gt;The market saturation effect is a function of the remaining market share.&lt;br/&gt;&lt;h4&gt;91. total market size --&gt;(+) market saturation effect&lt;/h4&gt;The market saturation effect is a function of the remaining market share.&lt;br/&gt;</log>
+		<settings>
+			<isee:setting key="quantitative/backgroundKnowledge" value=""/>
+			<isee:setting key="quantitative/problemStatement" value=""/>
+		</settings>
+	</ai_information>
+	<sim_specs isee:sim_duration="1.5" isee:run_prefix="Run" isee:simulation_delay="0.015" isee:restore_on_start="false" method="Euler" time_units="Months" isee:instantaneous_flows="false" isee:ignore_module_errors="false" isee:strict_units="true" isee:loop_scores="true" isee:loop_exhaustive_allowed="1000" isee:ltm_tag="">
+		<start>0</start>
+		<stop>100</stop>
+		<dt>0.25</dt>
+	</sim_specs>
+	<isee:prefs saved_runs="5" keep="false" show_module_prefix="true" live_update_on_drag="true" show_restore_buttons="false" layer="model" isee:design="Deluxe Prev-Next Blue Green Pastel" isee:design_custom="false" interface_scale_ui="true" interface_max_page_width="10000" interface_max_page_height="10000" interface_min_page_width="0" interface_min_page_height="0" rifp="true"/>
+	<isee:multiplayer_settings include_chat="true" allow_observers="false" advance_time_increment="1" max_advance_time_in_ms="0" model_stops_when_players_drop="false" observer_start_page="home_page" enabled="false"/>
+	<isee:time_formats default_format="Builtin">
+		<isee:time_format name="Builtin" type="adaptive"/>
+	</isee:time_formats>
+	<isee:number_format_extenders/>
+	<default_format/>
+	<model_units>
+		<unit name="Dimensionless">
+			<eqn>1</eqn>
+			<alias>dmnl</alias>
+			<alias>unitless</alias>
+			<alias>fraction</alias>
+		</unit>
+		<unit name="People">
+			<eqn/>
+			<alias>person</alias>
+			<alias>persons</alias>
+		</unit>
+		<unit name="Customer">
+			<eqn/>
+			<alias>Customers</alias>
+		</unit>
+		<unit name="Dollar">
+			<eqn/>
+			<alias>Dollars</alias>
+		</unit>
+		<unit name="Month">
+			<eqn/>
+			<alias>Months</alias>
+		</unit>
+	</model_units>
+	<model>
+		<variables>
+			<flow name="cash inflow" ai_state="C">
+				<doc>The rate at which cash enters the company, primarily from revenue.</doc>
+				<eqn>revenue</eqn>
+				<non_negative/>
+				<units>Dollars/Month</units>
+			</flow>
+			<flow name="cash outflow" ai_state="C">
+				<doc>The rate at which cash leaves the company to cover all expenses.</doc>
+				<eqn>total_expenses</eqn>
+				<non_negative/>
+				<units>Dollars/Month</units>
+			</flow>
+			<aux name="revenue" ai_state="C">
+				<doc>The total income generated from sales to customers.</doc>
+				<eqn>Customers * average_revenue_per_customer</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="average revenue per customer" ai_state="C">
+				<doc>The average monthly revenue generated by a single customer.</doc>
+				<eqn>100</eqn>
+				<units>Dollars/Customer/Month</units>
+			</aux>
+			<aux name="total expenses" ai_state="C">
+				<doc>The sum of all costs incurred by the company in a month.</doc>
+				<eqn>total_sales_compensation + marketing_spend + overhead_costs + cost_of_goods_sold + total_support_staff_cost</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="total sales compensation" ai_state="C">
+				<doc>The total salary and commission paid to the entire salesforce.</doc>
+				<eqn>total_salespeople * compensation_per_salesperson</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="compensation per salesperson" ai_state="C">
+				<doc>The average monthly cost of employing one salesperson.</doc>
+				<eqn>5000</eqn>
+				<units>Dollars/Person/Month</units>
+			</aux>
+			<aux name="marketing spend" ai_state="C">
+				<doc>The monthly budget allocated to marketing activities.</doc>
+				<eqn>budget_for_hiring_and_marketing * 0.5</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="overhead costs" ai_state="C">
+				<doc>Fixed monthly costs such as rent, utilities, and administrative salaries.</doc>
+				<eqn>20000</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="cost of goods sold" ai_state="C">
+				<doc>The direct costs attributable to the production of the goods sold by the company.</doc>
+				<eqn>customer_acquisition * unit_cost</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="unit cost" ai_state="C">
+				<doc>The cost associated with producing a single unit sold.</doc>
+				<eqn>20</eqn>
+				<units>Dollars/Unit</units>
+			</aux>
+			<aux name="total support staff cost" ai_state="C">
+				<doc>The total salary cost for all customer support staff.</doc>
+				<eqn>customer_support_staff * support_staff_salary</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="support staff salary" ai_state="C">
+				<doc>The average monthly salary for one customer support staff member.</doc>
+				<eqn>3000</eqn>
+				<units>Dollars/Person/Month</units>
+			</aux>
+			<aux name="profit" ai_state="C">
+				<doc>The company&apos;s net earnings, calculated as revenue minus expenses.</doc>
+				<eqn>revenue - total_expenses</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<aux name="reinvestment fraction" ai_state="C">
+				<doc>The fraction of profits that are reinvested back into the company for growth.</doc>
+				<eqn>0.5</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="budget for hiring and marketing" ai_state="G">
+				<doc>The total budget available for growth activities, derived from profits.</doc>
+				<eqn>MAX(0, expected_profit * reinvestment_fraction)</eqn>
+				<units>Dollars/Month</units>
+			</aux>
+			<flow name="customer acquisition" ai_state="C">
+				<doc>The rate at which new customers are acquired.</doc>
+				<eqn>total_sales_calls * closing_ratio * market_saturation_effect</eqn>
+				<non_negative/>
+				<units>Customers/Months</units>
+			</flow>
+			<flow name="customer churn" ai_state="C">
+				<doc>The rate at which existing customers are lost.</doc>
+				<eqn>Customers * total_churn_rate</eqn>
+				<non_negative/>
+				<units>Customers/Months</units>
+			</flow>
+			<flow name="hiring" ai_state="C">
+				<doc>The rate at which new salespeople are hired.</doc>
+				<eqn>MAX(0, salesforce_gap) / hiring_time</eqn>
+				<non_negative/>
+				<units>People/Months</units>
+			</flow>
+			<flow name="salesforce attrition" ai_state="C">
+				<doc>The rate at which salespeople leave the company.</doc>
+				<eqn>Salesforce * total_attrition_rate</eqn>
+				<non_negative/>
+				<units>People/Months</units>
+			</flow>
+			<flow name="gaining experience" ai_state="C">
+				<doc>The rate at which novice salespeople become experienced.</doc>
+				<eqn>Salesforce / time_to_gain_experience</eqn>
+				<non_negative/>
+				<units>People/Months</units>
+			</flow>
+			<flow name="experienced salesforce attrition" ai_state="C">
+				<doc>The rate at which experienced salespeople leave the company.</doc>
+				<eqn>Experienced_Salesforce * total_attrition_rate</eqn>
+				<non_negative/>
+				<units>People/Months</units>
+			</flow>
+			<flow name="reputation building" ai_state="C">
+				<doc>The rate at which brand reputation increases due to positive factors.</doc>
+				<eqn>customer_satisfaction * reputation_gain_factor</eqn>
+				<non_negative/>
+				<units>ReputationPoints/Month</units>
+			</flow>
+			<flow name="reputation erosion" ai_state="C">
+				<doc>The rate at which brand reputation decreases due to negative factors or neglect.</doc>
+				<eqn>Brand_Reputation * reputation_loss_factor + negative_events</eqn>
+				<non_negative/>
+				<units>ReputationPoints/Month</units>
+			</flow>
+			<flow name="new orders" ai_state="C">
+				<doc>The rate at which new orders are received.</doc>
+				<eqn>customer_acquisition</eqn>
+				<non_negative/>
+				<units>Orders/Month</units>
+			</flow>
+			<flow name="order fulfillment" ai_state="C">
+				<doc>The rate at which orders from the backlog are fulfilled.</doc>
+				<eqn>MIN(Product_Backlog / 0.1, production_capacity)</eqn>
+				<non_negative/>
+				<units>Orders/Month</units>
+			</flow>
+			<aux name="total sales calls" ai_state="C">
+				<doc>The total number of sales calls made by the entire salesforce.</doc>
+				<eqn>total_leads</eqn>
+				<units>Calls/Month</units>
+			</aux>
+			<aux name="closing ratio" ai_state="C">
+				<doc>The percentage of sales calls that result in a new customer.</doc>
+				<eqn>base_closing_ratio * effect_of_reputation_on_sales</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="base closing ratio" ai_state="C">
+				<doc>The baseline effectiveness of the sales process, without other influences.</doc>
+				<eqn>0.1</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="effect of reputation on sales" ai_state="C">
+				<doc>A multiplier representing how brand reputation affects sales effectiveness.</doc>
+				<eqn>Brand_Reputation</eqn>
+				<gf>
+					<yscale min="0.5" max="1.5"/>
+					<xpts>0,50,100</xpts>
+					<ypts>0.5,1,1.5</ypts>
+				</gf>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="total market size" ai_state="C">
+				<doc>The total number of potential customers in the addressable market.</doc>
+				<eqn>100000</eqn>
+				<units>People</units>
+			</aux>
+			<aux name="potential customers" ai_state="C">
+				<doc>The portion of the total market that has not yet become customers.</doc>
+				<eqn>total_market_size - Customers</eqn>
+				<units>People</units>
+			</aux>
+			<aux name="market saturation effect" ai_state="C">
+				<doc>A multiplier representing how market saturation reduces acquisition effectiveness.</doc>
+				<eqn>potential_customers/total_market_size</eqn>
+				<gf>
+					<yscale min="0" max="1"/>
+					<xpts>0,0.5,1</xpts>
+					<ypts>0,1,1</ypts>
+				</gf>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="desired salesforce" ai_state="C">
+				<doc>The number of salespeople the company aims to have, based on budget.</doc>
+				<eqn>budget_for_hiring_and_marketing * 0.5 / compensation_per_salesperson</eqn>
+				<units>People</units>
+			</aux>
+			<aux name="salesforce gap" ai_state="C">
+				<doc>The difference between the desired and current number of salespeople.</doc>
+				<eqn>desired_salesforce - total_salespeople</eqn>
+				<units>People</units>
+			</aux>
+			<aux name="hiring time" ai_state="C">
+				<doc>The average time it takes to recruit and onboard a new salesperson.</doc>
+				<eqn>3</eqn>
+				<units>Months</units>
+			</aux>
+			<aux name="total attrition rate" ai_state="C">
+				<doc>The total fractional rate at which salespeople leave the company.</doc>
+				<eqn>normal_attrition_rate + attrition_from_pressure</eqn>
+				<units>1/Month</units>
+			</aux>
+			<aux name="normal attrition rate" ai_state="C">
+				<doc>The baseline attrition rate due to natural turnover.</doc>
+				<eqn>1 / average_tenure</eqn>
+				<units>1/Month</units>
+			</aux>
+			<aux name="average tenure" ai_state="C">
+				<doc>The average length of time a salesperson stays with the company.</doc>
+				<eqn>48</eqn>
+				<units>Months</units>
+			</aux>
+			<aux name="attrition from pressure" ai_state="C">
+				<doc>The additional attrition caused by high workload pressure.</doc>
+				<eqn>effect_of_workload_on_attrition</eqn>
+				<units>1/Month</units>
+			</aux>
+			<aux name="effect of workload on attrition" ai_state="C">
+				<doc>A multiplier showing how workload pressure non-linearly increases attrition.</doc>
+				<eqn>workload_pressure</eqn>
+				<gf>
+					<yscale min="0" max="0.05"/>
+					<xpts>0.5,1,2</xpts>
+					<ypts>0,0.005,0.05</ypts>
+				</gf>
+				<units>1/Month</units>
+			</aux>
+			<aux name="workload pressure" ai_state="C">
+				<doc>The ratio of actual workload to a sustainable target workload.</doc>
+				<eqn>workload_per_salesperson / target_workload</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="workload per salesperson" ai_state="C">
+				<doc>The number of sales calls each salesperson is responsible for.</doc>
+				<eqn>total_sales_calls // total_salespeople</eqn>
+				<units>Calls/Person/Month</units>
+			</aux>
+			<aux name="target workload" ai_state="C">
+				<doc>The ideal or sustainable number of calls per salesperson per month.</doc>
+				<eqn>100</eqn>
+				<units>Calls/Person/Month</units>
+			</aux>
+			<aux name="time to gain experience" ai_state="C">
+				<doc>The time it takes for a new hire to become fully productive and experienced.</doc>
+				<eqn>12</eqn>
+				<units>Months</units>
+			</aux>
+			<aux name="total salespeople" ai_state="C">
+				<doc>The combined total of novice and experienced salespeople.</doc>
+				<eqn>Salesforce + Experienced_Salesforce</eqn>
+				<units>People</units>
+			</aux>
+			<aux name="total churn rate" ai_state="C">
+				<doc>The total fractional rate at which customers leave the company.</doc>
+				<eqn>normal_churn_rate + churn_from_dissatisfaction</eqn>
+				<units>1/Month</units>
+			</aux>
+			<aux name="normal churn rate" ai_state="C">
+				<doc>The baseline churn rate from customers leaving for reasons unrelated to satisfaction.</doc>
+				<eqn>1 / customer_lifetime</eqn>
+				<units>1/Month</units>
+			</aux>
+			<aux name="customer lifetime" ai_state="C">
+				<doc>The average duration a customer stays with the company under normal circumstances.</doc>
+				<eqn>24</eqn>
+				<units>Months</units>
+			</aux>
+			<aux name="churn from dissatisfaction" ai_state="C">
+				<doc>The additional churn caused by low customer satisfaction.</doc>
+				<eqn>effect_of_satisfaction_on_churn</eqn>
+				<units>1/Month</units>
+			</aux>
+			<aux name="effect of satisfaction on churn" ai_state="C">
+				<doc>A multiplier showing how low satisfaction non-linearly increases churn.</doc>
+				<eqn>customer_satisfaction</eqn>
+				<gf>
+					<yscale min="0" max="0.1"/>
+					<xpts>0,0.5,1</xpts>
+					<ypts>0.1,0.01,0</ypts>
+				</gf>
+				<units>1/Month</units>
+			</aux>
+			<aux name="customer satisfaction" ai_state="C">
+				<doc>An index representing the overall satisfaction level of the customer base.</doc>
+				<eqn>satisfaction_from_service_quality * satisfaction_from_delivery_delay</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="satisfaction from service quality" ai_state="C">
+				<doc>The component of satisfaction derived from the quality of customer service.</doc>
+				<eqn>service_quality</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="satisfaction from delivery delay" ai_state="C">
+				<doc>The component of satisfaction derived from the speed of order delivery.</doc>
+				<eqn>1 - delivery_delay/normal_delivery_time</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="service quality" ai_state="C">
+				<doc>An index of the quality of customer support, based on capacity vs demand.</doc>
+				<eqn>support_capacity // total_support_cases</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="support capacity" ai_state="C">
+				<doc>The total number of support cases the staff can handle per month.</doc>
+				<eqn>customer_support_staff * cases_per_staff</eqn>
+				<units>Cases/Month</units>
+			</aux>
+			<aux name="total support cases" ai_state="C">
+				<doc>The total number of support cases generated by the customer base.</doc>
+				<eqn>Customers * support_cases_per_customer</eqn>
+				<units>Cases/Month</units>
+			</aux>
+			<aux name="support cases per customer" ai_state="C">
+				<doc>The average number of support cases generated by one customer per month.</doc>
+				<eqn>0.1</eqn>
+				<units>Cases/Customer/Month</units>
+			</aux>
+			<aux name="customer support staff" ai_state="C">
+				<doc>The number of employees dedicated to customer support.</doc>
+				<eqn>5</eqn>
+				<units>People</units>
+			</aux>
+			<aux name="cases per staff" ai_state="C">
+				<doc>The number of support cases one staff member can handle per month.</doc>
+				<eqn>100</eqn>
+				<units>Cases/Person/Month</units>
+			</aux>
+			<aux name="delivery delay" ai_state="C">
+				<doc>The total time customers wait for their orders, including backlog delays.</doc>
+				<eqn>normal_delivery_time + effect_of_backlog_on_delivery_delay</eqn>
+				<units>Months</units>
+			</aux>
+			<aux name="effect of backlog on delivery delay" ai_state="C">
+				<doc>A multiplier showing how the backlog non-linearly increases delivery time.</doc>
+				<eqn>Product_Backlog/production_capacity</eqn>
+				<gf>
+					<yscale min="0" max="2"/>
+					<xpts>0,1,2</xpts>
+					<ypts>0,0.5,2</ypts>
+				</gf>
+				<units>Months</units>
+			</aux>
+			<aux name="normal delivery time" ai_state="C">
+				<doc>The standard time to deliver an order when there is no backlog.</doc>
+				<eqn>0.5</eqn>
+				<units>Months</units>
+			</aux>
+			<aux name="production capacity" ai_state="C">
+				<doc>The maximum number of orders the company can fulfill per month.</doc>
+				<eqn>150</eqn>
+				<units>Orders/Month</units>
+			</aux>
+			<aux name="reputation gain factor" ai_state="C">
+				<doc>A factor determining how quickly positive satisfaction builds reputation.</doc>
+				<eqn>0.1</eqn>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="reputation loss factor" ai_state="C">
+				<doc>A factor determining the natural rate of reputation decay.</doc>
+				<eqn>0.02</eqn>
+				<units>1/Month</units>
+			</aux>
+			<aux name="negative events" ai_state="C">
+				<doc>External negative events that can instantly damage reputation.</doc>
+				<eqn>0</eqn>
+				<units>ReputationPoints/Month</units>
+			</aux>
+			<aux name="word of mouth leads" ai_state="C">
+				<doc>Leads generated through customer referrals and word of mouth.</doc>
+				<eqn>Customers * contacts_per_customer * adoption_fraction</eqn>
+				<units>Leads/Month</units>
+			</aux>
+			<aux name="contacts per customer" ai_state="C">
+				<doc>The average number of people a customer talks to about the product.</doc>
+				<eqn>5</eqn>
+				<units>People/Customer</units>
+			</aux>
+			<aux name="adoption fraction" ai_state="C">
+				<doc>The fraction of contacts who become leads, influenced by satisfaction.</doc>
+				<eqn>0.01 * effect_of_satisfaction_on_word_of_mouth</eqn>
+				<units>Leads/Contact</units>
+			</aux>
+			<aux name="effect of satisfaction on word of mouth" ai_state="C">
+				<doc>A multiplier showing how satisfaction affects the persuasiveness of word of mouth.</doc>
+				<eqn>customer_satisfaction</eqn>
+				<gf>
+					<yscale min="0.1" max="2"/>
+					<xpts>0,0.5,1</xpts>
+					<ypts>0.1,1,2</ypts>
+				</gf>
+				<units>Dimensionless</units>
+			</aux>
+			<aux name="marketing leads" ai_state="C">
+				<doc>Leads generated directly from marketing campaigns.</doc>
+				<eqn>marketing_spend * marketing_effectiveness</eqn>
+				<units>Leads/Month</units>
+			</aux>
+			<aux name="marketing effectiveness" ai_state="C">
+				<doc>The number of leads generated per dollar of marketing spend.</doc>
+				<eqn>0.01</eqn>
+				<units>Leads/Dollar</units>
+			</aux>
+			<aux name="total leads" ai_state="C">
+				<doc>The total number of new leads from all sources.</doc>
+				<eqn>word_of_mouth_leads + marketing_leads</eqn>
+				<units>Leads/Month</units>
+			</aux>
+			<stock name="Cash" ai_state="C">
+				<doc>The company&apos;s main stock of liquid assets, which increases with revenue and decreases with expenses.</doc>
+				<eqn>100000</eqn>
+				<inflow>cash_inflow</inflow>
+				<outflow>cash_outflow</outflow>
+				<units>Dollars</units>
+			</stock>
+			<stock name="Customers" ai_state="C">
+				<doc>The number of active customers the company serves.</doc>
+				<eqn>100</eqn>
+				<inflow>customer_acquisition</inflow>
+				<outflow>customer_churn</outflow>
+				<units>Customers</units>
+			</stock>
+			<stock name="Salesforce" ai_state="C">
+				<doc>The total number of salespeople, including both novice and experienced staff.</doc>
+				<eqn>10</eqn>
+				<inflow>hiring</inflow>
+				<outflow>salesforce_attrition</outflow>
+				<outflow>gaining_experience</outflow>
+				<units>People</units>
+			</stock>
+			<stock name="Experienced Salesforce" ai_state="C">
+				<doc>The number of experienced salespeople who are more productive.</doc>
+				<eqn>5</eqn>
+				<inflow>gaining_experience</inflow>
+				<outflow>experienced_salesforce_attrition</outflow>
+				<units>People</units>
+			</stock>
+			<stock name="Brand Reputation" ai_state="C">
+				<doc>An intangible asset representing the public&apos;s perception of the company.</doc>
+				<eqn>50</eqn>
+				<inflow>reputation_building</inflow>
+				<outflow>reputation_erosion</outflow>
+				<units>ReputationPoints</units>
+			</stock>
+			<stock name="Product Backlog" ai_state="C">
+				<doc>The stock of unfulfilled customer orders.</doc>
+				<eqn>10</eqn>
+				<inflow>new_orders</inflow>
+				<outflow>order_fulfillment</outflow>
+				<units>Orders</units>
+			</stock>
+			<aux name="expected\nprofit" ai_state="F">
+				<eqn>SMTH1(profit,  time_to_perceive_profit, revenue*0.2)</eqn>
+				<isee:delay_aux/>
+				<units>Dollar/Month</units>
+			</aux>
+			<aux name="time to\nperceive\nprofit" ai_state="F">
+				<eqn>6</eqn>
+				<units>Months</units>
+			</aux>
+		</variables>
+		<views>
+			<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+				<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:loop_indicator color="black" background="white" vertical_text_align="top" font_size="12pt"/>
+				<numeric_display color="white" background="white" font_size="12pt" border_width="thin" border_style="solid" isee:transparent="false" isee:show_divider="true" isee:show_bounding_box="true" label_side="left"/>
+				<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+					<isee:series_styles>
+						<isee:series_style color="blue" thickness="1"/>
+						<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF7F00" thickness="1"/>
+						<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#FF007F" thickness="1"/>
+						<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+						<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+						<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+						<isee:series_style color="#C8C8C8" thickness="1"/>
+					</isee:series_styles>
+				</graph>
+				<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				<button color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595"/>
+				<isee:annotation color="black" background="#E0E0E0" font_size="12pt" border_width="thin" border_style="solid" transparent="false" corner_radius="0" isee:flat="false" icon_side="top" isee:highlight_on_hover="false" isee:highlight_color="#959595" popup_corner_radius="0" popup_background_color="#FFFECF"/>
+				<slider color="#0075FF" background="#E0E0E0" font_size="12pt" num_ticks="3" label_side="top" wrap_title="true" vertical="false" isee:fancy_appearance="false" isee:show_hover_tip="when_deciding" input_expands="true" input_width="100"/>
+				<isee:stacked_container color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" padding="6 8" border_color="#999999" border_width="thin" border_style="solid" item_spacing="0" corner_radius="4" selected_item_color="black" selected_item_background="white" item_background="#DDDDDD" transparent_bg="false"/>
+				<isee:dual_slider color="#66CC66" background="silver" font_size="12pt" num_ticks="3" label_side="top" wrap_title="true" isee:show_hover_tip="when_deciding" input_expands="true" input_width="100"/>
+				<isee:sim_speed_slider color="black" background="white"/>
+				<isee:time_slider color="#E95F74" background="silver"/>
+				<isee:pie_input color="black" background="white" font_size="12pt" legend_position="bottom" isee:transparent="false"/>
+				<knob color="#66CC66" background="#E0E0E0" font_size="12pt" label_side="bottom" wrap_title="true"/>
+				<numeric_input color="black" background="#E0E0E0" font_size="12pt" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<isee:dropdown_input color="black" background="#E0E0E0" font_size="12pt" label_side="left" wrap_title="true" input_expands="false" input_width="100"/>
+				<switch color="black" background="#E0E0E0" font_size="12pt" label_side="top" wrap_title="true" isee:appearance="switch" isee:on_color="green"/>
+				<options color="black" background="white" appearance="radio-buttons" arrangement="vertical"/>
+				<graphical_input color="black" background="#E0E0E0" font_size="12pt" isee:show_hover_tip="true"/>
+				<group_input color="black" background="#E0E0E0" font_size="12pt"/>
+				<lamp color="black" background="white" font_size="9pt"/>
+				<gauge color="black" background="white" font_size="9pt" needle_color="#F09F72" bar_color="#EEEEEE" bar_progress_color="black" appearance="radial" num_major_ticks="11" num_minor_ticks="1" show_numeric_value="true"/>
+				<isee:spatial_map color="black" background="white" font_size="12pt"/>
+				<isee:animation_object color="black" background="white" font_size="12pt"/>
+				<isee:navigation_widget color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" padding="6 8" border_color="#999999" border_width="thin" border_style="solid" item_spacing="6" appearance="tabs" corner_radius="4" selected_item_color="black" selected_item_background="white" item_background="#DDDDDD" transparent_bg="false"/>
+				<isee:shape color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_width="thin" border_style="solid" opacity="1" transparent_background="true" corner_radius="1"/>
+				<isee:selector color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+				<isee:iframe color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt" border_width="thin" border_style="solid"/>
+				<isee:financial_table color="black" background="#E0E0E0" text_align="right" font_size="12pt" hide_border="false" auto_fit="true" first_column_width="250" other_column_width="100" header_font_style="normal" header_font_weight="bold" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="14pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+			</style>
+			<view isee:show_pages="false" background="white" page_width="1122" page_height="793" isee:page_cols="3" isee:page_rows="4" isee:scroll_y="540" isee:popup_graphs_are_comparative="true" isee:enable_non_negative_highlights="false" type="stock_flow">
+				<style color="black" background="white" font_style="normal" font_weight="normal" text_decoration="none" text_align="center" vertical_text_align="center" font_color="black" font_family="Arial" font_size="10pt" padding="2" border_color="black" border_width="thin" border_style="none">
+					<stock color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="45" height="35"/>
+					</stock>
+					<flow color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</flow>
+					<isee:placeholder color="#228B22" background="white" font_color="#228B22" font_size="9pt" label_side="bottom"/>
+					<module color="blue" background="white" font_color="blue" font_size="9pt" label_side="top">
+						<shape type="rectangle" width="55" height="45"/>
+					</module>
+					<aux color="blue" background="white" font_color="blue" font_size="9pt" label_side="bottom">
+						<shape type="circle" radius="18"/>
+					</aux>
+					<group color="red" background="white" font_color="red" font_size="9pt"/>
+					<connector color="#FF007F" background="white" font_color="#FF007F" font_size="9pt" isee:thickness="1"/>
+					<text_box color="black" background="white" text_align="left" vertical_text_align="top" font_size="12pt"/>
+					<isee:loop_indicator color="black" background="white" vertical_text_align="top" font_size="12pt"/>
+					<numeric_display color="white" background="white" font_size="12pt" border_width="thin" border_style="solid" isee:transparent="false" isee:show_divider="true" isee:show_bounding_box="true" label_side="left"/>
+					<graph color="black" background="white" font_size="12pt" axis_color="#666666" grid_color="#C8C8C8" isee:graph_area_color="white" legend_position="bottom" isee:transparent="false" isee:hide_border="false" axis_title_font_style="normal" axis_title_font_weight="normal" axis_title_text_decoration="none" axis_title_text_align="center" axis_title_vertical_text_align="center" axis_title_font_color="black" axis_title_font_family="Arial" axis_title_font_size="12pt" axis_title_text_padding="2" axis_title_text_border_color="black" axis_title_text_border_width="thin" axis_title_text_border_style="none" axis_label_font_style="normal" axis_label_font_weight="normal" axis_label_text_decoration="none" axis_label_text_align="center" axis_label_vertical_text_align="center" axis_label_font_color="black" axis_label_font_family="Arial" axis_label_font_size="9pt" axis_label_text_padding="2" axis_label_text_border_color="black" axis_label_text_border_width="thin" axis_label_text_border_style="none">
+						<isee:series_styles>
+							<isee:series_style color="blue" thickness="1"/>
+							<isee:series_style color="red" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="fuchsia" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="#008F44" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF7F00" thickness="1"/>
+							<isee:series_style color="#7F00FF" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#0CA0FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="lime" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#FF007F" thickness="1"/>
+							<isee:series_style color="aqua" thickness="1" pen_style="dot_dashed"/>
+							<isee:series_style color="#F586FF" thickness="1" pen_style="dotted"/>
+							<isee:series_style color="black" thickness="1" pen_style="dashed"/>
+							<isee:series_style color="#C8C8C8" thickness="1"/>
+						</isee:series_styles>
+					</graph>
+					<table color="black" background="#E0E0E0" text_align="right" font_size="12pt" orientation="vertical" wrap_text="false" isee:auto_fit="true" isee:use_alternate_row_colors="false" isee:unlimited_table_length="false" blank_column_width="80" column_width="160" interval="1" report_balances="beginning" report_flows="instantaneous" header_font_style="normal" header_font_weight="normal" header_text_decoration="none" header_text_align="center" header_vertical_text_align="center" header_font_color="black" header_font_family="Arial" header_font_size="12pt" header_text_padding="2" header_text_border_color="black" header_text_border_width="thin" header_text_border_style="none"/>
+				</style>
+				<flow x="1504.95" y="463" name="cash inflow">
+					<pts>
+						<pt x="1437.4" y="463"/>
+						<pt x="1572.5" y="463"/>
+					</pts>
+				</flow>
+				<flow x="1669.25" y="463" name="cash outflow">
+					<pts>
+						<pt x="1617.5" y="463"/>
+						<pt x="1745" y="463"/>
+					</pts>
+				</flow>
+				<aux x="1011" y="659" name="revenue"/>
+				<aux x="961" y="512" name="average revenue per customer"/>
+				<aux x="924" y="1011" name="total expenses"/>
+				<aux x="747" y="991" name="total sales compensation"/>
+				<aux x="627" y="891" name="compensation per salesperson"/>
+				<aux x="1006" y="1129" name="marketing spend"/>
+				<aux x="926" y="1172" name="overhead costs"/>
+				<aux x="1020" y="851" name="cost of goods sold"/>
+				<aux x="933" y="687" name="unit cost"/>
+				<aux x="1055" y="1186" name="total support staff cost"/>
+				<aux x="1037" y="1382" name="support staff salary"/>
+				<aux x="888.2" y="823" name="profit"/>
+				<aux x="633" y="565" name="reinvestment fraction"/>
+				<aux x="713" y="728" name="budget for hiring and marketing"/>
+				<flow x="1062.75" y="725" name="customer acquisition">
+					<pts>
+						<pt x="999" y="725"/>
+						<pt x="1126.5" y="725"/>
+					</pts>
+				</flow>
+				<flow x="1223.25" y="725" name="customer churn">
+					<pts>
+						<pt x="1171.5" y="725"/>
+						<pt x="1299" y="725"/>
+					</pts>
+				</flow>
+				<flow x="317" y="957" name="hiring">
+					<pts>
+						<pt x="267" y="957"/>
+						<pt x="367" y="957"/>
+					</pts>
+				</flow>
+				<flow x="389.5" y="1014" name="salesforce attrition">
+					<pts>
+						<pt x="389.5" y="974.5"/>
+						<pt x="389.5" y="1074.5"/>
+					</pts>
+				</flow>
+				<flow x="483.5" y="1192" name="gaining experience">
+					<pts>
+						<pt x="389.5" y="974.5"/>
+						<pt x="389.5" y="1192"/>
+						<pt x="589.5" y="1192"/>
+					</pts>
+				</flow>
+				<flow x="672.5" y="1192" name="experienced salesforce attrition">
+					<pts>
+						<pt x="634.5" y="1192"/>
+						<pt x="734.5" y="1192"/>
+					</pts>
+				</flow>
+				<flow x="1740.52" y="1543" name="reputation building">
+					<pts>
+						<pt x="1705.55" y="1543"/>
+						<pt x="1775.5" y="1543"/>
+					</pts>
+				</flow>
+				<flow x="1871.17" y="1543" name="reputation erosion">
+					<pts>
+						<pt x="1820.5" y="1543"/>
+						<pt x="1945.83" y="1543"/>
+					</pts>
+				</flow>
+				<flow x="2214.75" y="1059" name="new orders">
+					<pts>
+						<pt x="2151" y="1059"/>
+						<pt x="2278.5" y="1059"/>
+					</pts>
+				</flow>
+				<flow x="2375.25" y="1059" name="order fulfillment">
+					<pts>
+						<pt x="2323.5" y="1059"/>
+						<pt x="2451" y="1059"/>
+					</pts>
+				</flow>
+				<aux x="807" y="932" name="total sales calls"/>
+				<aux x="1704" y="1274" name="closing ratio"/>
+				<aux x="1681" y="1132" name="base closing ratio"/>
+				<aux x="1728" y="1417" name="effect of reputation on sales"/>
+				<aux x="1116" y="386" name="total market size"/>
+				<aux x="1164" y="555" name="potential customers"/>
+				<aux x="1221" y="401" name="market saturation effect"/>
+				<aux x="555" y="791" name="desired salesforce"/>
+				<aux x="489" y="991" name="salesforce gap"/>
+				<aux x="625" y="1394" name="hiring time"/>
+				<aux x="295" y="1174" name="total attrition rate"/>
+				<aux x="326" y="1394" name="normal attrition rate"/>
+				<aux x="231" y="1431" name="average tenure"/>
+				<aux x="273" y="1073" name="attrition from pressure"/>
+				<aux x="277" y="908" name="effect of workload on attrition"/>
+				<aux x="423" y="800" name="workload pressure"/>
+				<aux x="621" y="841" name="workload per salesperson"/>
+				<aux x="318" y="661" name="target workload"/>
+				<aux x="541" y="1394" name="time to gain experience"/>
+				<aux x="661" y="941" name="total salespeople"/>
+				<aux x="2025" y="452" name="total churn rate"/>
+				<aux x="2124" y="333" name="normal churn rate"/>
+				<aux x="2222" y="219" name="customer lifetime"/>
+				<aux x="1927" y="576" name="churn from dissatisfaction"/>
+				<aux x="1829" y="709" name="effect of satisfaction on churn"/>
+				<aux x="1734" y="854" name="customer satisfaction"/>
+				<aux x="1622" y="938" name="satisfaction from service quality"/>
+				<aux x="1862" y="978" name="satisfaction from delivery delay"/>
+				<aux x="1453" y="944" name="service quality"/>
+				<aux x="1405" y="1133" name="support capacity"/>
+				<aux x="1322" y="791" name="total support cases"/>
+				<aux x="1395" y="618" name="support cases per customer"/>
+				<aux x="1243" y="1205" name="customer support staff"/>
+				<aux x="1482" y="1290" name="cases per staff"/>
+				<aux x="1990" y="1091" name="delivery delay"/>
+				<aux x="2152" y="1132" name="effect of backlog on delivery delay"/>
+				<aux x="2010" y="1257" name="normal delivery time"/>
+				<aux x="2243" y="1263" name="production capacity"/>
+				<aux x="1384" y="296" name="reputation gain factor"/>
+				<aux x="928" y="371" name="reputation loss factor"/>
+				<aux x="1601" y="675" name="negative events"/>
+				<aux x="1196" y="859" name="word of mouth leads"/>
+				<aux x="1278" y="966" name="contacts per customer"/>
+				<aux x="1391" y="841" name="adoption fraction"/>
+				<aux x="1572" y="792" name="effect of satisfaction on word of mouth"/>
+				<aux x="1088" y="1136" name="marketing leads"/>
+				<aux x="1111" y="1332" name="marketing effectiveness"/>
+				<aux x="1033" y="964" name="total leads"/>
+				<stock x="1595" y="463" name="Cash"/>
+				<stock x="1149" y="725" name="Customers"/>
+				<stock x="389.5" y="957" name="Salesforce"/>
+				<stock x="612" y="1192" name="Experienced Salesforce"/>
+				<stock x="1798" y="1543" name="Brand Reputation"/>
+				<stock x="2301" y="1059" name="Product Backlog"/>
+				<connector uid="1" polarity="+" isee:polarity_placement="outside" angle="21.6432">
+					<isee:documentation>Reasoning:
+Revenue from sales is the primary source of cash inflow for the company.
+
+Polarity Reasoning: 
+An increase in revenue leads to an increase in the cash flowing into the company.</isee:documentation>
+					<isee:reasoning>Revenue from sales is the primary source of cash inflow for the company.</isee:reasoning>
+					<isee:polarity_reasoning>An increase in revenue leads to an increase in the cash flowing into the company.</isee:polarity_reasoning>
+					<from>revenue</from>
+					<to>cash_inflow</to>
+				</connector>
+				<connector uid="2" polarity="+" isee:polarity_placement="outside" angle="36.3279">
+					<isee:documentation>Reasoning:
+Expenses such as salaries, marketing, and overhead constitute the company&apos;s cash outflow.
+
+Polarity Reasoning: 
+An increase in total expenses leads to an increase in the cash flowing out of the company.</isee:documentation>
+					<isee:reasoning>Expenses such as salaries, marketing, and overhead constitute the company&apos;s cash outflow.</isee:reasoning>
+					<isee:polarity_reasoning>An increase in total expenses leads to an increase in the cash flowing out of the company.</isee:polarity_reasoning>
+					<from>total_expenses</from>
+					<to>cash_outflow</to>
+				</connector>
+				<connector uid="3" polarity="+" isee:polarity_placement="outside" angle="137.008">
+					<isee:documentation>Reasoning:
+Total revenue is calculated based on the number of customers.
+
+Polarity Reasoning: 
+More customers, each generating an average amount of revenue, lead to higher total revenue.</isee:documentation>
+					<isee:reasoning>Total revenue is calculated based on the number of customers.</isee:reasoning>
+					<isee:polarity_reasoning>More customers, each generating an average amount of revenue, lead to higher total revenue.</isee:polarity_reasoning>
+					<from>Customers</from>
+					<to>revenue</to>
+				</connector>
+				<connector uid="4" polarity="+" isee:polarity_placement="outside" angle="288.785">
+					<isee:documentation>Reasoning:
+Total revenue is calculated based on the average revenue per customer.
+
+Polarity Reasoning: 
+A higher average revenue from each customer leads to higher total revenue.</isee:documentation>
+					<isee:reasoning>Total revenue is calculated based on the average revenue per customer.</isee:reasoning>
+					<isee:polarity_reasoning>A higher average revenue from each customer leads to higher total revenue.</isee:polarity_reasoning>
+					<from>average_revenue_per_customer</from>
+					<to>revenue</to>
+				</connector>
+				<connector uid="5" polarity="+" isee:polarity_placement="outside" angle="337.86">
+					<isee:documentation>Reasoning:
+Salesforce salaries are a major component of total expenses.
+
+Polarity Reasoning: 
+An increase in sales compensation increases the company&apos;s total expenses.</isee:documentation>
+					<isee:reasoning>Salesforce salaries are a major component of total expenses.</isee:reasoning>
+					<isee:polarity_reasoning>An increase in sales compensation increases the company&apos;s total expenses.</isee:polarity_reasoning>
+					<from>total_sales_compensation</from>
+					<to>total_expenses</to>
+				</connector>
+				<connector uid="6" polarity="+" isee:polarity_placement="outside" angle="124.796">
+					<isee:documentation>Reasoning:
+Marketing budgets contribute to total expenses.
+
+Polarity Reasoning: 
+An increase in marketing spend increases the company&apos;s total expenses.</isee:documentation>
+					<isee:reasoning>Marketing budgets contribute to total expenses.</isee:reasoning>
+					<isee:polarity_reasoning>An increase in marketing spend increases the company&apos;s total expenses.</isee:polarity_reasoning>
+					<from>marketing_spend</from>
+					<to>total_expenses</to>
+				</connector>
+				<connector uid="7" polarity="+" isee:polarity_placement="outside" angle="90.7117">
+					<isee:documentation>Reasoning:
+Fixed overheads are a component of total expenses.
+
+Polarity Reasoning: 
+An increase in overhead costs increases the company&apos;s total expenses.</isee:documentation>
+					<isee:reasoning>Fixed overheads are a component of total expenses.</isee:reasoning>
+					<isee:polarity_reasoning>An increase in overhead costs increases the company&apos;s total expenses.</isee:polarity_reasoning>
+					<from>overhead_costs</from>
+					<to>total_expenses</to>
+				</connector>
+				<connector uid="8" polarity="+" isee:polarity_placement="outside" angle="259.036">
+					<isee:documentation>Reasoning:
+The direct costs associated with sales contribute to total expenses.
+
+Polarity Reasoning: 
+An increase in the cost of goods sold increases the company&apos;s total expenses.</isee:documentation>
+					<isee:reasoning>The direct costs associated with sales contribute to total expenses.</isee:reasoning>
+					<isee:polarity_reasoning>An increase in the cost of goods sold increases the company&apos;s total expenses.</isee:polarity_reasoning>
+					<from>cost_of_goods_sold</from>
+					<to>total_expenses</to>
+				</connector>
+				<connector uid="9" polarity="+" isee:polarity_placement="outside" angle="126.817">
+					<isee:documentation>Reasoning:
+Salaries for support staff are a component of total expenses.
+
+Polarity Reasoning: 
+An increase in support staff costs increases the company&apos;s total expenses.</isee:documentation>
+					<isee:reasoning>Salaries for support staff are a component of total expenses.</isee:reasoning>
+					<isee:polarity_reasoning>An increase in support staff costs increases the company&apos;s total expenses.</isee:polarity_reasoning>
+					<from>total_support_staff_cost</from>
+					<to>total_expenses</to>
+				</connector>
+				<connector uid="10" polarity="+" isee:polarity_placement="outside" angle="320.194">
+					<isee:documentation>Reasoning:
+Total sales compensation is the number of salespeople multiplied by the compensation per person.
+
+Polarity Reasoning: 
+Higher compensation per salesperson leads to higher total compensation costs.</isee:documentation>
+					<isee:reasoning>Total sales compensation is the number of salespeople multiplied by the compensation per person.</isee:reasoning>
+					<isee:polarity_reasoning>Higher compensation per salesperson leads to higher total compensation costs.</isee:polarity_reasoning>
+					<from>compensation_per_salesperson</from>
+					<to>total_sales_compensation</to>
+				</connector>
+				<connector uid="11" polarity="+" isee:polarity_placement="outside" angle="269.53">
+					<isee:documentation>Reasoning:
+Each new customer acquired corresponds to a sale, which has an associated unit cost.
+
+Polarity Reasoning: 
+A higher rate of customer acquisition increases the number of units sold, thus increasing the cost of goods sold.</isee:documentation>
+					<isee:reasoning>Each new customer acquired corresponds to a sale, which has an associated unit cost.</isee:reasoning>
+					<isee:polarity_reasoning>A higher rate of customer acquisition increases the number of units sold, thus increasing the cost of goods sold.</isee:polarity_reasoning>
+					<from>customer_acquisition</from>
+					<to>cost_of_goods_sold</to>
+				</connector>
+				<connector uid="12" polarity="+" isee:polarity_placement="outside" angle="297.945">
+					<isee:documentation>Reasoning:
+Total COGS is the number of units sold multiplied by the cost per unit.
+
+Polarity Reasoning: 
+A higher cost per unit sold increases the total cost of goods sold.</isee:documentation>
+					<isee:reasoning>Total COGS is the number of units sold multiplied by the cost per unit.</isee:reasoning>
+					<isee:polarity_reasoning>A higher cost per unit sold increases the total cost of goods sold.</isee:polarity_reasoning>
+					<from>unit_cost</from>
+					<to>cost_of_goods_sold</to>
+				</connector>
+				<connector uid="13" polarity="+" isee:polarity_placement="outside" angle="174.229">
+					<isee:documentation>Reasoning:
+Total support cost is the number of staff multiplied by their salary.
+
+Polarity Reasoning: 
+More support staff leads to higher total support staff costs.</isee:documentation>
+					<isee:reasoning>Total support cost is the number of staff multiplied by their salary.</isee:reasoning>
+					<isee:polarity_reasoning>More support staff leads to higher total support staff costs.</isee:polarity_reasoning>
+					<from>customer_support_staff</from>
+					<to>total_support_staff_cost</to>
+				</connector>
+				<connector uid="14" polarity="+" isee:polarity_placement="outside" angle="84.7529">
+					<isee:documentation>Reasoning:
+Total support cost is the number of staff multiplied by their salary.
+
+Polarity Reasoning: 
+Higher salaries for support staff lead to higher total support staff costs.</isee:documentation>
+					<isee:reasoning>Total support cost is the number of staff multiplied by their salary.</isee:reasoning>
+					<isee:polarity_reasoning>Higher salaries for support staff lead to higher total support staff costs.</isee:polarity_reasoning>
+					<from>support_staff_salary</from>
+					<to>total_support_staff_cost</to>
+				</connector>
+				<connector uid="15" polarity="+" isee:polarity_placement="outside" angle="253.175">
+					<isee:documentation>Reasoning:
+Profit is calculated as revenue minus total expenses.
+
+Polarity Reasoning: 
+Higher revenue, assuming expenses are constant, leads to higher profit.</isee:documentation>
+					<isee:reasoning>Profit is calculated as revenue minus total expenses.</isee:reasoning>
+					<isee:polarity_reasoning>Higher revenue, assuming expenses are constant, leads to higher profit.</isee:polarity_reasoning>
+					<from>revenue</from>
+					<to>profit</to>
+				</connector>
+				<connector uid="16" polarity="-" isee:polarity_placement="outside" angle="80.7815">
+					<isee:documentation>Reasoning:
+Profit is calculated as revenue minus total expenses.
+
+Polarity Reasoning: 
+Higher expenses, assuming revenue is constant, lead to lower profit.</isee:documentation>
+					<isee:reasoning>Profit is calculated as revenue minus total expenses.</isee:reasoning>
+					<isee:polarity_reasoning>Higher expenses, assuming revenue is constant, lead to lower profit.</isee:polarity_reasoning>
+					<from>total_expenses</from>
+					<to>profit</to>
+				</connector>
+				<connector uid="18" polarity="+" isee:polarity_placement="outside" angle="296.142">
+					<isee:documentation>Reasoning:
+The budget is determined by the profit multiplied by the fraction designated for reinvestment.
+
+Polarity Reasoning: 
+A larger reinvestment fraction allocates more of the profits to the growth budget.</isee:documentation>
+					<isee:reasoning>The budget is determined by the profit multiplied by the fraction designated for reinvestment.</isee:reasoning>
+					<isee:polarity_reasoning>A larger reinvestment fraction allocates more of the profits to the growth budget.</isee:polarity_reasoning>
+					<from>reinvestment_fraction</from>
+					<to>budget_for_hiring_and_marketing</to>
+				</connector>
+				<connector uid="19" polarity="+" isee:polarity_placement="outside" angle="181.739">
+					<isee:documentation>Reasoning:
+The desired salesforce size is determined by what the company can afford based on its budget.
+
+Polarity Reasoning: 
+A larger budget allows the company to desire a larger salesforce.</isee:documentation>
+					<isee:reasoning>The desired salesforce size is determined by what the company can afford based on its budget.</isee:reasoning>
+					<isee:polarity_reasoning>A larger budget allows the company to desire a larger salesforce.</isee:polarity_reasoning>
+					<from>budget_for_hiring_and_marketing</from>
+					<to>desired_salesforce</to>
+				</connector>
+				<connector uid="20" polarity="-" isee:polarity_placement="outside" angle="125.754">
+					<isee:documentation>Reasoning:
+The number of affordable salespeople is the budget divided by the cost per person.
+
+Polarity Reasoning: 
+If each salesperson costs more, the same budget can support fewer people.</isee:documentation>
+					<isee:reasoning>The number of affordable salespeople is the budget divided by the cost per person.</isee:reasoning>
+					<isee:polarity_reasoning>If each salesperson costs more, the same budget can support fewer people.</isee:polarity_reasoning>
+					<from>compensation_per_salesperson</from>
+					<to>desired_salesforce</to>
+				</connector>
+				<connector uid="21" polarity="+" isee:polarity_placement="outside" angle="231.737">
+					<isee:documentation>Reasoning:
+The hiring gap is the difference between what is desired and what currently exists.
+
+Polarity Reasoning: 
+A larger desired salesforce increases the gap between the desired and current number of salespeople.</isee:documentation>
+					<isee:reasoning>The hiring gap is the difference between what is desired and what currently exists.</isee:reasoning>
+					<isee:polarity_reasoning>A larger desired salesforce increases the gap between the desired and current number of salespeople.</isee:polarity_reasoning>
+					<from>desired_salesforce</from>
+					<to>salesforce_gap</to>
+				</connector>
+				<connector uid="22" polarity="+" isee:polarity_placement="outside" angle="188.818">
+					<isee:documentation>Reasoning:
+The company hires to close the gap over a certain period of time.
+
+Polarity Reasoning: 
+A larger gap between desired and current salesforce prompts a higher rate of hiring.</isee:documentation>
+					<isee:reasoning>The company hires to close the gap over a certain period of time.</isee:reasoning>
+					<isee:polarity_reasoning>A larger gap between desired and current salesforce prompts a higher rate of hiring.</isee:polarity_reasoning>
+					<from>salesforce_gap</from>
+					<to>hiring</to>
+				</connector>
+				<connector uid="23" polarity="-" isee:polarity_placement="outside" angle="125.176">
+					<isee:documentation>Reasoning:
+The hiring rate is the gap divided by the time it takes to fill positions.
+
+Polarity Reasoning: 
+A longer time to hire means a slower rate of hiring for a given gap.</isee:documentation>
+					<isee:reasoning>The hiring rate is the gap divided by the time it takes to fill positions.</isee:reasoning>
+					<isee:polarity_reasoning>A longer time to hire means a slower rate of hiring for a given gap.</isee:polarity_reasoning>
+					<from>hiring_time</from>
+					<to>hiring</to>
+				</connector>
+				<connector uid="24" polarity="+" isee:polarity_placement="outside" angle="310">
+					<isee:documentation>Reasoning:
+Total attrition is the number of salespeople multiplied by the attrition rate.
+
+Polarity Reasoning: 
+More salespeople leaving at a given rate results in a higher absolute number of departures.</isee:documentation>
+					<isee:reasoning>Total attrition is the number of salespeople multiplied by the attrition rate.</isee:reasoning>
+					<isee:polarity_reasoning>More salespeople leaving at a given rate results in a higher absolute number of departures.</isee:polarity_reasoning>
+					<from>Salesforce</from>
+					<to>salesforce_attrition</to>
+				</connector>
+				<connector uid="25" polarity="+" isee:polarity_placement="outside" angle="57.3155">
+					<isee:documentation>Reasoning:
+Total attrition is the number of salespeople multiplied by the attrition rate.
+
+Polarity Reasoning: 
+A higher rate of attrition results in a higher absolute number of departures.</isee:documentation>
+					<isee:reasoning>Total attrition is the number of salespeople multiplied by the attrition rate.</isee:reasoning>
+					<isee:polarity_reasoning>A higher rate of attrition results in a higher absolute number of departures.</isee:polarity_reasoning>
+					<from>total_attrition_rate</from>
+					<to>salesforce_attrition</to>
+				</connector>
+				<connector uid="26" polarity="+" isee:polarity_placement="outside" angle="98.0207">
+					<isee:documentation>Reasoning:
+Total attrition is the sum of normal attrition and attrition from other pressures.
+
+Polarity Reasoning: 
+The baseline normal attrition contributes to the total attrition rate.</isee:documentation>
+					<isee:reasoning>Total attrition is the sum of normal attrition and attrition from other pressures.</isee:reasoning>
+					<isee:polarity_reasoning>The baseline normal attrition contributes to the total attrition rate.</isee:polarity_reasoning>
+					<from>normal_attrition_rate</from>
+					<to>total_attrition_rate</to>
+				</connector>
+				<connector uid="27" polarity="+" isee:polarity_placement="outside" angle="262.288">
+					<isee:documentation>Reasoning:
+Total attrition is the sum of normal attrition and attrition from other pressures.
+
+Polarity Reasoning: 
+Attrition caused by pressure adds to the total attrition rate.</isee:documentation>
+					<isee:reasoning>Total attrition is the sum of normal attrition and attrition from other pressures.</isee:reasoning>
+					<isee:polarity_reasoning>Attrition caused by pressure adds to the total attrition rate.</isee:polarity_reasoning>
+					<from>attrition_from_pressure</from>
+					<to>total_attrition_rate</to>
+				</connector>
+				<connector uid="28" polarity="-" isee:polarity_placement="outside" angle="21.2796">
+					<isee:documentation>Reasoning:
+The normal attrition rate is the inverse of the average time a person stays with the company.
+
+Polarity Reasoning: 
+A longer average tenure implies a lower normal rate of people leaving per month.</isee:documentation>
+					<isee:reasoning>The normal attrition rate is the inverse of the average time a person stays with the company.</isee:reasoning>
+					<isee:polarity_reasoning>A longer average tenure implies a lower normal rate of people leaving per month.</isee:polarity_reasoning>
+					<from>average_tenure</from>
+					<to>normal_attrition_rate</to>
+				</connector>
+				<connector uid="29" polarity="+" isee:polarity_placement="outside" angle="248.611">
+					<isee:documentation>Reasoning:
+This variable represents the additional attrition resulting from high workload.
+
+Polarity Reasoning: 
+A stronger effect from workload pressure increases the attrition caused by that pressure.</isee:documentation>
+					<isee:reasoning>This variable represents the additional attrition resulting from high workload.</isee:reasoning>
+					<isee:polarity_reasoning>A stronger effect from workload pressure increases the attrition caused by that pressure.</isee:polarity_reasoning>
+					<from>effect_of_workload_on_attrition</from>
+					<to>attrition_from_pressure</to>
+				</connector>
+				<connector uid="30" polarity="+" isee:polarity_placement="outside" angle="196.491">
+					<isee:documentation>Reasoning:
+This non-linear relationship captures how increasing pressure disproportionately increases attrition.
+
+Polarity Reasoning: 
+Higher workload pressure has a greater effect on attrition.</isee:documentation>
+					<isee:reasoning>This non-linear relationship captures how increasing pressure disproportionately increases attrition.</isee:reasoning>
+					<isee:polarity_reasoning>Higher workload pressure has a greater effect on attrition.</isee:polarity_reasoning>
+					<from>workload_pressure</from>
+					<to>effect_of_workload_on_attrition</to>
+				</connector>
+				<connector uid="31" polarity="+" isee:polarity_placement="outside" angle="148.301">
+					<isee:documentation>Reasoning:
+Workload pressure is the ratio of the actual workload to a target or sustainable workload.
+
+Polarity Reasoning: 
+A higher workload per person, relative to a target, increases the pressure.</isee:documentation>
+					<isee:reasoning>Workload pressure is the ratio of the actual workload to a target or sustainable workload.</isee:reasoning>
+					<isee:polarity_reasoning>A higher workload per person, relative to a target, increases the pressure.</isee:polarity_reasoning>
+					<from>workload_per_salesperson</from>
+					<to>workload_pressure</to>
+				</connector>
+				<connector uid="32" polarity="-" isee:polarity_placement="outside" angle="307.067">
+					<isee:documentation>Reasoning:
+Workload pressure is the ratio of the actual workload to a target or sustainable workload.
+
+Polarity Reasoning: 
+A higher target workload means a given actual workload results in less pressure.</isee:documentation>
+					<isee:reasoning>Workload pressure is the ratio of the actual workload to a target or sustainable workload.</isee:reasoning>
+					<isee:polarity_reasoning>A higher target workload means a given actual workload results in less pressure.</isee:polarity_reasoning>
+					<from>target_workload</from>
+					<to>workload_pressure</to>
+				</connector>
+				<connector uid="33" polarity="+" isee:polarity_placement="outside" angle="133.93">
+					<isee:documentation>Reasoning:
+Workload is the total work divided by the number of people available to do it.
+
+Polarity Reasoning: 
+More total calls to be made, with a fixed number of salespeople, increases the workload for each person.</isee:documentation>
+					<isee:reasoning>Workload is the total work divided by the number of people available to do it.</isee:reasoning>
+					<isee:polarity_reasoning>More total calls to be made, with a fixed number of salespeople, increases the workload for each person.</isee:polarity_reasoning>
+					<from>total_sales_calls</from>
+					<to>workload_per_salesperson</to>
+				</connector>
+				<connector uid="34" polarity="-" isee:polarity_placement="outside" angle="91.8014">
+					<isee:documentation>Reasoning:
+Workload is the total work divided by the number of people available to do it.
+
+Polarity Reasoning: 
+More salespeople available to make calls reduces the workload for each person.</isee:documentation>
+					<isee:reasoning>Workload is the total work divided by the number of people available to do it.</isee:reasoning>
+					<isee:polarity_reasoning>More salespeople available to make calls reduces the workload for each person.</isee:polarity_reasoning>
+					<from>total_salespeople</from>
+					<to>workload_per_salesperson</to>
+				</connector>
+				<connector uid="35" polarity="+" isee:polarity_placement="outside" angle="23.3726">
+					<isee:documentation>Reasoning:
+Total salespeople is the sum of novice and experienced staff.
+
+Polarity Reasoning: 
+The stock of novice salespeople contributes to the total number of salespeople.</isee:documentation>
+					<isee:reasoning>Total salespeople is the sum of novice and experienced staff.</isee:reasoning>
+					<isee:polarity_reasoning>The stock of novice salespeople contributes to the total number of salespeople.</isee:polarity_reasoning>
+					<from>Salesforce</from>
+					<to>total_salespeople</to>
+				</connector>
+				<connector uid="36" polarity="+" isee:polarity_placement="outside" angle="58.9537">
+					<isee:documentation>Reasoning:
+Total salespeople is the sum of novice and experienced staff.
+
+Polarity Reasoning: 
+The stock of experienced salespeople contributes to the total number of salespeople.</isee:documentation>
+					<isee:reasoning>Total salespeople is the sum of novice and experienced staff.</isee:reasoning>
+					<isee:polarity_reasoning>The stock of experienced salespeople contributes to the total number of salespeople.</isee:polarity_reasoning>
+					<from>Experienced_Salesforce</from>
+					<to>total_salespeople</to>
+				</connector>
+				<connector uid="37" polarity="+" isee:polarity_placement="outside" angle="38.9862">
+					<isee:documentation>Reasoning:
+Customer acquisition is a function of sales effort and effectiveness.
+
+Polarity Reasoning: 
+More sales calls, at a given closing ratio, lead to more new customers.</isee:documentation>
+					<isee:reasoning>Customer acquisition is a function of sales effort and effectiveness.</isee:reasoning>
+					<isee:polarity_reasoning>More sales calls, at a given closing ratio, lead to more new customers.</isee:polarity_reasoning>
+					<from>total_sales_calls</from>
+					<to>customer_acquisition</to>
+				</connector>
+				<connector uid="38" polarity="+" isee:polarity_placement="outside" angle="139.432">
+					<isee:documentation>Reasoning:
+The closing ratio represents sales effectiveness.
+
+Polarity Reasoning: 
+A higher closing ratio means more sales calls are converted into customers, increasing acquisition.</isee:documentation>
+					<isee:reasoning>The closing ratio represents sales effectiveness.</isee:reasoning>
+					<isee:polarity_reasoning>A higher closing ratio means more sales calls are converted into customers, increasing acquisition.</isee:polarity_reasoning>
+					<from>closing_ratio</from>
+					<to>customer_acquisition</to>
+				</connector>
+				<connector uid="39" polarity="+" isee:polarity_placement="outside" angle="243.968">
+					<isee:documentation>Reasoning:
+Market saturation makes it harder to find new customers, reducing the effectiveness of sales calls.
+
+Polarity Reasoning: 
+As the market becomes less saturated, it is easier to acquire customers, so the effect multiplier is higher.</isee:documentation>
+					<isee:reasoning>Market saturation makes it harder to find new customers, reducing the effectiveness of sales calls.</isee:reasoning>
+					<isee:polarity_reasoning>As the market becomes less saturated, it is easier to acquire customers, so the effect multiplier is higher.</isee:polarity_reasoning>
+					<from>market_saturation_effect</from>
+					<to>customer_acquisition</to>
+				</connector>
+				<connector uid="40" polarity="+" isee:polarity_placement="outside" angle="40">
+					<isee:documentation>Reasoning:
+Total churn is the number of customers multiplied by the churn rate.
+
+Polarity Reasoning: 
+More customers, leaving at a given rate, results in a higher absolute number of departures.</isee:documentation>
+					<isee:reasoning>Total churn is the number of customers multiplied by the churn rate.</isee:reasoning>
+					<isee:polarity_reasoning>More customers, leaving at a given rate, results in a higher absolute number of departures.</isee:polarity_reasoning>
+					<from>Customers</from>
+					<to>customer_churn</to>
+				</connector>
+				<connector uid="41" polarity="+" isee:polarity_placement="outside" angle="198.804">
+					<isee:documentation>Reasoning:
+Total churn is the number of customers multiplied by the churn rate.
+
+Polarity Reasoning: 
+A higher churn rate results in a higher absolute number of departures.</isee:documentation>
+					<isee:reasoning>Total churn is the number of customers multiplied by the churn rate.</isee:reasoning>
+					<isee:polarity_reasoning>A higher churn rate results in a higher absolute number of departures.</isee:polarity_reasoning>
+					<from>total_churn_rate</from>
+					<to>customer_churn</to>
+				</connector>
+				<connector uid="42" polarity="+" isee:polarity_placement="outside" angle="230.242">
+					<isee:documentation>Reasoning:
+Total churn is the sum of normal churn and churn from dissatisfaction.
+
+Polarity Reasoning: 
+The baseline normal churn contributes to the total churn rate.</isee:documentation>
+					<isee:reasoning>Total churn is the sum of normal churn and churn from dissatisfaction.</isee:reasoning>
+					<isee:polarity_reasoning>The baseline normal churn contributes to the total churn rate.</isee:polarity_reasoning>
+					<from>normal_churn_rate</from>
+					<to>total_churn_rate</to>
+				</connector>
+				<connector uid="43" polarity="+" isee:polarity_placement="outside" angle="44.3751">
+					<isee:documentation>Reasoning:
+Total churn is the sum of normal churn and churn from dissatisfaction.
+
+Polarity Reasoning: 
+Churn caused by dissatisfaction adds to the total churn rate.</isee:documentation>
+					<isee:reasoning>Total churn is the sum of normal churn and churn from dissatisfaction.</isee:reasoning>
+					<isee:polarity_reasoning>Churn caused by dissatisfaction adds to the total churn rate.</isee:polarity_reasoning>
+					<from>churn_from_dissatisfaction</from>
+					<to>total_churn_rate</to>
+				</connector>
+				<connector uid="44" polarity="-" isee:polarity_placement="outside" angle="229.316">
+					<isee:documentation>Reasoning:
+The normal churn rate is the inverse of the average time a customer stays with the company.
+
+Polarity Reasoning: 
+A longer average customer lifetime implies a lower normal rate of customers leaving per month.</isee:documentation>
+					<isee:reasoning>The normal churn rate is the inverse of the average time a customer stays with the company.</isee:reasoning>
+					<isee:polarity_reasoning>A longer average customer lifetime implies a lower normal rate of customers leaving per month.</isee:polarity_reasoning>
+					<from>customer_lifetime</from>
+					<to>normal_churn_rate</to>
+				</connector>
+				<connector uid="45" polarity="+" isee:polarity_placement="outside" angle="35.7389">
+					<isee:documentation>Reasoning:
+This variable represents the additional churn resulting from low customer satisfaction.
+
+Polarity Reasoning: 
+A stronger effect from dissatisfaction increases the churn caused by it.</isee:documentation>
+					<isee:reasoning>This variable represents the additional churn resulting from low customer satisfaction.</isee:reasoning>
+					<isee:polarity_reasoning>A stronger effect from dissatisfaction increases the churn caused by it.</isee:polarity_reasoning>
+					<from>effect_of_satisfaction_on_churn</from>
+					<to>churn_from_dissatisfaction</to>
+				</connector>
+				<connector uid="46" polarity="-" isee:polarity_placement="outside" angle="36.7683">
+					<isee:documentation>Reasoning:
+This non-linear relationship captures how falling satisfaction disproportionately increases churn.
+
+Polarity Reasoning: 
+Lower customer satisfaction leads to a greater (negative) effect on churn.</isee:documentation>
+					<isee:reasoning>This non-linear relationship captures how falling satisfaction disproportionately increases churn.</isee:reasoning>
+					<isee:polarity_reasoning>Lower customer satisfaction leads to a greater (negative) effect on churn.</isee:polarity_reasoning>
+					<from>customer_satisfaction</from>
+					<to>effect_of_satisfaction_on_churn</to>
+				</connector>
+				<connector uid="47" polarity="+" isee:polarity_placement="outside" angle="16.8699">
+					<isee:documentation>Reasoning:
+Overall satisfaction is an aggregation of satisfaction from different aspects of the business.
+
+Polarity Reasoning: 
+Higher satisfaction from service quality contributes positively to overall customer satisfaction.</isee:documentation>
+					<isee:reasoning>Overall satisfaction is an aggregation of satisfaction from different aspects of the business.</isee:reasoning>
+					<isee:polarity_reasoning>Higher satisfaction from service quality contributes positively to overall customer satisfaction.</isee:polarity_reasoning>
+					<from>satisfaction_from_service_quality</from>
+					<to>customer_satisfaction</to>
+				</connector>
+				<connector uid="48" polarity="+" isee:polarity_placement="outside" angle="115.909">
+					<isee:documentation>Reasoning:
+Overall satisfaction is an aggregation of satisfaction from different aspects of the business.
+
+Polarity Reasoning: 
+Higher satisfaction from delivery times contributes positively to overall customer satisfaction.</isee:documentation>
+					<isee:reasoning>Overall satisfaction is an aggregation of satisfaction from different aspects of the business.</isee:reasoning>
+					<isee:polarity_reasoning>Higher satisfaction from delivery times contributes positively to overall customer satisfaction.</isee:polarity_reasoning>
+					<from>satisfaction_from_delivery_delay</from>
+					<to>customer_satisfaction</to>
+				</connector>
+				<connector uid="49" polarity="+" isee:polarity_placement="outside" angle="342.033">
+					<isee:documentation>Reasoning:
+Customer perception of service quality directly impacts their satisfaction.
+
+Polarity Reasoning: 
+Higher service quality leads to higher satisfaction derived from that service.</isee:documentation>
+					<isee:reasoning>Customer perception of service quality directly impacts their satisfaction.</isee:reasoning>
+					<isee:polarity_reasoning>Higher service quality leads to higher satisfaction derived from that service.</isee:polarity_reasoning>
+					<from>service_quality</from>
+					<to>satisfaction_from_service_quality</to>
+				</connector>
+				<connector uid="50" polarity="+" isee:polarity_placement="outside" angle="75.75">
+					<isee:documentation>Reasoning:
+Service quality is determined by the ratio of available capacity to demand.
+
+Polarity Reasoning: 
+Greater support capacity relative to the number of cases leads to higher quality service.</isee:documentation>
+					<isee:reasoning>Service quality is determined by the ratio of available capacity to demand.</isee:reasoning>
+					<isee:polarity_reasoning>Greater support capacity relative to the number of cases leads to higher quality service.</isee:polarity_reasoning>
+					<from>support_capacity</from>
+					<to>service_quality</to>
+				</connector>
+				<connector uid="51" polarity="-" isee:polarity_placement="outside" angle="290.57">
+					<isee:documentation>Reasoning:
+Service quality is determined by the ratio of available capacity to demand.
+
+Polarity Reasoning: 
+More support cases for a given capacity leads to lower quality service.</isee:documentation>
+					<isee:reasoning>Service quality is determined by the ratio of available capacity to demand.</isee:reasoning>
+					<isee:polarity_reasoning>More support cases for a given capacity leads to lower quality service.</isee:polarity_reasoning>
+					<from>total_support_cases</from>
+					<to>service_quality</to>
+				</connector>
+				<connector uid="52" polarity="+" isee:polarity_placement="outside" angle="23.9625">
+					<isee:documentation>Reasoning:
+Total capacity is the number of staff multiplied by their individual capacity.
+
+Polarity Reasoning: 
+More support staff, each handling a certain number of cases, increases total support capacity.</isee:documentation>
+					<isee:reasoning>Total capacity is the number of staff multiplied by their individual capacity.</isee:reasoning>
+					<isee:polarity_reasoning>More support staff, each handling a certain number of cases, increases total support capacity.</isee:polarity_reasoning>
+					<from>customer_support_staff</from>
+					<to>support_capacity</to>
+				</connector>
+				<connector uid="53" polarity="+" isee:polarity_placement="outside" angle="116.125">
+					<isee:documentation>Reasoning:
+Total capacity is the number of staff multiplied by their individual capacity.
+
+Polarity Reasoning: 
+If each staff member can handle more cases, total support capacity increases.</isee:documentation>
+					<isee:reasoning>Total capacity is the number of staff multiplied by their individual capacity.</isee:reasoning>
+					<isee:polarity_reasoning>If each staff member can handle more cases, total support capacity increases.</isee:polarity_reasoning>
+					<from>cases_per_staff</from>
+					<to>support_capacity</to>
+				</connector>
+				<connector uid="54" polarity="+" isee:polarity_placement="outside" angle="326.741">
+					<isee:documentation>Reasoning:
+Total demand for support is driven by the size of the customer base.
+
+Polarity Reasoning: 
+More customers, each generating a certain number of support cases, increases the total number of cases.</isee:documentation>
+					<isee:reasoning>Total demand for support is driven by the size of the customer base.</isee:reasoning>
+					<isee:polarity_reasoning>More customers, each generating a certain number of support cases, increases the total number of cases.</isee:polarity_reasoning>
+					<from>Customers</from>
+					<to>total_support_cases</to>
+				</connector>
+				<connector uid="55" polarity="+" isee:polarity_placement="outside" angle="247.122">
+					<isee:documentation>Reasoning:
+Total demand for support is driven by the size of the customer base.
+
+Polarity Reasoning: 
+If each customer generates more support cases, the total number of cases increases.</isee:documentation>
+					<isee:reasoning>Total demand for support is driven by the size of the customer base.</isee:reasoning>
+					<isee:polarity_reasoning>If each customer generates more support cases, the total number of cases increases.</isee:polarity_reasoning>
+					<from>support_cases_per_customer</from>
+					<to>total_support_cases</to>
+				</connector>
+				<connector uid="56" polarity="-" isee:polarity_placement="outside" angle="118.562">
+					<isee:documentation>Reasoning:
+Customers are less satisfied when they have to wait longer for their orders.
+
+Polarity Reasoning: 
+Longer delivery delays lead to lower satisfaction from delivery.</isee:documentation>
+					<isee:reasoning>Customers are less satisfied when they have to wait longer for their orders.</isee:reasoning>
+					<isee:polarity_reasoning>Longer delivery delays lead to lower satisfaction from delivery.</isee:polarity_reasoning>
+					<from>delivery_delay</from>
+					<to>satisfaction_from_delivery_delay</to>
+				</connector>
+				<connector uid="57" polarity="+" isee:polarity_placement="outside" angle="146.761">
+					<isee:documentation>Reasoning:
+The time to fulfill an order is influenced by the queue of existing orders.
+
+Polarity Reasoning: 
+A larger backlog has a greater effect, increasing the delivery delay.</isee:documentation>
+					<isee:reasoning>The time to fulfill an order is influenced by the queue of existing orders.</isee:reasoning>
+					<isee:polarity_reasoning>A larger backlog has a greater effect, increasing the delivery delay.</isee:polarity_reasoning>
+					<from>effect_of_backlog_on_delivery_delay</from>
+					<to>delivery_delay</to>
+				</connector>
+				<connector uid="58" polarity="+" isee:polarity_placement="outside" angle="96.87">
+					<isee:documentation>Reasoning:
+Total delay is the normal time plus any additional delay from backlogs.
+
+Polarity Reasoning: 
+The baseline delivery time contributes to the total delivery delay.</isee:documentation>
+					<isee:reasoning>Total delay is the normal time plus any additional delay from backlogs.</isee:reasoning>
+					<isee:polarity_reasoning>The baseline delivery time contributes to the total delivery delay.</isee:polarity_reasoning>
+					<from>normal_delivery_time</from>
+					<to>delivery_delay</to>
+				</connector>
+				<connector uid="59" polarity="+" isee:polarity_placement="outside" angle="213.875">
+					<isee:documentation>Reasoning:
+This non-linear relationship captures how a growing backlog can exponentially increase delays.
+
+Polarity Reasoning: 
+A larger product backlog has a greater effect on delivery delay.</isee:documentation>
+					<isee:reasoning>This non-linear relationship captures how a growing backlog can exponentially increase delays.</isee:reasoning>
+					<isee:polarity_reasoning>A larger product backlog has a greater effect on delivery delay.</isee:polarity_reasoning>
+					<from>Product_Backlog</from>
+					<to>effect_of_backlog_on_delivery_delay</to>
+				</connector>
+				<connector uid="60" polarity="-" isee:polarity_placement="outside" angle="124.786">
+					<isee:documentation>Reasoning:
+A higher capacity allows the company to work through the backlog faster.
+
+Polarity Reasoning: 
+Higher production capacity reduces the effect of the backlog on delivery delay.</isee:documentation>
+					<isee:reasoning>A higher capacity allows the company to work through the backlog faster.</isee:reasoning>
+					<isee:polarity_reasoning>Higher production capacity reduces the effect of the backlog on delivery delay.</isee:polarity_reasoning>
+					<from>production_capacity</from>
+					<to>effect_of_backlog_on_delivery_delay</to>
+				</connector>
+				<connector uid="61" polarity="+" isee:polarity_placement="outside" angle="343.832">
+					<isee:documentation>Reasoning:
+We assume each new customer acquisition corresponds to one new order.
+
+Polarity Reasoning: 
+Each new customer acquired represents a new order to be added to the backlog.</isee:documentation>
+					<isee:reasoning>We assume each new customer acquisition corresponds to one new order.</isee:reasoning>
+					<isee:polarity_reasoning>Each new customer acquired represents a new order to be added to the backlog.</isee:polarity_reasoning>
+					<from>customer_acquisition</from>
+					<to>new_orders</to>
+				</connector>
+				<connector uid="62" polarity="+" isee:polarity_placement="outside" angle="40">
+					<isee:documentation>Reasoning:
+The fulfillment rate depends on both the backlog size and the capacity to fulfill.
+
+Polarity Reasoning: 
+The number of orders that can be fulfilled is limited by the number of orders in the backlog.</isee:documentation>
+					<isee:reasoning>The fulfillment rate depends on both the backlog size and the capacity to fulfill.</isee:reasoning>
+					<isee:polarity_reasoning>The number of orders that can be fulfilled is limited by the number of orders in the backlog.</isee:polarity_reasoning>
+					<from>Product_Backlog</from>
+					<to>order_fulfillment</to>
+				</connector>
+				<connector uid="63" polarity="+" isee:polarity_placement="outside" angle="57.0453">
+					<isee:documentation>Reasoning:
+The fulfillment rate depends on both the backlog size and the capacity to fulfill.
+
+Polarity Reasoning: 
+The number of orders that can be fulfilled is limited by the production capacity.</isee:documentation>
+					<isee:reasoning>The fulfillment rate depends on both the backlog size and the capacity to fulfill.</isee:reasoning>
+					<isee:polarity_reasoning>The number of orders that can be fulfilled is limited by the production capacity.</isee:polarity_reasoning>
+					<from>production_capacity</from>
+					<to>order_fulfillment</to>
+				</connector>
+				<connector uid="64" polarity="+" isee:polarity_placement="outside" angle="270.542">
+					<isee:documentation>Reasoning:
+Reputation is built over time through positive customer experiences.
+
+Polarity Reasoning: 
+Higher customer satisfaction contributes to building a positive brand reputation.</isee:documentation>
+					<isee:reasoning>Reputation is built over time through positive customer experiences.</isee:reasoning>
+					<isee:polarity_reasoning>Higher customer satisfaction contributes to building a positive brand reputation.</isee:polarity_reasoning>
+					<from>customer_satisfaction</from>
+					<to>reputation_building</to>
+				</connector>
+				<connector uid="65" polarity="+" isee:polarity_placement="outside" angle="285.956">
+					<isee:documentation>Reasoning:
+This factor modulates the speed at which reputation is built.
+
+Polarity Reasoning: 
+A higher gain factor means that satisfaction has a stronger effect on building reputation.</isee:documentation>
+					<isee:reasoning>This factor modulates the speed at which reputation is built.</isee:reasoning>
+					<isee:polarity_reasoning>A higher gain factor means that satisfaction has a stronger effect on building reputation.</isee:polarity_reasoning>
+					<from>reputation_gain_factor</from>
+					<to>reputation_building</to>
+				</connector>
+				<connector uid="66" polarity="+" isee:polarity_placement="outside" angle="287.289">
+					<isee:documentation>Reasoning:
+Reputation can be damaged by specific negative occurrences.
+
+Polarity Reasoning: 
+Negative events, such as scandals or recalls, contribute to the erosion of brand reputation.</isee:documentation>
+					<isee:reasoning>Reputation can be damaged by specific negative occurrences.</isee:reasoning>
+					<isee:polarity_reasoning>Negative events, such as scandals or recalls, contribute to the erosion of brand reputation.</isee:polarity_reasoning>
+					<from>negative_events</from>
+					<to>reputation_erosion</to>
+				</connector>
+				<connector uid="67" polarity="+" isee:polarity_placement="outside" angle="308.825">
+					<isee:documentation>Reasoning:
+This factor represents the natural decay or erosion of brand reputation if not maintained.
+
+Polarity Reasoning: 
+A higher loss factor means that reputation erodes more quickly over time.</isee:documentation>
+					<isee:reasoning>This factor represents the natural decay or erosion of brand reputation if not maintained.</isee:reasoning>
+					<isee:polarity_reasoning>A higher loss factor means that reputation erodes more quickly over time.</isee:polarity_reasoning>
+					<from>reputation_loss_factor</from>
+					<to>reputation_erosion</to>
+				</connector>
+				<connector uid="68" polarity="+" isee:polarity_placement="outside" angle="118.82">
+					<isee:documentation>Reasoning:
+Customers are more likely to buy from a company they trust and view positively.
+
+Polarity Reasoning: 
+A stronger brand reputation has a positive effect on the sales closing ratio.</isee:documentation>
+					<isee:reasoning>Customers are more likely to buy from a company they trust and view positively.</isee:reasoning>
+					<isee:polarity_reasoning>A stronger brand reputation has a positive effect on the sales closing ratio.</isee:polarity_reasoning>
+					<from>Brand_Reputation</from>
+					<to>effect_of_reputation_on_sales</to>
+				</connector>
+				<connector uid="69" polarity="+" isee:polarity_placement="outside" angle="88.4527">
+					<isee:documentation>Reasoning:
+The final closing ratio is a product of a base ratio and several influencing effects.
+
+Polarity Reasoning: 
+A positive effect from reputation increases the overall closing ratio.</isee:documentation>
+					<isee:reasoning>The final closing ratio is a product of a base ratio and several influencing effects.</isee:reasoning>
+					<isee:polarity_reasoning>A positive effect from reputation increases the overall closing ratio.</isee:polarity_reasoning>
+					<from>effect_of_reputation_on_sales</from>
+					<to>closing_ratio</to>
+				</connector>
+				<connector uid="70" polarity="+" isee:polarity_placement="outside" angle="279.2">
+					<isee:documentation>Reasoning:
+The final closing ratio is a product of a base ratio and several influencing effects.
+
+Polarity Reasoning: 
+The base closing ratio is the starting point for calculating the final closing ratio.</isee:documentation>
+					<isee:reasoning>The final closing ratio is a product of a base ratio and several influencing effects.</isee:reasoning>
+					<isee:polarity_reasoning>The base closing ratio is the starting point for calculating the final closing ratio.</isee:polarity_reasoning>
+					<from>base_closing_ratio</from>
+					<to>closing_ratio</to>
+				</connector>
+				<connector uid="71" polarity="+" isee:polarity_placement="outside" angle="331.801">
+					<isee:documentation>Reasoning:
+The rate of gaining experience depends on the number of novices and the time it takes.
+
+Polarity Reasoning: 
+Novice salespeople, over time, flow into the stock of experienced salespeople.</isee:documentation>
+					<isee:reasoning>The rate of gaining experience depends on the number of novices and the time it takes.</isee:reasoning>
+					<isee:polarity_reasoning>Novice salespeople, over time, flow into the stock of experienced salespeople.</isee:polarity_reasoning>
+					<from>Salesforce</from>
+					<to>gaining_experience</to>
+				</connector>
+				<connector uid="72" polarity="-" isee:polarity_placement="outside" angle="105.889">
+					<isee:documentation>Reasoning:
+The rate is the stock of novices divided by the time to transition.
+
+Polarity Reasoning: 
+A longer time to gain experience means a slower flow of novices becoming experienced.</isee:documentation>
+					<isee:reasoning>The rate is the stock of novices divided by the time to transition.</isee:reasoning>
+					<isee:polarity_reasoning>A longer time to gain experience means a slower flow of novices becoming experienced.</isee:polarity_reasoning>
+					<from>time_to_gain_experience</from>
+					<to>gaining_experience</to>
+				</connector>
+				<connector uid="73" polarity="+" isee:polarity_placement="outside" angle="40">
+					<isee:documentation>Reasoning:
+Total attrition is the number of staff multiplied by the attrition rate.
+
+Polarity Reasoning: 
+More experienced salespeople, leaving at a given rate, results in a higher absolute number of departures.</isee:documentation>
+					<isee:reasoning>Total attrition is the number of staff multiplied by the attrition rate.</isee:reasoning>
+					<isee:polarity_reasoning>More experienced salespeople, leaving at a given rate, results in a higher absolute number of departures.</isee:polarity_reasoning>
+					<from>Experienced_Salesforce</from>
+					<to>experienced_salesforce_attrition</to>
+				</connector>
+				<connector uid="74" polarity="+" isee:polarity_placement="outside" angle="337.27">
+					<isee:documentation>Reasoning:
+We assume the same overall attrition rate applies to experienced staff.
+
+Polarity Reasoning: 
+A higher attrition rate for the company as a whole leads to more experienced staff leaving.</isee:documentation>
+					<isee:reasoning>We assume the same overall attrition rate applies to experienced staff.</isee:reasoning>
+					<isee:polarity_reasoning>A higher attrition rate for the company as a whole leads to more experienced staff leaving.</isee:polarity_reasoning>
+					<from>total_attrition_rate</from>
+					<to>experienced_salesforce_attrition</to>
+				</connector>
+				<connector uid="75" polarity="+" isee:polarity_placement="outside" angle="309.328">
+					<isee:documentation>Reasoning:
+The customer base is the source of word-of-mouth referrals.
+
+Polarity Reasoning: 
+More customers generate more word of mouth, assuming other factors are constant.</isee:documentation>
+					<isee:reasoning>The customer base is the source of word-of-mouth referrals.</isee:reasoning>
+					<isee:polarity_reasoning>More customers generate more word of mouth, assuming other factors are constant.</isee:polarity_reasoning>
+					<from>Customers</from>
+					<to>word_of_mouth_leads</to>
+				</connector>
+				<connector uid="76" polarity="+" isee:polarity_placement="outside" angle="127.465">
+					<isee:documentation>Reasoning:
+The reach of word of mouth depends on the network size of each customer.
+
+Polarity Reasoning: 
+If each customer tells more people, more leads are generated.</isee:documentation>
+					<isee:reasoning>The reach of word of mouth depends on the network size of each customer.</isee:reasoning>
+					<isee:polarity_reasoning>If each customer tells more people, more leads are generated.</isee:polarity_reasoning>
+					<from>contacts_per_customer</from>
+					<to>word_of_mouth_leads</to>
+				</connector>
+				<connector uid="77" polarity="+" isee:polarity_placement="outside" angle="165.274">
+					<isee:documentation>Reasoning:
+This represents the conversion rate of a word-of-mouth mention into an actual lead.
+
+Polarity Reasoning: 
+A higher fraction of contacts who become interested leads to more word-of-mouth leads.</isee:documentation>
+					<isee:reasoning>This represents the conversion rate of a word-of-mouth mention into an actual lead.</isee:reasoning>
+					<isee:polarity_reasoning>A higher fraction of contacts who become interested leads to more word-of-mouth leads.</isee:polarity_reasoning>
+					<from>adoption_fraction</from>
+					<to>word_of_mouth_leads</to>
+				</connector>
+				<connector uid="78" polarity="+" isee:polarity_placement="outside" angle="200.851">
+					<isee:documentation>Reasoning:
+Satisfied customers are more persuasive, increasing the effectiveness of their referrals.
+
+Polarity Reasoning: 
+A stronger positive effect from satisfaction increases the adoption fraction from word of mouth.</isee:documentation>
+					<isee:reasoning>Satisfied customers are more persuasive, increasing the effectiveness of their referrals.</isee:reasoning>
+					<isee:polarity_reasoning>A stronger positive effect from satisfaction increases the adoption fraction from word of mouth.</isee:polarity_reasoning>
+					<from>effect_of_satisfaction_on_word_of_mouth</from>
+					<to>adoption_fraction</to>
+				</connector>
+				<connector uid="79" polarity="+" isee:polarity_placement="outside" angle="146.226">
+					<isee:documentation>Reasoning:
+Happy customers are more likely to generate positive and effective word of mouth.
+
+Polarity Reasoning: 
+Higher customer satisfaction has a greater positive effect on word of mouth.</isee:documentation>
+					<isee:reasoning>Happy customers are more likely to generate positive and effective word of mouth.</isee:reasoning>
+					<isee:polarity_reasoning>Higher customer satisfaction has a greater positive effect on word of mouth.</isee:polarity_reasoning>
+					<from>customer_satisfaction</from>
+					<to>effect_of_satisfaction_on_word_of_mouth</to>
+				</connector>
+				<connector uid="80" polarity="+" isee:polarity_placement="outside" angle="355.121">
+					<isee:documentation>Reasoning:
+Marketing leads are a direct result of marketing expenditure.
+
+Polarity Reasoning: 
+Spending more on marketing, at a given effectiveness, generates more leads.</isee:documentation>
+					<isee:reasoning>Marketing leads are a direct result of marketing expenditure.</isee:reasoning>
+					<isee:polarity_reasoning>Spending more on marketing, at a given effectiveness, generates more leads.</isee:polarity_reasoning>
+					<from>marketing_spend</from>
+					<to>marketing_leads</to>
+				</connector>
+				<connector uid="81" polarity="+" isee:polarity_placement="outside" angle="96.6929">
+					<isee:documentation>Reasoning:
+Effectiveness is the multiplier that converts spend into leads.
+
+Polarity Reasoning: 
+More effective marketing generates more leads for the same amount of spend.</isee:documentation>
+					<isee:reasoning>Effectiveness is the multiplier that converts spend into leads.</isee:reasoning>
+					<isee:polarity_reasoning>More effective marketing generates more leads for the same amount of spend.</isee:polarity_reasoning>
+					<from>marketing_effectiveness</from>
+					<to>marketing_leads</to>
+				</connector>
+				<connector uid="82" polarity="+" isee:polarity_placement="outside" angle="232.788">
+					<isee:documentation>Reasoning:
+Total leads are the sum of leads from all sources.
+
+Polarity Reasoning: 
+Leads from word of mouth contribute to the total number of leads.</isee:documentation>
+					<isee:reasoning>Total leads are the sum of leads from all sources.</isee:reasoning>
+					<isee:polarity_reasoning>Leads from word of mouth contribute to the total number of leads.</isee:polarity_reasoning>
+					<from>word_of_mouth_leads</from>
+					<to>total_leads</to>
+				</connector>
+				<connector uid="83" polarity="+" isee:polarity_placement="outside" angle="107.733">
+					<isee:documentation>Reasoning:
+Total leads are the sum of leads from all sources.
+
+Polarity Reasoning: 
+Leads from marketing contribute to the total number of leads.</isee:documentation>
+					<isee:reasoning>Total leads are the sum of leads from all sources.</isee:reasoning>
+					<isee:polarity_reasoning>Leads from marketing contribute to the total number of leads.</isee:polarity_reasoning>
+					<from>marketing_leads</from>
+					<to>total_leads</to>
+				</connector>
+				<connector uid="84" polarity="+" isee:polarity_placement="outside" angle="191.941">
+					<isee:documentation>Reasoning:
+Sales calls are made to the leads generated by marketing and word of mouth.
+
+Polarity Reasoning: 
+More total leads are required to generate more sales calls.</isee:documentation>
+					<isee:reasoning>Sales calls are made to the leads generated by marketing and word of mouth.</isee:reasoning>
+					<isee:polarity_reasoning>More total leads are required to generate more sales calls.</isee:polarity_reasoning>
+					<from>total_leads</from>
+					<to>total_sales_calls</to>
+				</connector>
+				<connector uid="85" polarity="+" isee:polarity_placement="outside" angle="285.856">
+					<isee:documentation>Reasoning:
+Potential customers are those in the total market who are not yet customers.
+
+Polarity Reasoning: 
+A larger total market provides a larger pool of potential customers.</isee:documentation>
+					<isee:reasoning>Potential customers are those in the total market who are not yet customers.</isee:reasoning>
+					<isee:polarity_reasoning>A larger total market provides a larger pool of potential customers.</isee:polarity_reasoning>
+					<from>total_market_size</from>
+					<to>potential_customers</to>
+				</connector>
+				<connector uid="86" polarity="-" isee:polarity_placement="outside" angle="64.9575">
+					<isee:documentation>Reasoning:
+Potential customers are those in the total market who are not yet customers.
+
+Polarity Reasoning: 
+As the number of current customers increases, the pool of remaining potential customers decreases.</isee:documentation>
+					<isee:reasoning>Potential customers are those in the total market who are not yet customers.</isee:reasoning>
+					<isee:polarity_reasoning>As the number of current customers increases, the pool of remaining potential customers decreases.</isee:polarity_reasoning>
+					<from>Customers</from>
+					<to>potential_customers</to>
+				</connector>
+				<connector uid="87" polarity="-" isee:polarity_placement="outside" angle="71.7256">
+					<isee:documentation>Reasoning:
+The market saturation effect is a function of the remaining market share.
+
+Polarity Reasoning: 
+A smaller pool of potential customers signifies a more saturated market, which reduces the effectiveness of acquisition efforts.</isee:documentation>
+					<isee:reasoning>The market saturation effect is a function of the remaining market share.</isee:reasoning>
+					<isee:polarity_reasoning>A smaller pool of potential customers signifies a more saturated market, which reduces the effectiveness of acquisition efforts.</isee:polarity_reasoning>
+					<from>potential_customers</from>
+					<to>market_saturation_effect</to>
+				</connector>
+				<connector uid="88" polarity="+" isee:polarity_placement="outside" angle="351.87">
+					<isee:documentation>Reasoning:
+The market saturation effect is a function of the remaining market share.
+
+Polarity Reasoning: 
+A larger total market means that for a given number of customers, the market is less saturated.</isee:documentation>
+					<isee:reasoning>The market saturation effect is a function of the remaining market share.</isee:reasoning>
+					<isee:polarity_reasoning>A larger total market means that for a given number of customers, the market is less saturated.</isee:polarity_reasoning>
+					<from>total_market_size</from>
+					<to>market_saturation_effect</to>
+				</connector>
+				<connector uid="89" angle="354.826">
+					<from>total_salespeople</from>
+					<to>total_sales_compensation</to>
+				</connector>
+				<connector uid="90" angle="331.155">
+					<from>budget_for_hiring_and_marketing</from>
+					<to>marketing_spend</to>
+				</connector>
+				<connector uid="91" angle="25">
+					<from>Brand_Reputation</from>
+					<to>reputation_erosion</to>
+				</connector>
+				<connector uid="92" angle="221.209">
+					<from>total_salespeople</from>
+					<to>salesforce_gap</to>
+				</connector>
+				<connector uid="93" angle="142.944">
+					<from>normal_delivery_time</from>
+					<to>satisfaction_from_delivery_delay</to>
+				</connector>
+				<aux x="797.6" y="752.8" name="expected\nprofit"/>
+				<connector uid="94" angle="107.454">
+					<from>profit</from>
+					<to>expected_profit</to>
+				</connector>
+				<connector uid="95" angle="135.659">
+					<from>expected_profit</from>
+					<to>budget_for_hiring_and_marketing</to>
+				</connector>
+				<aux x="839.2" y="672" name="time to\nperceive\nprofit"/>
+				<connector uid="96" angle="228.447">
+					<from>time_to_perceive_profit</from>
+					<to>expected_profit</to>
+				</connector>
+				<connector uid="97" angle="234.34">
+					<from>revenue</from>
+					<to>expected_profit</to>
+				</connector>
+			</view>
+		</views>
+	</model>
+</xmile>
+

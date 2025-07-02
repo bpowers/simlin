@@ -665,6 +665,7 @@ fn test_tables() {
         }),
         can_be_module_input: false,
         visibility: datamodel::Visibility::Private,
+        ai_state: None,
     });
 
     let expected = Variable::Var {

@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Cursor, Write};
 
+use crate::engine::datamodel::Visibility;
+use crate::xmile::view_element::LinkEnd;
 use float_cmp::approx_eq;
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
-use serde::{Deserialize, Serialize};
-
-use crate::engine::datamodel::Visibility;
-use crate::xmile::view_element::LinkEnd;
+use serde::de::{MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use simlin_engine::common::{Result, canonicalize, quoteize};
 use simlin_engine::datamodel;
 use simlin_engine::datamodel::{Equation, Rect, ViewElement};
@@ -50,6 +50,7 @@ pub struct File {
     #[serde(rename = "xmlns", default)]
     pub namespace: String, // 'https://docs.oasis-open.org/xmile/ns/XMILE/v1.0'
     pub header: Option<Header>,
+    pub ai_information: Option<AiInformation>,
     pub sim_specs: Option<SimSpecs>,
     #[serde(rename = "model_units")]
     pub units: Option<Units>,
@@ -156,6 +157,18 @@ impl From<File> for datamodel::Project {
                 .map(datamodel::Model::from)
                 .collect(),
             source: None,
+            ai_information: file.ai_information.map(|ai| datamodel::AiInformation {
+                status: datamodel::AiStatus {
+                    key_url: ai.status.key_url,
+                    algorithm: ai.status.algorithm,
+                    signature: ai.status.signature,
+                    tags: ai.status.tags,
+                },
+                testing: ai.testing.map(|t| datamodel::AiTesting {
+                    signed_message_body: t.signed_message_body,
+                }),
+                log: ai.log,
+            }),
         }
     }
 }
@@ -190,6 +203,7 @@ impl From<datamodel::Project> for File {
                 uuid: None,
                 includes: None,
             }),
+            ai_information: None,
             sim_specs: Some(project.sim_specs.into()),
             dimensions: if project.dimensions.is_empty() {
                 None
@@ -218,6 +232,82 @@ impl From<datamodel::Project> for File {
             macros: vec![],
         }
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct AiInformation {
+    pub status: AiStatus,
+    pub testing: Option<AiTesting>,
+    pub log: Option<String>,
+    // TODO: settings
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+pub struct AiStatus {
+    pub key_url: String,
+    pub algorithm: String,
+    pub signature: String,
+    pub tags: HashMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for AiStatus {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StatusVisitor;
+
+        impl<'de> Visitor<'de> for StatusVisitor {
+            type Value = AiStatus;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an AiStatus with attributes")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut key_url = None;
+                let mut algorithm = None;
+                let mut signature = None;
+                let mut tags = HashMap::new();
+
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    match key.as_str() {
+                        "@keyurl" => key_url = Some(value),
+                        "@algorithm" => algorithm = Some(value),
+                        "@signature" => signature = Some(value),
+                        k if k.starts_with('@') => {
+                            // Remove @ prefix for the tags map
+                            tags.insert(k[1..].to_string(), value);
+                        }
+                        _ => {
+                            // Handle non-attribute fields if needed
+                            tags.insert(key, value);
+                        }
+                    }
+                }
+
+                Ok(AiStatus {
+                    key_url: key_url.ok_or_else(|| serde::de::Error::missing_field("keyurl"))?,
+                    algorithm: algorithm
+                        .ok_or_else(|| serde::de::Error::missing_field("algorithm"))?,
+                    signature: signature
+                        .ok_or_else(|| serde::de::Error::missing_field("signature"))?,
+                    tags,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(StatusVisitor)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct AiTesting {
+    #[serde(rename = "@signed_message_body")]
+    pub signed_message_body: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -989,7 +1079,7 @@ impl From<Model> for datamodel::Model {
             })
             .collect();
         datamodel::Model {
-            name: canonicalize(model.name.as_deref().unwrap_or("main")),
+            name: model.name.as_deref().unwrap_or("main").to_string(),
             variables: match model.variables {
                 Some(Variables {
                     variables: vars, ..
@@ -2606,6 +2696,8 @@ pub struct Module {
     pub refs: Vec<Reference>,
     #[serde(rename = "@access")]
     pub access: Option<String>,
+    #[serde(rename = "@ai_state")]
+    pub ai_state: Option<String>,
 }
 
 fn can_be_module_input(access: &Option<String>) -> bool {
@@ -2669,6 +2761,10 @@ impl ToXml<XmlWriter> for Module {
             }
         }
 
+        if let Some(ref ai_state) = self.ai_state {
+            write_tag(writer, "ai_state", ai_state)?;
+        }
+
         write_tag_end(writer, "module")
     }
 }
@@ -2704,6 +2800,7 @@ impl From<Module> for datamodel::Module {
             references,
             can_be_module_input: can_be_module_input(&module.access),
             visibility: visibility(&module.access),
+            ai_state: ai_state_from(module.ai_state),
         }
     }
 }
@@ -2731,6 +2828,7 @@ impl From<datamodel::Module> for Module {
             units: module.units,
             refs,
             access: access_from(module.visibility, module.can_be_module_input),
+            ai_state: None, // TODO
         }
     }
 }
@@ -2792,6 +2890,8 @@ pub struct Stock {
     pub elements: Option<Vec<VarElement>>,
     #[serde(rename = "@access")]
     pub access: Option<String>,
+    #[serde(rename = "@ai_state")]
+    pub ai_state: Option<String>,
 }
 
 impl ToXml<XmlWriter> for Stock {
@@ -2846,6 +2946,10 @@ impl ToXml<XmlWriter> for Stock {
             write_tag(writer, "non_negative", "")?;
         }
 
+        if let Some(ref ai_state) = self.ai_state {
+            write_tag(writer, "ai_state", ai_state)?;
+        }
+
         write_tag_end(writer, "stock")
     }
 }
@@ -2893,6 +2997,23 @@ macro_rules! convert_stock_equation(
     }}
 );
 
+fn ai_state_from(s: Option<String>) -> Option<datamodel::AiState> {
+    s.map(|s| {
+        use datamodel::AiState::*;
+        match s.to_lowercase().as_str() {
+            "a" => A,
+            "b" => B,
+            "c" => C,
+            "d" => D,
+            "e" => E,
+            "f" => F,
+            "g" => G,
+            "h" => H,
+            _ => A,
+        }
+    })
+}
+
 impl From<Stock> for datamodel::Stock {
     fn from(stock: Stock) -> Self {
         let inflows = stock
@@ -2917,6 +3038,7 @@ impl From<Stock> for datamodel::Stock {
             non_negative: stock.non_negative.is_some(),
             can_be_module_input: can_be_module_input(&stock.access),
             visibility: visibility(&stock.access),
+            ai_state: ai_state_from(stock.ai_state),
         }
     }
 }
@@ -2995,6 +3117,7 @@ impl From<datamodel::Stock> for Stock {
                 ),
             },
             access: access_from(stock.visibility, stock.can_be_module_input),
+            ai_state: None, // TODO
         }
     }
 }
@@ -3015,6 +3138,8 @@ pub struct Flow {
     pub elements: Option<Vec<VarElement>>,
     #[serde(rename = "@access")]
     pub access: Option<String>,
+    #[serde(rename = "@ai_state")]
+    pub ai_state: Option<String>,
 }
 
 impl ToXml<XmlWriter> for Flow {
@@ -3063,6 +3188,10 @@ impl ToXml<XmlWriter> for Flow {
             write_tag(writer, "non_negative", "")?;
         }
 
+        if let Some(ref ai_state) = self.ai_state {
+            write_tag(writer, "ai_state", ai_state)?;
+        }
+
         write_tag_end(writer, "flow")
     }
 }
@@ -3078,6 +3207,7 @@ impl From<Flow> for datamodel::Flow {
             non_negative: flow.non_negative.is_some(),
             can_be_module_input: can_be_module_input(&flow.access),
             visibility: visibility(&flow.access),
+            ai_state: ai_state_from(flow.ai_state),
         }
     }
 }
@@ -3152,6 +3282,7 @@ impl From<datamodel::Flow> for Flow {
                 ),
             },
             access: access_from(flow.visibility, flow.can_be_module_input),
+            ai_state: None, // TODO
         }
     }
 }
@@ -3171,6 +3302,8 @@ pub struct Aux {
     pub elements: Option<Vec<VarElement>>,
     #[serde(rename = "@access")]
     pub access: Option<String>,
+    #[serde(rename = "@ai_state")]
+    pub ai_state: Option<String>,
 }
 
 impl ToXml<XmlWriter> for Aux {
@@ -3216,6 +3349,10 @@ impl ToXml<XmlWriter> for Aux {
             gf.write_xml(writer)?;
         }
 
+        if let Some(ref ai_state) = self.ai_state {
+            write_tag(writer, "ai_state", ai_state)?;
+        }
+
         write_tag_end(writer, "aux")
     }
 }
@@ -3230,6 +3367,7 @@ impl From<Aux> for datamodel::Aux {
             gf: aux.gf.map(datamodel::GraphicalFunction::from),
             can_be_module_input: can_be_module_input(&aux.access),
             visibility: visibility(&aux.access),
+            ai_state: ai_state_from(aux.ai_state),
         }
     }
 }
@@ -3299,6 +3437,7 @@ impl From<datamodel::Aux> for Aux {
                 ),
             },
             access: access_from(aux.visibility, aux.can_be_module_input),
+            ai_state: None, // TODO
         }
     }
 }
@@ -3378,6 +3517,7 @@ fn test_canonicalize_stock_inflows() {
         dimensions: None,
         elements: None,
         access: None,
+        ai_state: None,
     });
 
     let expected = datamodel::Variable::Stock(datamodel::Stock {
@@ -3390,6 +3530,7 @@ fn test_canonicalize_stock_inflows() {
         non_negative: false,
         can_be_module_input: false,
         visibility: Visibility::Private,
+        ai_state: None,
     });
 
     let output = datamodel::Variable::from(input);
@@ -3428,11 +3569,11 @@ pub fn project_from_reader(reader: &mut dyn BufRead) -> Result<datamodel::Projec
         }
     };
 
-    Ok(convert_file_to_project(&file))
+    Ok(convert_file_to_project(file))
 }
 
-pub fn convert_file_to_project(file: &File) -> datamodel::Project {
-    datamodel::Project::from(file.clone())
+pub fn convert_file_to_project(file: File) -> datamodel::Project {
+    datamodel::Project::from(file)
 }
 
 #[test]
@@ -3469,6 +3610,7 @@ fn test_xml_stock_parsing() {
         dimensions: None,
         elements: None,
         access: None,
+        ai_state: None,
     };
 
     use quick_xml::de;
@@ -3496,6 +3638,7 @@ fn test_xml_gt_parsing() {
         dimensions: None,
         elements: None,
         access: None,
+        ai_state: None,
     };
 
     use quick_xml::de;
@@ -3540,6 +3683,7 @@ fn test_xml_gf_parsing() {
         dimensions: None,
         elements: None,
         access: Some("input".to_owned()),
+        ai_state: None,
     };
 
     use quick_xml::de;
@@ -3595,6 +3739,7 @@ fn test_module_parsing() {
             }),
         ],
         access: Some("output".to_owned()),
+        ai_state: None,
     };
 
     use quick_xml::de;
@@ -3621,6 +3766,7 @@ fn test_module_parsing() {
             }),
         ],
         access: Some("output".to_owned()),
+        ai_state: None,
     };
 
     let roundtripped = Module::from(datamodel::Module::from(actual));

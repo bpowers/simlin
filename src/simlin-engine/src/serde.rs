@@ -435,6 +435,7 @@ impl From<project_io::variable::Stock> for Stock {
             visibility: Visibility::from(
                 project_io::variable::Visibility::try_from(stock.visibility).unwrap_or_default(),
             ),
+            ai_state: None,
         }
     }
 }
@@ -452,6 +453,7 @@ fn test_stock_roundtrip() {
             non_negative: false,
             can_be_module_input: true,
             visibility: Visibility::Public,
+            ai_state: None,
         },
         Stock {
             ident: "blerg2".to_string(),
@@ -463,6 +465,7 @@ fn test_stock_roundtrip() {
             non_negative: false,
             can_be_module_input: false,
             visibility: Visibility::Private,
+            ai_state: None,
         },
     ];
     for expected in cases {
@@ -504,6 +507,7 @@ impl From<project_io::variable::Flow> for Flow {
             visibility: Visibility::from(
                 project_io::variable::Visibility::try_from(flow.visibility).unwrap_or_default(),
             ),
+            ai_state: None,
         }
     }
 }
@@ -520,6 +524,7 @@ fn test_flow_roundtrip() {
             non_negative: false,
             can_be_module_input: true,
             visibility: Visibility::Private,
+            ai_state: None,
         },
         Flow {
             ident: "blerg2".to_string(),
@@ -542,6 +547,7 @@ fn test_flow_roundtrip() {
             non_negative: false,
             can_be_module_input: false,
             visibility: Visibility::Public,
+            ai_state: None,
         },
     ];
     for expected in cases {
@@ -581,6 +587,7 @@ impl From<project_io::variable::Aux> for Aux {
             visibility: Visibility::from(
                 project_io::variable::Visibility::try_from(aux.visibility).unwrap_or_default(),
             ),
+            ai_state: None,
         }
     }
 }
@@ -596,6 +603,7 @@ fn test_aux_roundtrip() {
             gf: None,
             can_be_module_input: false,
             visibility: Visibility::Public,
+            ai_state: None,
         },
         Aux {
             ident: "blerg2".to_string(),
@@ -617,6 +625,7 @@ fn test_aux_roundtrip() {
             }),
             can_be_module_input: true,
             visibility: Visibility::Private,
+            ai_state: None,
         },
     ];
     for expected in cases {
@@ -697,6 +706,7 @@ impl From<project_io::variable::Module> for Module {
             visibility: Visibility::from(
                 project_io::variable::Visibility::try_from(module.visibility).unwrap_or_default(),
             ),
+            ai_state: None,
         }
     }
 }
@@ -715,6 +725,7 @@ fn test_module_roundtrip() {
             }],
             can_be_module_input: false,
             visibility: Visibility::Private,
+            ai_state: None,
         },
         Module {
             ident: "blerg2".to_string(),
@@ -724,6 +735,7 @@ fn test_module_roundtrip() {
             references: vec![],
             can_be_module_input: true,
             visibility: Visibility::Public,
+            ai_state: None,
         },
     ];
     for expected in cases {
@@ -775,6 +787,7 @@ fn test_variable_roundtrip() {
             gf: None,
             can_be_module_input: false,
             visibility: Visibility::Public,
+            ai_state: None,
         }),
         Variable::Module(Module {
             ident: "blerg2".to_string(),
@@ -784,6 +797,7 @@ fn test_variable_roundtrip() {
             references: vec![],
             can_be_module_input: true,
             visibility: Visibility::Private,
+            ai_state: None,
         }),
     ];
     for expected in cases {
@@ -1572,6 +1586,7 @@ impl From<project_io::Project> for Project {
             units: project.units.into_iter().map(Unit::from).collect(),
             models: project.models.into_iter().map(Model::from).collect(),
             source: project.source.map(|source| source.into()),
+            ai_information: None,
         }
     }
 }

@@ -638,6 +638,7 @@ fn test_arrays() {
                         gf: None,
                         can_be_module_input: false,
                         visibility: Visibility::Private,
+                        ai_state: None,
                     }),
                     Variable::Aux(Aux {
                         ident: "picked".to_owned(),
@@ -647,6 +648,7 @@ fn test_arrays() {
                         gf: None,
                         can_be_module_input: false,
                         visibility: Visibility::Private,
+                        ai_state: None,
                     }),
                     Variable::Aux(Aux {
                         ident: "aux".to_owned(),
@@ -660,6 +662,7 @@ fn test_arrays() {
                         gf: None,
                         can_be_module_input: false,
                         visibility: Visibility::Private,
+                        ai_state: None,
                     }),
                     Variable::Aux(Aux {
                         ident: "picked2".to_owned(),
@@ -669,10 +672,12 @@ fn test_arrays() {
                         gf: None,
                         can_be_module_input: false,
                         visibility: Visibility::Private,
+                        ai_state: None,
                     }),
                 ],
                 views: vec![],
             }],
+            ai_information: None,
         }
     };
 

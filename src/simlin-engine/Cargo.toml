@@ -23,6 +23,8 @@ ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
 wasm-bindgen = { version = "0.2", optional = true }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+ed25519 = "2"
+base64 = "0.22"
 
 [dev-dependencies]
 rand = "0.8"

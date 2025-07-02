@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::rc::Rc;
@@ -359,4 +360,58 @@ fn bad_model_name() {
     let project = Project::from(datamodel_project);
     let project = Rc::new(project);
     assert!(Simulation::new(&project, "blerg").is_err());
+}
+
+#[test]
+fn verifies_ai_information_generated_then_edited() {
+    verify_ai_information("../../test/ai-information/GeneratedByAIThenEdited.stmx");
+}
+
+#[test]
+fn verifies_ai_information_pure_ai() {
+    verify_ai_information("../../test/ai-information/PureAIModel.stmx");
+}
+
+#[test]
+fn verifies_ai_information_pure_human() {
+    verify_ai_information("../../test/ai-information/PureHumanModel.stmx");
+}
+
+#[test]
+fn verifies_ai_information_with_modules_and_arrays() {
+    verify_ai_information("../../test/ai-information/WithModulesAndArrays.stmx");
+}
+
+fn verify_ai_information(xmile_path: &str) {
+    let known_keys = HashMap::from([(
+        "https://iseesystems.com/keys/stella01.txt",
+        "AAAAC3NzaC1lZDI1NTE5AAAAIP5Rg+bCssFIB2b2F9H/lUhVBXwtrBCtyRgiiq9RYkXS",
+    )]);
+
+    eprintln!("model: {xmile_path}");
+
+    let f = File::open(xmile_path).unwrap();
+    let mut f = BufReader::new(f);
+
+    let datamodel_project = xmile::project_from_reader(&mut f);
+    if let Err(ref err) = datamodel_project {
+        eprintln!("model '{xmile_path}' error: {err}");
+    }
+
+    #[allow(unused_variables)]
+    let datamodel_project = datamodel_project.unwrap();
+
+    let ai_info = datamodel_project.ai_information.as_ref().unwrap();
+    let key_bytes_encoded = known_keys[ai_info.status.key_url.as_str()];
+
+    use base64::{Engine as _, engine::general_purpose};
+    let key_bytes = general_purpose::STANDARD.decode(key_bytes_encoded).unwrap();
+
+    let openssh_pubkey = ssh_key::PublicKey::from_bytes(&key_bytes).unwrap();
+    let raw_pubkey = openssh_pubkey.key_data().ed25519().unwrap();
+
+    // OpenSSH format: skip the first 19 bytes to get to the actual 32-byte Ed25519 key
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&raw_pubkey.0).unwrap();
+
+    simlin_engine::ai_info::verify(&datamodel_project, &key).unwrap()
 }

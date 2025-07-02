@@ -4,7 +4,7 @@
 
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
-use crate::builtins::{walk_builtin_expr, BuiltinContents, BuiltinFn, Loc};
+use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
 use crate::common::{EquationResult, Ident};
 use crate::dimensions::{Dimension, NamedDimension, StridedDimension};
 use crate::eqn_err;
