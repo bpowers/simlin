@@ -457,6 +457,22 @@ impl Expr2 {
         }
     }
 
+    /// Allocates a new temp ID and ensures the ArrayView is contiguous
+    /// to avoid wasting allocated space
+    fn allocate_temp_array<C: Expr2Context>(ctx: &mut C, view: &ArrayView) -> ArraySource {
+        let contiguous_view = match view {
+            ArrayView::Contiguous { .. } => view.clone(),
+            ArrayView::Strided { dims, .. } => {
+                // Convert strided view to contiguous by extracting dimensions
+                // The dimension sizes already represent the view's shape
+                let dimensions: Vec<Dimension> =
+                    dims.iter().map(|sd| sd.dimension.clone()).collect();
+                ArrayView::Contiguous { dims: dimensions }
+            }
+        };
+        ArraySource::Temp(ctx.allocate_temp_id(), contiguous_view)
+    }
+
     fn unify_array_sources<C: Expr2Context>(
         ctx: &mut C,
         l: Option<&ArraySource>,
@@ -470,20 +486,18 @@ impl Expr2 {
             | (Some(ArraySource::Temp(_, view1)), Some(ArraySource::Named(_, view2)))
             | (Some(ArraySource::Temp(_, view1)), Some(ArraySource::Temp(_, view2))) => {
                 let view = Self::unify_views(view1, view2, loc)?;
-                Ok(Some(ArraySource::Temp(ctx.allocate_temp_id(), view)))
+                Ok(Some(Self::allocate_temp_array(ctx, &view)))
             }
             // Left is array, right is scalar - broadcast
             (Some(ArraySource::Named(_, view)), None)
-            | (Some(ArraySource::Temp(_, view)), None) => Ok(Some(ArraySource::Temp(
-                ctx.allocate_temp_id(),
-                view.clone(),
-            ))),
+            | (Some(ArraySource::Temp(_, view)), None) => {
+                Ok(Some(Self::allocate_temp_array(ctx, view)))
+            }
             // Right is array, left is scalar - broadcast
             (None, Some(ArraySource::Named(_, view)))
-            | (None, Some(ArraySource::Temp(_, view))) => Ok(Some(ArraySource::Temp(
-                ctx.allocate_temp_id(),
-                view.clone(),
-            ))),
+            | (None, Some(ArraySource::Temp(_, view))) => {
+                Ok(Some(Self::allocate_temp_array(ctx, view)))
+            }
             // Both scalars
             (None, None) => Ok(None),
         }
@@ -695,7 +709,7 @@ impl Expr2 {
 
                     // Apply subscript operation to get the resulting view
                     match base_view.subscript(&args) {
-                        Ok(view) => Some(ArraySource::Temp(ctx.allocate_temp_id(), view)),
+                        Ok(view) => Some(Self::allocate_temp_array(ctx, &view)),
                         Err(_) => None, // Invalid subscript, treat as scalar
                     }
                 } else {
@@ -711,12 +725,14 @@ impl Expr2 {
                 let array_source = match (&op, l_expr.get_array_source()) {
                     (UnaryOp::Transpose, Some(ArraySource::Named(_, view)))
                     | (UnaryOp::Transpose, Some(ArraySource::Temp(_, view))) => {
-                        Some(ArraySource::Temp(ctx.allocate_temp_id(), view.transpose()))
+                        // Transpose creates a strided view, but we allocate contiguous storage
+                        let transposed = view.transpose();
+                        Some(Self::allocate_temp_array(ctx, &transposed))
                     }
                     (_, Some(ArraySource::Named(_, view)))
                     | (_, Some(ArraySource::Temp(_, view))) => {
                         // Other unary ops preserve array structure
-                        Some(ArraySource::Temp(ctx.allocate_temp_id(), view.clone()))
+                        Some(Self::allocate_temp_array(ctx, view))
                     }
                     _ => None,
                 };

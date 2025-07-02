@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::iter::Iterator;
 
-#[cfg(feature = "wasm")]
-use wasm_bindgen::prelude::*;
 use crate::canonicalize;
 use crate::common::{DimensionName, ElementName};
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Default, Eq, Clone)]
 pub struct UnitMap {
@@ -547,7 +547,9 @@ pub struct Model {
 impl Model {
     pub fn get_variable(&self, ident: &str) -> Option<&Variable> {
         let ident = canonicalize(ident);
-        self.variables.iter().find(|&var| canonicalize(var.get_ident()) == ident)
+        self.variables
+            .iter()
+            .find(|&var| canonicalize(var.get_ident()) == ident)
     }
 
     pub fn get_variable_mut(&mut self, ident: &str) -> Option<&mut Variable> {

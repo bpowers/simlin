@@ -862,14 +862,14 @@ mod ast_tests {
                 assert!(array_source.is_some());
                 match array_source.unwrap() {
                     ArraySource::Temp(_, view) => {
-                        // Transpose should create a strided view even for 1D arrays
+                        // With the new allocate_temp_array helper, we allocate contiguous
+                        // storage for the transposed result
                         match view {
-                            ArrayView::Strided { dims, offset } => {
+                            ArrayView::Contiguous { dims } => {
                                 assert_eq!(dims.len(), 1);
-                                assert_eq!(dims[0].dimension.name(), "dim1");
-                                assert_eq!(offset, 0);
+                                assert_eq!(dims[0].name(), "dim1");
                             }
-                            _ => panic!("Expected strided array view after transpose"),
+                            _ => panic!("Expected contiguous array view for allocated temp"),
                         }
                     }
                     _ => panic!("Expected temp array source"),

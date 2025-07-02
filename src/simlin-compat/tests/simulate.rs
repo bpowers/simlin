@@ -331,6 +331,12 @@ fn simulates_except() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
 }
 
+#[test]
+#[ignore]
+fn simulates_sum() {
+    simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
+}
+
 // #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
 // fn simulates_sdeverywhere(resource: &str) {
 //     let resource = format!("../../{}", resource);

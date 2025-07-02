@@ -15,7 +15,7 @@ use crate::datamodel::Dimension;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 use crate::units::parse_units;
-use crate::{ErrorCode, datamodel, eqn_err, units, canonicalize};
+use crate::{ErrorCode, canonicalize, datamodel, eqn_err, units};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
