@@ -67,6 +67,7 @@ pub enum ArrayView {
     /// For example, selecting column 1 of a 3x4 matrix creates a strided view:
     /// - dims: [StridedDimension { dimension: Dimension(3), stride: 4 }]
     /// - offset: 1 (start at element [0,1])
+    ///
     /// This gives us elements at positions 1, 5, 9 in the underlying storage.
     Strided {
         dims: Vec<StridedDimension>,
@@ -84,6 +85,45 @@ impl ArrayView {
             ArrayView::Strided {
                 dims: dim_strides, ..
             } => dim_strides.iter().map(|ds| ds.dimension.len()).product(),
+        }
+    }
+
+    /// Check if this view represents contiguous data in row-major order
+    pub fn is_contiguous(&self) -> bool {
+        match self {
+            ArrayView::Contiguous { .. } => true,
+            ArrayView::Strided { dims, offset } => {
+                // Must start at beginning of data
+                if *offset != 0 {
+                    return false;
+                }
+
+                // Check if strides match row-major order
+                let mut expected_stride = 1isize;
+                for sd in dims.iter().rev() {
+                    if sd.stride != expected_stride {
+                        return false;
+                    }
+                    expected_stride *= sd.dimension.len() as isize;
+                }
+                true
+            }
+        }
+    }
+
+    /// Get the shape as a vector of dimension sizes
+    pub fn shape(&self) -> Vec<usize> {
+        match self {
+            ArrayView::Contiguous { dims } => dims.iter().map(|d| d.len()).collect(),
+            ArrayView::Strided { dims, .. } => dims.iter().map(|sd| sd.dimension.len()).collect(),
+        }
+    }
+
+    /// Get the dimensions (without stride information)
+    pub fn dimensions(&self) -> Vec<&Dimension> {
+        match self {
+            ArrayView::Contiguous { dims } => dims.iter().collect(),
+            ArrayView::Strided { dims, .. } => dims.iter().map(|sd| &sd.dimension).collect(),
         }
     }
 
@@ -1016,6 +1056,9 @@ mod tests {
             offset: 4, // Skip first row (4 elements)
         };
 
+        // Row slice with offset is not contiguous
+        assert!(!view.is_contiguous());
+
         let values: Vec<f64> = view.iter(&data).collect();
         assert_eq!(values, vec![5.0, 6.0, 7.0, 8.0]);
     }
@@ -1033,6 +1076,9 @@ mod tests {
             }],
             offset: 1, // Start at second element
         };
+
+        // Column slice is not contiguous (stride != 1 for last dimension)
+        assert!(!view.is_contiguous());
 
         let values: Vec<f64> = view.iter(&data).collect();
         assert_eq!(values, vec![2.0, 6.0, 10.0]);
@@ -1464,14 +1510,15 @@ mod tests {
         match array_source {
             ArraySource::Temp(id, view) => {
                 assert_eq!(id, 0);
-                match view {
-                    ArrayView::Contiguous { dims } => {
-                        assert_eq!(dims.len(), 2);
-                        assert_eq!(dims[0].len(), 3);
-                        assert_eq!(dims[1].len(), 4);
-                    }
-                    _ => panic!("Expected contiguous view"),
-                }
+                assert!(view.is_contiguous());
+                assert_eq!(view.size(), 12); // 3 * 4
+                assert_eq!(view.shape(), vec![3, 4]);
+
+                // We can also check dimension details if needed
+                let dims = view.dimensions();
+                assert_eq!(dims.len(), 2);
+                assert_eq!(dims[0].len(), 3);
+                assert_eq!(dims[1].len(), 4);
             }
             _ => panic!("Expected temp array source"),
         }
@@ -1518,17 +1565,17 @@ mod tests {
         match array_source {
             ArraySource::Temp(id, view) => {
                 assert_eq!(id, 10);
-                match view {
-                    ArrayView::Contiguous { dims } => {
-                        // Should extract dimensions from strided view
-                        assert_eq!(dims.len(), 2);
-                        assert_eq!(dims[0].name(), "row");
-                        assert_eq!(dims[0].len(), 3);
-                        assert_eq!(dims[1].name(), "col");
-                        assert_eq!(dims[1].len(), 2);
-                    }
-                    _ => panic!("Expected contiguous view"),
-                }
+                assert!(view.is_contiguous());
+                assert_eq!(view.size(), 6); // 3 * 2
+                assert_eq!(view.shape(), vec![3, 2]);
+
+                // Check dimension names
+                let dims = view.dimensions();
+                assert_eq!(dims.len(), 2);
+                assert_eq!(dims[0].name(), "row");
+                assert_eq!(dims[0].len(), 3);
+                assert_eq!(dims[1].name(), "col");
+                assert_eq!(dims[1].len(), 2);
             }
             _ => panic!("Expected temp array source"),
         }
@@ -1541,6 +1588,9 @@ mod tests {
             dims: indexed_dims(&[2, 3]),
         };
         let transposed = view.transpose();
+
+        // Transpose should create a non-contiguous view
+        assert!(!transposed.is_contiguous());
 
         // Original: [[1, 2, 3], [4, 5, 6]]
         // Transposed: [[1, 4], [2, 5], [3, 6]]
@@ -1600,6 +1650,73 @@ mod tests {
             }
             _ => panic!("Expected Strided view after transpose"),
         }
+    }
+
+    #[test]
+    fn test_is_contiguous() {
+        // Test 1: Contiguous variant is always contiguous
+        let view = ArrayView::Contiguous {
+            dims: indexed_dims(&[3, 4]),
+        };
+        assert!(view.is_contiguous());
+
+        // Test 2: Strided with row-major strides and zero offset is contiguous
+        let strided_contiguous = ArrayView::Strided {
+            dims: vec![
+                StridedDimension {
+                    dimension: Dimension::Indexed("row".to_string(), 3),
+                    stride: 4,
+                },
+                StridedDimension {
+                    dimension: Dimension::Indexed("col".to_string(), 4),
+                    stride: 1,
+                },
+            ],
+            offset: 0,
+        };
+        assert!(strided_contiguous.is_contiguous());
+
+        // Test 3: Non-zero offset makes it non-contiguous
+        let strided_with_offset = ArrayView::Strided {
+            dims: vec![
+                StridedDimension {
+                    dimension: Dimension::Indexed("row".to_string(), 3),
+                    stride: 4,
+                },
+                StridedDimension {
+                    dimension: Dimension::Indexed("col".to_string(), 4),
+                    stride: 1,
+                },
+            ],
+            offset: 5,
+        };
+        assert!(!strided_with_offset.is_contiguous());
+
+        // Test 4: Wrong strides make it non-contiguous (e.g., after transpose)
+        let strided_transposed = ArrayView::Strided {
+            dims: vec![
+                StridedDimension {
+                    dimension: Dimension::Indexed("col".to_string(), 4),
+                    stride: 1,
+                },
+                StridedDimension {
+                    dimension: Dimension::Indexed("row".to_string(), 3),
+                    stride: 4,
+                },
+            ],
+            offset: 0,
+        };
+        assert!(!strided_transposed.is_contiguous());
+
+        // Test 5: Scalar views are contiguous
+        let scalar_contiguous = ArrayView::Contiguous { dims: vec![] };
+        assert!(scalar_contiguous.is_contiguous());
+
+        let scalar_strided = ArrayView::Strided {
+            dims: vec![],
+            offset: 0,
+        };
+        assert!(scalar_strided.is_contiguous());
     }
 
     #[test]

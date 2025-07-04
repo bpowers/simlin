@@ -864,13 +864,13 @@ mod ast_tests {
                     ArraySource::Temp(_, view) => {
                         // With the new allocate_temp_array helper, we allocate contiguous
                         // storage for the transposed result
-                        match view {
-                            ArrayView::Contiguous { dims } => {
-                                assert_eq!(dims.len(), 1);
-                                assert_eq!(dims[0].name(), "dim1");
-                            }
-                            _ => panic!("Expected contiguous array view for allocated temp"),
-                        }
+                        assert!(view.is_contiguous());
+                        assert_eq!(view.shape(), vec![2]); // dim1 has 2 elements: A and B
+
+                        let dims = view.dimensions();
+                        assert_eq!(dims.len(), 1);
+                        assert_eq!(dims[0].name(), "dim1");
+                        assert_eq!(dims[0].len(), 2);
                     }
                     _ => panic!("Expected temp array source"),
                 }
