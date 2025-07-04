@@ -12,18 +12,62 @@ use float_cmp::approx_eq;
 use std::collections::HashMap;
 use std::iter::Iterator;
 
-/// Combines a dimension with its stride for strided arrays
+/// Dimension information for non-contiguous array views
+///
+/// `StridedDimension` is used only in `ArrayView::Strided` for views where
+/// elements are not stored consecutively in memory (e.g., after transpose,
+/// column/row selection, or slicing operations). For normal contiguous arrays,
+/// `ArrayView::Contiguous` is used instead, which only needs dimension sizes
+/// since strides can be computed implicitly assuming row-major order.
+///
+/// A `StridedDimension` describes how to iterate through one dimension of a
+/// strided array view. The key insight is that `dimension.len()` represents
+/// the number of elements in this dimension of the *view*, not the underlying
+/// storage.
+///
+/// For example, if you have a 3x4 matrix and select column 1, you get a view
+/// with shape [3]. The `StridedDimension` would be:
+/// - `dimension`: a Dimension with length 3 (the view has 3 elements)
+/// - `stride`: 4 (skip 4 elements in storage to get to the next row)
+///
+/// The stride tells you how many elements to skip in the underlying flat
+/// storage to move by 1 in this dimension. For a contiguous row-major array,
+/// the rightmost dimension has stride 1, and each dimension to the left has
+/// a stride equal to the product of all dimension sizes to its right.
+///
+/// Example: A 2x3x4 array in row-major order has strides [12, 4, 1]:
+/// - To move by 1 in the first dimension: skip 12 elements (3*4)
+/// - To move by 1 in the second dimension: skip 4 elements (4)
+/// - To move by 1 in the third dimension: skip 1 element
 #[derive(PartialEq, Clone, Debug)]
 pub struct StridedDimension {
     pub dimension: Dimension,
     pub stride: isize,
 }
 
+/// Represents different ways to view array data in memory
+///
+/// An `ArrayView` describes the shape and access pattern for array data without
+/// owning the data itself. This allows efficient operations like slicing and
+/// transposing without copying data.
 #[derive(PartialEq, Clone, Debug)]
 pub enum ArrayView {
     /// Simple contiguous array in row-major order
+    ///
+    /// All elements are stored consecutively in memory. For a 2D array [row][col],
+    /// elements are laid out as: [0,0], [0,1], [0,2], ..., [1,0], [1,1], ...
     Contiguous { dims: Vec<Dimension> },
+
     /// Strided array view (for transposes, slices, etc.)
+    ///
+    /// Elements may not be consecutive in memory. Each dimension has an associated
+    /// stride that determines how many elements to skip to move by 1 in that dimension.
+    /// The `offset` indicates where in the underlying storage this view starts.
+    ///
+    /// For example, selecting column 1 of a 3x4 matrix creates a strided view:
+    /// - dims: [StridedDimension { dimension: Dimension(3), stride: 4 }]
+    /// - offset: 1 (start at element [0,1])
+    /// This gives us elements at positions 1, 5, 9 in the underlying storage.
     Strided {
         dims: Vec<StridedDimension>,
         offset: usize,
@@ -1390,5 +1434,206 @@ mod tests {
             Loc::default(),
         );
         assert_eq!(7, const_int_eval(&complex).unwrap());
+    }
+
+    #[test]
+    fn test_allocate_temp_array_contiguous() {
+        // Test allocate_temp_array with already contiguous view
+        struct TestContext {
+            temp_counter: u32,
+        }
+
+        impl Expr2Context for TestContext {
+            fn get_dimensions(&self, _ident: &str) -> Option<Vec<Dimension>> {
+                None
+            }
+
+            fn allocate_temp_id(&mut self) -> u32 {
+                let id = self.temp_counter;
+                self.temp_counter += 1;
+                id
+            }
+        }
+
+        let mut ctx = TestContext { temp_counter: 0 };
+        let dims = indexed_dims(&[3, 4]);
+        let contiguous_view = ArrayView::Contiguous { dims };
+
+        let array_source = Expr2::allocate_temp_array(&mut ctx, &contiguous_view);
+
+        match array_source {
+            ArraySource::Temp(id, view) => {
+                assert_eq!(id, 0);
+                match view {
+                    ArrayView::Contiguous { dims } => {
+                        assert_eq!(dims.len(), 2);
+                        assert_eq!(dims[0].len(), 3);
+                        assert_eq!(dims[1].len(), 4);
+                    }
+                    _ => panic!("Expected contiguous view"),
+                }
+            }
+            _ => panic!("Expected temp array source"),
+        }
+    }
+
+    #[test]
+    fn test_allocate_temp_array_strided() {
+        // Test allocate_temp_array with strided view
+        struct TestContext {
+            temp_counter: u32,
+        }
+
+        impl Expr2Context for TestContext {
+            fn get_dimensions(&self, _ident: &str) -> Option<Vec<Dimension>> {
+                None
+            }
+
+            fn allocate_temp_id(&mut self) -> u32 {
+                let id = self.temp_counter;
+                self.temp_counter += 1;
+                id
+            }
+        }
+
+        let mut ctx = TestContext { temp_counter: 10 };
+
+        // Create a strided view (like after a transpose or slice)
+        let strided_view = ArrayView::Strided {
+            dims: vec![
+                StridedDimension {
+                    dimension: Dimension::Indexed("row".to_string(), 3),
+                    stride: 4,
+                },
+                StridedDimension {
+                    dimension: Dimension::Indexed("col".to_string(), 2),
+                    stride: 1,
+                },
+            ],
+            offset: 5,
+        };
+
+        let array_source = Expr2::allocate_temp_array(&mut ctx, &strided_view);
+
+        match array_source {
+            ArraySource::Temp(id, view) => {
+                assert_eq!(id, 10);
+                match view {
+                    ArrayView::Contiguous { dims } => {
+                        // Should extract dimensions from strided view
+                        assert_eq!(dims.len(), 2);
+                        assert_eq!(dims[0].name(), "row");
+                        assert_eq!(dims[0].len(), 3);
+                        assert_eq!(dims[1].name(), "col");
+                        assert_eq!(dims[1].len(), 2);
+                    }
+                    _ => panic!("Expected contiguous view"),
+                }
+            }
+            _ => panic!("Expected temp array source"),
+        }
+    }
+
+    #[test]
+    fn test_transpose_2d() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let view = ArrayView::Contiguous {
+            dims: indexed_dims(&[2, 3]),
+        };
+        let transposed = view.transpose();
+
+        // Original: [[1, 2, 3], [4, 5, 6]]
+        // Transposed: [[1, 4], [2, 5], [3, 6]]
+        let expected = vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0];
+        let values: Vec<f64> = transposed.iter(&data).collect();
+        assert_eq!(values, expected);
+
+        // Check that it's a strided view with reversed dimensions
+        match transposed {
+            ArrayView::Strided { dims, offset } => {
+                assert_eq!(dims.len(), 2);
+                assert_eq!(dims[0].dimension.len(), 3); // was column dimension
+                assert_eq!(dims[1].dimension.len(), 2); // was row dimension
+                assert_eq!(dims[0].stride, 1);
+                assert_eq!(dims[1].stride, 3);
+                assert_eq!(offset, 0);
+            }
+            _ => panic!("Expected Strided view after transpose"),
+        }
+    }
+
+    #[test]
+    fn test_transpose_3d() {
+        let data: Vec<f64> = (1..=24).map(|i| i as f64).collect();
+        let view = ArrayView::Contiguous {
+            dims: indexed_dims(&[2, 3, 4]),
+        };
+        let transposed = view.transpose();
+
+        // Verify a few specific values
+        let values: Vec<f64> = transposed.iter(&data).collect();
+        assert_eq!(values.len(), 24);
+
+        // For a 3D array with shape [2, 3, 4], transpose reverses to [4, 3, 2]
+        // Original layout in memory (row-major):
+        // [0,0,0]=1, [0,0,1]=2, [0,0,2]=3, [0,0,3]=4,
+        // [0,1,0]=5, [0,1,1]=6, [0,1,2]=7, [0,1,3]=8,
+        // [0,2,0]=9, [0,2,1]=10, [0,2,2]=11, [0,2,3]=12,
+        // [1,0,0]=13, [1,0,1]=14, [1,0,2]=15, [1,0,3]=16,
+        // [1,1,0]=17, [1,1,1]=18, [1,1,2]=19, [1,1,3]=20,
+        // [1,2,0]=21, [1,2,1]=22, [1,2,2]=23, [1,2,3]=24
+
+        // After transpose, the new shape is [4, 3, 2] and the iteration order is:
+        // [0,0,0]=1, [0,0,1]=13, [0,1,0]=5, [0,1,1]=17, [0,2,0]=9, [0,2,1]=21,
+        // [1,0,0]=2, [1,0,1]=14, ...
+        assert_eq!(values[0], 1.0); // [0,0,0] in transposed = [0,0,0] in original
+        assert_eq!(values[1], 13.0); // [0,0,1] in transposed = [1,0,0] in original
+
+        // Check dimensions are reversed
+        match transposed {
+            ArrayView::Strided { dims, offset } => {
+                assert_eq!(dims.len(), 3);
+                assert_eq!(dims[0].dimension.len(), 4); // was last dimension
+                assert_eq!(dims[1].dimension.len(), 3); // was middle dimension
+                assert_eq!(dims[2].dimension.len(), 2); // was first dimension
+                assert_eq!(offset, 0);
+            }
+            _ => panic!("Expected Strided view after transpose"),
+        }
+    }
+
+    #[test]
+    fn test_transpose_strided() {
+        // Test transposing an already strided view
+        let strided_view = ArrayView::Strided {
+            dims: vec![
+                StridedDimension {
+                    dimension: Dimension::Indexed("row".to_string(), 3),
+                    stride: 4,
+                },
+                StridedDimension {
+                    dimension: Dimension::Indexed("col".to_string(), 2),
+                    stride: 1,
+                },
+            ],
+            offset: 0,
+        };
+
+        let transposed = strided_view.transpose();
+
+        match transposed {
+            ArrayView::Strided { dims, offset } => {
+                assert_eq!(dims.len(), 2);
+                // Dimensions should be reversed
+                assert_eq!(dims[0].dimension.name(), "col");
+                assert_eq!(dims[0].dimension.len(), 2);
+                assert_eq!(dims[0].stride, 1);
+                assert_eq!(dims[1].dimension.name(), "row");
+                assert_eq!(dims[1].dimension.len(), 3);
+                assert_eq!(dims[1].stride, 4);
+                assert_eq!(offset, 0);
+            }
+            _ => panic!("Expected Strided view"),
+        }
     }
 }
