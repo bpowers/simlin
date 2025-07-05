@@ -1003,109 +1003,126 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn test_contiguous_iterator() {
-        let data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-        ];
-        let view = ArrayView::Contiguous {
-            dims: indexed_dims(&[3, 4]),
-        };
-
-        let values: Vec<f64> = view.iter(&data).collect();
-        assert_eq!(values, data);
-        assert_eq!(view.size(), 12);
+    // Common test context for Expr2Context
+    struct TestContext {
+        temp_counter: u32,
+        dimensions: HashMap<String, Vec<Dimension>>,
     }
 
-    #[test]
-    fn test_transpose() {
-        let data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-        ];
-        let view = ArrayView::Contiguous {
-            dims: indexed_dims(&[3, 4]),
-        };
-        let transposed = view.transpose();
+    impl TestContext {
+        fn new() -> Self {
+            Self {
+                temp_counter: 0,
+                dimensions: HashMap::new(),
+            }
+        }
 
-        // Original: [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
-        // Transposed: [[1, 5, 9], [2, 6, 10], [3, 7, 11], [4, 8, 12]]
-        let expected = vec![
-            1.0, 5.0, 9.0, 2.0, 6.0, 10.0, 3.0, 7.0, 11.0, 4.0, 8.0, 12.0,
-        ];
-        let values: Vec<f64> = transposed.iter(&data).collect();
-        assert_eq!(values, expected);
+        fn with_counter(temp_counter: u32) -> Self {
+            Self {
+                temp_counter,
+                dimensions: HashMap::new(),
+            }
+        }
+    }
 
-        // Check that it's a strided view
-        match transposed {
-            ArrayView::Strided { .. } => (),
-            _ => panic!("Expected Strided view after transpose"),
+    impl Expr2Context for TestContext {
+        fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>> {
+            self.dimensions.get(ident).cloned()
+        }
+
+        fn allocate_temp_id(&mut self) -> u32 {
+            let id = self.temp_counter;
+            self.temp_counter += 1;
+            id
+        }
+    }
+
+    // Helper to create a row slice view
+    fn row_slice_view(cols: usize, row_idx: usize) -> ArrayView {
+        ArrayView::Strided {
+            dims: vec![StridedDimension {
+                dimension: Dimension::Indexed("col".to_string(), cols as u32),
+                stride: 1,
+            }],
+            offset: row_idx * cols,
+        }
+    }
+
+    // Helper to create a column slice view
+    fn col_slice_view(rows: usize, cols: usize, col_idx: usize) -> ArrayView {
+        ArrayView::Strided {
+            dims: vec![StridedDimension {
+                dimension: Dimension::Indexed("row".to_string(), rows as u32),
+                stride: cols as isize,
+            }],
+            offset: col_idx,
         }
     }
 
     #[test]
-    fn test_row_slice() {
+    fn test_array_iterators() {
         let data = vec![
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ];
-        // Select row 1 (second row): [5, 6, 7, 8]
-        let view = ArrayView::Strided {
-            dims: vec![StridedDimension {
-                dimension: Dimension::Indexed("col".to_string(), 4),
-                stride: 1,
-            }],
-            offset: 4, // Skip first row (4 elements)
-        };
 
-        // Row slice with offset is not contiguous
-        assert!(!view.is_contiguous());
+        struct TestCase {
+            name: &'static str,
+            view: ArrayView,
+            expected: Vec<f64>,
+            expected_size: usize,
+        }
 
-        let values: Vec<f64> = view.iter(&data).collect();
-        assert_eq!(values, vec![5.0, 6.0, 7.0, 8.0]);
-    }
-
-    #[test]
-    fn test_column_slice() {
-        let data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-        ];
-        // Select column 1 (second column): [2, 6, 10]
-        let view = ArrayView::Strided {
-            dims: vec![StridedDimension {
-                dimension: Dimension::Indexed("row".to_string(), 3),
-                stride: 4, // Skip 4 elements to get to next row
-            }],
-            offset: 1, // Start at second element
-        };
-
-        // Column slice is not contiguous (stride != 1 for last dimension)
-        assert!(!view.is_contiguous());
-
-        let values: Vec<f64> = view.iter(&data).collect();
-        assert_eq!(values, vec![2.0, 6.0, 10.0]);
-    }
-
-    #[test]
-    fn test_subarray() {
-        let data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-        ];
-        // Select a 2x2 subarray from the middle: [[6, 7], [10, 11]]
-        let view = ArrayView::Strided {
-            dims: vec![
-                StridedDimension {
-                    dimension: Dimension::Indexed("row".to_string(), 2),
-                    stride: 4,
+        let test_cases = vec![
+            TestCase {
+                name: "contiguous 3x4",
+                view: ArrayView::Contiguous {
+                    dims: indexed_dims(&[3, 4]),
                 },
-                StridedDimension {
-                    dimension: Dimension::Indexed("col".to_string(), 2),
-                    stride: 1,
+                expected: data.clone(),
+                expected_size: 12,
+            },
+            TestCase {
+                name: "row slice (second row)",
+                view: row_slice_view(4, 1),
+                expected: vec![5.0, 6.0, 7.0, 8.0],
+                expected_size: 4,
+            },
+            TestCase {
+                name: "column slice (second column)",
+                view: col_slice_view(3, 4, 1),
+                expected: vec![2.0, 6.0, 10.0],
+                expected_size: 3,
+            },
+            TestCase {
+                name: "2x2 subarray from middle",
+                view: ArrayView::Strided {
+                    dims: vec![
+                        StridedDimension {
+                            dimension: Dimension::Indexed("row".to_string(), 2),
+                            stride: 4,
+                        },
+                        StridedDimension {
+                            dimension: Dimension::Indexed("col".to_string(), 2),
+                            stride: 1,
+                        },
+                    ],
+                    offset: 5, // Start at element 6 (index 5)
                 },
-            ],
-            offset: 5, // Start at element 6 (index 5)
-        };
+                expected: vec![6.0, 7.0, 10.0, 11.0],
+                expected_size: 4,
+            },
+        ];
 
-        let values: Vec<f64> = view.iter(&data).collect();
-        assert_eq!(values, vec![6.0, 7.0, 10.0, 11.0]);
+        for tc in test_cases {
+            let values: Vec<f64> = tc.view.iter(&data).collect();
+            assert_eq!(values, tc.expected, "Failed for {}", tc.name);
+            assert_eq!(
+                tc.view.size(),
+                tc.expected_size,
+                "Failed size for {}",
+                tc.name
+            );
+        }
     }
 
     #[test]
@@ -1359,123 +1376,147 @@ mod tests {
 
     #[test]
     fn test_const_int_eval() {
-        // Basic constants
-        assert_eq!(
-            0,
-            const_int_eval(&Expr2::Const("0".to_string(), 0.0, Loc::default())).unwrap()
-        );
-        assert_eq!(
-            1,
-            const_int_eval(&Expr2::Const("1".to_string(), 1.0, Loc::default())).unwrap()
-        );
-        assert_eq!(
-            -1,
-            const_int_eval(&Expr2::Const("-1".to_string(), -1.0, Loc::default())).unwrap()
-        );
-        assert_eq!(
-            42,
-            const_int_eval(&Expr2::Const("42".to_string(), 42.0, Loc::default())).unwrap()
-        );
+        // Helper to create const expression
+        fn const_expr(val: f64) -> Expr2 {
+            Expr2::Const(val.to_string(), val, Loc::default())
+        }
 
-        // Rounds correctly
-        assert_eq!(
-            3,
-            const_int_eval(&Expr2::Const("3.0".to_string(), 3.0, Loc::default())).unwrap()
-        );
+        // Test basic constants
+        let const_cases = vec![
+            (0.0, 0),
+            (1.0, 1),
+            (-1.0, -1),
+            (42.0, 42),
+            (3.0, 3), // Tests rounding
+        ];
 
-        // Unary operations
-        let neg_five = Expr2::Op1(
-            UnaryOp::Negative,
-            Box::new(Expr2::Const("5".to_string(), 5.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(-5, const_int_eval(&neg_five).unwrap());
+        for (val, expected) in const_cases {
+            assert_eq!(expected, const_int_eval(&const_expr(val)).unwrap());
+        }
 
-        // Binary operations
-        let two_plus_three = Expr2::Op2(
-            BinaryOp::Add,
-            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
-            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(5, const_int_eval(&two_plus_three).unwrap());
-
-        let four_minus_one = Expr2::Op2(
-            BinaryOp::Sub,
-            Box::new(Expr2::Const("4".to_string(), 4.0, Loc::default())),
-            Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(3, const_int_eval(&four_minus_one).unwrap());
-
-        // Division truncates
-        let two_div_three = Expr2::Op2(
-            BinaryOp::Div,
-            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
-            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(0, const_int_eval(&two_div_three).unwrap());
-
-        // Division by zero returns 0
-        let seven_div_zero = Expr2::Op2(
-            BinaryOp::Div,
-            Box::new(Expr2::Const("7".to_string(), 7.0, Loc::default())),
-            Box::new(Expr2::Const("0".to_string(), 0.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(0, const_int_eval(&seven_div_zero).unwrap());
-
-        // Modulo
-        let fifteen_mod_seven = Expr2::Op2(
-            BinaryOp::Mod,
-            Box::new(Expr2::Const("15".to_string(), 15.0, Loc::default())),
-            Box::new(Expr2::Const("7".to_string(), 7.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(1, const_int_eval(&fifteen_mod_seven).unwrap());
-
-        // Exponentiation
-        let three_pow_three = Expr2::Op2(
-            BinaryOp::Exp,
-            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
-            Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(27, const_int_eval(&three_pow_three).unwrap());
-
-        // Comparison operators
-        let four_gt_two = Expr2::Op2(
-            BinaryOp::Gt,
-            Box::new(Expr2::Const("4".to_string(), 4.0, Loc::default())),
-            Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
-            None,
-            Loc::default(),
-        );
-        assert_eq!(1, const_int_eval(&four_gt_two).unwrap());
-
-        // Error cases
-        assert!(const_int_eval(&Expr2::Const("3.5".to_string(), 3.5, Loc::default())).is_err());
+        // Test error case
+        assert!(const_int_eval(&const_expr(3.5)).is_err());
         assert!(const_int_eval(&Expr2::Var("foo".to_string(), None, Loc::default())).is_err());
 
-        // Complex expression
+        // Test unary operations
+        let unary_cases = vec![
+            (UnaryOp::Negative, 5, -5),
+            (UnaryOp::Positive, 5, 5),
+            (UnaryOp::Not, 0, 1),
+            (UnaryOp::Not, 5, 0),
+        ];
+
+        for (op, input, expected) in unary_cases {
+            let expr = Expr2::Op1(op, Box::new(const_expr(input as f64)), None, Loc::default());
+            assert_eq!(expected, const_int_eval(&expr).unwrap());
+        }
+
+        // Test binary operations
+        struct BinaryTestCase {
+            op: BinaryOp,
+            left: i32,
+            right: i32,
+            expected: i32,
+        }
+
+        let binary_cases = vec![
+            BinaryTestCase {
+                op: BinaryOp::Add,
+                left: 2,
+                right: 3,
+                expected: 5,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Sub,
+                left: 4,
+                right: 1,
+                expected: 3,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Mul,
+                left: 3,
+                right: 4,
+                expected: 12,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Div,
+                left: 7,
+                right: 3,
+                expected: 2,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Div,
+                left: 7,
+                right: 0,
+                expected: 0,
+            }, // div by zero
+            BinaryTestCase {
+                op: BinaryOp::Mod,
+                left: 15,
+                right: 7,
+                expected: 1,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Exp,
+                left: 3,
+                right: 3,
+                expected: 27,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Gt,
+                left: 4,
+                right: 2,
+                expected: 1,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Lt,
+                left: 2,
+                right: 4,
+                expected: 1,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Eq,
+                left: 3,
+                right: 3,
+                expected: 1,
+            },
+            BinaryTestCase {
+                op: BinaryOp::Neq,
+                left: 3,
+                right: 4,
+                expected: 1,
+            },
+        ];
+
+        for tc in binary_cases {
+            let expr = Expr2::Op2(
+                tc.op,
+                Box::new(const_expr(tc.left as f64)),
+                Box::new(const_expr(tc.right as f64)),
+                None,
+                Loc::default(),
+            );
+            assert_eq!(
+                tc.expected,
+                const_int_eval(&expr).unwrap(),
+                "Failed for {:?} {} {}",
+                tc.op,
+                tc.left,
+                tc.right
+            );
+        }
+
+        // Test complex expression: (2 * 3) + 1 = 7
         let complex = Expr2::Op2(
             BinaryOp::Add,
             Box::new(Expr2::Op2(
                 BinaryOp::Mul,
-                Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
-                Box::new(Expr2::Const("3".to_string(), 3.0, Loc::default())),
+                Box::new(const_expr(2.0)),
+                Box::new(const_expr(3.0)),
                 None,
                 Loc::default(),
             )),
-            Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(const_expr(1.0)),
             None,
             Loc::default(),
         );
@@ -1485,23 +1526,7 @@ mod tests {
     #[test]
     fn test_allocate_temp_array_contiguous() {
         // Test allocate_temp_array with already contiguous view
-        struct TestContext {
-            temp_counter: u32,
-        }
-
-        impl Expr2Context for TestContext {
-            fn get_dimensions(&self, _ident: &str) -> Option<Vec<Dimension>> {
-                None
-            }
-
-            fn allocate_temp_id(&mut self) -> u32 {
-                let id = self.temp_counter;
-                self.temp_counter += 1;
-                id
-            }
-        }
-
-        let mut ctx = TestContext { temp_counter: 0 };
+        let mut ctx = TestContext::new();
         let dims = indexed_dims(&[3, 4]);
         let contiguous_view = ArrayView::Contiguous { dims };
 
@@ -1527,23 +1552,7 @@ mod tests {
     #[test]
     fn test_allocate_temp_array_strided() {
         // Test allocate_temp_array with strided view
-        struct TestContext {
-            temp_counter: u32,
-        }
-
-        impl Expr2Context for TestContext {
-            fn get_dimensions(&self, _ident: &str) -> Option<Vec<Dimension>> {
-                None
-            }
-
-            fn allocate_temp_id(&mut self) -> u32 {
-                let id = self.temp_counter;
-                self.temp_counter += 1;
-                id
-            }
-        }
-
-        let mut ctx = TestContext { temp_counter: 10 };
+        let mut ctx = TestContext::with_counter(10);
 
         // Create a strided view (like after a transpose or slice)
         let strided_view = ArrayView::Strided {
