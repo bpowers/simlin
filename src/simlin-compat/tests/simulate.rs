@@ -337,6 +337,14 @@ fn simulates_sum() {
     simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
 }
 
+#[test]
+#[ignore]
+fn simulates_2d_array() {
+    simulate_path(
+        "../../test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
+    );
+}
+
 // #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
 // fn simulates_sdeverywhere(resource: &str) {
 //     let resource = format!("../../{}", resource);

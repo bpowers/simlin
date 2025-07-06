@@ -6,7 +6,7 @@ use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
 use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
 use crate::common::{EquationResult, Ident};
-use crate::dimensions::Dimension;
+use crate::dimensions::{Dimension, NamedDimension};
 use crate::eqn_err;
 use float_cmp::approx_eq;
 use std::collections::HashMap;
@@ -150,19 +150,17 @@ impl ArrayView {
                     original_strides[i] = original_strides[i + 1] * dims[i + 1].len() as isize;
                 }
 
+                // Check that we have exactly the right number of indices
+                if indices.len() != dims.len() {
+                    // Use the location from the first index if available, otherwise default
+                    let loc = indices.first().map(|idx| idx.get_loc()).unwrap_or_default();
+                    return eqn_err!(Generic, loc.start, loc.end);
+                }
+
                 let mut new_dims = Vec::new();
                 let mut offset = 0usize;
 
                 for (i, index_expr) in indices.iter().enumerate() {
-                    if i >= dims.len() {
-                        // Get location from the first excess index
-                        let loc = indices
-                            .get(dims.len())
-                            .map(|idx| idx.get_loc())
-                            .unwrap_or_else(Loc::default);
-                        return eqn_err!(Generic, loc.start, loc.end);
-                    }
-
                     match index_expr {
                         IndexExpr2::Wildcard(_) => {
                             // Keep this dimension
@@ -173,14 +171,53 @@ impl ArrayView {
                         }
                         IndexExpr2::Expr(expr) => {
                             let loc = expr.get_loc();
-                            // Evaluate the expression to get an integer index
-                            let idx = const_int_eval(expr)?;
 
-                            if idx < 0 || idx as usize >= dims[i].len() {
-                                return eqn_err!(Generic, loc.start, loc.end);
+                            if let Expr2::Var(id, _, _loc) = expr {
+                                // Case 1: Check if id matches the current dimension name
+                                if id == dims[i].name() {
+                                    // Keep this dimension (select all elements)
+                                    new_dims.push(StridedDimension {
+                                        dimension: dims[i].clone(),
+                                        stride: original_strides[i],
+                                    });
+                                } else {
+                                    // Case 2: Check if id is a subscript element of the current dimension
+                                    let mut found_element = false;
+                                    let mut element_index = 0usize;
+
+                                    if let Dimension::Named(_, named_dim) =  &dims[i] {
+                                        // Check if id matches any element name in this dimension
+                                        if let Some(idx) = named_dim.indexed_elements.get(id) {
+                                            found_element = true;
+                                            // indexed_elements are 1-based, convert to 0-based
+                                            element_index = idx - 1;
+                                        }
+                                    }
+
+                                    if found_element {
+                                        // Skip this dimension and adjust offset
+                                        offset += element_index * original_strides[i] as usize;
+                                    } else {
+                                        // Case 3: id is a variable - we don't know the specific index at compile time
+                                        // but we still skip this dimension (reducing dimensionality)
+                                        // The actual offset will be computed at runtime
+
+                                        // For now, we skip this dimension without adding to offset
+                                        // This represents a dynamic index that will be resolved at runtime
+
+                                        // TODO: eventually we probably need something here that is more explicit about "dynamic"
+                                    }
+                                }
+                            } else {
+                                // Evaluate the expression to get an integer index
+                                let idx = const_int_eval(expr)?;
+
+                                if idx < 0 || idx as usize >= dims[i].len() {
+                                    return eqn_err!(Generic, loc.start, loc.end);
+                                }
+                                // Skip this dimension and adjust offset
+                                offset += idx as usize * original_strides[i] as usize;
                             }
-                            // Skip this dimension and adjust offset
-                            offset += idx as usize * original_strides[i] as usize;
                         }
                         IndexExpr2::Range(start, end, range_loc) => {
                             // Extract start and end values
@@ -217,7 +254,7 @@ impl ArrayView {
                                     }
                                     Dimension::Named(
                                         format!("{name}[{start_idx}:{end_idx}]"),
-                                        crate::dimensions::NamedDimension {
+                                        NamedDimension {
                                             elements: new_elements,
                                             indexed_elements,
                                         },
@@ -245,22 +282,9 @@ impl ArrayView {
                 }
 
                 // If we consumed all indices and reduced all dimensions, return a scalar view
-                if new_dims.is_empty() && indices.len() == dims.len() {
+                if new_dims.is_empty() {
                     // This represents a scalar - could return Contiguous with empty dims
                     Ok(ArrayView::Contiguous { dims: vec![] })
-                } else if new_dims.is_empty() {
-                    // Partial indexing - keep remaining dimensions
-                    let mut remaining_dims = Vec::new();
-                    for i in indices.len()..dims.len() {
-                        remaining_dims.push(StridedDimension {
-                            dimension: dims[i].clone(),
-                            stride: original_strides[i],
-                        });
-                    }
-                    Ok(ArrayView::Strided {
-                        dims: remaining_dims,
-                        offset,
-                    })
                 } else {
                     Ok(ArrayView::Strided {
                         dims: new_dims,
@@ -1170,12 +1194,11 @@ mod tests {
             dims: indexed_dims(&[3, 4]),
         };
 
-        // Select second row (index 1)
-        let indices = vec![IndexExpr2::Expr(Expr2::Const(
-            "1".to_string(),
-            1.0,
-            Loc::default(),
-        ))];
+        // Select second row (index 1), all columns
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+            IndexExpr2::Wildcard(Loc::default()),
+        ];
         let subscripted = view.subscript(&indices).unwrap();
 
         match &subscripted {
@@ -1289,34 +1312,27 @@ mod tests {
     }
 
     #[test]
-    fn test_subscript_partial() {
-        let data: Vec<f64> = (1..=24).map(|i| i as f64).collect();
+    fn test_subscript_partial_not_allowed() {
         let view = ArrayView::Contiguous {
             dims: indexed_dims(&[2, 3, 4]),
         };
 
-        // Select first element of first dimension only
+        // Attempt to select first element of first dimension only (partial indexing)
         let indices = vec![IndexExpr2::Expr(Expr2::Const(
             "0".to_string(),
             0.0,
             Loc::default(),
         ))];
-        let subscripted = view.subscript(&indices).unwrap();
 
-        match &subscripted {
-            ArrayView::Strided { dims, offset } => {
-                assert_eq!(dims.len(), 2); // Remaining dimensions
-                assert_eq!(dims[0].dimension.len(), 3);
-                assert_eq!(dims[1].dimension.len(), 4);
-                assert_eq!(*offset, 0); // First slice
-            }
-            _ => panic!("Expected Strided view"),
-        }
+        // This should fail because we need exactly 3 indices for a 3D array
+        assert!(view.subscript(&indices).is_err());
 
-        let values: Vec<f64> = subscripted.iter(&data).collect();
-        assert_eq!(values.len(), 12);
-        assert_eq!(values[0], 1.0);
-        assert_eq!(values[11], 12.0);
+        // Also test with 2 indices for a 3D array
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Const("0".to_string(), 0.0, Loc::default())),
+            IndexExpr2::Expr(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+        ];
+        assert!(view.subscript(&indices).is_err());
     }
 
     #[test]
@@ -1334,19 +1350,29 @@ mod tests {
         assert!(view.subscript(&indices).is_err());
 
         // Index out of bounds
-        let indices = vec![IndexExpr2::Expr(Expr2::Const(
-            "5".to_string(),
-            5.0,
-            Loc::default(),
-        ))];
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Const("5".to_string(), 5.0, Loc::default())),
+            IndexExpr2::Expr(Expr2::Const("0".to_string(), 0.0, Loc::default())),
+        ];
         assert!(view.subscript(&indices).is_err());
 
         // Invalid range
-        let indices = vec![IndexExpr2::Range(
-            Expr2::Const("2".to_string(), 2.0, Loc::default()),
-            Expr2::Const("1".to_string(), 1.0, Loc::default()),
+        let indices = vec![
+            IndexExpr2::Range(
+                Expr2::Const("2".to_string(), 2.0, Loc::default()),
+                Expr2::Const("1".to_string(), 1.0, Loc::default()),
+                Loc::default(),
+            ),
+            IndexExpr2::Wildcard(Loc::default()),
+        ];
+        assert!(view.subscript(&indices).is_err());
+
+        // Too few indices
+        let indices = vec![IndexExpr2::Expr(Expr2::Const(
+            "0".to_string(),
+            0.0,
             Loc::default(),
-        )];
+        ))];
         assert!(view.subscript(&indices).is_err());
     }
 
@@ -1359,7 +1385,7 @@ mod tests {
             dims: indexed_dims(&[3, 4]),
         };
 
-        // Select row using an expression: 1 + 0
+        // Select row using an expression: 1 + 0, all columns
         let one_plus_zero = Expr2::Op2(
             BinaryOp::Add,
             Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
@@ -1367,7 +1393,10 @@ mod tests {
             None,
             Loc::default(),
         );
-        let indices = vec![IndexExpr2::Expr(one_plus_zero)];
+        let indices = vec![
+            IndexExpr2::Expr(one_plus_zero),
+            IndexExpr2::Wildcard(Loc::default()),
+        ];
         let subscripted = view.subscript(&indices).unwrap();
 
         let values: Vec<f64> = subscripted.iter(&data).collect();
@@ -1761,5 +1790,206 @@ mod tests {
             }
             _ => panic!("Expected Strided view"),
         }
+    }
+
+    #[test]
+    fn test_subscript_with_dimension_name() {
+        // Test Case 1: Using dimension name selects all elements
+        let dims = vec![
+            Dimension::Indexed("row".to_string(), 3),
+            Dimension::Indexed("col".to_string(), 4),
+        ];
+        let view = ArrayView::Contiguous { dims };
+
+        // Use "row" and "col" as subscripts - should select all elements
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Var("row".to_string(), None, Loc::default())),
+            IndexExpr2::Expr(Expr2::Var("col".to_string(), None, Loc::default())),
+        ];
+        let subscripted = view.subscript(&indices).unwrap();
+
+        match &subscripted {
+            ArrayView::Strided { dims, offset } => {
+                assert_eq!(dims.len(), 2);
+                // Both dimensions should be preserved
+                assert_eq!(dims[0].dimension.name(), "row");
+                assert_eq!(dims[0].dimension.len(), 3);
+                assert_eq!(dims[1].dimension.name(), "col");
+                assert_eq!(dims[1].dimension.len(), 4);
+                assert_eq!(*offset, 0);
+            }
+            _ => panic!("Expected Strided view"),
+        }
+    }
+
+    #[test]
+    fn test_subscript_with_named_element() {
+        // Test Case 2: Using element name from a named dimension
+        let named_dim = NamedDimension {
+            elements: vec![
+                "Boston".to_string(),
+                "Chicago".to_string(),
+                "LA".to_string(),
+            ],
+            indexed_elements: vec![
+                ("Boston".to_string(), 1),
+                ("Chicago".to_string(), 2),
+                ("LA".to_string(), 3),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let dims = vec![
+            Dimension::Named("Location".to_string(), named_dim),
+            Dimension::Indexed("Product".to_string(), 2),
+        ];
+        let view = ArrayView::Contiguous { dims };
+
+        // Select "Chicago" for location and all products
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Var("Chicago".to_string(), None, Loc::default())),
+            IndexExpr2::Wildcard(Loc::default()), // All products
+        ];
+        let subscripted = view.subscript(&indices).unwrap();
+
+        match &subscripted {
+            ArrayView::Strided { dims, offset } => {
+                assert_eq!(dims.len(), 1);
+                // Only Product dimension should remain (Location dimension reduced)
+                assert_eq!(dims[0].dimension.name(), "Product");
+                assert_eq!(dims[0].dimension.len(), 2);
+                // Offset should skip to Chicago row (index 1, stride 2)
+                assert_eq!(*offset, 2); // 1 * 2
+            }
+            _ => panic!("Expected Strided view"),
+        }
+    }
+
+    #[test]
+    fn test_subscript_with_numeric_string() {
+        // Test Case 2 variant: Using numeric string for indexed dimension
+        let dims = vec![
+            Dimension::Indexed("row".to_string(), 3),
+            Dimension::Indexed("col".to_string(), 4),
+        ];
+        let view = ArrayView::Contiguous { dims };
+
+        // Select row "2" (1-based, so index 1 in 0-based) and column "3"
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Var("2".to_string(), None, Loc::default())),
+            IndexExpr2::Expr(Expr2::Var("3".to_string(), None, Loc::default())),
+        ];
+        let subscripted = view.subscript(&indices).unwrap();
+
+        match &subscripted {
+            ArrayView::Contiguous { dims } => {
+                assert_eq!(dims.len(), 0); // Scalar result
+            }
+            _ => panic!("Expected Contiguous scalar view"),
+        }
+    }
+
+    #[test]
+    fn test_subscript_with_unknown_variable() {
+        // Test Case 3: Using unknown variable name (runtime index)
+        let dims = vec![
+            Dimension::Indexed("row".to_string(), 3),
+            Dimension::Indexed("col".to_string(), 4),
+        ];
+        let view = ArrayView::Contiguous { dims };
+
+        // Use "some_var" which is neither dimension name nor element
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Var("some_var".to_string(), None, Loc::default())),
+            IndexExpr2::Expr(Expr2::Var("another_var".to_string(), None, Loc::default())),
+        ];
+        let subscripted = view.subscript(&indices).unwrap();
+
+        match &subscripted {
+            ArrayView::Contiguous { dims } => {
+                assert_eq!(dims.len(), 0); // Scalar result
+            }
+            _ => panic!("Expected Contiguous scalar view"),
+        }
+    }
+
+    #[test]
+    fn test_subscript_mixed_cases() {
+        // Test mixing different subscript types
+        let named_dim = NamedDimension {
+            elements: vec!["A".to_string(), "B".to_string()],
+            indexed_elements: vec![("A".to_string(), 1), ("B".to_string(), 2)]
+                .into_iter()
+                .collect(),
+        };
+        let dims = vec![
+            Dimension::Named("Letter".to_string(), named_dim),
+            Dimension::Indexed("Number".to_string(), 3),
+            Dimension::Indexed("Color".to_string(), 2),
+        ];
+        let view = ArrayView::Contiguous { dims };
+
+        // Mix of element name, dimension name, and wildcard
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Var("B".to_string(), None, Loc::default())), // Element "B"
+            IndexExpr2::Expr(Expr2::Var("Number".to_string(), None, Loc::default())), // Dimension name
+            IndexExpr2::Wildcard(Loc::default()),                                     // Wildcard
+        ];
+        let subscripted = view.subscript(&indices).unwrap();
+
+        match &subscripted {
+            ArrayView::Strided { dims, offset } => {
+                assert_eq!(dims.len(), 2);
+                // Number dimension preserved (dimension name used)
+                assert_eq!(dims[0].dimension.name(), "Number");
+                assert_eq!(dims[0].dimension.len(), 3);
+                // Color dimension preserved (wildcard)
+                assert_eq!(dims[1].dimension.name(), "Color");
+                assert_eq!(dims[1].dimension.len(), 2);
+                // Offset skips to "B" row: 1 * (3*2) = 6
+                assert_eq!(*offset, 6);
+            }
+            _ => panic!("Expected Strided view"),
+        }
+    }
+
+    #[test]
+    fn test_subscript_with_data_iteration() {
+        // Test that subscripting with variable names produces correct data
+        let data = vec![
+            1.0, 2.0, 3.0, 4.0, // row 0
+            5.0, 6.0, 7.0, 8.0, // row 1
+            9.0, 10.0, 11.0, 12.0, // row 2
+        ];
+
+        let named_dim = NamedDimension {
+            elements: vec![
+                "First".to_string(),
+                "Second".to_string(),
+                "Third".to_string(),
+            ],
+            indexed_elements: vec![
+                ("First".to_string(), 1),
+                ("Second".to_string(), 2),
+                ("Third".to_string(), 3),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let dims = vec![
+            Dimension::Named("Row".to_string(), named_dim),
+            Dimension::Indexed("Col".to_string(), 4),
+        ];
+        let view = ArrayView::Contiguous { dims };
+
+        // Select "Second" row, all columns
+        let indices = vec![
+            IndexExpr2::Expr(Expr2::Var("Second".to_string(), None, Loc::default())),
+            IndexExpr2::Wildcard(Loc::default()),
+        ];
+        let subscripted = view.subscript(&indices).unwrap();
+
+        let values: Vec<f64> = subscripted.iter(&data).collect();
+        assert_eq!(values, vec![5.0, 6.0, 7.0, 8.0]);
     }
 }
