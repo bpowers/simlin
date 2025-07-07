@@ -185,7 +185,7 @@ impl ArrayView {
                                     let mut found_element = false;
                                     let mut element_index = 0usize;
 
-                                    if let Dimension::Named(_, named_dim) =  &dims[i] {
+                                    if let Dimension::Named(_, named_dim) = &dims[i] {
                                         // Check if id matches any element name in this dimension
                                         if let Some(idx) = named_dim.indexed_elements.get(id) {
                                             found_element = true;
