@@ -4,46 +4,13 @@
 
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
-use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
+use crate::builtins::{walk_builtin_expr, BuiltinContents, BuiltinFn, Loc};
 use crate::common::{EquationResult, Ident};
-use crate::dimensions::{Dimension, NamedDimension};
+use crate::dimensions::{Dimension, NamedDimension, StridedDimension};
 use crate::eqn_err;
 use float_cmp::approx_eq;
 use std::collections::HashMap;
 use std::iter::Iterator;
-
-/// Dimension information for non-contiguous array views
-///
-/// `StridedDimension` is used only in `ArrayView::Strided` for views where
-/// elements are not stored consecutively in memory (e.g., after transpose,
-/// column/row selection, or slicing operations). For normal contiguous arrays,
-/// `ArrayView::Contiguous` is used instead, which only needs dimension sizes
-/// since strides can be computed implicitly assuming row-major order.
-///
-/// A `StridedDimension` describes how to iterate through one dimension of a
-/// strided array view. The key insight is that `dimension.len()` represents
-/// the number of elements in this dimension of the *view*, not the underlying
-/// storage.
-///
-/// For example, if you have a 3x4 matrix and select column 1, you get a view
-/// with shape [3]. The `StridedDimension` would be:
-/// - `dimension`: a Dimension with length 3 (the view has 3 elements)
-/// - `stride`: 4 (skip 4 elements in storage to get to the next row)
-///
-/// The stride tells you how many elements to skip in the underlying flat
-/// storage to move by 1 in this dimension. For a contiguous row-major array,
-/// the rightmost dimension has stride 1, and each dimension to the left has
-/// a stride equal to the product of all dimension sizes to its right.
-///
-/// Example: A 2x3x4 array in row-major order has strides [12, 4, 1]:
-/// - To move by 1 in the first dimension: skip 12 elements (3*4)
-/// - To move by 1 in the second dimension: skip 4 elements (4)
-/// - To move by 1 in the third dimension: skip 1 element
-#[derive(PartialEq, Clone, Debug)]
-pub struct StridedDimension {
-    pub dimension: Dimension,
-    pub stride: isize,
-}
 
 /// Represents different ways to view array data in memory
 ///

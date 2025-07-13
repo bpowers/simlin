@@ -2,7 +2,63 @@
 
 ## Overview
 
-This document outlines the design for comprehensive array support in the simlin-engine, building upon the existing foundation while addressing gaps identified through analysis of the XMILE specification, current implementation, and test requirements.
+This document outlines the design for comprehensive array support in `simlin-engine`, which is needed to run large existing and important models.
+It builds upon the existing foundation while addressing gaps with whats outlined in the XMILE specification, current implementation, and test requirements.
+
+## High-level design
+
+System dynamics models as specified in the [XMILE standard](./xmile-v1.0.html) support a rich syntax around accessing and slicing arrays, much of which (e.g., `array[time]` or `array[some_variable]`) is dynamic simulation-time behavior.
+This means we cannot determine exact strides, offsets, or even which elements will be accessed during the equation parsing or compilation. 
+
+### Multi-Phase Array Handling
+
+1. **Parser (Expr0)**: Captures all array syntax including subscripts, transpose, dimension positions (DONE)
+2. **Type Checking (Expr2)**: Focuses on: (IN PROGRESS)
+   - Computing **maximum** array bounds (conservative estimates)
+   - Basic array-size compatibility checks
+   - Determining if subscripts are static or dynamic
+   - Calculating temporary storage requirements, e.g. uniquely numbering temporaries
+3. **Compiler**: Static optimizations and efficiently preparing for runtime evaluation: (TODO)
+   - Pulls to "compile time" what we can, e.g. stride calculations for static subscripts
+   - View creation (transpose, slicing)
+   - Identifies how much temporary storage to allocate for array temporaries
+     - in the interpreter and VM we will use this to allocate one scratch buffer that we bump-allocate array temporaries out of  
+4. **Interpreter/VM**: Runtime evaluation (TODO)
+   - We have both an AST-walking interpreter and bytecode VM, we implement the same semantics in both to validate our implementations produce the same behavior
+   - Dynamic subscript evaluation
+   - Actual array operations and array-based builtin functions
+   
+### Simplified Expr2 Representation
+
+Instead of complex ArrayView with Contiguous/Strided variants, Expr2 will use:
+
+```rust
+// Simplified array information in Expr2
+struct ArrayBounds {
+    dims:       Vec<(bool, usize)>,  // tuple of "is_dynamic" and "max size"
+}
+
+// ArraySource now references ArrayBounds instead of ArrayView
+pub enum ArraySource {
+   Named(Ident, ArrayBounds),
+   Temp(u32, ArrayBounds),
+}
+```
+
+### Compiler Subscript Types
+
+The compiler will distinguish between static and dynamic subscripts by having separate enum variants in its `Expr` enum:
+
+```rust
+pub enum Expr {
+   // ...
+   StaticSubscript(usize, ArrayView, Loc), // offset, index expression, bounds
+   DynamicSubscript(usize, DynamicArrayView<Expr>, Loc), // offset, index expression, bounds
+   // ...
+}
+```
+
+This separation allows the compiler to optimize static subscripts while properly handling dynamic ones.
 
 ## Current State Summary
 
@@ -17,11 +73,11 @@ The engine has substantial array support already implemented:
 - Aggregate functions (sum, mean, stddev, min, max, prod)
 - Basic broadcasting support (e.g., 2D array * 1D array)
 - Partial reduction operations (e.g., SUM along specific dimensions)
+- Transpose operator (')
+- Dimension position operator (@)
 
 Key limitations:
 - Limited slicing with range operations (e.g., a[1:3])
-- ~~No transpose operator (')~~ **IMPLEMENTED**
-- ~~Missing dimension position operator (@)~~ **IMPLEMENTED**
 - Missing array manipulation functions
 - Incomplete error handling for invalid indices
 - No explicit array constructors
@@ -54,51 +110,30 @@ The engine already supports some broadcasting scenarios:
 2. ~~**Dimension position operator** (`@`): References dimensions by position~~ **IMPLEMENTED** - Parser support added, AST nodes created, awaiting compiler implementation
 3. **Range subscripts**: Selecting subarrays with syntax like `array[1:3, *]`
 
-### 2. Temporary Array Storage Management
+### 2. Temporary Array Storage Management (Simplified)
 
-Rather than creating new variables and rewriting ASTs, array operations will use a temporary storage system with unique IDs:
+The simplified design moves array view complexity from Expr2 to the compiler:
 
-**Key concepts:**
-- **ArrayView**: Describes how to access array data
-  - `Contiguous`: Simple arrays with uniform stride (most common case)
-  - `Strided`: For transposed arrays, slices, and other complex views
-- **ArraySource**: Identifies where array data lives
-  - `Named(Ident, ArrayView)`: References a named variable
-  - `Temp(u32, ArrayView)`: References temporary storage with a unique ID
+**Expr2 Phase (Simple)**:
+- Each array-producing expression gets a `temp_id: Option<u32>` 
+- Array bounds are tracked as maximum possible sizes
+- No complex ArrayView or ArraySource types needed
 
-**ArrayView enum variants:**
-```rust
-struct StridedDimension {
-    dimension: Dimension,  // Retains dimension name and size
-    stride: isize,        // Stride for this dimension
-}
+**Compiler Phase (Complex)**:
+Array views are computed during compilation when we have more context.
 
-enum ArrayView {
-    Contiguous {
-        dims: Vec<Dimension>,  // Just dimensions for row-major arrays
-    },
-    Strided {
-        dims: Vec<StridedDimension>,  // Combined dimension and stride info
-        offset: usize,               // Starting offset
-    },
-}
-```
+**Benefits of Simplified Approach**:
+- **Cleaner Expr2**: No complex ArrayView propagation through AST
+- **Better dynamic handling**: Compiler can generate different code paths for static vs dynamic cases
+- **Easier optimization**: All array layout decisions happen in one place
+- **Reduced AST size**: No ArraySource field on every expression
 
-Benefits of this design:
-- **Reduced errors**: Shape and stride information are coupled in a single struct
-- **Better error messages**: Dimension names are preserved for debugging
-- **Cleaner API**: No possibility of shape/stride length mismatch in Strided variant
-- **Implicit strides**: Contiguous arrays calculate strides from dimensions as needed
-
-**How it works:**
-- Each AST node that produces an array result gets an `Option<ArraySource>`
-- During compilation, temporary IDs are assigned where needed
-- During evaluation, space is allocated for each temporary ID
-- Subscript operations modify the ArrayView without allocating new storage
-- Transpose creates a `Strided` view with reordered strides (no data copy)
-- Slicing adjusts offset and strides to create sub-array views
-
-This approach avoids AST rewriting while enabling efficient array operations.
+**How it works**:
+1. During Expr2 transformation, assign temp IDs to intermediate array results
+2. Track maximum bounds for type checking
+3. In compiler, analyze subscript patterns and generate appropriate views
+4. For static subscripts: compute exact offsets and strides at compile time
+5. For dynamic subscripts: generate bounds checking and offset calculation code
 
 ### 3. Array Expression Types
 
@@ -119,6 +154,45 @@ Enhance dimension handling to support:
 - **Dimension ranges**: `DimA.Start:DimA.End`
 - **Dynamic dimension queries**: `SIZE(array, dimension_index)`
 - **Dimension membership tests**: `IS_IN(index, dimension)`
+
+## Examples of Simplified Approach
+
+### Example 1: Static Subscript
+```
+array[Location.Boston, *]
+```
+- **Expr2**: Records max bounds = [size of second dimension], static subscript
+- **Compiler**: Computes exact offset = Boston's index × stride of first dimension
+- **VM**: Direct memory access with pre-computed offset
+
+### Example 2: Dynamic Subscript
+```
+array[time, Product.A]
+```
+- **Expr2**: Records max bounds = scalar, dynamic first subscript
+- **Compiler**: Generates code to evaluate `time` and compute offset at runtime
+- **VM**: Bounds check, then access with computed offset
+
+### Example 3: Transpose with Range
+```
+matrix[1:3, *]'
+```
+- **Expr2**: Records max bounds = [3, second dimension size], has transpose
+- **Compiler**: 
+  - Creates view with offset=0, adjusted first dimension size
+  - Swaps stride order for transpose
+- **VM**: Iterates with transposed strides
+
+### Example 4: Complex Dynamic Expression
+```
+array[@(dim_index), time:time+5]
+```
+- **Expr2**: Records max bounds = [first dim size, 5], both subscripts dynamic
+- **Compiler**: Generates code to:
+  - Evaluate `dim_index` and validate it's a valid dimension position
+  - Evaluate `time` and `time+5` for range bounds
+  - Compute appropriate view at runtime
+- **VM**: Dynamic bounds checking and view creation
 
 ## Proposed Architecture
 
@@ -221,35 +295,51 @@ The implementation follows a clean architecture:
 
 ## Implementation Phases
 
-### Phase 1: Core XMILE Features (Partially Complete)
-1. **Range subscripts**: Implement `array[start:end]` syntax
-   - ✓ Parser already supports range syntax
-   - ⏳ Generate temporary arrays for slice results
-   - ⏳ Handle edge cases and bounds checking
-2. **Transpose operator**: Implement `array'` syntax
-   - ✓ Added to parser with correct precedence
-   - ⏳ Implement dimension reversal in compiler
-   - ⏳ Create efficient view without copying data
+### Phase 1: Simplify Expr2 Array Representation
+1. **Remove ArrayView complexity from Expr2**:
+   - Replace ArrayView/ArraySource with simple ArrayBounds
+   - Add temp_id tracking for intermediate results
+   - Implement is_dynamic flags for subscript analysis
+2. **Update AST transformations**:
+   - Simplify expr0→expr1→expr2 array handling
+   - Focus on maximum bounds computation
+   - Mark static vs dynamic subscripts
 
-### Phase 2: Advanced XMILE Features (Partially Complete)
-1. **Dimension position operator**: Implement `@n` syntax
-   - ✓ Parse and resolve dimension positions
-   - ✓ Support in subscript expressions
-   - ⏳ Handle dimension reordering in compiler
-2. **Enhanced error handling**:
-   - Configurable invalid index behavior (0 or NaN)
-   - Clear shape mismatch error messages
-   - Runtime bounds checking
+### Phase 2: Enhanced Compiler Array Support
+1. **Split Subscript handling**:
+   - Create StaticSubscript for compile-time resolution
+   - Create DynamicSubscript for runtime evaluation
+   - Generate efficient code for each case
+2. **Implement array operations in compiler**:
+   - Transpose: Generate stride-swapped views
+   - Ranges: Handle slice bounds and view creation
+   - Dimension positions: Resolve @n references
+3. **VM instruction updates**:
+   - Add instructions for dynamic view creation
+   - Implement efficient bounds checking
+   - Support strided array iteration
 
-### Phase 3: Optimization & Extensions
-1. **Performance optimizations**:
-   - Lazy evaluation for slices (views instead of copies)
-   - Cache-aware memory layouts
-   - Vectorized operations where possible
-2. **Additional array functions** (if needed):
-   - Array constructors
-   - Additional statistical functions
-   - Matrix operations (if required beyond XMILE)
+### Phase 3: Complete XMILE Features
+1. **Range subscripts**: Full `array[start:end]` support
+   - ✓ Parser already supports syntax
+   - Implement in simplified compiler
+   - Handle dynamic range bounds
+2. **Transpose operator**: Complete `array'` implementation
+   - ✓ Parser support complete
+   - Generate appropriate stride reordering
+3. **Dimension position**: Complete `@n` implementation
+   - ✓ Parser support complete
+   - Resolve positions in compiler
+
+### Phase 4: Optimization
+1. **Static subscript optimization**:
+   - Pre-compute all offsets at compile time
+   - Eliminate runtime bounds checks where possible
+   - Inline simple array accesses
+2. **Dynamic subscript optimization**:
+   - Cache computed offsets when possible
+   - Optimize common patterns (sequential access)
+   - Vectorize where applicable
 
 ## Error Handling
 
@@ -275,12 +365,28 @@ The implementation follows a clean architecture:
 
 ## Conclusion
 
-This design focuses on implementing the specific array features required by the XMILE specification that are not yet supported in simlin-engine. The engine already has robust support for basic array operations, element-wise arithmetic, and some broadcasting. 
+This design has evolved from a complex ArrayView-based approach to a simplified three-phase architecture that better handles the realities of dynamic subscripts in system dynamics models.
 
-**Update (June 2025)**: Significant progress has been made on the main gaps:
+**Key Design Decisions**:
 
-1. **Range-based subscripting** (e.g., `array[1:3]`) - Parser support exists, compiler implementation pending
-2. **Transpose operator** (`'`) - ✅ Parser fully implemented, compiler implementation pending
-3. **Dimension position operator** (`@`) - ✅ Parser fully implemented, compiler implementation pending
+1. **Simplified Expr2**: By removing complex ArrayView types from Expr2 and focusing on maximum bounds computation, we reduce AST complexity and make the type checking phase more maintainable.
 
-The parser now supports all three features, with proper AST representation and comprehensive tests. The next step is to implement the compiler and VM support to make these features fully functional. By focusing on completing the compiler implementation for these already-parsed features, we can achieve full XMILE compliance efficiently.
+2. **Compiler-Centric Array Handling**: Moving stride calculations, view creation, and offset computation to the compiler allows us to optimize static cases while properly handling dynamic subscripts.
+
+3. **Static vs Dynamic Distinction**: Explicitly separating static and dynamic subscript handling in the compiler enables better optimization opportunities and clearer code paths.
+
+**Current Status (July 2025)**:
+
+1. **Parser**: ✅ Fully supports all XMILE array syntax (transpose, dimension positions, ranges)
+2. **Expr2**: ⏳ Needs simplification to remove ArrayView complexity
+3. **Compiler**: ⏳ Needs enhancement to handle array operations currently returning `ArraysNotImplemented`
+4. **VM**: ⏳ Needs new instructions for dynamic array views
+
+**Next Steps**:
+
+1. Simplify Expr2 array representation as outlined in Phase 1
+2. Enhance compiler with static/dynamic subscript separation
+3. Implement missing array operations (transpose, ranges, dimension positions)
+4. Add comprehensive tests for all array scenarios
+
+By following this simplified design, we can achieve full XMILE compliance while maintaining a cleaner, more maintainable codebase that properly handles both static and dynamic array operations.
