@@ -265,24 +265,39 @@ struct ArrayInfo {
 }
 ```
 
-## Current Implementation Status (June 2025)
+## Current Implementation Status
 
-### Recently Implemented Features
+### Successfully Implemented Features
 
-#### 1. Transpose Operator (`'`)
-- **Parser Support**: Full support for parsing transpose operator as a postfix unary operator
-- **AST Representation**: Added `Transpose` variant to `UnaryOp` enum (not a separate `Expr0` variant)
-- **Precedence**: Correctly positioned between subscript and atom level in parser grammar
-- **Tests**: Comprehensive parser tests including `a'`, `matrix[*, 1]'`, and `a' * b`
-- **Compiler**: Returns `ArraysNotImplemented` error - awaiting full array operation support
+#### 1. Simplified Expr2 Array Representation ✅
+- **ArrayBounds**: Simplified enum with just `Named` and `Temp` variants (as designed)
+- **Temp ID allocation**: Working context-based allocation system
+- **Dimension tracking**: Properly tracks maximum bounds for type checking
+- **Tests**: Comprehensive test coverage for array bounds tracking and propagation
 
-#### 2. Dimension Position Operator (`@`)
-- **Parser Support**: Full support for parsing `@n` syntax in subscript expressions
-- **AST Representation**: Added `DimensionPosition(u32, Loc)` variant to all `IndexExpr{0,1,2}` enums
-- **Lexer**: Added `At` token and lexer rule for `@` character
-- **Validation**: Parser accepts any u32 value (including `@0`); semantic validation deferred to compiler
-- **Tests**: Comprehensive tests including `a[@1]`, `a[@3, @2, @1]`, and mixed expressions like `a[DimM, @1, @2]`
-- **Compiler**: Returns `ArraysNotImplemented` error - awaiting full array operation support
+#### 2. Transpose Operator (`'`) - Partially Complete
+- **Parser Support**: ✅ Full support for parsing transpose operator as a postfix unary operator
+- **AST Representation**: ✅ Added `Transpose` variant to `UnaryOp` enum
+- **Expr2 Handling**: ✅ Properly reverses dimensions during type checking
+- **Tests**: ✅ Comprehensive parser and Expr2 tests
+- **Compiler**: ❌ Returns `ArraysNotImplemented` error - needs implementation
+- **VM/Interpreter**: ❌ Not yet implemented
+
+#### 3. Dimension Position Operator (`@`) - Partially Complete
+- **Parser Support**: ✅ Full support for parsing `@n` syntax in subscript expressions
+- **AST Representation**: ✅ Added `DimensionPosition(u32, Loc)` variant to all `IndexExpr{0,1,2}` enums
+- **Lexer**: ✅ Added `At` token and lexer rule for `@` character
+- **Expr2 Handling**: ✅ Properly tracked through type checking phase
+- **Tests**: ✅ Comprehensive parser tests including `a[@1]`, `a[@3, @2, @1]`
+- **Compiler**: ❌ Returns `ArraysNotImplemented` error - needs implementation
+- **VM/Interpreter**: ❌ Not yet implemented
+
+#### 4. Range Subscripts - Partially Complete
+- **Parser Support**: ✅ Can parse range syntax like `a[1:3]`
+- **AST Representation**: ✅ `Range` variant in `IndexExpr{0,1,2}`
+- **Expr2 Handling**: ✅ Properly tracked through type checking phase
+- **Compiler**: ❌ Returns `TodoRange` error - needs implementation
+- **VM/Interpreter**: ❌ Not yet implemented
 
 ### Implementation Details
 
@@ -295,43 +310,41 @@ The implementation follows a clean architecture:
 
 ## Implementation Phases
 
-### Phase 1: Simplify Expr2 Array Representation
-1. **Remove ArrayView complexity from Expr2**:
-   - Replace ArrayView/ArraySource with simple ArrayBounds
-   - Add temp_id tracking for intermediate results
-   - Implement is_dynamic flags for subscript analysis
-2. **Update AST transformations**:
-   - Simplify expr0→expr1→expr2 array handling
+### Phase 1: Simplify Expr2 Array Representation ✅ COMPLETE
+1. **Remove ArrayView complexity from Expr2**: ✅
+   - Replaced with simple ArrayBounds enum
+   - Added temp_id tracking for intermediate results
+   - Proper dimension tracking for type checking
+2. **Update AST transformations**: ✅
+   - Simplified expr0→expr1→expr2 array handling
    - Focus on maximum bounds computation
-   - Mark static vs dynamic subscripts
+   - Tests verify correct array bounds propagation
 
-### Phase 2: Enhanced Compiler Array Support
-1. **Split Subscript handling**:
+### Phase 2: Enhanced Compiler Array Support 🚧 IN PROGRESS
+This is the current focus area. The compiler needs to handle the array operations that are already parsed and type-checked.
+
+1. **Split Subscript handling** (TODO):
    - Create StaticSubscript for compile-time resolution
    - Create DynamicSubscript for runtime evaluation
    - Generate efficient code for each case
-2. **Implement array operations in compiler**:
-   - Transpose: Generate stride-swapped views
-   - Ranges: Handle slice bounds and view creation
-   - Dimension positions: Resolve @n references
-3. **VM instruction updates**:
+2. **Implement array operations in compiler** (TODO):
+   - **Transpose**: Generate stride-swapped views (currently returns `ArraysNotImplemented`)
+   - **Ranges**: Handle slice bounds and view creation (currently returns `TodoRange`)
+   - **Dimension positions**: Resolve @n references (currently returns `ArraysNotImplemented`)
+   - **Wildcards**: Handle wildcard subscripts (currently returns `TodoWildcard`)
+   - **Star ranges**: Handle *:dimension syntax (currently returns `TodoStarRange`)
+3. **VM instruction updates** (TODO):
    - Add instructions for dynamic view creation
    - Implement efficient bounds checking
    - Support strided array iteration
 
-### Phase 3: Complete XMILE Features
-1. **Range subscripts**: Full `array[start:end]` support
-   - ✓ Parser already supports syntax
-   - Implement in simplified compiler
-   - Handle dynamic range bounds
-2. **Transpose operator**: Complete `array'` implementation
-   - ✓ Parser support complete
-   - Generate appropriate stride reordering
-3. **Dimension position**: Complete `@n` implementation
-   - ✓ Parser support complete
-   - Resolve positions in compiler
+### Phase 3: Interpreter Support (TODO)
+Parallel to compiler work, the interpreter needs the same functionality:
+1. **Array view operations**: Transpose, slicing, dimension reordering
+2. **Dynamic subscript evaluation**: Runtime bounds checking and offset calculation
+3. **Test parity**: Ensure interpreter and VM produce identical results
 
-### Phase 4: Optimization
+### Phase 4: Optimization (FUTURE)
 1. **Static subscript optimization**:
    - Pre-compute all offsets at compile time
    - Eliminate runtime bounds checks where possible
@@ -369,24 +382,57 @@ This design has evolved from a complex ArrayView-based approach to a simplified 
 
 **Key Design Decisions**:
 
-1. **Simplified Expr2**: By removing complex ArrayView types from Expr2 and focusing on maximum bounds computation, we reduce AST complexity and make the type checking phase more maintainable.
+1. **Simplified Expr2**: ✅ **IMPLEMENTED** - Successfully removed complex ArrayView types from Expr2, focusing on maximum bounds computation. This has reduced AST complexity and made the type checking phase more maintainable.
 
-2. **Compiler-Centric Array Handling**: Moving stride calculations, view creation, and offset computation to the compiler allows us to optimize static cases while properly handling dynamic subscripts.
+2. **Compiler-Centric Array Handling**: Moving stride calculations, view creation, and offset computation to the compiler allows us to optimize static cases while properly handling dynamic subscripts. This is the current focus area.
 
-3. **Static vs Dynamic Distinction**: Explicitly separating static and dynamic subscript handling in the compiler enables better optimization opportunities and clearer code paths.
+3. **Static vs Dynamic Distinction**: The design calls for explicitly separating static and dynamic subscript handling in the compiler to enable better optimization opportunities and clearer code paths.
 
-**Current Status (July 2025)**:
+**Current Status (January 2025)**:
 
 1. **Parser**: ✅ Fully supports all XMILE array syntax (transpose, dimension positions, ranges)
-2. **Expr2**: ⏳ Needs simplification to remove ArrayView complexity
-3. **Compiler**: ⏳ Needs enhancement to handle array operations currently returning `ArraysNotImplemented`
-4. **VM**: ⏳ Needs new instructions for dynamic array views
+2. **Expr2**: ✅ Successfully simplified with ArrayBounds replacing complex ArrayView types
+3. **Compiler**: 🚧 Needs implementation of array operations (currently returns error codes)
+4. **VM/Interpreter**: ⏳ Needs array view operations and dynamic subscript support
 
-**Next Steps**:
+## Recommended Next Steps
 
-1. Simplify Expr2 array representation as outlined in Phase 1
-2. Enhance compiler with static/dynamic subscript separation
-3. Implement missing array operations (transpose, ranges, dimension positions)
-4. Add comprehensive tests for all array scenarios
+Based on the current implementation status, here's the prioritized roadmap:
 
-By following this simplified design, we can achieve full XMILE compliance while maintaining a cleaner, more maintainable codebase that properly handles both static and dynamic array operations.
+### Immediate Priority: Compiler Array Operations
+The most pressing need is to implement array operations in the compiler. Start with the simplest cases and build up:
+
+1. **Implement Wildcard Subscripts** (`TodoWildcard`)
+   - These are the simplest to implement
+   - Create a view that preserves the dimension
+   - Good starting point for array view infrastructure
+
+2. **Implement Dimension Position** (`ArraysNotImplemented` for `@n`)
+   - Relatively straightforward dimension reordering
+   - Build on wildcard implementation
+   - Can be statically resolved at compile time
+
+3. **Implement Transpose** (`ArraysNotImplemented` for `'`)
+   - Similar to dimension position but simpler (just reverse)
+   - Reuse dimension reordering logic
+   - Good test case for stride manipulation
+
+4. **Implement Range Subscripts** (`TodoRange`)
+   - More complex due to dynamic bounds
+   - Requires runtime bounds checking
+   - Foundation for more advanced slicing
+
+5. **Implement Star Ranges** (`TodoStarRange`)
+   - Most complex subscript type
+   - Builds on range implementation
+   - May require dimension name resolution
+
+### Secondary Priority: Interpreter Parity
+Once compiler implementations are working, ensure the interpreter has matching functionality for testing and validation.
+
+### Future Work
+- Static optimization for known compile-time subscripts
+- Efficient memory layout for common access patterns
+- Advanced array functions and operations
+
+By following this incremental approach, we can systematically build up full array support while maintaining a working system at each step.
