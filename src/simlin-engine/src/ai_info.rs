@@ -87,11 +87,7 @@ fn build_signed_message_body(ai_info: &AiInformation, project: &Project) -> Stri
 }
 
 fn is_module(v: &Variable) -> bool {
-    if let Variable::Module(_) = v {
-        true
-    } else {
-        false
-    }
+    matches!(v, Variable::Module(_))
 }
 
 fn append_model(s: &mut String, prefix: &str, mut i: i32, sample: i32, model: &Model) -> i32 {
@@ -106,7 +102,7 @@ fn append_model(s: &mut String, prefix: &str, mut i: i32, sample: i32, model: &M
         let var = model.get_variable(var_name).unwrap();
         let name = escape(var.get_ident());
 
-        if i % sample == 0 && !is_module(&var) {
+        if i % sample == 0 && !is_module(var) {
             s.push_str(prefix);
             s.push_str(&name);
             match var.get_equation() {
