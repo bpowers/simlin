@@ -311,7 +311,7 @@ impl Context<'_> {
     fn lower(&self, expr: &ast::Expr2) -> Result<Expr> {
         let expr = match expr {
             ast::Expr2::Const(_, n, loc) => Expr::Const(*n, *loc),
-            ast::Expr2::Var(id, loc) => {
+            ast::Expr2::Var(id, _, loc) => {
                 if let Some((off, _)) = self
                     .inputs
                     .iter()
@@ -328,7 +328,7 @@ impl Context<'_> {
                     }
                 }
             }
-            ast::Expr2::App(builtin, loc) => {
+            ast::Expr2::App(builtin, _, loc) => {
                 use crate::builtins::BuiltinFn as BFn;
                 let builtin: BuiltinFn = match builtin {
                     BFn::Lookup(id, expr, loc) => {
@@ -413,7 +413,7 @@ impl Context<'_> {
                 };
                 Expr::App(builtin, *loc)
             }
-            ast::Expr2::Subscript(id, args, loc) => {
+            ast::Expr2::Subscript(id, args, _, loc) => {
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
@@ -435,7 +435,7 @@ impl Context<'_> {
                                 sim_err!(ArraysNotImplemented, id.clone())
                             }
                             IndexExpr2::Expr(arg) => {
-                                let expr = if let ast::Expr2::Var(ident, loc) = arg {
+                                let expr = if let ast::Expr2::Var(ident, _, loc) = arg {
                                     let dim = &dims[i];
                                     // we need to check to make sure that any explicit subscript names are
                                     // converted to offsets here and not passed to self.lower
@@ -460,7 +460,7 @@ impl Context<'_> {
                 let bounds = dims.iter().map(|dim| dim.len()).collect();
                 Expr::Subscript(off, args?, bounds, *loc)
             }
-            ast::Expr2::Op1(op, l, loc) => {
+            ast::Expr2::Op1(op, l, _, loc) => {
                 let l = self.lower(l)?;
                 match op {
                     ast::UnaryOp::Negative => Expr::Op2(
@@ -481,7 +481,7 @@ impl Context<'_> {
                     }
                 }
             }
-            ast::Expr2::Op2(op, l, r, loc) => {
+            ast::Expr2::Op2(op, l, r, _, loc) => {
                 let l = self.lower(l)?;
                 let r = self.lower(r)?;
                 let op = match op {
@@ -502,7 +502,7 @@ impl Context<'_> {
                 };
                 Expr::Op2(op, Box::new(l), Box::new(r), *loc)
             }
-            ast::Expr2::If(cond, t, f, loc) => {
+            ast::Expr2::If(cond, t, f, _, loc) => {
                 let cond = self.lower(cond)?;
                 let t = self.lower(t)?;
                 let f = self.lower(f)?;
@@ -580,12 +580,14 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 And,
-                Box::new(Var("true_input".to_string(), Loc::default())),
-                Box::new(Var("false_input".to_string(), Loc::default())),
+                Box::new(Var("true_input".to_string(), None, Loc::default())),
+                Box::new(Var("false_input".to_string(), None, Loc::default())),
+                None,
                 Loc::default(),
             )),
             Box::new(Const("1".to_string(), 1.0, Loc::default())),
             Box::new(Const("0".to_string(), 0.0, Loc::default())),
+            None,
             Loc::default(),
         ))
     };
@@ -669,12 +671,14 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 Or,
-                Box::new(Var("true_input".to_string(), Loc::default())),
-                Box::new(Var("false_input".to_string(), Loc::default())),
+                Box::new(Var("true_input".to_string(), None, Loc::default())),
+                Box::new(Var("false_input".to_string(), None, Loc::default())),
+                None,
                 Loc::default(),
             )),
             Box::new(Const("1".to_string(), 1.0, Loc::default())),
             Box::new(Const("0".to_string(), 0.0, Loc::default())),
+            None,
             Loc::default(),
         ))
     };

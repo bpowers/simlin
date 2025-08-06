@@ -509,7 +509,7 @@ impl IdentifierSetVisitor<'_> {
             IndexExpr2::Range(_, _, _) => {}
             IndexExpr2::DimPosition(_, _) => {}
             IndexExpr2::Expr(expr) => {
-                if let Expr2::Var(arg_ident, _) = expr {
+                if let Expr2::Var(arg_ident, _, _) = expr {
                     let mut is_subscript_or_dimension = false;
                     // TODO: this should be optimized
                     for dim in self.dimensions.iter() {
@@ -535,10 +535,10 @@ impl IdentifierSetVisitor<'_> {
     fn walk(&mut self, e: &Expr2) {
         match e {
             Expr2::Const(_, _, _) => (),
-            Expr2::Var(id, _) => {
+            Expr2::Var(id, _, _) => {
                 self.identifiers.insert(id.clone());
             }
-            Expr2::App(builtin, _) => {
+            Expr2::App(builtin, _, _) => {
                 walk_builtin_expr(builtin, |contents| match contents {
                     BuiltinContents::Ident(id, _loc) => {
                         self.identifiers.insert(id.to_owned());
@@ -546,20 +546,20 @@ impl IdentifierSetVisitor<'_> {
                     BuiltinContents::Expr(expr) => self.walk(expr),
                 });
             }
-            Expr2::Subscript(id, args, _) => {
+            Expr2::Subscript(id, args, _, _) => {
                 self.identifiers.insert(id.clone());
                 args.iter().for_each(|arg| self.walk_index(arg));
             }
-            Expr2::Op2(_, l, r, _) => {
+            Expr2::Op2(_, l, r, _, _) => {
                 self.walk(l);
                 self.walk(r);
             }
-            Expr2::Op1(_, l, _) => {
+            Expr2::Op1(_, l, _, _) => {
                 self.walk(l);
             }
-            Expr2::If(cond, t, f, _) => {
+            Expr2::If(cond, t, f, _, _) => {
                 if let Some(module_inputs) = self.module_inputs {
-                    if let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _) = cond.as_ref() {
+                    if let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref() {
                         if module_inputs.contains(ident) {
                             self.walk(t);
                         } else {

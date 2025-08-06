@@ -94,12 +94,12 @@ impl UnitInferer<'_> {
     ) -> UnitResult<Units> {
         match expr {
             Expr2::Const(_, _, _) => Ok(Units::Constant),
-            Expr2::Var(ident, _loc) => {
+            Expr2::Var(ident, _, _loc) => {
                 let units: UnitMap = [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
 
                 Ok(Units::Explicit(units))
             }
-            Expr2::App(builtin, _) => match builtin {
+            Expr2::App(builtin, _, _) => match builtin {
                 BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
                 BuiltinFn::Time
                 | BuiltinFn::TimeStep
@@ -186,6 +186,7 @@ impl UnitInferer<'_> {
                         BinaryOp::Div,
                         a.clone(),
                         b.clone(),
+                        None,
                         a.get_loc().union(&b.get_loc()),
                     );
                     let units = self.gen_constraints(&div, prefix, constraints)?;
@@ -217,9 +218,9 @@ impl UnitInferer<'_> {
                     Ok(a_units)
                 }
             },
-            Expr2::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr2::Op1(_, l, _) => self.gen_constraints(l, prefix, constraints),
-            Expr2::Op2(op, l, r, _) => {
+            Expr2::Subscript(_, _, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr2::Op1(_, l, _, _) => self.gen_constraints(l, prefix, constraints),
+            Expr2::Op2(op, l, r, _, _) => {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
                 let runits = self.gen_constraints(r, prefix, constraints)?;
 
@@ -265,7 +266,7 @@ impl UnitInferer<'_> {
                     }
                 }
             }
-            Expr2::If(_, l, r, _) => {
+            Expr2::If(_, l, r, _, _) => {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
                 let runits = self.gen_constraints(r, prefix, constraints)?;
 

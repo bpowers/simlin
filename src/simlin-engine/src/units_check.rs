@@ -27,7 +27,7 @@ impl UnitEvaluator<'_> {
         use UnitError::ConsistencyError;
         match expr {
             Expr2::Const(_, _, _) => Ok(Units::Constant),
-            Expr2::Var(ident, loc) => {
+            Expr2::Var(ident, _, loc) => {
                 let units: &UnitMap = if ident == "time"
                     || ident == "initial_time"
                     || ident == "final_time"
@@ -53,7 +53,7 @@ impl UnitEvaluator<'_> {
 
                 Ok(Units::Explicit(units.clone()))
             }
-            Expr2::App(builtin, _) => match builtin {
+            Expr2::App(builtin, _, _) => match builtin {
                 BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
                 BuiltinFn::Time
                 | BuiltinFn::TimeStep
@@ -168,6 +168,7 @@ impl UnitEvaluator<'_> {
                         BinaryOp::Div,
                         a.clone(),
                         b.clone(),
+                        None,
                         a.get_loc().union(&b.get_loc()),
                     );
                     let units = self.check(&div)?;
@@ -183,9 +184,9 @@ impl UnitEvaluator<'_> {
                 }
                 BuiltinFn::Rank(a, _rest) => self.check(a),
             },
-            Expr2::Subscript(_, _, _) => Ok(Units::Explicit(UnitMap::new())),
-            Expr2::Op1(_, l, _) => self.check(l),
-            Expr2::Op2(op, l, r, _) => {
+            Expr2::Subscript(_, _, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr2::Op1(_, l, _, _) => self.check(l),
+            Expr2::Op2(op, l, r, _, _) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 
@@ -238,7 +239,7 @@ impl UnitEvaluator<'_> {
                     }
                 }
             }
-            Expr2::If(_, l, r, _) => {
+            Expr2::If(_, l, r, _, _) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 

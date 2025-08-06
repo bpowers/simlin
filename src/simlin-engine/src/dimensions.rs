@@ -20,6 +20,13 @@ pub enum Dimension {
 }
 
 impl Dimension {
+    pub fn len(&self) -> usize {
+        match self {
+            Dimension::Indexed(_, size) => *size as usize,
+            Dimension::Named(_, named) => named.elements.len(),
+        }
+    }
+
     #[allow(unused)]
     pub fn name(&self) -> &str {
         match self {
