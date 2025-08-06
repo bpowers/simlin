@@ -790,7 +790,7 @@ impl<'a> Iterator for SubscriptIterator<'a> {
                 .enumerate()
                 .map(|(i, elem)| match &self.dims[i] {
                     Dimension::Named(_, elements) => elements[*elem].clone(),
-                    Dimension::Indexed(name, _size) => format!("{}.{}", name, elem + 1),
+                    Dimension::Indexed(_name, _size) => format!("{}", elem + 1),
                 })
                 .collect()
         })

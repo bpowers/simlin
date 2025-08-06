@@ -452,18 +452,12 @@ impl Context<'_> {
                                                     *loc,
                                                 ));
                                             }
-                                        } else if let Dimension::Indexed(name, _size) = dim {
-                                            // For indexed dimensions, the subscript format is "DimName.Index"
-                                            // where Index is 1-based. Extract the index from this format.
-                                            let expected_prefix = format!("{name}.");
-                                            if active_subscript.starts_with(&expected_prefix) {
-                                                if let Ok(idx) = active_subscript
-                                                    [expected_prefix.len()..]
-                                                    .parse::<usize>()
-                                                {
-                                                    // The index is already 1-based, so we can use it directly
-                                                    return Ok(Expr::Const(idx as f64, *loc));
-                                                }
+                                        } else if let Dimension::Indexed(_name, _size) = dim {
+                                            // For indexed dimensions, the subscript is now just a numeric string
+                                            // like "1", "2", etc. (1-based)
+                                            if let Ok(idx) = active_subscript.parse::<usize>() {
+                                                // The index is already 1-based, so we can use it directly
+                                                return Ok(Expr::Const(idx as f64, *loc));
                                             }
                                         }
                                     }

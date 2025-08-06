@@ -97,14 +97,26 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Implement partial wildcard support in multi-dimensional arrays
+    fn simple_index() {
+        // Test numeric indexing per XMILE spec
+        let project = ArrayTestProject::new("simple_index")
+            .indexed_dimension("A", 2)
+            .array_const("m[A]", 5.0) // All elements = 5
+            .scalar_aux("first_item", "m[1]"); // XMILE uses simple numeric indices
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("first_item", 5.0);
+    }
+
+    #[test]
     fn wildcard_simple_2d() {
         // Simpler test for 2D arrays with wildcards
         let project = ArrayTestProject::new("wildcard_simple_2d")
             .indexed_dimension("A", 2)
             .indexed_dimension("B", 2)
             .array_const("m[A,B]", 5.0) // All elements = 5
-            .array_aux("first_row[B]", "m[A.1, *]"); // Should be [5, 5]
+            .array_aux("first_row[B]", "m[1, *]"); // Use numeric index per XMILE spec
 
         project.assert_compiles();
         project.assert_sim_builds();
@@ -112,7 +124,6 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Implement partial wildcard support in multi-dimensional arrays
     fn wildcard_in_multidim_fixed_first() {
         // Test wildcard in multi-dimensional arrays with first dimension fixed
         let project = ArrayTestProject::new("wildcard_multidim_fixed_first")
@@ -121,16 +132,16 @@ mod wildcard_tests {
             .array_with_ranges(
                 "matrix[Row,Col]",
                 vec![
-                    ("Row.1,Col.1", "10"),
-                    ("Row.1,Col.2", "11"),
-                    ("Row.1,Col.3", "12"),
-                    ("Row.2,Col.1", "20"),
-                    ("Row.2,Col.2", "21"),
-                    ("Row.2,Col.3", "22"),
+                    ("1,1", "10"),
+                    ("1,2", "11"),
+                    ("1,3", "12"),
+                    ("2,1", "20"),
+                    ("2,2", "21"),
+                    ("2,3", "22"),
                 ],
             )
-            .array_aux("row1[Col]", "matrix[Row.1, *]") // Should be [10, 11, 12]
-            .array_aux("row2[Col]", "matrix[Row.2, *]"); // Should be [20, 21, 22]
+            .array_aux("row1[Col]", "matrix[1, *]") // Should be [10, 11, 12]
+            .array_aux("row2[Col]", "matrix[2, *]"); // Should be [20, 21, 22]
 
         project.assert_compiles();
         project.assert_sim_builds();
@@ -139,7 +150,6 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Implement partial wildcard support in multi-dimensional arrays
     fn wildcard_in_multidim_fixed_second() {
         // Test wildcard in multi-dimensional arrays with second dimension fixed
         let project = ArrayTestProject::new("wildcard_multidim_fixed_second")
@@ -148,16 +158,16 @@ mod wildcard_tests {
             .array_with_ranges(
                 "matrix[Row,Col]",
                 vec![
-                    ("Row.1,Col.1", "110"),
-                    ("Row.1,Col.2", "120"),
-                    ("Row.2,Col.1", "210"),
-                    ("Row.2,Col.2", "220"),
-                    ("Row.3,Col.1", "310"),
-                    ("Row.3,Col.2", "320"),
+                    ("1,1", "110"),
+                    ("1,2", "120"),
+                    ("2,1", "210"),
+                    ("2,2", "220"),
+                    ("3,1", "310"),
+                    ("3,2", "320"),
                 ],
             )
-            .array_aux("col1[Row]", "matrix[*, Col.1]") // Should be [110, 210, 310]
-            .array_aux("col2[Row]", "matrix[*, Col.2]"); // Should be [120, 220, 320]
+            .array_aux("col1[Row]", "matrix[*, 1]") // Should be [110, 210, 310]
+            .array_aux("col2[Row]", "matrix[*, 2]"); // Should be [120, 220, 320]
 
         project.assert_compiles();
         project.assert_sim_builds();
@@ -166,7 +176,7 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Implement partial wildcard support in multi-dimensional arrays
+    #[ignore]
     fn wildcard_with_named_and_indexed_dims() {
         // Test wildcard with mixed named and indexed dimensions
         let project = ArrayTestProject::new("wildcard_mixed_dims")
@@ -175,16 +185,16 @@ mod wildcard_tests {
             .array_with_ranges(
                 "population[City,Year]",
                 vec![
-                    ("City.Boston,Year.1", "1100"),
-                    ("City.Boston,Year.2", "1200"),
-                    ("City.NYC,Year.1", "1100"),
-                    ("City.NYC,Year.2", "1200"),
-                    ("City.LA,Year.1", "1100"),
-                    ("City.LA,Year.2", "1200"),
+                    ("City.Boston,1", "1100"),
+                    ("City.Boston,2", "1200"),
+                    ("City.NYC,1", "1100"),
+                    ("City.NYC,2", "1200"),
+                    ("City.LA,1", "1100"),
+                    ("City.LA,2", "1200"),
                 ],
             )
-            .array_aux("boston_years[Year]", "population[City.Boston, *]") // Should be [1100, 1200]
-            .array_aux("year1_cities[City]", "population[*, Year.1]"); // Should be [1100, 1100, 1100]
+            .array_aux("boston_years[Year]", "population[Boston, *]") // Named dim uses element name
+            .array_aux("year1_cities[City]", "population[*, 1]"); // Indexed dim uses numeric
 
         project.assert_compiles();
         project.assert_sim_builds();
@@ -213,9 +223,9 @@ mod wildcard_tests {
                     ("X.2,Y.2,Z.2", "222"),
                 ],
             )
-            .array_aux("slice_xy[X,Y]", "cube[*,*,Z.1]") // Fix Z=1: [111, 121, 211, 221]
-            .array_aux("slice_xz[X,Z]", "cube[*,Y.2,*]") // Fix Y=2: [121, 122, 221, 222]
-            .array_aux("slice_yz[Y,Z]", "cube[X.1,*,*]"); // Fix X=1: [111, 112, 121, 122]
+            .array_aux("slice_xy[X,Y]", "cube[*,*,1]") // Fix Z=1: [111, 121, 211, 221]
+            .array_aux("slice_xz[X,Z]", "cube[*,2,*]") // Fix Y=2: [121, 122, 221, 222]
+            .array_aux("slice_yz[Y,Z]", "cube[1,*,*]"); // Fix X=1: [111, 112, 121, 122]
 
         project.assert_compiles();
         project.assert_sim_builds();

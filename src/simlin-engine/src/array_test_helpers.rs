@@ -297,13 +297,17 @@ impl ArrayTestProject {
             }
         }
 
+        // Note: We don't modify non-array variables here because some might be
+        // true scalars that need last-timestep-only handling, but we can't
+        // distinguish them from arrays that have been flattened
+
         Ok(output)
     }
 
     /// Test that compilation succeeds
     pub fn assert_compiles(&self) {
         match self.compile() {
-            Ok(_) => {}
+            Ok(_compiled) => {}
             Err(errors) => {
                 let error_msg = errors
                     .iter()
@@ -337,6 +341,31 @@ impl ArrayTestProject {
                 }
             }
         }
+    }
+
+    /// Test that interpreter evaluation succeeds and returns expected values for a scalar variable
+    /// (checks only the final timestep value)
+    pub fn assert_scalar_result(&self, var_name: &str, expected: f64) {
+        let results = self
+            .run_interpreter()
+            .expect("Interpreter should run successfully");
+
+        let actual = results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {} not found in results", var_name));
+
+        let final_value = actual
+            .last()
+            .copied()
+            .unwrap_or_else(|| panic!("Variable {} has no values", var_name));
+
+        assert!(
+            (final_value - expected).abs() < 1e-6,
+            "Value mismatch for {}: expected {}, got {}",
+            var_name,
+            expected,
+            final_value
+        );
     }
 
     /// Test that interpreter evaluation succeeds and returns expected values
