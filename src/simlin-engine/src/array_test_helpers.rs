@@ -250,6 +250,7 @@ impl ArrayTestProject {
         // Extract results
         let mut output = HashMap::new();
 
+        // First collect all individual array elements
         for (name, &offset) in &results.offsets {
             let mut values = Vec::new();
             for step in 0..results.step_count {
@@ -257,6 +258,43 @@ impl ArrayTestProject {
                 values.push(results.data[idx]);
             }
             output.insert(name.clone(), values);
+        }
+
+        // Now collect array variables by their base name
+        // Array elements are stored as "varname[subscript]", we want to collect them as "varname"
+        let mut array_results: HashMap<String, Vec<(String, Vec<f64>)>> = HashMap::new();
+        for (name, values) in &output {
+            if let Some(bracket_pos) = name.find('[') {
+                let base_name = &name[..bracket_pos];
+                let entry = array_results.entry(base_name.to_string()).or_default();
+                entry.push((name.clone(), values.clone()));
+            }
+        }
+
+        // Sort array elements and flatten into single vector
+        for (base_name, mut elements) in array_results {
+            // Sort by subscript to ensure consistent ordering
+            elements.sort_by(|a, b| a.0.cmp(&b.0));
+
+            // For simplicity, we'll just concatenate all values at each timestep
+            // This assumes all elements have the same number of timesteps
+            if !elements.is_empty() {
+                let n_steps = elements[0].1.len();
+                let mut combined = Vec::new();
+
+                // Since we're testing array values, we only want the values at the final timestep
+                // (arrays don't change over time in our test cases)
+                // Get the last timestep values
+                let last_step = n_steps - 1;
+                for (_name, values) in &elements {
+                    if last_step < values.len() {
+                        combined.push(values[last_step]);
+                    }
+                }
+
+                // Store with base name (without brackets)
+                output.insert(base_name, combined);
+            }
         }
 
         Ok(output)

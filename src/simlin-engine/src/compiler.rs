@@ -188,7 +188,7 @@ pub(crate) struct Context<'a> {
     #[allow(dead_code)]
     pub(crate) ident: &'a str,
     pub(crate) active_dimension: Option<Vec<Dimension>>,
-    pub(crate) active_subscript: Option<Vec<&'a str>>,
+    pub(crate) active_subscript: Option<Vec<String>>,
     pub(crate) metadata: &'a HashMap<Ident, HashMap<Ident, VariableMetadata>>,
     pub(crate) module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
     pub(crate) is_initial: bool,
@@ -233,7 +233,7 @@ impl Context<'_> {
                 active_off += 1;
                 let candidate = &active_dims[off];
                 if candidate.name() == dim.name() {
-                    subscripts.push(active_subscripts[off]);
+                    subscripts.push(active_subscripts[off].as_str());
                     break;
                 }
             }
@@ -425,7 +425,53 @@ impl Context<'_> {
                     .enumerate()
                     .map(|(i, arg)| {
                         match arg {
-                            IndexExpr2::Wildcard(_loc) => sim_err!(TodoWildcard, id.clone()),
+                            IndexExpr2::Wildcard(loc) => {
+                                // Wildcard means use the implicit subscript for this dimension
+                                if self.active_dimension.is_none() {
+                                    return sim_err!(
+                                        ArrayReferenceNeedsExplicitSubscripts,
+                                        id.clone()
+                                    );
+                                }
+                                let active_dims = self.active_dimension.as_ref().unwrap();
+                                let active_subscripts = self.active_subscript.as_ref().unwrap();
+                                let dim = &dims[i];
+
+                                // Find the matching dimension in the active context
+                                for (active_dim, active_subscript) in
+                                    active_dims.iter().zip(active_subscripts)
+                                {
+                                    if active_dim.name() == dim.name() {
+                                        // Found the matching dimension, use its subscript
+                                        if let Dimension::Named(_, _) = dim {
+                                            if let Some(subscript_off) =
+                                                dim.get_offset(active_subscript)
+                                            {
+                                                return Ok(Expr::Const(
+                                                    (subscript_off + 1) as f64,
+                                                    *loc,
+                                                ));
+                                            }
+                                        } else if let Dimension::Indexed(name, _size) = dim {
+                                            // For indexed dimensions, the subscript format is "DimName.Index"
+                                            // where Index is 1-based. Extract the index from this format.
+                                            let expected_prefix = format!("{name}.");
+                                            if active_subscript.starts_with(&expected_prefix) {
+                                                if let Ok(idx) = active_subscript
+                                                    [expected_prefix.len()..]
+                                                    .parse::<usize>()
+                                                {
+                                                    // The index is already 1-based, so we can use it directly
+                                                    return Ok(Expr::Const(idx as f64, *loc));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // If we didn't find a matching dimension, that's an error
+                                sim_err!(MismatchedDimensions, id.clone())
+                            }
                             IndexExpr2::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
                             IndexExpr2::Range(_l, _r, _loc) => sim_err!(TodoRange, id.clone()),
                             IndexExpr2::DimPosition(_pos, _loc) => {
@@ -439,8 +485,29 @@ impl Context<'_> {
                                     let dim = &dims[i];
                                     // we need to check to make sure that any explicit subscript names are
                                     // converted to offsets here and not passed to self.lower
+
+                                    // First check for named dimension subscripts
                                     if let Some(subscript_off) = dim.get_offset(ident) {
                                         Expr::Const((subscript_off + 1) as f64, *loc)
+                                    } else if let Dimension::Indexed(name, _size) = dim {
+                                        // For indexed dimensions, check if ident is of format "DimName.Index"
+                                        let expected_prefix = format!("{name}.");
+                                        if ident.starts_with(&expected_prefix) {
+                                            if let Ok(idx) =
+                                                ident[expected_prefix.len()..].parse::<usize>()
+                                            {
+                                                // Validate the index is within bounds (1-based)
+                                                if idx >= 1 && idx <= dim.len() {
+                                                    Expr::Const(idx as f64, *loc)
+                                                } else {
+                                                    return sim_err!(BadDimensionName, id.clone());
+                                                }
+                                            } else {
+                                                self.lower(arg)?
+                                            }
+                                        } else {
+                                            self.lower(arg)?
+                                        }
                                     } else if let Some(subscript_off) =
                                         self.get_dimension_name_subscript(ident)
                                     {
@@ -923,7 +990,7 @@ impl Var {
                                     .map(|(i, subscripts)| {
                                         let mut ctx = ctx.clone();
                                         ctx.active_dimension = Some(dims.clone());
-                                        ctx.active_subscript = Some(subscripts);
+                                        ctx.active_subscript = Some(subscripts.clone());
                                         ctx.lower(ast)
                                             .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                     })

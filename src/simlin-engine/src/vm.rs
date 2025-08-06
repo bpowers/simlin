@@ -781,19 +781,16 @@ impl<'a> SubscriptIterator<'a> {
 }
 
 impl<'a> Iterator for SubscriptIterator<'a> {
-    type Item = Vec<&'a str>;
+    type Item = Vec<String>;
 
-    fn next(&mut self) -> Option<Vec<&'a str>> {
+    fn next(&mut self) -> Option<Vec<String>> {
         self.offsets.next().map(|subscripts| {
             subscripts
                 .iter()
                 .enumerate()
-                .map(|(i, elem)| {
-                    if let Dimension::Named(_, elements) = &self.dims[i] {
-                        elements[*elem].as_str()
-                    } else {
-                        unreachable!("expected a named dimension")
-                    }
+                .map(|(i, elem)| match &self.dims[i] {
+                    Dimension::Named(_, elements) => elements[*elem].clone(),
+                    Dimension::Indexed(name, _size) => format!("{}.{}", name, elem + 1),
                 })
                 .collect()
         })
@@ -841,11 +838,15 @@ fn test_subscript_iter() {
     ];
 
     for (input, expected) in cases {
+        let mut n = 0;
         for (i, subscripts) in SubscriptIterator::new(input).enumerate() {
+            let refs: Vec<&str> = subscripts.iter().map(|s| s.as_str()).collect();
             eprintln!("exp: {:?}", expected[i]);
-            eprintln!("got: {subscripts:?}");
-            assert_eq!(expected[i], subscripts);
+            eprintln!("got: {:?}", refs);
+            assert_eq!(expected[i], refs);
+            n += 1;
         }
+        assert_eq!(expected.len(), n);
     }
 }
 
