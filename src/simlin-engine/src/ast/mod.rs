@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{ElementName, EquationResult};
 use crate::datamodel::Dimension;
-use crate::model::{ModelStage0, ScopeStage0};
-use crate::variable::Variable;
+use crate::model::ScopeStage0;
 
 mod expr0;
 mod expr1;
@@ -18,7 +17,7 @@ mod expr2;
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::Expr1;
 #[allow(unused_imports)]
-pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
+pub use expr2::{Expr2, IndexExpr2};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {
@@ -52,85 +51,15 @@ impl Ast<Expr2> {
     }
 }
 
-/// Context for AST lowering that provides dimension information from ScopeStage0
-struct ArrayContext<'a> {
-    scope: &'a ScopeStage0<'a>,
-    model_name: &'a str,
-    next_temp_id: u32,
-}
-
-impl<'a> ArrayContext<'a> {
-    fn new(scope: &'a ScopeStage0<'a>, model_name: &'a str) -> Self {
-        Self {
-            scope,
-            model_name,
-            next_temp_id: 0,
-        }
-    }
-
-    fn get_model(&self, model_name: &str) -> Option<&'a ModelStage0> {
-        self.scope.models.get(model_name)
-    }
-
-    fn get_variable(
-        &self,
-        model_name: &str,
-        ident: &str,
-    ) -> Option<&'a Variable<crate::datamodel::ModuleReference, Expr0>> {
-        // Handle dotted notation for submodel variables
-        if let Some(pos) = ident.find('·') {
-            let submodel_module_name = &ident[..pos];
-            let submodel_var = &ident[pos + '·'.len_utf8()..];
-
-            // Get the module variable to find the submodel name
-            let module_var = self
-                .get_model(model_name)?
-                .variables
-                .get(submodel_module_name)?;
-            if let Variable::Module {
-                model_name: submodel_name,
-                ..
-            } = module_var
-            {
-                return self.get_variable(submodel_name, submodel_var);
-            }
-            None
-        } else {
-            self.get_model(model_name)?.variables.get(ident)
-        }
-    }
-}
-
-impl<'a> Expr2Context for ArrayContext<'a> {
-    fn get_dimensions(&self, ident: &str) -> Option<Vec<crate::dimensions::Dimension>> {
-        // During AST lowering, we may encounter variables that don't exist yet
-        // (e.g., in tests or when processing incomplete models)
-        let var = self.get_variable(self.model_name, ident)?;
-        var.get_dimensions().map(|dims| {
-            dims.iter()
-                .map(|d| crate::dimensions::Dimension::from(d.clone()))
-                .collect()
-        })
-    }
-
-    fn allocate_temp_id(&mut self) -> u32 {
-        let id = self.next_temp_id;
-        self.next_temp_id += 1;
-        id
-    }
-}
-
 pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
-    let mut ctx = ArrayContext::new(scope, scope.model_name);
-
     match ast {
         Ast::Scalar(expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
-            .and_then(|expr| Expr2::from(expr, &mut ctx))
+            .and_then(Expr2::from)
             .map(Ast::Scalar),
         Ast::ApplyToAll(dims, expr) => Expr1::from(expr)
             .map(|expr| expr.constify_dimensions(scope))
-            .and_then(|expr| Expr2::from(expr, &mut ctx))
+            .and_then(Expr2::from)
             .map(|expr| Ast::ApplyToAll(dims, expr)),
         Ast::Arrayed(dims, elements) => {
             let elements: EquationResult<HashMap<ElementName, Expr2>> = elements
@@ -138,7 +67,7 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
                 .map(|(id, expr)| {
                     match Expr1::from(expr)
                         .map(|expr| expr.constify_dimensions(scope))
-                        .and_then(|expr| Expr2::from(expr, &mut ctx))
+                        .and_then(Expr2::from)
                     {
                         Ok(expr) => Ok((id, expr)),
                         Err(err) => Err(err),
@@ -198,25 +127,25 @@ macro_rules! child_needs_parens2(
     ($expr:tt, $parent:expr, $child:expr, $eqn:expr) => {{
         match $parent {
             // no children so doesn't matter
-            $expr::Const(_, _, _) | $expr::Var(_, _, _) => false,
+            $expr::Const(_, _, _) | $expr::Var(_, _) => false,
             // children are comma separated, so no ambiguity possible
-            $expr::App(_, _, _) | $expr::Subscript(_, _, _, _) => false,
-            $expr::Op1(_, _, _, _) => matches!($child, $expr::Op2(_, _, _, _, _)),
-            $expr::Op2(parent_op, _, _, _, _) => match $child {
+            $expr::App(_, _) | $expr::Subscript(_, _, _) => false,
+            $expr::Op1(_, _, _) => matches!($child, $expr::Op2(_, _, _, _)),
+            $expr::Op2(parent_op, _, _, _) => match $child {
                 $expr::Const(_, _, _)
-                | $expr::Var(_, _, _)
-                | $expr::App(_, _, _)
-                | $expr::Subscript(_, _, _, _)
-                | $expr::If(_, _, _, _, _)
-                | $expr::Op1(_, _, _, _) => false,
+                | $expr::Var(_, _)
+                | $expr::App(_, _)
+                | $expr::Subscript(_, _, _)
+                | $expr::If(_, _, _, _)
+                | $expr::Op1(_, _, _) => false,
                 // 3 * 2 + 1
-                $expr::Op2(child_op, _, _, _, _) => {
+                $expr::Op2(child_op, _, _, _) => {
                     // if we have `3 * (2 + 3)`, the parent's precedence
                     // is higher than the child and we need enclosing parens
                     parent_op.precedence() > child_op.precedence()
                 }
             },
-            $expr::If(_, _, _, _, _) => false,
+            $expr::If(_, _, _, _) => false,
         }
     }}
 );
@@ -412,11 +341,11 @@ impl LatexVisitor {
                     s.clone()
                 }
             }
-            Expr2::Var(id, _, _) => {
+            Expr2::Var(id, _) => {
                 let id = str::replace(id, "_", "\\_");
                 format!("\\mathrm{{{id}}}")
             }
-            Expr2::App(builtin, _, _) => {
+            Expr2::App(builtin, _) => {
                 let mut args: Vec<String> = vec![];
                 walk_builtin_expr(builtin, |contents| {
                     let arg = match contents {
@@ -428,11 +357,11 @@ impl LatexVisitor {
                 let func = builtin.name();
                 format!("\\operatorname{{{}}}({})", func, args.join(", "))
             }
-            Expr2::Subscript(id, args, _, _) => {
+            Expr2::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
                 format!("{}[{}]", id, args.join(", "))
             }
-            Expr2::Op1(op, l, _, _) => {
+            Expr2::Op1(op, l, _) => {
                 match op {
                     UnaryOp::Transpose => {
                         let l = self.walk(l);
@@ -450,7 +379,7 @@ impl LatexVisitor {
                     }
                 }
             }
-            Expr2::Op2(op, l, r, _, _) => {
+            Expr2::Op2(op, l, r, _) => {
                 let l = paren_if_necessary1(expr, l, self.walk(l));
                 let r = paren_if_necessary1(expr, r, self.walk(r));
                 let op: &str = match op {
@@ -475,7 +404,7 @@ impl LatexVisitor {
                 };
                 format!("{l} {op} {r}")
             }
-            Expr2::If(cond, t, f, _, _) => {
+            Expr2::If(cond, t, f, _) => {
                 let cond = self.walk(cond);
                 let t = self.walk(t);
                 let f = self.walk(f);
@@ -502,9 +431,8 @@ fn test_latex_eqn() {
         "\\mathrm{a\\_c} + \\mathrm{b}",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Add,
-            Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(1, 2))),
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
-            None,
+            Box::new(Expr2::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr2::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
@@ -512,9 +440,8 @@ fn test_latex_eqn() {
         "\\mathrm{a\\_c} \\cdot \\mathrm{b}",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(1, 2))),
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
-            None,
+            Box::new(Expr2::Var("a_c".to_string(), Loc::new(1, 2))),
+            Box::new(Expr2::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
@@ -524,13 +451,11 @@ fn test_latex_eqn() {
             BinaryOp::Mul,
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(0, 0))),
+                Box::new(Expr2::Var("a_c".to_string(), Loc::new(0, 0))),
                 Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
-                None,
                 Loc::new(0, 0),
             )),
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
-            None,
+            Box::new(Expr2::Var("b".to_string(), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
@@ -538,15 +463,13 @@ fn test_latex_eqn() {
         "\\mathrm{b} \\cdot (\\mathrm{a\\_c} - 1)",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            Box::new(Expr2::Var("b".to_string(), Loc::new(5, 6))),
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(0, 0))),
+                Box::new(Expr2::Var("a_c".to_string(), Loc::new(0, 0))),
                 Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
-                None,
                 Loc::new(0, 0),
             )),
-            None,
             Loc::new(0, 7),
         ))
     );
@@ -554,8 +477,7 @@ fn test_latex_eqn() {
         "-\\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Negative,
-            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
-            None,
+            Box::new(Expr2::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
@@ -563,8 +485,7 @@ fn test_latex_eqn() {
         "\\neg \\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Not,
-            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
-            None,
+            Box::new(Expr2::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
@@ -572,8 +493,7 @@ fn test_latex_eqn() {
         "+\\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Positive,
-            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
-            None,
+            Box::new(Expr2::Var("a".to_string(), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
@@ -589,173 +509,7 @@ fn test_latex_eqn() {
                 Box::new(Expr2::Const("1.0".to_owned(), 1.0, Default::default())),
                 Default::default(),
             ),
-            None,
             Loc::new(0, 14),
         ))
     );
-}
-
-#[cfg(test)]
-mod ast_tests {
-    use super::*;
-    use crate::common::canonicalize;
-    use crate::datamodel;
-    use crate::model::ModelStage0;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_simple_expr2_context() {
-        // Create a simple model with an array variable
-        let dim = datamodel::Dimension::Named(
-            "region".to_string(),
-            vec!["north".to_string(), "south".to_string()],
-        );
-        let array_var = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("population"),
-            equation: datamodel::Equation::ApplyToAll(
-                vec!["region".to_string()],
-                "100".to_string(),
-                None,
-            ),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
-            ai_state: None,
-        });
-
-        let model_datamodel = datamodel::Model {
-            name: "test_model".to_string(),
-            variables: vec![array_var],
-            views: vec![],
-        };
-
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
-        let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
-
-        let mut models = HashMap::new();
-        models.insert("test_model".to_string(), model_s0);
-
-        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
-        let scope = ScopeStage0 {
-            models: &models,
-            dimensions: &dims_ctx,
-            model_name: "test_model",
-        };
-
-        let mut ctx = ArrayContext::new(&scope, "test_model");
-
-        // Test that we can get dimensions for the array variable
-        let dims = ctx.get_dimensions("population");
-        assert!(dims.is_some());
-        let dims = dims.unwrap();
-        assert_eq!(dims.len(), 1);
-        assert_eq!(dims[0].name(), "region");
-        assert_eq!(dims[0].len(), 2);
-
-        // Test that scalar variables return None
-        assert!(ctx.get_dimensions("nonexistent").is_none());
-
-        // Test temp ID allocation
-        assert_eq!(ctx.allocate_temp_id(), 0);
-        assert_eq!(ctx.allocate_temp_id(), 1);
-        assert_eq!(ctx.allocate_temp_id(), 2);
-    }
-
-    #[test]
-    fn test_expr2_dimension_mismatch_errors() {
-        use crate::ast::BinaryOp;
-        use crate::ast::expr1::Expr1;
-        use crate::common::ErrorCode;
-
-        // Create a model with array variables of different dimensions
-        let dim1 = datamodel::Dimension::Named(
-            "region".to_string(),
-            vec!["north".to_string(), "south".to_string()],
-        );
-        let dim2 = datamodel::Dimension::Named(
-            "product".to_string(),
-            vec!["A".to_string(), "B".to_string(), "C".to_string()],
-        );
-
-        let array_var1 = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("regional_data"),
-            equation: datamodel::Equation::ApplyToAll(
-                vec!["region".to_string()],
-                "100".to_string(),
-                None,
-            ),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
-            ai_state: None,
-        });
-        let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("product_data"),
-            equation: datamodel::Equation::ApplyToAll(
-                vec!["product".to_string()],
-                "50".to_string(),
-                None,
-            ),
-            documentation: "".to_string(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
-            ai_state: None,
-        });
-
-        let model_datamodel = datamodel::Model {
-            name: "test_model".to_string(),
-            variables: vec![array_var1, array_var2],
-            views: vec![],
-        };
-
-        let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
-        let model_s0 = ModelStage0::new(
-            &model_datamodel,
-            &[dim1.clone(), dim2.clone()],
-            &units_ctx,
-            false,
-        );
-
-        let mut models = HashMap::new();
-        models.insert("test_model".to_string(), model_s0);
-
-        let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim1, dim2]);
-        let scope = ScopeStage0 {
-            models: &models,
-            dimensions: &dims_ctx,
-            model_name: "test_model",
-        };
-
-        let mut ctx = ArrayContext::new(&scope, "test_model");
-
-        // Test binary op with mismatched dimensions
-        let add_expr = Expr1::Op2(
-            BinaryOp::Add,
-            Box::new(Expr1::Var("regional_data".to_string(), Loc::default())),
-            Box::new(Expr1::Var("product_data".to_string(), Loc::default())),
-            Loc::new(0, 10),
-        );
-        let result = Expr2::from(add_expr, &mut ctx);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::MismatchedDimensions);
-
-        // Test if expression with mismatched dimensions
-        let if_expr = Expr1::If(
-            Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Expr1::Var("regional_data".to_string(), Loc::default())),
-            Box::new(Expr1::Var("product_data".to_string(), Loc::default())),
-            Loc::new(0, 20),
-        );
-        let result = Expr2::from(if_expr, &mut ctx);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::MismatchedDimensions);
-    }
 }
