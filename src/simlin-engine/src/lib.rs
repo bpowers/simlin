@@ -29,6 +29,10 @@ mod stdlib {
     include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 }
 pub mod ai_info;
+#[cfg(test)]
+mod array_test_helpers;
+#[cfg(test)]
+mod array_tests;
 mod builder;
 mod bytecode;
 pub mod interpreter;
