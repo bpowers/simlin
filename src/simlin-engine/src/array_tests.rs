@@ -176,7 +176,6 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore]
     fn wildcard_with_named_and_indexed_dims() {
         // Test wildcard with mixed named and indexed dimensions
         let project = ArrayTestProject::new("wildcard_mixed_dims")
@@ -185,12 +184,12 @@ mod wildcard_tests {
             .array_with_ranges(
                 "population[City,Year]",
                 vec![
-                    ("City.Boston,1", "1100"),
-                    ("City.Boston,2", "1200"),
-                    ("City.NYC,1", "1100"),
-                    ("City.NYC,2", "1200"),
-                    ("City.LA,1", "1100"),
-                    ("City.LA,2", "1200"),
+                    ("Boston,1", "1100"),
+                    ("Boston,2", "1200"),
+                    ("NYC,1", "1100"),
+                    ("NYC,2", "1200"),
+                    ("LA,1", "1100"),
+                    ("LA,2", "1200"),
                 ],
             )
             .array_aux("boston_years[Year]", "population[Boston, *]") // Named dim uses element name
@@ -203,7 +202,6 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Implement partial wildcard support in multi-dimensional arrays
     fn wildcard_three_dimensions() {
         // Test wildcard in 3D arrays
         let project = ArrayTestProject::new("wildcard_3d")
@@ -213,14 +211,14 @@ mod wildcard_tests {
             .array_with_ranges(
                 "cube[X,Y,Z]",
                 vec![
-                    ("X.1,Y.1,Z.1", "111"),
-                    ("X.1,Y.1,Z.2", "112"),
-                    ("X.1,Y.2,Z.1", "121"),
-                    ("X.1,Y.2,Z.2", "122"),
-                    ("X.2,Y.1,Z.1", "211"),
-                    ("X.2,Y.1,Z.2", "212"),
-                    ("X.2,Y.2,Z.1", "221"),
-                    ("X.2,Y.2,Z.2", "222"),
+                    ("1,1,1", "111"),
+                    ("1,1,2", "112"),
+                    ("1,2,1", "121"),
+                    ("1,2,2", "122"),
+                    ("2,1,1", "211"),
+                    ("2,1,2", "212"),
+                    ("2,2,1", "221"),
+                    ("2,2,2", "222"),
                 ],
             )
             .array_aux("slice_xy[X,Y]", "cube[*,*,1]") // Fix Z=1: [111, 121, 211, 221]
@@ -235,54 +233,54 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Implement partial wildcard support in multi-dimensional arrays
     fn wildcard_multiple_in_expression() {
         // Test multiple wildcards in the same expression (both operands)
         let project = ArrayTestProject::new("wildcard_multiple")
-            .indexed_dimension("Time", 3)
+            .indexed_dimension("Blerg", 3)
             .indexed_dimension("Product", 2)
             .array_with_ranges(
-                "sales[Time,Product]",
+                "sales[Blerg,Product]",
                 vec![
-                    ("Time.1,Product.1", "10"), // (1) * 1 * 10 = 10
-                    ("Time.1,Product.2", "20"), // (1) * 2 * 10 = 20
-                    ("Time.2,Product.1", "20"), // (2) * 1 * 10 = 20
-                    ("Time.2,Product.2", "40"), // (2) * 2 * 10 = 40
-                    ("Time.3,Product.1", "30"), // (3) * 1 * 10 = 30
-                    ("Time.3,Product.2", "60"), // (3) * 2 * 10 = 60
+                    ("1,1", "10"), // (1) * 1 * 10 = 10
+                    ("1,2", "20"), // (1) * 2 * 10 = 20
+                    ("2,1", "20"), // (2) * 1 * 10 = 20
+                    ("2,2", "40"), // (2) * 2 * 10 = 40
+                    ("3,1", "30"), // (3) * 1 * 10 = 30
+                    ("3,2", "60"), // (3) * 2 * 10 = 60
                 ],
             )
             .array_with_ranges(
-                "costs[Time,Product]",
+                "costs[Blerg,Product]",
                 vec![
-                    ("Time.1,Product.1", "5"),  // 1 * 5 = 5
-                    ("Time.1,Product.2", "10"), // 2 * 5 = 10
-                    ("Time.2,Product.1", "5"),  // 1 * 5 = 5
-                    ("Time.2,Product.2", "10"), // 2 * 5 = 10
-                    ("Time.3,Product.1", "5"),  // 1 * 5 = 5
-                    ("Time.3,Product.2", "10"), // 2 * 5 = 10
+                    ("1,1", "5"),  // 1 * 5 = 5
+                    ("1,2", "10"), // 2 * 5 = 10
+                    ("2,1", "5"),  // 1 * 5 = 5
+                    ("2,2", "10"), // 2 * 5 = 10
+                    ("3,1", "5"),  // 1 * 5 = 5
+                    ("3,2", "10"), // 2 * 5 = 10
                 ],
             )
-            .array_aux("profit[Time,Product]", "sales[*,*] - costs[*,*]"); // Element-wise subtraction
+            .array_aux("profit1[Blerg,Product]", "sales[*,*] - costs[*,*]") // Element-wise subtraction
+            .array_aux("profit2[Blerg,Product]", "sales - costs"); // different syntax same result
 
         project.assert_compiles();
         project.assert_sim_builds();
         // profit should be: [10-5, 20-10, 20-5, 40-10, 30-5, 60-10] = [5, 10, 15, 30, 25, 50]
-        project.assert_interpreter_result("profit", &[5.0, 10.0, 15.0, 30.0, 25.0, 50.0]);
+        project.assert_interpreter_result("profit1", &[5.0, 10.0, 15.0, 30.0, 25.0, 50.0]);
+        project.assert_interpreter_result("profit2", &[5.0, 10.0, 15.0, 30.0, 25.0, 50.0]);
     }
 
     #[test]
-    #[ignore] // Enable when wildcard is implemented
     fn wildcard_interpreter_basic() {
         ArrayTestProject::new("wildcard_interpreter")
-            .indexed_dimension("Time", 3)
-            .array_const("source[Time]", 10.0)
-            .array_aux("result[Time]", "source[*]")
+            .indexed_dimension("Widgets", 3)
+            .array_const("source[Widgets]", 10.0)
+            .array_aux("result[Widgets]", "source[*]")
             .assert_interpreter_result("result", &[10.0, 10.0, 10.0]);
     }
 
     #[test]
-    #[ignore] // Enable when wildcard is implemented
+    #[ignore]
     fn wildcard_interpreter_expression() {
         ArrayTestProject::new("wildcard_expr")
             .indexed_dimension("Index", 3)

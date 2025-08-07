@@ -516,7 +516,15 @@ impl IdentifierSetVisitor<'_> {
                         if arg_ident == dim.name() {
                             is_subscript_or_dimension = true;
                         } else if let Dimension::Named(_, elements) = dim {
-                            is_subscript_or_dimension |= elements.contains(arg_ident);
+                            // Check if arg_ident matches any element (case-insensitive)
+                            // We need to canonicalize both for comparison since identifiers are canonicalized
+                            let canonicalized_arg = canonicalize(arg_ident);
+                            let is_element = elements
+                                .iter()
+                                .any(|elem| canonicalize(elem) == canonicalized_arg);
+                            if is_element {
+                                is_subscript_or_dimension = true;
+                            }
                         }
                         if is_subscript_or_dimension {
                             break;

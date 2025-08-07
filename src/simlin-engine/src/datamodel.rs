@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::cmp::{max, min};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::iter::Iterator;
@@ -638,6 +639,9 @@ impl Dimension {
                     return Some(i);
                 }
             }
+        } else if let Dimension::Indexed(_, size) = self {
+            let n = subscript.parse::<u32>().unwrap();
+            return Some((min(max(n, 1), *size) - 1) as usize);
         }
         None
     }

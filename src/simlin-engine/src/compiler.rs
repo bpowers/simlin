@@ -481,8 +481,19 @@ impl Context<'_> {
                                     // converted to offsets here and not passed to self.lower
 
                                     // First check for named dimension subscripts
-                                    if let Some(subscript_off) = dim.get_offset(ident) {
-                                        Expr::Const((subscript_off + 1) as f64, *loc)
+                                    // Need to do case-insensitive matching since identifiers are canonicalized
+                                    let subscript_off = if let Dimension::Named(_, elements) = dim {
+                                        let canonicalized_ident =
+                                            crate::common::canonicalize(ident);
+                                        elements.iter().position(|elem| {
+                                            crate::common::canonicalize(elem) == canonicalized_ident
+                                        })
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(offset) = subscript_off {
+                                        Expr::Const((offset + 1) as f64, *loc)
                                     } else if let Dimension::Indexed(name, _size) = dim {
                                         // For indexed dimensions, check if ident is of format "DimName.Index"
                                         let expected_prefix = format!("{name}.");
