@@ -305,6 +305,18 @@ mod wildcard_tests {
     }
 
     #[test]
+    fn dimension_as_index() {
+        // Test that dimension names evaluate to indices in A2A context
+        let project = ArrayTestProject::new("dim_index")
+            .named_dimension("Cities", &["Boston", "NYC", "LA"])
+            .array_aux("indices[Cities]", "Cities"); // Should be [1, 2, 3]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("indices", &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
     fn wildcard_interpreter_expression_scalar_fails() {
         let project = ArrayTestProject::new("wildcard_expr")
             .named_dimension("Cities", &["Boston", "NYC"])

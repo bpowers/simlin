@@ -769,11 +769,20 @@ impl Context<'_> {
                                 // The active subscripts correspond to the OUTPUT dimensions, not the input
                                 for (view_idx, stride) in view.strides.iter().enumerate() {
                                     if view_idx < active_subscripts.len() {
-                                        if let Ok(idx) =
-                                            active_subscripts[view_idx].parse::<usize>()
-                                        {
-                                            let idx_0based = idx - 1;
-                                            result_index += idx_0based * (*stride as usize);
+                                        // Get the dimension for this view index
+                                        let dim_idx = dim_mapping[view_idx].unwrap_or(view_idx);
+                                        if dim_idx < dims.len() {
+                                            let dim = &dims[dim_idx];
+                                            let subscript = &active_subscripts[view_idx];
+
+                                            // Get the offset for this subscript in the dimension
+                                            if let Some(offset) = dim.get_offset(subscript) {
+                                                result_index += offset * (*stride as usize);
+                                            } else if let Ok(idx) = subscript.parse::<usize>() {
+                                                // For indexed dimensions with numeric subscripts
+                                                let idx_0based = idx - 1;
+                                                result_index += idx_0based * (*stride as usize);
+                                            }
                                         }
                                     }
                                 }

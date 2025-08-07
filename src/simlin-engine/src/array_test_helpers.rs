@@ -262,31 +262,34 @@ impl ArrayTestProject {
 
         // Now collect array variables by their base name
         // Array elements are stored as "varname[subscript]", we want to collect them as "varname"
-        let mut array_results: HashMap<String, Vec<(String, Vec<f64>)>> = HashMap::new();
+        // We need to preserve the original offset order, not sort alphabetically
+        let mut array_results: HashMap<String, Vec<(usize, String, Vec<f64>)>> = HashMap::new();
         for (name, values) in &output {
             if let Some(bracket_pos) = name.find('[') {
                 let base_name = &name[..bracket_pos];
+                // Get the offset for this element to maintain proper ordering
+                let offset = results.offsets.get(name).copied().unwrap_or(usize::MAX);
                 let entry = array_results.entry(base_name.to_string()).or_default();
-                entry.push((name.clone(), values.clone()));
+                entry.push((offset, name.clone(), values.clone()));
             }
         }
 
-        // Sort array elements and flatten into single vector
+        // Sort array elements by their offset (not alphabetically!) and flatten into single vector
         for (base_name, mut elements) in array_results {
-            // Sort by subscript to ensure consistent ordering
-            elements.sort_by(|a, b| a.0.cmp(&b.0));
+            // Sort by offset to ensure correct ordering (not alphabetical)
+            elements.sort_by_key(|e| e.0);
 
             // For simplicity, we'll just concatenate all values at each timestep
             // This assumes all elements have the same number of timesteps
             if !elements.is_empty() {
-                let n_steps = elements[0].1.len();
+                let n_steps = elements[0].2.len();
                 let mut combined = Vec::new();
 
                 // Since we're testing array values, we only want the values at the final timestep
                 // (arrays don't change over time in our test cases)
                 // Get the last timestep values
                 let last_step = n_steps - 1;
-                for (_name, values) in &elements {
+                for (_offset, _name, values) in &elements {
                     if last_step < values.len() {
                         combined.push(values[last_step]);
                     }

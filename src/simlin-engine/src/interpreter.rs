@@ -91,10 +91,8 @@ impl ModuleEvaluator<'_> {
             }
             Expr::Var(off, _) => self.curr[self.off + *off],
             Expr::StaticSubscript(off, view, _) => {
-                // For static subscripts with a view, we access the element at the view's offset
-                // This handles array slicing - the view describes which elements to access
-                // TODO: For now we just return the first element of the view
-                // Proper implementation would need to handle the iteration context
+                // Static subscripts represent a pre-computed view into an array
+                // The view contains offset and strides for efficient access
                 self.curr[self.off + *off + view.offset]
             }
             Expr::Subscript(off, r, bounds, _) => {
