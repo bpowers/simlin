@@ -41,10 +41,44 @@ export default defineConfig({
         },
       },
     },
+    {
+      name: 'integration',
+      testMatch: /integration\/.+\.spec\.ts$/,
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1280, height: 720 },
+      },
+    },
   ],
 
   // Run your local dev server before starting the tests
-  webServer: {
+  // For integration tests, we need all services running including Firebase Auth emulator
+  webServer: process.env.TEST_MODE === 'integration' ? [
+    {
+      command: 'yarn start:firestore',
+      port: 8092,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120 * 1000,
+    },
+    {
+      command: 'cd src/app && yarn firebase emulators:start --only auth',
+      port: 9099,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120 * 1000,
+    },
+    {
+      command: './scripts/start-backend-for-tests.sh',
+      port: 3030,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120 * 1000,
+    },
+    {
+      command: 'yarn start:frontend',
+      port: 3000,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120 * 1000,
+    },
+  ] : {
     command: 'yarn start:frontend',
     port: 3000,
     reuseExistingServer: !process.env.CI,
