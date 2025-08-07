@@ -21,6 +21,10 @@ node_modules
 
 # testing
 /coverage
+/test-results
+/playwright-report
+/ui-tests/visual/**/*.png
+!/ui-tests/visual/**/*-expected.png
 
 # production
 /build
@@ -29,6 +33,7 @@ node_modules
 /build-component-rsbuild
 /src/app/build
 /src/app/build-component
+/src/app/test-results
 
 # misc
 .DS_Store
