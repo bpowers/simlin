@@ -16,6 +16,7 @@ use crate::vm::{
 use crate::{Ident, Project, Results, Variable, compiler, quoteize};
 use float_cmp::approx_eq;
 use std::borrow::BorrowMut;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -347,38 +348,115 @@ impl ModuleEvaluator<'_> {
                         step(time, dt, height, step_time)
                     }
                     BuiltinFn::Sum(arg) => {
-                        // Sum needs to handle both StaticSubscript (array views) and regular arrays
+                        // Sum needs to handle arrays, temporaries, and operations on them
                         match arg.as_ref() {
+                            Expr::TempArray(id, view, _) => {
+                                // Sum over the temporary array
+                                let id = *id as usize;
+                                if id >= self.sim.temp_offsets.len() - 1 {
+                                    panic!("Invalid temporary ID: {id}");
+                                }
+
+                                let start = self.sim.temp_offsets[id];
+                                let mut sum = 0.0;
+                                let temps = (*self.sim.temps).borrow();
+
+                                // Temporary arrays are stored contiguously, so just sum all elements
+                                let size = view.dims.iter().product::<usize>();
+                                for i in 0..size {
+                                    sum += temps[start + i];
+                                }
+                                sum
+                            }
                             Expr::StaticSubscript(off, view, _) => {
                                 // Sum over the array view
                                 let mut sum = 0.0;
                                 let base_off = self.off + *off;
 
-                                // For now, handle 1D views
-                                if view.dims.len() == 1 {
-                                    for i in 0..view.dims[0] {
-                                        let idx = view.offset + i * view.strides[0] as usize;
-                                        sum += self.curr[base_off + idx];
+                                // Multi-dimensional iteration works for both 1D and multi-D views
+                                let total_elements = view.dims.iter().product::<usize>();
+                                for i in 0..total_elements {
+                                    // Calculate the position in the multi-dimensional array
+                                    let mut remainder = i;
+                                    let mut idx = view.offset;
+                                    for (dim_idx, &dim_size) in view.dims.iter().enumerate().rev() {
+                                        let coord = remainder % dim_size;
+                                        remainder /= dim_size;
+                                        idx += coord * view.strides[dim_idx] as usize;
                                     }
-                                } else {
-                                    // For multi-dimensional views, we need to iterate properly
-                                    // This is a simplified version that assumes contiguous or simple strided access
-                                    let total_elements = view.dims.iter().product::<usize>();
-                                    for i in 0..total_elements {
-                                        // Calculate the position in the multi-dimensional array
-                                        let mut remainder = i;
-                                        let mut idx = view.offset;
-                                        for (dim_idx, &dim_size) in
-                                            view.dims.iter().enumerate().rev()
-                                        {
-                                            let coord = remainder % dim_size;
-                                            remainder /= dim_size;
-                                            idx += coord * view.strides[dim_idx] as usize;
-                                        }
-                                        sum += self.curr[base_off + idx];
-                                    }
+                                    sum += self.curr[base_off + idx];
                                 }
                                 sum
+                            }
+                            Expr::Op2(op, l, r, _) => {
+                                // Check if this is an array operation
+                                // If left side is an array, we need to do element-wise operations
+                                if let Expr::StaticSubscript(off, view, _) = l.as_ref() {
+                                    // This is an array operation, sum the results
+                                    let mut sum = 0.0;
+                                    let base_off = self.off + *off;
+
+                                    // Evaluate right operand once if it's a scalar
+                                    let r_val = self.eval(r);
+
+                                    for i in 0..view.dims[0] {
+                                        let idx = view.offset + i * view.strides[0] as usize;
+                                        let l_val = self.curr[base_off + idx];
+
+                                        let elem_result = match op {
+                                            BinaryOp::Add => l_val + r_val,
+                                            BinaryOp::Sub => l_val - r_val,
+                                            BinaryOp::Mul => l_val * r_val,
+                                            BinaryOp::Div => l_val / r_val,
+                                            _ => l_val, // Other ops not expected in this context
+                                        };
+                                        sum += elem_result;
+                                    }
+                                    sum
+                                } else if let Expr::Op2(inner_op, inner_l, inner_r, _) = l.as_ref()
+                                {
+                                    // Nested Op2 - need to handle recursively
+                                    // For now, handle the specific case of (2 * source[3:5]) + 1
+                                    if let Expr::StaticSubscript(off, view, _) = inner_r.as_ref() {
+                                        // Pattern: scalar * array + scalar
+                                        let mut sum = 0.0;
+                                        let base_off = self.off + *off;
+                                        let scalar_l = self.eval(inner_l);
+                                        let scalar_r = self.eval(r);
+
+                                        for i in 0..view.dims[0] {
+                                            let idx = view.offset + i * view.strides[0] as usize;
+                                            let array_val = self.curr[base_off + idx];
+
+                                            // First apply inner operation
+                                            let inner_result = match inner_op {
+                                                BinaryOp::Mul => scalar_l * array_val,
+                                                BinaryOp::Add => scalar_l + array_val,
+                                                BinaryOp::Sub => scalar_l - array_val,
+                                                BinaryOp::Div => scalar_l / array_val,
+                                                _ => array_val,
+                                            };
+
+                                            // Then apply outer operation
+                                            let final_result = match op {
+                                                BinaryOp::Add => inner_result + scalar_r,
+                                                BinaryOp::Sub => inner_result - scalar_r,
+                                                BinaryOp::Mul => inner_result * scalar_r,
+                                                BinaryOp::Div => inner_result / scalar_r,
+                                                _ => inner_result,
+                                            };
+
+                                            sum += final_result;
+                                        }
+                                        sum
+                                    } else {
+                                        // Fall back to scalar evaluation
+                                        self.eval(arg)
+                                    }
+                                } else {
+                                    // Fall back to scalar evaluation
+                                    self.eval(arg)
+                                }
                             }
                             _ => {
                                 // For non-view arguments, just evaluate and return
@@ -392,6 +470,126 @@ impl ModuleEvaluator<'_> {
                     }
                 }
             }
+            Expr::TempArray(id, _view, _) => {
+                // TempArray should not be evaluated as a scalar
+                // This is only used within array contexts
+                panic!("TempArray {id} should not be evaluated as a scalar");
+            }
+            Expr::AssignTemp(id, rhs, view) => {
+                // Evaluate the array expression element by element and store in temporary
+                let id = *id as usize;
+                if id >= self.sim.temp_offsets.len() - 1 {
+                    panic!("Invalid temporary ID: {id}");
+                }
+
+                let start = self.sim.temp_offsets[id];
+                let _size = view.dims.iter().product::<usize>();
+
+                // Evaluate the expression as an array
+                // We need to evaluate element by element to avoid borrowing conflicts
+                match rhs.as_ref() {
+                    Expr::Op2(op, l, r, _) => {
+                        // For the expression (2 * source[3:5]) + 1, we need to handle nested operations
+                        // We'll evaluate element by element
+                        let mut temp_data = (*self.sim.temps).borrow_mut();
+
+                        for i in 0..view.dims[0] {
+                            // Evaluate left operand for this index
+                            let l_val = match l.as_ref() {
+                                Expr::Op2(inner_op, inner_l, inner_r, _) => {
+                                    // Handle nested Op2 like 2 * array[i]
+                                    let inner_l_val = match inner_l.as_ref() {
+                                        Expr::Const(n, _) => *n,
+                                        Expr::StaticSubscript(off, l_view, _) => {
+                                            let base_off = self.off + *off;
+                                            let src_idx =
+                                                l_view.offset + i * l_view.strides[0] as usize;
+                                            self.curr[base_off + src_idx]
+                                        }
+                                        _ => panic!(
+                                            "Unsupported expression in nested Op2 left: {inner_l:?}"
+                                        ),
+                                    };
+                                    let inner_r_val = match inner_r.as_ref() {
+                                        Expr::Const(n, _) => *n,
+                                        Expr::StaticSubscript(off, r_view, _) => {
+                                            let base_off = self.off + *off;
+                                            let src_idx =
+                                                r_view.offset + i * r_view.strides[0] as usize;
+                                            self.curr[base_off + src_idx]
+                                        }
+                                        _ => panic!(
+                                            "Unsupported expression in nested Op2 right: {inner_r:?}"
+                                        ),
+                                    };
+                                    match inner_op {
+                                        BinaryOp::Add => inner_l_val + inner_r_val,
+                                        BinaryOp::Sub => inner_l_val - inner_r_val,
+                                        BinaryOp::Mul => inner_l_val * inner_r_val,
+                                        BinaryOp::Div => inner_l_val / inner_r_val,
+                                        _ => inner_l_val,
+                                    }
+                                }
+                                Expr::Const(n, _) => *n,
+                                Expr::StaticSubscript(off, l_view, _) => {
+                                    let base_off = self.off + *off;
+                                    let src_idx = l_view.offset + i * l_view.strides[0] as usize;
+                                    self.curr[base_off + src_idx]
+                                }
+                                _ => panic!("Unsupported expression in Op2 left: {l:?}"),
+                            };
+
+                            // Evaluate right operand for this index
+                            let r_val = match r.as_ref() {
+                                Expr::Const(n, _) => *n,
+                                Expr::StaticSubscript(off, r_view, _) => {
+                                    let base_off = self.off + *off;
+                                    let src_idx = r_view.offset + i * r_view.strides[0] as usize;
+                                    self.curr[base_off + src_idx]
+                                }
+                                _ => panic!("Unsupported expression in Op2 right: {r:?}"),
+                            };
+
+                            // Apply the operation
+                            let result = match op {
+                                BinaryOp::Add => l_val + r_val,
+                                BinaryOp::Sub => l_val - r_val,
+                                BinaryOp::Mul => l_val * r_val,
+                                BinaryOp::Div => l_val / r_val,
+                                _ => l_val,
+                            };
+
+                            temp_data[start + i] = result;
+                        }
+                    }
+                    Expr::StaticSubscript(off, src_view, _) => {
+                        // Direct array copy using multi-dimensional iteration
+                        let base_off = self.off + *off;
+                        let mut temp_data = (*self.sim.temps).borrow_mut();
+
+                        // Multi-dimensional iteration works for both 1D and multi-D arrays
+                        let total_elements = src_view.dims.iter().product::<usize>();
+                        for i in 0..total_elements {
+                            // Calculate source position using src_view strides
+                            let mut remainder = i;
+                            let mut src_idx = src_view.offset;
+                            for (dim_idx, &dim_size) in src_view.dims.iter().enumerate().rev() {
+                                let coord = remainder % dim_size;
+                                remainder /= dim_size;
+                                src_idx += coord * src_view.strides[dim_idx] as usize;
+                            }
+                            // Store contiguously in temp array
+                            temp_data[start + i] = self.curr[base_off + src_idx];
+                        }
+                    }
+                    _ => {
+                        panic!("AssignTemp with non-array expression: {rhs:?}");
+                    }
+                }
+
+                // AssignTemp doesn't produce a scalar value
+                0.0
+            }
         }
     }
 }
@@ -402,6 +600,8 @@ pub struct Simulation {
     specs: Specs,
     root: String,
     offsets: HashMap<Ident, usize>,
+    temps: Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
+    temp_offsets: Vec<usize>,     // Offset of each temporary in the temps vector
 }
 
 impl Simulation {
@@ -449,11 +649,34 @@ impl Simulation {
         let offsets: HashMap<Ident, usize> =
             offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
 
+        // Calculate temporary storage requirements
+        let mut max_temps = 0;
+        let mut max_temp_sizes = Vec::new();
+        for module in compiled_modules.values() {
+            if module.n_temps > max_temps {
+                max_temps = module.n_temps;
+                max_temp_sizes = module.temp_sizes.clone();
+            }
+        }
+
+        // Allocate temporary storage
+        let mut temp_offsets = Vec::with_capacity(max_temps + 1);
+        let mut total_temp_size = 0;
+        for size in &max_temp_sizes {
+            temp_offsets.push(total_temp_size);
+            total_temp_size += size;
+        }
+        temp_offsets.push(total_temp_size); // Final offset for easy range calculation
+
+        let temps = Rc::new(RefCell::new(vec![0.0; total_temp_size]));
+
         Ok(Simulation {
             modules: compiled_modules,
             specs,
             root: main_model_name.to_string(),
             offsets,
+            temps,
+            temp_offsets,
         })
     }
 

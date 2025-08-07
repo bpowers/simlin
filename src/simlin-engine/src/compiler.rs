@@ -124,6 +124,7 @@ pub enum Expr {
     Var(usize, Loc),                              // offset
     Subscript(usize, Vec<Expr>, Vec<usize>, Loc), // offset, index expression, bounds (for dynamic/old-style)
     StaticSubscript(usize, ArrayView, Loc),       // offset, precomputed view, location
+    TempArray(u32, ArrayView, Loc),               // temp id, view into temp array, location
     Dt(Loc),
     App(BuiltinFn, Loc),
     EvalModule(Ident, Ident, Vec<Expr>),
@@ -133,6 +134,7 @@ pub enum Expr {
     If(Box<Expr>, Box<Expr>, Box<Expr>, Loc),
     AssignCurr(usize, Box<Expr>),
     AssignNext(usize, Box<Expr>),
+    AssignTemp(u32, Box<Expr>, ArrayView), // temp id, expression to evaluate, view info
 }
 
 impl Expr {
@@ -142,6 +144,7 @@ impl Expr {
             Expr::Var(_, loc) => *loc,
             Expr::Subscript(_, _, _, loc) => *loc,
             Expr::StaticSubscript(_, _, loc) => *loc,
+            Expr::TempArray(_, _, loc) => *loc,
             Expr::Dt(loc) => *loc,
             Expr::App(_, loc) => *loc,
             Expr::EvalModule(_, _, _) => Loc::default(),
@@ -151,6 +154,7 @@ impl Expr {
             Expr::If(_, _, _, loc) => *loc,
             Expr::AssignCurr(_, _) => Loc::default(),
             Expr::AssignNext(_, _) => Loc::default(),
+            Expr::AssignTemp(_, _, _) => Loc::default(),
         }
     }
 
@@ -168,6 +172,7 @@ impl Expr {
                 Expr::Subscript(off, subscripts, bounds, loc)
             }
             Expr::StaticSubscript(off, view, _) => Expr::StaticSubscript(off, view, loc),
+            Expr::TempArray(id, view, _) => Expr::TempArray(id, view, loc),
             Expr::Dt(_) => Expr::Dt(loc),
             Expr::App(builtin, _loc) => {
                 let builtin = match builtin {
@@ -250,6 +255,9 @@ impl Expr {
             ),
             Expr::AssignCurr(off, rhs) => Expr::AssignCurr(off, Box::new(rhs.strip_loc())),
             Expr::AssignNext(off, rhs) => Expr::AssignNext(off, Box::new(rhs.strip_loc())),
+            Expr::AssignTemp(id, rhs, view) => {
+                Expr::AssignTemp(id, Box::new(rhs.strip_loc()), view)
+            }
         }
     }
 }
@@ -984,7 +992,7 @@ impl Context<'_> {
                     }
                 }
             }
-            ast::Expr2::Op2(op, l, r, _, loc) => {
+            ast::Expr2::Op2(op, l, r, _array_bounds, loc) => {
                 let l = self.lower(l)?;
                 let r = self.lower(r)?;
                 let op = match op {
@@ -1003,6 +1011,9 @@ impl Context<'_> {
                     ast::BinaryOp::And => BinaryOp::And,
                     ast::BinaryOp::Or => BinaryOp::Or,
                 };
+
+                // For now, just create the Op2 expression
+                // The rewriting to use temporaries will happen in a separate pass
                 Expr::Op2(op, Box::new(l), Box::new(r), *loc)
             }
             ast::Expr2::If(cond, t, f, _, loc) => {
@@ -1543,13 +1554,124 @@ impl Var {
 pub struct Module {
     pub(crate) ident: Ident,
     pub(crate) inputs: HashSet<Ident>,
-    pub(crate) n_slots: usize, // number of f64s we need storage for
+    pub(crate) n_slots: usize,         // number of f64s we need storage for
+    pub(crate) n_temps: usize,         // number of temporary arrays
+    pub(crate) temp_sizes: Vec<usize>, // size of each temporary array
     pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
     pub(crate) runlist_order: Vec<Ident>,
     pub(crate) tables: HashMap<Ident, Table>,
+}
+
+/// Rewrite expressions to use temporaries for array operations
+fn rewrite_expressions_with_temporaries(exprs: Vec<Expr>) -> (Vec<Expr>, usize, Vec<usize>) {
+    let mut next_temp_id = 0u32;
+    let mut temp_sizes = Vec::new();
+    let mut rewritten = Vec::new();
+
+    for expr in exprs {
+        let (new_expr, assignments) =
+            rewrite_expr_with_temporaries(expr, &mut next_temp_id, &mut temp_sizes);
+        // Add any temporary assignments before the main expression
+        rewritten.extend(assignments);
+        rewritten.push(new_expr);
+    }
+    (rewritten, next_temp_id as usize, temp_sizes)
+}
+
+/// Rewrite a single expression to use temporaries, returning the rewritten expression
+/// and any temporary assignments that need to be executed first
+fn rewrite_expr_with_temporaries(
+    expr: Expr,
+    next_temp_id: &mut u32,
+    temp_sizes: &mut Vec<usize>,
+) -> (Expr, Vec<Expr>) {
+    match expr {
+        // For SUM of array operations, we need to rewrite the argument
+        Expr::App(BuiltinFn::Sum(arg), loc) => {
+            // Check if the argument needs array temporaries
+            if expr_produces_array(&arg) {
+                let (temp_expr, assignments) =
+                    create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
+                (
+                    Expr::App(BuiltinFn::Sum(Box::new(temp_expr)), loc),
+                    assignments,
+                )
+            } else {
+                (Expr::App(BuiltinFn::Sum(arg), loc), vec![])
+            }
+        }
+        // For assignments, rewrite the RHS
+        Expr::AssignCurr(off, rhs) => {
+            let (new_rhs, assignments) =
+                rewrite_expr_with_temporaries(*rhs, next_temp_id, temp_sizes);
+            (Expr::AssignCurr(off, Box::new(new_rhs)), assignments)
+        }
+        Expr::AssignNext(off, rhs) => {
+            let (new_rhs, assignments) =
+                rewrite_expr_with_temporaries(*rhs, next_temp_id, temp_sizes);
+            (Expr::AssignNext(off, Box::new(new_rhs)), assignments)
+        }
+        // Other expressions pass through unchanged for now
+        _ => (expr, vec![]),
+    }
+}
+
+/// Check if an expression produces an array result
+fn expr_produces_array(expr: &Expr) -> bool {
+    match expr {
+        Expr::StaticSubscript(_, _, _) => true,
+        Expr::Op2(_, l, r, _) => {
+            // If either operand is an array, the result is an array
+            expr_produces_array(l) || expr_produces_array(r)
+        }
+        Expr::Op1(_, e, _) => expr_produces_array(e),
+        _ => false,
+    }
+}
+
+/// Create a temporary for an array expression
+fn create_temp_for_array_expr(
+    expr: Expr,
+    next_temp_id: &mut u32,
+    temp_sizes: &mut Vec<usize>,
+) -> (Expr, Vec<Expr>) {
+    // Get the array dimensions from the expression
+    let view = get_array_view(&expr);
+    if view.is_none() {
+        return (expr, vec![]);
+    }
+    let view = view.unwrap();
+
+    let temp_id = *next_temp_id;
+    *next_temp_id += 1;
+
+    // Add the size of this temporary
+    let size = view.dims.iter().product();
+    temp_sizes.push(size);
+
+    // Create the assignment to populate the temporary
+    let assign = Expr::AssignTemp(temp_id, Box::new(expr), view.clone());
+
+    // Return a reference to the temporary
+    let temp_ref = Expr::TempArray(temp_id, view, Loc::default());
+
+    (temp_ref, vec![assign])
+}
+
+/// Extract the array view from an expression
+fn get_array_view(expr: &Expr) -> Option<ArrayView> {
+    match expr {
+        Expr::StaticSubscript(_, view, _) => Some(view.clone()),
+        Expr::Op2(_, l, r, _) => {
+            // For binary operations, get the view from the array operand
+            get_array_view(l).or_else(|| get_array_view(r))
+        }
+        Expr::Op1(_, e, _) => get_array_view(e),
+        _ => None,
+    }
 }
 
 // calculate a mapping of module variable name -> module model name
@@ -1797,7 +1919,7 @@ impl Module {
 
         // flatten out the variables so that we're just dealing with lists of expressions
         let runlist_initials = runlist_initials.into_iter().flat_map(|v| v.ast).collect();
-        let runlist_flows = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_flows: Vec<Expr> = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
         let runlist_stocks = runlist_stocks.into_iter().flat_map(|v| v.ast).collect();
 
         let tables: Result<HashMap<String, Table>> = var_names
@@ -1824,10 +1946,33 @@ impl Module {
             })
             .collect();
 
+        // Rewrite expressions to use temporaries for array operations
+        let (runlist_flows, n_temps_flows, temp_sizes_flows) =
+            rewrite_expressions_with_temporaries(runlist_flows);
+        let (runlist_stocks, n_temps_stocks, temp_sizes_stocks) =
+            rewrite_expressions_with_temporaries(runlist_stocks);
+        let (runlist_initials, n_temps_initials, temp_sizes_initials) =
+            rewrite_expressions_with_temporaries(runlist_initials);
+
+        // Combine temporary counts and sizes
+        let n_temps = n_temps_flows.max(n_temps_stocks).max(n_temps_initials);
+        let mut temp_sizes = vec![0; n_temps];
+        for (i, size) in temp_sizes_flows.into_iter().enumerate() {
+            temp_sizes[i] = temp_sizes[i].max(size);
+        }
+        for (i, size) in temp_sizes_stocks.into_iter().enumerate() {
+            temp_sizes[i] = temp_sizes[i].max(size);
+        }
+        for (i, size) in temp_sizes_initials.into_iter().enumerate() {
+            temp_sizes[i] = temp_sizes[i].max(size);
+        }
+
         Ok(Module {
             ident: model_name.to_string(),
             inputs: inputs_set.into_iter().collect(),
             n_slots,
+            n_temps,
+            temp_sizes,
             runlist_initials,
             runlist_flows,
             runlist_stocks,
@@ -1902,6 +2047,14 @@ impl<'module> Compiler<'module> {
                 let final_off = (*off + view.offset) as VariableOffset;
                 self.push(Opcode::LoadVar { off: final_off });
                 Some(())
+            }
+            Expr::TempArray(_id, _view, _) => {
+                // TODO: Implement loading from temporary arrays
+                // For now, just return an error
+                return sim_err!(
+                    Generic,
+                    "TempArray not yet implemented in bytecode compiler".to_string()
+                );
             }
             Expr::Dt(_) => {
                 self.push(Opcode::LoadGlobalVar {
@@ -2167,6 +2320,13 @@ impl<'module> Compiler<'module> {
                 });
                 None
             }
+            Expr::AssignTemp(_id, _rhs, _view) => {
+                // TODO: Implement AssignTemp in bytecode compiler
+                return sim_err!(
+                    Generic,
+                    "AssignTemp not yet implemented in bytecode compiler".to_string()
+                );
+            }
         };
         Ok(result)
     }
@@ -2200,13 +2360,17 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
         // no children so doesn't matter
         Expr::Const(_, _) | Expr::Var(_, _) => false,
         // children are comma separated, so no ambiguity possible
-        Expr::App(_, _) | Expr::Subscript(_, _, _, _) | Expr::StaticSubscript(_, _, _) => false,
+        Expr::App(_, _)
+        | Expr::Subscript(_, _, _, _)
+        | Expr::StaticSubscript(_, _, _)
+        | Expr::TempArray(_, _, _) => false,
         // these don't need it
         Expr::Dt(_)
         | Expr::EvalModule(_, _, _)
         | Expr::ModuleInput(_, _)
         | Expr::AssignCurr(_, _)
-        | Expr::AssignNext(_, _) => false,
+        | Expr::AssignNext(_, _)
+        | Expr::AssignTemp(_, _, _) => false,
         Expr::Op1(_, _, _) => matches!(child, Expr::Op2(_, _, _, _)),
         Expr::Op2(parent_op, _, _, _) => match child {
             Expr::Const(_, _)
@@ -2214,12 +2378,14 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
             | Expr::App(_, _)
             | Expr::Subscript(_, _, _, _)
             | Expr::StaticSubscript(_, _, _)
+            | Expr::TempArray(_, _, _)
             | Expr::If(_, _, _, _)
             | Expr::Dt(_)
             | Expr::EvalModule(_, _, _)
             | Expr::ModuleInput(_, _)
             | Expr::AssignCurr(_, _)
             | Expr::AssignNext(_, _)
+            | Expr::AssignTemp(_, _, _)
             | Expr::Op1(_, _, _) => false,
             // 3 * 2 + 1
             Expr::Op2(child_op, _, _, _) => {
@@ -2250,6 +2416,16 @@ pub fn pretty(expr: &Expr) -> String {
             let strides: Vec<_> = view.strides.iter().map(|s| format!("{s}")).collect();
             format!(
                 "curr[{off} + view(dims: [{}], strides: [{}], offset: {})]",
+                dims.join(", "),
+                strides.join(", "),
+                view.offset
+            )
+        }
+        Expr::TempArray(id, view, _) => {
+            let dims: Vec<_> = view.dims.iter().map(|d| format!("{d}")).collect();
+            let strides: Vec<_> = view.strides.iter().map(|s| format!("{s}")).collect();
+            format!(
+                "temp[{id}] + view(dims: [{}], strides: [{}], offset: {})",
                 dims.join(", "),
                 strides.join(", "),
                 view.offset
@@ -2386,6 +2562,10 @@ pub fn pretty(expr: &Expr) -> String {
         }
         Expr::AssignCurr(off, rhs) => format!("curr[{}] := {}", off, pretty(rhs)),
         Expr::AssignNext(off, rhs) => format!("next[{}] := {}", off, pretty(rhs)),
+        Expr::AssignTemp(id, expr, view) => {
+            let dims: Vec<_> = view.dims.iter().map(|d| format!("{d}")).collect();
+            format!("temp[{id}][{}] <- {}", dims.join(", "), pretty(expr))
+        }
     }
 }
 

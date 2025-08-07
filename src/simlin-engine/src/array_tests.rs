@@ -634,6 +634,21 @@ mod range_tests {
     use crate::common::ErrorCode;
 
     #[test]
+    fn range_sum_1d_w_ops() {
+        let project = ArrayTestProject::new("range_sum_1d_w_ops")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5")],
+            )
+            .scalar_aux("summed", "SUM(2 * source[3:5] + 1)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("summed", 27.0);
+    }
+
+    #[test]
     fn range_sum_1d() {
         let project = ArrayTestProject::new("range_sum_1d")
             .indexed_dimension("A", 5)
