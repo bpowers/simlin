@@ -39,11 +39,89 @@ impl Table {
 
 pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 
+/// Represents a view into array data with support for striding and slicing
+#[derive(PartialEq, Clone, Debug)]
+pub struct ArrayView {
+    /// Dimension sizes after slicing/viewing
+    pub dims: Vec<usize>,
+    /// Stride for each dimension (elements to skip to move by 1 in that dimension)
+    pub strides: Vec<isize>,
+    /// Starting offset in the underlying data
+    pub offset: usize,
+}
+
+impl ArrayView {
+    /// Create a contiguous array view (row-major order)
+    pub fn contiguous(dims: Vec<usize>) -> Self {
+        let mut strides = vec![1isize; dims.len()];
+        // Build strides from right to left for row-major order
+        for i in (0..dims.len().saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * dims[i + 1] as isize;
+        }
+        ArrayView {
+            dims,
+            strides,
+            offset: 0,
+        }
+    }
+
+    /// Total number of elements in the view
+    #[allow(dead_code)]
+    pub fn size(&self) -> usize {
+        self.dims.iter().product()
+    }
+
+    /// Check if this view represents contiguous data in row-major order
+    #[allow(dead_code)]
+    pub fn is_contiguous(&self) -> bool {
+        if self.offset != 0 {
+            return false;
+        }
+
+        let mut expected_stride = 1isize;
+        for i in (0..self.dims.len()).rev() {
+            if self.strides[i] != expected_stride {
+                return false;
+            }
+            expected_stride *= self.dims[i] as isize;
+        }
+        true
+    }
+
+    /// Apply a range subscript to create a new view
+    pub fn apply_range_subscript(
+        &self,
+        dim_index: usize,
+        start: usize,
+        end: usize,
+    ) -> Result<ArrayView> {
+        if dim_index >= self.dims.len() {
+            return sim_err!(Generic, "dimension index out of bounds".to_string());
+        }
+        if start >= end || end > self.dims[dim_index] {
+            return sim_err!(Generic, "invalid range bounds".to_string());
+        }
+
+        let mut new_dims = self.dims.clone();
+        new_dims[dim_index] = end - start;
+
+        let new_strides = self.strides.clone();
+        let new_offset = self.offset + (start * self.strides[dim_index] as usize);
+
+        Ok(ArrayView {
+            dims: new_dims,
+            strides: new_strides,
+            offset: new_offset,
+        })
+    }
+}
+
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr {
     Const(f64, Loc),
     Var(usize, Loc),                              // offset
-    Subscript(usize, Vec<Expr>, Vec<usize>, Loc), // offset, index expression, bounds
+    Subscript(usize, Vec<Expr>, Vec<usize>, Loc), // offset, index expression, bounds (for dynamic/old-style)
+    StaticSubscript(usize, ArrayView, Loc),       // offset, precomputed view, location
     Dt(Loc),
     App(BuiltinFn, Loc),
     EvalModule(Ident, Ident, Vec<Expr>),
@@ -61,6 +139,7 @@ impl Expr {
             Expr::Const(_, loc) => *loc,
             Expr::Var(_, loc) => *loc,
             Expr::Subscript(_, _, _, loc) => *loc,
+            Expr::StaticSubscript(_, _, loc) => *loc,
             Expr::Dt(loc) => *loc,
             Expr::App(_, loc) => *loc,
             Expr::EvalModule(_, _, _) => Loc::default(),
@@ -86,6 +165,7 @@ impl Expr {
                     .collect();
                 Expr::Subscript(off, subscripts, bounds, loc)
             }
+            Expr::StaticSubscript(off, view, _) => Expr::StaticSubscript(off, view, loc),
             Expr::Dt(_) => Expr::Dt(loc),
             Expr::App(builtin, _loc) => {
                 let builtin = match builtin {
@@ -468,6 +548,128 @@ impl Context<'_> {
                 if args.len() != dims.len() {
                     return sim_err!(MismatchedDimensions, id.clone());
                 }
+
+                // First, check if this is a static subscript that we can optimize
+                let mut is_static = true;
+                let mut has_range = false;
+
+                // Build a list of operations to apply to the view
+                enum IndexOp {
+                    Range(usize, usize), // start, end (0-based, end exclusive)
+                    Single(usize),       // single index (0-based)
+                    Wildcard,            // keep dimension
+                }
+
+                let mut operations = Vec::new();
+
+                for arg in args.iter() {
+                    match arg {
+                        IndexExpr2::Range(start_expr, end_expr, _) => {
+                            has_range = true;
+                            if let (
+                                ast::Expr2::Const(_, start_val, _),
+                                ast::Expr2::Const(_, end_val, _),
+                            ) = (start_expr, end_expr)
+                            {
+                                // Convert from 1-based (XMILE) to 0-based indexing
+                                let start_idx = (*start_val as isize - 1).max(0) as usize;
+                                let end_idx = (*end_val as isize).max(0) as usize;
+                                operations.push(IndexOp::Range(start_idx, end_idx));
+                            } else {
+                                is_static = false;
+                                break;
+                            }
+                        }
+                        IndexExpr2::Wildcard(_) => {
+                            operations.push(IndexOp::Wildcard);
+                        }
+                        IndexExpr2::Expr(expr) if matches!(expr, ast::Expr2::Const(_, _, _)) => {
+                            if let ast::Expr2::Const(_, val, _) = expr {
+                                let idx = (*val as isize - 1).max(0) as usize;
+                                operations.push(IndexOp::Single(idx));
+                            }
+                        }
+                        _ => {
+                            is_static = false;
+                            break;
+                        }
+                    }
+                }
+
+                if is_static && has_range {
+                    // Build the view based on operations
+                    let mut view = ArrayView::contiguous(dims.iter().map(|d| d.len()).collect());
+                    let mut dim_offset = 0; // Track which dimension we're processing after removals
+
+                    for (i, op) in operations.iter().enumerate() {
+                        match op {
+                            IndexOp::Range(start, end) => {
+                                // Validate bounds
+                                if *end > dims[i].len() || *start >= *end {
+                                    return sim_err!(
+                                        Generic,
+                                        format!("Invalid range bounds for dimension {}", i)
+                                    );
+                                }
+                                view = view.apply_range_subscript(dim_offset, *start, *end)?;
+                                dim_offset += 1; // Range keeps the dimension
+                            }
+                            IndexOp::Single(idx) => {
+                                // Validate bounds
+                                if *idx >= dims[i].len() {
+                                    return sim_err!(
+                                        Generic,
+                                        format!("Index out of bounds for dimension {}", i)
+                                    );
+                                }
+                                // Single index removes the dimension
+                                view.offset += idx * view.strides[dim_offset] as usize;
+                                view.dims.remove(dim_offset);
+                                view.strides.remove(dim_offset);
+                                // Don't increment dim_offset since we removed a dimension
+                            }
+                            IndexOp::Wildcard => {
+                                // Wildcard keeps the dimension as-is
+                                dim_offset += 1;
+                            }
+                        }
+                    }
+
+                    // Check if we're in an array iteration context
+                    if let Some(active_subscripts) = &self.active_subscript {
+                        if let Some(active_dims) = &self.active_dimension {
+                            // We need to map active subscripts to the view dimensions
+                            // This is complex for multi-dimensional cases
+
+                            // Calculate the linear index in the result array
+                            let mut result_index = 0;
+
+                            // Match active dimensions with view dimensions
+                            let mut view_dim_idx = 0;
+                            for (active_idx, _active_dim) in active_dims.iter().enumerate() {
+                                // Check if this dimension exists in the view
+                                if view_dim_idx < view.dims.len() {
+                                    // Parse the active subscript for this dimension
+                                    if let Ok(idx) = active_subscripts[active_idx].parse::<usize>()
+                                    {
+                                        let idx_0based = idx - 1;
+                                        // Add to the result index
+                                        result_index +=
+                                            idx_0based * view.strides[view_dim_idx] as usize;
+                                    }
+                                    view_dim_idx += 1;
+                                }
+                            }
+
+                            return Ok(Expr::Var(off + view.offset + result_index, *loc));
+                        }
+                    }
+
+                    // Not in iteration context - use StaticSubscript for the full view
+                    return Ok(Expr::StaticSubscript(off, view, *loc));
+                }
+
+                // Fall back to dynamic subscript handling
                 let args: Result<Vec<_>> = args
                     .iter()
                     .enumerate()
@@ -515,7 +717,10 @@ impl Context<'_> {
                                 sim_err!(MismatchedDimensions, id.clone())
                             }
                             IndexExpr2::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
-                            IndexExpr2::Range(_l, _r, _loc) => sim_err!(TodoRange, id.clone()),
+                            IndexExpr2::Range(_start_expr, _end_expr, _loc) => {
+                                // Dynamic range - not supported yet in old-style subscript
+                                sim_err!(TodoRange, id.clone())
+                            }
                             IndexExpr2::DimPosition(_pos, _loc) => {
                                 // @1 refers to the first dimension, @2 to the second, etc.
                                 // This is a placeholder for now - proper implementation would need
@@ -1512,6 +1717,14 @@ impl<'module> Compiler<'module> {
                 });
                 Some(())
             }
+            Expr::StaticSubscript(off, view, _) => {
+                // For static subscripts, we can directly compute the final offset
+                // For now, just load from the offset + view offset
+                // TODO: This needs proper iteration support for non-scalar views
+                let final_off = (*off + view.offset) as VariableOffset;
+                self.push(Opcode::LoadVar { off: final_off });
+                Some(())
+            }
             Expr::Dt(_) => {
                 self.push(Opcode::LoadGlobalVar {
                     off: DT_OFF as VariableOffset,
@@ -1806,7 +2019,7 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
         // no children so doesn't matter
         Expr::Const(_, _) | Expr::Var(_, _) => false,
         // children are comma separated, so no ambiguity possible
-        Expr::App(_, _) | Expr::Subscript(_, _, _, _) => false,
+        Expr::App(_, _) | Expr::Subscript(_, _, _, _) | Expr::StaticSubscript(_, _, _) => false,
         // these don't need it
         Expr::Dt(_)
         | Expr::EvalModule(_, _, _)
@@ -1819,6 +2032,7 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
             | Expr::Var(_, _)
             | Expr::App(_, _)
             | Expr::Subscript(_, _, _, _)
+            | Expr::StaticSubscript(_, _, _)
             | Expr::If(_, _, _, _)
             | Expr::Dt(_)
             | Expr::EvalModule(_, _, _)
@@ -1850,6 +2064,16 @@ pub fn pretty(expr: &Expr) -> String {
     match expr {
         Expr::Const(n, _) => format!("{n}"),
         Expr::Var(off, _) => format!("curr[{off}]"),
+        Expr::StaticSubscript(off, view, _) => {
+            let dims: Vec<_> = view.dims.iter().map(|d| format!("{d}")).collect();
+            let strides: Vec<_> = view.strides.iter().map(|s| format!("{s}")).collect();
+            format!(
+                "curr[{off} + view(dims: [{}], strides: [{}], offset: {})]",
+                dims.join(", "),
+                strides.join(", "),
+                view.offset
+            )
+        }
         Expr::Subscript(off, args, bounds, _) => {
             let args: Vec<_> = args.iter().map(pretty).collect();
             let string_args = args.join(", ");
@@ -1987,4 +2211,145 @@ pub fn pretty(expr: &Expr) -> String {
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum UnaryOp {
     Not,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_array_view_contiguous() {
+        // Test creating a contiguous 2D array view
+        let view = ArrayView::contiguous(vec![3, 4]);
+
+        assert_eq!(view.dims, vec![3, 4]);
+        assert_eq!(view.strides, vec![4, 1]); // Row-major order
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.size(), 12);
+        assert!(view.is_contiguous());
+    }
+
+    #[test]
+    fn test_array_view_contiguous_1d() {
+        // Test creating a contiguous 1D array view
+        let view = ArrayView::contiguous(vec![5]);
+
+        assert_eq!(view.dims, vec![5]);
+        assert_eq!(view.strides, vec![1]);
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.size(), 5);
+        assert!(view.is_contiguous());
+    }
+
+    #[test]
+    fn test_array_view_contiguous_3d() {
+        // Test creating a contiguous 3D array view
+        let view = ArrayView::contiguous(vec![2, 3, 4]);
+
+        assert_eq!(view.dims, vec![2, 3, 4]);
+        assert_eq!(view.strides, vec![12, 4, 1]); // Row-major: 3*4, 4, 1
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.size(), 24);
+        assert!(view.is_contiguous());
+    }
+
+    #[test]
+    fn test_array_view_apply_range_first_dim() {
+        // Test applying a range to the first dimension
+        let view = ArrayView::contiguous(vec![5, 3]);
+        let sliced = view.apply_range_subscript(0, 2, 5).unwrap();
+
+        assert_eq!(sliced.dims, vec![3, 3]); // [2:5] gives 3 elements
+        assert_eq!(sliced.strides, vec![3, 1]); // Same strides
+        assert_eq!(sliced.offset, 6); // Skip first 2 rows (2 * 3 = 6)
+        assert_eq!(sliced.size(), 9);
+        assert!(!sliced.is_contiguous()); // No longer contiguous due to offset
+    }
+
+    #[test]
+    fn test_array_view_apply_range_second_dim() {
+        // Test applying a range to the second dimension
+        let view = ArrayView::contiguous(vec![3, 5]);
+        let sliced = view.apply_range_subscript(1, 1, 3).unwrap();
+
+        assert_eq!(sliced.dims, vec![3, 2]); // [1:3] gives 2 elements
+        assert_eq!(sliced.strides, vec![5, 1]); // Row stride unchanged
+        assert_eq!(sliced.offset, 1); // Skip first column
+        assert_eq!(sliced.size(), 6);
+        assert!(!sliced.is_contiguous());
+    }
+
+    #[test]
+    fn test_array_view_apply_range_1d() {
+        // Test applying a range to a 1D array (like source[3:5])
+        let view = ArrayView::contiguous(vec![5]);
+        let sliced = view.apply_range_subscript(0, 2, 5).unwrap(); // 0-based: [2:5)
+
+        assert_eq!(sliced.dims, vec![3]); // Elements at indices 2, 3, 4
+        assert_eq!(sliced.strides, vec![1]);
+        assert_eq!(sliced.offset, 2);
+        assert_eq!(sliced.size(), 3);
+        assert!(!sliced.is_contiguous()); // Has non-zero offset
+    }
+
+    #[test]
+    fn test_array_view_range_bounds_checking() {
+        let view = ArrayView::contiguous(vec![5, 3]);
+
+        // Test out of bounds dimension index
+        assert!(view.apply_range_subscript(2, 0, 1).is_err());
+
+        // Test invalid range (start >= end)
+        assert!(view.apply_range_subscript(0, 3, 3).is_err());
+        assert!(view.apply_range_subscript(0, 4, 2).is_err());
+
+        // Test range exceeding dimension size
+        assert!(view.apply_range_subscript(0, 0, 6).is_err());
+        assert!(view.apply_range_subscript(0, 4, 6).is_err());
+    }
+
+    #[test]
+    fn test_array_view_empty_array() {
+        // Test edge case of empty array
+        let view = ArrayView::contiguous(vec![]);
+
+        assert_eq!(view.dims, vec![]);
+        assert_eq!(view.strides, vec![]);
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.size(), 1); // Empty product is 1
+        assert!(view.is_contiguous());
+    }
+
+    #[test]
+    fn test_array_view_is_contiguous() {
+        // Test various cases for is_contiguous
+
+        // Contiguous: fresh array
+        let view1 = ArrayView::contiguous(vec![3, 4]);
+        assert!(view1.is_contiguous());
+
+        // Not contiguous: has offset
+        let view2 = ArrayView {
+            dims: vec![3, 4],
+            strides: vec![4, 1],
+            offset: 5,
+        };
+        assert!(!view2.is_contiguous());
+
+        // Not contiguous: wrong strides for row-major
+        let view3 = ArrayView {
+            dims: vec![3, 4],
+            strides: vec![1, 3], // Column-major strides
+            offset: 0,
+        };
+        assert!(!view3.is_contiguous());
+
+        // Contiguous: manually constructed but correct
+        let view4 = ArrayView {
+            dims: vec![2, 3, 4],
+            strides: vec![12, 4, 1],
+            offset: 0,
+        };
+        assert!(view4.is_contiguous());
+    }
 }

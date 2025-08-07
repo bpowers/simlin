@@ -424,19 +424,216 @@ mod range_tests {
             .array_aux("source[A]", "")
             .array_with_ranges(
                 "source[A]",
-                vec![
-                    ("1", "1"),
-                    ("2", "2"),
-                    ("3", "3"),
-                    ("4", "4"),
-                    ("5", "5"),
-                ],
+                vec![("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5")],
             )
             .array_aux("slice[B]", "source[3:5]");
 
         project.assert_compiles();
         project.assert_sim_builds();
         project.assert_interpreter_result("slice", &[3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn range_2d_first_dim() {
+        // Test slicing the first dimension of a 2D array: source[2:3, *]
+        let project = ArrayTestProject::new("range_2d_first")
+            .indexed_dimension("Row", 4)
+            .indexed_dimension("Col", 3)
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "11"),
+                    ("1,2", "12"),
+                    ("1,3", "13"),
+                    ("2,1", "21"),
+                    ("2,2", "22"),
+                    ("2,3", "23"),
+                    ("3,1", "31"),
+                    ("3,2", "32"),
+                    ("3,3", "33"),
+                    ("4,1", "41"),
+                    ("4,2", "42"),
+                    ("4,3", "43"),
+                ],
+            )
+            // Slice rows 2:3 (inclusive), keeping all columns
+            .indexed_dimension("SliceRow", 2)
+            .array_aux("slice[SliceRow,Col]", "matrix[2:3, *]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get rows 2 and 3: [21, 22, 23, 31, 32, 33]
+        project.assert_interpreter_result("slice", &[21.0, 22.0, 23.0, 31.0, 32.0, 33.0]);
+    }
+
+    #[test]
+    fn range_2d_second_dim() {
+        // Test slicing the second dimension of a 2D array: source[*, 2:3]
+        let project = ArrayTestProject::new("range_2d_second")
+            .indexed_dimension("Row", 3)
+            .indexed_dimension("Col", 4)
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "11"),
+                    ("1,2", "12"),
+                    ("1,3", "13"),
+                    ("1,4", "14"),
+                    ("2,1", "21"),
+                    ("2,2", "22"),
+                    ("2,3", "23"),
+                    ("2,4", "24"),
+                    ("3,1", "31"),
+                    ("3,2", "32"),
+                    ("3,3", "33"),
+                    ("3,4", "34"),
+                ],
+            )
+            // Slice columns 2:3 (inclusive), keeping all rows
+            .indexed_dimension("SliceCol", 2)
+            .array_aux("slice[Row,SliceCol]", "matrix[*, 2:3]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get columns 2 and 3: [12, 13, 22, 23, 32, 33]
+        project.assert_interpreter_result("slice", &[12.0, 13.0, 22.0, 23.0, 32.0, 33.0]);
+    }
+
+    #[test]
+    fn range_2d_both_dims() {
+        // Test slicing both dimensions: source[2:3, 2:4]
+        let project = ArrayTestProject::new("range_2d_both")
+            .indexed_dimension("Row", 4)
+            .indexed_dimension("Col", 5)
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "11"),
+                    ("1,2", "12"),
+                    ("1,3", "13"),
+                    ("1,4", "14"),
+                    ("1,5", "15"),
+                    ("2,1", "21"),
+                    ("2,2", "22"),
+                    ("2,3", "23"),
+                    ("2,4", "24"),
+                    ("2,5", "25"),
+                    ("3,1", "31"),
+                    ("3,2", "32"),
+                    ("3,3", "33"),
+                    ("3,4", "34"),
+                    ("3,5", "35"),
+                    ("4,1", "41"),
+                    ("4,2", "42"),
+                    ("4,3", "43"),
+                    ("4,4", "44"),
+                    ("4,5", "45"),
+                ],
+            )
+            // Slice rows 2:3 and columns 2:4
+            .indexed_dimension("SliceRow", 2)
+            .indexed_dimension("SliceCol", 3)
+            .array_aux("slice[SliceRow,SliceCol]", "matrix[2:3, 2:4]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get 2x3 submatrix: [22, 23, 24, 32, 33, 34]
+        project.assert_interpreter_result("slice", &[22.0, 23.0, 24.0, 32.0, 33.0, 34.0]);
+    }
+
+    #[test]
+    fn range_3d_single_dim() {
+        // Test slicing one dimension of a 3D array
+        let project = ArrayTestProject::new("range_3d_single")
+            .indexed_dimension("X", 3)
+            .indexed_dimension("Y", 3)
+            .indexed_dimension("Z", 3)
+            .array_with_ranges(
+                "cube[X,Y,Z]",
+                vec![
+                    // X=1
+                    ("1,1,1", "111"),
+                    ("1,1,2", "112"),
+                    ("1,1,3", "113"),
+                    ("1,2,1", "121"),
+                    ("1,2,2", "122"),
+                    ("1,2,3", "123"),
+                    ("1,3,1", "131"),
+                    ("1,3,2", "132"),
+                    ("1,3,3", "133"),
+                    // X=2
+                    ("2,1,1", "211"),
+                    ("2,1,2", "212"),
+                    ("2,1,3", "213"),
+                    ("2,2,1", "221"),
+                    ("2,2,2", "222"),
+                    ("2,2,3", "223"),
+                    ("2,3,1", "231"),
+                    ("2,3,2", "232"),
+                    ("2,3,3", "233"),
+                    // X=3
+                    ("3,1,1", "311"),
+                    ("3,1,2", "312"),
+                    ("3,1,3", "313"),
+                    ("3,2,1", "321"),
+                    ("3,2,2", "322"),
+                    ("3,2,3", "323"),
+                    ("3,3,1", "331"),
+                    ("3,3,2", "332"),
+                    ("3,3,3", "333"),
+                ],
+            )
+            // Slice Z dimension to [2:3]
+            .indexed_dimension("SliceZ", 2)
+            .array_aux("slice[X,Y,SliceZ]", "cube[*, *, 2:3]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get all X,Y with Z=2,3
+        project.assert_interpreter_result(
+            "slice",
+            &[
+                112.0, 113.0, 122.0, 123.0, 132.0, 133.0, // X=1
+                212.0, 213.0, 222.0, 223.0, 232.0, 233.0, // X=2
+                312.0, 313.0, 322.0, 323.0, 332.0, 333.0, // X=3
+            ],
+        );
+    }
+
+    #[test]
+    fn range_with_single_index_mix() {
+        // Test mixing range with single index: source[2, 3:5]
+        let project = ArrayTestProject::new("range_mixed")
+            .indexed_dimension("Row", 3)
+            .indexed_dimension("Col", 5)
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "11"),
+                    ("1,2", "12"),
+                    ("1,3", "13"),
+                    ("1,4", "14"),
+                    ("1,5", "15"),
+                    ("2,1", "21"),
+                    ("2,2", "22"),
+                    ("2,3", "23"),
+                    ("2,4", "24"),
+                    ("2,5", "25"),
+                    ("3,1", "31"),
+                    ("3,2", "32"),
+                    ("3,3", "33"),
+                    ("3,4", "34"),
+                    ("3,5", "35"),
+                ],
+            )
+            // Select row 2, slice columns 3:5
+            .indexed_dimension("SliceCol", 3)
+            .array_aux("slice[SliceCol]", "matrix[2, 3:5]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get row 2, columns 3-5: [23, 24, 25]
+        project.assert_interpreter_result("slice", &[23.0, 24.0, 25.0]);
     }
 
     #[test]
