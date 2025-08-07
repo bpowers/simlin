@@ -485,7 +485,6 @@ mod transpose_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Requires bare transpose operator support in interpreter
     fn transpose_1d_array() {
         // Transpose of 1D array should be no-op
         let project = ArrayTestProject::new("transpose_1d")
@@ -542,7 +541,6 @@ mod transpose_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Requires bare transpose operator support in interpreter
     fn transpose_chain() {
         // Test that (A')' = A
         let project = ArrayTestProject::new("transpose_chain")

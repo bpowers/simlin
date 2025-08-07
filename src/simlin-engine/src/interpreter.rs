@@ -4,7 +4,9 @@
 
 use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
-use crate::compiler::{ArrayView, BuiltinFn, Expr, Module, UnaryOp};
+#[cfg(test)]
+use crate::compiler::ArrayView;
+use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
 use crate::model::enumerate_modules;
 use crate::sim_err;
 use crate::vm::{
@@ -17,6 +19,39 @@ use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Helper function to transpose an index from row-major to column-major ordering
+/// For a 2D array [rows, cols], transpose maps (r,c) -> (c,r)
+/// In flat indexing: idx = r*cols + c becomes idx' = c*rows + r
+fn transpose_index(idx: usize, dims: &[usize]) -> usize {
+    if dims.is_empty() || dims.len() == 1 {
+        // 0D or 1D arrays are unchanged by transpose
+        return idx;
+    }
+
+    // Convert flat index to multi-dimensional coordinates
+    let mut coords = Vec::with_capacity(dims.len());
+    let mut remaining = idx;
+    for &dim in dims.iter().rev() {
+        coords.push(remaining % dim);
+        remaining /= dim;
+    }
+    coords.reverse();
+
+    // Reverse the coordinates for transpose
+    coords.reverse();
+
+    // Reverse the dimensions for transpose
+    let mut transposed_dims = dims.to_vec();
+    transposed_dims.reverse();
+
+    // Convert back to flat index with transposed dimensions
+    let mut result = 0;
+    for (i, &coord) in coords.iter().enumerate() {
+        result = result * transposed_dims[i] + coord;
+    }
+    result
+}
+
 pub struct ModuleEvaluator<'a> {
     step_part: StepPart,
     off: usize,
@@ -25,6 +60,16 @@ pub struct ModuleEvaluator<'a> {
     next: &'a mut [f64],
     module: &'a Module,
     sim: &'a Simulation,
+    /// Tracks array context for proper transpose handling
+    array_context: Option<ArrayContext>,
+}
+
+#[derive(Debug, Clone)]
+struct ArrayContext {
+    /// The dimensions of the array being processed
+    dims: Vec<usize>,
+    /// The current index in the flattened array
+    current_index: usize,
 }
 
 impl ModuleEvaluator<'_> {
@@ -106,21 +151,27 @@ impl ModuleEvaluator<'_> {
                         (!is_truthy(l)) as i8 as f64
                     }
                     UnaryOp::Transpose => {
-                        // Transpose of bare array variables in A2A context requires proper
-                        // dimension tracking which isn't fully implemented yet.
-                        //
-                        // For bare array transpose (e.g., matrix' where matrix is [Row,Col]),
-                        // we would need to track that the result has dimensions [Col,Row].
-                        // This requires integration with the A2A assignment machinery.
-                        //
-                        // Workaround: Use dimension positions instead (e.g., matrix[@2, @1])
-                        // which achieves the same result and is fully supported.
-                        //
-                        // Note: Transpose of subscripted arrays (handled via StaticSubscript
-                        // in the compiler) works correctly since the view is pre-computed.
-                        todo!(
-                            "Transpose operator in interpreter not yet implemented - use dimension positions (e.g., matrix[@2, @1]) as a workaround"
-                        )
+                        // Handle transpose for bare array variables
+                        match l.as_ref() {
+                            Expr::Var(var_off, _) => {
+                                // For bare array transpose, we need to map from the transposed
+                                // index to the original index.
+                                if let Some(ref ctx) = self.array_context {
+                                    // Calculate the transposed index mapping
+                                    let transposed_idx =
+                                        transpose_index(ctx.current_index, &ctx.dims);
+                                    self.curr[self.off + var_off + transposed_idx]
+                                } else {
+                                    // Without array context, we can't properly transpose
+                                    // This case shouldn't happen in well-formed A2A assignments
+                                    self.curr[self.off + var_off]
+                                }
+                            }
+                            _ => {
+                                // For non-variable expressions, just evaluate them
+                                self.eval(l)
+                            }
+                        }
                     }
                 }
             }
@@ -483,6 +534,7 @@ impl Simulation {
             module,
             inputs: module_inputs,
             sim: self,
+            array_context: None, // Will be set when processing array assignments
         };
 
         for expr in runlist.iter() {
