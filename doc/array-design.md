@@ -1,5 +1,29 @@
 # High-Level Design for Array Support in Simlin-Engine
 
+## Executive Summary
+
+The simlin-engine has initial implementations of several XMILE array features in the compiler and AST-walking interpreter. However, these features are **not usable in practice** because they are not implemented in the bytecode VM, which is the primary execution engine.
+
+🚧 **Partially Implemented** (Compiler + AST interpreter only, NOT in bytecode VM):
+- **ArrayView abstraction** - Efficient strided array access (compiler only)
+- **Wildcard subscripts** (`a[*]`) - Works in compiler and AST interpreter
+- **Range subscripts** (`a[1:3]`) - Initial support in compiler, SUM works in AST interpreter
+- **Dimension positions** (`a[@2,@1]`) - Basic support in compiler
+- **StaticSubscript** - Compile-time optimized array access (compiler only)
+
+⚠️ **Very Limited Implementation**:
+- **Transpose operator** (`a'`) - Only works for subscripted arrays in compiler, `todo!()` for bare arrays in interpreter
+- **SUM with ranges** - Works in AST interpreter for some cases only
+
+❌ **Not Implemented**:
+- Bytecode VM support for ANY of the new array features
+- Star ranges (`*:DimName`)
+- Named dimension ranges (`DimA.Boston:DimA.LA`)
+- Additional aggregate functions (MEAN, MIN, MAX, etc.)
+- Bare array transpose (fails with `todo!()` in interpreter)
+
+The architecture uses a three-phase approach: Parser → Type Checking (Expr2) → Compiler with ArrayView. However, the bytecode VM does not yet support these new features, limiting their practical use.
+
 ## Overview
 
 This document outlines the design for comprehensive array support in `simlin-engine`, which is needed to run large existing and important models.
@@ -48,9 +72,10 @@ pub enum Expr {
 
 This separation allows the compiler to optimize static subscripts while properly handling dynamic ones.
 
-## Current State Summary
+## Current State
 
-The engine has significant array support already implemented:
+### Working Features
+The engine has significant array support already implemented that works across all execution paths:
 - Dimension definitions (indexed and named)
 - Array variable declarations with dimension associations
 - Subscript parsing and AST representation (including wildcards and element selection)
@@ -59,15 +84,21 @@ The engine has significant array support already implemented:
 - Array-to-array arithmetic operations (addition, multiplication, etc.)
 - Scalar-to-array operations
 - Basic broadcasting support (e.g., 2D array * 1D array)
-- Partial reduction operations (e.g., SUM along specific dimensions)
-- Transpose operator (')
-- Dimension position operator (@)
+- Basic reduction operations (e.g., SUM along specific dimensions)
 
-Key limitations:
-- Limited slicing with range operations (e.g., a[1:3])
-- Missing array manipulation functions
-- Incomplete error handling for invalid indices
-- Aggregate functions (sum, mean, stddev, min, max, prod)
+### Partially Implemented Features
+These features have initial implementations but **do not work in the bytecode VM**:
+- **Transpose operator** (`'`) - Compiler support for subscripted arrays only, bare arrays fail
+- **Dimension position operator** (`@`) - Basic compiler support, not in VM
+- **Wildcard subscripts** (`*`) - Works in compiler and AST interpreter, not in VM
+- **Range subscripts** (e.g., `a[1:3]`) - Initial compiler support with ArrayView, not in VM
+- **SUM with ranges** - Limited AST interpreter support, not in VM
+
+### Not Implemented
+- Star ranges (e.g., `*:Dimension`)
+- Named dimension ranges (e.g., `DimA.Boston:DimA.LA`)
+- Other aggregate functions (MEAN, STDDEV, MIN, MAX, PROD)
+- Complete error handling for invalid indices
 
 ## Design Goals
 
@@ -92,10 +123,10 @@ The engine already supports some broadcasting scenarios:
 - 1D array can multiply with 2D array when dimensions match (e.g., `array[A,B] * array[A]`)
 - This is implemented through the existing ApplyToAll and expression evaluation
 
-**Required XMILE Features Not Yet Implemented:**
-1. ~~**Transpose operator** (`'`): Reverses array dimensions~~ **IMPLEMENTED** - Parser support added, AST nodes created, awaiting compiler implementation
-2. ~~**Dimension position operator** (`@`): References dimensions by position~~ **IMPLEMENTED** - Parser support added, AST nodes created, awaiting compiler implementation
-3. **Range subscripts**: Selecting subarrays with syntax like `array[1:3, *]`
+**Required XMILE Features Implementation Status:**
+1. **Transpose operator** (`'`): 🚧 **PARTIAL** - Works for subscripted arrays in compiler only, bare arrays hit `todo!()` in interpreter, not in VM
+2. **Dimension position operator** (`@`): 🚧 **PARTIAL** - Basic compiler support with dimension reordering, not in VM
+3. **Range subscripts**: 🚧 **PARTIAL** - Initial compiler support via ArrayView slicing, limited interpreter support, not in VM
 
 ### 2. Temporary Array Storage Management
 
@@ -123,10 +154,16 @@ Current support includes:
 - **Reduction operations**: `SUM(a[*])`, `MEAN(a[DimA, *])` - already supported
 - **Basic subscripting**: `a[DimA.Boston, *]` - already supported
 
+Partially implemented features - **Compiler and AST interpreter only, not in VM**:
+- **Range slicing**: 🚧 `a[1:3, *]` - Initial ArrayView support in compiler
+- **Transpose**: ⚠️ `a'` or `a[DimA, DimB]'` - Only subscripted arrays in compiler, bare arrays fail with `todo!()`
+- **Dimension position**: 🚧 `a[@2, @1]` for reordering dimensions - Basic compiler support
+- **Wildcard subscripts**: 🚧 `a[*]` - Works in compiler and AST interpreter
+- **SUM with ranges**: 🚧 `SUM(a[1:3])` - Limited support in AST interpreter only
+
 Still needed:
-- **Range slicing**: `a[1:3, *]`, `a[DimA.Boston:DimA.LA, *]`
-- ~~**Transpose**: `a'` or `a[DimA, DimB]'`~~ **IMPLEMENTED** in parser
-- ~~**Dimension position**: `a[@2, @1]` for reordering dimensions~~ **IMPLEMENTED** in parser
+- **Named dimension ranges**: `a[DimA.Boston:DimA.LA, *]` 
+- **Star ranges**: `*:DimA.End` syntax
 
 ### 4. Dimension Context Enhancement
 
@@ -255,29 +292,40 @@ struct ArrayInfo {
 - **Dimension tracking**: Properly tracks maximum bounds for type checking
 - **Tests**: Comprehensive test coverage for array bounds tracking and propagation
 
-#### 2. Transpose Operator (`'`) - Partially Complete
+#### 2. Transpose Operator (`'`) 🚧 PARTIAL
 - **Parser Support**: ✅ Full support for parsing transpose operator as a postfix unary operator
 - **AST Representation**: ✅ Added `Transpose` variant to `UnaryOp` enum
 - **Expr2 Handling**: ✅ Properly reverses dimensions during type checking
-- **Tests**: ✅ Comprehensive parser and Expr2 tests
-- **Compiler**: ❌ Returns `ArraysNotImplemented` error - needs implementation
-- **VM/Interpreter**: ❌ Not yet implemented
+- **Compiler**: 🚧 Works ONLY for subscripted arrays with ArrayView stride reversal
+- **AST Interpreter**: ❌ Has `todo!()` for bare array transpose - not implemented
+- **Bytecode VM**: ❌ Not implemented
+- **Tests**: 🚧 Some tests pass for subscripted arrays, bare array tests are commented out/ignored
 
-#### 3. Dimension Position Operator (`@`) - Partially Complete
+#### 3. Dimension Position Operator (`@`) 🚧 PARTIAL
 - **Parser Support**: ✅ Full support for parsing `@n` syntax in subscript expressions
 - **AST Representation**: ✅ Added `DimensionPosition(u32, Loc)` variant to all `IndexExpr{0,1,2}` enums
 - **Lexer**: ✅ Added `At` token and lexer rule for `@` character
 - **Expr2 Handling**: ✅ Properly tracked through type checking phase
-- **Tests**: ✅ Comprehensive parser tests including `a[@1]`, `a[@3, @2, @1]`
-- **Compiler**: ❌ Returns `ArraysNotImplemented` error - needs implementation
-- **VM/Interpreter**: ❌ Not yet implemented
+- **Compiler**: 🚧 Basic implementation with dimension reordering in ArrayView
+- **AST Interpreter**: 🚧 Limited support
+- **Bytecode VM**: ❌ Not implemented
+- **Tests**: 🚧 Some tests pass in limited scenarios
 
-#### 4. Range Subscripts - Partially Complete
+#### 4. Range Subscripts 🚧 PARTIAL
 - **Parser Support**: ✅ Can parse range syntax like `a[1:3]`
 - **AST Representation**: ✅ `Range` variant in `IndexExpr{0,1,2}`
 - **Expr2 Handling**: ✅ Properly tracked through type checking phase
-- **Compiler**: ❌ Returns `TodoRange` error - needs implementation
-- **VM/Interpreter**: ❌ Not yet implemented
+- **Compiler**: 🚧 Initial implementation with ArrayView slicing using `apply_range_subscript`
+- **AST Interpreter**: 🚧 SUM function has limited support for range subscripts
+- **Bytecode VM**: ❌ Not implemented
+- **Tests**: 🚧 Many tests exist but several are ignored/not passing
+
+#### 5. Wildcard Subscripts 🚧 PARTIAL
+- **Parser Support**: ✅ Parsing `*` in subscripts
+- **Compiler**: 🚧 Implementation with dimension preservation in ArrayView
+- **AST Interpreter**: 🚧 Basic support for wildcard subscripts
+- **Bytecode VM**: ❌ Not implemented
+- **Tests**: 🚧 Tests pass for AST interpreter, not for VM
 
 ### Implementation Details
 
@@ -288,43 +336,52 @@ The implementation follows a clean architecture:
 4. **Visitor patterns** updated to handle new AST nodes
 5. **Error handling** returns appropriate error codes when features aren't fully implemented
 
-## Implementation Phases
+## Implementation Status
 
-### Phase 1: Simplify Expr2 Array Representation ✅ COMPLETE
-1. **Remove ArrayView complexity from Expr2**: ✅
+### Completed: Expr2 Array Representation
+1. **ArrayView complexity removed from Expr2**: ✅
    - Replaced with simple ArrayBounds enum
    - Added temp_id tracking for intermediate results
    - Proper dimension tracking for type checking
-2. **Update AST transformations**: ✅
+2. **AST transformations updated**: ✅
    - Simplified expr0→expr1→expr2 array handling
    - Focus on maximum bounds computation
    - Tests verify correct array bounds propagation
 
-### Phase 2: Enhanced Compiler Array Support 🚧 IN PROGRESS
-This is the current focus area. The compiler needs to handle the array operations that are already parsed and type-checked.
+### In Progress: Compiler Array Support
+Initial array operations have been implemented in the compiler using the ArrayView abstraction, but are not yet integrated with the bytecode VM.
 
-1. **Split Subscript handling** (TODO):
-   - Create StaticSubscript for compile-time resolution
-   - Create DynamicSubscript for runtime evaluation
-   - Generate efficient code for each case
-2. **Implement array operations in compiler** (TODO):
-   - **Transpose**: Generate stride-swapped views (currently returns `ArraysNotImplemented`)
-   - **Ranges**: Handle slice bounds and view creation (currently returns `TodoRange`)
-   - **Dimension positions**: Resolve @n references (currently returns `ArraysNotImplemented`)
-   - **Wildcards**: Handle wildcard subscripts (currently returns `TodoWildcard`)
-   - **Star ranges**: Handle *:dimension syntax (currently returns `TodoStarRange`)
-3. **VM instruction updates** (TODO):
-   - Add instructions for dynamic view creation
-   - Implement efficient bounds checking
-   - Support strided array iteration
+1. **Split Subscript handling** 🚧 PARTIAL:
+   - StaticSubscript created for compile-time resolution with precomputed ArrayView
+   - Works in compiler but not translated to VM bytecode
+   - Dynamic subscripts partially handled
+2. **Implement array operations in compiler** 🚧 PARTIAL:
+   - **Transpose**: 🚧 Only for subscripted arrays, bare arrays fail
+   - **Ranges**: 🚧 Initial implementation with `apply_range_subscript`
+   - **Dimension positions**: 🚧 Basic @n reference resolution
+   - **Wildcards**: 🚧 Initial implementation with dimension preservation
+   - **Star ranges**: ❌ Not implemented (returns `TodoStarRange`)
+3. **VM instruction updates** ❌ NOT DONE:
+   - No VM bytecode support for new array features
+   - StaticSubscript not translated to bytecode
+   - ArrayView operations not available in VM
 
-### Phase 3: Interpreter Support (TODO)
-Parallel to compiler work, the interpreter needs the same functionality:
-1. **Array view operations**: Transpose, slicing, dimension reordering
-2. **Dynamic subscript evaluation**: Runtime bounds checking and offset calculation
-3. **Test parity**: Ensure interpreter and VM produce identical results
+### Partial: AST Interpreter Support
+The AST-walking interpreter has limited support for new array operations:
+1. **Array view operations**: 🚧 Basic StaticSubscript support
+2. **SUM with ranges**: 🚧 Limited implementation for some array views
+3. **Transpose**: ❌ `todo!()` for bare arrays
+4. **Test coverage**: 🚧 Many tests ignored or failing
 
-### Phase 4: Optimization (FUTURE)
+Critical gaps:
+- Bare array transpose hits `todo!()` and fails
+- Limited coverage of edge cases
+- No bytecode VM support at all
+
+### Not Started: VM Bytecode Support
+**This is the most critical gap** - none of the new array features have VM bytecode implementations.
+
+### Future: Optimization
 1. **Static subscript optimization**:
    - Pre-compute all offsets at compile time
    - Eliminate runtime bounds checks where possible
@@ -368,51 +425,90 @@ This design has evolved from a complex ArrayView-based approach to a simplified 
 
 3. **Static vs Dynamic Distinction**: The design calls for explicitly separating static and dynamic subscript handling in the compiler to enable better optimization opportunities and clearer code paths.
 
-**Current Status (January 2025)**:
+**Current Status**:
 
 1. **Parser**: ✅ Fully supports all XMILE array syntax (transpose, dimension positions, ranges)
 2. **Expr2**: ✅ Successfully simplified with ArrayBounds replacing complex ArrayView types
-3. **Compiler**: 🚧 Needs implementation of array operations (currently returns error codes)
-4. **VM/Interpreter**: ⏳ Needs array view operations and dynamic subscript support
+3. **Compiler**: 🚧 Initial array operations with ArrayView, but not integrated with VM
+4. **AST Interpreter**: 🚧 Limited support, bare array transpose fails with `todo!()`
+5. **Bytecode VM**: ❌ NO support for any new array features - this is the critical gap
 
 ## Recommended Next Steps
 
 Based on the current implementation status, here's the prioritized roadmap:
 
-### Immediate Priority: Compiler Array Operations
-The most pressing need is to implement array operations in the compiler. Start with the simplest cases and build up:
+### CRITICAL Priority: Bytecode VM Support
 
-1. **Implement Wildcard Subscripts** (`TodoWildcard`)
-   - These are the simplest to implement
-   - Create a view that preserves the dimension
-   - Good starting point for array view infrastructure
+**The most critical gap is that NONE of the new array features work in the bytecode VM.** This must be addressed before these features can be considered usable.
 
-2. **Implement Dimension Position** (`ArraysNotImplemented` for `@n`)
-   - Relatively straightforward dimension reordering
-   - Build on wildcard implementation
-   - Can be statically resolved at compile time
+1. **Implement VM bytecode for StaticSubscript**
+   - Translate ArrayView operations to bytecode
+   - Support strided iteration in VM
+   - Handle view offset and stride calculations
 
-3. **Implement Transpose** (`ArraysNotImplemented` for `'`)
-   - Similar to dimension position but simpler (just reverse)
-   - Reuse dimension reordering logic
-   - Good test case for stride manipulation
+2. **Fix bare array transpose in AST interpreter**
+   - Remove `todo!()` and implement proper handling
+   - Required for basic testing before VM implementation
 
-4. **Implement Range Subscripts** (`TodoRange`)
-   - More complex due to dynamic bounds
-   - Requires runtime bounds checking
-   - Foundation for more advanced slicing
+### High Priority: Complete Partial Implementations
 
-5. **Implement Star Ranges** (`TodoStarRange`)
-   - Most complex subscript type
-   - Builds on range implementation
-   - May require dimension name resolution
+1. **Finish range subscript support**
+   - Complete compiler implementation
+   - Full AST interpreter support
+   - Then implement in VM
 
-### Secondary Priority: Interpreter Parity
-Once compiler implementations are working, ensure the interpreter has matching functionality for testing and validation.
+2. **Complete wildcard implementation**
+   - Ensure all edge cases work
+   - Full test coverage
+   - VM bytecode support
 
-### Future Work
-- Static optimization for known compile-time subscripts
-- Efficient memory layout for common access patterns
-- Advanced array functions and operations
+3. **Finish dimension position operator**
+   - Complete compiler support
+   - Full AST interpreter coverage
+   - VM implementation
 
-By following this incremental approach, we can systematically build up full array support while maintaining a working system at each step.
+### Secondary Priority: Optimization and Polish
+
+1. **Dynamic Subscript Optimization**
+   - Cache computed offsets where possible
+   - Optimize sequential access patterns
+   - Consider SIMD for array operations
+
+2. **Better Error Messages**
+   - More descriptive array bounds errors
+   - Clear dimension mismatch messages
+   - Helpful suggestions for common mistakes
+
+3. **Performance Testing**
+   - Benchmark array operations at scale
+   - Profile memory access patterns
+   - Optimize hot paths
+
+### Future Enhancements
+
+1. **Star Ranges** (`*:DimName`)
+   - Not yet started
+   - Requires dimension name resolution
+
+2. **Named Dimension Ranges**
+   - Support `DimA.Boston:DimA.LA` syntax
+   - Requires dimension element name lookup
+
+3. **Additional Aggregate Functions**
+   - MEAN, STDDEV, MIN, MAX, PROD
+   - Build on SUM pattern once VM support exists
+
+4. **Advanced Array Functions**
+   - Matrix operations (though not required by XMILE)
+   - Statistical functions
+   - Financial array functions
+
+## Summary
+
+The array support infrastructure exists (ArrayView, parsing, initial compiler support), but **the features are not usable in production** because:
+1. The bytecode VM has no support for any of the new array features
+2. The AST interpreter has critical gaps (bare array transpose fails with `todo!()`)
+3. Many test cases are ignored or commented out
+4. The implementations are incomplete and only work in limited scenarios
+
+The ArrayView abstraction provides a solid foundation, but substantial work remains to make these features production-ready. The critical next step is implementing VM bytecode support for these operations.
