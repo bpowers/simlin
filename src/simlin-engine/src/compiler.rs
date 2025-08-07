@@ -553,13 +553,13 @@ impl Context<'_> {
 
                 // First, check if this is a static subscript that we can optimize
                 let mut is_static = true;
-                let mut has_range = false;
 
                 // Build a list of operations to apply to the view
                 enum IndexOp {
                     Range(usize, usize), // start, end (0-based, end exclusive)
                     Single(usize),       // single index (0-based)
                     Wildcard,            // keep dimension
+                    DimPosition(usize),  // dimension position (0-based)
                 }
 
                 let mut operations = Vec::new();
@@ -567,7 +567,6 @@ impl Context<'_> {
                 for arg in args.iter() {
                     match arg {
                         IndexExpr2::Range(start_expr, end_expr, _) => {
-                            has_range = true;
                             if let (
                                 ast::Expr2::Const(_, start_val, _),
                                 ast::Expr2::Const(_, end_val, _),
@@ -585,6 +584,11 @@ impl Context<'_> {
                         IndexExpr2::Wildcard(_) => {
                             operations.push(IndexOp::Wildcard);
                         }
+                        IndexExpr2::DimPosition(pos, _) => {
+                            // @1 is position 0, @2 is position 1, etc.
+                            let dim_idx = (*pos as usize).saturating_sub(1);
+                            operations.push(IndexOp::DimPosition(dim_idx));
+                        }
                         IndexExpr2::Expr(expr) if matches!(expr, ast::Expr2::Const(_, _, _)) => {
                             if let ast::Expr2::Const(_, val, _) = expr {
                                 let idx = (*val as isize - 1).max(0) as usize;
@@ -598,77 +602,135 @@ impl Context<'_> {
                     }
                 }
 
-                if is_static && has_range {
-                    // Build the view based on operations
-                    let mut view = ArrayView::contiguous(dims.iter().map(|d| d.len()).collect());
-                    let mut dim_offset = 0; // Track which dimension we're processing after removals
+                if is_static {
+                    // Build a unified view for any combination of static operations
+                    let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+
+                    // Calculate original strides (row-major)
+                    let mut orig_strides = vec![1isize; orig_dims.len()];
+                    for i in (0..orig_dims.len().saturating_sub(1)).rev() {
+                        orig_strides[i] = orig_strides[i + 1] * orig_dims[i + 1] as isize;
+                    }
+
+                    // First pass: determine dimension mapping and validate
+                    // dim_mapping[i] = Some(j) means output dim i comes from input dim j
+                    // dim_mapping[i] = None means output dim i is removed (single index)
+                    let mut dim_mapping: Vec<Option<usize>> = Vec::new();
+                    let mut single_indices: Vec<usize> = Vec::new();
+                    let mut offset_adjustment = 0usize;
 
                     for (i, op) in operations.iter().enumerate() {
                         match op {
-                            IndexOp::Range(start, end) => {
-                                // Validate bounds
-                                if *end > dims[i].len() || *start >= *end {
-                                    return sim_err!(
-                                        Generic,
-                                        format!("Invalid range bounds for dimension {}", i)
-                                    );
-                                }
-                                view = view.apply_range_subscript(dim_offset, *start, *end)?;
-                                dim_offset += 1; // Range keeps the dimension
-                            }
                             IndexOp::Single(idx) => {
                                 // Validate bounds
-                                if *idx >= dims[i].len() {
+                                if *idx >= orig_dims[i] {
                                     return sim_err!(
                                         Generic,
                                         format!("Index out of bounds for dimension {}", i)
                                     );
                                 }
-                                // Single index removes the dimension
-                                view.offset += idx * view.strides[dim_offset] as usize;
-                                view.dims.remove(dim_offset);
-                                view.strides.remove(dim_offset);
-                                // Don't increment dim_offset since we removed a dimension
+                                single_indices.push(*idx);
+                                offset_adjustment += idx * orig_strides[i] as usize;
+                            }
+                            IndexOp::Range(start, end) => {
+                                // Validate bounds
+                                if *end > orig_dims[i] || *start >= *end {
+                                    return sim_err!(
+                                        Generic,
+                                        format!("Invalid range bounds for dimension {}", i)
+                                    );
+                                }
+                                dim_mapping.push(Some(i));
+                                single_indices.push(*start); // Track start offset
+                                offset_adjustment += start * orig_strides[i] as usize;
                             }
                             IndexOp::Wildcard => {
-                                // Wildcard keeps the dimension as-is
-                                dim_offset += 1;
+                                dim_mapping.push(Some(i));
+                                single_indices.push(0); // No offset for wildcard
+                            }
+                            IndexOp::DimPosition(pos) => {
+                                if *pos >= orig_dims.len() {
+                                    return sim_err!(
+                                        Generic,
+                                        format!("Dimension position @{} out of bounds", pos + 1)
+                                    );
+                                }
+                                dim_mapping.push(Some(*pos));
+                                single_indices.push(0); // Will be resolved at runtime in A2A context
                             }
                         }
                     }
+
+                    // Build the resulting view
+                    let mut new_dims = Vec::new();
+                    let mut new_strides = Vec::new();
+
+                    for (i, op) in operations.iter().enumerate() {
+                        match op {
+                            IndexOp::Single(_) => {
+                                // Dimension is removed, don't add to output
+                            }
+                            IndexOp::Range(start, end) => {
+                                new_dims.push(end - start);
+                                new_strides.push(orig_strides[i]);
+                            }
+                            IndexOp::Wildcard => {
+                                new_dims.push(orig_dims[i]);
+                                new_strides.push(orig_strides[i]);
+                            }
+                            IndexOp::DimPosition(pos) => {
+                                // Use the dimension size and stride from the referenced position
+                                new_dims.push(orig_dims[*pos]);
+                                new_strides.push(orig_strides[*pos]);
+                            }
+                        }
+                    }
+
+                    let view = ArrayView {
+                        dims: new_dims,
+                        strides: new_strides,
+                        offset: offset_adjustment,
+                    };
 
                     // Check if we're in an array iteration context
+                    // If we have dimension positions, we need special handling in A2A context
                     if let Some(active_subscripts) = &self.active_subscript {
-                        if let Some(active_dims) = &self.active_dimension {
-                            // We need to map active subscripts to the view dimensions
-                            // This is complex for multi-dimensional cases
+                        if let Some(_active_dims) = &self.active_dimension {
+                            // Check if we have any dimension positions
+                            let has_dim_positions = operations
+                                .iter()
+                                .any(|op| matches!(op, IndexOp::DimPosition(_)));
 
-                            // Calculate the linear index in the result array
-                            let mut result_index = 0;
+                            if has_dim_positions {
+                                // For dimension positions in A2A context, we need to fall back to dynamic evaluation
+                                // because @n refers to the nth dimension of the target variable's current iteration
+                                is_static = false;
+                            } else {
+                                // Calculate the linear index in the result array based on the view
+                                let mut result_index = 0;
 
-                            // Match active dimensions with view dimensions
-                            let mut view_dim_idx = 0;
-                            for (active_idx, _active_dim) in active_dims.iter().enumerate() {
-                                // Check if this dimension exists in the view
-                                if view_dim_idx < view.dims.len() {
-                                    // Parse the active subscript for this dimension
-                                    if let Ok(idx) = active_subscripts[active_idx].parse::<usize>()
-                                    {
-                                        let idx_0based = idx - 1;
-                                        // Add to the result index
-                                        result_index +=
-                                            idx_0based * view.strides[view_dim_idx] as usize;
+                                // For each dimension in the view, find its value from active subscripts
+                                // The active subscripts correspond to the OUTPUT dimensions, not the input
+                                for (view_idx, stride) in view.strides.iter().enumerate() {
+                                    if view_idx < active_subscripts.len() {
+                                        if let Ok(idx) = active_subscripts[view_idx].parse::<usize>() {
+                                            let idx_0based = idx - 1;
+                                            result_index += idx_0based * (*stride as usize);
+                                        }
                                     }
-                                    view_dim_idx += 1;
                                 }
-                            }
 
-                            return Ok(Expr::Var(off + view.offset + result_index, *loc));
+                                return Ok(Expr::Var(off + view.offset + result_index, *loc));
+                            }
                         }
                     }
 
-                    // Not in iteration context - use StaticSubscript for the full view
-                    return Ok(Expr::StaticSubscript(off, view, *loc));
+                    if !is_static {
+                        // Fall through to dynamic handling
+                    } else {
+                        // Not in iteration context or no dimension positions - use StaticSubscript for the full view
+                        return Ok(Expr::StaticSubscript(off, view, *loc));
+                    }
                 }
 
                 // Fall back to dynamic subscript handling
@@ -723,11 +785,41 @@ impl Context<'_> {
                                 // Dynamic range - not supported yet in old-style subscript
                                 sim_err!(TodoRange, id.clone())
                             }
-                            IndexExpr2::DimPosition(_pos, _loc) => {
+                            IndexExpr2::DimPosition(pos, loc) => {
                                 // @1 refers to the first dimension, @2 to the second, etc.
-                                // This is a placeholder for now - proper implementation would need
-                                // to resolve this based on the target variable's dimensions
-                                sim_err!(ArraysNotImplemented, id.clone())
+                                // In dynamic context, we need the active subscript for that dimension position
+                                if self.active_dimension.is_none() {
+                                    return sim_err!(
+                                        ArrayReferenceNeedsExplicitSubscripts,
+                                        id.clone()
+                                    );
+                                }
+                                let active_dims = self.active_dimension.as_ref().unwrap();
+                                let active_subscripts = self.active_subscript.as_ref().unwrap();
+
+                                // Convert 1-based position to 0-based index
+                                let dim_idx = (*pos as usize).saturating_sub(1);
+
+                                // Check if the dimension position is valid
+                                if dim_idx >= active_dims.len() {
+                                    return sim_err!(
+                                        Generic,
+                                        format!("Dimension position @{} out of bounds", pos)
+                                    );
+                                }
+
+                                // Get the subscript for the specified dimension position
+                                let subscript = &active_subscripts[dim_idx];
+
+                                // Parse it as a numeric index (1-based)
+                                if let Ok(idx) = subscript.parse::<usize>() {
+                                    Ok(Expr::Const(idx as f64, *loc))
+                                } else {
+                                    // If it's a named subscript, we need to resolve it
+                                    // This would require looking up the dimension at that position
+                                    // For now, return an error
+                                    sim_err!(ArraysNotImplemented, id.clone())
+                                }
                             }
                             IndexExpr2::Expr(arg) => {
                                 let expr = if let ast::Expr2::Var(ident, _, loc) = arg {

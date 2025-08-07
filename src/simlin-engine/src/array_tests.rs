@@ -317,42 +317,110 @@ mod wildcard_tests {
 #[cfg(test)]
 mod dimension_position_tests {
     use crate::array_test_helpers::ArrayTestProject;
-    use crate::common::ErrorCode;
 
     #[test]
-    #[ignore]
     fn dimension_position_single() {
-        // Test @1 syntax for accessing first dimension
-        ArrayTestProject::new("dim_pos_single")
-            .indexed_dimension("Time", 3)
-            .array_const("arr[Time]", 5.0)
-            .scalar_aux("first_elem", "arr[@1]")
-            .assert_compile_error(ErrorCode::ArraysNotImplemented);
+        // Test @1 syntax for accessing first element of a dimension
+        let project = ArrayTestProject::new("dim_pos_single")
+            .indexed_dimension("Items", 3)
+            .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
+            .scalar_aux("first_elem", "arr[@1]"); // Should get first element = 10
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("first_elem", 10.0);
     }
 
     #[test]
-    #[ignore]
     fn dimension_position_reorder() {
         // Test reordering dimensions with @2, @1
-        ArrayTestProject::new("dim_pos_reorder")
+        let project = ArrayTestProject::new("dim_pos_reorder")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
-            .array_const("matrix[Row,Col]", 1.0)
-            .array_aux("transposed[Col,Row]", "matrix[@2, @1]")
-            .assert_compile_error(ErrorCode::ArraysNotImplemented);
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "11"),
+                    ("1,2", "12"),
+                    ("1,3", "13"),
+                    ("2,1", "21"),
+                    ("2,2", "22"),
+                    ("2,3", "23"),
+                ],
+            )
+            .array_aux("transposed[Col,Row]", "matrix[@2, @1]"); // Swap dimensions
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Original matrix is row-major: [11, 12, 13, 21, 22, 23]
+        // Transposed should be: [11, 21, 12, 22, 13, 23]
+        project.assert_interpreter_result("transposed", &[11.0, 21.0, 12.0, 22.0, 13.0, 23.0]);
     }
 
     #[test]
-    #[ignore] // Enable when dimension position is implemented
-    fn dimension_position_interpreter() {
-        ArrayTestProject::new("dim_pos_interp")
+    fn dimension_position_3d() {
+        // Test dimension position with 3D arrays
+        let project = ArrayTestProject::new("dim_pos_3d")
             .indexed_dimension("X", 2)
-            .indexed_dimension("Y", 3)
-            .array_aux("matrix[X,Y]", "X * 10 + Y")
-            .array_aux("swapped[Y,X]", "matrix[@2, @1]")
-            // matrix[0,0]=0, [0,1]=1, [0,2]=2, [1,0]=10, [1,1]=11, [1,2]=12
-            // swapped[0,0]=matrix[0,0]=0, [0,1]=matrix[1,0]=10, etc.
-            .assert_interpreter_result("swapped", &[0.0, 10.0, 1.0, 11.0, 2.0, 12.0]);
+            .indexed_dimension("Y", 2)
+            .indexed_dimension("Z", 2)
+            .array_with_ranges(
+                "cube[X,Y,Z]",
+                vec![
+                    ("1,1,1", "111"),
+                    ("1,1,2", "112"),
+                    ("1,2,1", "121"),
+                    ("1,2,2", "122"),
+                    ("2,1,1", "211"),
+                    ("2,1,2", "212"),
+                    ("2,2,1", "221"),
+                    ("2,2,2", "222"),
+                ],
+            )
+            // Reorder to [Z,Y,X]
+            .array_aux("reordered[Z,Y,X]", "cube[@3, @2, @1]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Original cube is in X,Y,Z order: [111, 112, 121, 122, 211, 212, 221, 222]
+        // Reordered to Z,Y,X should be: [111, 211, 121, 221, 112, 212, 122, 222]
+        project.assert_interpreter_result(
+            "reordered",
+            &[111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0],
+        );
+    }
+
+    #[test]
+    fn dimension_position_partial() {
+        // Test mixing dimension position with wildcards
+        let project = ArrayTestProject::new("dim_pos_partial")
+            .indexed_dimension("A", 2)
+            .indexed_dimension("B", 3)
+            .indexed_dimension("C", 2)
+            .array_with_ranges(
+                "arr[A,B,C]",
+                vec![
+                    ("1,1,1", "111"),
+                    ("1,1,2", "112"),
+                    ("1,2,1", "121"),
+                    ("1,2,2", "122"),
+                    ("1,3,1", "131"),
+                    ("1,3,2", "132"),
+                    ("2,1,1", "211"),
+                    ("2,1,2", "212"),
+                    ("2,2,1", "221"),
+                    ("2,2,2", "222"),
+                    ("2,3,1", "231"),
+                    ("2,3,2", "232"),
+                ],
+            )
+            // Fix first dimension at position 1, keep all B, use C dimension
+            .array_aux("slice[C,B]", "arr[1, *, @1]"); // Fix A=1, keep all B, use C dimension
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get A=1 slice with C,B ordering: [111, 121, 131, 112, 122, 132]
+        project.assert_interpreter_result("slice", &[111.0, 121.0, 131.0, 112.0, 122.0, 132.0]);
     }
 }
 
@@ -378,9 +446,9 @@ mod transpose_tests {
     fn transpose_1d_array() {
         // Transpose of 1D array should be no-op
         ArrayTestProject::new("transpose_1d")
-            .indexed_dimension("Time", 5)
-            .array_const("vec[Time]", 3.0)
-            .array_aux("result[Time]", "vec'")
+            .indexed_dimension("Points", 5)
+            .array_const("vec[Points]", 3.0)
+            .array_aux("result[Points]", "vec'")
             .assert_compile_error(ErrorCode::ArraysNotImplemented);
     }
 
@@ -655,9 +723,9 @@ mod range_tests {
     fn range_basic() {
         // Test basic range subscript [1:3]
         ArrayTestProject::new("range_basic")
-            .indexed_dimension("Time", 5)
-            .array_aux("source[Time]", "Time")
-            .array_aux("slice[Time]", "source[1:3]") // Should create smaller array
+            .indexed_dimension("Periods", 5)
+            .array_aux("source[Periods]", "Periods")
+            .array_aux("slice[Periods]", "source[1:3]") // Should create smaller array
             .assert_compile_error(ErrorCode::TodoRange);
     }
 
@@ -679,10 +747,10 @@ mod range_tests {
     fn range_open_ended() {
         // Test open-ended ranges [:3] and [2:]
         ArrayTestProject::new("range_open")
-            .indexed_dimension("Time", 5)
-            .array_const("arr[Time]", 10.0)
-            .array_aux("prefix[Time]", "arr[:3]")
-            .array_aux("suffix[Time]", "arr[2:]")
+            .indexed_dimension("Steps", 5)
+            .array_const("arr[Steps]", 10.0)
+            .array_aux("prefix[Steps]", "arr[:3]")
+            .array_aux("suffix[Steps]", "arr[2:]")
             .assert_compile_error(ErrorCode::TodoRange);
     }
 
@@ -769,12 +837,12 @@ mod combined_operations_tests {
     fn complex_expression() {
         // Test complex array expression
         ArrayTestProject::new("complex_expr")
-            .indexed_dimension("Time", 5)
+            .indexed_dimension("Period", 5)
             .indexed_dimension("Product", 3)
-            .array_aux("sales[Time,Product]", "Time * Product")
-            .array_aux("costs[Time,Product]", "Product * 10")
-            .array_aux("profit[Time,Product]", "sales[*,*] - costs[*,*]")
-            .array_aux("total_profit[Time]", "SUM(profit[*, Product.*])")
+            .array_aux("sales[Period,Product]", "Period * Product")
+            .array_aux("costs[Period,Product]", "Product * 10")
+            .array_aux("profit[Period,Product]", "sales[*,*] - costs[*,*]")
+            .array_aux("total_profit[Period]", "SUM(profit[*, Product.*])")
             .assert_compiles();
     }
 }
