@@ -416,6 +416,30 @@ mod range_tests {
     use crate::common::ErrorCode;
 
     #[test]
+    fn range_basic_a() {
+        // Test basic range subscript [1:3]
+        let project = ArrayTestProject::new("range_basic")
+            .indexed_dimension("A", 5)
+            .indexed_dimension("B", 3)
+            .array_aux("source[A]", "")
+            .array_with_ranges(
+                "source[A]",
+                vec![
+                    ("1", "1"),
+                    ("2", "2"),
+                    ("3", "3"),
+                    ("4", "4"),
+                    ("5", "5"),
+                ],
+            )
+            .array_aux("slice[B]", "source[3:5]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("slice", &[3.0, 4.0, 5.0]);
+    }
+
+    #[test]
     #[ignore]
     fn range_basic() {
         // Test basic range subscript [1:3]

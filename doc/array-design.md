@@ -5,45 +5,33 @@
 This document outlines the design for comprehensive array support in `simlin-engine`, which is needed to run large existing and important models.
 It builds upon the existing foundation while addressing gaps with whats outlined in the XMILE specification, current implementation, and test requirements.
 
+
 ## High-level design
 
 System dynamics models as specified in the [XMILE standard](./xmile-v1.0.html) support a rich syntax around accessing and slicing arrays, much of which (e.g., `array[time]` or `array[some_variable]`) is dynamic simulation-time behavior.
 This means we cannot determine exact strides, offsets, or even which elements will be accessed during the equation parsing or compilation. 
 
+
 ### Multi-Phase Array Handling
 
 1. **Parser (Expr0)**: Captures all array syntax including subscripts, transpose, dimension positions (DONE)
-2. **Type Checking (Expr2)**: Focuses on: (IN PROGRESS)
+2. **Type Checking (Expr2)**: Focuses on: (DONE)
    - Computing **maximum** array bounds (conservative estimates)
    - Basic array-size compatibility checks
-   - Determining if subscripts are static or dynamic
    - Calculating temporary storage requirements, e.g. uniquely numbering temporaries
 3. **Compiler**: Static optimizations and efficiently preparing for runtime evaluation: (TODO)
    - Pulls to "compile time" what we can, e.g. stride calculations for static subscripts
    - View creation (transpose, slicing)
    - Identifies how much temporary storage to allocate for array temporaries
      - in the interpreter and VM we will use this to allocate one scratch buffer that we bump-allocate array temporaries out of  
-4. **Interpreter/VM**: Runtime evaluation (TODO)
-   - We have both an AST-walking interpreter and bytecode VM, we implement the same semantics in both to validate our implementations produce the same behavior
+4. **AST-walking Interpreter**: Runtime evaluation (TODO)
+   - Dynamic subscript evaluation
+   - Actual array operations and array-based builtin functions
+5. **Bytecode VM**: Runtime evaluation (TODO)
+   - implement the same semantics as the AST-walking Interpreter to validate our implementations produce the same behavior
    - Dynamic subscript evaluation
    - Actual array operations and array-based builtin functions
    
-### Simplified Expr2 Representation
-
-Instead of complex ArrayView with Contiguous/Strided variants, Expr2 will use:
-
-```rust
-// Simplified array information in Expr2
-struct ArrayBounds {
-    dims:       Vec<(bool, usize)>,  // tuple of "is_dynamic" and "max size"
-}
-
-// ArraySource now references ArrayBounds instead of ArrayView
-pub enum ArraySource {
-   Named(Ident, ArrayBounds),
-   Temp(u32, ArrayBounds),
-}
-```
 
 ### Compiler Subscript Types
 
@@ -62,7 +50,7 @@ This separation allows the compiler to optimize static subscripts while properly
 
 ## Current State Summary
 
-The engine has substantial array support already implemented:
+The engine has significant array support already implemented:
 - Dimension definitions (indexed and named)
 - Array variable declarations with dimension associations
 - Subscript parsing and AST representation (including wildcards and element selection)
@@ -70,7 +58,6 @@ The engine has substantial array support already implemented:
 - Element-wise operations between arrays (ApplyToAll and Arrayed)
 - Array-to-array arithmetic operations (addition, multiplication, etc.)
 - Scalar-to-array operations
-- Aggregate functions (sum, mean, stddev, min, max, prod)
 - Basic broadcasting support (e.g., 2D array * 1D array)
 - Partial reduction operations (e.g., SUM along specific dimensions)
 - Transpose operator (')
@@ -80,7 +67,7 @@ Key limitations:
 - Limited slicing with range operations (e.g., a[1:3])
 - Missing array manipulation functions
 - Incomplete error handling for invalid indices
-- No explicit array constructors
+- Aggregate functions (sum, mean, stddev, min, max, prod)
 
 ## Design Goals
 
@@ -110,23 +97,17 @@ The engine already supports some broadcasting scenarios:
 2. ~~**Dimension position operator** (`@`): References dimensions by position~~ **IMPLEMENTED** - Parser support added, AST nodes created, awaiting compiler implementation
 3. **Range subscripts**: Selecting subarrays with syntax like `array[1:3, *]`
 
-### 2. Temporary Array Storage Management (Simplified)
+### 2. Temporary Array Storage Management
 
 The simplified design moves array view complexity from Expr2 to the compiler:
 
-**Expr2 Phase (Simple)**:
+**Expr2 Phase**:
 - Each array-producing expression gets a `temp_id: Option<u32>` 
 - Array bounds are tracked as maximum possible sizes
 - No complex ArrayView or ArraySource types needed
 
 **Compiler Phase (Complex)**:
 Array views are computed during compilation when we have more context.
-
-**Benefits of Simplified Approach**:
-- **Cleaner Expr2**: No complex ArrayView propagation through AST
-- **Better dynamic handling**: Compiler can generate different code paths for static vs dynamic cases
-- **Easier optimization**: All array layout decisions happen in one place
-- **Reduced AST size**: No ArraySource field on every expression
 
 **How it works**:
 1. During Expr2 transformation, assign temp IDs to intermediate array results
@@ -153,7 +134,6 @@ Enhance dimension handling to support:
 - **Dimension arithmetic**: `Location.Boston + 1` → `Location.Chicago`
 - **Dimension ranges**: `DimA.Start:DimA.End`
 - **Dynamic dimension queries**: `SIZE(array, dimension_index)`
-- **Dimension membership tests**: `IS_IN(index, dimension)`
 
 ## Examples of Simplified Approach
 
