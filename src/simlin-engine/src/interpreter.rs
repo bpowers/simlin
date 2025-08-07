@@ -278,10 +278,48 @@ impl ModuleEvaluator<'_> {
 
                         step(time, dt, height, step_time)
                     }
-                    BuiltinFn::Rank(_, _)
-                    | BuiltinFn::Size(_)
-                    | BuiltinFn::Stddev(_)
-                    | BuiltinFn::Sum(_) => {
+                    BuiltinFn::Sum(arg) => {
+                        // Sum needs to handle both StaticSubscript (array views) and regular arrays
+                        match arg.as_ref() {
+                            Expr::StaticSubscript(off, view, _) => {
+                                // Sum over the array view
+                                let mut sum = 0.0;
+                                let base_off = self.off + *off;
+
+                                // For now, handle 1D views
+                                if view.dims.len() == 1 {
+                                    for i in 0..view.dims[0] {
+                                        let idx = view.offset + i * view.strides[0] as usize;
+                                        sum += self.curr[base_off + idx];
+                                    }
+                                } else {
+                                    // For multi-dimensional views, we need to iterate properly
+                                    // This is a simplified version that assumes contiguous or simple strided access
+                                    let total_elements = view.dims.iter().product::<usize>();
+                                    for i in 0..total_elements {
+                                        // Calculate the position in the multi-dimensional array
+                                        let mut remainder = i;
+                                        let mut idx = view.offset;
+                                        for (dim_idx, &dim_size) in
+                                            view.dims.iter().enumerate().rev()
+                                        {
+                                            let coord = remainder % dim_size;
+                                            remainder /= dim_size;
+                                            idx += coord * view.strides[dim_idx] as usize;
+                                        }
+                                        sum += self.curr[base_off + idx];
+                                    }
+                                }
+                                sum
+                            }
+                            _ => {
+                                // For non-view arguments, just evaluate and return
+                                // This handles scalar cases or other expressions
+                                self.eval(arg)
+                            }
+                        }
+                    }
+                    BuiltinFn::Rank(_, _) | BuiltinFn::Size(_) | BuiltinFn::Stddev(_) => {
                         unreachable!();
                     }
                 }

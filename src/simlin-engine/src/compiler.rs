@@ -535,8 +535,10 @@ impl Context<'_> {
                     BFn::Stddev(_) => {
                         return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
                     }
-                    BFn::Sum(_) => {
-                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    BFn::Sum(a) => {
+                        // Lower the argument and check if it's a static array view
+                        let arg = self.lower(a)?;
+                        BuiltinFn::Sum(Box::new(arg))
                     }
                 };
                 Expr::App(builtin, *loc)
