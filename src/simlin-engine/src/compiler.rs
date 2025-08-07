@@ -10,7 +10,7 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{ErrorCode, ErrorKind, Ident, Result};
+use crate::common::{ErrorCode, ErrorKind, Ident, Result, canonicalize};
 use crate::datamodel::Dimension;
 use crate::model::ModelStage1;
 use crate::project::Project;
@@ -312,6 +312,54 @@ impl Context<'_> {
         let expr = match expr {
             ast::Expr2::Const(_, n, loc) => Expr::Const(*n, *loc),
             ast::Expr2::Var(id, _, loc) => {
+                // Check if this identifier is a dimension name
+                let is_dimension = self
+                    .dimensions
+                    .iter()
+                    .any(|dim| canonicalize(id) == canonicalize(dim.name()));
+
+                if is_dimension {
+                    // This is a dimension name
+                    if let Some(active_dims) = &self.active_dimension {
+                        if let Some(active_subscripts) = &self.active_subscript {
+                            // We're in an array context - find the matching dimension
+                            for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
+                            {
+                                if canonicalize(id) == canonicalize(dim.name()) {
+                                    // Convert to the subscript index (0-based)
+                                    let index = match dim {
+                                        Dimension::Indexed(_, _) => {
+                                            // Subscript is already a 1-based index as a string
+                                            subscript.parse::<f64>().unwrap()
+                                        }
+                                        Dimension::Named(_, elements) => {
+                                            let off = elements
+                                                .iter()
+                                                .position(|elem| {
+                                                    canonicalize(elem) == canonicalize(subscript)
+                                                })
+                                                .unwrap();
+
+                                            (off + 1) as f64
+                                        }
+                                    };
+                                    return Ok(Expr::Const(index, *loc));
+                                }
+                            }
+                        }
+                    } else {
+                        // We're in a scalar context but trying to use a dimension name
+                        return Err(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::DimensionInScalarContext,
+                            details: Some(format!(
+                                "Dimension '{id}' cannot be used in a scalar equation"
+                            )),
+                        });
+                    }
+                }
+
+                // Not a dimension, check if it's a module input
                 if let Some((off, _)) = self
                     .inputs
                     .iter()

@@ -544,7 +544,17 @@ impl IdentifierSetVisitor<'_> {
         match e {
             Expr2::Const(_, _, _) => (),
             Expr2::Var(id, _, _) => {
-                self.identifiers.insert(id.clone());
+                // Check if this identifier is a dimension name
+                // If so, don't add it as a dependency since it will be resolved during compilation
+                let is_dimension = self.dimensions.iter().any(|dim| {
+                    let canonicalized_id = canonicalize(id);
+                    let canonicalized_dim = canonicalize(dim.name());
+                    canonicalized_id == canonicalized_dim
+                });
+
+                if !is_dimension {
+                    self.identifiers.insert(id.clone());
+                }
             }
             Expr2::App(builtin, _, _) => {
                 walk_builtin_expr(builtin, |contents| match contents {

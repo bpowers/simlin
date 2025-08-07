@@ -124,6 +124,12 @@ pub trait Expr2Context {
 
     /// Allocate a new temp ID for the current equation
     fn allocate_temp_id(&mut self) -> u32;
+
+    /// Check if an identifier is a dimension name
+    fn is_dimension_name(&self, ident: &str) -> bool;
+
+    /// Check if we're in an array context (processing an arrayed or apply-to-all equation)
+    fn is_array_context(&self) -> bool;
 }
 
 impl Expr2 {
@@ -194,6 +200,12 @@ impl Expr2 {
         let expr = match expr {
             Expr1::Const(s, n, loc) => Expr2::Const(s, n, loc),
             Expr1::Var(id, loc) => {
+                // Check if this is a dimension name being used in a scalar context
+                // In array contexts, dimension names are allowed and will be converted to indices
+                if ctx.is_dimension_name(&id) && !ctx.is_array_context() {
+                    return eqn_err!(DimensionInScalarContext, loc.start, loc.end);
+                }
+
                 let array_bounds = if let Some(dims) = ctx.get_dimensions(&id) {
                     let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
                     Some(ArrayBounds::Named {
@@ -555,6 +567,16 @@ mod tests {
             let id = self.temp_counter;
             self.temp_counter += 1;
             id
+        }
+
+        fn is_dimension_name(&self, _ident: &str) -> bool {
+            // For tests, we don't have dimension names
+            false
+        }
+
+        fn is_array_context(&self) -> bool {
+            // For tests, assume we're not in array context unless specifically testing that
+            false
         }
     }
 

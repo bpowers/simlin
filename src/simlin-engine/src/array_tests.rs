@@ -9,6 +9,7 @@
 
 #[cfg(test)]
 mod wildcard_tests {
+    use crate::ErrorCode;
     use crate::array_test_helpers::ArrayTestProject;
 
     #[test]
@@ -280,13 +281,36 @@ mod wildcard_tests {
     }
 
     #[test]
-    #[ignore]
-    fn wildcard_interpreter_expression() {
-        ArrayTestProject::new("wildcard_expr")
+    fn wildcard_interpreter_expression_indexed() {
+        let project = ArrayTestProject::new("wildcard_expr")
             .indexed_dimension("Index", 3)
             .array_aux("values[Index]", "1 + Index") // Assuming Index gives position
-            .array_aux("doubled[Index]", "values[*] * 2")
-            .assert_interpreter_result("doubled", &[2.0, 4.0, 6.0]);
+            .array_aux("doubled[Index]", "values[*] * 2");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("doubled", &[4.0, 6.0, 8.0]);
+    }
+
+    #[test]
+    fn wildcard_interpreter_expression_named() {
+        let project = ArrayTestProject::new("wildcard_expr")
+            .named_dimension("Cities", &["Boston", "NYC"])
+            .array_aux("values[Cities]", "1 + Cities") // Assuming Index gives position
+            .array_aux("doubled[Cities]", "values[*] * 2");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("doubled", &[4.0, 6.0]);
+    }
+
+    #[test]
+    fn wildcard_interpreter_expression_scalar_fails() {
+        let project = ArrayTestProject::new("wildcard_expr")
+            .named_dimension("Cities", &["Boston", "NYC"])
+            .scalar_aux("value", "1 + Cities");
+
+        project.assert_compile_error(ErrorCode::DimensionInScalarContext);
     }
 }
 

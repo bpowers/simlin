@@ -65,16 +65,25 @@ impl DimensionsContext {
         DimensionsContext {
             dimensions: dimensions
                 .iter()
-                .map(|dim| (dim.name().to_owned(), Dimension::from(dim.clone())))
+                .map(|dim| {
+                    (
+                        crate::canonicalize(dim.name()),
+                        Dimension::from(dim.clone()),
+                    )
+                })
                 .collect(),
         }
     }
 
+    pub(crate) fn is_dimension_name(&self, name: &str) -> bool {
+        self.dimensions.contains_key(&crate::canonicalize(name))
+    }
+
     pub(crate) fn lookup(&self, element: &str) -> Option<u32> {
         if let Some(pos) = element.find('·') {
-            let dimension_name = &element[..pos];
+            let dimension_name = crate::canonicalize(&element[..pos]);
             let element_name = &element[pos + '·'.len_utf8()..];
-            if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(dimension_name) {
+            if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(&dimension_name) {
                 if let Some(off) = dimension.indexed_elements.get(element_name) {
                     return Some(*off as u32);
                 }

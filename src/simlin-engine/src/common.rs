@@ -73,6 +73,7 @@ pub enum ErrorCode {
     TodoRange,
     TodoArrayBuiltin,
     CantSubscriptScalar,
+    DimensionInScalarContext,
 }
 
 impl fmt::Display for ErrorCode {
@@ -129,6 +130,7 @@ impl fmt::Display for ErrorCode {
             TodoRange => "todo_range",
             TodoArrayBuiltin => "todo_array_builtin",
             CantSubscriptScalar => "cant_subscript_scalar",
+            DimensionInScalarContext => "dimension_in_scalar_context",
         };
 
         write!(f, "{name}")

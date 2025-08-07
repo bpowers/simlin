@@ -57,6 +57,7 @@ struct ArrayContext<'a> {
     scope: &'a ScopeStage0<'a>,
     model_name: &'a str,
     next_temp_id: u32,
+    is_array: bool,
 }
 
 impl<'a> ArrayContext<'a> {
@@ -65,6 +66,16 @@ impl<'a> ArrayContext<'a> {
             scope,
             model_name,
             next_temp_id: 0,
+            is_array: false,
+        }
+    }
+
+    fn with_array_context(scope: &'a ScopeStage0<'a>, model_name: &'a str) -> Self {
+        Self {
+            scope,
+            model_name,
+            next_temp_id: 0,
+            is_array: true,
         }
     }
 
@@ -118,21 +129,35 @@ impl<'a> Expr2Context for ArrayContext<'a> {
         self.next_temp_id += 1;
         id
     }
+
+    fn is_dimension_name(&self, ident: &str) -> bool {
+        // Check if this identifier is the name of a dimension
+        self.scope.dimensions.is_dimension_name(ident)
+    }
+
+    fn is_array_context(&self) -> bool {
+        self.is_array
+    }
 }
 
 pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
-    let mut ctx = ArrayContext::new(scope, scope.model_name);
-
     match ast {
-        Ast::Scalar(expr) => Expr1::from(expr)
-            .map(|expr| expr.constify_dimensions(scope))
-            .and_then(|expr| Expr2::from(expr, &mut ctx))
-            .map(Ast::Scalar),
-        Ast::ApplyToAll(dims, expr) => Expr1::from(expr)
-            .map(|expr| expr.constify_dimensions(scope))
-            .and_then(|expr| Expr2::from(expr, &mut ctx))
-            .map(|expr| Ast::ApplyToAll(dims, expr)),
+        Ast::Scalar(expr) => {
+            let mut ctx = ArrayContext::new(scope, scope.model_name);
+            Expr1::from(expr)
+                .map(|expr| expr.constify_dimensions(scope))
+                .and_then(|expr| Expr2::from(expr, &mut ctx))
+                .map(Ast::Scalar)
+        }
+        Ast::ApplyToAll(dims, expr) => {
+            let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
+            Expr1::from(expr)
+                .map(|expr| expr.constify_dimensions(scope))
+                .and_then(|expr| Expr2::from(expr, &mut ctx))
+                .map(|expr| Ast::ApplyToAll(dims, expr))
+        }
         Ast::Arrayed(dims, elements) => {
+            let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
             let elements: EquationResult<HashMap<ElementName, Expr2>> = elements
                 .into_iter()
                 .map(|(id, expr)| {
