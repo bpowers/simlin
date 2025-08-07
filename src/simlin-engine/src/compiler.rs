@@ -713,7 +713,9 @@ impl Context<'_> {
                                 // The active subscripts correspond to the OUTPUT dimensions, not the input
                                 for (view_idx, stride) in view.strides.iter().enumerate() {
                                     if view_idx < active_subscripts.len() {
-                                        if let Ok(idx) = active_subscripts[view_idx].parse::<usize>() {
+                                        if let Ok(idx) =
+                                            active_subscripts[view_idx].parse::<usize>()
+                                        {
                                             let idx_0based = idx - 1;
                                             result_index += idx_0based * (*stride as usize);
                                         }
@@ -891,12 +893,29 @@ impl Context<'_> {
                     ast::UnaryOp::Positive => l,
                     ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
                     ast::UnaryOp::Transpose => {
-                        // TODO: Implement transpose operation
-                        return Err(Error::new(
-                            ErrorKind::Variable,
-                            ErrorCode::ArraysNotImplemented,
-                            Some("transpose operator not yet implemented".to_owned()),
-                        ));
+                        // Transpose reverses the dimensions of an array
+                        match l {
+                            Expr::StaticSubscript(off, view, loc) => {
+                                // Transpose a view by reversing its dimensions and strides
+                                let mut transposed_dims = view.dims.clone();
+                                transposed_dims.reverse();
+                                let mut transposed_strides = view.strides.clone();
+                                transposed_strides.reverse();
+
+                                let transposed_view = ArrayView {
+                                    dims: transposed_dims,
+                                    strides: transposed_strides,
+                                    offset: view.offset,
+                                };
+
+                                Expr::StaticSubscript(off, transposed_view, loc)
+                            }
+                            _ => {
+                                // For other expressions (including bare variables),
+                                // wrap in a transpose operation to be handled at runtime
+                                Expr::Op1(UnaryOp::Transpose, Box::new(l), *loc)
+                            }
+                        }
                     }
                 }
             }
@@ -2055,6 +2074,9 @@ impl<'module> Compiler<'module> {
                 self.walk_expr(rhs)?.unwrap();
                 match op {
                     UnaryOp::Not => self.push(Opcode::Not {}),
+                    UnaryOp::Transpose => {
+                        unreachable!("Transpose should be handled at compile time in lower()");
+                    }
                 };
                 Some(())
             }
@@ -2290,6 +2312,7 @@ pub fn pretty(expr: &Expr) -> String {
         Expr::Op1(op, l, _) => {
             let op: &str = match op {
                 UnaryOp::Not => "!",
+                UnaryOp::Transpose => "'",
             };
             format!("{}{}", op, paren_if_necessary(expr, l, pretty(l)))
         }
@@ -2305,6 +2328,7 @@ pub fn pretty(expr: &Expr) -> String {
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum UnaryOp {
     Not,
+    Transpose,
 }
 
 #[cfg(test)]

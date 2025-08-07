@@ -113,13 +113,13 @@ This is a yarn workspace with these packages:
 - Node.js and Yarn
 - Rust toolchain (specified in `rust-toolchain.toml`)
 
-### Testing Strategy
+# Testing Strategy
 
-- Rust: Unit tests in `src/*/tests/` and integration tests in `test/` directory
+- Rust: Unit tests in `src/*/tests/` and integration tests in `test/` directory.
 - TypeScript: Workspace-level linting and type checking
 - Models: Extensive test suite in `test/` with expected outputs.  This is very important and ensures the engine behavior matches known-good results from other software.
 
-### Development strategy when working in Rust
+# Development strategy and conventions when working in Rust
 
 When asked to perform tasks in Rust crates like `src/simlin-engine`, the following general workflow should be followed:
 * Before starting, run `cargo clippy` and note any existing lints that are failing.
@@ -127,3 +127,7 @@ When asked to perform tasks in Rust crates like `src/simlin-engine`, the followi
   * Run `cargo fmt` to ensure the code is appropriately formatted.
   * Run `cargo clippy`, and if there are new lints that weren't failing at the start of the task fix them (directly and without shortcuts) so that `cargo clippy` doesn't complain.
   * Run `cargo test` at the root of the workspace to ensure we haven't regressed on any behavior.
+* Unless we are _explicitly_ in a situation where we're expecting user input that might be bad, you must use `.unwrap()` over `.unwrap_or_default()`.  During this phase of development, it is more valualble to understand when our assumptions are wrong, and using a default/0/1 fixed value hides that.
+* If a case is expected to be unreachable, use the `unreachable!()` macro not a code comment
+* Code should never have comments like "this is a placeholder".  If you have stubbed something out, that should be documented in code via the use of the `todo!()` or `unimplemented!()` macros.  But generally this means your current task is not complete.  Continue working until you have a general purpose, maintainable solution that can be confidently deployed to a production environment.
+

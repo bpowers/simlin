@@ -100,9 +100,28 @@ impl ModuleEvaluator<'_> {
                 }
             }
             Expr::Op1(op, l, _) => {
-                let l = self.eval(l);
                 match op {
-                    UnaryOp::Not => (!is_truthy(l)) as i8 as f64,
+                    UnaryOp::Not => {
+                        let l = self.eval(l);
+                        (!is_truthy(l)) as i8 as f64
+                    }
+                    UnaryOp::Transpose => {
+                        // Transpose of bare array variables in A2A context requires proper
+                        // dimension tracking which isn't fully implemented yet.
+                        //
+                        // For bare array transpose (e.g., matrix' where matrix is [Row,Col]),
+                        // we would need to track that the result has dimensions [Col,Row].
+                        // This requires integration with the A2A assignment machinery.
+                        //
+                        // Workaround: Use dimension positions instead (e.g., matrix[@2, @1])
+                        // which achieves the same result and is fully supported.
+                        //
+                        // Note: Transpose of subscripted arrays (handled via StaticSubscript
+                        // in the compiler) works correctly since the view is pre-computed.
+                        todo!(
+                            "Transpose operator in interpreter not yet implemented - use dimension positions (e.g., matrix[@2, @1]) as a workaround"
+                        )
+                    }
                 }
             }
             Expr::Op2(op, l, r, _) => {
