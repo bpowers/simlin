@@ -52,6 +52,7 @@ pub struct ArrayView {
 
 impl ArrayView {
     /// Create a contiguous array view (row-major order)
+    #[allow(dead_code)]
     pub fn contiguous(dims: Vec<usize>) -> Self {
         let mut strides = vec![1isize; dims.len()];
         // Build strides from right to left for row-major order
@@ -89,6 +90,7 @@ impl ArrayView {
     }
 
     /// Apply a range subscript to create a new view
+    #[allow(dead_code)]
     pub fn apply_range_subscript(
         &self,
         dim_index: usize,
@@ -564,18 +566,42 @@ impl Context<'_> {
 
                 let mut operations = Vec::new();
 
-                for arg in args.iter() {
+                for (i, arg) in args.iter().enumerate() {
                     match arg {
                         IndexExpr2::Range(start_expr, end_expr, _) => {
-                            if let (
-                                ast::Expr2::Const(_, start_val, _),
-                                ast::Expr2::Const(_, end_val, _),
-                            ) = (start_expr, end_expr)
+                            // Helper to resolve a dimension element to an index
+                            let resolve_to_index = |expr: &ast::Expr2| -> Option<usize> {
+                                match expr {
+                                    ast::Expr2::Const(_, val, _) => {
+                                        // Numeric constant - convert from 1-based to 0-based
+                                        Some((*val as isize - 1).max(0) as usize)
+                                    }
+                                    ast::Expr2::Var(ident, _, _) => {
+                                        // Could be a named dimension element
+                                        if i < dims.len() {
+                                            if let Dimension::Named(_, elements) = &dims[i] {
+                                                let canonicalized_ident =
+                                                    crate::common::canonicalize(ident);
+                                                elements.iter().position(|elem| {
+                                                    crate::common::canonicalize(elem)
+                                                        == canonicalized_ident
+                                                })
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            };
+
+                            if let (Some(start_idx), Some(end_idx)) =
+                                (resolve_to_index(start_expr), resolve_to_index(end_expr))
                             {
-                                // Convert from 1-based (XMILE) to 0-based indexing
-                                let start_idx = (*start_val as isize - 1).max(0) as usize;
-                                let end_idx = (*end_val as isize).max(0) as usize;
-                                operations.push(IndexOp::Range(start_idx, end_idx));
+                                // end_idx is inclusive in the source, but we need exclusive for the range
+                                operations.push(IndexOp::Range(start_idx, end_idx + 1));
                             } else {
                                 is_static = false;
                                 break;
@@ -589,10 +615,40 @@ impl Context<'_> {
                             let dim_idx = (*pos as usize).saturating_sub(1);
                             operations.push(IndexOp::DimPosition(dim_idx));
                         }
-                        IndexExpr2::Expr(expr) if matches!(expr, ast::Expr2::Const(_, _, _)) => {
-                            if let ast::Expr2::Const(_, val, _) = expr {
-                                let idx = (*val as isize - 1).max(0) as usize;
-                                operations.push(IndexOp::Single(idx));
+                        IndexExpr2::Expr(expr) => {
+                            match expr {
+                                ast::Expr2::Const(_, val, _) => {
+                                    let idx = (*val as isize - 1).max(0) as usize;
+                                    operations.push(IndexOp::Single(idx));
+                                }
+                                ast::Expr2::Var(ident, _, _) => {
+                                    // Check if it's a named dimension element
+                                    if i < dims.len() {
+                                        if let Dimension::Named(_, elements) = &dims[i] {
+                                            let canonicalized_ident =
+                                                crate::common::canonicalize(ident);
+                                            if let Some(idx) = elements.iter().position(|elem| {
+                                                crate::common::canonicalize(elem)
+                                                    == canonicalized_ident
+                                            }) {
+                                                operations.push(IndexOp::Single(idx));
+                                            } else {
+                                                is_static = false;
+                                                break;
+                                            }
+                                        } else {
+                                            is_static = false;
+                                            break;
+                                        }
+                                    } else {
+                                        is_static = false;
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    is_static = false;
+                                    break;
+                                }
                             }
                         }
                         _ => {

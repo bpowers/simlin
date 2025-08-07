@@ -91,12 +91,12 @@ These features have initial implementations but **do not work in the bytecode VM
 - **Transpose operator** (`'`) - Compiler support for subscripted arrays only, bare arrays fail
 - **Dimension position operator** (`@`) - Basic compiler support, not in VM
 - **Wildcard subscripts** (`*`) - Works in compiler and AST interpreter, not in VM
-- **Range subscripts** (e.g., `a[1:3]`) - Initial compiler support with ArrayView, not in VM
+- **Numeric range subscripts** (e.g., `a[1:3]`) - Works in compiler with ArrayView, not in VM
+- **Named dimension ranges** (e.g., `sales[Boston:LA]`) - Works in compiler with element resolution, not in VM
 - **SUM with ranges** - Limited AST interpreter support, not in VM
 
 ### Not Implemented
 - Star ranges (e.g., `*:Dimension`)
-- Named dimension ranges (e.g., `DimA.Boston:DimA.LA`)
 - Other aggregate functions (MEAN, STDDEV, MIN, MAX, PROD)
 - Complete error handling for invalid indices
 
@@ -126,7 +126,7 @@ The engine already supports some broadcasting scenarios:
 **Required XMILE Features Implementation Status:**
 1. **Transpose operator** (`'`): 🚧 **PARTIAL** - Works for subscripted arrays in compiler only, bare arrays hit `todo!()` in interpreter, not in VM
 2. **Dimension position operator** (`@`): 🚧 **PARTIAL** - Basic compiler support with dimension reordering, not in VM
-3. **Range subscripts**: 🚧 **PARTIAL** - Initial compiler support via ArrayView slicing, limited interpreter support, not in VM
+3. **Range subscripts**: 🚧 **PARTIAL** - Compiler support for both numeric (`[1:3]`) and named (`[Boston:LA]`) ranges via ArrayView slicing, limited interpreter support, not in VM
 
 ### 2. Temporary Array Storage Management
 
@@ -155,14 +155,14 @@ Current support includes:
 - **Basic subscripting**: `a[DimA.Boston, *]` - already supported
 
 Partially implemented features - **Compiler and AST interpreter only, not in VM**:
-- **Range slicing**: 🚧 `a[1:3, *]` - Initial ArrayView support in compiler
+- **Numeric range slicing**: 🚧 `a[1:3, *]` - Works in compiler with ArrayView support
+- **Named range slicing**: 🚧 `sales[Boston:LA]` - Works in compiler with automatic element-to-index resolution
 - **Transpose**: ⚠️ `a'` or `a[DimA, DimB]'` - Only subscripted arrays in compiler, bare arrays fail with `todo!()`
 - **Dimension position**: 🚧 `a[@2, @1]` for reordering dimensions - Basic compiler support
 - **Wildcard subscripts**: 🚧 `a[*]` - Works in compiler and AST interpreter
-- **SUM with ranges**: 🚧 `SUM(a[1:3])` - Limited support in AST interpreter only
+- **SUM with ranges**: 🚧 `SUM(a[1:3])` or `SUM(sales[Jan:Mar])` - Limited support in AST interpreter only
 
 Still needed:
-- **Named dimension ranges**: `a[DimA.Boston:DimA.LA, *]` 
 - **Star ranges**: `*:DimA.End` syntax
 
 ### 4. Dimension Context Enhancement
@@ -174,13 +174,21 @@ Enhance dimension handling to support:
 
 ## Examples of Simplified Approach
 
-### Example 1: Static Subscript
+### Example 1: Static Subscript with Named Element
 ```
-array[Location.Boston, *]
+array[Boston, *]
 ```
 - **Expr2**: Records max bounds = [size of second dimension], static subscript
-- **Compiler**: Computes exact offset = Boston's index × stride of first dimension
+- **Compiler**: Resolves "Boston" to index in Location dimension, computes exact offset
 - **VM**: Direct memory access with pre-computed offset
+
+### Example 1b: Named Range Subscript
+```
+sales[Jan:Mar]
+```
+- **Expr2**: Records range with Var expressions for start and end
+- **Compiler**: Resolves "Jan" to index 0, "Mar" to index 2, creates Range(0, 3)
+- **VM**: Not yet implemented
 
 ### Example 2: Dynamic Subscript
 ```
@@ -312,13 +320,16 @@ struct ArrayInfo {
 - **Tests**: 🚧 Some tests pass in limited scenarios
 
 #### 4. Range Subscripts 🚧 PARTIAL
-- **Parser Support**: ✅ Can parse range syntax like `a[1:3]`
+- **Parser Support**: ✅ Can parse range syntax like `a[1:3]` and `sales[Boston:LA]`
 - **AST Representation**: ✅ `Range` variant in `IndexExpr{0,1,2}`
 - **Expr2 Handling**: ✅ Properly tracked through type checking phase
-- **Compiler**: 🚧 Initial implementation with ArrayView slicing using `apply_range_subscript`
+- **Compiler**: ✅ Full support for numeric and named ranges with element resolution
+  - Numeric ranges: Direct index conversion (1-based to 0-based)
+  - Named ranges: Automatic lookup of element names in dimension definitions
+  - Creates optimized `StaticSubscript` with precomputed ArrayView
 - **AST Interpreter**: 🚧 SUM function has limited support for range subscripts
 - **Bytecode VM**: ❌ Not implemented
-- **Tests**: 🚧 Many tests exist but several are ignored/not passing
+- **Tests**: ✅ Comprehensive test coverage for named and numeric ranges
 
 #### 5. Wildcard Subscripts 🚧 PARTIAL
 - **Parser Support**: ✅ Parsing `*` in subscripts
@@ -335,6 +346,14 @@ The implementation follows a clean architecture:
 3. **AST transformations** properly handle new variants through expr0→expr1→expr2 pipeline
 4. **Visitor patterns** updated to handle new AST nodes
 5. **Error handling** returns appropriate error codes when features aren't fully implemented
+
+#### Named Range Resolution
+The compiler handles named dimension ranges through automatic element-to-index resolution:
+1. **Element Detection**: When a `Var` expression appears in a range context, the compiler checks if it matches a named dimension element
+2. **Case-Insensitive Matching**: Uses canonicalized names for comparison to handle different casings
+3. **Index Conversion**: Converts element names to 0-based indices for internal use
+4. **Range Creation**: Constructs an `IndexOp::Range` with resolved start and end indices
+5. **Syntax**: Named elements are used directly without dimension prefix (e.g., `Boston` not `City.Boston`)
 
 ## Implementation Status
 
@@ -452,20 +471,19 @@ Based on the current implementation status, here's the prioritized roadmap:
 
 ### High Priority: Complete Partial Implementations
 
-1. **Finish range subscript support**
-   - Complete compiler implementation
-   - Full AST interpreter support
-   - Then implement in VM
-
-2. **Complete wildcard implementation**
+1. **Complete wildcard implementation**
    - Ensure all edge cases work
    - Full test coverage
    - VM bytecode support
 
-3. **Finish dimension position operator**
+2. **Finish dimension position operator**
    - Complete compiler support
    - Full AST interpreter coverage
    - VM implementation
+
+3. **Extend range support**
+   - VM bytecode implementation for both numeric and named ranges
+   - Full AST interpreter support beyond just SUM
 
 ### Secondary Priority: Optimization and Polish
 
@@ -490,15 +508,11 @@ Based on the current implementation status, here's the prioritized roadmap:
    - Not yet started
    - Requires dimension name resolution
 
-2. **Named Dimension Ranges**
-   - Support `DimA.Boston:DimA.LA` syntax
-   - Requires dimension element name lookup
-
-3. **Additional Aggregate Functions**
+2. **Additional Aggregate Functions**
    - MEAN, STDDEV, MIN, MAX, PROD
    - Build on SUM pattern once VM support exists
 
-4. **Advanced Array Functions**
+3. **Advanced Array Functions**
    - Matrix operations (though not required by XMILE)
    - Statistical functions
    - Financial array functions

@@ -4,7 +4,7 @@
 
 use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
-use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
+use crate::compiler::{ArrayView, BuiltinFn, Expr, Module, UnaryOp};
 use crate::model::enumerate_modules;
 use crate::sim_err;
 use crate::vm::{
@@ -865,10 +865,13 @@ fn test_arrays() {
         ident: var.ident().to_owned(),
         ast: vec![Expr::AssignCurr(
             11,
-            Box::new(Expr::Subscript(
+            Box::new(Expr::StaticSubscript(
                 4,
-                vec![Expr::Const(2.0, Loc::default())],
-                vec![3],
+                ArrayView {
+                    dims: vec![],
+                    strides: vec![],
+                    offset: 1,
+                },
                 Loc::default(),
             )),
         )],

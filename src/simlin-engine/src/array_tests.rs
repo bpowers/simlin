@@ -426,7 +426,6 @@ mod dimension_position_tests {
 
 #[cfg(test)]
 mod transpose_tests {
-    use crate::Variable;
     use crate::array_test_helpers::ArrayTestProject;
 
     #[test]
@@ -857,6 +856,125 @@ mod range_tests {
         project.assert_sim_builds();
         // Should get row 2, columns 3-5: [23, 24, 25]
         project.assert_interpreter_result("slice", &[23.0, 24.0, 25.0]);
+    }
+
+    #[test]
+    fn named_range_basic() {
+        // Test basic named dimension range [City.Boston:City.LA]
+        let project = ArrayTestProject::new("named_range_basic")
+            .named_dimension("City", &["Boston", "NYC", "LA", "SF", "Seattle"])
+            .array_with_ranges(
+                "population[City]",
+                vec![
+                    ("Boston", "100"),
+                    ("NYC", "200"),
+                    ("LA", "300"),
+                    ("SF", "400"),
+                    ("Seattle", "500"),
+                ],
+            )
+            .indexed_dimension("Result", 3) // Boston, NYC, LA
+            .array_aux("east_to_la[Result]", "population[Boston:LA]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("east_to_la", &[100.0, 200.0, 300.0]);
+    }
+
+    #[test]
+    fn named_range_sum() {
+        // Test SUM with named dimension range
+        let project = ArrayTestProject::new("named_range_sum")
+            .named_dimension("Month", &["Jan", "Feb", "Mar", "Apr", "May", "Jun"])
+            .array_with_ranges(
+                "sales[Month]",
+                vec![
+                    ("Jan", "10"),
+                    ("Feb", "20"),
+                    ("Mar", "30"),
+                    ("Apr", "40"),
+                    ("May", "50"),
+                    ("Jun", "60"),
+                ],
+            )
+            .scalar_aux("q1_total", "SUM(sales[Jan:Mar])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("q1_total", 60.0); // 10 + 20 + 30
+    }
+
+    #[test]
+    fn named_range_2d() {
+        // Test named range in 2D array
+        let project = ArrayTestProject::new("named_range_2d")
+            .named_dimension("City", &["Boston", "NYC", "LA", "SF"])
+            .indexed_dimension("Year", 3)
+            .array_with_ranges(
+                "data[City,Year]",
+                vec![
+                    ("Boston,1", "11"),
+                    ("Boston,2", "12"),
+                    ("Boston,3", "13"),
+                    ("NYC,1", "21"),
+                    ("NYC,2", "22"),
+                    ("NYC,3", "23"),
+                    ("LA,1", "31"),
+                    ("LA,2", "32"),
+                    ("LA,3", "33"),
+                    ("SF,1", "41"),
+                    ("SF,2", "42"),
+                    ("SF,3", "43"),
+                ],
+            )
+            .indexed_dimension("SubCities", 2) // NYC, LA
+            .array_aux("subset[SubCities,Year]", "data[NYC:LA, *]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get NYC and LA rows: [21,22,23,31,32,33]
+        project.assert_interpreter_result("subset", &[21.0, 22.0, 23.0, 31.0, 32.0, 33.0]);
+    }
+
+    #[test]
+    fn named_range_mixed_dimensions() {
+        // Test mixing named range with numeric range
+        let project = ArrayTestProject::new("named_range_mixed")
+            .named_dimension("Product", &["A", "B", "C", "D", "E"])
+            .indexed_dimension("Quarter", 4)
+            .array_with_ranges(
+                "sales[Product,Quarter]",
+                vec![
+                    ("A,1", "10"),
+                    ("A,2", "11"),
+                    ("A,3", "12"),
+                    ("A,4", "13"),
+                    ("B,1", "20"),
+                    ("B,2", "21"),
+                    ("B,3", "22"),
+                    ("B,4", "23"),
+                    ("C,1", "30"),
+                    ("C,2", "31"),
+                    ("C,3", "32"),
+                    ("C,4", "33"),
+                    ("D,1", "40"),
+                    ("D,2", "41"),
+                    ("D,3", "42"),
+                    ("D,4", "43"),
+                    ("E,1", "50"),
+                    ("E,2", "51"),
+                    ("E,3", "52"),
+                    ("E,4", "53"),
+                ],
+            )
+            .indexed_dimension("SubProducts", 3) // B, C, D
+            .indexed_dimension("SubQuarters", 2) // Q2, Q3
+            .array_aux("subset[SubProducts,SubQuarters]", "sales[B:D, 2:3]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get B,C,D for Q2,Q3: [21,22,31,32,41,42]
+        project.assert_interpreter_result("subset", &[21.0, 22.0, 31.0, 32.0, 41.0, 42.0]);
     }
 
     #[test]
