@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The simlin-engine implements comprehensive array support following the XMILE v1.0 specification. The architecture uses a multi-phase approach with strong support for static optimization of array operations through the ArrayView abstraction. While the parser, type checker, and compiler have mature implementations, the bytecode VM lacks support for the advanced array features, limiting their practical use.
+The simlin-engine implements comprehensive array support following the XMILE v1.0 specification. The architecture uses a multi-phase approach with strong support for static optimization of array operations through the ArrayView abstraction. The parser, type checker, compiler, and AST interpreter provide full support for array operations including complex expressions with array builtins. The bytecode VM lacks support for the advanced array features, limiting their use in production.
 
 ## Current Implementation Status
 
@@ -15,6 +15,7 @@ The simlin-engine implements comprehensive array support following the XMILE v1.
 - **Element-wise operations**: Full support for array arithmetic following XMILE semantics
 - **Broadcasting**: Automatic scalar-to-array and compatible array-to-array operations
 - **Basic subscripting**: Element access via indices or named elements
+- **XMILE-compliant ranges**: Inclusive ranges (e.g., `[1:5]` includes elements 1,2,3,4,5)
 
 #### Parser (Expr0)
 - **Transpose operator** (`'`): Postfix unary operator with proper precedence
@@ -33,17 +34,21 @@ The simlin-engine implements comprehensive array support following the XMILE v1.
 - **ArrayView abstraction**: Efficient strided array representation without data copying
 - **Static subscript optimization**: Pre-computed views for compile-time known subscripts
 - **Named element resolution**: Automatic case-insensitive lookup of dimension elements
-- **Range slicing**: Creates efficient views with adjusted offsets and strides
+- **Range slicing**: Creates efficient views with adjusted offsets and strides (inclusive)
 - **Transpose support**: Stride reversal for subscripted arrays
-- **Dimension position handling**: Basic support for `@n` references
-
-### Partially Implemented Features
+- **Dimension position handling**: Support for `@n` references
+- **Expression rewriting**: Complex array builtin arguments automatically decomposed into temporaries
+- **Temporary array management**: Full support for AssignTemp and TempArray expressions
 
 #### AST Interpreter
+- **Complete array builtin support**: SUM, MEAN, STDDEV, MIN, MAX, SIZE with complex expressions
 - **StaticSubscript evaluation**: Direct offset access for optimized subscripts
-- **Limited transpose**: Works for subscripted arrays, fails for bare arrays
-- **SUM with ranges**: Basic support for some array view patterns
-- **Array context tracking**: Infrastructure for A2A (apply-to-all) operations
+- **TempArray evaluation**: Support for temporary array storage and access
+- **Complex expression handling**: Nested operations like `MAX(source[3:5] * 2 - 1)`
+- **Efficient array iteration**: Helper methods for clean, reusable array operations
+- **Multi-dimensional support**: Proper stride-aware iteration for any dimensionality
+
+### Partially Implemented Features
 
 #### Bytecode VM
 - **Basic array operations**: Element-wise operations work through existing infrastructure
@@ -51,11 +56,10 @@ The simlin-engine implements comprehensive array support following the XMILE v1.
 - **No advanced features**: StaticSubscript, TempArray, and ArrayView operations not implemented
 
 ### Not Implemented
-- **VM support for ArrayView operations**: Critical gap preventing use of optimized array features
-- **Bare array transpose**: Results in `todo!()` panic in interpreter
-- **Star ranges**: Parser support exists but no evaluation implementation
-- **Additional aggregate functions**: MEAN, STDDEV, MIN, MAX, PROD
-- **Temporary array management**: TempArray allocation and access
+- **VM support for ArrayView operations**: Critical gap preventing use of optimized array features in production
+- **Bare array transpose**: Results in panic in interpreter for non-subscripted arrays
+- **Star ranges**: Parser support exists but no runtime evaluation
+- **RANK builtin**: Full implementation pending
 
 ## Architecture
 
@@ -90,8 +94,12 @@ pub enum ArrayBounds {
 
 1. **Parser**: Captures all XMILE array syntax into Expr0 AST
 2. **Type Checker**: Computes maximum bounds, allocates temp IDs, validates dimensions
-3. **Compiler**: Optimizes static subscripts, creates ArrayView instances, generates Expr tree
-4. **Interpreter/VM**: Evaluates expressions with array operations
+3. **Compiler**: 
+   - Optimizes static subscripts into ArrayView instances
+   - Rewrites complex array builtin arguments into temporary arrays
+   - Generates optimized Expr tree with AssignTemp/TempArray nodes
+4. **Interpreter**: Evaluates expressions with full array operation support
+5. **VM**: Limited evaluation (basic operations only)
 
 ### Static Subscript Optimization
 
@@ -113,7 +121,30 @@ ArrayView enables efficient array operations without copying data:
 - **Slicing**: Adjusts offset and dimensions while preserving strides
 - **Transpose**: Reverses stride order to change iteration pattern
 - **Dimension reordering**: Reorders strides to match new dimension order
-- **Range selection**: Combines offset adjustment with dimension reduction
+- **Range selection**: Combines offset adjustment with dimension reduction (inclusive ranges)
+
+### Interpreter Array Helpers
+
+The interpreter provides clean abstractions for array operations:
+
+```rust
+// Iterate over all elements in an array (handles both StaticSubscript and TempArray)
+fn iter_array_elements<F>(&mut self, expr: &Expr, f: F) where F: FnMut(f64)
+
+// Get the total size of an array
+fn get_array_size(&self, expr: &Expr) -> usize
+
+// Apply a reduction operation over array elements
+fn reduce_array<F>(&mut self, expr: &Expr, init: f64, reducer: F) -> f64
+
+// Calculate mean of an array
+fn array_mean(&mut self, expr: &Expr) -> f64
+
+// Calculate standard deviation of an array
+fn array_stddev(&mut self, expr: &Expr) -> f64
+```
+
+These helpers eliminate code duplication and ensure consistent multi-dimensional array handling across all builtins.
 
 ## Proposed Next Steps
 
@@ -136,11 +167,11 @@ Implement bytecode operations for advanced array features:
    - Proper bounds checking for views
    - Support for non-contiguous access patterns
 
-### Priority 2: Complete Interpreter Support
+### Priority 2: Complete Remaining Features
 
-1. **Fix bare array transpose**: Implement proper index mapping without ArrayView
-2. **Complete aggregate functions**: Extend SUM pattern to other reductions
-3. **Star range evaluation**: Implement runtime dimension queries
+1. **Fix bare array transpose**: Implement proper index mapping for non-subscripted arrays
+2. **Star range evaluation**: Implement runtime dimension queries
+3. **RANK builtin**: Complete implementation for dimension queries
 
 ### Priority 3: Optimization
 
@@ -174,21 +205,23 @@ All array operations follow XMILE v1.0 semantics:
 ### Current Test Coverage
 - Parser: Comprehensive coverage of all array syntax forms
 - Type checker: Array bounds propagation and unification
-- Compiler: Static subscript optimization and view creation
-- Integration: XMILE model compatibility tests
+- Compiler: Static subscript optimization, view creation, and expression rewriting
+- Interpreter: Full coverage of array builtins with complex expressions
+- Integration: XMILE model compatibility tests including inclusive ranges
 
 ### Needed Tests
 - VM array operations with various view configurations
 - Stress tests for large arrays
 - Performance benchmarks for array operations
-- Edge cases in dimension position and star ranges
+- Edge cases in star ranges
+- Bare array transpose operations
 
 ## Future Enhancements
 
 ### Near Term
 - Complete VM implementation for production use
-- Add remaining aggregate functions
 - Implement star ranges fully
+- Fix bare array transpose
 
 ### Long Term
 - GPU acceleration for large array operations
@@ -196,3 +229,27 @@ All array operations follow XMILE v1.0 semantics:
 - Advanced indexing (boolean masks, indirect)
 - Parallel array operations
 - Memory pooling for temporary arrays
+- SIMD vectorization for array operations
+
+## Recent Improvements (2025)
+
+### Compiler Expression Rewriting
+The compiler now automatically rewrites complex array builtin arguments into temporary arrays, enabling expressions like `MAX(source[3:5] * 2 - 1)` to work correctly. This transformation happens transparently:
+- Complex expressions are identified and extracted
+- Temporary arrays are allocated with appropriate dimensions
+- AssignTemp nodes evaluate the expression element-wise
+- TempArray references are passed to the builtins
+
+### Interpreter Refactoring
+The interpreter has been significantly refactored to eliminate code duplication:
+- Common array iteration logic extracted into helper methods
+- Clean separation between array and scalar builtin paths
+- Consistent multi-dimensional array handling
+- Support for both StaticSubscript and TempArray in all contexts
+
+### XMILE Compliance
+Full compliance with XMILE v1.0 specification for:
+- Inclusive range notation (e.g., `[1:5]` includes elements 1,2,3,4,5)
+- Element-wise array operations
+- Sample standard deviation (using n-1 divisor)
+- Case-insensitive dimension element matching
