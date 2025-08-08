@@ -25,6 +25,8 @@ pub enum ArrayBounds {
         name: String,
         /// Maximum size of each dimension
         dims: Vec<usize>,
+        /// Dimension names (if available)
+        dim_names: Option<Vec<String>>,
     },
     /// Array bounds for a temporary (intermediate result)
     Temp {
@@ -32,6 +34,8 @@ pub enum ArrayBounds {
         id: u32,
         /// Maximum size of each dimension
         dims: Vec<usize>,
+        /// Dimension names (if available)
+        dim_names: Option<Vec<String>>,
     },
 }
 
@@ -49,6 +53,15 @@ impl ArrayBounds {
     pub fn dims(&self) -> &[usize] {
         match self {
             ArrayBounds::Named { dims, .. } | ArrayBounds::Temp { dims, .. } => dims,
+        }
+    }
+
+    /// Returns the dimension names (if available)
+    pub fn dim_names(&self) -> Option<&[String]> {
+        match self {
+            ArrayBounds::Named { dim_names, .. } | ArrayBounds::Temp { dim_names, .. } => {
+                dim_names.as_deref()
+            }
         }
     }
 }
@@ -151,6 +164,20 @@ impl Expr2 {
         ArrayBounds::Temp {
             id: ctx.allocate_temp_id(),
             dims,
+            dim_names: None, // Temp arrays don't have dimension names initially
+        }
+    }
+
+    /// Allocates a new temp ID for an array with given dimensions and names
+    fn allocate_temp_array_with_names<C: Expr2Context>(
+        ctx: &mut C,
+        dims: Vec<usize>,
+        names: Vec<String>,
+    ) -> ArrayBounds {
+        ArrayBounds::Temp {
+            id: ctx.allocate_temp_id(),
+            dims,
+            dim_names: Some(names),
         }
     }
 
@@ -163,12 +190,32 @@ impl Expr2 {
         match (l, r) {
             // Both sides are arrays - check dimensions match
             (Some(left), Some(right)) => {
-                let dims = Self::unify_dims(left.dims(), right.dims(), loc)?;
-                Ok(Some(Self::allocate_temp_array(ctx, dims)))
+                // Check if dimensions can be unified (with possible reordering)
+                let (dims, dim_names) = Self::unify_dims_with_names(
+                    left.dims(),
+                    left.dim_names(),
+                    right.dims(),
+                    right.dim_names(),
+                    loc,
+                )?;
+
+                if let Some(names) = dim_names {
+                    Ok(Some(Self::allocate_temp_array_with_names(ctx, dims, names)))
+                } else {
+                    Ok(Some(Self::allocate_temp_array(ctx, dims)))
+                }
             }
             // one side is array, the other is scalar: broadcast
             (Some(array), None) | (None, Some(array)) => {
-                Ok(Some(Self::allocate_temp_array(ctx, array.dims().to_vec())))
+                if let Some(names) = array.dim_names() {
+                    Ok(Some(Self::allocate_temp_array_with_names(
+                        ctx,
+                        array.dims().to_vec(),
+                        names.to_vec(),
+                    )))
+                } else {
+                    Ok(Some(Self::allocate_temp_array(ctx, array.dims().to_vec())))
+                }
             }
             // Both scalars
             (None, None) => Ok(None),
@@ -196,6 +243,61 @@ impl Expr2 {
         dims
     }
 
+    /// Check if two array dimension lists are compatible for element-wise operations
+    /// This version also handles dimension names and allows reordering
+    fn unify_dims_with_names(
+        a_dims: &[usize],
+        a_names: Option<&[String]>,
+        b_dims: &[usize],
+        b_names: Option<&[String]>,
+        loc: Loc,
+    ) -> EquationResult<(Vec<usize>, Option<Vec<String>>)> {
+        // If we don't have names for both, fall back to position-based matching
+        let (a_names, b_names) = match (a_names, b_names) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                // Fall back to old behavior
+                let dims = Self::unify_dims(a_dims, b_dims, loc)?;
+                return Ok((dims, None));
+            }
+        };
+
+        // Check if dimensions have same count
+        if a_dims.len() != b_dims.len() {
+            return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+        }
+
+        // Try to match dimensions by name
+        use crate::compiler::find_dimension_reordering;
+
+        // Check if b can be reordered to match a's dimension order
+        if let Some(reordering) = find_dimension_reordering(b_names, a_names) {
+            // Build the unified dimensions using a's order
+            let mut unified_dims = Vec::with_capacity(a_dims.len());
+            let mut has_mismatch = false;
+
+            for (i, &a_dim) in a_dims.iter().enumerate() {
+                let b_idx = reordering[i];
+                let b_dim = b_dims[b_idx];
+
+                if a_dim != b_dim {
+                    has_mismatch = true;
+                    break;
+                }
+                unified_dims.push(a_dim);
+            }
+
+            if has_mismatch {
+                return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+            }
+
+            return Ok((unified_dims, Some(a_names.to_vec())));
+        }
+
+        // If reordering doesn't work, dimensions are incompatible
+        eqn_err!(MismatchedDimensions, loc.start, loc.end)
+    }
+
     pub(crate) fn from<C: Expr2Context>(expr: Expr1, ctx: &mut C) -> EquationResult<Self> {
         let expr = match expr {
             Expr1::Const(s, n, loc) => Expr2::Const(s, n, loc),
@@ -208,9 +310,12 @@ impl Expr2 {
 
                 let array_bounds = if let Some(dims) = ctx.get_dimensions(&id) {
                     let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+                    let dim_names: Vec<String> =
+                        dims.iter().map(|d| d.name().to_string()).collect();
                     Some(ArrayBounds::Named {
                         name: id.clone(),
                         dims: dim_sizes,
+                        dim_names: Some(dim_names),
                     })
                 } else {
                     None
@@ -586,9 +691,10 @@ mod tests {
         let named_bounds = ArrayBounds::Named {
             name: "array_var".to_string(),
             dims: vec![3, 4],
+            dim_names: None,
         };
         match &named_bounds {
-            ArrayBounds::Named { name, dims } => {
+            ArrayBounds::Named { name, dims, .. } => {
                 assert_eq!(name, "array_var");
                 assert_eq!(dims, &vec![3, 4]);
             }
@@ -601,9 +707,10 @@ mod tests {
         let temp_bounds = ArrayBounds::Temp {
             id: 5,
             dims: vec![2, 3],
+            dim_names: None,
         };
         match &temp_bounds {
-            ArrayBounds::Temp { id, dims } => {
+            ArrayBounds::Temp { id, dims, .. } => {
                 assert_eq!(*id, 5);
                 assert_eq!(dims, &vec![2, 3]);
             }
@@ -616,6 +723,7 @@ mod tests {
         let scalar_bounds = ArrayBounds::Temp {
             id: 1,
             dims: vec![],
+            dim_names: None,
         };
         assert_eq!(scalar_bounds.size(), 1); // Empty product = 1
 
@@ -623,6 +731,7 @@ mod tests {
         let bounds_1d = ArrayBounds::Named {
             name: "vector".to_string(),
             dims: vec![5],
+            dim_names: None,
         };
         assert_eq!(bounds_1d.size(), 5);
 
@@ -630,6 +739,7 @@ mod tests {
         let bounds_3d = ArrayBounds::Temp {
             id: 3,
             dims: vec![2, 3, 4],
+            dim_names: None,
         };
         assert_eq!(bounds_3d.size(), 24); // 2 * 3 * 4 = 24
     }
@@ -822,7 +932,7 @@ mod tests {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
-                    ArrayBounds::Named { name, dims } => {
+                    ArrayBounds::Named { name, dims, .. } => {
                         assert_eq!(name, "array_var");
                         assert_eq!(dims, vec![3, 4]);
                     }
@@ -861,7 +971,7 @@ mod tests {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
-                    ArrayBounds::Temp { id, dims } => {
+                    ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![4]); // Only second dimension remains
                     }
@@ -927,7 +1037,7 @@ mod tests {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
-                    ArrayBounds::Temp { id, dims } => {
+                    ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![2, 3]); // Dimensions preserved
                     }
@@ -961,7 +1071,7 @@ mod tests {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
-                    ArrayBounds::Temp { id, dims } => {
+                    ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![4, 3]); // Dimensions reversed
                     }
@@ -996,7 +1106,7 @@ mod tests {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
-                    ArrayBounds::Temp { id, dims } => {
+                    ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![2, 3]); // Array dimensions preserved
                     }
@@ -1033,7 +1143,7 @@ mod tests {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
-                    ArrayBounds::Temp { id, dims } => {
+                    ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![3, 4]); // Dimensions preserved
                     }
@@ -1068,7 +1178,7 @@ mod tests {
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
-                    ArrayBounds::Temp { id, dims } => {
+                    ArrayBounds::Temp { id, dims, .. } => {
                         assert_eq!(id, 0); // First temp allocation
                         assert_eq!(dims, vec![2, 2]); // Dimensions preserved
                     }
