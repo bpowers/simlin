@@ -484,11 +484,12 @@ impl Context<'_> {
                     BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower(a)?)),
                     BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower(a)?)),
                     BFn::Max(a, b) => {
-                        if let Some(b) = b {
-                            BuiltinFn::Max(Box::new(self.lower(a)?), Some(Box::new(self.lower(b)?)))
+                        let b = if let Some(b) = b {
+                            Some(Box::new(self.lower(b)?))
                         } else {
-                            return sim_err!(BadBuiltinArgs, self.ident.to_owned());
-                        }
+                            None
+                        };
+                        BuiltinFn::Max(Box::new(self.lower(a)?), b)
                     }
                     BFn::Mean(args) => {
                         let args = args
@@ -498,11 +499,12 @@ impl Context<'_> {
                         BuiltinFn::Mean(args?)
                     }
                     BFn::Min(a, b) => {
-                        if let Some(b) = b {
-                            BuiltinFn::Min(Box::new(self.lower(a)?), Some(Box::new(self.lower(b)?)))
+                        let b = if let Some(b) = b {
+                            Some(Box::new(self.lower(b)?))
                         } else {
-                            return sim_err!(BadBuiltinArgs, self.ident.to_owned());
-                        }
+                            None
+                        };
+                        BuiltinFn::Min(Box::new(self.lower(a)?), b)
                     }
                     BFn::Pi => BuiltinFn::Pi,
                     BFn::Pulse(a, b, c) => {
@@ -539,14 +541,15 @@ impl Context<'_> {
                     BFn::Rank(_, _) => {
                         return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
                     }
-                    BFn::Size(_) => {
-                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    BFn::Size(a) => {
+                        let arg = self.lower(a)?;
+                        BuiltinFn::Size(Box::new(arg))
                     }
-                    BFn::Stddev(_) => {
-                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                    BFn::Stddev(a) => {
+                        let arg = self.lower(a)?;
+                        BuiltinFn::Stddev(Box::new(arg))
                     }
                     BFn::Sum(a) => {
-                        // Lower the argument and check if it's a static array view
                         let arg = self.lower(a)?;
                         BuiltinFn::Sum(Box::new(arg))
                     }
@@ -1601,6 +1604,67 @@ fn rewrite_expr_with_temporaries(
                 )
             } else {
                 (Expr::App(BuiltinFn::Sum(arg), loc), vec![])
+            }
+        }
+        // For MEAN of array operations, rewrite arguments that are arrays
+        Expr::App(BuiltinFn::Mean(args), loc) => {
+            let mut new_args = Vec::new();
+            let mut all_assignments = Vec::new();
+
+            for arg in args {
+                if expr_produces_array(&arg) {
+                    let (temp_expr, assignments) =
+                        create_temp_for_array_expr(arg, next_temp_id, temp_sizes);
+                    all_assignments.extend(assignments);
+                    new_args.push(temp_expr);
+                } else {
+                    new_args.push(arg);
+                }
+            }
+
+            (Expr::App(BuiltinFn::Mean(new_args), loc), all_assignments)
+        }
+        // For MIN/MAX with single array argument
+        Expr::App(BuiltinFn::Min(arg, None), loc) if expr_produces_array(&arg) => {
+            let (temp_expr, assignments) =
+                create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
+            (
+                Expr::App(BuiltinFn::Min(Box::new(temp_expr), None), loc),
+                assignments,
+            )
+        }
+        Expr::App(BuiltinFn::Max(arg, None), loc) if expr_produces_array(&arg) => {
+            let (temp_expr, assignments) =
+                create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
+            (
+                Expr::App(BuiltinFn::Max(Box::new(temp_expr), None), loc),
+                assignments,
+            )
+        }
+        // For STDDEV of array operations
+        Expr::App(BuiltinFn::Stddev(arg), loc) => {
+            if expr_produces_array(&arg) {
+                let (temp_expr, assignments) =
+                    create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
+                (
+                    Expr::App(BuiltinFn::Stddev(Box::new(temp_expr)), loc),
+                    assignments,
+                )
+            } else {
+                (Expr::App(BuiltinFn::Stddev(arg), loc), vec![])
+            }
+        }
+        // For SIZE of array operations
+        Expr::App(BuiltinFn::Size(arg), loc) => {
+            if expr_produces_array(&arg) {
+                let (temp_expr, assignments) =
+                    create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
+                (
+                    Expr::App(BuiltinFn::Size(Box::new(temp_expr)), loc),
+                    assignments,
+                )
+            } else {
+                (Expr::App(BuiltinFn::Size(arg), loc), vec![])
             }
         }
         // For assignments, rewrite the RHS

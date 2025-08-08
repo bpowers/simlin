@@ -907,6 +907,190 @@ mod range_tests {
     }
 
     #[test]
+    fn range_mean_1d() {
+        let project = ArrayTestProject::new("range_mean_1d")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![
+                    ("1", "10"),
+                    ("2", "20"),
+                    ("3", "30"),
+                    ("4", "40"),
+                    ("5", "50"),
+                ],
+            )
+            .scalar_aux("mean_val", "MEAN(source[2:4])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("mean_val", 30.0);
+    }
+
+    #[test]
+    fn range_mean_1d_w_ops() {
+        let project = ArrayTestProject::new("range_mean_1d_w_ops")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5")],
+            )
+            .scalar_aux("mean_val", "MEAN(2 * source[3:5] + 1)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("mean_val", 9.0);
+    }
+
+    #[test]
+    fn range_stddev_1d() {
+        let project = ArrayTestProject::new("range_stddev_1d")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5")],
+            )
+            .scalar_aux("stddev_val", "STDDEV(source[2:4])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("stddev_val", 1.0);
+    }
+
+    #[test]
+    fn range_stddev_1d_w_ops() {
+        let project = ArrayTestProject::new("range_stddev_1d_w_ops")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![("1", "2"), ("2", "4"), ("3", "6"), ("4", "8"), ("5", "10")],
+            )
+            .scalar_aux("stddev_val", "STDDEV(source[1:5] / 2)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // source[1:5] = [2, 4, 6, 8, 10] (inclusive range per XMILE spec)
+        // source[1:5] / 2 = [1, 2, 3, 4, 5], mean = 3, stddev = sqrt(2.5) ≈ 1.581
+        project.assert_scalar_result("stddev_val", 1.5811388300841898);
+    }
+
+    #[test]
+    fn range_min_1d() {
+        let project = ArrayTestProject::new("range_min_1d")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![
+                    ("1", "10"),
+                    ("2", "5"),
+                    ("3", "15"),
+                    ("4", "3"),
+                    ("5", "20"),
+                ],
+            )
+            .scalar_aux("min_val", "MIN(source[2:4])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("min_val", 3.0);
+    }
+
+    #[test]
+    fn range_min_1d_w_ops() {
+        let project = ArrayTestProject::new("range_min_1d_w_ops")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5")],
+            )
+            .scalar_aux("min_val", "MIN(source[3:5] * 2 - 1)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("min_val", 5.0);
+    }
+
+    #[test]
+    fn range_max_1d() {
+        let project = ArrayTestProject::new("range_max_1d")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![
+                    ("1", "10"),
+                    ("2", "5"),
+                    ("3", "15"),
+                    ("4", "3"),
+                    ("5", "20"),
+                ],
+            )
+            .scalar_aux("max_val", "MAX(source[2:4])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("max_val", 15.0);
+    }
+
+    #[test]
+    fn range_max_1d_w_ops() {
+        let project = ArrayTestProject::new("range_max_1d_w_ops")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5")],
+            )
+            .scalar_aux("max_val", "MAX(source[3:5] * 2 - 1)");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("max_val", 9.0);
+    }
+
+    #[test]
+    fn range_size_1d() {
+        let project = ArrayTestProject::new("range_size_1d")
+            .indexed_dimension("A", 5)
+            .array_with_ranges(
+                "source[A]",
+                vec![("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5")],
+            )
+            .scalar_aux("size_val", "SIZE(source[2:4])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("size_val", 3.0);
+    }
+
+    #[test]
+    fn range_size_2d() {
+        let project = ArrayTestProject::new("range_size_2d")
+            .indexed_dimension("Row", 3)
+            .indexed_dimension("Col", 4)
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "11"),
+                    ("1,2", "12"),
+                    ("1,3", "13"),
+                    ("1,4", "14"),
+                    ("2,1", "21"),
+                    ("2,2", "22"),
+                    ("2,3", "23"),
+                    ("2,4", "24"),
+                    ("3,1", "31"),
+                    ("3,2", "32"),
+                    ("3,3", "33"),
+                    ("3,4", "34"),
+                ],
+            )
+            .scalar_aux("size_val", "SIZE(matrix[2:3, 2:3])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("size_val", 4.0);
+    }
+
+    #[test]
     fn named_range_sum() {
         // Test SUM with named dimension range
         let project = ArrayTestProject::new("named_range_sum")

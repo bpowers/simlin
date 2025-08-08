@@ -74,6 +74,99 @@ struct ArrayContext {
 }
 
 impl ModuleEvaluator<'_> {
+    /// Helper to iterate over all elements in an array expression
+    fn iter_array_elements<F>(&mut self, expr: &Expr, mut f: F)
+    where
+        F: FnMut(f64),
+    {
+        match expr {
+            Expr::StaticSubscript(off, view, _) => {
+                let base_off = self.off + *off;
+                let total_elements = view.dims.iter().product::<usize>();
+
+                for i in 0..total_elements {
+                    let mut remainder = i;
+                    let mut idx = view.offset;
+                    for (dim_idx, &dim_size) in view.dims.iter().enumerate().rev() {
+                        let coord = remainder % dim_size;
+                        remainder /= dim_size;
+                        idx += coord * view.strides[dim_idx] as usize;
+                    }
+                    f(self.curr[base_off + idx]);
+                }
+            }
+            Expr::TempArray(id, view, _) => {
+                let id = *id as usize;
+                if id >= self.sim.temp_offsets.len() - 1 {
+                    panic!("Invalid temporary ID: {id}");
+                }
+
+                let start = self.sim.temp_offsets[id];
+                let temps = (*self.sim.temps).borrow();
+                let size = view.dims.iter().product::<usize>();
+
+                for i in 0..size {
+                    f(temps[start + i]);
+                }
+            }
+            _ => panic!("iter_array_elements called with non-array expression: {expr:?}"),
+        }
+    }
+
+    /// Helper to get the size of an array
+    fn get_array_size(&self, expr: &Expr) -> usize {
+        match expr {
+            Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => {
+                view.dims.iter().product()
+            }
+            _ => panic!("get_array_size called with non-array expression: {expr:?}"),
+        }
+    }
+
+    /// Helper to apply a reduction operation over array elements
+    fn reduce_array<F>(&mut self, expr: &Expr, init: f64, mut reducer: F) -> f64
+    where
+        F: FnMut(f64, f64) -> f64,
+    {
+        let mut acc = init;
+        self.iter_array_elements(expr, |val| {
+            acc = reducer(acc, val);
+        });
+        acc
+    }
+
+    /// Helper to calculate mean of an array
+    fn array_mean(&mut self, expr: &Expr) -> f64 {
+        let size = self.get_array_size(expr);
+        if size == 0 {
+            return 0.0;
+        }
+
+        let sum = self.reduce_array(expr, 0.0, |acc, val| acc + val);
+        sum / size as f64
+    }
+
+    /// Helper to calculate standard deviation of an array
+    fn array_stddev(&mut self, expr: &Expr) -> f64 {
+        let size = self.get_array_size(expr);
+        if size <= 1 {
+            return 0.0;
+        }
+
+        // First pass: calculate mean
+        let mean = self.array_mean(expr);
+
+        // Second pass: calculate variance
+        let mut variance = 0.0;
+        self.iter_array_elements(expr, |val| {
+            let diff = val - mean;
+            variance += diff * diff;
+        });
+
+        // Sample standard deviation (n-1 divisor)
+        (variance / (size - 1) as f64).sqrt()
+    }
+
     fn eval(&mut self, expr: &Expr) -> f64 {
         match expr {
             Expr::Const(n, _) => *n,
@@ -239,30 +332,47 @@ impl ModuleEvaluator<'_> {
                     }
                     BuiltinFn::Sqrt(a) => self.eval(a).sqrt(),
                     BuiltinFn::Min(a, b) => {
-                        let a = self.eval(a);
-                        if let Some(b) = b {
-                            let b = self.eval(b);
-                            // we can't use std::cmp::min here, becuase f64 is only
-                            // PartialOrd
-                            if a < b { a } else { b }
+                        // Check if this is array min or scalar min
+                        if b.is_none() {
+                            // Single argument - must be an array
+                            self.reduce_array(
+                                a,
+                                f64::INFINITY,
+                                |acc, val| {
+                                    if val < acc { val } else { acc }
+                                },
+                            )
                         } else {
-                            unreachable!();
+                            // Two scalar arguments
+                            let a = self.eval(a);
+                            let b = self.eval(b.as_ref().unwrap());
+                            if a < b { a } else { b }
                         }
                     }
                     BuiltinFn::Mean(args) => {
-                        let count = args.len() as f64;
-                        let sum: f64 = args.iter().map(|arg| self.eval(arg)).sum();
-                        sum / count
+                        // Check if this is a single array argument or multiple scalar arguments
+                        if args.len() == 1 {
+                            // Single array argument
+                            self.array_mean(&args[0])
+                        } else {
+                            // Multiple scalar arguments - original behavior
+                            let count = args.len() as f64;
+                            let sum: f64 = args.iter().map(|arg| self.eval(arg)).sum();
+                            sum / count
+                        }
                     }
                     BuiltinFn::Max(a, b) => {
-                        let a = self.eval(a);
-                        if let Some(b) = b {
-                            let b = self.eval(b);
-                            // we can't use std::cmp::min here, becuase f64 is only
-                            // PartialOrd
-                            if a > b { a } else { b }
+                        // Check if this is array max or scalar max
+                        if b.is_none() {
+                            // Single argument - must be an array
+                            self.reduce_array(a, f64::NEG_INFINITY, |acc, val| {
+                                if val > acc { val } else { acc }
+                            })
                         } else {
-                            unreachable!();
+                            // Two scalar arguments
+                            let a = self.eval(a);
+                            let b = self.eval(b.as_ref().unwrap());
+                            if a > b { a } else { b }
                         }
                     }
                     BuiltinFn::Lookup(id, index, _) => {
@@ -348,124 +458,12 @@ impl ModuleEvaluator<'_> {
                         step(time, dt, height, step_time)
                     }
                     BuiltinFn::Sum(arg) => {
-                        // Sum needs to handle arrays, temporaries, and operations on them
-                        match arg.as_ref() {
-                            Expr::TempArray(id, view, _) => {
-                                // Sum over the temporary array
-                                let id = *id as usize;
-                                if id >= self.sim.temp_offsets.len() - 1 {
-                                    panic!("Invalid temporary ID: {id}");
-                                }
-
-                                let start = self.sim.temp_offsets[id];
-                                let mut sum = 0.0;
-                                let temps = (*self.sim.temps).borrow();
-
-                                // Temporary arrays are stored contiguously, so just sum all elements
-                                let size = view.dims.iter().product::<usize>();
-                                for i in 0..size {
-                                    sum += temps[start + i];
-                                }
-                                sum
-                            }
-                            Expr::StaticSubscript(off, view, _) => {
-                                // Sum over the array view
-                                let mut sum = 0.0;
-                                let base_off = self.off + *off;
-
-                                // Multi-dimensional iteration works for both 1D and multi-D views
-                                let total_elements = view.dims.iter().product::<usize>();
-                                for i in 0..total_elements {
-                                    // Calculate the position in the multi-dimensional array
-                                    let mut remainder = i;
-                                    let mut idx = view.offset;
-                                    for (dim_idx, &dim_size) in view.dims.iter().enumerate().rev() {
-                                        let coord = remainder % dim_size;
-                                        remainder /= dim_size;
-                                        idx += coord * view.strides[dim_idx] as usize;
-                                    }
-                                    sum += self.curr[base_off + idx];
-                                }
-                                sum
-                            }
-                            Expr::Op2(op, l, r, _) => {
-                                // Check if this is an array operation
-                                // If left side is an array, we need to do element-wise operations
-                                if let Expr::StaticSubscript(off, view, _) = l.as_ref() {
-                                    // This is an array operation, sum the results
-                                    let mut sum = 0.0;
-                                    let base_off = self.off + *off;
-
-                                    // Evaluate right operand once if it's a scalar
-                                    let r_val = self.eval(r);
-
-                                    for i in 0..view.dims[0] {
-                                        let idx = view.offset + i * view.strides[0] as usize;
-                                        let l_val = self.curr[base_off + idx];
-
-                                        let elem_result = match op {
-                                            BinaryOp::Add => l_val + r_val,
-                                            BinaryOp::Sub => l_val - r_val,
-                                            BinaryOp::Mul => l_val * r_val,
-                                            BinaryOp::Div => l_val / r_val,
-                                            _ => l_val, // Other ops not expected in this context
-                                        };
-                                        sum += elem_result;
-                                    }
-                                    sum
-                                } else if let Expr::Op2(inner_op, inner_l, inner_r, _) = l.as_ref()
-                                {
-                                    // Nested Op2 - need to handle recursively
-                                    // For now, handle the specific case of (2 * source[3:5]) + 1
-                                    if let Expr::StaticSubscript(off, view, _) = inner_r.as_ref() {
-                                        // Pattern: scalar * array + scalar
-                                        let mut sum = 0.0;
-                                        let base_off = self.off + *off;
-                                        let scalar_l = self.eval(inner_l);
-                                        let scalar_r = self.eval(r);
-
-                                        for i in 0..view.dims[0] {
-                                            let idx = view.offset + i * view.strides[0] as usize;
-                                            let array_val = self.curr[base_off + idx];
-
-                                            // First apply inner operation
-                                            let inner_result = match inner_op {
-                                                BinaryOp::Mul => scalar_l * array_val,
-                                                BinaryOp::Add => scalar_l + array_val,
-                                                BinaryOp::Sub => scalar_l - array_val,
-                                                BinaryOp::Div => scalar_l / array_val,
-                                                _ => array_val,
-                                            };
-
-                                            // Then apply outer operation
-                                            let final_result = match op {
-                                                BinaryOp::Add => inner_result + scalar_r,
-                                                BinaryOp::Sub => inner_result - scalar_r,
-                                                BinaryOp::Mul => inner_result * scalar_r,
-                                                BinaryOp::Div => inner_result / scalar_r,
-                                                _ => inner_result,
-                                            };
-
-                                            sum += final_result;
-                                        }
-                                        sum
-                                    } else {
-                                        // Fall back to scalar evaluation
-                                        self.eval(arg)
-                                    }
-                                } else {
-                                    // Fall back to scalar evaluation
-                                    self.eval(arg)
-                                }
-                            }
-                            _ => {
-                                // For non-view arguments, just evaluate and return
-                                // This handles scalar cases or other expressions
-                                self.eval(arg)
-                            }
-                        }
+                        // Sum array elements
+                        self.reduce_array(arg, 0.0, |acc, val| acc + val)
                     }
-                    BuiltinFn::Rank(_, _) | BuiltinFn::Size(_) | BuiltinFn::Stddev(_) => {
+                    BuiltinFn::Stddev(arg) => self.array_stddev(arg),
+                    BuiltinFn::Size(arg) => self.get_array_size(arg) as f64,
+                    BuiltinFn::Rank(_, _) => {
                         unreachable!();
                     }
                 }
@@ -483,108 +481,68 @@ impl ModuleEvaluator<'_> {
                 }
 
                 let start = self.sim.temp_offsets[id];
-                let _size = view.dims.iter().product::<usize>();
+                let total_elements = view.dims.iter().product::<usize>();
 
-                // Evaluate the expression as an array
-                // We need to evaluate element by element to avoid borrowing conflicts
-                match rhs.as_ref() {
-                    Expr::Op2(op, l, r, _) => {
-                        // For the expression (2 * source[3:5]) + 1, we need to handle nested operations
-                        // We'll evaluate element by element
-                        let mut temp_data = (*self.sim.temps).borrow_mut();
-
-                        for i in 0..view.dims[0] {
-                            // Evaluate left operand for this index
-                            let l_val = match l.as_ref() {
-                                Expr::Op2(inner_op, inner_l, inner_r, _) => {
-                                    // Handle nested Op2 like 2 * array[i]
-                                    let inner_l_val = match inner_l.as_ref() {
-                                        Expr::Const(n, _) => *n,
-                                        Expr::StaticSubscript(off, l_view, _) => {
-                                            let base_off = self.off + *off;
-                                            let src_idx =
-                                                l_view.offset + i * l_view.strides[0] as usize;
-                                            self.curr[base_off + src_idx]
-                                        }
-                                        _ => panic!(
-                                            "Unsupported expression in nested Op2 left: {inner_l:?}"
-                                        ),
-                                    };
-                                    let inner_r_val = match inner_r.as_ref() {
-                                        Expr::Const(n, _) => *n,
-                                        Expr::StaticSubscript(off, r_view, _) => {
-                                            let base_off = self.off + *off;
-                                            let src_idx =
-                                                r_view.offset + i * r_view.strides[0] as usize;
-                                            self.curr[base_off + src_idx]
-                                        }
-                                        _ => panic!(
-                                            "Unsupported expression in nested Op2 right: {inner_r:?}"
-                                        ),
-                                    };
-                                    match inner_op {
-                                        BinaryOp::Add => inner_l_val + inner_r_val,
-                                        BinaryOp::Sub => inner_l_val - inner_r_val,
-                                        BinaryOp::Mul => inner_l_val * inner_r_val,
-                                        BinaryOp::Div => inner_l_val / inner_r_val,
-                                        _ => inner_l_val,
-                                    }
-                                }
-                                Expr::Const(n, _) => *n,
-                                Expr::StaticSubscript(off, l_view, _) => {
-                                    let base_off = self.off + *off;
-                                    let src_idx = l_view.offset + i * l_view.strides[0] as usize;
-                                    self.curr[base_off + src_idx]
-                                }
-                                _ => panic!("Unsupported expression in Op2 left: {l:?}"),
-                            };
-
-                            // Evaluate right operand for this index
-                            let r_val = match r.as_ref() {
-                                Expr::Const(n, _) => *n,
-                                Expr::StaticSubscript(off, r_view, _) => {
-                                    let base_off = self.off + *off;
-                                    let src_idx = r_view.offset + i * r_view.strides[0] as usize;
-                                    self.curr[base_off + src_idx]
-                                }
-                                _ => panic!("Unsupported expression in Op2 right: {r:?}"),
-                            };
-
-                            // Apply the operation
-                            let result = match op {
+                // Helper function to evaluate an expression at a specific array index
+                fn eval_at_index(
+                    evaluator: &mut ModuleEvaluator,
+                    expr: &Expr,
+                    flat_idx: usize,
+                    dims: &[usize],
+                ) -> f64 {
+                    match expr {
+                        Expr::Const(n, _) => *n,
+                        Expr::StaticSubscript(off, view, _) => {
+                            // Calculate position in the source array
+                            let mut remainder = flat_idx;
+                            let mut src_idx = view.offset;
+                            for (dim_idx, &dim_size) in dims.iter().enumerate().rev() {
+                                let coord = remainder % dim_size;
+                                remainder /= dim_size;
+                                src_idx += coord * view.strides[dim_idx] as usize;
+                            }
+                            evaluator.curr[evaluator.off + *off + src_idx]
+                        }
+                        Expr::Op2(op, l, r, _) => {
+                            let l_val = eval_at_index(evaluator, l, flat_idx, dims);
+                            let r_val = eval_at_index(evaluator, r, flat_idx, dims);
+                            match op {
                                 BinaryOp::Add => l_val + r_val,
                                 BinaryOp::Sub => l_val - r_val,
                                 BinaryOp::Mul => l_val * r_val,
                                 BinaryOp::Div => l_val / r_val,
-                                _ => l_val,
-                            };
-
-                            temp_data[start + i] = result;
-                        }
-                    }
-                    Expr::StaticSubscript(off, src_view, _) => {
-                        // Direct array copy using multi-dimensional iteration
-                        let base_off = self.off + *off;
-                        let mut temp_data = (*self.sim.temps).borrow_mut();
-
-                        // Multi-dimensional iteration works for both 1D and multi-D arrays
-                        let total_elements = src_view.dims.iter().product::<usize>();
-                        for i in 0..total_elements {
-                            // Calculate source position using src_view strides
-                            let mut remainder = i;
-                            let mut src_idx = src_view.offset;
-                            for (dim_idx, &dim_size) in src_view.dims.iter().enumerate().rev() {
-                                let coord = remainder % dim_size;
-                                remainder /= dim_size;
-                                src_idx += coord * src_view.strides[dim_idx] as usize;
+                                BinaryOp::Exp => l_val.powf(r_val),
+                                BinaryOp::Mod => l_val % r_val,
+                                BinaryOp::Lt => (l_val < r_val) as i8 as f64,
+                                BinaryOp::Lte => (l_val <= r_val) as i8 as f64,
+                                BinaryOp::Gt => (l_val > r_val) as i8 as f64,
+                                BinaryOp::Gte => (l_val >= r_val) as i8 as f64,
+                                BinaryOp::Eq => approx_eq!(f64, l_val, r_val) as i8 as f64,
+                                BinaryOp::Neq => (!approx_eq!(f64, l_val, r_val)) as i8 as f64,
+                                BinaryOp::And => {
+                                    (is_truthy(l_val) && is_truthy(r_val)) as i8 as f64
+                                }
+                                BinaryOp::Or => (is_truthy(l_val) || is_truthy(r_val)) as i8 as f64,
                             }
-                            // Store contiguously in temp array
-                            temp_data[start + i] = self.curr[base_off + src_idx];
                         }
+                        Expr::Op1(op, e, _) => {
+                            let val = eval_at_index(evaluator, e, flat_idx, dims);
+                            match op {
+                                UnaryOp::Not => (!is_truthy(val)) as i8 as f64,
+                                UnaryOp::Transpose => {
+                                    panic!("Transpose not supported in AssignTemp context")
+                                }
+                            }
+                        }
+                        _ => panic!("Unsupported expression in AssignTemp: {expr:?}"),
                     }
-                    _ => {
-                        panic!("AssignTemp with non-array expression: {rhs:?}");
-                    }
+                }
+
+                let mut temp_data = (*self.sim.temps).borrow_mut();
+
+                // Evaluate element by element
+                for i in 0..total_elements {
+                    temp_data[start + i] = eval_at_index(self, rhs.as_ref(), i, &view.dims);
                 }
 
                 // AssignTemp doesn't produce a scalar value
