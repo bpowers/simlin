@@ -469,7 +469,6 @@ mod transpose_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Fix bare array transpose
     fn transpose_2d_array_bare() {
         // Test transpose operator on bare 2D array variable
         let project = ArrayTestProject::new("transpose_2d_bare")
@@ -486,7 +485,6 @@ mod transpose_tests {
                     ("2,3", "23"),
                 ],
             )
-            // This should work but currently fails with MismatchedDimensions
             .array_aux("transposed[Col,Row]", "matrix'");
 
         project.assert_compiles();
@@ -494,6 +492,89 @@ mod transpose_tests {
         // Original matrix is row-major: [11, 12, 13, 21, 22, 23]
         // Transposed should be: [11, 21, 12, 22, 13, 23]
         project.assert_interpreter_result("transposed", &[11.0, 21.0, 12.0, 22.0, 13.0, 23.0]);
+    }
+
+    #[test]
+    fn transpose_3d_array_bare() {
+        // Test transpose on 3D array
+        let project = ArrayTestProject::new("transpose_3d_bare")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 2)
+            .indexed_dimension("Z", 2)
+            .array_with_ranges(
+                "cube[X,Y,Z]",
+                vec![
+                    ("1,1,1", "111"),
+                    ("1,1,2", "112"),
+                    ("1,2,1", "121"),
+                    ("1,2,2", "122"),
+                    ("2,1,1", "211"),
+                    ("2,1,2", "212"),
+                    ("2,2,1", "221"),
+                    ("2,2,2", "222"),
+                ],
+            )
+            .array_aux("transposed[Z,Y,X]", "cube'");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Original: [111, 112, 121, 122, 211, 212, 221, 222]
+        // Transposed (Z,Y,X order): [111, 211, 121, 221, 112, 212, 122, 222]
+        project.assert_interpreter_result(
+            "transposed",
+            &[111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0],
+        );
+    }
+
+    #[test]
+    fn transpose_with_operations() {
+        // Test transpose in expressions
+        let project = ArrayTestProject::new("transpose_with_ops")
+            .indexed_dimension("Row", 2)
+            .indexed_dimension("Col", 3)
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "2"),
+                    ("1,3", "3"),
+                    ("2,1", "4"),
+                    ("2,2", "5"),
+                    ("2,3", "6"),
+                ],
+            )
+            .array_aux("doubled_transpose[Col,Row]", "(matrix * 2)'");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Original * 2: [2, 4, 6, 8, 10, 12]
+        // Transposed: [2, 8, 4, 10, 6, 12]
+        project.assert_interpreter_result("doubled_transpose", &[2.0, 8.0, 4.0, 10.0, 6.0, 12.0]);
+    }
+
+    #[test]
+    fn transpose_sum() {
+        // Test using transpose with aggregate functions
+        let project = ArrayTestProject::new("transpose_sum")
+            .indexed_dimension("Row", 2)
+            .indexed_dimension("Col", 3)
+            .array_with_ranges(
+                "matrix[Row,Col]",
+                vec![
+                    ("1,1", "1"),
+                    ("1,2", "2"),
+                    ("1,3", "3"),
+                    ("2,1", "4"),
+                    ("2,2", "5"),
+                    ("2,3", "6"),
+                ],
+            )
+            .scalar_aux("sum_transpose", "SUM(matrix')");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Sum should be same whether transposed or not: 1+2+3+4+5+6 = 21
+        project.assert_scalar_result("sum_transpose", 21.0);
     }
 
     #[test]
@@ -1339,5 +1420,41 @@ mod error_handling_tests {
         //     .array_const("arr[Small]", 10.0)
         //     .scalar_aux("bad_access", "arr[5]")  // Index 5 out of bounds for size 3
         //     .assert_compile_error(ErrorCode::ArrayIndexOutOfBounds);
+    }
+}
+
+mod a2a_assignment_tests {
+    use crate::array_test_helpers::ArrayTestProject;
+
+    #[test]
+    fn a2a_with_bare_transpose_and_operations() {
+        // Test that A2A assignments with bare transpose + operations work correctly
+        // This specifically tests that the compiler properly handles the expression rewriting
+        ArrayTestProject::new("a2a_transpose_ops")
+            .indexed_dimension("Row", 2)
+            .indexed_dimension("Col", 3)
+            // Create matrix with individual equations
+            // matrix[1,1] = 1, matrix[1,2] = 3, matrix[1,3] = 5
+            // matrix[2,1] = 2, matrix[2,2] = 4, matrix[2,3] = 6
+            .array_aux("matrix[Row, Col]", "Row + (Col - 1) * 2")
+            .array_aux("transposed_doubled[Col, Row]", "matrix' * 2")
+            // After transpose: [1,2; 3,4; 5,6], doubled: [2,4; 6,8; 10,12]
+            .assert_interpreter_result("transposed_doubled", &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
+    }
+
+    #[test]
+    fn a2a_with_complex_expression() {
+        // Test A2A with complex expression involving multiple operations
+        ArrayTestProject::new("a2a_complex")
+            .indexed_dimension("X", 3)
+            .indexed_dimension("Y", 2)
+            // source[1,1]=1, source[1,2]=2, source[2,1]=3, source[2,2]=4, source[3,1]=5, source[3,2]=6
+            .array_aux("source[X, Y]", "(X - 1) * 2 + Y")
+            .array_aux("result[Y, X]", "(source' + 1) * 2 - 3")
+            // source': [1, 3, 5; 2, 4, 6]
+            // +1: [2, 4, 6; 3, 5, 7]
+            // *2: [4, 8, 12; 6, 10, 14]
+            // -3: [1, 5, 9; 3, 7, 11]
+            .assert_interpreter_result("result", &[1.0, 5.0, 9.0, 3.0, 7.0, 11.0]);
     }
 }

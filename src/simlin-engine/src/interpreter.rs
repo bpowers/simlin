@@ -20,37 +20,46 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Helper function to transpose an index from row-major to column-major ordering
-/// For a 2D array [rows, cols], transpose maps (r,c) -> (c,r)
+/// Maps a flat index from transposed array space to original array space
+///
+/// For a 2D array [rows, cols], transpose maps [r,c] -> [c,r]
 /// In flat indexing: idx = r*cols + c becomes idx' = c*rows + r
-fn transpose_index(idx: usize, dims: &[usize]) -> usize {
-    if dims.is_empty() || dims.len() == 1 {
+///
+/// # Arguments
+/// * `transposed_flat_idx` - The flat index in the transposed array
+/// * `transposed_dims` - The dimensions of the transposed array
+///
+/// # Returns
+/// The corresponding flat index in the original array
+pub fn transpose_flat_index(transposed_flat_idx: usize, transposed_dims: &[usize]) -> usize {
+    if transposed_dims.is_empty() || transposed_dims.len() == 1 {
         // 0D or 1D arrays are unchanged by transpose
-        return idx;
+        return transposed_flat_idx;
     }
 
-    // Convert flat index to multi-dimensional coordinates
-    let mut coords = Vec::with_capacity(dims.len());
-    let mut remaining = idx;
-    for &dim in dims.iter().rev() {
+    // Get original dimensions by reversing transposed dimensions
+    let mut orig_dims = transposed_dims.to_vec();
+    orig_dims.reverse();
+
+    // Convert flat index to coordinates in transposed space
+    let mut coords = Vec::with_capacity(transposed_dims.len());
+    let mut remaining = transposed_flat_idx;
+    for &dim in transposed_dims.iter().rev() {
         coords.push(remaining % dim);
         remaining /= dim;
     }
     coords.reverse();
 
-    // Reverse the coordinates for transpose
+    // Reverse coordinates to get original space coordinates
     coords.reverse();
 
-    // Reverse the dimensions for transpose
-    let mut transposed_dims = dims.to_vec();
-    transposed_dims.reverse();
-
-    // Convert back to flat index with transposed dimensions
-    let mut result = 0;
+    // Convert to flat index in original space
+    let mut orig_idx = 0;
     for (i, &coord) in coords.iter().enumerate() {
-        result = result * transposed_dims[i] + coord;
+        orig_idx = orig_idx * orig_dims[i] + coord;
     }
-    result
+
+    orig_idx
 }
 
 pub struct ModuleEvaluator<'a> {
@@ -61,16 +70,6 @@ pub struct ModuleEvaluator<'a> {
     next: &'a mut [f64],
     module: &'a Module,
     sim: &'a Simulation,
-    /// Tracks array context for proper transpose handling
-    array_context: Option<ArrayContext>,
-}
-
-#[derive(Debug, Clone)]
-struct ArrayContext {
-    /// The dimensions of the array being processed
-    dims: Vec<usize>,
-    /// The current index in the flattened array
-    current_index: usize,
 }
 
 impl ModuleEvaluator<'_> {
@@ -119,6 +118,7 @@ impl ModuleEvaluator<'_> {
             Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => {
                 view.dims.iter().product()
             }
+            Expr::TempArrayElement(_, _, _, _) => 1, // Single element
             _ => panic!("get_array_size called with non-array expression: {expr:?}"),
         }
     }
@@ -243,27 +243,11 @@ impl ModuleEvaluator<'_> {
                         (!is_truthy(l)) as i8 as f64
                     }
                     UnaryOp::Transpose => {
-                        // Handle transpose for bare array variables
-                        match l.as_ref() {
-                            Expr::Var(var_off, _) => {
-                                // For bare array transpose, we need to map from the transposed
-                                // index to the original index.
-                                if let Some(ref ctx) = self.array_context {
-                                    // Calculate the transposed index mapping
-                                    let transposed_idx =
-                                        transpose_index(ctx.current_index, &ctx.dims);
-                                    self.curr[self.off + var_off + transposed_idx]
-                                } else {
-                                    // Without array context, we can't properly transpose
-                                    // This case shouldn't happen in well-formed A2A assignments
-                                    self.curr[self.off + var_off]
-                                }
-                            }
-                            _ => {
-                                // For non-variable expressions, just evaluate them
-                                self.eval(l)
-                            }
-                        }
+                        // Transpose should only be handled through TempArrayElement
+                        // in properly compiled A2A assignments
+                        panic!(
+                            "Bare transpose in interpreter - should be handled via TempArrayElement"
+                        )
                     }
                 }
             }
@@ -468,10 +452,36 @@ impl ModuleEvaluator<'_> {
                     }
                 }
             }
-            Expr::TempArray(id, _view, _) => {
-                // TempArray should not be evaluated as a scalar
-                // This is only used within array contexts
-                panic!("TempArray {id} should not be evaluated as a scalar");
+            Expr::TempArray(id, view, _) => {
+                // TempArray should only be used in array contexts (like builtins)
+                // For scalar evaluation in A2A contexts, TempArrayElement should be used instead
+                let id = *id as usize;
+                let start = self.sim.temp_offsets[id];
+                let temp_data = (*self.sim.temps).borrow();
+
+                let size = view.dims.iter().product::<usize>();
+
+                // If it's a single-element array, return that element
+                if size == 1 {
+                    return temp_data[start + view.offset];
+                }
+
+                // For multi-element arrays, TempArray cannot be evaluated as scalar
+                // The compiler should have converted this to TempArrayElement for A2A contexts
+                panic!(
+                    "TempArray {id} cannot be evaluated as scalar - use TempArrayElement for A2A"
+                );
+            }
+            Expr::TempArrayElement(id, _view, element_idx, _) => {
+                // TempArrayElement specifies which element to access
+                let id = *id as usize;
+                let start = self.sim.temp_offsets[id];
+                let temp_data = (*self.sim.temps).borrow();
+
+                // The temp array has already been computed and stored
+                // element_idx is the flat index into the view
+                // Just return that element directly
+                temp_data[start + element_idx]
             }
             Expr::AssignTemp(id, rhs, view) => {
                 // Evaluate the array expression element by element and store in temporary
@@ -503,6 +513,23 @@ impl ModuleEvaluator<'_> {
                             }
                             evaluator.curr[evaluator.off + *off + src_idx]
                         }
+                        Expr::TempArray(id, view, _) => {
+                            // Access element from temporary array
+                            let id = *id as usize;
+                            let start = evaluator.sim.temp_offsets[id];
+
+                            // Calculate position in the temp array
+                            let mut remainder = flat_idx;
+                            let mut src_idx = view.offset;
+                            for (dim_idx, &dim_size) in dims.iter().enumerate().rev() {
+                                let coord = remainder % dim_size;
+                                remainder /= dim_size;
+                                src_idx += coord * view.strides[dim_idx] as usize;
+                            }
+
+                            let temp_data = (*evaluator.sim.temps).borrow();
+                            temp_data[start + src_idx]
+                        }
                         Expr::Op2(op, l, r, _) => {
                             let l_val = eval_at_index(evaluator, l, flat_idx, dims);
                             let r_val = eval_at_index(evaluator, r, flat_idx, dims);
@@ -526,11 +553,21 @@ impl ModuleEvaluator<'_> {
                             }
                         }
                         Expr::Op1(op, e, _) => {
-                            let val = eval_at_index(evaluator, e, flat_idx, dims);
                             match op {
-                                UnaryOp::Not => (!is_truthy(val)) as i8 as f64,
+                                UnaryOp::Not => {
+                                    let val = eval_at_index(evaluator, e, flat_idx, dims);
+                                    (!is_truthy(val)) as i8 as f64
+                                }
                                 UnaryOp::Transpose => {
-                                    panic!("Transpose not supported in AssignTemp context")
+                                    // For transpose in AssignTemp, we need to map the index
+                                    // flat_idx is in the transposed space (dims), we need to map to original space
+                                    let orig_idx = transpose_flat_index(flat_idx, dims);
+
+                                    // Get original dimensions by reversing transposed dimensions
+                                    let mut orig_dims = dims.to_vec();
+                                    orig_dims.reverse();
+
+                                    eval_at_index(evaluator, e, orig_idx, &orig_dims)
                                 }
                             }
                         }
@@ -713,7 +750,6 @@ impl Simulation {
             module,
             inputs: module_inputs,
             sim: self,
-            array_context: None, // Will be set when processing array assignments
         };
 
         for expr in runlist.iter() {
@@ -889,6 +925,105 @@ fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
     }
 
     offsets
+}
+
+#[cfg(test)]
+mod transpose_tests {
+    use super::transpose_flat_index;
+
+    #[test]
+    fn test_transpose_1d_array() {
+        // 1D arrays should be unchanged by transpose
+        assert_eq!(transpose_flat_index(0, &[5]), 0);
+        assert_eq!(transpose_flat_index(2, &[5]), 2);
+        assert_eq!(transpose_flat_index(4, &[5]), 4);
+    }
+
+    #[test]
+    fn test_transpose_2d_array() {
+        // 2x3 matrix transposed to 3x2
+        // Original: [[0,1,2], [3,4,5]]
+        // Transposed: [[0,3], [1,4], [2,5]]
+        let transposed_dims = &[3, 2];
+
+        // Element at transposed[0,0] = original[0,0] = 0
+        assert_eq!(transpose_flat_index(0, transposed_dims), 0);
+
+        // Element at transposed[0,1] = original[1,0] = 3
+        assert_eq!(transpose_flat_index(1, transposed_dims), 3);
+
+        // Element at transposed[1,0] = original[0,1] = 1
+        assert_eq!(transpose_flat_index(2, transposed_dims), 1);
+
+        // Element at transposed[1,1] = original[1,1] = 4
+        assert_eq!(transpose_flat_index(3, transposed_dims), 4);
+
+        // Element at transposed[2,0] = original[0,2] = 2
+        assert_eq!(transpose_flat_index(4, transposed_dims), 2);
+
+        // Element at transposed[2,1] = original[1,2] = 5
+        assert_eq!(transpose_flat_index(5, transposed_dims), 5);
+    }
+
+    #[test]
+    fn test_transpose_3d_array() {
+        // 2x3x4 array transposed to 4x3x2
+        let transposed_dims = &[4, 3, 2];
+
+        // Test a few key mappings
+        // transposed[0,0,0] = original[0,0,0] = 0
+        assert_eq!(transpose_flat_index(0, transposed_dims), 0);
+
+        // transposed[0,0,1] = original[1,0,0] = 12 (stride=12 in original)
+        assert_eq!(transpose_flat_index(1, transposed_dims), 12);
+
+        // transposed[1,0,0] = original[0,0,1] = 1
+        assert_eq!(transpose_flat_index(6, transposed_dims), 1);
+
+        // transposed[3,2,1] = original[1,2,3] = 12+8+3 = 23
+        assert_eq!(transpose_flat_index(23, transposed_dims), 23);
+    }
+
+    #[test]
+    fn test_transpose_square_matrix() {
+        // 3x3 matrix - transpose should swap row/col indices
+        let transposed_dims = &[3, 3];
+
+        // Diagonal elements unchanged
+        assert_eq!(transpose_flat_index(0, transposed_dims), 0); // [0,0]
+        assert_eq!(transpose_flat_index(4, transposed_dims), 4); // [1,1]
+        assert_eq!(transpose_flat_index(8, transposed_dims), 8); // [2,2]
+
+        // Off-diagonal elements swap
+        assert_eq!(transpose_flat_index(1, transposed_dims), 3); // [0,1] -> [1,0]
+        assert_eq!(transpose_flat_index(3, transposed_dims), 1); // [1,0] -> [0,1]
+        assert_eq!(transpose_flat_index(2, transposed_dims), 6); // [0,2] -> [2,0]
+        assert_eq!(transpose_flat_index(6, transposed_dims), 2); // [2,0] -> [0,2]
+    }
+
+    #[test]
+    fn test_transpose_empty_array() {
+        // Empty dimensions should return input unchanged
+        assert_eq!(transpose_flat_index(0, &[]), 0);
+        assert_eq!(transpose_flat_index(5, &[]), 5);
+    }
+
+    #[test]
+    fn test_transpose_index_mapping_correctness() {
+        // Test that transpose is its own inverse for 2D arrays
+        let dims_2d = &[3, 4];
+        let transposed_dims_2d = &[4, 3];
+
+        for i in 0..12 {
+            let transposed_idx = transpose_flat_index(i, dims_2d);
+            let back_to_original = transpose_flat_index(transposed_idx, transposed_dims_2d);
+            assert_eq!(
+                back_to_original, i,
+                "Transpose should be its own inverse: {} -> {} -> {}",
+                i, transposed_idx, back_to_original
+            );
+        }
+    }
 }
 
 #[test]
