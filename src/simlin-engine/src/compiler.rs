@@ -119,6 +119,7 @@ impl ArrayView {
 }
 
 #[derive(PartialEq, Clone, Debug)]
+#[allow(dead_code)]
 pub enum Expr {
     Const(f64, Loc),
     Var(usize, Loc),                              // offset
@@ -263,6 +264,11 @@ impl Expr {
             }
         }
     }
+}
+
+#[allow(dead_code)]
+fn decompose_array_temps(expr: Expr, next_temp_id: usize) -> Result<(Expr, Vec<Expr>, usize)> {
+    Ok((expr, vec![], next_temp_id))
 }
 
 #[derive(Clone, Debug)]
@@ -1928,219 +1934,8 @@ pub struct Module {
     pub(crate) tables: HashMap<Ident, Table>,
 }
 
-/// Rewrite expressions to use temporaries for array operations
-fn rewrite_expressions_with_temporaries(exprs: Vec<Expr>) -> (Vec<Expr>, usize, Vec<usize>) {
-    let mut next_temp_id = 0u32;
-    let mut temp_sizes = Vec::new();
-    let mut rewritten = Vec::new();
-
-    // First pass: detect A2A assignment sequences with identical array expressions
-    let mut i = 0;
-    while i < exprs.len() {
-        // Check if this is the start of an A2A sequence with array expressions
-        if let Expr::AssignCurr(base_off, rhs) = &exprs[i] {
-            // Check if the RHS needs a temporary
-            if expr_produces_array(rhs) {
-                // Look ahead to see if there are more AssignCurr with similar expressions
-                let mut j = i + 1;
-                let mut is_sequence = false;
-                while j < exprs.len() {
-                    if let Expr::AssignCurr(next_off, _) = &exprs[j] {
-                        if *next_off == base_off + (j - i) {
-                            is_sequence = true;
-                            j += 1;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-
-                if is_sequence && j > i + 1 {
-                    // This is an A2A sequence - create a single temporary for all
-                    let (temp_expr, assignments) = create_temp_for_array_expr(
-                        (**rhs).clone(),
-                        &mut next_temp_id,
-                        &mut temp_sizes,
-                    );
-
-                    // Add the temporary assignment
-                    rewritten.extend(assignments);
-
-                    // Get the temp ID and view from the temp_expr
-                    if let Expr::TempArray(temp_id, view, loc) = temp_expr {
-                        // Create TempArrayElement references for each AssignCurr
-                        for (idx, k) in (i..j).enumerate() {
-                            if let Expr::AssignCurr(off, _) = &exprs[k] {
-                                rewritten.push(Expr::AssignCurr(
-                                    *off,
-                                    Box::new(Expr::TempArrayElement(
-                                        temp_id,
-                                        view.clone(),
-                                        idx,
-                                        loc,
-                                    )),
-                                ));
-                            }
-                        }
-                    }
-
-                    i = j;
-                    continue;
-                }
-            }
-        }
-
-        // Not part of an A2A sequence, process normally
-        let (new_expr, assignments) =
-            rewrite_expr_with_temporaries(exprs[i].clone(), &mut next_temp_id, &mut temp_sizes);
-        rewritten.extend(assignments);
-        rewritten.push(new_expr);
-        i += 1;
-    }
-
-    (rewritten, next_temp_id as usize, temp_sizes)
-}
-
-/// Rewrite a single expression to use temporaries, returning the rewritten expression
-/// and any temporary assignments that need to be executed first
-fn rewrite_expr_with_temporaries(
-    expr: Expr,
-    next_temp_id: &mut u32,
-    temp_sizes: &mut Vec<usize>,
-) -> (Expr, Vec<Expr>) {
-    match expr {
-        // For SUM of array operations, we need to rewrite the argument
-        Expr::App(BuiltinFn::Sum(arg), loc) => {
-            // Check if the argument needs array temporaries
-            if expr_produces_array(&arg) {
-                let (temp_expr, assignments) =
-                    create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
-                (
-                    Expr::App(BuiltinFn::Sum(Box::new(temp_expr)), loc),
-                    assignments,
-                )
-            } else {
-                (Expr::App(BuiltinFn::Sum(arg), loc), vec![])
-            }
-        }
-        // For MEAN of array operations, rewrite arguments that are arrays
-        Expr::App(BuiltinFn::Mean(args), loc) => {
-            let mut new_args = Vec::new();
-            let mut all_assignments = Vec::new();
-
-            for arg in args {
-                if expr_produces_array(&arg) {
-                    let (temp_expr, assignments) =
-                        create_temp_for_array_expr(arg, next_temp_id, temp_sizes);
-                    all_assignments.extend(assignments);
-                    new_args.push(temp_expr);
-                } else {
-                    new_args.push(arg);
-                }
-            }
-
-            (Expr::App(BuiltinFn::Mean(new_args), loc), all_assignments)
-        }
-        // For MIN/MAX with single array argument
-        Expr::App(BuiltinFn::Min(arg, None), loc) if expr_produces_array(&arg) => {
-            let (temp_expr, assignments) =
-                create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
-            (
-                Expr::App(BuiltinFn::Min(Box::new(temp_expr), None), loc),
-                assignments,
-            )
-        }
-        Expr::App(BuiltinFn::Max(arg, None), loc) if expr_produces_array(&arg) => {
-            let (temp_expr, assignments) =
-                create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
-            (
-                Expr::App(BuiltinFn::Max(Box::new(temp_expr), None), loc),
-                assignments,
-            )
-        }
-        // For STDDEV of array operations
-        Expr::App(BuiltinFn::Stddev(arg), loc) => {
-            if expr_produces_array(&arg) {
-                let (temp_expr, assignments) =
-                    create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
-                (
-                    Expr::App(BuiltinFn::Stddev(Box::new(temp_expr)), loc),
-                    assignments,
-                )
-            } else {
-                (Expr::App(BuiltinFn::Stddev(arg), loc), vec![])
-            }
-        }
-        // For SIZE of array operations
-        Expr::App(BuiltinFn::Size(arg), loc) => {
-            if expr_produces_array(&arg) {
-                let (temp_expr, assignments) =
-                    create_temp_for_array_expr(*arg, next_temp_id, temp_sizes);
-                (
-                    Expr::App(BuiltinFn::Size(Box::new(temp_expr)), loc),
-                    assignments,
-                )
-            } else {
-                (Expr::App(BuiltinFn::Size(arg), loc), vec![])
-            }
-        }
-        // For assignments, rewrite the RHS
-        Expr::AssignCurr(off, rhs) => {
-            let (new_rhs, assignments) =
-                rewrite_expr_with_temporaries(*rhs, next_temp_id, temp_sizes);
-            (Expr::AssignCurr(off, Box::new(new_rhs)), assignments)
-        }
-        Expr::AssignNext(off, rhs) => {
-            let (new_rhs, assignments) =
-                rewrite_expr_with_temporaries(*rhs, next_temp_id, temp_sizes);
-            (Expr::AssignNext(off, Box::new(new_rhs)), assignments)
-        }
-        // For transpose of bare arrays, create a temporary
-        Expr::Op1(UnaryOp::Transpose, arg, loc) => {
-            // Check if this is a bare array that needs a temporary
-            if expr_produces_array(&arg) {
-                let (temp_expr, assignments) = create_temp_for_array_expr(
-                    Expr::Op1(UnaryOp::Transpose, arg, loc),
-                    next_temp_id,
-                    temp_sizes,
-                );
-                (temp_expr, assignments)
-            } else {
-                // This shouldn't happen for well-formed expressions, but pass through
-                (Expr::Op1(UnaryOp::Transpose, arg, loc), vec![])
-            }
-        }
-        // Other expressions pass through unchanged for now
-        _ => (expr, vec![]),
-    }
-}
-
-/// Check if an expression produces an array result
-fn expr_produces_array(expr: &Expr) -> bool {
-    match expr {
-        Expr::StaticSubscript(_, _, _) => true,
-        Expr::TempArray(_, _, _) => true,
-        Expr::TempArrayElement(_, _, _, _) => false, // Single element
-        Expr::Op2(_, l, r, _) => {
-            // If either operand is an array, the result is an array
-            expr_produces_array(l) || expr_produces_array(r)
-        }
-        Expr::Op1(UnaryOp::Transpose, e, _) => {
-            // Transpose of an array produces an array
-            // Special case: transpose of Var might be a bare array variable
-            match &**e {
-                Expr::Var(_, _) => true, // Assume it's an array variable (will fail at runtime if not)
-                _ => expr_produces_array(e),
-            }
-        }
-        Expr::Op1(_, e, _) => expr_produces_array(e),
-        _ => false,
-    }
-}
-
 /// Create a temporary for an array expression
+#[allow(dead_code)]
 fn create_temp_for_array_expr(
     expr: Expr,
     next_temp_id: &mut u32,
@@ -2170,6 +1965,7 @@ fn create_temp_for_array_expr(
 }
 
 /// Extract the array view from an expression
+#[allow(dead_code)]
 fn get_array_view(expr: &Expr) -> Option<ArrayView> {
     match expr {
         Expr::StaticSubscript(_, view, _) => Some(view.clone()),
@@ -2468,26 +2264,8 @@ impl Module {
             })
             .collect();
 
-        // Rewrite expressions to use temporaries for array operations
-        let (runlist_flows, n_temps_flows, temp_sizes_flows) =
-            rewrite_expressions_with_temporaries(runlist_flows);
-        let (runlist_stocks, n_temps_stocks, temp_sizes_stocks) =
-            rewrite_expressions_with_temporaries(runlist_stocks);
-        let (runlist_initials, n_temps_initials, temp_sizes_initials) =
-            rewrite_expressions_with_temporaries(runlist_initials);
-
-        // Combine temporary counts and sizes
-        let n_temps = n_temps_flows.max(n_temps_stocks).max(n_temps_initials);
-        let mut temp_sizes = vec![0; n_temps];
-        for (i, size) in temp_sizes_flows.into_iter().enumerate() {
-            temp_sizes[i] = temp_sizes[i].max(size);
-        }
-        for (i, size) in temp_sizes_stocks.into_iter().enumerate() {
-            temp_sizes[i] = temp_sizes[i].max(size);
-        }
-        for (i, size) in temp_sizes_initials.into_iter().enumerate() {
-            temp_sizes[i] = temp_sizes[i].max(size);
-        }
+        let n_temps = 0;
+        let temp_sizes = vec![];
 
         Ok(Module {
             ident: model_name.to_string(),
