@@ -4,6 +4,11 @@
 
 The simlin-engine implements comprehensive array support following the XMILE v1.0 specification. The architecture uses a multi-phase approach with strong support for static optimization of array operations through the ArrayView abstraction. The parser, type checker, compiler, and AST interpreter provide full support for array operations including complex expressions with array builtins. The bytecode VM lacks support for the advanced array features, limiting their use in production.
 
+## General subscript notes:
+* Array indexing is 1-based
+* Numerical and integer ranges like `Cities.Boston:Cities.Seattle` and `1:5` are inclusive of both the start and end number, so `1:3` selects the elements 1,2,3
+* Sub dimensions and '*:dim', etc
+
 ## Current Implementation Status
 
 ### Fully Implemented Features
@@ -223,33 +228,38 @@ All array operations follow XMILE v1.0 semantics:
 - Implement star ranges fully
 - Fix bare array transpose
 
-### Long Term
-- GPU acceleration for large array operations
-- Sparse array support
-- Advanced indexing (boolean masks, indirect)
-- Parallel array operations
-- Memory pooling for temporary arrays
-- SIMD vectorization for array operations
 
-## Recent Improvements (2025)
+Bobby notes:
 
-### Compiler Expression Rewriting
-The compiler now automatically rewrites complex array builtin arguments into temporary arrays, enabling expressions like `MAX(source[3:5] * 2 - 1)` to work correctly. This transformation happens transparently:
-- Complex expressions are identified and extracted
-- Temporary arrays are allocated with appropriate dimensions
-- AssignTemp nodes evaluate the expression element-wise
-- TempArray references are passed to the builtins
+* we need to refactor the array support to do more work in individual passes
+* proposed:
+  * rejigger how we represent Dimensions: for named dimensions they need to be in a hashmap for quick lookup, _and_ we need to easily determine whether one dim is a subdimension or superdimension of another.  it probably makes sense to have some interior mutability so that after we make that determination the first time it is O(1) to answer in the future
+  * ArrayView also needs an update so that we can propoerly handle '*:dim' (or 'dim.*') subdimension splats which might result in _sparse_ iteration.  I think the insight to leverage here is that dimensions are typically pretty small in length: p50 is probably < 10 items, and max is likely several hundred (having 100 items for a "population" array aging chain is normal).  We should be able to use a bitmap for sparse iteration: 2 64-bit numbers covers 128 items
+  * prep: rename compiler.rs's Context.lower to Context.lower_late (or maybe lower_old)
+  * pass 0 (call this Context.lower): expand bare array var references to explicit subscripts, and normalize e.g. '*' to 'dim.*'.  I think this is useful for subsequent phases to always treat encountered Vars as scalars.  We _ALSO_ need to either generate more detailed ArrayViews or use the array info from Expr2 on Expr
+    - `revenue – sales` becomes `revenue[Location, Product] – sales[Location, Product]`  e.g. Op2(Subscript(), Subscript())
+  * pass 1: generate AssignTempArray Exprs while recursively re-writing as much of the original expression as we can that doesn't need a2a-element specific behavior.  For example SUM(revenue[*, *]) can be rewritten here, but SUM(revenue[*, Product]) _can't_ because Product is going to be replaced by a specific integer depending on which a2a element it is evaluated for
+    * as we're doing this, if there is a dimension size mismatch we need to report an error
+  * pass 2: generate AssignTempArray Exprs in the context of a specific a2a element (active_element and active_dim are non-None)
+    * also need to report an error if there is a dim size mismatch here
+* pass 0 and pass 1 need to happen for all equations.  pass 2 has to happen for A2A equations only.  and we need a check for non-A2A equations that after pass 0 and pass 1 we're not left with.  pass 1 and pass 2 I think are the _same_ pass, but behaving differently if there is active_dim
 
-### Interpreter Refactoring
-The interpreter has been significantly refactored to eliminate code duplication:
-- Common array iteration logic extracted into helper methods
-- Clean separation between array and scalar builtin paths
-- Consistent multi-dimensional array handling
-- Support for both StaticSubscript and TempArray in all contexts
 
-### XMILE Compliance
-Full compliance with XMILE v1.0 specification for:
-- Inclusive range notation (e.g., `[1:5]` includes elements 1,2,3,4,5)
-- Element-wise array operations
-- Sample standard deviation (using n-1 divisor)
-- Case-insensitive dimension element matching
+
+
+concrete examples:
+
+if we have:
+b[dimA] = c      (no decompose, use c array view directly)
+b[dimA] = c[1:3] (no decompose, use array view directly
+b[dimA] = sum(c) (no decompose, use array view directly
+b[dimA] = sum(c[1:3] + 1)
+ -> tmp(0, [indexed(3)]) := c[1:3] + 1
+    b[dimA] = sum(tmp(0, [indexed(3)]))
+
+b[dimA] = if (rand() % 2 == 0) then sum(c[1:3] + 1) * dimA else 2*c
+ -> tmp(0, [indexed(3)]) := c[1:3] + 1
+    tmp(1, [dimA]) := sum(tmp(0, [indexed(3)])) * dimA
+    tmp(2, [dimA]) := 2*c
+    tmp(3, [dimA]) := if (rand() % 2 == 0) then tmp(1, [dimA]) else tmp(2, [dimB])
+    b[dimA] = tmp(3, [dimA])
