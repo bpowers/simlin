@@ -339,7 +339,6 @@ fn simulates_sum() {
 }
 
 #[test]
-#[ignore]
 fn simulates_2d_array() {
     simulate_path(
         "../../test/test-models/tests/subscript_2d_arrays/test_subscript_2d_arrays.xmile",
