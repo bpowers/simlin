@@ -108,6 +108,12 @@ export interface Engine {
   /**
    * @param {string} model_name
    * @param {string} ident
+   * @returns {string | undefined}
+   */
+  getLatexEquation(model_name: string, ident: string): string | undefined;
+  /**
+   * @param {string} model_name
+   * @param {string} ident
    * @param {Uint8Array} graphical_function_pb
    * @returns {Error | undefined}
    */

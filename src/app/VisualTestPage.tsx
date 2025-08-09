@@ -10,10 +10,11 @@ import { Set } from 'immutable';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 
-import { Project, UID, ViewElement } from '@system-dynamics/core/datamodel';
+import { Project, UID, ViewElement, Variable } from '@system-dynamics/core/datamodel';
 import { defined } from '@system-dynamics/core/common';
 import { fromXmile } from '@system-dynamics/importer';
 import { Canvas } from '@system-dynamics/diagram/drawing/Canvas';
+import { VariableDetails } from '@system-dynamics/diagram/VariableDetails';
 import { Point } from '@system-dynamics/diagram/drawing/common';
 
 const theme = createTheme({
@@ -25,6 +26,8 @@ const theme = createTheme({
 export const VisualTestPage: React.FC = () => {
   const [project, setProject] = useState<Project | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const [selectedIdent, setSelectedIdent] = useState<string | undefined>();
+  const [activeTab, setActiveTab] = useState<number>(0);
 
   useEffect(() => {
     // Expose API for Playwright tests
@@ -36,6 +39,10 @@ export const VisualTestPage: React.FC = () => {
         const importedProject = Project.deserializeBinary(projectBinary);
         console.log('Deserialized project, models:', importedProject.models.size);
         setProject(importedProject);
+        // Default to fractional_growth_rate if present
+        const model = importedProject.models.get('main') || importedProject.models.first();
+        const defaultIdent = model?.variables.has('fractional_growth_rate') ? 'fractional_growth_rate' : undefined;
+        setSelectedIdent(defaultIdent);
         setError(undefined);
         return true;
       } catch (err) {
@@ -50,6 +57,9 @@ export const VisualTestPage: React.FC = () => {
         const binary = toUint8Array(base64);
         const project = Project.deserializeBinary(binary);
         setProject(project);
+        const model = project.models.get('main') || project.models.first();
+        const defaultIdent = model?.variables.has('fractional_growth_rate') ? 'fractional_growth_rate' : undefined;
+        setSelectedIdent(defaultIdent);
         setError(undefined);
         return true;
       } catch (err) {
@@ -86,6 +96,10 @@ export const VisualTestPage: React.FC = () => {
   }
 
   const view = defined(model.views.get(0));
+  const variable: Variable | undefined = selectedIdent ? model.variables.get(selectedIdent) : undefined;
+  const viewElement: ViewElement | undefined = selectedIdent
+    ? (view.elements.find((el) => (el as any).ident === selectedIdent) as ViewElement | undefined)
+    : undefined;
 
   // Stub callbacks for static rendering
   const noop = () => {};
@@ -97,7 +111,7 @@ export const VisualTestPage: React.FC = () => {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <div style={{ width: '100vw', height: '100vh', overflow: 'hidden' }}>
+      <div style={{ width: '100vw', height: '100vh', overflow: 'auto' }}>
         <Canvas
           embedded={true}
           project={project}
@@ -118,6 +132,19 @@ export const VisualTestPage: React.FC = () => {
           onShowVariableDetails={noop}
           onViewBoxChange={noop}
         />
+        {variable && viewElement && (
+          <div style={{ padding: 20 }}>
+            <VariableDetails
+              variable={variable}
+              viewElement={viewElement}
+              activeTab={activeTab}
+              onActiveTabChange={setActiveTab}
+              onDelete={() => {}}
+              onEquationChange={() => {}}
+              onTableChange={() => {}}
+            />
+          </div>
+        )}
       </div>
     </ThemeProvider>
   );

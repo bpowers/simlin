@@ -27,9 +27,10 @@ import { NewUser } from './NewUser';
 import { User } from './User';
 
 // Only import VisualTestPage in development/test environments
-const VisualTestPage = process.env.NODE_ENV !== 'production' 
-  ? React.lazy(() => import('./VisualTestPage').then(m => ({ default: m.VisualTestPage })))
-  : null;
+const VisualTestPage =
+  process.env.NODE_ENV !== 'production'
+    ? React.lazy(() => import('./VisualTestPage').then((m) => ({ default: m.VisualTestPage })))
+    : null;
 
 const config = {
   apiKey: 'AIzaSyConH72HQl9xOtjmYJO9o2kQ9nZZzl96G8',
@@ -280,9 +281,7 @@ const InnerApp = styled(
           <Switch>
             <div className={className}>
               <Route path="/" component={this.home} />
-              {process.env.NODE_ENV !== 'production' && (
-                <Route path="/visual-test" component={this.visualTest} />
-              )}
+              {process.env.NODE_ENV !== 'production' && <Route path="/visual-test" component={this.visualTest} />}
               <Route path="/:username/:projectName" component={this.editor} />
               <Route path="/new" component={this.home} />
             </div>

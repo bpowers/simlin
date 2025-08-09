@@ -433,6 +433,14 @@ impl Engine {
         None
     }
 
+    #[wasm_bindgen(js_name = getLatexEquation)]
+    pub fn get_latex_equation(&self, model_name: &str, ident: &str) -> Option<String> {
+        let model = self.project.models.get(model_name)?;
+        let var = model.variables.get(ident)?;
+        let ast = var.ast()?;
+        Some(ast.to_latex())
+    }
+
     #[wasm_bindgen(js_name = setUnits)]
     pub fn set_units(&mut self, model_name: &str, ident: &str, new_units: &str) -> Option<Error> {
         let mut project = self.project.datamodel.clone();

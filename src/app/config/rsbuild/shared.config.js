@@ -101,6 +101,7 @@ const sharedConfig = defineConfig({
               pathname.startsWith('/oauth/') ||
               pathname.startsWith('/logout') ||
               pathname.startsWith('/render/') ||
+              pathname.startsWith('/session') ||
               pathname.startsWith('/download/')) {
             return true;
           }

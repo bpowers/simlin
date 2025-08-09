@@ -8,10 +8,11 @@ import { List } from 'immutable';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import clsx from 'clsx';
 import { styled } from '@mui/material/styles';
-import { createEditor, Descendant, Text } from 'slate';
+import { createEditor, Descendant, Text, Transforms } from 'slate';
 import { withHistory } from 'slate-history';
 import { Editable, ReactEditor, RenderLeafProps, Slate, withReact } from 'slate-react';
 import { Button, Card, CardActions, CardContent, Tab, Tabs, Typography } from '@mui/material';
+import katex from 'katex';
 import { brewer } from 'chroma-js';
 
 import {
@@ -28,7 +29,7 @@ import {
 
 import { defined, Series } from '@system-dynamics/core/common';
 import { plainDeserialize, plainSerialize } from './drawing/common';
-import { CustomElement, FormattedText } from './drawing/SlateEditor';
+import { CustomElement, FormattedText, CustomEditor } from './drawing/SlateEditor';
 import { LookupEditor } from './LookupEditor';
 import { errorCodeDescription } from '@system-dynamics/engine';
 
@@ -39,6 +40,7 @@ const SearchbarWidthLg = 480;
 interface VariableDetailsProps {
   variable: Variable;
   viewElement: ViewElement;
+  getLatexEquation?: (ident: string) => string | undefined;
   onDelete: (ident: string) => void;
   onEquationChange: (
     ident: string,
@@ -55,11 +57,12 @@ interface VariableDetailsProps {
 
 interface VariableDetailsState {
   equationContents: Descendant[];
-  equationEditor: ReactEditor;
+  equationEditor: CustomEditor;
   unitsContents: Descendant[];
-  unitsEditor: ReactEditor;
+  unitsEditor: CustomEditor;
   notesContents: Descendant[];
-  notesEditor: ReactEditor;
+  notesEditor: CustomEditor;
+  editingEquation: boolean;
 }
 
 function stringFromDescendants(children: Descendant[]): string {
@@ -125,6 +128,9 @@ function highlightErrors(
   return result;
 }
 
+// LaTeX provided by engine (Ast.to_latex); keep trivial passthrough fallback
+const passthroughLatex = (s: string) => s;
+
 export const VariableDetails = styled(
   class InnerVariableDetails extends React.PureComponent<
     VariableDetailsProps & { className?: string },
@@ -144,12 +150,13 @@ export const VariableDetails = styled(
       const units = highlightErrors(props.variable.units, props.variable.errors, props.variable.unitErrors, true);
 
       this.state = {
-        equationEditor: withHistory(withReact(createEditor())),
+        equationEditor: withHistory(withReact(createEditor())) as unknown as CustomEditor,
         equationContents: equation,
-        unitsEditor: withHistory(withReact(createEditor())),
+        unitsEditor: withHistory(withReact(createEditor())) as unknown as CustomEditor,
         unitsContents: units,
-        notesEditor: withHistory(withReact(createEditor())),
+        notesEditor: withHistory(withReact(createEditor())) as unknown as CustomEditor,
         notesContents: descendantsFromString(props.variable.documentation),
+        editingEquation: !!(props.variable.errors && props.variable.errors.size > 0),
       };
     }
 
@@ -174,6 +181,7 @@ export const VariableDetails = styled(
         equationContents: descendantsFromString(scalarEquationFor(this.props.variable)),
         unitsContents: descendantsFromString(this.props.variable.units),
         notesContents: descendantsFromString(this.props.variable.documentation),
+        editingEquation: false,
       });
     };
 
@@ -339,21 +347,68 @@ export const VariableDetails = styled(
         );
       }
 
+      const showPreview = !errors && !unitErrors && !this.state.editingEquation;
+
+      const equationStr = stringFromDescendants(equationContents);
+      let latexHTML = '';
+      if (showPreview) {
+        try {
+          const ident = defined(this.props.viewElement.ident);
+          let latex = this.props.getLatexEquation
+            ? (this.props.getLatexEquation(ident) ?? passthroughLatex(equationStr))
+            : passthroughLatex(equationStr);
+          // Hint line breaks after common binary operators and commas for nicer wrapping
+          const insertBreaks = (s: string): string =>
+            s
+              .replace(/\\cdot/g, '\\cdot\\allowbreak{} ')
+              .replace(/\\times/g, '\\times\\allowbreak{} ')
+              .replace(/\+/g, '+\\allowbreak{} ')
+              .replace(/-/g, '-\\allowbreak{} ')
+              .replace(/=/g, '=\\allowbreak{} ')
+              .replace(/,/g, ',\\allowbreak{} ');
+          latex = insertBreaks(latex);
+          latexHTML = katex.renderToString(latex, { throwOnError: false, displayMode: true });
+        } catch (e) {
+          // fall back to plain text
+          latexHTML = '';
+        }
+      }
+
       return (
         <CardContent>
-          <Slate
-            editor={this.state.equationEditor}
-            initialValue={this.state.equationContents}
-            onChange={this.handleEquationChange}
-          >
-            <Editable
-              className="simlin-variabledetails-eqneditor"
-              renderLeaf={this.renderLeaf}
-              placeholder="Enter an equation..."
-              spellCheck={false}
-              onBlur={this.handleEquationSave}
+          {showPreview ? (
+            <div
+              className="simlin-variabledetails-eqnpreview"
+              onClick={(e) => this.handlePreviewClick(e, equationStr)}
+              // eslint-disable-next-line react/no-danger
+              dangerouslySetInnerHTML={{ __html: latexHTML }}
             />
-          </Slate>
+          ) : (
+            <Slate
+              editor={this.state.equationEditor}
+              initialValue={this.state.equationContents}
+              onChange={this.handleEquationChange}
+            >
+              <Editable
+                className="simlin-variabledetails-eqneditor"
+                renderLeaf={this.renderLeaf}
+                placeholder="Enter an equation..."
+                spellCheck={false}
+                autoFocus
+                onBlur={() => {
+                  this.handleEquationSave();
+                  if (!this.props.variable.errors && !this.props.variable.unitErrors) {
+                    this.setState({ editingEquation: false });
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    this.setState({ editingEquation: false });
+                  }
+                }}
+              />
+            </Slate>
+          )}
 
           <Slate
             editor={this.state.unitsEditor}
@@ -413,6 +468,83 @@ export const VariableDetails = styled(
         </CardContent>
       );
     }
+
+    handlePreviewClick = (e: React.MouseEvent<HTMLDivElement>, equationStr: string) => {
+      const target = e.currentTarget as HTMLElement;
+      const rect = target.getBoundingClientRect();
+      const style = window.getComputedStyle(target);
+      const padLeft = parseFloat(style.paddingLeft || '0');
+      const padRight = parseFloat(style.paddingRight || '0');
+      const usableWidth = Math.max(1, rect.width - padLeft - padRight);
+      const clickX = Math.max(0, Math.min(usableWidth, e.clientX - rect.left - padLeft));
+
+      // Precise caret mapping via hidden monospace ghost with per-char spans
+      const computeOffset = (): number => {
+        try {
+          const ghost = document.createElement('div');
+          ghost.style.position = 'absolute';
+          ghost.style.left = `${padLeft}px`;
+          ghost.style.top = '0';
+          ghost.style.visibility = 'hidden';
+          ghost.style.whiteSpace = 'pre-wrap';
+          ghost.style.pointerEvents = 'none';
+          ghost.style.width = `${usableWidth}px`;
+          // Match editor font
+          ghost.style.fontFamily = "'Roboto Mono', monospace";
+          // Try to inherit approximate size
+          ghost.style.fontSize = window.getComputedStyle(document.body).fontSize || '16px';
+          target.appendChild(ghost);
+
+          const spans: HTMLSpanElement[] = [];
+          for (let i = 0; i < equationStr.length; i++) {
+            const s = document.createElement('span');
+            s.textContent = equationStr[i];
+            // Ensure each char is measurable
+            s.style.display = 'inline-block';
+            ghost.appendChild(s);
+            spans.push(s);
+          }
+
+          // Build cumulative right edge positions
+          const ghostRect = ghost.getBoundingClientRect();
+          const rights: number[] = [];
+          for (let i = 0; i < spans.length; i++) {
+            const r = spans[i].getBoundingClientRect();
+            rights.push(r.right - ghostRect.left);
+          }
+
+          // Find first position whose right edge crosses clickX
+          let idx = rights.findIndex((rx) => rx >= clickX);
+          if (idx === -1) idx = spans.length; // click beyond end
+
+          // Cleanup
+          target.removeChild(ghost);
+          return idx;
+        } catch {
+          // Fallback to proportional mapping
+          const len = equationStr.length;
+          return Math.max(0, Math.min(len, Math.round((clickX / usableWidth) * len)));
+        }
+      };
+
+      const offset = computeOffset();
+
+      this.setState({ editingEquation: true }, () => {
+        // Focus and set caret after the editor renders
+        requestAnimationFrame(() => {
+          try {
+            const editor = this.state.equationEditor;
+            ReactEditor.focus(editor);
+            Transforms.select(editor, {
+              anchor: { path: [0, 0], offset },
+              focus: { path: [0, 0], offset },
+            });
+          } catch {
+            // ignore if selection fails; user can click to place caret
+          }
+        });
+      });
+    };
 
     handleLookupChange = (ident: string, newTable: GraphicalFunction | null) => {
       this.props.onTableChange(ident, newTable);
@@ -497,6 +629,30 @@ export const VariableDetails = styled(
     height: 80,
     fontFamily: "'Roboto Mono', monospace",
     overflowY: 'auto',
+  },
+  '.simlin-variabledetails-eqnpreview': {
+    backgroundColor: 'rgba(245, 245, 245)',
+    borderRadius: 4,
+    marginTop: 4,
+    padding: 8,
+    minHeight: 80, // match editor height to avoid layout shift
+    cursor: 'text',
+    transition: 'opacity 120ms ease-in-out',
+    display: 'flex',
+    alignItems: 'center',
+    // normalize KaTeX display mode margins and size
+    '& .katex-display': {
+      margin: '0 !important',
+      textAlign: 'left',
+      width: '100%',
+    },
+    '& .katex': {
+      fontSize: '1.1em',
+      whiteSpace: 'normal',
+      overflowWrap: 'anywhere',
+      wordBreak: 'break-word',
+      maxWidth: '100%',
+    },
   },
   '.simlin-variabledetails-unitseditor': {
     backgroundColor: 'rgba(245, 245, 245)',

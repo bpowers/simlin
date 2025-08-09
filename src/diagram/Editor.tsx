@@ -416,6 +416,16 @@ export const Editor = styled(
       this.setState({ showDetails: 'variable' });
     };
 
+    getLatexEquation = (ident: string): string | undefined => {
+      const engine = this.engine();
+      if (!engine) return undefined;
+      try {
+        return (engine as any).getLatexEquation?.(this.state.modelName, ident);
+      } catch {
+        return undefined;
+      }
+    };
+
     handleSelectionDelete = () => {
       const selection = this.state.selection;
       const { modelName } = this.state;
@@ -1448,6 +1458,7 @@ export const Editor = styled(
             key={`vd-${this.state.projectVersion}-${this.state.projectOffset}-${ident}`}
             variable={variable}
             viewElement={namedElement}
+            getLatexEquation={this.getLatexEquation}
             activeTab={activeTab}
             onActiveTabChange={this.handleVariableDetailsActiveTabChange}
             onDelete={this.handleVariableDelete}

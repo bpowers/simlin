@@ -32,6 +32,7 @@
     "js-base64": "^3.7.7",
     "react": "^18.1.0",
     "react-dom": "^18.1.0",
+    "katex": "^0.13.18",
     "slate": "^0.112.0",
     "slate-dom": "^0.112.2",
     "slate-history": "^0.110.3",
@@ -55,7 +56,6 @@
     "eslint-config-prettier": "^9.0.0",
     "eslint-plugin-import": "^2.20.1",
     "eslint-plugin-prettier": "^5.0.0",
-    "katex": "^0.13.18",
     "prettier": "^3.0.0",
     "recharts": "2.12.7",
     "typescript": "^5.7.2"
