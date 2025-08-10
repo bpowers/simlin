@@ -13,7 +13,8 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Op2, Opcode,
 };
 use crate::common::{Ident, Result};
-use crate::datamodel::{Dimension, Dt, SimMethod, SimSpecs};
+use crate::datamodel::{Dt, SimMethod, SimSpecs};
+use crate::dimensions::Dimension;
 use crate::sim_err;
 
 pub(crate) const TIME_OFF: usize = 0;
@@ -721,13 +722,20 @@ impl Iterator for SubscriptOffsetIterator {
 
 #[test]
 fn test_subscript_offset_iter() {
-    let empty_dim = Dimension::Named("".to_string(), vec![]);
-    let one_dim = Dimension::Named("".to_string(), vec!["0".to_owned()]);
-    let two_dim = Dimension::Named("".to_string(), vec!["0".to_owned(), "1".to_owned()]);
-    let three_dim = Dimension::Named(
+    use crate::datamodel;
+    let empty_dim = Dimension::from(datamodel::Dimension::Named("".to_string(), vec![]));
+    let one_dim = Dimension::from(datamodel::Dimension::Named(
+        "".to_string(),
+        vec!["0".to_owned()],
+    ));
+    let two_dim = Dimension::from(datamodel::Dimension::Named(
+        "".to_string(),
+        vec!["0".to_owned(), "1".to_owned()],
+    ));
+    let three_dim = Dimension::from(datamodel::Dimension::Named(
         "".to_string(),
         vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
-    );
+    ));
     let cases: &[(Vec<Dimension>, Vec<Vec<usize>>)] = &[
         (vec![empty_dim.clone()], vec![]),
         (vec![empty_dim.clone(), empty_dim], vec![]),
@@ -789,7 +797,9 @@ impl<'a> Iterator for SubscriptIterator<'a> {
                 .iter()
                 .enumerate()
                 .map(|(i, elem)| match &self.dims[i] {
-                    Dimension::Named(_, elements) => elements[*elem].clone(),
+                    Dimension::Named(_, named_dim) => {
+                        named_dim.elements[*elem].as_str().to_string()
+                    }
                     Dimension::Indexed(_name, _size) => format!("{}", elem + 1),
                 })
                 .collect()
@@ -799,13 +809,20 @@ impl<'a> Iterator for SubscriptIterator<'a> {
 
 #[test]
 fn test_subscript_iter() {
-    let empty_dim = Dimension::Named("".to_string(), vec![]);
-    let one_dim = Dimension::Named("".to_string(), vec!["0".to_owned()]);
-    let two_dim = Dimension::Named("".to_string(), vec!["0".to_owned(), "1".to_owned()]);
-    let three_dim = Dimension::Named(
+    use crate::datamodel;
+    let empty_dim = Dimension::from(datamodel::Dimension::Named("".to_string(), vec![]));
+    let one_dim = Dimension::from(datamodel::Dimension::Named(
+        "".to_string(),
+        vec!["0".to_owned()],
+    ));
+    let two_dim = Dimension::from(datamodel::Dimension::Named(
+        "".to_string(),
+        vec!["0".to_owned(), "1".to_owned()],
+    ));
+    let three_dim = Dimension::from(datamodel::Dimension::Named(
         "".to_string(),
         vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
-    );
+    ));
     let cases: &[(Vec<Dimension>, Vec<Vec<&str>>)] = &[
         (vec![empty_dim.clone()], vec![]),
         (vec![empty_dim.clone(), empty_dim], vec![]),

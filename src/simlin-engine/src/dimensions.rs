@@ -33,6 +33,31 @@ impl Dimension {
             Dimension::Indexed(name, _) | Dimension::Named(name, _) => name.as_str(),
         }
     }
+
+    /// Get the offset of an element by name (for named dimensions) or by index string (for indexed dimensions).
+    /// Returns 0-based offset for use in array indexing.
+    pub fn get_offset(&self, subscript: &str) -> Option<usize> {
+        match self {
+            Dimension::Named(_, named) => {
+                // Try canonical lookup first
+                let canonical_element = CanonicalElementName::from_raw(subscript);
+                named
+                    .indexed_elements
+                    .get(&canonical_element)
+                    .map(|&idx| idx - 1) // Convert from 1-based to 0-based
+            }
+            Dimension::Indexed(_, size) => {
+                // Parse as number for indexed dimensions
+                subscript.parse::<u32>().ok().and_then(|n| {
+                    if n >= 1 && n <= *size {
+                        Some((n - 1) as usize) // Convert from 1-based to 0-based
+                    } else {
+                        None
+                    }
+                })
+            }
+        }
+    }
 }
 
 impl From<datamodel::Dimension> for Dimension {
@@ -173,4 +198,161 @@ impl DimensionVec {
 pub struct StridedDimension {
     pub dimension: Dimension,
     pub stride: isize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datamodel;
+
+    #[test]
+    fn test_get_offset_named_dimension() {
+        // Create a named dimension with canonical elements
+        let datamodel_dim = datamodel::Dimension::Named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string(), "East".to_string()],
+        );
+        let dim = Dimension::from(datamodel_dim);
+
+        // Test exact matches (canonical form)
+        assert_eq!(dim.get_offset("north"), Some(0));
+        assert_eq!(dim.get_offset("south"), Some(1));
+        assert_eq!(dim.get_offset("east"), Some(2));
+
+        // Test case insensitive matching (should canonicalize)
+        assert_eq!(dim.get_offset("North"), Some(0));
+        assert_eq!(dim.get_offset("SOUTH"), Some(1));
+        assert_eq!(dim.get_offset("EaSt"), Some(2));
+
+        // Test non-existent element
+        assert_eq!(dim.get_offset("west"), None);
+        assert_eq!(dim.get_offset(""), None);
+    }
+
+    #[test]
+    fn test_get_offset_indexed_dimension() {
+        // Create an indexed dimension
+        let datamodel_dim = datamodel::Dimension::Indexed("Index".to_string(), 5);
+        let dim = Dimension::from(datamodel_dim);
+
+        // Test valid indices (1-based input, 0-based output)
+        assert_eq!(dim.get_offset("1"), Some(0));
+        assert_eq!(dim.get_offset("2"), Some(1));
+        assert_eq!(dim.get_offset("3"), Some(2));
+        assert_eq!(dim.get_offset("4"), Some(3));
+        assert_eq!(dim.get_offset("5"), Some(4));
+
+        // Test out of bounds indices
+        assert_eq!(dim.get_offset("0"), None);
+        assert_eq!(dim.get_offset("6"), None);
+        assert_eq!(dim.get_offset("100"), None);
+        assert_eq!(dim.get_offset("-1"), None);
+
+        // Test invalid input (not a number)
+        assert_eq!(dim.get_offset("abc"), None);
+        assert_eq!(dim.get_offset(""), None);
+        assert_eq!(dim.get_offset("1.5"), None);
+    }
+
+    #[test]
+    fn test_get_offset_with_special_characters() {
+        // Test dimension with elements containing spaces and dots
+        let datamodel_dim = datamodel::Dimension::Named(
+            "Product Type".to_string(),
+            vec![
+                "Product A".to_string(),
+                "Product.B".to_string(),
+                "Product_C".to_string(),
+            ],
+        );
+        let dim = Dimension::from(datamodel_dim);
+
+        // Spaces should be converted to underscores
+        assert_eq!(dim.get_offset("Product A"), Some(0));
+        assert_eq!(dim.get_offset("Product_A"), Some(0));
+        assert_eq!(dim.get_offset("product a"), Some(0));
+        assert_eq!(dim.get_offset("product_a"), Some(0));
+
+        // Dots should be converted to middle dots
+        assert_eq!(dim.get_offset("Product.B"), Some(1));
+        assert_eq!(dim.get_offset("product.b"), Some(1));
+
+        // Underscores are preserved
+        assert_eq!(dim.get_offset("Product_C"), Some(2));
+        assert_eq!(dim.get_offset("product_c"), Some(2));
+    }
+
+    #[test]
+    fn test_get_offset_empty_dimension() {
+        // Edge case: empty named dimension
+        let datamodel_dim = datamodel::Dimension::Named("Empty".to_string(), vec![]);
+        let dim = Dimension::from(datamodel_dim);
+
+        assert_eq!(dim.get_offset("anything"), None);
+
+        // Edge case: indexed dimension with size 0
+        let datamodel_dim = datamodel::Dimension::Indexed("Zero".to_string(), 0);
+        let dim = Dimension::from(datamodel_dim);
+
+        assert_eq!(dim.get_offset("1"), None);
+        assert_eq!(dim.get_offset("0"), None);
+    }
+
+    #[test]
+    fn test_get_offset_large_indexed_dimension() {
+        // Test with a larger indexed dimension
+        let datamodel_dim = datamodel::Dimension::Indexed("Large".to_string(), 1000);
+        let dim = Dimension::from(datamodel_dim);
+
+        // Test boundary values
+        assert_eq!(dim.get_offset("1"), Some(0));
+        assert_eq!(dim.get_offset("500"), Some(499));
+        assert_eq!(dim.get_offset("1000"), Some(999));
+
+        // Test out of bounds
+        assert_eq!(dim.get_offset("0"), None);
+        assert_eq!(dim.get_offset("1001"), None);
+    }
+
+    #[test]
+    fn test_dimension_name_and_len() {
+        // Test name() and len() methods work correctly with canonical types
+        let datamodel_dim = datamodel::Dimension::Named(
+            "Test Dimension".to_string(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+        let dim = Dimension::from(datamodel_dim);
+
+        // Name should be canonicalized
+        assert_eq!(dim.name(), "test_dimension");
+        assert_eq!(dim.len(), 3);
+
+        // Test indexed dimension
+        let datamodel_dim = datamodel::Dimension::Indexed("Index Dim".to_string(), 10);
+        let dim = Dimension::from(datamodel_dim);
+
+        assert_eq!(dim.name(), "index_dim");
+        assert_eq!(dim.len(), 10);
+    }
+
+    #[test]
+    fn test_dimensions_context_lookup() {
+        // Test the DimensionsContext lookup method which uses get_offset internally
+        let dims = vec![datamodel::Dimension::Named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string()],
+        )];
+
+        let ctx = DimensionsContext::from(&dims);
+
+        // Test element lookup with dimension·element notation
+        assert_eq!(ctx.lookup("region·north"), Some(1)); // 1-based in context
+        assert_eq!(ctx.lookup("Region·South"), Some(2)); // Should canonicalize
+        assert_eq!(ctx.lookup("REGION·NORTH"), Some(1)); // Case insensitive
+
+        // Test invalid lookups
+        assert_eq!(ctx.lookup("region·west"), None);
+        assert_eq!(ctx.lookup("invalid·north"), None);
+        assert_eq!(ctx.lookup("no_dot"), None);
+    }
 }

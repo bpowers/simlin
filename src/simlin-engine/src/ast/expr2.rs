@@ -645,7 +645,9 @@ mod tests {
         sizes
             .iter()
             .enumerate()
-            .map(|(i, &size)| Dimension::Indexed(CanonicalDimensionName::from_raw(&format!("dim{i}")), size))
+            .map(|(i, &size)| {
+                Dimension::Indexed(CanonicalDimensionName::from_raw(&format!("dim{i}")), size)
+            })
             .collect()
     }
 

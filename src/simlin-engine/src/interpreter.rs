@@ -1150,7 +1150,12 @@ fn test_arrays() {
     let arrayed_constants_var = &parsed_project.models["main"].variables["constants"];
     let parsed_var = Var::new(
         &Context {
-            dimensions: &parsed_project.datamodel.dimensions,
+            dimensions: parsed_project
+                .datamodel
+                .dimensions
+                .iter()
+                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .collect(),
             model_name: "main",
             ident: arrayed_constants_var.ident(),
             active_dimension: None,
@@ -1182,7 +1187,12 @@ fn test_arrays() {
     let arrayed_aux_var = &parsed_project.models["main"].variables["aux"];
     let parsed_var = Var::new(
         &Context {
-            dimensions: &parsed_project.datamodel.dimensions,
+            dimensions: parsed_project
+                .datamodel
+                .dimensions
+                .iter()
+                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .collect(),
             model_name: "main",
             ident: arrayed_aux_var.ident(),
             active_dimension: None,
@@ -1213,7 +1223,12 @@ fn test_arrays() {
     let var = &parsed_project.models["main"].variables["picked2"];
     let parsed_var = Var::new(
         &Context {
-            dimensions: &parsed_project.datamodel.dimensions,
+            dimensions: parsed_project
+                .datamodel
+                .dimensions
+                .iter()
+                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .collect(),
             model_name: "main",
             ident: var.ident(),
             active_dimension: None,
@@ -1252,7 +1267,12 @@ fn test_arrays() {
     let var = &parsed_project.models["main"].variables["picked"];
     let parsed_var = Var::new(
         &Context {
-            dimensions: &parsed_project.datamodel.dimensions,
+            dimensions: parsed_project
+                .datamodel
+                .dimensions
+                .iter()
+                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .collect(),
             model_name: "main",
             ident: var.ident(),
             active_dimension: None,

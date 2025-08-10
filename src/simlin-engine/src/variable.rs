@@ -9,13 +9,16 @@ use crate::ast::Loc;
 use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::instantiate_implicit_modules;
-use crate::common::{DimensionName, EquationError, EquationResult, Ident, UnitError};
-use crate::datamodel::Dimension;
+use crate::common::{
+    CanonicalElementName, DimensionName, EquationError, EquationResult, Ident, UnitError,
+};
+use crate::datamodel;
+use crate::dimensions::Dimension;
 #[cfg(test)]
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 use crate::units::parse_units;
-use crate::{ErrorCode, canonicalize, datamodel, eqn_err, units};
+use crate::{ErrorCode, canonicalize, eqn_err, units};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
@@ -235,15 +238,15 @@ fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Opti
 }
 
 fn get_dimensions(
-    dimensions: &[Dimension],
+    dimensions: &[datamodel::Dimension],
     names: &[DimensionName],
-) -> Result<Vec<datamodel::Dimension>, EquationError> {
+) -> Result<Vec<Dimension>, EquationError> {
     names
         .iter()
-        .map(|name| -> Result<datamodel::Dimension, EquationError> {
+        .map(|name| -> Result<Dimension, EquationError> {
             for dim in dimensions {
                 if dim.name() == name {
-                    return Ok(dim.clone());
+                    return Ok(Dimension::from(dim.clone()));
                 }
             }
             eqn_err!(BadDimensionName, 0, 0)
@@ -253,7 +256,7 @@ fn get_dimensions(
 
 fn parse_equation(
     eqn: &datamodel::Equation,
-    dimensions: &[Dimension],
+    dimensions: &[datamodel::Dimension],
     is_initial: bool,
 ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
     fn parse_inner(eqn: &str) -> (Option<Expr0>, Vec<EquationError>) {
@@ -301,7 +304,7 @@ fn parse_equation(
                         parse_inner(eqn)
                     };
                     errors.extend(single_errors);
-                    (subscript.clone(), ast)
+                    (CanonicalElementName::from_raw(subscript), ast)
                 })
                 .filter(|(_, ast)| ast.is_some())
                 .map(|(subscript, ast)| (subscript, ast.unwrap()))
@@ -319,7 +322,7 @@ fn parse_equation(
 }
 
 pub fn parse_var<MI, F>(
-    dimensions: &[Dimension],
+    dimensions: &[datamodel::Dimension],
     v: &datamodel::Variable,
     implicit_vars: &mut Vec<datamodel::Variable>,
     units_ctx: &units::Context,
@@ -515,13 +518,14 @@ impl IdentifierSetVisitor<'_> {
                     for dim in self.dimensions.iter() {
                         if arg_ident == dim.name() {
                             is_subscript_or_dimension = true;
-                        } else if let Dimension::Named(_, elements) = dim {
+                        } else if let Dimension::Named(_, named_dim) = dim {
                             // Check if arg_ident matches any element (case-insensitive)
                             // We need to canonicalize both for comparison since identifiers are canonicalized
                             let canonicalized_arg = canonicalize(arg_ident);
-                            let is_element = elements
+                            let is_element = named_dim
+                                .elements
                                 .iter()
-                                .any(|elem| canonicalize(elem) == canonicalized_arg);
+                                .any(|elem| elem.as_str() == canonicalized_arg);
                             if is_element {
                                 is_subscript_or_dimension = true;
                             }
@@ -630,7 +634,10 @@ fn test_identifier_sets() {
         ("g[foo]", &["g"]),
     ];
 
-    let dimensions: &[Dimension] = &[Dimension::Named("dim1".to_string(), vec!["foo".to_owned()])];
+    let dimensions: Vec<Dimension> = vec![Dimension::from(datamodel::Dimension::Named(
+        "dim1".to_string(),
+        vec!["foo".to_owned()],
+    ))];
 
     let module_inputs: &[ModuleInput] = &[ModuleInput {
         src: "whatever".to_string(),
@@ -655,7 +662,7 @@ fn test_identifier_sets() {
         let ast = lower_ast(&scope, ast.unwrap()).unwrap();
         let id_set_expected: HashSet<Ident> = id_list.iter().map(|s| s.to_string()).collect();
         let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
-        let id_set_test = identifier_set(&ast, dimensions, Some(&module_input_names));
+        let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));
         assert_eq!(id_set_expected, id_set_test);
     }
 }

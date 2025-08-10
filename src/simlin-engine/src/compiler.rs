@@ -10,8 +10,8 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{ErrorCode, ErrorKind, Ident, Result, canonicalize};
-use crate::datamodel::Dimension;
+use crate::common::{CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize};
+use crate::dimensions::Dimension;
 use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
@@ -281,8 +281,7 @@ pub(crate) struct VariableMetadata {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Context<'a> {
-    #[allow(dead_code)]
-    pub(crate) dimensions: &'a [Dimension],
+    pub(crate) dimensions: Vec<Dimension>,
     pub(crate) model_name: &'a str,
     #[allow(dead_code)]
     pub(crate) ident: &'a str,
@@ -318,7 +317,7 @@ impl Context<'_> {
 
         // Check if dimensions can be reordered to match
         if dims.len() == active_dims.len() {
-            // Get dimension names
+            // Get dimension names (all canonical at this point)
             let source_dim_names: Vec<String> = dims.iter().map(|d| d.name().to_string()).collect();
             let target_dim_names: Vec<String> =
                 active_dims.iter().map(|d| d.name().to_string()).collect();
@@ -334,7 +333,7 @@ impl Context<'_> {
                 for source_dim in dims {
                     // Find which active dimension matches this source dimension
                     for (j, active_dim) in active_dims.iter().enumerate() {
-                        if canonicalize(active_dim.name()) == canonicalize(source_dim.name()) {
+                        if active_dim.name() == source_dim.name() {
                             subscripts.push(active_subscripts[j].as_str());
                             break;
                         }
@@ -460,11 +459,12 @@ impl Context<'_> {
                                             // Subscript is already a 1-based index as a string
                                             subscript.parse::<f64>().unwrap()
                                         }
-                                        Dimension::Named(_, elements) => {
-                                            let off = elements
+                                        Dimension::Named(_, named_dim) => {
+                                            let off = named_dim
+                                                .elements
                                                 .iter()
                                                 .position(|elem| {
-                                                    canonicalize(elem) == canonicalize(subscript)
+                                                    elem.as_str() == canonicalize(subscript)
                                                 })
                                                 .unwrap();
 
@@ -720,12 +720,11 @@ impl Context<'_> {
                                     ast::Expr2::Var(ident, _, _) => {
                                         // Could be a named dimension element
                                         if i < dims.len() {
-                                            if let Dimension::Named(_, elements) = &dims[i] {
+                                            if let Dimension::Named(_, named_dim) = &dims[i] {
                                                 let canonicalized_ident =
                                                     crate::common::canonicalize(ident);
-                                                elements.iter().position(|elem| {
-                                                    crate::common::canonicalize(elem)
-                                                        == canonicalized_ident
+                                                named_dim.elements.iter().position(|elem| {
+                                                    elem.as_str() == canonicalized_ident
                                                 })
                                             } else {
                                                 None
@@ -765,13 +764,14 @@ impl Context<'_> {
                                 ast::Expr2::Var(ident, _, _) => {
                                     // Check if it's a named dimension element
                                     if i < dims.len() {
-                                        if let Dimension::Named(_, elements) = &dims[i] {
+                                        if let Dimension::Named(_, named_dim) = &dims[i] {
                                             let canonicalized_ident =
                                                 crate::common::canonicalize(ident);
-                                            if let Some(idx) = elements.iter().position(|elem| {
-                                                crate::common::canonicalize(elem)
-                                                    == canonicalized_ident
-                                            }) {
+                                            if let Some(idx) =
+                                                named_dim.elements.iter().position(|elem| {
+                                                    elem.as_str() == canonicalized_ident
+                                                })
+                                            {
                                                 operations.push(IndexOp::Single(idx));
                                             } else {
                                                 is_static = false;
@@ -1037,21 +1037,22 @@ impl Context<'_> {
 
                                     // First check for named dimension subscripts
                                     // Need to do case-insensitive matching since identifiers are canonicalized
-                                    let subscript_off = if let Dimension::Named(_, elements) = dim {
-                                        let canonicalized_ident =
-                                            crate::common::canonicalize(ident);
-                                        elements.iter().position(|elem| {
-                                            crate::common::canonicalize(elem) == canonicalized_ident
-                                        })
-                                    } else {
-                                        None
-                                    };
+                                    let subscript_off =
+                                        if let Dimension::Named(_, named_dim) = dim {
+                                            let canonicalized_ident =
+                                                crate::common::canonicalize(ident);
+                                            named_dim.elements.iter().position(|elem| {
+                                                elem.as_str() == canonicalized_ident
+                                            })
+                                        } else {
+                                            None
+                                        };
 
                                     if let Some(offset) = subscript_off {
                                         Expr::Const((offset + 1) as f64, *loc)
                                     } else if let Dimension::Indexed(name, _size) = dim {
                                         // For indexed dimensions, check if ident is of format "DimName.Index"
-                                        let expected_prefix = format!("{name}.");
+                                        let expected_prefix = format!("{}.", name.as_str());
                                         if ident.starts_with(&expected_prefix) {
                                             if let Ok(idx) =
                                                 ident[expected_prefix.len()..].parse::<usize>()
@@ -1455,8 +1456,6 @@ impl Context<'_> {
 
 #[test]
 fn test_lower() {
-    use crate::datamodel;
-
     let input = {
         use ast::BinaryOp::*;
         use ast::Expr2::*;
@@ -1520,9 +1519,8 @@ fn test_lower() {
     );
     let mut metadata2 = HashMap::new();
     metadata2.insert("main".to_string(), metadata);
-    let dimensions: Vec<datamodel::Dimension> = vec![];
     let context = Context {
-        dimensions: &dimensions,
+        dimensions: vec![],
         model_name: "main",
         ident: "test",
         active_dimension: None,
@@ -1612,7 +1610,7 @@ fn test_lower() {
     let mut metadata2 = HashMap::new();
     metadata2.insert("main".to_string(), metadata);
     let context = Context {
-        dimensions: &dimensions,
+        dimensions: vec![],
         model_name: "main",
         ident: "test",
         active_dimension: None,
@@ -1732,9 +1730,8 @@ fn test_fold_flows() {
     );
     let mut metadata2 = HashMap::new();
     metadata2.insert("main".to_string(), metadata);
-    let dimensions: Vec<Dimension> = vec![];
     let ctx = Context {
-        dimensions: &dimensions,
+        dimensions: vec![],
         model_name: "main",
         ident: "test",
         active_dimension: None,
@@ -1818,7 +1815,9 @@ impl Var {
                                     .enumerate()
                                     .map(|(i, subscripts)| {
                                         let subscript_str = subscripts.join(",");
-                                        let ast = &elements[&subscript_str];
+                                        let canonical_key =
+                                            CanonicalElementName::from_raw(&subscript_str);
+                                        let ast = &elements[&canonical_key];
                                         let mut ctx = ctx.clone();
                                         ctx.active_dimension = Some(dims.clone());
                                         ctx.active_subscript = Some(subscripts);
@@ -1898,7 +1897,9 @@ impl Var {
                                 .enumerate()
                                 .map(|(i, subscripts)| {
                                     let subscript_str = subscripts.join(",");
-                                    let ast = &elements[&subscript_str];
+                                    let canonical_key =
+                                        CanonicalElementName::from_raw(&subscript_str);
+                                    let ast = &elements[&canonical_key];
                                     let mut ctx = ctx.clone();
                                     ctx.active_dimension = Some(dims.clone());
                                     ctx.active_subscript = Some(subscripts);
@@ -2196,10 +2197,17 @@ impl Module {
         };
         let module_models = calc_module_model_map(project, model_name);
 
+        let converted_dims: Vec<Dimension> = project
+            .datamodel
+            .dimensions
+            .iter()
+            .map(|d| Dimension::from(d.clone()))
+            .collect();
+
         let build_var = |ident, is_initial| {
             Var::new(
                 &Context {
-                    dimensions: &project.datamodel.dimensions,
+                    dimensions: converted_dims.clone(),
                     model_name,
                     ident,
                     active_dimension: None,

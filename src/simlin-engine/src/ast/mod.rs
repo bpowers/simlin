@@ -6,8 +6,8 @@ pub use crate::builtins::Loc;
 use std::collections::HashMap;
 
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
-use crate::common::{ElementName, EquationResult};
-use crate::datamodel::Dimension;
+use crate::common::{CanonicalElementName, EquationResult};
+use crate::dimensions::Dimension;
 use crate::model::{ModelStage0, ScopeStage0};
 use crate::variable::Variable;
 
@@ -24,7 +24,7 @@ pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
 pub enum Ast<Expr> {
     Scalar(Expr),
     ApplyToAll(Vec<Dimension>, Expr),
-    Arrayed(Vec<Dimension>, HashMap<ElementName, Expr>),
+    Arrayed(Vec<Dimension>, HashMap<CanonicalElementName, Expr>),
 }
 
 impl Ast<Expr2> {
@@ -117,11 +117,7 @@ impl<'a> Expr2Context for ArrayContext<'a> {
         // During AST lowering, we may encounter variables that don't exist yet
         // (e.g., in tests or when processing incomplete models)
         let var = self.get_variable(self.model_name, ident)?;
-        var.get_dimensions().map(|dims| {
-            dims.iter()
-                .map(|d| crate::dimensions::Dimension::from(d.clone()))
-                .collect()
-        })
+        var.get_dimensions().map(|dims| dims.to_vec())
     }
 
     fn allocate_temp_id(&mut self) -> u32 {
@@ -158,7 +154,7 @@ pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<
         }
         Ast::Arrayed(dims, elements) => {
             let mut ctx = ArrayContext::with_array_context(scope, scope.model_name);
-            let elements: EquationResult<HashMap<ElementName, Expr2>> = elements
+            let elements: EquationResult<HashMap<CanonicalElementName, Expr2>> = elements
                 .into_iter()
                 .map(|(id, expr)| {
                     match Expr1::from(expr)
