@@ -516,12 +516,12 @@ impl IdentifierSetVisitor<'_> {
                     let mut is_subscript_or_dimension = false;
                     // TODO: this should be optimized
                     for dim in self.dimensions.iter() {
-                        if arg_ident == dim.name() {
+                        if arg_ident.as_str() == canonicalize(dim.name()) {
                             is_subscript_or_dimension = true;
                         } else if let Dimension::Named(_, named_dim) = dim {
                             // Check if arg_ident matches any element (case-insensitive)
                             // We need to canonicalize both for comparison since identifiers are canonicalized
-                            let canonicalized_arg = canonicalize(arg_ident);
+                            let canonicalized_arg = arg_ident.as_str();
                             let is_element = named_dim
                                 .elements
                                 .iter()
@@ -551,13 +551,12 @@ impl IdentifierSetVisitor<'_> {
                 // Check if this identifier is a dimension name
                 // If so, don't add it as a dependency since it will be resolved during compilation
                 let is_dimension = self.dimensions.iter().any(|dim| {
-                    let canonicalized_id = canonicalize(id);
                     let canonicalized_dim = canonicalize(dim.name());
-                    canonicalized_id == canonicalized_dim
+                    id.as_str() == canonicalized_dim
                 });
 
                 if !is_dimension {
-                    self.identifiers.insert(id.clone());
+                    self.identifiers.insert(id.as_str().to_string());
                 }
             }
             Expr2::App(builtin, _, _) => {
@@ -569,7 +568,7 @@ impl IdentifierSetVisitor<'_> {
                 });
             }
             Expr2::Subscript(id, args, _, _) => {
-                self.identifiers.insert(id.clone());
+                self.identifiers.insert(id.as_str().to_string());
                 args.iter().for_each(|arg| self.walk_index(arg));
             }
             Expr2::Op2(_, l, r, _, _) => {

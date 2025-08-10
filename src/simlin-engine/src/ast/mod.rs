@@ -439,7 +439,7 @@ impl LatexVisitor {
                 }
             }
             Expr2::Var(id, _, _) => {
-                let id = str::replace(id, "_", "\\_");
+                let id = str::replace(id.as_str(), "_", "\\_");
                 format!("\\mathrm{{{id}}}")
             }
             Expr2::App(builtin, _, _) => {
@@ -456,7 +456,7 @@ impl LatexVisitor {
             }
             Expr2::Subscript(id, args, _, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
-                format!("{}[{}]", id, args.join(", "))
+                format!("{}[{}]", id.as_str(), args.join(", "))
             }
             Expr2::Op1(op, l, _, _) => {
                 match op {
@@ -524,12 +524,21 @@ pub fn latex_eqn(expr: &Expr2) -> String {
 
 #[test]
 fn test_latex_eqn() {
+    use crate::common::CanonicalIdent;
     assert_eq!(
         "\\mathrm{a\\_c} + \\mathrm{b}",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Add,
-            Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(1, 2))),
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("a_c"),
+                None,
+                Loc::new(1, 2)
+            )),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("b"),
+                None,
+                Loc::new(5, 6)
+            )),
             None,
             Loc::new(0, 7),
         ))
@@ -538,8 +547,16 @@ fn test_latex_eqn() {
         "\\mathrm{a\\_c} \\cdot \\mathrm{b}",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(1, 2))),
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("a_c"),
+                None,
+                Loc::new(1, 2)
+            )),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("b"),
+                None,
+                Loc::new(5, 6)
+            )),
             None,
             Loc::new(0, 7),
         ))
@@ -550,12 +567,20 @@ fn test_latex_eqn() {
             BinaryOp::Mul,
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(0, 0))),
+                Box::new(Expr2::Var(
+                    CanonicalIdent::from_raw("a_c"),
+                    None,
+                    Loc::new(0, 0)
+                )),
                 Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 None,
                 Loc::new(0, 0),
             )),
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("b"),
+                None,
+                Loc::new(5, 6)
+            )),
             None,
             Loc::new(0, 7),
         ))
@@ -564,10 +589,18 @@ fn test_latex_eqn() {
         "\\mathrm{b} \\cdot (\\mathrm{a\\_c} - 1)",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr2::Var("b".to_string(), None, Loc::new(5, 6))),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("b"),
+                None,
+                Loc::new(5, 6)
+            )),
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr2::Var("a_c".to_string(), None, Loc::new(0, 0))),
+                Box::new(Expr2::Var(
+                    CanonicalIdent::from_raw("a_c"),
+                    None,
+                    Loc::new(0, 0)
+                )),
                 Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 None,
                 Loc::new(0, 0),
@@ -580,7 +613,11 @@ fn test_latex_eqn() {
         "-\\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Negative,
-            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("a"),
+                None,
+                Loc::new(1, 2)
+            )),
             None,
             Loc::new(0, 2),
         ))
@@ -589,7 +626,11 @@ fn test_latex_eqn() {
         "\\neg \\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Not,
-            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("a"),
+                None,
+                Loc::new(1, 2)
+            )),
             None,
             Loc::new(0, 2),
         ))
@@ -598,7 +639,11 @@ fn test_latex_eqn() {
         "+\\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Positive,
-            Box::new(Expr2::Var("a".to_string(), None, Loc::new(1, 2))),
+            Box::new(Expr2::Var(
+                CanonicalIdent::from_raw("a"),
+                None,
+                Loc::new(1, 2)
+            )),
             None,
             Loc::new(0, 2),
         ))

@@ -5,7 +5,7 @@
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
 use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
-use crate::common::{EquationResult, Ident};
+use crate::common::{CanonicalDimensionName, CanonicalIdent, EquationResult};
 use crate::dimensions::Dimension;
 use crate::eqn_err;
 
@@ -72,7 +72,7 @@ impl ArrayBounds {
 pub enum IndexExpr2 {
     Wildcard(Loc),
     // *:dimension_name
-    StarRange(Ident, Loc),
+    StarRange(CanonicalDimensionName, Loc),
     Range(Expr2, Expr2, Loc),
     DimPosition(u32, Loc),
     Expr(Expr2),
@@ -82,7 +82,9 @@ impl IndexExpr2 {
     pub(crate) fn from<C: Expr2Context>(expr: IndexExpr1, ctx: &mut C) -> EquationResult<Self> {
         let expr = match expr {
             IndexExpr1::Wildcard(loc) => IndexExpr2::Wildcard(loc),
-            IndexExpr1::StarRange(ident, loc) => IndexExpr2::StarRange(ident.to_ident(), loc),
+            IndexExpr1::StarRange(ident, loc) => {
+                IndexExpr2::StarRange(CanonicalDimensionName::from_raw(ident.as_str()), loc)
+            }
             IndexExpr1::Range(l, r, loc) => {
                 IndexExpr2::Range(Expr2::from(l, ctx)?, Expr2::from(r, ctx)?, loc)
             }
@@ -97,7 +99,7 @@ impl IndexExpr2 {
         match self {
             IndexExpr2::Wildcard(_) => None,
             IndexExpr2::StarRange(v, loc) => {
-                if v == ident {
+                if v.as_str() == ident {
                     Some(*loc)
                 } else {
                     None
@@ -121,9 +123,9 @@ impl IndexExpr2 {
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr2 {
     Const(String, f64, Loc),
-    Var(Ident, Option<ArrayBounds>, Loc),
+    Var(CanonicalIdent, Option<ArrayBounds>, Loc),
     App(BuiltinFn<Expr2>, Option<ArrayBounds>, Loc),
-    Subscript(Ident, Vec<IndexExpr2>, Option<ArrayBounds>, Loc),
+    Subscript(CanonicalIdent, Vec<IndexExpr2>, Option<ArrayBounds>, Loc),
     Op1(UnaryOp, Box<Expr2>, Option<ArrayBounds>, Loc),
     Op2(BinaryOp, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
     If(Box<Expr2>, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
@@ -313,14 +315,14 @@ impl Expr2 {
                     let dim_names: Vec<String> =
                         dims.iter().map(|d| d.name().to_string()).collect();
                     Some(ArrayBounds::Named {
-                        name: id.to_ident(),
+                        name: id.as_str().to_string(),
                         dims: dim_sizes,
                         dim_names: Some(dim_names),
                     })
                 } else {
                     None
                 };
-                Expr2::Var(id.to_ident(), array_bounds, loc)
+                Expr2::Var(id, array_bounds, loc)
             }
             Expr1::App(builtin_fn, loc) => {
                 use BuiltinFn::*;
@@ -442,7 +444,7 @@ impl Expr2 {
                     None // Scalar variable or unknown variable
                 };
 
-                Expr2::Subscript(id.to_ident(), args, array_bounds, loc)
+                Expr2::Subscript(id, args, array_bounds, loc)
             }
             Expr1::Op1(op, l, loc) => {
                 let l_expr = Expr2::from(*l, ctx)?;
@@ -518,7 +520,7 @@ impl Expr2 {
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             Expr2::Const(_s, _n, _loc) => None,
-            Expr2::Var(v, _, loc) if v == ident => Some(*loc),
+            Expr2::Var(v, _, loc) if v.as_str() == ident => Some(*loc),
             Expr2::Var(_v, _, _loc) => None,
             Expr2::App(builtin, _, _loc) => {
                 let mut loc: Option<Loc> = None;
@@ -536,7 +538,7 @@ impl Expr2 {
                 });
                 loc
             }
-            Expr2::Subscript(v, _args, _, loc) if v == ident => Some(*loc),
+            Expr2::Subscript(v, _args, _, loc) if v.as_str() == ident => Some(*loc),
             Expr2::Subscript(_v, args, _, _loc) => {
                 for arg in args {
                     if let Some(loc) = arg.get_var_loc(ident) {
@@ -636,6 +638,7 @@ fn const_int_eval(ast: &Expr2) -> EquationResult<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::CanonicalIdent;
     use std::collections::HashMap;
     use std::iter::Iterator;
 
@@ -769,7 +772,14 @@ mod tests {
 
         // Test error case
         assert!(const_int_eval(&const_expr(3.5)).is_err());
-        assert!(const_int_eval(&Expr2::Var("foo".to_string(), None, Loc::default())).is_err());
+        assert!(
+            const_int_eval(&Expr2::Var(
+                CanonicalIdent::from_raw("foo"),
+                None,
+                Loc::default()
+            ))
+            .is_err()
+        );
 
         // Test unary operations
         let unary_cases = vec![
@@ -909,7 +919,7 @@ mod tests {
 
         match expr2 {
             Expr2::Var(id, array_bounds, _) => {
-                assert_eq!(id, "scalar_var");
+                assert_eq!(id.as_str(), "scalar_var");
                 assert!(array_bounds.is_none()); // Scalar has no array bounds
             }
             _ => panic!("Expected Var expression"),
@@ -933,7 +943,7 @@ mod tests {
 
         match expr2 {
             Expr2::Var(id, array_bounds, _) => {
-                assert_eq!(id, "array_var");
+                assert_eq!(id.as_str(), "array_var");
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
                 match bounds {
@@ -972,7 +982,7 @@ mod tests {
 
         match expr2 {
             Expr2::Subscript(id, args, array_bounds, _) => {
-                assert_eq!(id, "matrix");
+                assert_eq!(id.as_str(), "matrix");
                 assert_eq!(args.len(), 2);
                 assert!(array_bounds.is_some());
                 let bounds = array_bounds.unwrap();
@@ -1013,7 +1023,7 @@ mod tests {
 
         match expr2 {
             Expr2::Subscript(id, args, array_bounds, _) => {
-                assert_eq!(id, "vector");
+                assert_eq!(id.as_str(), "vector");
                 assert_eq!(args.len(), 1);
                 assert!(array_bounds.is_none()); // Scalar result
             }

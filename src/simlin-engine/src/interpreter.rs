@@ -4,6 +4,7 @@
 
 use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
+use crate::common::CanonicalIdent;
 #[cfg(test)]
 use crate::compiler::ArrayView;
 use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
@@ -174,8 +175,8 @@ impl ModuleEvaluator<'_> {
             Expr::ModuleInput(off, _) => self.inputs[*off],
             Expr::EvalModule(ident, model_name, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
-                let module_offsets = &self.module.offsets[&self.module.ident];
-                let off = self.off + module_offsets[ident].0;
+                let module_offsets = &self.module.offsets[self.module.ident.as_str()];
+                let off = self.off + module_offsets[ident.as_str()].0;
                 let module = &self.sim.modules[model_name.as_str()];
 
                 self.sim
@@ -297,9 +298,11 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Inf => f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
-                    BuiltinFn::IsModuleInput(ident, _) => {
-                        self.module.inputs.contains(ident) as i8 as f64
-                    }
+                    BuiltinFn::IsModuleInput(ident, _) => self
+                        .module
+                        .inputs
+                        .contains(&CanonicalIdent::from_raw(ident))
+                        as i8 as f64,
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
                     BuiltinFn::Log10(a) => self.eval(a).log10(),
                     BuiltinFn::SafeDiv(a, b, default) => {
@@ -914,13 +917,17 @@ fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
 
     for ident in module.runlist_order.iter() {
         // FIXME: this isnt' quite right (assumes no regular var has same name as module)
-        if sim.modules.contains_key(ident) {
-            let sub_var_names = calc_flattened_order(sim, ident);
+        if sim.modules.contains_key(ident.as_str()) {
+            let sub_var_names = calc_flattened_order(sim, ident.as_str());
             for sub_name in sub_var_names.iter() {
-                offsets.push(format!("{}.{}", quoteize(ident), quoteize(sub_name)));
+                offsets.push(format!(
+                    "{}.{}",
+                    quoteize(ident.as_str()),
+                    quoteize(sub_name)
+                ));
             }
         } else {
-            offsets.push(quoteize(ident));
+            offsets.push(quoteize(ident.as_str()));
         }
     }
 
@@ -1171,7 +1178,7 @@ fn test_arrays() {
     assert!(parsed_var.is_ok());
 
     let expected = Var {
-        ident: arrayed_constants_var.ident().to_owned(),
+        ident: CanonicalIdent::from_raw(arrayed_constants_var.ident()),
         ast: vec![
             Expr::AssignCurr(7, Box::new(Expr::Const(9.0, Loc::default()))),
             Expr::AssignCurr(8, Box::new(Expr::Const(7.0, Loc::default()))),
@@ -1207,7 +1214,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: arrayed_aux_var.ident().to_owned(),
+        ident: CanonicalIdent::from_raw(arrayed_aux_var.ident()),
         ast: vec![
             Expr::AssignCurr(4, Box::new(Expr::Var(7, Loc::default()))),
             Expr::AssignCurr(5, Box::new(Expr::Var(8, Loc::default()))),
@@ -1243,7 +1250,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: var.ident().to_owned(),
+        ident: CanonicalIdent::from_raw(var.ident()),
         ast: vec![Expr::AssignCurr(
             11,
             Box::new(Expr::StaticSubscript(
@@ -1287,7 +1294,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: var.ident().to_owned(),
+        ident: CanonicalIdent::from_raw(var.ident()),
         ast: vec![Expr::AssignCurr(
             10,
             Box::new(Expr::Subscript(

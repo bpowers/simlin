@@ -10,7 +10,9 @@ use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
-use crate::common::{CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize};
+use crate::common::{
+    CanonicalElementName, CanonicalIdent, ErrorCode, ErrorKind, Ident, Result, canonicalize,
+};
 use crate::dimensions::Dimension;
 use crate::model::ModelStage1;
 use crate::project::Project;
@@ -129,7 +131,7 @@ pub enum Expr {
     TempArrayElement(u32, ArrayView, usize, Loc), // temp id, view, element index, location
     Dt(Loc),
     App(BuiltinFn, Loc),
-    EvalModule(Ident, Ident, Vec<Expr>),
+    EvalModule(CanonicalIdent, CanonicalIdent, Vec<Expr>),
     ModuleInput(usize, Loc),
     Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
     Op1(UnaryOp, Box<Expr>, Loc),
@@ -443,7 +445,7 @@ impl Context<'_> {
                 let is_dimension = self
                     .dimensions
                     .iter()
-                    .any(|dim| canonicalize(id) == canonicalize(dim.name()));
+                    .any(|dim| id.as_str() == canonicalize(dim.name()));
 
                 if is_dimension {
                     // This is a dimension name
@@ -452,7 +454,7 @@ impl Context<'_> {
                             // We're in an array context - find the matching dimension
                             for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
                             {
-                                if canonicalize(id) == canonicalize(dim.name()) {
+                                if id.as_str() == canonicalize(dim.name()) {
                                     // Convert to the subscript index (0-based)
                                     let index = match dim {
                                         Dimension::Indexed(_, _) => {
@@ -492,21 +494,21 @@ impl Context<'_> {
                     .inputs
                     .iter()
                     .enumerate()
-                    .find(|(_, input)| id == *input)
+                    .find(|(_, input)| id.as_str() == *input)
                 {
                     Expr::ModuleInput(off, *loc)
                 } else {
-                    match self.get_offset(id) {
+                    match self.get_offset(id.as_str()) {
                         Ok(off) => Expr::Var(off, *loc),
                         Err(err) => {
                             // If get_offset fails because it's an array without implicit subscripts,
                             // try to create a full array view
                             if matches!(err.code, ErrorCode::ArrayReferenceNeedsExplicitSubscripts)
                             {
-                                if let Ok(metadata) = self.get_metadata(id) {
+                                if let Ok(metadata) = self.get_metadata(id.as_str()) {
                                     if let Some(source_dims) = metadata.var.get_dimensions() {
                                         // This is an array variable - check if we need dimension reordering
-                                        let off = self.get_base_offset(id)?;
+                                        let off = self.get_base_offset(id.as_str())?;
 
                                         // Check if we're in an A2A context and need to reorder dimensions
                                         if let Some(target_dims) = &self.active_dimension {
@@ -687,11 +689,11 @@ impl Context<'_> {
                 Expr::App(builtin, *loc)
             }
             ast::Expr2::Subscript(id, args, _, loc) => {
-                let off = self.get_base_offset(id)?;
-                let metadata = self.get_metadata(id)?;
+                let off = self.get_base_offset(id.as_str())?;
+                let metadata = self.get_metadata(id.as_str())?;
                 let dims = metadata.var.get_dimensions().unwrap();
                 if args.len() != dims.len() {
-                    return sim_err!(MismatchedDimensions, id.clone());
+                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
                 }
 
                 // First, check if this is a static subscript that we can optimize
@@ -721,10 +723,8 @@ impl Context<'_> {
                                         // Could be a named dimension element
                                         if i < dims.len() {
                                             if let Dimension::Named(_, named_dim) = &dims[i] {
-                                                let canonicalized_ident =
-                                                    crate::common::canonicalize(ident);
                                                 named_dim.elements.iter().position(|elem| {
-                                                    elem.as_str() == canonicalized_ident
+                                                    elem.as_str() == ident.as_str()
                                                 })
                                             } else {
                                                 None
@@ -765,12 +765,10 @@ impl Context<'_> {
                                     // Check if it's a named dimension element
                                     if i < dims.len() {
                                         if let Dimension::Named(_, named_dim) = &dims[i] {
-                                            let canonicalized_ident =
-                                                crate::common::canonicalize(ident);
-                                            if let Some(idx) =
-                                                named_dim.elements.iter().position(|elem| {
-                                                    elem.as_str() == canonicalized_ident
-                                                })
+                                            if let Some(idx) = named_dim
+                                                .elements
+                                                .iter()
+                                                .position(|elem| elem.as_str() == ident.as_str())
                                             {
                                                 operations.push(IndexOp::Single(idx));
                                             } else {
@@ -952,7 +950,7 @@ impl Context<'_> {
                                 if self.active_dimension.is_none() {
                                     return sim_err!(
                                         ArrayReferenceNeedsExplicitSubscripts,
-                                        id.clone()
+                                        id.as_str().to_string()
                                     );
                                 }
                                 let active_dims = self.active_dimension.as_ref().unwrap();
@@ -986,12 +984,14 @@ impl Context<'_> {
                                 }
 
                                 // If we didn't find a matching dimension, that's an error
-                                sim_err!(MismatchedDimensions, id.clone())
+                                sim_err!(MismatchedDimensions, id.as_str().to_string())
                             }
-                            IndexExpr2::StarRange(_id, _loc) => sim_err!(TodoStarRange, id.clone()),
+                            IndexExpr2::StarRange(_id, _loc) => {
+                                sim_err!(TodoStarRange, id.as_str().to_string())
+                            }
                             IndexExpr2::Range(_start_expr, _end_expr, _loc) => {
                                 // Dynamic range - not supported yet in old-style subscript
-                                sim_err!(TodoRange, id.clone())
+                                sim_err!(TodoRange, id.as_str().to_string())
                             }
                             IndexExpr2::DimPosition(pos, loc) => {
                                 // @1 refers to the first dimension, @2 to the second, etc.
@@ -999,7 +999,7 @@ impl Context<'_> {
                                 if self.active_dimension.is_none() {
                                     return sim_err!(
                                         ArrayReferenceNeedsExplicitSubscripts,
-                                        id.clone()
+                                        id.as_str().to_string()
                                     );
                                 }
                                 let active_dims = self.active_dimension.as_ref().unwrap();
@@ -1026,7 +1026,7 @@ impl Context<'_> {
                                     // If it's a named subscript, we need to resolve it
                                     // This would require looking up the dimension at that position
                                     // For now, return an error
-                                    sim_err!(ArraysNotImplemented, id.clone())
+                                    sim_err!(ArraysNotImplemented, id.as_str().to_string())
                                 }
                             }
                             IndexExpr2::Expr(arg) => {
@@ -1039,8 +1039,7 @@ impl Context<'_> {
                                     // Need to do case-insensitive matching since identifiers are canonicalized
                                     let subscript_off =
                                         if let Dimension::Named(_, named_dim) = dim {
-                                            let canonicalized_ident =
-                                                crate::common::canonicalize(ident);
+                                            let canonicalized_ident = ident.as_str();
                                             named_dim.elements.iter().position(|elem| {
                                                 elem.as_str() == canonicalized_ident
                                             })
@@ -1053,15 +1052,18 @@ impl Context<'_> {
                                     } else if let Dimension::Indexed(name, _size) = dim {
                                         // For indexed dimensions, check if ident is of format "DimName.Index"
                                         let expected_prefix = format!("{}.", name.as_str());
-                                        if ident.starts_with(&expected_prefix) {
-                                            if let Ok(idx) =
-                                                ident[expected_prefix.len()..].parse::<usize>()
+                                        if ident.as_str().starts_with(&expected_prefix) {
+                                            if let Ok(idx) = ident.as_str()[expected_prefix.len()..]
+                                                .parse::<usize>()
                                             {
                                                 // Validate the index is within bounds (1-based)
                                                 if idx >= 1 && idx <= dim.len() {
                                                     Expr::Const(idx as f64, *loc)
                                                 } else {
-                                                    return sim_err!(BadDimensionName, id.clone());
+                                                    return sim_err!(
+                                                        BadDimensionName,
+                                                        id.as_str().to_string()
+                                                    );
                                                 }
                                             } else {
                                                 self.lower(arg)?
@@ -1070,7 +1072,7 @@ impl Context<'_> {
                                             self.lower(arg)?
                                         }
                                     } else if let Some(subscript_off) =
-                                        self.get_dimension_name_subscript(ident)
+                                        self.get_dimension_name_subscript(ident.as_str())
                                     {
                                         // some modelers do `Variable[SubscriptName]` in their A2A equations
                                         Expr::Const((subscript_off + 1) as f64, *loc)
@@ -1094,7 +1096,7 @@ impl Context<'_> {
                         // Special handling for transpose of bare array variables
                         if let ast::Expr2::Var(id, _, var_loc) = &**l {
                             // Get the variable's metadata to check if it's an array
-                            if let Ok(metadata) = self.get_metadata(id) {
+                            if let Ok(metadata) = self.get_metadata(id.as_str()) {
                                 if let Some(dims) = metadata.var.get_dimensions() {
                                     if self.active_dimension.is_some() {
                                         // We're in an A2A context - need to handle bare array transpose specially
@@ -1117,7 +1119,7 @@ impl Context<'_> {
                                     } else {
                                         // Not in A2A context - create a wildcard subscript to get the full array
                                         // then apply transpose
-                                        let off = self.get_base_offset(id)?;
+                                        let off = self.get_base_offset(id.as_str())?;
                                         let orig_dims: Vec<usize> =
                                             dims.iter().map(|d| d.len()).collect();
                                         let orig_strides =
@@ -1301,14 +1303,14 @@ impl Context<'_> {
             ast::Expr2::Var(id, _, _) => {
                 // Get the variable's dimensions
                 let metadata = self.metadata.get(self.model_name)?;
-                let var_metadata = metadata.get(&canonicalize(id))?;
+                let var_metadata = metadata.get(id.as_str())?;
                 let dims = var_metadata.var.get_dimensions()?;
                 Some(dims.iter().map(|d| d.name().to_string()).collect())
             }
             ast::Expr2::Subscript(id, _, _, _) => {
                 // For subscripted arrays, get the base variable's dimensions
                 let metadata = self.metadata.get(self.model_name)?;
-                let var_metadata = metadata.get(&canonicalize(id))?;
+                let var_metadata = metadata.get(id.as_str())?;
                 let dims = var_metadata.var.get_dimensions()?;
                 Some(dims.iter().map(|d| d.name().to_string()).collect())
             }
@@ -1456,14 +1458,23 @@ impl Context<'_> {
 
 #[test]
 fn test_lower() {
+    use crate::common::CanonicalIdent;
     let input = {
         use ast::BinaryOp::*;
         use ast::Expr2::*;
         Box::new(If(
             Box::new(Op2(
                 And,
-                Box::new(Var("true_input".to_string(), None, Loc::default())),
-                Box::new(Var("false_input".to_string(), None, Loc::default())),
+                Box::new(Var(
+                    CanonicalIdent::from_raw("true_input"),
+                    None,
+                    Loc::default(),
+                )),
+                Box::new(Var(
+                    CanonicalIdent::from_raw("false_input"),
+                    None,
+                    Loc::default(),
+                )),
                 None,
                 Loc::default(),
             )),
@@ -1552,8 +1563,16 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 Or,
-                Box::new(Var("true_input".to_string(), None, Loc::default())),
-                Box::new(Var("false_input".to_string(), None, Loc::default())),
+                Box::new(Var(
+                    CanonicalIdent::from_raw("true_input"),
+                    None,
+                    Loc::default(),
+                )),
+                Box::new(Var(
+                    CanonicalIdent::from_raw("false_input"),
+                    None,
+                    Loc::default(),
+                )),
                 None,
                 Loc::default(),
             )),
@@ -1639,7 +1658,7 @@ fn test_lower() {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Var {
-    pub(crate) ident: Ident,
+    pub(crate) ident: CanonicalIdent,
     pub(crate) ast: Vec<Expr>,
 }
 
@@ -1785,7 +1804,11 @@ impl Var {
                         .into_iter()
                         .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap(), Loc::default()))
                         .collect();
-                    vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
+                    vec![Expr::EvalModule(
+                        CanonicalIdent::from_raw(ident),
+                        CanonicalIdent::from_raw(model_name),
+                        inputs,
+                    )]
                 }
                 Variable::Stock { init_ast: ast, .. } => {
                     let off = ctx.get_base_offset(var.ident())?;
@@ -1914,7 +1937,7 @@ impl Var {
             }
         };
         Ok(Var {
-            ident: var.ident().to_owned(),
+            ident: CanonicalIdent::from_raw(var.ident()),
             ast,
         })
     }
@@ -1922,8 +1945,8 @@ impl Var {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
-    pub(crate) ident: Ident,
-    pub(crate) inputs: HashSet<Ident>,
+    pub(crate) ident: CanonicalIdent,
+    pub(crate) inputs: HashSet<CanonicalIdent>,
     pub(crate) n_slots: usize,         // number of f64s we need storage for
     pub(crate) n_temps: usize,         // number of temporary arrays
     pub(crate) temp_sizes: Vec<usize>, // size of each temporary array
@@ -1931,7 +1954,7 @@ pub struct Module {
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
-    pub(crate) runlist_order: Vec<Ident>,
+    pub(crate) runlist_order: Vec<CanonicalIdent>,
     pub(crate) tables: HashMap<Ident, Table>,
 }
 
@@ -2276,8 +2299,11 @@ impl Module {
         let temp_sizes = vec![];
 
         Ok(Module {
-            ident: model_name.to_string(),
-            inputs: inputs_set.into_iter().collect(),
+            ident: CanonicalIdent::from_raw(model_name),
+            inputs: inputs_set
+                .into_iter()
+                .map(|s| CanonicalIdent::from_raw(&s))
+                .collect(),
             n_slots,
             n_temps,
             temp_sizes,
@@ -2391,7 +2417,11 @@ impl<'module> Compiler<'module> {
 
                 // so are module builtins
                 if let BuiltinFn::IsModuleInput(ident, _loc) = builtin {
-                    let id = if self.module.inputs.contains(ident) {
+                    let id = if self
+                        .module
+                        .inputs
+                        .contains(&CanonicalIdent::from_raw(ident))
+                    {
                         self.curr_code.intern_literal(1.0)
                     } else {
                         self.curr_code.intern_literal(0.0)
@@ -2560,10 +2590,10 @@ impl<'module> Compiler<'module> {
                 for arg in args.iter() {
                     self.walk_expr(arg).unwrap().unwrap()
                 }
-                let module_offsets = &self.module.offsets[&self.module.ident];
+                let module_offsets = &self.module.offsets[self.module.ident.as_str()];
                 self.module_decls.push(ModuleDeclaration {
-                    model_name: model_name.clone(),
-                    off: module_offsets[ident].0,
+                    model_name: model_name.as_str().to_string(),
+                    off: module_offsets[ident.as_str()].0,
                 });
                 let id = (self.module_decls.len() - 1) as ModuleId;
 
@@ -2657,7 +2687,7 @@ impl<'module> Compiler<'module> {
         let compiled_stocks = Rc::new(self.walk(&self.module.runlist_stocks)?);
 
         Ok(CompiledModule {
-            ident: self.module.ident.clone(),
+            ident: self.module.ident.as_str().to_string(),
             n_slots: self.module.n_slots,
             context: Rc::new(ByteCodeContext {
                 graphical_functions: self.graphical_functions,

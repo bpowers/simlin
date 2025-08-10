@@ -28,9 +28,9 @@ impl UnitEvaluator<'_> {
         match expr {
             Expr2::Const(_, _, _) => Ok(Units::Constant),
             Expr2::Var(ident, _, loc) => {
-                let units: &UnitMap = if ident == "time"
-                    || ident == "initial_time"
-                    || ident == "final_time"
+                let units: &UnitMap = if ident.as_str() == "time"
+                    || ident.as_str() == "initial_time"
+                    || ident.as_str() == "final_time"
                 {
                     // we created this time variable just for unit checking, it is definitely Some
                     self.time.units().unwrap()
@@ -39,9 +39,9 @@ impl UnitEvaluator<'_> {
                     // if they don't exist, try to use any inferred units (this handles modules)
                     self.model
                         .variables
-                        .get(ident)
+                        .get(ident.as_str())
                         .and_then(|var| var.units())
-                        .or_else(|| self.inferred_units.get(ident))
+                        .or_else(|| self.inferred_units.get(ident.as_str()))
                         .ok_or_else(|| {
                             ConsistencyError(
                                 ErrorCode::DoesNotExist,
