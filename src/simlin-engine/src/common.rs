@@ -16,9 +16,40 @@ use std::borrow::Cow;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+// Legacy type aliases - to be deprecated
 pub type Ident = String;
 pub type DimensionName = String;
 pub type ElementName = String;
+
+/// A canonicalized identifier - guaranteed to be in canonical form
+///
+/// Canonical form means:
+/// - Lowercase
+/// - Spaces/newlines replaced with underscores
+/// - Dots outside quotes replaced with middle dot (·)
+/// - Properly handles quoted sections
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CanonicalIdent(String);
+
+/// A raw, non-canonicalized identifier as it appears in source
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RawIdent(String);
+
+/// A canonicalized dimension name
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CanonicalDimensionName(String);
+
+/// A raw dimension name as it appears in source
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RawDimensionName(String);
+
+/// A canonicalized element name (dimension element)
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CanonicalElementName(String);
+
+/// A raw element name as it appears in source
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RawElementName(String);
 
 #[cfg_attr(feature = "wasm", wasm_bindgen)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -378,6 +409,272 @@ pub fn quoteize(ident: &str) -> String {
 fn test_quoteize() {
     assert_eq!("a_b", quoteize("a_b"));
     assert_eq!("a.b", quoteize("a·b"));
+}
+
+#[test]
+fn test_canonical_ident() {
+    // Test canonicalization from raw
+    let raw = RawIdent::new("Hello World".to_string());
+    let canonical = raw.canonicalize();
+    assert_eq!(canonical.as_str(), "hello_world");
+
+    // Test direct creation
+    let canonical2 = CanonicalIdent::from_raw("Hello World");
+    assert_eq!(canonical, canonical2);
+
+    // Test quoteize
+    let canonical3 = CanonicalIdent::from_raw("a.b");
+    assert_eq!(canonical3.as_str(), "a·b");
+    assert_eq!(canonical3.quoteize(), "a.b");
+
+    // Test conversion to legacy type
+    let legacy: Ident = canonical.to_ident();
+    assert_eq!(legacy, "hello_world");
+}
+
+#[test]
+fn test_canonical_dimension_name() {
+    let raw = RawDimensionName::new("Time Units".to_string());
+    let canonical = raw.canonicalize();
+    assert_eq!(canonical.as_str(), "time_units");
+
+    let canonical2 = CanonicalDimensionName::from_raw("Time Units");
+    assert_eq!(canonical, canonical2);
+}
+
+#[test]
+fn test_canonical_element_name() {
+    let raw = RawElementName::new("Element Name".to_string());
+    let canonical = raw.canonicalize();
+    assert_eq!(canonical.as_str(), "element_name");
+
+    let canonical2 = CanonicalElementName::from_raw("Element Name");
+    assert_eq!(canonical, canonical2);
+}
+
+// Implementations for identifier types
+
+impl CanonicalIdent {
+    /// Create from an already-canonicalized string (internal use only)
+    ///
+    /// # Safety
+    /// Caller must guarantee the string is already in canonical form
+    pub(crate) fn from_canonical_unchecked(s: String) -> Self {
+        CanonicalIdent(s)
+    }
+
+    /// Create from a raw string, canonicalizing it
+    pub fn from_raw(s: &str) -> Self {
+        CanonicalIdent(canonicalize(s))
+    }
+
+    /// Get the underlying canonical string
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert to the legacy Ident type (for gradual migration)
+    pub fn to_ident(&self) -> Ident {
+        self.0.clone()
+    }
+
+    /// Get a quoteized version for display
+    pub fn quoteize(&self) -> String {
+        quoteize(&self.0)
+    }
+}
+
+impl RawIdent {
+    /// Create a new raw identifier
+    pub fn new(s: String) -> Self {
+        RawIdent(s)
+    }
+
+    /// Create from a string slice
+    pub fn from_str(s: &str) -> Self {
+        RawIdent(s.to_string())
+    }
+
+    /// Canonicalize this identifier
+    pub fn canonicalize(&self) -> CanonicalIdent {
+        CanonicalIdent(canonicalize(&self.0))
+    }
+
+    /// Get the underlying raw string
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CanonicalDimensionName {
+    /// Create from an already-canonicalized string (internal use only)
+    pub(crate) fn from_canonical_unchecked(s: String) -> Self {
+        CanonicalDimensionName(s)
+    }
+
+    /// Create from a raw string, canonicalizing it
+    pub fn from_raw(s: &str) -> Self {
+        CanonicalDimensionName(canonicalize(s))
+    }
+
+    /// Get the underlying canonical string
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert to the legacy DimensionName type (for gradual migration)
+    pub fn to_dimension_name(&self) -> DimensionName {
+        self.0.clone()
+    }
+}
+
+impl RawDimensionName {
+    /// Create a new raw dimension name
+    pub fn new(s: String) -> Self {
+        RawDimensionName(s)
+    }
+
+    /// Canonicalize this dimension name
+    pub fn canonicalize(&self) -> CanonicalDimensionName {
+        CanonicalDimensionName(canonicalize(&self.0))
+    }
+
+    /// Get the underlying raw string
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CanonicalElementName {
+    /// Create from an already-canonicalized string (internal use only)
+    pub(crate) fn from_canonical_unchecked(s: String) -> Self {
+        CanonicalElementName(s)
+    }
+
+    /// Create from a raw string, canonicalizing it
+    pub fn from_raw(s: &str) -> Self {
+        CanonicalElementName(canonicalize(s))
+    }
+
+    /// Get the underlying canonical string
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert to the legacy ElementName type (for gradual migration)
+    pub fn to_element_name(&self) -> ElementName {
+        self.0.clone()
+    }
+}
+
+impl RawElementName {
+    /// Create a new raw element name
+    pub fn new(s: String) -> Self {
+        RawElementName(s)
+    }
+
+    /// Canonicalize this element name
+    pub fn canonicalize(&self) -> CanonicalElementName {
+        CanonicalElementName(canonicalize(&self.0))
+    }
+
+    /// Get the underlying raw string
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// Display implementations for better debugging
+impl fmt::Display for CanonicalIdent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for RawIdent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for CanonicalDimensionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for RawDimensionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for CanonicalElementName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for RawElementName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// Conversion from legacy types for migration
+impl From<CanonicalIdent> for Ident {
+    fn from(canonical: CanonicalIdent) -> Self {
+        canonical.0
+    }
+}
+
+impl From<CanonicalDimensionName> for DimensionName {
+    fn from(canonical: CanonicalDimensionName) -> Self {
+        canonical.0
+    }
+}
+
+impl From<CanonicalElementName> for ElementName {
+    fn from(canonical: CanonicalElementName) -> Self {
+        canonical.0
+    }
+}
+
+// AsRef implementations for convenient use in APIs
+impl AsRef<str> for CanonicalIdent {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for RawIdent {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for CanonicalDimensionName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for RawDimensionName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for CanonicalElementName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for RawElementName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }
 
 pub fn topo_sort<'out>(
