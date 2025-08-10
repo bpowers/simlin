@@ -459,6 +459,7 @@ impl CanonicalIdent {
     ///
     /// # Safety
     /// Caller must guarantee the string is already in canonical form
+    #[allow(dead_code)]
     pub(crate) fn from_canonical_unchecked(s: String) -> Self {
         CanonicalIdent(s)
     }
@@ -491,7 +492,7 @@ impl RawIdent {
     }
 
     /// Create from a string slice
-    pub fn from_str(s: &str) -> Self {
+    pub fn new_from_str(s: &str) -> Self {
         RawIdent(s.to_string())
     }
 
@@ -508,6 +509,7 @@ impl RawIdent {
 
 impl CanonicalDimensionName {
     /// Create from an already-canonicalized string (internal use only)
+    #[allow(dead_code)]
     pub(crate) fn from_canonical_unchecked(s: String) -> Self {
         CanonicalDimensionName(s)
     }
@@ -547,6 +549,7 @@ impl RawDimensionName {
 
 impl CanonicalElementName {
     /// Create from an already-canonicalized string (internal use only)
+    #[allow(dead_code)]
     pub(crate) fn from_canonical_unchecked(s: String) -> Self {
         CanonicalElementName(s)
     }

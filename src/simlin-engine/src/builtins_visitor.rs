@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
-use crate::common::{EquationError, Ident};
+use crate::common::{EquationError, Ident, RawIdent};
 use crate::datamodel::Visibility;
 use crate::{datamodel, eqn_err};
 
@@ -60,8 +60,8 @@ impl<'a> BuiltinVisitor<'a> {
         let result: Expr0 = match expr {
             Const(_, _, _) => expr,
             Var(ref ident, loc) => {
-                if ident == "self" && self.self_allowed {
-                    Var(self.variable_name.to_owned(), loc)
+                if ident.as_str().eq_ignore_ascii_case("self") && self.self_allowed {
+                    Var(RawIdent::new_from_str(self.variable_name), loc)
                 } else {
                     expr
                 }
@@ -88,7 +88,7 @@ impl<'a> BuiltinVisitor<'a> {
 
                 let ident_args = args.into_iter().enumerate().map(|(i, arg)| {
                     if let Var(id, _loc) = arg {
-                        id
+                        id.as_str().to_string()
                     } else {
                         let id = format!("$⁚{}⁚{}⁚arg{}", self.variable_name, self.n, i);
                         let eqn = print_eqn(&arg);
@@ -129,7 +129,7 @@ impl<'a> BuiltinVisitor<'a> {
                 self.vars.insert(module_name, x_module);
 
                 self.n += 1;
-                Var(module_output_name, loc)
+                Var(RawIdent::new_from_str(&module_output_name), loc)
             }
             Subscript(id, args, loc) => {
                 let args: Result<Vec<IndexExpr0>, EquationError> =

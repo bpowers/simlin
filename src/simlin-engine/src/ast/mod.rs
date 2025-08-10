@@ -260,7 +260,7 @@ impl Visitor<String> for PrintVisitor {
     fn walk_index(&mut self, expr: &IndexExpr0) -> String {
         match expr {
             IndexExpr0::Wildcard(_) => "*".to_string(),
-            IndexExpr0::StarRange(id, _) => format!("*:{id}"),
+            IndexExpr0::StarRange(id, _) => format!("*:{}", crate::canonicalize(id.as_str())),
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
             IndexExpr0::DimPosition(n, _) => format!("@{n}"),
             IndexExpr0::Expr(e) => self.walk(e),
@@ -270,14 +270,18 @@ impl Visitor<String> for PrintVisitor {
     fn walk(&mut self, expr: &Expr0) -> String {
         match expr {
             Expr0::Const(s, _, _) => s.clone(),
-            Expr0::Var(id, _) => id.clone(),
+            Expr0::Var(id, _) => {
+                // Canonicalize for display (lowercase, etc.)
+                crate::canonicalize(id.as_str())
+            }
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
                 format!("{}({})", func, args.join(", "))
             }
             Expr0::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
-                format!("{}[{}]", id, args.join(", "))
+                // Canonicalize identifier for display
+                format!("{}[{}]", crate::canonicalize(id.as_str()), args.join(", "))
             }
             Expr0::Op1(op, l, _) => {
                 match op {
@@ -335,12 +339,13 @@ pub fn print_eqn(expr: &Expr0) -> String {
 
 #[test]
 fn test_print_eqn() {
+    use crate::common::RawIdent;
     assert_eq!(
         "a + b",
         print_eqn(&Expr0::Op2(
             BinaryOp::Add,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
-            Box::new(Expr0::Var("b".to_string(), Loc::new(5, 6))),
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
+            Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::new(5, 6))),
             Loc::new(0, 7),
         ))
     );
@@ -348,11 +353,11 @@ fn test_print_eqn() {
         "a + b * c",
         print_eqn(&Expr0::Op2(
             BinaryOp::Add,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
             Box::new(Expr0::Op2(
                 BinaryOp::Mul,
-                Box::new(Expr0::Var("b".to_string(), Loc::default())),
-                Box::new(Expr0::Var("c".to_owned(), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
                 Loc::default()
             )),
             Loc::new(0, 7),
@@ -362,11 +367,11 @@ fn test_print_eqn() {
         "a * (b + c)",
         print_eqn(&Expr0::Op2(
             BinaryOp::Mul,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
             Box::new(Expr0::Op2(
                 BinaryOp::Add,
-                Box::new(Expr0::Var("b".to_string(), Loc::default())),
-                Box::new(Expr0::Var("c".to_owned(), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("b"), Loc::default())),
+                Box::new(Expr0::Var(RawIdent::new_from_str("c"), Loc::default())),
                 Loc::default()
             )),
             Loc::new(0, 7),
@@ -376,7 +381,7 @@ fn test_print_eqn() {
         "-a",
         print_eqn(&Expr0::Op1(
             UnaryOp::Negative,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
@@ -384,7 +389,7 @@ fn test_print_eqn() {
         "!a",
         print_eqn(&Expr0::Op1(
             UnaryOp::Not,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
@@ -392,7 +397,7 @@ fn test_print_eqn() {
         "+a",
         print_eqn(&Expr0::Op1(
             UnaryOp::Positive,
-            Box::new(Expr0::Var("a".to_string(), Loc::new(1, 2))),
+            Box::new(Expr0::Var(RawIdent::new_from_str("a"), Loc::new(1, 2))),
             Loc::new(0, 2),
         ))
     );
@@ -406,7 +411,7 @@ fn test_print_eqn() {
             UntypedBuiltinFn(
                 "lookup".to_string(),
                 vec![
-                    Expr0::Var("a".to_string(), Loc::new(7, 8)),
+                    Expr0::Var(RawIdent::new_from_str("a"), Loc::new(7, 8)),
                     Expr0::Const("1.0".to_string(), 1.0, Loc::new(10, 13))
                 ]
             ),

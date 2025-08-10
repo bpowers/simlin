@@ -25,7 +25,9 @@ impl IndexExpr1 {
     pub(crate) fn from(expr: IndexExpr0) -> EquationResult<Self> {
         let expr = match expr {
             IndexExpr0::Wildcard(loc) => IndexExpr1::Wildcard(loc),
-            IndexExpr0::StarRange(ident, loc) => IndexExpr1::StarRange(ident, loc),
+            IndexExpr0::StarRange(ident, loc) => {
+                IndexExpr1::StarRange(ident.canonicalize().to_ident(), loc)
+            }
             IndexExpr0::Range(l, r, loc) => {
                 IndexExpr1::Range(Expr1::from(l)?, Expr1::from(r)?, loc)
             }
@@ -68,7 +70,7 @@ impl Expr1 {
     pub(crate) fn from(expr: Expr0) -> EquationResult<Self> {
         let expr = match expr {
             Expr0::Const(s, n, loc) => Expr1::Const(s, n, loc),
-            Expr0::Var(id, loc) => Expr1::Var(id, loc),
+            Expr0::Var(id, loc) => Expr1::Var(id.canonicalize().to_ident(), loc),
             Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
                 let args: EquationResult<Vec<Expr1>> =
                     orig_args.into_iter().map(Expr1::from).collect();
@@ -212,7 +214,7 @@ impl Expr1 {
             Expr0::Subscript(id, args, loc) => {
                 let args: EquationResult<Vec<IndexExpr1>> =
                     args.into_iter().map(IndexExpr1::from).collect();
-                Expr1::Subscript(id, args?, loc)
+                Expr1::Subscript(id.canonicalize().to_ident(), args?, loc)
             }
             Expr0::Op1(op, l, loc) => Expr1::Op1(op, Box::new(Expr1::from(*l)?), loc),
             Expr0::Op2(op, l, r, loc) => Expr1::Op2(

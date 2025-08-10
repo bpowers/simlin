@@ -293,14 +293,23 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
             }
         }
         Expr0::Var(id, _) => {
-            let id = ctx.aliases.get(id).unwrap_or(id);
-            if id == "dmnl" || id == "nil" || id == "dimensionless" || id == "fraction" {
+            let id_str = id.as_str();
+            let id_str = ctx
+                .aliases
+                .get(id_str)
+                .map(|s| s.as_str())
+                .unwrap_or(id_str);
+            if id_str == "dmnl"
+                || id_str == "nil"
+                || id_str == "dimensionless"
+                || id_str == "fraction"
+            {
                 // dimensionless is special
                 UnitMap::new()
             } else {
-                ctx.lookup(id)
+                ctx.lookup(id_str)
                     .cloned()
-                    .unwrap_or_else(|| [(id.to_owned(), 1)].iter().cloned().collect())
+                    .unwrap_or_else(|| [(id_str.to_owned(), 1)].iter().cloned().collect())
             }
         }
         Expr0::App(_, loc) => {

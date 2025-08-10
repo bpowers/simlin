@@ -6,7 +6,7 @@ use crate::ast::{IndexExpr0, Expr0 as Expr, Loc};
 use crate::ast::UnaryOp::*;
 use crate::ast::BinaryOp::*;
 use crate::ast::Expr0::*;
-use crate::common::{self, canonicalize, EquationError};
+use crate::common::{RawIdent, EquationError};
 use crate::token::Token;
 use crate::builtins::UntypedBuiltinFn;
 
@@ -81,7 +81,7 @@ Exp: Expr = {
 };
 
 App: Expr = {
-    <lpos:@L> <id:Ident> "(" <args:Exprs> ")" <rpos:@R> => App(UntypedBuiltinFn(id, args), Loc::new(lpos, rpos)),
+    <lpos:@L> <id:Ident> "(" <args:Exprs> ")" <rpos:@R> => App(UntypedBuiltinFn(id.as_str().to_lowercase(), args), Loc::new(lpos, rpos)),
     Postfix,
 };
 
@@ -119,8 +119,8 @@ Comma<T>: Vec<T> = {
 Exprs = Comma<Expr>;
 IndexExprs = Comma<IndexExpr>;
 
-Ident: common::Ident = {
-    <id:"Iden"> => canonicalize(id),
+Ident: RawIdent = {
+    <id:"Iden"> => RawIdent::new_from_str(id),
 };
 
 extern {

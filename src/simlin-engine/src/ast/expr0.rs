@@ -2,9 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::Ident;
 use crate::builtins::{Loc, UntypedBuiltinFn, is_0_arity_builtin_fn};
-use crate::common::EquationError;
+use crate::common::{EquationError, RawIdent};
 use crate::token::LexerType;
 use std::result::Result as StdResult;
 
@@ -65,9 +64,9 @@ impl BinaryOp {
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr0 {
     Const(String, f64, Loc),
-    Var(Ident, Loc),
+    Var(RawIdent, Loc),
     App(UntypedBuiltinFn<Expr0>, Loc),
-    Subscript(Ident, Vec<IndexExpr0>, Loc),
+    Subscript(RawIdent, Vec<IndexExpr0>, Loc),
     Op1(UnaryOp, Box<Expr0>, Loc),
     Op2(BinaryOp, Box<Expr0>, Box<Expr0>, Loc),
     If(Box<Expr0>, Box<Expr0>, Box<Expr0>, Loc),
@@ -76,7 +75,7 @@ pub enum Expr0 {
 #[derive(PartialEq, Clone, Debug)]
 pub enum IndexExpr0 {
     Wildcard(Loc),
-    StarRange(Ident, Loc),
+    StarRange(RawIdent, Loc),
     Range(Expr0, Expr0, Loc),
     DimPosition(u32, Loc),
     Expr(Expr0),
@@ -179,8 +178,10 @@ impl Expr0 {
     fn reify_0_arity_builtins(self) -> Self {
         match self {
             Expr0::Var(ref id, loc) => {
-                if is_0_arity_builtin_fn(id) {
-                    Expr0::App(UntypedBuiltinFn(id.clone(), vec![]), loc)
+                // Check for 0-arity builtins using lowercase version
+                let lowercase_id = id.as_str().to_lowercase();
+                if is_0_arity_builtin_fn(&lowercase_id) {
+                    Expr0::App(UntypedBuiltinFn(lowercase_id, vec![]), loc)
                 } else {
                     self
                 }
@@ -286,8 +287,8 @@ fn test_parse() {
     let if2 = Box::new(If(
         Box::new(Op2(
             Eq,
-            Box::new(Var("blerg".to_string(), Loc::default())),
-            Box::new(Var("foo".to_string(), Loc::default())),
+            Box::new(Var(RawIdent::new_from_str("blerg"), Loc::default())),
+            Box::new(Var(RawIdent::new_from_str("foo"), Loc::default())),
             Loc::default(),
         )),
         Box::new(Const("2".to_string(), 2.0, Loc::default())),
@@ -298,8 +299,11 @@ fn test_parse() {
     let if3 = Box::new(If(
         Box::new(Op2(
             Eq,
-            Box::new(Var("quotient".to_string(), Loc::default())),
-            Box::new(Var("quotient_target".to_string(), Loc::default())),
+            Box::new(Var(RawIdent::new_from_str("quotient"), Loc::default())),
+            Box::new(Var(
+                RawIdent::new_from_str("quotient_target"),
+                Loc::default(),
+            )),
             Loc::default(),
         )),
         Box::new(Const("1".to_string(), 1.0, Loc::default())),
@@ -310,8 +314,8 @@ fn test_parse() {
     let if4 = Box::new(If(
         Box::new(Op2(
             And,
-            Box::new(Var("true_input".to_string(), Loc::default())),
-            Box::new(Var("false_input".to_string(), Loc::default())),
+            Box::new(Var(RawIdent::new_from_str("true_input"), Loc::default())),
+            Box::new(Var(RawIdent::new_from_str("false_input"), Loc::default())),
             Loc::default(),
         )),
         Box::new(Const("1".to_string(), 1.0, Loc::default())),
@@ -321,22 +325,25 @@ fn test_parse() {
 
     let quoting_eq = Box::new(Op2(
         Eq,
-        Box::new(Var("oh_dear".to_string(), Loc::default())),
-        Box::new(Var("oh_dear".to_string(), Loc::default())),
+        Box::new(Var(RawIdent::new_from_str("\"oh dear\""), Loc::default())), // Quoted identifier with quotes
+        Box::new(Var(RawIdent::new_from_str("oh_dear"), Loc::default())),
         Loc::default(),
     ));
 
     let subscript1 = Box::new(Subscript(
-        "a".to_owned(),
+        RawIdent::new_from_str("a"),
         vec![IndexExpr0::Expr(Const("1".to_owned(), 1.0, Loc::default()))],
         Loc::default(),
     ));
     let subscript2 = Box::new(Subscript(
-        "a".to_owned(),
+        RawIdent::new_from_str("a"),
         vec![
             IndexExpr0::Expr(Const("2".to_owned(), 2.0, Loc::default())),
             IndexExpr0::Expr(App(
-                UntypedBuiltinFn("int".to_owned(), vec![Var("b".to_owned(), Loc::default())]),
+                UntypedBuiltinFn(
+                    "int".to_owned(),
+                    vec![Var(RawIdent::new_from_str("b"), Loc::default())],
+                ),
                 Loc::default(),
             )),
         ],
@@ -344,7 +351,7 @@ fn test_parse() {
     ));
 
     let subscript3 = Box::new(Subscript(
-        "a".to_string(),
+        RawIdent::new_from_str("a"),
         vec![
             IndexExpr0::Wildcard(Loc::default()),
             IndexExpr0::Wildcard(Loc::default()),
@@ -353,13 +360,16 @@ fn test_parse() {
     ));
 
     let subscript4 = Box::new(Subscript(
-        "a".to_string(),
-        vec![IndexExpr0::StarRange("d".to_string(), Loc::default())],
+        RawIdent::new_from_str("a"),
+        vec![IndexExpr0::StarRange(
+            RawIdent::new_from_str("d"),
+            Loc::default(),
+        )],
         Loc::default(),
     ));
 
     let subscript5 = Box::new(Subscript(
-        "a".to_string(),
+        RawIdent::new_from_str("a"),
         vec![IndexExpr0::Range(
             Const("1".to_owned(), 1.0, Loc::default()),
             Const("2".to_owned(), 2.0, Loc::default()),
@@ -369,25 +379,25 @@ fn test_parse() {
     ));
 
     let subscript6 = Box::new(Subscript(
-        "a".to_string(),
+        RawIdent::new_from_str("a"),
         vec![IndexExpr0::Range(
-            Var("l".to_owned(), Loc::default()),
-            Var("r".to_owned(), Loc::default()),
+            Var(RawIdent::new_from_str("l"), Loc::default()),
+            Var(RawIdent::new_from_str("r"), Loc::default()),
             Loc::default(),
         )],
         Loc::default(),
     ));
 
     let dimension_pos1 = Box::new(Subscript(
-        "a".to_owned(),
+        RawIdent::new_from_str("a"),
         vec![IndexExpr0::DimPosition(1, Loc::default())],
         Loc::default(),
     ));
 
     let dimension_pos2 = Box::new(Subscript(
-        "a".to_owned(),
+        RawIdent::new_from_str("a"),
         vec![
-            IndexExpr0::Expr(Var("dimm".to_owned(), Loc::default())),
+            IndexExpr0::Expr(Var(RawIdent::new_from_str("DimM"), Loc::default())),
             IndexExpr0::DimPosition(1, Loc::default()),
             IndexExpr0::DimPosition(2, Loc::default()),
         ],
@@ -400,7 +410,7 @@ fn test_parse() {
     ));
 
     let time2 = Box::new(Subscript(
-        "aux".to_owned(),
+        RawIdent::new_from_str("aux"),
         vec![IndexExpr0::Expr(Op2(
             BinaryOp::Add,
             Box::new(App(
@@ -427,14 +437,14 @@ fn test_parse() {
     // Test cases for transpose operator
     let transpose1 = Box::new(Op1(
         UnaryOp::Transpose,
-        Box::new(Var("a".to_owned(), Loc::default())),
+        Box::new(Var(RawIdent::new_from_str("a"), Loc::default())),
         Loc::default(),
     ));
 
     let transpose2 = Box::new(Op1(
         UnaryOp::Transpose,
         Box::new(Subscript(
-            "matrix".to_owned(),
+            RawIdent::new_from_str("matrix"),
             vec![
                 IndexExpr0::Wildcard(Loc::default()),
                 IndexExpr0::Expr(Const("1".to_owned(), 1.0, Loc::default())),
@@ -448,10 +458,10 @@ fn test_parse() {
         BinaryOp::Mul,
         Box::new(Op1(
             UnaryOp::Transpose,
-            Box::new(Var("a".to_owned(), Loc::default())),
+            Box::new(Var(RawIdent::new_from_str("a"), Loc::default())),
             Loc::default(),
         )),
-        Box::new(Var("b".to_owned(), Loc::default())),
+        Box::new(Var(RawIdent::new_from_str("b"), Loc::default())),
         Loc::default(),
     ));
 
