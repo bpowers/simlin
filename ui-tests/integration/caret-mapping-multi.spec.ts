@@ -73,18 +73,15 @@ function mapKatexCharToAsciiChar(kchar: string): string {
   return kchar;
 }
 
-test.describe('Editor caret mapping from LaTeX to ASCII', () => {
-  test('clicking rendered glyphs places caret immediately after matching ASCII char', async ({ page }) => {
-    const user = makeTestUser('caret');
+test.describe('Caret mapping by clicking specific KaTeX glyphs', () => {
+  test('clicking specific rendered glyphs places caret right after matching ASCII char', async ({ page }) => {
+    const user = makeTestUser('caret-multi2');
     await createAndLoginNewUser(page, user);
 
-    // Navigate to the default logistic-growth project for this user
     await page.goto(`/${user.username}/logistic-growth`);
-
-    // Wait for canvas
     await page.waitForSelector('.simlin-canvas', { state: 'visible' });
 
-    // Use search to open VariableDetails for the target variable
+    // Open VariableDetails via search
     const searchBar = page.locator('.simlin-editor-searchbar');
     await expect(searchBar).toBeVisible();
     const searchInput = searchBar.locator('input');
@@ -100,18 +97,19 @@ test.describe('Editor caret mapping from LaTeX to ASCII', () => {
       await returnToPreview(page);
     }
 
-    // Open editor once to capture the ASCII equation
+    // Open editor once to capture the ASCII equation for mapping
+    // Click the preview near the start
     const pvBox = await preview.boundingBox();
     if (!pvBox) throw new Error('Missing preview bounding box');
     await page.mouse.click(pvBox.x + 10, pvBox.y + pvBox.height / 2);
     const ascii = await getEditorText(page);
     await returnToPreview(page);
 
-    // Collect glyphs from KaTeX output
+    // Build list of glyphs to test in order they appear visually
     const chars = await getKatexChars(page);
     expect(chars.length).toBeGreaterThan(0);
 
-    // Test a small but representative set of glyphs in order of appearance
+    // Choose a few robust glyphs that should exist: '*', '(', '1', '-', ')'
     const glyphSpecs: { candidates: string[]; describe: string }[] = [
       { candidates: ['m', 'M'], describe: 'letter-m' },
       { candidates: ['⋅', '·', '×', '*'], describe: 'multiplication' },
@@ -121,6 +119,7 @@ test.describe('Editor caret mapping from LaTeX to ASCII', () => {
       { candidates: [')'], describe: 'close-paren' },
     ];
 
+    // Running index in ASCII for sequential searches
     let searchFrom = 0;
     for (const spec of glyphSpecs) {
       const kidx = findFirstCharIndex(chars, spec.candidates);
@@ -136,10 +135,12 @@ test.describe('Editor caret mapping from LaTeX to ASCII', () => {
       const expectedPos = ascii.indexOf(targetAsciiChar, searchFrom);
       expect(expectedPos, `ASCII char '${targetAsciiChar}' not found after ${searchFrom} for ${spec.describe}`).toBeGreaterThanOrEqual(0);
 
+      // Expected caret is immediately after that char
       const expectedCaret = expectedPos + 1;
       console.log(`Clicked ${spec.describe} '${g.ch}' -> caret ${info.caret}, expected ${expectedCaret}, context: ${info.context}`);
       expect(info.caret, `${spec.describe} caret mismatch`).toBe(expectedCaret);
 
+      // Advance searchFrom to just after this occurrence to avoid matching earlier duplicates
       searchFrom = expectedCaret;
       await returnToPreview(page);
     }

@@ -478,8 +478,282 @@ export const VariableDetails = styled(
       const usableWidth = Math.max(1, rect.width - padLeft - padRight);
       const clickX = Math.max(0, Math.min(usableWidth, e.clientX - rect.left - padLeft));
 
-      // Precise caret mapping via hidden monospace ghost with per-char spans
+      // Map click to text offset.
+      // Strategy:
+      // 1) Try to resolve the specific KaTeX glyph under the click, map it to the matching ASCII
+      //    character, and place the caret immediately after the closest matching occurrence in the
+      //    ASCII equation (by proximity to the coarse proportional index).
+      // 2) Otherwise, prefer proportional mapping over KaTeX content width.
+      // 3) Fall back to a hidden monospace ghost with per-char spans and midpoints.
+      // 4) Finally fall back to plain proportional mapping over the container width.
       const computeOffset = (): number => {
+        // Utility: map KaTeX glyph to ASCII char
+        const mapGlyphToAscii = (ch: string): string => {
+          if (ch === '·' || ch === '×' || ch === '⋅') return '*';
+          if (ch === '−') return '-';
+          return ch;
+        };
+
+        // Build a linear list of KaTeX glyphs with positions to enable context disambiguation
+        const buildGlyphs = () => {
+          const list: { raw: string; ascii: string; left: number; right: number; top: number; bottom: number }[] = [];
+          const root = target.querySelector('.katex') as HTMLElement | null;
+          if (!root) return { list, contentRect: target.getBoundingClientRect() };
+          const html = target.querySelector('.katex .katex-html, .katex-display .katex-html') as HTMLElement | null;
+          const contentRect = (html ?? root).getBoundingClientRect();
+          try {
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+              const tn = walker.currentNode as any;
+              const text: string = (tn && (tn as any).nodeValue) || '';
+              for (let i = 0; i < text.length; i++) {
+                const rng = document.createRange();
+                rng.setStart(tn as Node, i);
+                rng.setEnd(tn as Node, i + 1);
+                const r = rng.getBoundingClientRect();
+                if (!r || r.width <= 0 || r.height <= 0) continue;
+                const raw = text[i];
+                const ascii = mapGlyphToAscii(raw);
+                list.push({ raw, ascii, left: r.left, right: r.right, top: r.top, bottom: r.bottom });
+              }
+            }
+          } catch {
+            // ignore
+          }
+          try {
+            // eslint-disable-next-line no-console
+            console.log('[CaretMap] glyphs', {
+              count: list.length,
+              ascii: list.map((g) => g.ascii).join(''),
+              first20: list
+                .slice(0, 20)
+                .map((g) => g.ascii)
+                .join(''),
+            });
+          } catch {}
+          return { list, contentRect };
+        };
+
+        // Utility: try to find the KaTeX glyph index at click coordinates
+        const glyphIndexAtPoint = (glyphs: ReturnType<typeof buildGlyphs>['list']): number => {
+          // First, exact hit
+          for (let i = 0; i < glyphs.length; i++) {
+            const g = glyphs[i];
+            if (e.clientX >= g.left && e.clientX <= g.right && e.clientY >= g.top && e.clientY <= g.bottom) {
+              try {
+                // eslint-disable-next-line no-console
+                console.log('[CaretMap] exact glyph hit', { index: i, ascii: g.ascii, raw: g.raw });
+              } catch {}
+              return i;
+            }
+          }
+          // Otherwise nearest on same line (by center distance)
+          let best = -1;
+          let bestDist = Number.POSITIVE_INFINITY;
+          for (let i = 0; i < glyphs.length; i++) {
+            const g = glyphs[i];
+            const cx = (g.left + g.right) / 2;
+            const cy = (g.top + g.bottom) / 2;
+            const dx = Math.abs(e.clientX - cx);
+            const dy = Math.abs(e.clientY - cy);
+            const d = dx + dy * 0.5;
+            if (d < bestDist) {
+              bestDist = d;
+              best = i;
+            }
+          }
+          try {
+            if (best >= 0) {
+              const g = glyphs[best];
+              // eslint-disable-next-line no-console
+              console.log('[CaretMap] nearest glyph', { index: best, ascii: g.ascii, raw: g.raw, dist: bestDist });
+            } else {
+              // eslint-disable-next-line no-console
+              console.log('[CaretMap] no glyph found');
+            }
+          } catch {}
+          return best;
+        };
+
+        // Try glyph-based mapping first
+        try {
+          const { list: glyphs, contentRect } = buildGlyphs();
+          if (glyphs.length > 0) {
+            const gidx = glyphIndexAtPoint(glyphs);
+            if (gidx >= 0) {
+              const center = glyphs[gidx].ascii;
+              const prev = gidx > 0 ? glyphs[gidx - 1].ascii : '';
+              const next = gidx + 1 < glyphs.length ? glyphs[gidx + 1].ascii : '';
+              const pattern = (prev + center + next).trim();
+              const len = equationStr.length;
+              // Try word-token based mapping for alphanumeric/underscore sequences
+              const isTokenChar = (ch: string) => /[A-Za-z0-9_]/.test(ch);
+              if (isTokenChar(center)) {
+                let li = gidx;
+                let ri = gidx;
+                while (li - 1 >= 0 && isTokenChar(glyphs[li - 1].ascii)) li--;
+                while (ri + 1 < glyphs.length && isTokenChar(glyphs[ri + 1].ascii)) ri++;
+                const token = glyphs
+                  .slice(li, ri + 1)
+                  .map((g) => g.ascii)
+                  .join('');
+                const posInToken = gidx - li;
+                if (token.length > 1) {
+                  // Prefer nearest occurrence of the token to the coarse proportional index
+                  const cx = Math.max(0, Math.min(contentRect.width, e.clientX - contentRect.left));
+                  const coarse = Math.max(0, Math.min(len, Math.round((cx / Math.max(1, contentRect.width)) * len)));
+                  const candidates: number[] = [];
+                  let s = 0;
+                  for (;;) {
+                    const idx = equationStr.indexOf(token, s);
+                    if (idx === -1) break;
+                    candidates.push(idx);
+                    s = idx + 1;
+                  }
+                  if (candidates.length > 0) {
+                    let choiceIdx = candidates[0];
+                    let bestDist = Math.abs(choiceIdx - coarse);
+                    for (const c of candidates) {
+                      const d = Math.abs(c - coarse);
+                      if (d < bestDist) {
+                        bestDist = d;
+                        choiceIdx = c;
+                      }
+                    }
+                    try {
+                      // eslint-disable-next-line no-console
+                      console.log('[CaretMap] token match', { token, candidates, choiceIdx, posInToken });
+                    } catch {}
+                    return choiceIdx + posInToken + 1;
+                  } else {
+                    try {
+                      // eslint-disable-next-line no-console
+                      console.log('[CaretMap] token not found', { token });
+                    } catch {}
+                  }
+                }
+              }
+              // Signature neighbor matching for punctuation/operators/digits (and single-char tokens)
+              const isSigChar = (ch: string) => /[A-Za-z0-9_()*+\-]/.test(ch);
+              const prevSig = (() => {
+                for (let k = gidx - 1; k >= 0; k--) if (isSigChar(glyphs[k].ascii)) return glyphs[k].ascii; return '';
+              })();
+              const nextSig = (() => {
+                for (let k = gidx + 1; k < glyphs.length; k++) if (isSigChar(glyphs[k].ascii)) return glyphs[k].ascii; return '';
+              })();
+              if (center && (prevSig || nextSig)) {
+                const positions: number[] = [];
+                for (let i = 0; i < len; i++) if (equationStr[i] === center) positions.push(i);
+                const matchScore = (idx: number) => {
+                  let score = 0;
+                  if (prevSig) {
+                    let j = idx - 1; while (j >= 0 && /\s/.test(equationStr[j])) j--; if (j >= 0 && equationStr[j] === prevSig) score += 2;
+                  }
+                  if (nextSig) {
+                    let j = idx + 1; while (j < len && /\s/.test(equationStr[j])) j++; if (j < len && equationStr[j] === nextSig) score += 2;
+                  }
+                  return score;
+                };
+                let bestIdx = -1;
+                let bestScore = -1;
+                for (const p of positions) { const s = matchScore(p); if (s > bestScore) { bestScore = s; bestIdx = p; } }
+                if (bestIdx >= 0) {
+                  try { console.log('[CaretMap] sig-neighbor match', { center, prevSig, nextSig, bestIdx, bestScore }); } catch {}
+                  return bestIdx + 1;
+                }
+                try { console.log('[CaretMap] sig-neighbor no match', { center, prevSig, nextSig, positions }); } catch {}
+              }
+
+              // Try contextual match: prev+center+next
+              if (pattern.length >= 2) {
+                const idx = equationStr.indexOf(pattern);
+                if (idx >= 0) {
+                  try {
+                    // eslint-disable-next-line no-console
+                    console.log('[CaretMap] context match', { pattern, idx, prev, center, next });
+                  } catch {}
+                  const centerOffset = prev ? 1 : 0;
+                  return idx + centerOffset + 1;
+                }
+                try {
+                  // eslint-disable-next-line no-console
+                  console.log('[CaretMap] context not found', { pattern });
+                } catch {}
+              }
+              // Fallback: match just center using nth occurrence by glyph index
+              if (center) {
+                // Count occurrences among glyphs up to this glyph to get the per-char occurrence index
+                let glyphOcc = 0;
+                for (let k = 0; k < gidx; k++) if (glyphs[k].ascii === center) glyphOcc++;
+                let count = -1;
+                for (let i = 0; i < len; i++) {
+                  if (equationStr[i] === center) {
+                    count++;
+                    if (count === glyphOcc) {
+                      try {
+                        // eslint-disable-next-line no-console
+                        console.log('[CaretMap] nth occurrence fallback', { center, glyphOcc, index: i });
+                      } catch {}
+                      return i + 1;
+                    }
+                  }
+                }
+                try {
+                  // eslint-disable-next-line no-console
+                  console.log('[CaretMap] nth occurrence not found', { center, glyphOcc });
+                } catch {}
+              }
+              // Fallback: choose occurrence closest to coarse proportional position
+              const cx = Math.max(0, Math.min(contentRect.width, e.clientX - contentRect.left));
+              const coarse = Math.max(0, Math.min(len, Math.round((cx / Math.max(1, contentRect.width)) * len)));
+              const positions: number[] = [];
+              for (let i = 0; i < len; i++) if (equationStr[i] === center) positions.push(i);
+              if (positions.length > 0) {
+                let choice = positions[0];
+                let bestDist = Math.abs(choice - coarse);
+                for (const p of positions) {
+                  const d = Math.abs(p - coarse);
+                  if (d < bestDist) {
+                    bestDist = d;
+                    choice = p;
+                  }
+                }
+                try {
+                  // eslint-disable-next-line no-console
+                  console.log('[CaretMap] coarse fallback', { center, coarse, positions, choice });
+                } catch {}
+                return choice + 1;
+              }
+              try {
+                // eslint-disable-next-line no-console
+                console.log('[CaretMap] no positions for center', { center });
+              } catch {}
+            }
+          }
+        } catch {
+          // ignore and try next strategy
+        }
+
+        try {
+          // Prefer mapping relative to actual KaTeX content box, ignoring padding.
+          const katexHtml = target.querySelector(
+            '.katex .katex-html, .katex-display .katex-html',
+          ) as HTMLElement | null;
+          if (katexHtml) {
+            const contentRect = katexHtml.getBoundingClientRect();
+            const cx = Math.max(0, Math.min(contentRect.width, e.clientX - contentRect.left));
+            const len = equationStr.length;
+            try {
+              // eslint-disable-next-line no-console
+              console.log('[CaretMap] proportional over KaTeX content', { width: contentRect.width, cx, len });
+            } catch {}
+            return Math.max(0, Math.min(len, Math.round((cx / Math.max(1, contentRect.width)) * len)));
+          }
+        } catch {
+          // ignore and try ghost mapping
+        }
+
+        // Precise caret mapping via hidden monospace ghost with per-char spans
         try {
           const ghost = document.createElement('div');
           ghost.style.position = 'absolute';
@@ -513,21 +787,43 @@ export const VariableDetails = styled(
             rights.push(r.right - ghostRect.left);
           }
 
-          // Find first position whose right edge crosses clickX
-          let idx = rights.findIndex((rx) => rx >= clickX);
-          if (idx === -1) idx = spans.length; // click beyond end
+          // Prefer nearest character boundary using midpoints between glyph boxes
+          // left edge for i is rights[i-1] (or 0 for i=0)
+          let idx = spans.length;
+          for (let i = 0; i < spans.length; i++) {
+            const left = i === 0 ? 0 : rights[i - 1];
+            const right = rights[i];
+            const mid = (left + right) / 2;
+            if (clickX < mid) {
+              idx = i;
+              break;
+            }
+            // If past the midpoint, caret should go after this character; keep scanning
+          }
 
           // Cleanup
           target.removeChild(ghost);
+          try {
+            // eslint-disable-next-line no-console
+            console.log('[CaretMap] ghost midpoint idx', { idx });
+          } catch {}
           return idx;
         } catch {
           // Fallback to proportional mapping
           const len = equationStr.length;
+          try {
+            // eslint-disable-next-line no-console
+            console.log('[CaretMap] container proportional fallback', { usableWidth, clickX, len });
+          } catch {}
           return Math.max(0, Math.min(len, Math.round((clickX / usableWidth) * len)));
         }
       };
 
       const offset = computeOffset();
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[CaretMap] final offset', { offset });
+      } catch {}
 
       this.setState({ editingEquation: true }, () => {
         // Focus and set caret after the editor renders
