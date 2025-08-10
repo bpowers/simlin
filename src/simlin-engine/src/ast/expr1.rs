@@ -5,7 +5,7 @@
 use crate::ast::expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use crate::builtins::Loc;
 use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
-use crate::common::{EquationResult, Ident};
+use crate::common::{CanonicalIdent, EquationResult};
 use crate::eqn_err;
 use crate::model::ScopeStage0;
 
@@ -15,7 +15,7 @@ use crate::model::ScopeStage0;
 pub enum IndexExpr1 {
     Wildcard(Loc),
     // *:dimension_name
-    StarRange(Ident, Loc),
+    StarRange(CanonicalIdent, Loc),
     Range(Expr1, Expr1, Loc),
     DimPosition(u32, Loc),
     Expr(Expr1),
@@ -25,9 +25,7 @@ impl IndexExpr1 {
     pub(crate) fn from(expr: IndexExpr0) -> EquationResult<Self> {
         let expr = match expr {
             IndexExpr0::Wildcard(loc) => IndexExpr1::Wildcard(loc),
-            IndexExpr0::StarRange(ident, loc) => {
-                IndexExpr1::StarRange(ident.canonicalize().to_ident(), loc)
-            }
+            IndexExpr0::StarRange(ident, loc) => IndexExpr1::StarRange(ident.canonicalize(), loc),
             IndexExpr0::Range(l, r, loc) => {
                 IndexExpr1::Range(Expr1::from(l)?, Expr1::from(r)?, loc)
             }
@@ -58,9 +56,9 @@ impl IndexExpr1 {
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr1 {
     Const(String, f64, Loc),
-    Var(Ident, Loc),
+    Var(CanonicalIdent, Loc),
     App(BuiltinFn<Expr1>, Loc),
-    Subscript(Ident, Vec<IndexExpr1>, Loc),
+    Subscript(CanonicalIdent, Vec<IndexExpr1>, Loc),
     Op1(UnaryOp, Box<Expr1>, Loc),
     Op2(BinaryOp, Box<Expr1>, Box<Expr1>, Loc),
     If(Box<Expr1>, Box<Expr1>, Box<Expr1>, Loc),
@@ -70,7 +68,7 @@ impl Expr1 {
     pub(crate) fn from(expr: Expr0) -> EquationResult<Self> {
         let expr = match expr {
             Expr0::Const(s, n, loc) => Expr1::Const(s, n, loc),
-            Expr0::Var(id, loc) => Expr1::Var(id.canonicalize().to_ident(), loc),
+            Expr0::Var(id, loc) => Expr1::Var(id.canonicalize(), loc),
             Expr0::App(UntypedBuiltinFn(id, orig_args), loc) => {
                 let args: EquationResult<Vec<Expr1>> =
                     orig_args.into_iter().map(Expr1::from).collect();
@@ -162,7 +160,7 @@ impl Expr1 {
                 let builtin = match id.as_str() {
                     "lookup" => {
                         if let Some(Expr1::Var(ident, loc)) = args.first() {
-                            BuiltinFn::Lookup(ident.clone(), Box::new(args[1].clone()), *loc)
+                            BuiltinFn::Lookup(ident.to_ident(), Box::new(args[1].clone()), *loc)
                         } else {
                             return eqn_err!(BadTable, loc.start, loc.end);
                         }
@@ -178,7 +176,7 @@ impl Expr1 {
                     "int" => check_arity!(Int, 1),
                     "ismoduleinput" => {
                         if let Some(Expr1::Var(ident, loc)) = args.first() {
-                            BuiltinFn::IsModuleInput(ident.clone(), *loc)
+                            BuiltinFn::IsModuleInput(ident.to_ident(), *loc)
                         } else {
                             return eqn_err!(ExpectedIdent, loc.start, loc.end);
                         }
@@ -214,7 +212,7 @@ impl Expr1 {
             Expr0::Subscript(id, args, loc) => {
                 let args: EquationResult<Vec<IndexExpr1>> =
                     args.into_iter().map(IndexExpr1::from).collect();
-                Expr1::Subscript(id.canonicalize().to_ident(), args?, loc)
+                Expr1::Subscript(id.canonicalize(), args?, loc)
             }
             Expr0::Op1(op, l, loc) => Expr1::Op1(op, Box::new(Expr1::from(*l)?), loc),
             Expr0::Op2(op, l, r, loc) => Expr1::Op2(
@@ -240,8 +238,8 @@ impl Expr1 {
         match self {
             Expr1::Const(s, n, loc) => Expr1::Const(s, n, loc),
             Expr1::Var(id, loc) => {
-                if let Some(off) = scope.dimensions.lookup(&id) {
-                    Expr1::Const(id, off as f64, loc)
+                if let Some(off) = scope.dimensions.lookup(id.as_str()) {
+                    Expr1::Const(id.to_ident(), off as f64, loc)
                 } else {
                     Expr1::Var(id, loc)
                 }

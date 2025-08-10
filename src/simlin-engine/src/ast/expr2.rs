@@ -82,7 +82,7 @@ impl IndexExpr2 {
     pub(crate) fn from<C: Expr2Context>(expr: IndexExpr1, ctx: &mut C) -> EquationResult<Self> {
         let expr = match expr {
             IndexExpr1::Wildcard(loc) => IndexExpr2::Wildcard(loc),
-            IndexExpr1::StarRange(ident, loc) => IndexExpr2::StarRange(ident, loc),
+            IndexExpr1::StarRange(ident, loc) => IndexExpr2::StarRange(ident.to_ident(), loc),
             IndexExpr1::Range(l, r, loc) => {
                 IndexExpr2::Range(Expr2::from(l, ctx)?, Expr2::from(r, ctx)?, loc)
             }
@@ -304,23 +304,23 @@ impl Expr2 {
             Expr1::Var(id, loc) => {
                 // Check if this is a dimension name being used in a scalar context
                 // In array contexts, dimension names are allowed and will be converted to indices
-                if ctx.is_dimension_name(&id) && !ctx.is_array_context() {
+                if ctx.is_dimension_name(id.as_str()) && !ctx.is_array_context() {
                     return eqn_err!(DimensionInScalarContext, loc.start, loc.end);
                 }
 
-                let array_bounds = if let Some(dims) = ctx.get_dimensions(&id) {
+                let array_bounds = if let Some(dims) = ctx.get_dimensions(id.as_str()) {
                     let dim_sizes: Vec<usize> = dims.iter().map(|d| d.len()).collect();
                     let dim_names: Vec<String> =
                         dims.iter().map(|d| d.name().to_string()).collect();
                     Some(ArrayBounds::Named {
-                        name: id.clone(),
+                        name: id.to_ident(),
                         dims: dim_sizes,
                         dim_names: Some(dim_names),
                     })
                 } else {
                     None
                 };
-                Expr2::Var(id, array_bounds, loc)
+                Expr2::Var(id.to_ident(), array_bounds, loc)
             }
             Expr1::App(builtin_fn, loc) => {
                 use BuiltinFn::*;
@@ -403,7 +403,7 @@ impl Expr2 {
                 let args = args?;
 
                 // Check if the subscripted variable is an array
-                let array_bounds = if let Some(dims) = ctx.get_dimensions(&id) {
+                let array_bounds = if let Some(dims) = ctx.get_dimensions(id.as_str()) {
                     // For now, compute maximum bounds after subscripting
                     // In the simplified design, we just track the result dimensions
                     // The actual subscript logic will be handled in the compiler
@@ -442,7 +442,7 @@ impl Expr2 {
                     None // Scalar variable or unknown variable
                 };
 
-                Expr2::Subscript(id, args, array_bounds, loc)
+                Expr2::Subscript(id.to_ident(), args, array_bounds, loc)
             }
             Expr1::Op1(op, l, loc) => {
                 let l_expr = Expr2::from(*l, ctx)?;
@@ -896,11 +896,12 @@ mod tests {
     #[test]
     fn test_expr2_from_scalar_var() {
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
         // Test scalar variable (no dimensions)
-        let var_expr = Expr1::Var("scalar_var".to_string(), Loc::default());
+        let var_expr = Expr1::Var(CanonicalIdent::from_raw("scalar_var"), Loc::default());
         let expr2 = Expr2::from(var_expr, &mut ctx).unwrap();
 
         match expr2 {
@@ -915,6 +916,7 @@ mod tests {
     #[test]
     fn test_expr2_from_array_var() {
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -923,7 +925,7 @@ mod tests {
             .insert("array_var".to_string(), indexed_dims(&[3, 4]));
 
         // Test array variable with dimensions
-        let var_expr = Expr1::Var("array_var".to_string(), Loc::default());
+        let var_expr = Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default());
         let expr2 = Expr2::from(var_expr, &mut ctx).unwrap();
 
         match expr2 {
@@ -946,6 +948,7 @@ mod tests {
     #[test]
     fn test_expr2_subscript_reduces_dimensions() {
         use crate::ast::expr1::{Expr1, IndexExpr1};
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -955,7 +958,7 @@ mod tests {
 
         // Test subscript with one index reduces dimension
         let subscript_expr = Expr1::Subscript(
-            "matrix".to_string(),
+            CanonicalIdent::from_raw("matrix"),
             vec![
                 IndexExpr1::Expr(Expr1::Const("1".to_string(), 1.0, Loc::default())),
                 IndexExpr1::Wildcard(Loc::default()),
@@ -985,6 +988,7 @@ mod tests {
     #[test]
     fn test_expr2_subscript_scalar_result() {
         use crate::ast::expr1::{Expr1, IndexExpr1};
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -994,7 +998,7 @@ mod tests {
 
         // Test subscript that results in scalar
         let subscript_expr = Expr1::Subscript(
-            "vector".to_string(),
+            CanonicalIdent::from_raw("vector"),
             vec![IndexExpr1::Expr(Expr1::Const(
                 "2".to_string(),
                 2.0,
@@ -1016,7 +1020,9 @@ mod tests {
 
     #[test]
     fn test_expr2_unary_op_preserves_array() {
+        use crate::ast::UnaryOp;
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -1027,7 +1033,7 @@ mod tests {
         // Test unary negative preserves array dimensions
         let neg_expr = Expr1::Op1(
             UnaryOp::Negative,
-            Box::new(Expr1::Var("array_var".to_string(), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(neg_expr, &mut ctx).unwrap();
@@ -1050,7 +1056,9 @@ mod tests {
 
     #[test]
     fn test_expr2_transpose_reverses_dims() {
+        use crate::ast::UnaryOp;
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -1061,7 +1069,7 @@ mod tests {
         // Test transpose reverses dimensions
         let transpose_expr = Expr1::Op1(
             UnaryOp::Transpose,
-            Box::new(Expr1::Var("matrix".to_string(), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("matrix"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(transpose_expr, &mut ctx).unwrap();
@@ -1084,7 +1092,9 @@ mod tests {
 
     #[test]
     fn test_expr2_binary_op_array_scalar() {
+        use crate::ast::BinaryOp;
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -1095,7 +1105,7 @@ mod tests {
         // Test array + scalar (broadcasting)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var("array_var".to_string(), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
             Box::new(Expr1::Const("10".to_string(), 10.0, Loc::default())),
             Loc::default(),
         );
@@ -1119,7 +1129,9 @@ mod tests {
 
     #[test]
     fn test_expr2_binary_op_matching_arrays() {
+        use crate::ast::BinaryOp;
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -1132,8 +1144,8 @@ mod tests {
         // Test array + array (matching dimensions)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var("array1".to_string(), Loc::default())),
-            Box::new(Expr1::Var("array2".to_string(), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array1"), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array2"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(add_expr, &mut ctx).unwrap();
@@ -1157,6 +1169,7 @@ mod tests {
     #[test]
     fn test_expr2_if_array_branches() {
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -1167,8 +1180,8 @@ mod tests {
         // Test if expression with array in both branches
         let if_expr = Expr1::If(
             Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Expr1::Var("array_var".to_string(), Loc::default())),
-            Box::new(Expr1::Var("array_var".to_string(), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(if_expr, &mut ctx).unwrap();
@@ -1191,7 +1204,9 @@ mod tests {
 
     #[test]
     fn test_expr2_temp_id_allocation() {
+        use crate::ast::{BinaryOp, UnaryOp};
         use crate::ast::expr1::Expr1;
+        use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
 
@@ -1205,7 +1220,7 @@ mod tests {
         // First operation: -array1 (should get temp_id 0)
         let neg_expr = Expr1::Op1(
             UnaryOp::Negative,
-            Box::new(Expr1::Var("array1".to_string(), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array1"), Loc::default())),
             Loc::default(),
         );
         let expr2_1 = Expr2::from(neg_expr, &mut ctx).unwrap();
@@ -1213,8 +1228,8 @@ mod tests {
         // Second operation: array1 + array2 (should get temp_id 1)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var("array1".to_string(), Loc::default())),
-            Box::new(Expr1::Var("array2".to_string(), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array1"), Loc::default())),
+            Box::new(Expr1::Var(CanonicalIdent::from_raw("array2"), Loc::default())),
             Loc::default(),
         );
         let expr2_2 = Expr2::from(add_expr, &mut ctx).unwrap();
