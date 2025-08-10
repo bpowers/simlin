@@ -680,6 +680,12 @@ impl Engine {
         results.iter().map(|curr| curr[off]).collect()
     }
 
+    #[wasm_bindgen(js_name = generateViews)]
+    pub fn generate_views(&mut self) -> Option<Error> {
+        // TODO: Implement view generation logic
+        None
+    }
+
     #[wasm_bindgen(js_name = simClose)]
     pub fn sim_close(&mut self) {
         self.results = None

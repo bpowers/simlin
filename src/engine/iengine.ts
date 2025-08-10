@@ -153,6 +153,10 @@ export interface Engine {
   /**
    */
   simClose(): void;
+  /**
+   * @returns {Error | undefined}
+   */
+  generateViews(): Error | undefined;
 }
 /**
  */

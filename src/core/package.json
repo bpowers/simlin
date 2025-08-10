@@ -62,6 +62,6 @@
     "lint": "eslint .",
     "prepublishOnly": "yarn build",
     "clean": "rm -rf ./lib ./lib.module",
-    "build": "tsc && tsc -p tsconfig.browser.json"
+    "build": "tsc && tsc -p tsconfig.browser.json && cp pb/*.js lib/pb/ && cp pb/*.js lib.module/pb/"
   }
 }
