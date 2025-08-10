@@ -284,28 +284,28 @@ pub(crate) struct VariableMetadata {
 #[derive(Clone, Debug)]
 pub(crate) struct Context<'a> {
     pub(crate) dimensions: Vec<Dimension>,
-    pub(crate) model_name: &'a str,
+    pub(crate) model_name: &'a CanonicalIdent,
     #[allow(dead_code)]
-    pub(crate) ident: &'a str,
+    pub(crate) ident: &'a CanonicalIdent,
     pub(crate) active_dimension: Option<Vec<Dimension>>,
-    pub(crate) active_subscript: Option<Vec<String>>,
-    pub(crate) metadata: &'a HashMap<Ident, HashMap<Ident, VariableMetadata>>,
-    pub(crate) module_models: &'a HashMap<Ident, HashMap<Ident, Ident>>,
+    pub(crate) active_subscript: Option<Vec<CanonicalElementName>>,
+    pub(crate) metadata: &'a HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>>,
+    pub(crate) module_models: &'a HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>>,
     pub(crate) is_initial: bool,
-    pub(crate) inputs: &'a BTreeSet<Ident>,
+    pub(crate) inputs: &'a BTreeSet<CanonicalIdent>,
 }
 
 impl Context<'_> {
-    fn get_offset(&self, ident: &str) -> Result<usize> {
+    fn get_offset(&self, ident: &CanonicalIdent) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, false)
     }
 
     /// get_base_offset ignores arrays and should only be used from Var::new and Expr::Subscript
-    fn get_base_offset(&self, ident: &str) -> Result<usize> {
+    fn get_base_offset(&self, ident: &CanonicalIdent) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, true)
     }
 
-    fn get_metadata(&self, ident: &str) -> Result<&VariableMetadata> {
+    fn get_metadata(&self, ident: &CanonicalIdent) -> Result<&VariableMetadata> {
         self.get_submodel_metadata(self.model_name, ident)
     }
 
@@ -382,7 +382,10 @@ impl Context<'_> {
             .iter()
             .zip(subscripts)
             .fold(0_usize, |acc, (dim, subscript)| {
-                acc * dim.len() + dim.get_offset(subscript).unwrap()
+                acc * dim.len()
+                    + dim
+                        .get_offset(&CanonicalElementName::from_raw(subscript))
+                        .unwrap()
             });
 
         Ok(off)
@@ -401,33 +404,54 @@ impl Context<'_> {
         None
     }
 
-    fn get_submodel_metadata(&self, model: &str, ident: &str) -> Result<&VariableMetadata> {
+    fn get_submodel_metadata(
+        &self,
+        model: &CanonicalIdent,
+        ident: &CanonicalIdent,
+    ) -> Result<&VariableMetadata> {
         let metadata = &self.metadata[model];
-        if let Some(pos) = ident.find('·') {
-            let submodel_module_name = &ident[..pos];
-            let submodel_name = &self.module_models[model][submodel_module_name];
-            let submodel_var = &ident[pos + '·'.len_utf8()..];
-            self.get_submodel_metadata(submodel_name, submodel_var)
+        if let Some(pos) = ident.as_str().find('·') {
+            let submodel_module_name = &ident.as_str()[..pos];
+            let submodel_name = &self.module_models[model]
+                [&CanonicalIdent::from_canonical_str_unchecked(submodel_module_name)];
+            let submodel_var = &ident.as_str()[pos + '·'.len_utf8()..];
+            self.get_submodel_metadata(
+                submodel_name,
+                &CanonicalIdent::from_canonical_str_unchecked(submodel_var),
+            )
         } else {
             Ok(&metadata[ident])
         }
     }
 
-    fn get_submodel_offset(&self, model: &str, ident: &str, ignore_arrays: bool) -> Result<usize> {
+    fn get_submodel_offset(
+        &self,
+        model: &CanonicalIdent,
+        ident: &CanonicalIdent,
+        ignore_arrays: bool,
+    ) -> Result<usize> {
         let metadata = &self.metadata[model];
-        if let Some(pos) = ident.find('·') {
-            let submodel_module_name = &ident[..pos];
-            let submodel_name = &self.module_models[model][submodel_module_name];
-            let submodel_var = &ident[pos + '·'.len_utf8()..];
-            let submodel_off = metadata[submodel_module_name].offset;
+        let ident_str = ident.as_str();
+        if let Some(pos) = ident_str.find('·') {
+            let submodel_module_name = &ident_str[..pos];
+            let submodel_name = &self.module_models[model]
+                [&CanonicalIdent::from_canonical_str_unchecked(submodel_module_name)];
+            let submodel_var = &ident_str[pos + '·'.len_utf8()..];
+            let submodel_off = metadata
+                [&CanonicalIdent::from_canonical_str_unchecked(submodel_module_name)]
+                .offset;
             Ok(submodel_off
-                + self.get_submodel_offset(submodel_name, submodel_var, ignore_arrays)?)
+                + self.get_submodel_offset(
+                    submodel_name,
+                    &CanonicalIdent::from_canonical_str_unchecked(submodel_var),
+                    ignore_arrays,
+                )?)
         } else if !ignore_arrays {
             if !metadata.contains_key(ident) {
                 return sim_err!(DoesNotExist);
             }
             if let Some(dims) = metadata[ident].var.get_dimensions() {
-                let off = self.get_implicit_subscript_off(dims, ident)?;
+                let off = self.get_implicit_subscript_off(dims, ident.as_str())?;
                 Ok(metadata[ident].offset + off)
             } else {
                 Ok(metadata[ident].offset)
@@ -459,14 +483,14 @@ impl Context<'_> {
                                     let index = match dim {
                                         Dimension::Indexed(_, _) => {
                                             // Subscript is already a 1-based index as a string
-                                            subscript.parse::<f64>().unwrap()
+                                            subscript.as_str().parse::<f64>().unwrap()
                                         }
                                         Dimension::Named(_, named_dim) => {
                                             let off = named_dim
                                                 .elements
                                                 .iter()
                                                 .position(|elem| {
-                                                    elem.as_str() == canonicalize(subscript)
+                                                    elem.as_str() == subscript.as_str()
                                                 })
                                                 .unwrap();
 
@@ -494,21 +518,21 @@ impl Context<'_> {
                     .inputs
                     .iter()
                     .enumerate()
-                    .find(|(_, input)| id.as_str() == *input)
+                    .find(|(_, input)| id.as_str() == input.as_str())
                 {
                     Expr::ModuleInput(off, *loc)
                 } else {
-                    match self.get_offset(id.as_str()) {
+                    match self.get_offset(id) {
                         Ok(off) => Expr::Var(off, *loc),
                         Err(err) => {
                             // If get_offset fails because it's an array without implicit subscripts,
                             // try to create a full array view
                             if matches!(err.code, ErrorCode::ArrayReferenceNeedsExplicitSubscripts)
                             {
-                                if let Ok(metadata) = self.get_metadata(id.as_str()) {
+                                if let Ok(metadata) = self.get_metadata(id) {
                                     if let Some(source_dims) = metadata.var.get_dimensions() {
                                         // This is an array variable - check if we need dimension reordering
-                                        let off = self.get_base_offset(id.as_str())?;
+                                        let off = self.get_base_offset(id)?;
 
                                         // Check if we're in an A2A context and need to reorder dimensions
                                         if let Some(target_dims) = &self.active_dimension {
@@ -671,7 +695,7 @@ impl Context<'_> {
                     BFn::StartTime => BuiltinFn::StartTime,
                     BFn::FinalTime => BuiltinFn::FinalTime,
                     BFn::Rank(_, _) => {
-                        return sim_err!(TodoArrayBuiltin, self.ident.to_owned());
+                        return sim_err!(TodoArrayBuiltin, self.ident.to_string());
                     }
                     BFn::Size(a) => {
                         let arg = self.lower(a)?;
@@ -689,8 +713,8 @@ impl Context<'_> {
                 Expr::App(builtin, *loc)
             }
             ast::Expr2::Subscript(id, args, _, loc) => {
-                let off = self.get_base_offset(id.as_str())?;
-                let metadata = self.get_metadata(id.as_str())?;
+                let off = self.get_base_offset(id)?;
+                let metadata = self.get_metadata(id)?;
                 let dims = metadata.var.get_dimensions().unwrap();
                 if args.len() != dims.len() {
                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
@@ -917,7 +941,9 @@ impl Context<'_> {
                                             // Get the offset for this subscript in the dimension
                                             if let Some(offset) = dim.get_offset(subscript) {
                                                 result_index += offset * (*stride as usize);
-                                            } else if let Ok(idx) = subscript.parse::<usize>() {
+                                            } else if let Ok(idx) =
+                                                subscript.as_str().parse::<usize>()
+                                            {
                                                 // For indexed dimensions with numeric subscripts
                                                 let idx_0based = idx - 1;
                                                 result_index += idx_0based * (*stride as usize);
@@ -975,7 +1001,9 @@ impl Context<'_> {
                                         } else if let Dimension::Indexed(_name, _size) = dim {
                                             // For indexed dimensions, the subscript is now just a numeric string
                                             // like "1", "2", etc. (1-based)
-                                            if let Ok(idx) = active_subscript.parse::<usize>() {
+                                            if let Ok(idx) =
+                                                active_subscript.as_str().parse::<usize>()
+                                            {
                                                 // The index is already 1-based, so we can use it directly
                                                 return Ok(Expr::Const(idx as f64, *loc));
                                             }
@@ -1020,7 +1048,7 @@ impl Context<'_> {
                                 let subscript = &active_subscripts[dim_idx];
 
                                 // Parse it as a numeric index (1-based)
-                                if let Ok(idx) = subscript.parse::<usize>() {
+                                if let Ok(idx) = subscript.as_str().parse::<usize>() {
                                     Ok(Expr::Const(idx as f64, *loc))
                                 } else {
                                     // If it's a named subscript, we need to resolve it
@@ -1096,7 +1124,7 @@ impl Context<'_> {
                         // Special handling for transpose of bare array variables
                         if let ast::Expr2::Var(id, _, var_loc) = &**l {
                             // Get the variable's metadata to check if it's an array
-                            if let Ok(metadata) = self.get_metadata(id.as_str()) {
+                            if let Ok(metadata) = self.get_metadata(id) {
                                 if let Some(dims) = metadata.var.get_dimensions() {
                                     if self.active_dimension.is_some() {
                                         // We're in an A2A context - need to handle bare array transpose specially
@@ -1119,7 +1147,7 @@ impl Context<'_> {
                                     } else {
                                         // Not in A2A context - create a wildcard subscript to get the full array
                                         // then apply transpose
-                                        let off = self.get_base_offset(id.as_str())?;
+                                        let off = self.get_base_offset(id)?;
                                         let orig_dims: Vec<usize> =
                                             dims.iter().map(|d| d.len()).collect();
                                         let orig_strides =
@@ -1282,7 +1310,7 @@ impl Context<'_> {
         Ok(expr)
     }
 
-    fn fold_flows(&self, flows: &[String]) -> Option<Expr> {
+    fn fold_flows(&self, flows: &[CanonicalIdent]) -> Option<Expr> {
         if flows.is_empty() {
             return None;
         }
@@ -1303,14 +1331,14 @@ impl Context<'_> {
             ast::Expr2::Var(id, _, _) => {
                 // Get the variable's dimensions
                 let metadata = self.metadata.get(self.model_name)?;
-                let var_metadata = metadata.get(id.as_str())?;
+                let var_metadata = metadata.get(id)?;
                 let dims = var_metadata.var.get_dimensions()?;
                 Some(dims.iter().map(|d| d.name().to_string()).collect())
             }
             ast::Expr2::Subscript(id, _, _, _) => {
                 // For subscripted arrays, get the base variable's dimensions
                 let metadata = self.metadata.get(self.model_name)?;
-                let var_metadata = metadata.get(id.as_str())?;
+                let var_metadata = metadata.get(id)?;
                 let dims = var_metadata.var.get_dimensions()?;
                 Some(dims.iter().map(|d| d.name().to_string()).collect())
             }
@@ -1486,15 +1514,16 @@ fn test_lower() {
     };
 
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
-    let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
+    let module_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+        HashMap::new();
+    let mut metadata: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
     metadata.insert(
-        "true_input".to_string(),
+        CanonicalIdent::from_raw("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1509,12 +1538,12 @@ fn test_lower() {
         },
     );
     metadata.insert(
-        "false_input".to_string(),
+        CanonicalIdent::from_raw("false_input"),
         VariableMetadata {
             offset: 8,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1529,11 +1558,13 @@ fn test_lower() {
         },
     );
     let mut metadata2 = HashMap::new();
-    metadata2.insert("main".to_string(), metadata);
+    let main_ident = CanonicalIdent::from_raw("main");
+    let test_ident = CanonicalIdent::from_raw("test");
+    metadata2.insert(main_ident.clone(), metadata);
     let context = Context {
         dimensions: vec![],
-        model_name: "main",
-        ident: "test",
+        model_name: &main_ident,
+        ident: &test_ident,
         active_dimension: None,
         active_subscript: None,
         metadata: &metadata2,
@@ -1584,15 +1615,16 @@ fn test_lower() {
     };
 
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
-    let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
+    let module_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+        HashMap::new();
+    let mut metadata: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
     metadata.insert(
-        "true_input".to_string(),
+        CanonicalIdent::from_raw("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1607,12 +1639,12 @@ fn test_lower() {
         },
     );
     metadata.insert(
-        "false_input".to_string(),
+        CanonicalIdent::from_raw("false_input"),
         VariableMetadata {
             offset: 8,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1627,11 +1659,13 @@ fn test_lower() {
         },
     );
     let mut metadata2 = HashMap::new();
-    metadata2.insert("main".to_string(), metadata);
+    let main_ident = CanonicalIdent::from_raw("main");
+    let test_ident = CanonicalIdent::from_raw("test");
+    metadata2.insert(main_ident.clone(), metadata);
     let context = Context {
         dimensions: vec![],
-        model_name: "main",
-        ident: "test",
+        model_name: &main_ident,
+        ident: &test_ident,
         active_dimension: None,
         active_subscript: None,
         metadata: &metadata2,
@@ -1665,15 +1699,16 @@ pub struct Var {
 #[test]
 fn test_fold_flows() {
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
-    let mut metadata: HashMap<String, VariableMetadata> = HashMap::new();
+    let module_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+        HashMap::new();
+    let mut metadata: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
     metadata.insert(
-        "a".to_string(),
+        CanonicalIdent::from_raw("a"),
         VariableMetadata {
             offset: 1,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1688,12 +1723,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        "b".to_string(),
+        CanonicalIdent::from_raw("b"),
         VariableMetadata {
             offset: 2,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1708,12 +1743,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        "c".to_string(),
+        CanonicalIdent::from_raw("c"),
         VariableMetadata {
             offset: 3,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1728,12 +1763,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        "d".to_string(),
+        CanonicalIdent::from_raw("d"),
         VariableMetadata {
             offset: 4,
             size: 1,
             var: Variable::Var {
-                ident: "".to_string(),
+                ident: CanonicalIdent::from_raw(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1748,11 +1783,13 @@ fn test_fold_flows() {
         },
     );
     let mut metadata2 = HashMap::new();
-    metadata2.insert("main".to_string(), metadata);
+    let main_ident = CanonicalIdent::from_raw("main");
+    let test_ident = CanonicalIdent::from_raw("test");
+    metadata2.insert(main_ident.clone(), metadata);
     let ctx = Context {
         dimensions: vec![],
-        model_name: "main",
-        ident: "test",
+        model_name: &main_ident,
+        ident: &test_ident,
         active_dimension: None,
         active_subscript: None,
         metadata: &metadata2,
@@ -1764,7 +1801,7 @@ fn test_fold_flows() {
     assert_eq!(None, ctx.fold_flows(&[]));
     assert_eq!(
         Some(Expr::Var(1, Loc::default())),
-        ctx.fold_flows(&["a".to_string()])
+        ctx.fold_flows(&[CanonicalIdent::from_raw("a")])
     );
     assert_eq!(
         Some(Expr::Op2(
@@ -1773,21 +1810,21 @@ fn test_fold_flows() {
             Box::new(Expr::Var(4, Loc::default())),
             Loc::default(),
         )),
-        ctx.fold_flows(&["a".to_string(), "d".to_string()])
+        ctx.fold_flows(&[CanonicalIdent::from_raw("a"), CanonicalIdent::from_raw("d")])
     );
 }
 
 impl Var {
     pub(crate) fn new(ctx: &Context, var: &Variable) -> Result<Self> {
         // if this variable is overriden by a module input, our expression is easy
-        let ast: Vec<Expr> = if let Some((off, ident)) = ctx
+        let ast: Vec<Expr> = if let Some((off, _ident)) = ctx
             .inputs
             .iter()
             .enumerate()
-            .find(|(_i, n)| *n == var.ident())
+            .find(|(_i, n)| n.as_str() == var.ident())
         {
             vec![Expr::AssignCurr(
-                ctx.get_offset(ident)?,
+                ctx.get_offset(&CanonicalIdent::from_raw(var.ident()))?,
                 Box::new(Expr::ModuleInput(off, Loc::default())),
             )]
         } else {
@@ -1804,14 +1841,10 @@ impl Var {
                         .into_iter()
                         .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap(), Loc::default()))
                         .collect();
-                    vec![Expr::EvalModule(
-                        CanonicalIdent::from_raw(ident),
-                        CanonicalIdent::from_raw(model_name),
-                        inputs,
-                    )]
+                    vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
                 }
                 Variable::Stock { init_ast: ast, .. } => {
-                    let off = ctx.get_base_offset(var.ident())?;
+                    let off = ctx.get_base_offset(&CanonicalIdent::from_raw(var.ident()))?;
                     if ctx.is_initial {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
@@ -1826,7 +1859,12 @@ impl Var {
                                     .map(|(i, subscripts)| {
                                         let mut ctx = ctx.clone();
                                         ctx.active_dimension = Some(dims.clone());
-                                        ctx.active_subscript = Some(subscripts.clone());
+                                        ctx.active_subscript = Some(
+                                            subscripts
+                                                .iter()
+                                                .map(|s| CanonicalElementName::from_raw(s))
+                                                .collect(),
+                                        );
                                         ctx.lower(ast)
                                             .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                     })
@@ -1843,7 +1881,12 @@ impl Var {
                                         let ast = &elements[&canonical_key];
                                         let mut ctx = ctx.clone();
                                         ctx.active_dimension = Some(dims.clone());
-                                        ctx.active_subscript = Some(subscripts);
+                                        ctx.active_subscript = Some(
+                                            subscripts
+                                                .iter()
+                                                .map(|s| CanonicalElementName::from_raw(s))
+                                                .collect(),
+                                        );
                                         ctx.lower(ast)
                                             .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                     })
@@ -1863,11 +1906,16 @@ impl Var {
                                     .map(|(i, subscripts)| {
                                         let mut ctx = ctx.clone();
                                         ctx.active_dimension = Some(dims.clone());
-                                        ctx.active_subscript = Some(subscripts);
+                                        ctx.active_subscript = Some(
+                                            subscripts
+                                                .iter()
+                                                .map(|s| CanonicalElementName::from_raw(s))
+                                                .collect(),
+                                        );
                                         // when building the stock update expression, we need
                                         // the specific index of this subscript, not the base offset
                                         let update_expr = ctx.build_stock_update_expr(
-                                            ctx.get_offset(var.ident())?,
+                                            ctx.get_offset(&CanonicalIdent::from_raw(var.ident()))?,
                                             var,
                                         );
                                         Ok(Expr::AssignNext(off + i, Box::new(update_expr)))
@@ -1879,7 +1927,7 @@ impl Var {
                     }
                 }
                 Variable::Var { ident, table, .. } => {
-                    let off = ctx.get_base_offset(var.ident())?;
+                    let off = ctx.get_base_offset(&CanonicalIdent::from_raw(var.ident()))?;
                     let ast = if ctx.is_initial {
                         var.init_ast()
                     } else {
@@ -1894,7 +1942,11 @@ impl Var {
                             let expr = if table.is_some() {
                                 let loc = expr.get_loc();
                                 Expr::App(
-                                    BuiltinFn::Lookup(ident.clone(), Box::new(expr), loc),
+                                    BuiltinFn::Lookup(
+                                        ident.as_str().to_string(),
+                                        Box::new(expr),
+                                        loc,
+                                    ),
                                     loc,
                                 )
                             } else {
@@ -1908,7 +1960,12 @@ impl Var {
                                 .map(|(i, subscripts)| {
                                     let mut ctx = ctx.clone();
                                     ctx.active_dimension = Some(dims.clone());
-                                    ctx.active_subscript = Some(subscripts);
+                                    ctx.active_subscript = Some(
+                                        subscripts
+                                            .iter()
+                                            .map(|s| CanonicalElementName::from_raw(s))
+                                            .collect(),
+                                    );
                                     ctx.lower(ast)
                                         .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                 })
@@ -1925,7 +1982,12 @@ impl Var {
                                     let ast = &elements[&canonical_key];
                                     let mut ctx = ctx.clone();
                                     ctx.active_dimension = Some(dims.clone());
-                                    ctx.active_subscript = Some(subscripts);
+                                    ctx.active_subscript = Some(
+                                        subscripts
+                                            .iter()
+                                            .map(|s| CanonicalElementName::from_raw(s))
+                                            .collect(),
+                                    );
                                     ctx.lower(ast)
                                         .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
                                 })
@@ -2019,9 +2081,10 @@ fn get_array_view(expr: &Expr) -> Option<ArrayView> {
 // calculate a mapping of module variable name -> module model name
 pub(crate) fn calc_module_model_map(
     project: &Project,
-    model_name: &str,
-) -> HashMap<Ident, HashMap<Ident, Ident>> {
-    let mut all_models: HashMap<Ident, HashMap<Ident, Ident>> = HashMap::new();
+    model_name: &CanonicalIdent,
+) -> HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> {
+    let mut all_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+        HashMap::new();
 
     let model = Rc::clone(&project.models[model_name]);
     let var_names: Vec<&str> = {
@@ -2030,17 +2093,22 @@ pub(crate) fn calc_module_model_map(
         var_names
     };
 
-    let mut current_mapping: HashMap<Ident, Ident> = HashMap::new();
+    let mut current_mapping: HashMap<CanonicalIdent, CanonicalIdent> = HashMap::new();
 
     for ident in var_names.iter() {
-        if let Variable::Module { model_name, .. } = &model.variables[*ident] {
-            current_mapping.insert(ident.to_string(), model_name.clone());
-            let all_sub_models = calc_module_model_map(project, model_name);
+        let canonical_ident = CanonicalIdent::from_raw(ident);
+        if let Variable::Module {
+            model_name: module_model_name,
+            ..
+        } = &model.variables[&canonical_ident]
+        {
+            current_mapping.insert(canonical_ident.clone(), module_model_name.clone());
+            let all_sub_models = calc_module_model_map(project, module_model_name);
             all_models.extend(all_sub_models);
         };
     }
 
-    all_models.insert(model_name.to_string(), current_mapping);
+    all_models.insert(model_name.clone(), current_mapping);
 
     all_models
 }
@@ -2048,21 +2116,22 @@ pub(crate) fn calc_module_model_map(
 // TODO: this should memoize
 pub(crate) fn build_metadata(
     project: &Project,
-    model_name: &str,
+    model_name: &CanonicalIdent,
     is_root: bool,
-) -> HashMap<Ident, HashMap<Ident, VariableMetadata>> {
-    let mut all_offsets: HashMap<Ident, HashMap<Ident, VariableMetadata>> = HashMap::new();
+) -> HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>> {
+    let mut all_offsets: HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>> =
+        HashMap::new();
 
-    let mut offsets: HashMap<Ident, VariableMetadata> = HashMap::new();
+    let mut offsets: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
     let mut i = 0;
     if is_root {
         offsets.insert(
-            "time".to_string(),
+            CanonicalIdent::from_raw("time"),
             VariableMetadata {
                 offset: 0,
                 size: 1,
                 var: Variable::Var {
-                    ident: "time".to_string(),
+                    ident: CanonicalIdent::from_raw("time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2077,12 +2146,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            "dt".to_string(),
+            CanonicalIdent::from_raw("dt"),
             VariableMetadata {
                 offset: 1,
                 size: 1,
                 var: Variable::Var {
-                    ident: "dt".to_string(),
+                    ident: CanonicalIdent::from_raw("dt"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2097,12 +2166,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            "initial_time".to_string(),
+            CanonicalIdent::from_raw("initial_time"),
             VariableMetadata {
                 offset: 2,
                 size: 1,
                 var: Variable::Var {
-                    ident: "initial_time".to_string(),
+                    ident: CanonicalIdent::from_raw("initial_time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2117,12 +2186,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            "final_time".to_string(),
+            CanonicalIdent::from_raw("final_time"),
             VariableMetadata {
                 offset: 3,
                 size: 1,
                 var: Variable::Var {
-                    ident: "final_time".to_string(),
+                    ident: CanonicalIdent::from_raw("final_time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2140,45 +2209,45 @@ pub(crate) fn build_metadata(
     }
 
     let model = Rc::clone(&project.models[model_name]);
-    let var_names: Vec<&str> = {
-        let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
+    let var_names: Vec<&CanonicalIdent> = {
+        let mut var_names: Vec<_> = model.variables.keys().collect();
         var_names.sort_unstable();
         var_names
     };
 
-    for ident in var_names.iter() {
-        let size = if let Variable::Module { model_name, .. } = &model.variables[*ident] {
+    for canonical_ident in var_names {
+        let size = if let Variable::Module { model_name, .. } = &model.variables[canonical_ident] {
             let all_sub_offsets = build_metadata(project, model_name, false);
             let sub_offsets = &all_sub_offsets[model_name];
             let sub_size: usize = sub_offsets.values().map(|metadata| metadata.size).sum();
             all_offsets.extend(all_sub_offsets);
             sub_size
-        } else if let Some(Ast::ApplyToAll(dims, _)) = model.variables[*ident].ast() {
+        } else if let Some(Ast::ApplyToAll(dims, _)) = model.variables[canonical_ident].ast() {
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _)) = model.variables[*ident].ast() {
+        } else if let Some(Ast::Arrayed(dims, _)) = model.variables[canonical_ident].ast() {
             dims.iter().map(|dim| dim.len()).product()
         } else {
             1
         };
         offsets.insert(
-            (*ident).to_owned(),
+            canonical_ident.clone(),
             VariableMetadata {
                 offset: i,
                 size,
-                var: model.variables[*ident].clone(),
+                var: model.variables[canonical_ident].clone(),
             },
         );
         i += size;
     }
 
-    all_offsets.insert(model_name.to_string(), offsets);
+    all_offsets.insert(model_name.clone(), offsets);
 
     all_offsets
 }
 
 fn calc_n_slots(
-    all_metadata: &HashMap<Ident, HashMap<Ident, VariableMetadata>>,
-    model_name: &str,
+    all_metadata: &HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>>,
+    model_name: &CanonicalIdent,
 ) -> usize {
     let metadata = &all_metadata[model_name];
 
@@ -2189,27 +2258,25 @@ impl Module {
     pub(crate) fn new(
         project: &Project,
         model: Rc<ModelStage1>,
-        inputs: &BTreeSet<Ident>,
+        inputs: &BTreeSet<CanonicalIdent>,
         is_root: bool,
     ) -> Result<Self> {
-        let inputs_set = inputs.iter().cloned().collect::<BTreeSet<_>>();
-
         let instantiation = model
             .instantiations
             .as_ref()
-            .and_then(|instantiations| instantiations.get(&inputs_set))
+            .and_then(|instantiations| instantiations.get(inputs))
             .ok_or(Error {
                 kind: ErrorKind::Simulation,
                 code: ErrorCode::NotSimulatable,
-                details: Some(model.name.clone()),
+                details: Some(model.name.to_string()),
             })?;
 
         // TODO: eventually we should try to simulate subsets of the model in the face of errors
         if model.errors.is_some() && !model.errors.as_ref().unwrap().is_empty() {
-            return sim_err!(NotSimulatable, model.name.clone());
+            return sim_err!(NotSimulatable, model.name.to_string());
         }
 
-        let model_name: &str = &model.name;
+        let model_name: &CanonicalIdent = &model.name;
         let metadata = build_metadata(project, model_name, is_root);
 
         let n_slots = calc_n_slots(&metadata, model_name);
@@ -2227,7 +2294,7 @@ impl Module {
             .map(|d| Dimension::from(d.clone()))
             .collect();
 
-        let build_var = |ident, is_initial| {
+        let build_var = |ident: &CanonicalIdent, is_initial| {
             Var::new(
                 &Context {
                     dimensions: converted_dims.clone(),
@@ -2273,7 +2340,10 @@ impl Module {
 
         let tables: Result<HashMap<String, Table>> = var_names
             .iter()
-            .map(|id| (id, &model.variables[*id]))
+            .map(|id| {
+                let canonical_id = CanonicalIdent::from_raw(id);
+                (id, &model.variables[&canonical_id])
+            })
             .filter(|(_, v)| v.table().is_some())
             .map(|(id, v)| (id, Table::new(id, v.table().unwrap())))
             .map(|(id, t)| match t {
@@ -2287,9 +2357,9 @@ impl Module {
             .into_iter()
             .map(|(k, v)| {
                 (
-                    k,
+                    k.to_string(),
                     v.iter()
-                        .map(|(k, v)| (k.clone(), (v.offset, v.size)))
+                        .map(|(k, v)| (k.to_string(), (v.offset, v.size)))
                         .collect(),
                 )
             })
@@ -2299,11 +2369,8 @@ impl Module {
         let temp_sizes = vec![];
 
         Ok(Module {
-            ident: CanonicalIdent::from_raw(model_name),
-            inputs: inputs_set
-                .into_iter()
-                .map(|s| CanonicalIdent::from_raw(&s))
-                .collect(),
+            ident: model_name.clone(),
+            inputs: inputs.iter().cloned().collect(),
             n_slots,
             n_temps,
             temp_sizes,

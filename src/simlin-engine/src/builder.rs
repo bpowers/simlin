@@ -21,7 +21,7 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
 
     let mut found_model_error = false;
     for (model_name, model) in project.models.iter() {
-        let model_datamodel = project_datamodel.get_model(model_name);
+        let model_datamodel = project_datamodel.get_model(model_name.as_str());
         if model_datamodel.is_none() {
             continue;
         }

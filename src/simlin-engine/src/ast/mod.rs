@@ -6,7 +6,7 @@ pub use crate::builtins::Loc;
 use std::collections::HashMap;
 
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
-use crate::common::{CanonicalElementName, EquationResult};
+use crate::common::{CanonicalElementName, CanonicalIdent, EquationResult};
 use crate::dimensions::Dimension;
 use crate::model::{ModelStage0, ScopeStage0};
 use crate::variable::Variable;
@@ -97,17 +97,19 @@ impl<'a> ArrayContext<'a> {
             let module_var = self
                 .get_model(model_name)?
                 .variables
-                .get(submodel_module_name)?;
+                .get(&CanonicalIdent::from_raw(submodel_module_name))?;
             if let Variable::Module {
                 model_name: submodel_name,
                 ..
             } = module_var
             {
-                return self.get_variable(submodel_name, submodel_var);
+                return self.get_variable(submodel_name.as_str(), submodel_var);
             }
             None
         } else {
-            self.get_model(model_name)?.variables.get(ident)
+            self.get_model(model_name)?
+                .variables
+                .get(&CanonicalIdent::from_raw(ident))
         }
     }
 }

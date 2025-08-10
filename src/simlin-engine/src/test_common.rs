@@ -300,7 +300,7 @@ impl TestProject {
         for (model_name, model) in &compiled.models {
             if let Some(model_errors) = &model.errors {
                 for err in model_errors {
-                    errors.push((model_name.clone(), err.code));
+                    errors.push((model_name.to_string(), err.code));
                 }
             }
 

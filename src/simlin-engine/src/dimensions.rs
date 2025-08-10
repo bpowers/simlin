@@ -36,19 +36,19 @@ impl Dimension {
 
     /// Get the offset of an element by name (for named dimensions) or by index string (for indexed dimensions).
     /// Returns 0-based offset for use in array indexing.
-    pub fn get_offset(&self, subscript: &str) -> Option<usize> {
+    pub fn get_offset(&self, subscript: &CanonicalElementName) -> Option<usize> {
         match self {
             Dimension::Named(_, named) => {
                 // Try canonical lookup first
-                let canonical_element = CanonicalElementName::from_raw(subscript);
+                let canonical_element = subscript;
                 named
                     .indexed_elements
-                    .get(&canonical_element)
+                    .get(canonical_element)
                     .map(|&idx| idx - 1) // Convert from 1-based to 0-based
             }
             Dimension::Indexed(_, size) => {
                 // Parse as number for indexed dimensions
-                subscript.parse::<u32>().ok().and_then(|n| {
+                subscript.as_str().parse::<u32>().ok().and_then(|n| {
                     if n >= 1 && n <= *size {
                         Some((n - 1) as usize) // Convert from 1-based to 0-based
                     } else {
@@ -203,6 +203,7 @@ pub struct StridedDimension {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::CanonicalElementName;
     use crate::datamodel;
 
     #[test]
@@ -215,18 +216,39 @@ mod tests {
         let dim = Dimension::from(datamodel_dim);
 
         // Test exact matches (canonical form)
-        assert_eq!(dim.get_offset("north"), Some(0));
-        assert_eq!(dim.get_offset("south"), Some(1));
-        assert_eq!(dim.get_offset("east"), Some(2));
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("north")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("south")),
+            Some(1)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("east")),
+            Some(2)
+        );
 
         // Test case insensitive matching (should canonicalize)
-        assert_eq!(dim.get_offset("North"), Some(0));
-        assert_eq!(dim.get_offset("SOUTH"), Some(1));
-        assert_eq!(dim.get_offset("EaSt"), Some(2));
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("North")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("SOUTH")),
+            Some(1)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("EaSt")),
+            Some(2)
+        );
 
         // Test non-existent element
-        assert_eq!(dim.get_offset("west"), None);
-        assert_eq!(dim.get_offset(""), None);
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("west")),
+            None
+        );
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("")), None);
     }
 
     #[test]
@@ -236,22 +258,37 @@ mod tests {
         let dim = Dimension::from(datamodel_dim);
 
         // Test valid indices (1-based input, 0-based output)
-        assert_eq!(dim.get_offset("1"), Some(0));
-        assert_eq!(dim.get_offset("2"), Some(1));
-        assert_eq!(dim.get_offset("3"), Some(2));
-        assert_eq!(dim.get_offset("4"), Some(3));
-        assert_eq!(dim.get_offset("5"), Some(4));
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("1")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("2")),
+            Some(1)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("3")),
+            Some(2)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("4")),
+            Some(3)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("5")),
+            Some(4)
+        );
 
         // Test out of bounds indices
-        assert_eq!(dim.get_offset("0"), None);
-        assert_eq!(dim.get_offset("6"), None);
-        assert_eq!(dim.get_offset("100"), None);
-        assert_eq!(dim.get_offset("-1"), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("0")), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("6")), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("100")), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("-1")), None);
 
         // Test invalid input (not a number)
-        assert_eq!(dim.get_offset("abc"), None);
-        assert_eq!(dim.get_offset(""), None);
-        assert_eq!(dim.get_offset("1.5"), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("abc")), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("")), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("1.5")), None);
     }
 
     #[test]
@@ -268,18 +305,42 @@ mod tests {
         let dim = Dimension::from(datamodel_dim);
 
         // Spaces should be converted to underscores
-        assert_eq!(dim.get_offset("Product A"), Some(0));
-        assert_eq!(dim.get_offset("Product_A"), Some(0));
-        assert_eq!(dim.get_offset("product a"), Some(0));
-        assert_eq!(dim.get_offset("product_a"), Some(0));
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("Product A")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("Product_A")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("product a")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("product_a")),
+            Some(0)
+        );
 
         // Dots should be converted to middle dots
-        assert_eq!(dim.get_offset("Product.B"), Some(1));
-        assert_eq!(dim.get_offset("product.b"), Some(1));
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("Product.B")),
+            Some(1)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("product.b")),
+            Some(1)
+        );
 
         // Underscores are preserved
-        assert_eq!(dim.get_offset("Product_C"), Some(2));
-        assert_eq!(dim.get_offset("product_c"), Some(2));
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("Product_C")),
+            Some(2)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("product_c")),
+            Some(2)
+        );
     }
 
     #[test]
@@ -288,14 +349,17 @@ mod tests {
         let datamodel_dim = datamodel::Dimension::Named("Empty".to_string(), vec![]);
         let dim = Dimension::from(datamodel_dim);
 
-        assert_eq!(dim.get_offset("anything"), None);
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("anything")),
+            None
+        );
 
         // Edge case: indexed dimension with size 0
         let datamodel_dim = datamodel::Dimension::Indexed("Zero".to_string(), 0);
         let dim = Dimension::from(datamodel_dim);
 
-        assert_eq!(dim.get_offset("1"), None);
-        assert_eq!(dim.get_offset("0"), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("1")), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("0")), None);
     }
 
     #[test]
@@ -305,13 +369,25 @@ mod tests {
         let dim = Dimension::from(datamodel_dim);
 
         // Test boundary values
-        assert_eq!(dim.get_offset("1"), Some(0));
-        assert_eq!(dim.get_offset("500"), Some(499));
-        assert_eq!(dim.get_offset("1000"), Some(999));
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("1")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("500")),
+            Some(499)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("1000")),
+            Some(999)
+        );
 
         // Test out of bounds
-        assert_eq!(dim.get_offset("0"), None);
-        assert_eq!(dim.get_offset("1001"), None);
+        assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("0")), None);
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("1001")),
+            None
+        );
     }
 
     #[test]

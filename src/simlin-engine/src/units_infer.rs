@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::BuiltinFn;
-use crate::common::{Ident, Result, UnitResult, canonicalize};
+use crate::common::{CanonicalIdent, Ident, Result, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::model_err;
@@ -17,7 +17,7 @@ use crate::variable::Variable;
 
 struct UnitInferer<'a> {
     ctx: &'a Context,
-    models: &'a HashMap<Ident, &'a ModelStage1>,
+    models: &'a HashMap<CanonicalIdent, &'a ModelStage1>,
     // units for module inputs
     time: Variable,
 }
@@ -306,7 +306,7 @@ impl UnitInferer<'_> {
                 .cloned()
                 .collect::<UnitMap>()
                 .push_ctx(format!("stock@{prefix}{stock_ident}"));
-                let mut check_flows = |flows: &Vec<Ident>| {
+                let mut check_flows = |flows: &Vec<CanonicalIdent>| {
                     for ident in flows.iter() {
                         let flow_units: UnitMap =
                             [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
@@ -609,7 +609,7 @@ fn test_inference_negative() {
 }
 
 pub(crate) fn infer(
-    models: &HashMap<Ident, &ModelStage1>,
+    models: &HashMap<CanonicalIdent, &ModelStage1>,
     units_ctx: &Context,
     model: &ModelStage1,
 ) -> Result<HashMap<String, UnitMap>> {
@@ -619,7 +619,7 @@ pub(crate) fn infer(
         ctx: units_ctx,
         models,
         time: Variable::Var {
-            ident: "time".to_string(),
+            ident: CanonicalIdent::from_raw("time"),
             ast: None,
             init_ast: None,
             eqn: None,
@@ -634,4 +634,31 @@ pub(crate) fn infer(
     };
 
     units.infer(model)
+}
+
+#[test]
+fn test_constraint_generation_consistency() {
+    use crate::common::CanonicalIdent;
+
+    // Test that constraint generation produces consistent variable names
+    // This simulates what happens when stdlib models are processed
+
+    // In the stdlib XMILE file, the variable might be "Output" (capitalized)
+    let xmile_var_name = "Output";
+
+    // When it becomes a CanonicalIdent key in the HashMap
+    let map_key = CanonicalIdent::from_raw(xmile_var_name);
+    assert_eq!(map_key.as_str(), "output", "Map key should be lowercase");
+
+    // When used in constraint generation in line 366/376
+    let constraint_var = format!("@{}", map_key);
+    assert_eq!(constraint_var, "@output");
+
+    // But if the AST still references the canonical form...
+    let ast_reference = CanonicalIdent::from_raw("output");
+    let ast_constraint = format!("@{}", ast_reference);
+    assert_eq!(ast_constraint, "@output");
+
+    // They should match!
+    assert_eq!(constraint_var, ast_constraint);
 }

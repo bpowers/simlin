@@ -452,6 +452,46 @@ fn test_canonical_element_name() {
     assert_eq!(canonical, canonical2);
 }
 
+#[test]
+fn test_canonical_ident_with_dots() {
+    // Test that dots outside quotes become middle dots
+    let c1 = CanonicalIdent::from_raw("a.d");
+    assert_eq!(c1.as_str(), "a·d");
+
+    // Test that quoted identifiers with dots keep them as middle dots after canonicalization
+    let c2 = CanonicalIdent::from_raw("\"a.d\"");
+    assert_eq!(c2.as_str(), "a.d");
+
+    // Test mixed case
+    let c3 = CanonicalIdent::from_raw("a.\"b.c\"");
+    assert_eq!(c3.as_str(), "a·b.c");
+}
+
+#[test]
+fn test_stdlib_model_name_canonicalization() {
+    // Test canonicalization of stdlib model names
+    let stdlib_name = "stdlib⁚smth1";
+    let canonical = CanonicalIdent::from_raw(stdlib_name);
+    assert_eq!(canonical.as_str(), "stdlib⁚smth1");
+
+    // Test that the to_ident conversion preserves the name
+    assert_eq!(canonical.to_ident(), "stdlib⁚smth1");
+}
+
+#[test]
+fn test_stdlib_variable_canonicalization() {
+    // Test that stdlib variable names are canonicalized correctly
+    let names = vec!["input", "output", "Output", "delay_time", "initial_value"];
+    for name in names {
+        let canonical = CanonicalIdent::from_raw(name);
+        let expected = canonicalize(name);
+        assert_eq!(canonical.as_str(), expected, "Failed for {}", name);
+    }
+
+    // Specifically test Output -> output conversion
+    assert_eq!(CanonicalIdent::from_raw("Output").as_str(), "output");
+}
+
 // Implementations for identifier types
 
 impl CanonicalIdent {
@@ -462,6 +502,15 @@ impl CanonicalIdent {
     #[allow(dead_code)]
     pub(crate) fn from_canonical_unchecked(s: String) -> Self {
         CanonicalIdent(s)
+    }
+
+    /// Create from an already-canonicalized string (internal use only)
+    ///
+    /// # Safety
+    /// Caller must guarantee the string is already in canonical form
+    #[allow(dead_code)]
+    pub(crate) fn from_canonical_str_unchecked(s: &str) -> Self {
+        CanonicalIdent(s.to_string())
     }
 
     /// Create from a raw string, canonicalizing it
@@ -681,23 +730,23 @@ impl AsRef<str> for RawElementName {
 }
 
 pub fn topo_sort<'out>(
-    runlist: Vec<&'out str>,
-    dependencies: &'out HashMap<Ident, BTreeSet<Ident>>,
-) -> Vec<&'out str> {
+    runlist: Vec<&'out CanonicalIdent>,
+    dependencies: &'out HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>,
+) -> Vec<&'out CanonicalIdent> {
     use std::collections::HashSet;
 
     let runlist_len = runlist.len();
-    let mut result: Vec<&'out str> = Vec::with_capacity(runlist_len);
-    let mut used: HashSet<&str> = HashSet::new();
+    let mut result: Vec<&'out CanonicalIdent> = Vec::with_capacity(runlist_len);
+    let mut used: HashSet<&CanonicalIdent> = HashSet::new();
 
     // We want to do a postorder, recursive traversal of variables to ensure
     // dependencies are calculated before the variables that reference them.
     // By this point, we have already errored out if we have e.g. a cycle
     fn add<'a>(
-        dependencies: &'a HashMap<Ident, BTreeSet<Ident>>,
-        result: &mut Vec<&'a str>,
-        used: &mut HashSet<&'a str>,
-        ident: &'a str,
+        dependencies: &'a HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>,
+        result: &mut Vec<&'a CanonicalIdent>,
+        used: &mut HashSet<&'a CanonicalIdent>,
+        ident: &'a CanonicalIdent,
     ) {
         if used.contains(ident) {
             return;
@@ -708,7 +757,7 @@ pub fn topo_sort<'out>(
                 add(dependencies, result, used, dep)
             }
         } else {
-            panic!("internal compiler error: unknown ident {ident}");
+            panic!("internal compiler error: unknown ident {}", ident.as_str());
         }
         result.push(ident);
     }

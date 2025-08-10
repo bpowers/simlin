@@ -14,7 +14,7 @@ use js_sys::{Array, Function, Map};
 use prost::Message;
 
 use simlin_engine as engine;
-use simlin_engine::common::{ErrorCode, ErrorKind};
+use simlin_engine::common::{CanonicalIdent, ErrorCode, ErrorKind};
 use simlin_engine::datamodel::{Extension, GraphicalFunction, Source, Variable, Visibility};
 use simlin_engine::{Error, Vm, canonicalize, datamodel, project_io, prost, serde};
 
@@ -198,7 +198,11 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getModelVariableErrors)]
     pub fn get_model_variable_errors(&self, model_name: &str) -> EquationErrorMap {
-        let model = &self.project.models.get(model_name).unwrap();
+        let model = &self
+            .project
+            .models
+            .get(&CanonicalIdent::from_raw(model_name))
+            .unwrap();
 
         let mut result = Map::new();
         for (ident, errors) in model.get_variable_errors() {
@@ -211,7 +215,11 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getModelVariableUnitErrors)]
     pub fn get_model_variable_unit_errors(&self, model_name: &str) -> EquationErrorMap {
-        let model = &self.project.models.get(model_name).unwrap();
+        let model = &self
+            .project
+            .models
+            .get(&CanonicalIdent::from_raw(model_name))
+            .unwrap();
 
         let mut result = Map::new();
         for (ident, errors) in model.get_unit_errors() {
@@ -228,7 +236,11 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getModelErrors)]
     pub fn get_model_errors(&self, model_name: &str) -> MaybeErrorArray {
-        let model = &self.project.models.get(model_name).unwrap();
+        let model = &self
+            .project
+            .models
+            .get(&CanonicalIdent::from_raw(model_name))
+            .unwrap();
 
         if model.errors.is_none() {
             return Array::new();
@@ -435,8 +447,11 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getLatexEquation)]
     pub fn get_latex_equation(&self, model_name: &str, ident: &str) -> Option<String> {
-        let model = self.project.models.get(model_name)?;
-        let var = model.variables.get(ident)?;
+        let model = self
+            .project
+            .models
+            .get(&CanonicalIdent::from_raw(model_name))?;
+        let var = model.variables.get(&CanonicalIdent::from_raw(ident))?;
         let ast = var.ast()?;
         Some(ast.to_latex())
     }

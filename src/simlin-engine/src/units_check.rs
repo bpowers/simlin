@@ -7,7 +7,9 @@ use std::result::Result as StdResult;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize};
+use crate::common::{
+    CanonicalIdent, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize,
+};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::units::{Context, UnitOp, Units, combine};
@@ -39,7 +41,7 @@ impl UnitEvaluator<'_> {
                     // if they don't exist, try to use any inferred units (this handles modules)
                     self.model
                         .variables
-                        .get(ident.as_str())
+                        .get(ident)
                         .and_then(|var| var.units())
                         .or_else(|| self.inferred_units.get(ident.as_str()))
                         .ok_or_else(|| {
@@ -70,7 +72,7 @@ impl UnitEvaluator<'_> {
                     if let Some(units) = self
                         .model
                         .variables
-                        .get(ident)
+                        .get(&CanonicalIdent::from_raw(ident))
                         .and_then(|var| var.units())
                         .or_else(|| self.inferred_units.get(ident))
                     {
@@ -284,7 +286,7 @@ pub fn check(
         model,
         inferred_units,
         time: Variable::Var {
-            ident: "time".to_string(),
+            ident: CanonicalIdent::from_raw("time"),
             ast: None,
             init_ast: None,
             eqn: None,
@@ -316,7 +318,7 @@ pub fn check(
                 let stock_ident = ident;
                 let expected_flow_units =
                     combine(UnitOp::Mul, expected.clone(), one_over_time.clone());
-                let mut check_flows = |flows: &Vec<Ident>| {
+                let mut check_flows = |flows: &Vec<CanonicalIdent>| {
                     for ident in flows.iter() {
                         if let Some(var) = model.variables.get(ident) {
                             if let Some(units) = var.units() {
@@ -354,7 +356,7 @@ pub fn check(
                                 );
                                 let loc = expr.get_loc();
                                 errors.push((
-                                    ident.clone(),
+                                    ident.to_ident(),
                                     ConsistencyError(
                                         ErrorCode::UnitMismatch,
                                         Loc::new(loc.start.into(), loc.end.into()),
@@ -367,7 +369,7 @@ pub fn check(
                             // definitionally we're fine
                         }
                         Err(err) => {
-                            errors.push((ident.clone(), err));
+                            errors.push((ident.to_ident(), err));
                         }
                     },
                     Ast::ApplyToAll(_, _) => {}

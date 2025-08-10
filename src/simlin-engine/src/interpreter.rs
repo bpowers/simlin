@@ -604,7 +604,10 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn new(project: &Project, main_model_name: &str) -> crate::Result<Self> {
-        if !project.models.contains_key(main_model_name) {
+        if !project
+            .models
+            .contains_key(&CanonicalIdent::from_raw(main_model_name))
+        {
             return sim_err!(
                 NotSimulatable,
                 format!("no model named '{}' to simulate", main_model_name)
@@ -632,9 +635,9 @@ impl Simulation {
 
         let mut compiled_modules: HashMap<Ident, Module> = HashMap::new();
         for name in module_names {
-            let distinct_inputs = &modules[name];
+            let distinct_inputs = &modules[&CanonicalIdent::from_raw(name)];
             for inputs in distinct_inputs.iter() {
-                let model = Rc::clone(&project.models[name]);
+                let model = Rc::clone(&project.models[&CanonicalIdent::from_raw(name)]);
                 let is_root = name == main_model_name;
                 let module = Module::new(project, model, inputs, is_root)?;
                 compiled_modules.insert(name.to_string(), module);
@@ -859,7 +862,7 @@ pub fn calc_flattened_offsets(
         i += IMPLICIT_VAR_COUNT;
     }
 
-    let model = Rc::clone(&project.models[model_name]);
+    let model = Rc::clone(&project.models[&CanonicalIdent::from_raw(model_name)]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
         var_names.sort_unstable();
@@ -867,8 +870,10 @@ pub fn calc_flattened_offsets(
     };
 
     for ident in var_names.iter() {
-        let size = if let Variable::Module { model_name, .. } = &model.variables[*ident] {
-            let sub_offsets = calc_flattened_offsets(project, model_name);
+        let size = if let Variable::Module { model_name, .. } =
+            &model.variables[&CanonicalIdent::from_raw(ident)]
+        {
+            let sub_offsets = calc_flattened_offsets(project, model_name.as_str());
             let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
             sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
@@ -880,14 +885,18 @@ pub fn calc_flattened_offsets(
             }
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
-        } else if let Some(Ast::ApplyToAll(dims, _)) = &model.variables[*ident].ast() {
+        } else if let Some(Ast::ApplyToAll(dims, _)) =
+            &model.variables[&CanonicalIdent::from_raw(ident)].ast()
+        {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
                 let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[*ident].ast() {
+        } else if let Some(Ast::Arrayed(dims, _)) =
+            &model.variables[&CanonicalIdent::from_raw(ident)].ast()
+        {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
                 let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
@@ -1141,20 +1150,34 @@ fn test_arrays() {
         assert_eq!(actual, expected);
     }
 
-    let metadata = compiler::build_metadata(&parsed_project, "main", true);
-    let main_metadata = &metadata["main"];
-    assert_eq!(main_metadata["aux"].offset, 4);
-    assert_eq!(main_metadata["aux"].size, 3);
-    assert_eq!(main_metadata["constants"].offset, 7);
-    assert_eq!(main_metadata["constants"].size, 3);
-    assert_eq!(main_metadata["picked"].offset, 10);
-    assert_eq!(main_metadata["picked"].size, 1);
-    assert_eq!(main_metadata["picked2"].offset, 11);
-    assert_eq!(main_metadata["picked2"].size, 1);
+    let main_ident = CanonicalIdent::from_raw("main");
+    let metadata = compiler::build_metadata(&parsed_project, &main_ident, true);
+    let main_metadata = &metadata[&main_ident];
+    assert_eq!(main_metadata[&CanonicalIdent::from_raw("aux")].offset, 4);
+    assert_eq!(main_metadata[&CanonicalIdent::from_raw("aux")].size, 3);
+    assert_eq!(
+        main_metadata[&CanonicalIdent::from_raw("constants")].offset,
+        7
+    );
+    assert_eq!(
+        main_metadata[&CanonicalIdent::from_raw("constants")].size,
+        3
+    );
+    assert_eq!(
+        main_metadata[&CanonicalIdent::from_raw("picked")].offset,
+        10
+    );
+    assert_eq!(main_metadata[&CanonicalIdent::from_raw("picked")].size, 1);
+    assert_eq!(
+        main_metadata[&CanonicalIdent::from_raw("picked2")].offset,
+        11
+    );
+    assert_eq!(main_metadata[&CanonicalIdent::from_raw("picked2")].size, 1);
 
-    let module_models = compiler::calc_module_model_map(&parsed_project, "main");
+    let module_models = compiler::calc_module_model_map(&parsed_project, &main_ident);
 
-    let arrayed_constants_var = &parsed_project.models["main"].variables["constants"];
+    let arrayed_constants_var =
+        &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("constants")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1163,8 +1186,8 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
-            model_name: "main",
-            ident: arrayed_constants_var.ident(),
+            model_name: &main_ident,
+            ident: arrayed_constants_var.canonical_ident(),
             active_dimension: None,
             active_subscript: None,
             metadata: &metadata,
@@ -1191,7 +1214,8 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let arrayed_aux_var = &parsed_project.models["main"].variables["aux"];
+    let arrayed_aux_var =
+        &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("aux")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1200,8 +1224,8 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
-            model_name: "main",
-            ident: arrayed_aux_var.ident(),
+            model_name: &main_ident,
+            ident: arrayed_aux_var.canonical_ident(),
             active_dimension: None,
             active_subscript: None,
             metadata: &metadata,
@@ -1227,7 +1251,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let var = &parsed_project.models["main"].variables["picked2"];
+    let var = &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("picked2")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1236,8 +1260,8 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
-            model_name: "main",
-            ident: var.ident(),
+            model_name: &main_ident,
+            ident: var.canonical_ident(),
             active_dimension: None,
             active_subscript: None,
             metadata: &metadata,
@@ -1271,7 +1295,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let var = &parsed_project.models["main"].variables["picked"];
+    let var = &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("picked")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1280,8 +1304,8 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
-            model_name: "main",
-            ident: var.ident(),
+            model_name: &main_ident,
+            ident: var.canonical_ident(),
             active_dimension: None,
             active_subscript: None,
             metadata: &metadata,

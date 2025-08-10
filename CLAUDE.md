@@ -124,6 +124,7 @@ This is a yarn workspace with these packages:
 When asked to perform tasks in Rust crates like `src/simlin-engine`, the following general workflow should be followed:
 * Before starting, run `cargo clippy` and note any existing lints that are failing.
 * to run specific tests use the form "RUST_BACKTRACE=1 cargo test -p simlin-compat $test_name"
+* DON'T write one-off rust files and compile them with `rustc`.  Instead, write new unit tests as close to the source of the problem as possible.
 * At the end of the task:
   * Run `cargo fmt` to ensure the code is appropriately formatted.
   * Run `cargo clippy`, and if there are new lints that weren't failing at the start of the task fix them (directly and without shortcuts) so that `cargo clippy` doesn't complain.

@@ -8,7 +8,8 @@ use std::result::Result as StdResult;
 
 use crate::ast::{Expr0, lower_ast};
 use crate::common::{
-    EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result, UnitError, topo_sort,
+    CanonicalIdent, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
+    UnitError, topo_sort,
 };
 use crate::datamodel::{Dimension, UnitMap};
 use crate::dimensions::DimensionsContext;
@@ -19,8 +20,8 @@ use crate::variable::{ModuleInput, Variable, identifier_set, parse_var};
 use crate::vm::StepPart;
 use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
 
-pub type ModuleInputSet = BTreeSet<Ident>;
-pub type DependencySet = BTreeSet<Ident>;
+pub type ModuleInputSet = BTreeSet<CanonicalIdent>;
+pub type DependencySet = BTreeSet<CanonicalIdent>;
 
 pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 
@@ -28,9 +29,9 @@ pub type VariableStage0 = Variable<datamodel::ModuleReference, Expr0>;
 /// identifiers to Variables where module dependencies haven't been resolved.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ModelStage0 {
-    pub ident: Ident,
+    pub ident: CanonicalIdent,
     pub display_name: String,
-    pub variables: HashMap<Ident, VariableStage0>,
+    pub variables: HashMap<CanonicalIdent, VariableStage0>,
     pub errors: Option<Vec<Error>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
@@ -39,12 +40,12 @@ pub struct ModelStage0 {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct ModelStage1 {
-    pub name: String,
+    pub name: CanonicalIdent,
     pub display_name: String,
-    pub variables: HashMap<Ident, Variable>,
+    pub variables: HashMap<CanonicalIdent, Variable>,
     pub errors: Option<Vec<Error>>,
     /// model_deps is the transitive set of model names referenced from modules in this model
-    pub model_deps: Option<BTreeSet<Ident>>,
+    pub model_deps: Option<BTreeSet<CanonicalIdent>>,
     pub instantiations: Option<HashMap<ModuleInputSet, ModuleStage2>>,
     /// implicit is true if this model was implicitly added to the project
     /// by virtue of it being in the stdlib (or some similar reason)
@@ -53,24 +54,24 @@ pub struct ModelStage1 {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModuleStage2 {
-    pub model_ident: Ident,
+    pub model_ident: CanonicalIdent,
     /// inputs is the set of variables overridden (provided as input) in this
     /// module instantiation.
     pub inputs: ModuleInputSet,
     /// initial_dependencies contains variables dependencies needed to calculate the initial values of stocks
-    pub initial_dependencies: HashMap<Ident, DependencySet>,
+    pub initial_dependencies: HashMap<CanonicalIdent, DependencySet>,
     /// dt_dependencies contains the variable dependencies used during normal "dt" iterations/calculations.
-    pub dt_dependencies: HashMap<Ident, DependencySet>,
-    pub runlist_initials: Vec<Ident>,
-    pub runlist_flows: Vec<Ident>,
-    pub runlist_stocks: Vec<Ident>,
+    pub dt_dependencies: HashMap<CanonicalIdent, DependencySet>,
+    pub runlist_initials: Vec<CanonicalIdent>,
+    pub runlist_flows: Vec<CanonicalIdent>,
+    pub runlist_stocks: Vec<CanonicalIdent>,
 }
 
 impl ModelStage1 {
     pub(crate) fn dt_deps(
         &self,
         inputs: &ModuleInputSet,
-    ) -> Option<&HashMap<Ident, DependencySet>> {
+    ) -> Option<&HashMap<CanonicalIdent, DependencySet>> {
         self.instantiations
             .as_ref()
             .and_then(|instances| instances.get(inputs).map(|module| &module.dt_dependencies))
@@ -79,7 +80,7 @@ impl ModelStage1 {
     pub(crate) fn initial_deps(
         &self,
         inputs: &ModuleInputSet,
-    ) -> Option<&HashMap<Ident, DependencySet>> {
+    ) -> Option<&HashMap<CanonicalIdent, DependencySet>> {
         self.instantiations.as_ref().and_then(|instances| {
             instances
                 .get(inputs)
@@ -88,7 +89,11 @@ impl ModelStage1 {
     }
 }
 
-fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool) -> Vec<Ident> {
+fn module_deps(
+    ctx: &DepContext,
+    var: &Variable,
+    is_stock: &dyn Fn(&CanonicalIdent) -> bool,
+) -> Vec<CanonicalIdent> {
     if let Variable::Module {
         inputs, model_name, ..
     } = var
@@ -98,11 +103,12 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
             // FIXME: do this higher up
             let module_inputs = &inputs.iter().map(|mi| mi.dst.clone()).collect();
             if let Some(initial_deps) = model.initial_deps(module_inputs) {
-                let mut stock_deps = HashSet::<Ident>::new();
+                let mut stock_deps = HashSet::<CanonicalIdent>::new();
 
                 for var in model.variables.values() {
                     if let Variable::Stock { .. } = var {
-                        if let Some(deps) = initial_deps.get(var.ident()) {
+                        if let Some(deps) = initial_deps.get(&CanonicalIdent::from_raw(var.ident()))
+                        {
                             stock_deps.extend(deps.iter().cloned());
                         }
                     }
@@ -113,15 +119,15 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
                     .flat_map(|input| {
                         let src = &input.src;
                         if stock_deps.contains(&input.dst) {
-                            let direct_dep = match src.find('.') {
-                                Some(pos) => &src[..pos],
-                                None => src,
+                            let direct_dep = match src.as_str().find('.') {
+                                Some(pos) => &src.as_str()[..pos],
+                                None => src.as_str(),
                             };
 
                             if is_stock(src) {
                                 None
                             } else {
-                                Some(direct_dep.to_string())
+                                Some(CanonicalIdent::from_raw(direct_dep))
                             }
                         } else {
                             None
@@ -136,15 +142,15 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
                 .iter()
                 .flat_map(|r| {
                     let src = &r.src;
-                    let direct_dep = match src.find('.') {
-                        Some(pos) => &src[..pos],
-                        None => src,
+                    let direct_dep = match src.as_str().find('.') {
+                        Some(pos) => &src.as_str()[..pos],
+                        None => src.as_str(),
                     };
 
                     if is_stock(src) {
                         None
                     } else {
-                        Some(direct_dep.to_string())
+                        Some(CanonicalIdent::from_raw(direct_dep))
                     }
                 })
                 .collect()
@@ -156,13 +162,13 @@ fn module_deps(ctx: &DepContext, var: &Variable, is_stock: &dyn Fn(&str) -> bool
 
 fn module_output_deps<'a>(
     ctx: &DepContext,
-    model_name: &str,
+    model_name: &CanonicalIdent,
     output_ident: &str,
     inputs: &'a [ModuleInput],
     module_ident: &'a str,
 ) -> Result<BTreeSet<&'a str>> {
     if !ctx.models.contains_key(model_name) {
-        return model_err!(BadModelName, model_name.to_owned());
+        return model_err!(BadModelName, model_name.to_string());
     }
     let model = ctx.models[model_name];
 
@@ -177,12 +183,13 @@ fn module_output_deps<'a>(
         return model_err!(Generic, output_ident.to_owned());
     }
     let deps = deps.unwrap();
-    if !deps.contains_key(output_ident) {
+    let canonical_output = CanonicalIdent::from_raw(output_ident);
+    if !deps.contains_key(&canonical_output) {
         return model_err!(UnknownDependency, output_ident.to_owned());
     }
 
-    let output_var = &model.variables[output_ident];
-    let output_deps = &deps[output_ident];
+    let output_var = &model.variables[&canonical_output];
+    let output_deps = &deps[&canonical_output];
 
     let mut final_deps: BTreeSet<&str> = BTreeSet::new();
 
@@ -193,7 +200,7 @@ fn module_output_deps<'a>(
     for dep in output_deps.iter() {
         for module_input in inputs.iter() {
             if &module_input.dst == dep {
-                final_deps.insert(&module_input.src);
+                final_deps.insert(module_input.src.as_str());
             }
         }
     }
@@ -201,9 +208,12 @@ fn module_output_deps<'a>(
     Ok(final_deps)
 }
 
-fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
-    let is_stock = |ident: &str| -> bool {
-        matches!(resolve_relative2(ctx, ident), Some(Variable::Stock { .. }))
+fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<CanonicalIdent> {
+    let is_stock = |ident: &CanonicalIdent| -> bool {
+        matches!(
+            resolve_relative2(ctx, ident.as_str()),
+            Some(Variable::Stock { .. })
+        )
     };
     if var.is_module() {
         module_deps(ctx, var, &is_stock)
@@ -231,9 +241,9 @@ fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident> {
 
 struct DepContext<'a> {
     is_initial: bool,
-    model_name: &'a str,
-    models: &'a HashMap<Ident, &'a ModelStage1>,
-    sibling_vars: &'a HashMap<Ident, Variable>,
+    model_name: &'a str, // this needs to be a str, not a CanonicalIdent for lifetime reasons when recursing
+    models: &'a HashMap<CanonicalIdent, &'a ModelStage1>,
+    sibling_vars: &'a HashMap<CanonicalIdent, Variable>,
     module_inputs: Option<&'a ModuleInputSet>,
     dimensions: &'a [Dimension],
 }
@@ -245,7 +255,7 @@ struct DepContext<'a> {
 fn all_deps<'a, Iter>(
     ctx: &DepContext,
     vars: Iter,
-) -> StdResult<HashMap<Ident, BTreeSet<Ident>>, (Ident, EquationError)>
+) -> StdResult<HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>, (Ident, EquationError)>
 where
     Iter: Iterator<Item = &'a Variable>,
 {
@@ -254,20 +264,23 @@ where
     let mut processing: BTreeSet<Ident> = BTreeSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
         vars.iter().map(|v| (v.ident(), *v)).collect();
-    let mut all_var_deps: HashMap<Ident, Option<BTreeSet<Ident>>> =
-        vars.iter().map(|v| (v.ident().to_owned(), None)).collect();
+    let mut all_var_deps: HashMap<CanonicalIdent, Option<BTreeSet<CanonicalIdent>>> = vars
+        .iter()
+        .map(|v| (CanonicalIdent::from_raw(v.ident()), None))
+        .collect();
 
     fn all_deps_inner<'a>(
         ctx: &DepContext,
         id: &str,
         processing: &mut BTreeSet<Ident>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
-        all_var_deps: &mut HashMap<Ident, Option<BTreeSet<Ident>>>,
+        all_var_deps: &mut HashMap<CanonicalIdent, Option<BTreeSet<CanonicalIdent>>>,
     ) -> StdResult<(), (Ident, EquationError)> {
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
-        if all_var_deps[id].is_some() {
+        let canonical_id = CanonicalIdent::from_raw(id);
+        if all_var_deps[&canonical_id].is_some() {
             return Ok(());
         }
 
@@ -275,20 +288,24 @@ where
         // last dt timestep.  BUT if we are calculating dependencies in the
         // initial dt, then we need to treat stocks as ordinary variables.
         if var.is_stock() && !ctx.is_initial {
-            all_var_deps.insert(id.to_owned(), Some(BTreeSet::new()));
+            all_var_deps.insert(canonical_id.clone(), Some(BTreeSet::new()));
             return Ok(());
         }
 
         processing.insert(id.to_owned());
 
         // all deps start out as the direct deps
-        let mut all_deps: BTreeSet<Ident> = BTreeSet::new();
+        let mut all_deps: BTreeSet<CanonicalIdent> = BTreeSet::new();
 
         for dep in direct_deps(ctx, var).into_iter() {
             // TODO: we could potentially handle this by passing around some context
             //   variable, but its just terrible.
-            if dep.starts_with("\\·") {
-                let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+            if dep.as_str().starts_with("\\·") {
+                let loc = var
+                    .ast()
+                    .unwrap()
+                    .get_var_loc(dep.as_str())
+                    .unwrap_or_default();
                 return var_eqn_err!(
                     var.ident().to_owned(),
                     NoAbsoluteReferences,
@@ -299,15 +316,19 @@ where
 
             // in the case of a dependency on a module output, this one dep may
             // turn into several: we'll need to depend on the inputs to that module
-            let filtered_deps: Vec<Ident> = if dep.contains('·') {
+            let filtered_deps: Vec<CanonicalIdent> = if dep.as_str().contains('·') {
                 // if the dependency was e.g. "submodel.output", do a dataflow analysis to
                 // figure out which of the set of (inputs + module) we depend on
-                let parts = dep.splitn(2, '·').collect::<Vec<_>>();
+                let parts = dep.as_str().splitn(2, '·').collect::<Vec<_>>();
                 let module_ident = parts[0];
                 let output_ident = parts[1];
 
                 if !all_vars.contains_key(module_ident) {
-                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    let loc = var
+                        .ast()
+                        .unwrap()
+                        .get_var_loc(dep.as_str())
+                        .unwrap_or_default();
                     return var_eqn_err!(
                         var.ident().to_owned(),
                         UnknownDependency,
@@ -324,13 +345,17 @@ where
                     //      and then special case modules below (end of this
                     //      for loop)
                     match module_output_deps(ctx, model_name, output_ident, inputs, module_ident) {
-                        Ok(deps) => deps.into_iter().map(|s| s.to_string()).collect(),
+                        Ok(deps) => deps.into_iter().map(CanonicalIdent::from_raw).collect(),
                         Err(err) => {
                             return Err((var.ident().to_owned(), err.into()));
                         }
                     }
                 } else {
-                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    let loc = var
+                        .ast()
+                        .unwrap()
+                        .get_var_loc(dep.as_str())
+                        .unwrap_or_default();
                     return var_eqn_err!(
                         var.ident().to_owned(),
                         ExpectedModule,
@@ -344,7 +369,11 @@ where
 
             for dep in filtered_deps {
                 if !all_vars.contains_key(dep.as_str()) {
-                    let loc = var.ast().unwrap().get_var_loc(&dep).unwrap_or_default();
+                    let loc = var
+                        .ast()
+                        .unwrap()
+                        .get_var_loc(dep.as_str())
+                        .unwrap_or_default();
                     return var_eqn_err!(
                         var.ident().to_owned(),
                         UnknownDependency,
@@ -354,12 +383,12 @@ where
                 }
 
                 if ctx.is_initial || !all_vars[dep.as_str()].is_stock() {
-                    all_deps.insert(dep.to_string());
+                    all_deps.insert(dep.clone());
 
                     // ensure we don't blow the stack
                     if processing.contains(dep.as_str()) {
                         let loc = match var.ast() {
-                            Some(ast) => ast.get_var_loc(&dep).unwrap_or_default(),
+                            Some(ast) => ast.get_var_loc(dep.as_str()).unwrap_or_default(),
                             None => Default::default(),
                         };
                         return var_eqn_err!(
@@ -370,14 +399,14 @@ where
                         );
                     }
 
-                    if all_var_deps[dep.as_str()].is_none() {
-                        all_deps_inner(ctx, &dep, processing, all_vars, all_var_deps)?;
+                    if all_var_deps[&dep].is_none() {
+                        all_deps_inner(ctx, dep.as_str(), processing, all_vars, all_var_deps)?;
                     }
 
                     // we actually don't want the module's dependencies here;
                     // we handled that above in module_output_deps()
                     if !all_vars[dep.as_str()].is_module() {
-                        let dep_deps = all_var_deps[dep.as_str()].as_ref().unwrap();
+                        let dep_deps = all_var_deps[&dep].as_ref().unwrap();
                         all_deps.extend(dep_deps.iter().cloned());
                     }
                 }
@@ -386,7 +415,7 @@ where
 
         processing.remove(id);
 
-        all_var_deps.insert(id.to_owned(), Some(all_deps));
+        all_var_deps.insert(canonical_id, Some(all_deps));
 
         Ok(())
     }
@@ -402,7 +431,7 @@ where
     }
 
     // this unwrap is safe, because of the full iteration over vars directly above
-    let var_deps: HashMap<Ident, BTreeSet<Ident>> = all_var_deps
+    let var_deps: HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>> = all_var_deps
         .into_iter()
         .map(|(k, v)| (k, v.unwrap()))
         .collect();
@@ -433,10 +462,11 @@ fn resolve_relative<'a>(
         let submodel_var = &ident[pos + '·'.len_utf8()..];
         resolve_relative(models, submodel_name, submodel_var)
     } else {
-        Some(model.variables.get(ident)?)
+        Some(model.variables.get(&CanonicalIdent::from_raw(ident))?)
     }
 }
 
+// the ident arg must be from a CanonicalIdent, but is a &str here for lifetime reasons around recursion.
 fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Variable> {
     let model_name = ctx.model_name;
     let ident = if model_name == "main" && ident.starts_with('·') {
@@ -458,13 +488,16 @@ fn resolve_relative2<'a>(ctx: &DepContext<'a>, ident: &'a str) -> Option<&'a Var
             is_initial: ctx.is_initial,
             model_name: submodel_name,
             models: ctx.models,
-            sibling_vars: &ctx.models.get(submodel_name)?.variables,
+            sibling_vars: &ctx
+                .models
+                .get(&CanonicalIdent::from_canonical_str_unchecked(submodel_name))?
+                .variables,
             module_inputs: None,
             dimensions: ctx.dimensions,
         };
         resolve_relative2(&ctx, submodel_var)
     } else {
-        Some(ctx.sibling_vars.get(ident)?)
+        Some(ctx.sibling_vars.get(&CanonicalIdent::from_raw(ident))?)
     }
 }
 
@@ -562,7 +595,13 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
             let var_errors = errors;
 
             let inputs = inputs.iter().map(|mi| {
-                resolve_module_input(scope.models, scope.model_name, ident, &mi.src, &mi.dst)
+                resolve_module_input(
+                    scope.models,
+                    scope.model_name,
+                    ident.as_str(),
+                    mi.src.as_str(),
+                    mi.dst.as_str(),
+                )
             });
 
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
@@ -619,11 +658,17 @@ pub(crate) fn resolve_module_input<'a>(
     // TODO: reevaluate if this is really the best option here
     // if the source is a temporary created by the engine, assume it is OK
     if src.starts_with("$⁚") {
-        return Ok(Some(ModuleInput { src, dst }));
+        return Ok(Some(ModuleInput {
+            src: CanonicalIdent::from_raw(&src),
+            dst: CanonicalIdent::from_raw(&dst),
+        }));
     }
 
     match resolve_relative(models, parent_model_name, &src) {
-        Some(_) => Ok(Some(ModuleInput { src, dst })),
+        Some(_) => Ok(Some(ModuleInput {
+            src: CanonicalIdent::from_raw(&src),
+            dst: CanonicalIdent::from_raw(&dst),
+        })),
         None => eqn_err!(BadModuleInputSrc, 0, 0),
     }
 }
@@ -632,7 +677,7 @@ pub fn enumerate_modules<T>(
     models: &HashMap<&str, &ModelStage1>,
     main_model_name: &str,
     mapper: fn(&ModelStage1) -> T,
-) -> Result<HashMap<T, BTreeSet<BTreeSet<Ident>>>>
+) -> Result<HashMap<T, BTreeSet<BTreeSet<CanonicalIdent>>>>
 where
     T: Eq + Hash,
 {
@@ -657,7 +702,7 @@ pub(crate) fn enumerate_modules_inner<T>(
     models: &HashMap<&str, &ModelStage1>,
     model_name: &str,
     mapper: fn(&ModelStage1) -> T,
-    modules: &mut HashMap<T, BTreeSet<BTreeSet<Ident>>>,
+    modules: &mut HashMap<T, BTreeSet<BTreeSet<CanonicalIdent>>>,
 ) -> Result<()>
 where
     T: Eq + Hash,
@@ -673,7 +718,7 @@ where
         } = v
         {
             if let Some(model) = models.get(model_name.as_str()) {
-                let inputs: BTreeSet<Ident> =
+                let inputs: BTreeSet<CanonicalIdent> =
                     inputs.iter().map(|input| input.dst.clone()).collect();
 
                 let key = mapper(model);
@@ -681,12 +726,12 @@ where
                 if !modules.contains_key(&key) {
                     // first time we are seeing the model for this module.
                     // make sure all _its_ module instantiations are recorded
-                    enumerate_modules_inner(models, model_name, mapper, modules)?;
+                    enumerate_modules_inner(models, model_name.as_str(), mapper, modules)?;
                 }
 
                 modules.entry(key).or_default().insert(inputs);
             } else {
-                return model_err!(BadModelName, model_name.clone());
+                return model_err!(BadModelName, model_name.as_str().to_string());
             }
         }
     }
@@ -728,13 +773,13 @@ impl ModelStage0 {
             assert_eq!(0, dummy_implicit_vars.len());
         }
 
-        let variables: HashMap<Ident, _> = variable_list
+        let variables: HashMap<CanonicalIdent, _> = variable_list
             .into_iter()
-            .map(|v| (v.ident().to_string(), v))
+            .map(|v| (CanonicalIdent::from_raw(v.ident()), v))
             .collect();
 
         Self {
-            ident: canonicalize(&x_model.name),
+            ident: CanonicalIdent::from_raw(&x_model.name),
             display_name: x_model.name.clone(),
             variables,
             errors: None,
@@ -768,7 +813,7 @@ impl ModelStage1 {
         let model_scope = ScopeStage0 {
             models: scope.models,
             dimensions: scope.dimensions,
-            model_name: &model_s0.ident,
+            model_name: model_s0.ident.as_str(),
         };
 
         ModelStage1 {
@@ -795,7 +840,7 @@ impl ModelStage1 {
             Ok(Ok(())) => {}
             Ok(Err(errors)) => {
                 for (ident, err) in errors.into_iter() {
-                    if let Some(var) = self.variables.get_mut(&ident) {
+                    if let Some(var) = self.variables.get_mut(&CanonicalIdent::from_raw(&ident)) {
                         var.push_unit_error(err);
                     }
                 }
@@ -810,19 +855,20 @@ impl ModelStage1 {
 
     pub(crate) fn set_dependencies(
         &mut self,
-        models: &HashMap<Ident, &ModelStage1>,
+        models: &HashMap<CanonicalIdent, &ModelStage1>,
         dimensions: &[Dimension],
         instantiations: &BTreeSet<ModuleInputSet>,
     ) {
         // used when building runlists - give us a stable order to start with
-        let var_names: Vec<&str> = {
-            let mut var_names: Vec<_> = self.variables.keys().map(|s| s.as_str()).collect();
+        let var_names: Vec<&CanonicalIdent> = self.variables.keys().collect();
+        {
+            let mut var_names: Vec<_> = self.variables.keys().collect();
             var_names.sort_unstable();
             var_names
         };
 
         // use a Set to deduplicate problems we see in dt_deps and initial_deps
-        let mut var_errors: HashMap<Ident, HashSet<EquationError>> = HashMap::new();
+        let mut var_errors: HashMap<CanonicalIdent, HashSet<EquationError>> = HashMap::new();
         // model errors
         let mut errors: Vec<Error> = Vec::new();
 
@@ -841,7 +887,10 @@ impl ModelStage1 {
                 let dt_deps = match all_deps(&ctx, self.variables.values()) {
                     Ok(deps) => Some(deps),
                     Err((ident, err)) => {
-                        var_errors.entry(ident).or_default().insert(err);
+                        var_errors
+                            .entry(CanonicalIdent::from_raw(&ident))
+                            .or_default()
+                            .insert(err);
                         None
                     }
                 };
@@ -851,31 +900,36 @@ impl ModelStage1 {
                 let initial_deps = match all_deps(&ctx, self.variables.values()) {
                     Ok(deps) => Some(deps),
                     Err((ident, err)) => {
-                        var_errors.entry(ident).or_default().insert(err);
+                        var_errors
+                            .entry(CanonicalIdent::from_raw(&ident))
+                            .or_default()
+                            .insert(err);
                         None
                     }
                 };
 
-                let build_runlist = |deps: &HashMap<Ident, BTreeSet<Ident>>,
+                let build_runlist = |deps: &HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>,
                                      part: StepPart,
-                                     predicate: &dyn Fn(&&str) -> bool|
-                 -> Vec<Ident> {
-                    let runlist: Vec<&str> = var_names.iter().cloned().filter(predicate).collect();
+                                     predicate: &dyn Fn(&CanonicalIdent) -> bool|
+                 -> Vec<CanonicalIdent> {
+                    let canonical_var_names: Vec<CanonicalIdent> = var_names
+                        .iter()
+                        .filter(|id| predicate(id))
+                        .map(|id| (*id).clone())
+                        .collect();
+                    let runlist: Vec<&CanonicalIdent> = canonical_var_names.iter().collect();
                     let runlist = match part {
                         StepPart::Initials => {
-                            let needed: HashSet<&str> = runlist
+                            let needed: HashSet<&CanonicalIdent> = runlist
                                 .iter()
                                 .cloned()
                                 .filter(|id| {
-                                    let v = &self.variables[*id];
+                                    let v = &self.variables[id];
                                     v.is_stock() || v.is_module()
                                 })
                                 .collect();
-                            let mut runlist: HashSet<&str> = needed
-                                .iter()
-                                .flat_map(|id| &deps[*id])
-                                .map(|id| id.as_str())
-                                .collect();
+                            let mut runlist: HashSet<&CanonicalIdent> =
+                                needed.iter().flat_map(|id| &deps[*id]).collect();
                             runlist.extend(needed);
                             let runlist = runlist.into_iter().collect();
                             topo_sort(runlist, deps)
@@ -887,8 +941,7 @@ impl ModelStage1 {
                     // for (i, name) in runlist.iter().enumerate() {
                     //     eprintln!("  {}: {}", i, name);
                     // }
-                    let runlist: Vec<Ident> =
-                        runlist.into_iter().map(|ident| ident.to_owned()).collect();
+                    let runlist: Vec<CanonicalIdent> = runlist.into_iter().cloned().collect();
                     // for v in runlist.clone().unwrap().iter() {
                     //     eprintln!("{}", pretty(&v.ast));
                     // }
@@ -905,7 +958,7 @@ impl ModelStage1 {
 
                 let runlist_flows = if let Some(deps) = dt_deps.as_ref() {
                     build_runlist(deps, StepPart::Flows, &|id| {
-                        instantiation.contains(*id) || !self.variables[*id].is_stock()
+                        instantiation.contains(id) || !self.variables[id].is_stock()
                     })
                 } else {
                     vec![]
@@ -913,10 +966,10 @@ impl ModelStage1 {
 
                 let runlist_stocks = if let Some(deps) = dt_deps.as_ref() {
                     build_runlist(deps, StepPart::Stocks, &|id| {
-                        let v = &self.variables[*id];
+                        let v = &self.variables[id];
                         // modules need to be called _both_ during Flows and Stocks, as
                         // they may contain _both_ flows and Stocks
-                        !instantiation.contains(*id) && (v.is_stock() || v.is_module())
+                        !instantiation.contains(id) && (v.is_stock() || v.is_module())
                     })
                 } else {
                     vec![]
@@ -969,14 +1022,14 @@ impl ModelStage1 {
     pub fn get_unit_errors(&self) -> HashMap<Ident, Vec<UnitError>> {
         self.variables
             .iter()
-            .flat_map(|(ident, var)| var.unit_errors().map(|errs| (ident.clone(), errs)))
+            .flat_map(|(ident, var)| var.unit_errors().map(|errs| (ident.to_ident(), errs)))
             .collect()
     }
 
     pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
         self.variables
             .iter()
-            .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.clone(), errs)))
+            .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.to_ident(), errs)))
             .collect()
     }
 }
@@ -1022,17 +1075,17 @@ fn test_module_parse() {
     use crate::variable::ModuleInput;
     let inputs: Vec<ModuleInput> = vec![
         ModuleInput {
-            src: "area".to_string(),
-            dst: "area".to_string(),
+            src: CanonicalIdent::from_raw("area"),
+            dst: CanonicalIdent::from_raw("area"),
         },
         ModuleInput {
-            src: "lynxes·lynxes_stock".to_string(),
-            dst: "lynxes".to_string(),
+            src: CanonicalIdent::from_raw("lynxes·lynxes_stock"),
+            dst: CanonicalIdent::from_raw("lynxes"),
         },
     ];
     let expected = Variable::Module {
-        model_name: "hares".to_string(),
-        ident: "hares".to_string(),
+        model_name: CanonicalIdent::from_raw("hares"),
+        ident: CanonicalIdent::from_raw("hares"),
         units: None,
         inputs,
         errors: vec![],
@@ -1148,16 +1201,16 @@ fn test_all_deps() {
     fn verify_all_deps(
         expected_deps_list: &[(&Variable, &[&str])],
         is_initial: bool,
-        models: &HashMap<Ident, &ModelStage1>,
-        module_inputs: Option<&BTreeSet<Ident>>,
+        models: &HashMap<CanonicalIdent, &ModelStage1>,
+        module_inputs: Option<&BTreeSet<CanonicalIdent>>,
     ) {
-        let default_inputs = BTreeSet::<Ident>::new();
-        let expected_deps: HashMap<Ident, BTreeSet<Ident>> = expected_deps_list
+        let default_inputs = BTreeSet::<CanonicalIdent>::new();
+        let expected_deps: HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>> = expected_deps_list
             .iter()
             .map(|(v, deps)| {
                 (
-                    v.ident().to_string(),
-                    deps.iter().map(|s| s.to_string()).collect(),
+                    CanonicalIdent::from_raw(v.ident()),
+                    deps.iter().map(|s| CanonicalIdent::from_raw(s)).collect(),
                 )
             })
             .collect();
@@ -1184,7 +1237,8 @@ fn test_all_deps() {
                 let mut expected: Vec<_> = expected.to_vec();
                 expected.sort();
                 eprintln!("  expected: {expected:?}");
-                let mut actual: Vec<_> = deps[v.ident()].iter().collect();
+                let mut actual: Vec<_> =
+                    deps[&CanonicalIdent::from_raw(v.ident())].iter().collect();
                 actual.sort();
                 eprintln!("  actual  : {actual:?}");
             }
@@ -1258,7 +1312,7 @@ fn test_all_deps() {
 
     let models = {
         let no_instantiations = BTreeSet::new();
-        let mut models: HashMap<Ident, &ModelStage1> = HashMap::new();
+        let mut models: HashMap<CanonicalIdent, &ModelStage1> = HashMap::new();
         for model in model_list.iter_mut() {
             let instantiations = module_instantiations
                 .get(&model.name)
@@ -1361,7 +1415,10 @@ fn test_all_deps() {
         (&aux_false, &[]),
     ];
 
-    let module_inputs = ["aux_true".to_string()].iter().cloned().collect();
+    let module_inputs = [CanonicalIdent::from_raw("aux_true")]
+        .iter()
+        .cloned()
+        .collect();
     verify_all_deps(&expected_deps_list, true, &models, Some(&module_inputs));
 
     // test non-existant variables

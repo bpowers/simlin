@@ -6,19 +6,19 @@ use std::collections::{BTreeSet, HashMap};
 
 use prost::alloc::rc::Rc;
 
-use crate::common::{Error, Ident};
+use crate::common::{CanonicalIdent, Error, Ident};
+use crate::datamodel;
 use crate::dimensions::DimensionsContext;
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
-use crate::{datamodel, model};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub datamodel: datamodel::Project,
     // these are Rcs so that multiple Modules created by the compiler can
     // reference the same Model instance
-    pub models: HashMap<Ident, Rc<model::ModelStage1>>,
-    model_order: Vec<Ident>,
+    pub models: HashMap<CanonicalIdent, Rc<ModelStage1>>,
+    model_order: Vec<CanonicalIdent>,
     pub errors: Vec<Error>,
 }
 
@@ -50,7 +50,7 @@ impl From<datamodel::Project> for Project {
 impl Project {
     pub(crate) fn base_from<F>(project_datamodel: datamodel::Project, mut model_cb: F) -> Self
     where
-        F: FnMut(&HashMap<Ident, &ModelStage1>, &Context, &mut ModelStage1),
+        F: FnMut(&HashMap<CanonicalIdent, &ModelStage1>, &Context, &mut ModelStage1),
     {
         use crate::common::{ErrorCode, ErrorKind, topo_sort};
         use crate::model::enumerate_modules;
@@ -96,7 +96,7 @@ impl Project {
         let models: HashMap<Ident, ModelStage0> = models_list
             .iter()
             .cloned()
-            .map(|m| (m.ident.clone(), m))
+            .map(|m| (m.ident.to_ident(), m))
             .collect();
 
         let dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
@@ -106,27 +106,27 @@ impl Project {
                 let scope = ScopeStage0 {
                     models: &models,
                     dimensions: &dims_ctx,
-                    model_name: &model.ident,
+                    model_name: model.ident.as_str(),
                 };
                 ModelStage1::new(&scope, &model)
             })
             .collect();
 
         let model_order = {
-            let model_deps = models_list
+            let model_deps: HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>> = models_list
                 .iter_mut()
-                .map(|model| (model.name.clone(), model.model_deps.take().unwrap()))
-                .collect::<HashMap<_, _>>();
+                .map(|model| {
+                    let deps = model.model_deps.take().unwrap();
+                    (model.name.clone(), deps)
+                })
+                .collect();
 
-            let model_runlist = models_list
-                .iter()
-                .map(|m| m.name.as_str())
-                .collect::<Vec<&str>>();
+            let model_runlist: Vec<&CanonicalIdent> = model_deps.keys().collect();
             let model_runlist = topo_sort(model_runlist, &model_deps);
             model_runlist
                 .into_iter()
                 .enumerate()
-                .map(|(i, n)| (n.to_owned(), i))
+                .map(|(i, n)| (n.to_ident(), i))
                 .collect::<HashMap<Ident, usize>>()
         };
 
@@ -145,14 +145,18 @@ impl Project {
         // to ensure we have the information available for modules
         {
             let no_instantiations = BTreeSet::new();
-            let mut models: HashMap<Ident, &ModelStage1> = HashMap::new();
+            let mut models: HashMap<CanonicalIdent, &ModelStage1> = HashMap::new();
             for model in models_list.iter_mut() {
                 let instantiations = module_instantiations
                     .get(&model.name)
                     .unwrap_or(&no_instantiations);
                 model.set_dependencies(&models, &project_datamodel.dimensions, instantiations);
                 // things like unit inference happen through this callback
-                model_cb(&models, &units_ctx, model);
+                // Skip unit inference for implicit (stdlib) models as they are generic
+                // templates that only make sense when instantiated with specific inputs
+                if !model.implicit {
+                    model_cb(&models, &units_ctx, model);
+                }
                 models.insert(model.name.clone(), model);
             }
         }
@@ -164,7 +168,7 @@ impl Project {
 
         let models = models_list
             .into_iter()
-            .map(|m| (m.name.to_string(), Rc::new(m)))
+            .map(|m| (m.name.clone(), Rc::new(m)))
             .collect();
 
         Project {

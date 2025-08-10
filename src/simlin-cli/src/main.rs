@@ -197,7 +197,7 @@ fn main() {
             let var_count = model.variables.len();
             for (i, (var_name, var)) in model.variables.iter().enumerate() {
                 let subscript = if var.is_stock() { "(t_0)" } else { "" };
-                let var_name = str::replace(var_name, "_", "\\_");
+                let var_name = str::replace(var_name.as_str(), "_", "\\_");
                 let continuation = if !var.is_stock() && i == var_count - 1 {
                     ""
                 } else {
@@ -223,7 +223,7 @@ fn main() {
                         let mut eqn = inflows
                             .iter()
                             .map(|inflow| {
-                                format!("\\mathrm{{{}}}", str::replace(inflow, "_", "\\_"))
+                                format!("\\mathrm{{{}}}", str::replace(inflow.as_str(), "_", "\\_"))
                             })
                             .collect::<Vec<_>>()
                             .join(" + ");
@@ -235,7 +235,7 @@ fn main() {
                                     .iter()
                                     .map(|inflow| format!(
                                         "\\mathrm{{{}}}",
-                                        str::replace(inflow, "_", "\\_")
+                                        str::replace(inflow.as_str(), "_", "\\_")
                                     ))
                                     .collect::<Vec<_>>()
                                     .join(" - ")
