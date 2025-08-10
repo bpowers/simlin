@@ -4,19 +4,19 @@
 
 use std::collections::HashMap;
 
-use crate::common::Ident;
+use crate::common::{CanonicalDimensionName, CanonicalElementName};
 use crate::datamodel;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NamedDimension {
-    pub elements: Vec<String>,
-    pub indexed_elements: HashMap<Ident, usize>,
+    pub elements: Vec<CanonicalElementName>,
+    pub indexed_elements: HashMap<CanonicalElementName, usize>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Dimension {
-    Indexed(Ident, u32),
-    Named(Ident, NamedDimension),
+    Indexed(CanonicalDimensionName, u32),
+    Named(CanonicalDimensionName, NamedDimension),
 }
 
 impl Dimension {
@@ -30,7 +30,7 @@ impl Dimension {
     #[allow(unused)]
     pub fn name(&self) -> &str {
         match self {
-            Dimension::Indexed(name, _) | Dimension::Named(name, _) => name,
+            Dimension::Indexed(name, _) | Dimension::Named(name, _) => name.as_str(),
         }
     }
 }
@@ -38,26 +38,35 @@ impl Dimension {
 impl From<datamodel::Dimension> for Dimension {
     fn from(dim: datamodel::Dimension) -> Dimension {
         match dim {
-            datamodel::Dimension::Indexed(name, size) => Dimension::Indexed(name, size),
-            datamodel::Dimension::Named(name, elements) => Dimension::Named(
-                name,
-                NamedDimension {
-                    indexed_elements: elements
-                        .iter()
-                        .enumerate()
-                        // system dynamic indexes are 1-indexed
-                        .map(|(i, elem)| (elem.clone(), i + 1))
-                        .collect(),
-                    elements,
-                },
-            ),
+            datamodel::Dimension::Indexed(name, size) => {
+                Dimension::Indexed(CanonicalDimensionName::from_raw(&name), size)
+            }
+            datamodel::Dimension::Named(name, elements) => {
+                let canonical_elements: Vec<CanonicalElementName> = elements
+                    .iter()
+                    .map(|e| CanonicalElementName::from_raw(e))
+                    .collect();
+                let indexed_elements: HashMap<CanonicalElementName, usize> = canonical_elements
+                    .iter()
+                    .enumerate()
+                    // system dynamic indexes are 1-indexed
+                    .map(|(i, elem)| (elem.clone(), i + 1))
+                    .collect();
+                Dimension::Named(
+                    CanonicalDimensionName::from_raw(&name),
+                    NamedDimension {
+                        indexed_elements,
+                        elements: canonical_elements,
+                    },
+                )
+            }
         }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct DimensionsContext {
-    dimensions: HashMap<Ident, Dimension>,
+    dimensions: HashMap<CanonicalDimensionName, Dimension>,
 }
 
 impl DimensionsContext {
@@ -67,7 +76,7 @@ impl DimensionsContext {
                 .iter()
                 .map(|dim| {
                     (
-                        crate::canonicalize(dim.name()),
+                        CanonicalDimensionName::from_raw(dim.name()),
                         Dimension::from(dim.clone()),
                     )
                 })
@@ -76,15 +85,16 @@ impl DimensionsContext {
     }
 
     pub(crate) fn is_dimension_name(&self, name: &str) -> bool {
-        self.dimensions.contains_key(&crate::canonicalize(name))
+        let canonical_name = CanonicalDimensionName::from_raw(name);
+        self.dimensions.contains_key(&canonical_name)
     }
 
     pub(crate) fn lookup(&self, element: &str) -> Option<u32> {
         if let Some(pos) = element.find('·') {
-            let dimension_name = crate::canonicalize(&element[..pos]);
-            let element_name = &element[pos + '·'.len_utf8()..];
+            let dimension_name = CanonicalDimensionName::from_raw(&element[..pos]);
+            let element_name = CanonicalElementName::from_raw(&element[pos + '·'.len_utf8()..]);
             if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(&dimension_name) {
-                if let Some(off) = dimension.indexed_elements.get(element_name) {
+                if let Some(off) = dimension.indexed_elements.get(&element_name) {
                     return Some(*off as u32);
                 }
             }

@@ -641,10 +641,11 @@ mod tests {
 
     // Helper function to create indexed dimensions for testing
     fn indexed_dims(sizes: &[u32]) -> Vec<Dimension> {
+        use crate::common::CanonicalDimensionName;
         sizes
             .iter()
             .enumerate()
-            .map(|(i, &size)| Dimension::Indexed(format!("dim{i}"), size))
+            .map(|(i, &size)| Dimension::Indexed(CanonicalDimensionName::from_raw(&format!("dim{i}")), size))
             .collect()
     }
 
@@ -1033,7 +1034,10 @@ mod tests {
         // Test unary negative preserves array dimensions
         let neg_expr = Expr1::Op1(
             UnaryOp::Negative,
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array_var"),
+                Loc::default(),
+            )),
             Loc::default(),
         );
         let expr2 = Expr2::from(neg_expr, &mut ctx).unwrap();
@@ -1069,7 +1073,10 @@ mod tests {
         // Test transpose reverses dimensions
         let transpose_expr = Expr1::Op1(
             UnaryOp::Transpose,
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("matrix"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("matrix"),
+                Loc::default(),
+            )),
             Loc::default(),
         );
         let expr2 = Expr2::from(transpose_expr, &mut ctx).unwrap();
@@ -1105,7 +1112,10 @@ mod tests {
         // Test array + scalar (broadcasting)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array_var"),
+                Loc::default(),
+            )),
             Box::new(Expr1::Const("10".to_string(), 10.0, Loc::default())),
             Loc::default(),
         );
@@ -1144,8 +1154,14 @@ mod tests {
         // Test array + array (matching dimensions)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array1"), Loc::default())),
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array2"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array1"),
+                Loc::default(),
+            )),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array2"),
+                Loc::default(),
+            )),
             Loc::default(),
         );
         let expr2 = Expr2::from(add_expr, &mut ctx).unwrap();
@@ -1180,8 +1196,14 @@ mod tests {
         // Test if expression with array in both branches
         let if_expr = Expr1::If(
             Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array_var"),
+                Loc::default(),
+            )),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array_var"),
+                Loc::default(),
+            )),
             Loc::default(),
         );
         let expr2 = Expr2::from(if_expr, &mut ctx).unwrap();
@@ -1204,8 +1226,8 @@ mod tests {
 
     #[test]
     fn test_expr2_temp_id_allocation() {
-        use crate::ast::{BinaryOp, UnaryOp};
         use crate::ast::expr1::Expr1;
+        use crate::ast::{BinaryOp, UnaryOp};
         use crate::common::CanonicalIdent;
 
         let mut ctx = TestContext::new();
@@ -1220,7 +1242,10 @@ mod tests {
         // First operation: -array1 (should get temp_id 0)
         let neg_expr = Expr1::Op1(
             UnaryOp::Negative,
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array1"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array1"),
+                Loc::default(),
+            )),
             Loc::default(),
         );
         let expr2_1 = Expr2::from(neg_expr, &mut ctx).unwrap();
@@ -1228,8 +1253,14 @@ mod tests {
         // Second operation: array1 + array2 (should get temp_id 1)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array1"), Loc::default())),
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("array2"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array1"),
+                Loc::default(),
+            )),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("array2"),
+                Loc::default(),
+            )),
             Loc::default(),
         );
         let expr2_2 = Expr2::from(add_expr, &mut ctx).unwrap();

@@ -767,8 +767,14 @@ mod ast_tests {
         // Test binary op with mismatched dimensions
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("regional_data"), Loc::default())),
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("product_data"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("regional_data"),
+                Loc::default(),
+            )),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("product_data"),
+                Loc::default(),
+            )),
             Loc::new(0, 10),
         );
         let result = Expr2::from(add_expr, &mut ctx);
@@ -779,8 +785,14 @@ mod ast_tests {
         // Test if expression with mismatched dimensions
         let if_expr = Expr1::If(
             Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("regional_data"), Loc::default())),
-            Box::new(Expr1::Var(CanonicalIdent::from_raw("product_data"), Loc::default())),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("regional_data"),
+                Loc::default(),
+            )),
+            Box::new(Expr1::Var(
+                CanonicalIdent::from_raw("product_data"),
+                Loc::default(),
+            )),
             Loc::new(0, 20),
         );
         let result = Expr2::from(if_expr, &mut ctx);
