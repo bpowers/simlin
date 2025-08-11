@@ -2,10 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Test infrastructure for array functionality
+//! Common test infrastructure for building test projects
 //!
 //! This module provides a builder-based API for creating test projects
-//! with arrays, making it easy to test array functionality incrementally.
+//! that can be used by various test modules.
 
 #[cfg(test)]
 use crate::common::ErrorCode;
@@ -20,32 +20,73 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::rc::Rc;
 
-/// Builder for creating test projects with arrays
+/// Builder for creating test projects with support for arrays, units, and all variable types
 #[cfg(test)]
-pub struct ArrayTestProject {
-    name: String,
-    dimensions: Vec<Dimension>,
-    variables: Vec<Variable>,
-    sim_specs: SimSpecs,
+pub struct TestProject {
+    pub name: String,
+    pub dimensions: Vec<Dimension>,
+    pub variables: Vec<Variable>,
+    pub units: Vec<datamodel::Unit>,
+    pub sim_specs: SimSpecs,
 }
 
 #[cfg(test)]
-impl ArrayTestProject {
-    /// Create a new test project builder
+impl TestProject {
+    /// Create a new test project builder with default settings
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             dimensions: Vec::new(),
             variables: Vec::new(),
+            units: Vec::new(),
             sim_specs: SimSpecs {
                 start: 0.0,
                 stop: 1.0,
                 dt: datamodel::Dt::Dt(1.0),
                 save_step: Some(datamodel::Dt::Dt(1.0)),
                 sim_method: datamodel::SimMethod::Euler,
-                time_units: None,
+                time_units: Some("Month".to_string()),
             },
         }
+    }
+
+    /// Create a new test project builder with custom sim specs
+    #[allow(dead_code)]
+    pub fn new_with_specs(name: &str, sim_specs: SimSpecs) -> Self {
+        Self {
+            name: name.to_string(),
+            dimensions: Vec::new(),
+            variables: Vec::new(),
+            units: Vec::new(),
+            sim_specs,
+        }
+    }
+
+    /// Set time units for the simulation
+    #[allow(dead_code)]
+    pub fn with_time_units(mut self, units: &str) -> Self {
+        self.sim_specs.time_units = Some(units.to_string());
+        self
+    }
+
+    /// Set simulation time parameters
+    #[allow(dead_code)]
+    pub fn with_sim_time(mut self, start: f64, stop: f64, dt: f64) -> Self {
+        self.sim_specs.start = start;
+        self.sim_specs.stop = stop;
+        self.sim_specs.dt = datamodel::Dt::Dt(dt);
+        self
+    }
+
+    /// Add a custom unit definition
+    pub fn unit(mut self, name: &str, equation: Option<&str>) -> Self {
+        self.units.push(datamodel::Unit {
+            name: name.to_string(),
+            equation: equation.map(|s| s.to_string()),
+            disabled: false,
+            aliases: vec![],
+        });
+        self
     }
 
     /// Add an indexed dimension (e.g., for numeric indices)
@@ -64,28 +105,13 @@ impl ArrayTestProject {
         self
     }
 
-    /// Add a constant scalar variable
-    pub fn scalar_const(mut self, name: &str, value: f64) -> Self {
-        self.variables.push(Variable::Aux(datamodel::Aux {
-            ident: name.to_string(),
-            equation: Equation::Scalar(value.to_string(), None),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
-            ai_state: None,
-        }));
-        self
-    }
-
-    /// Add a scalar auxiliary variable with an equation
-    pub fn scalar_aux(mut self, name: &str, equation: &str) -> Self {
+    /// Add an auxiliary variable
+    pub fn aux(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
         self.variables.push(Variable::Aux(datamodel::Aux {
             ident: name.to_string(),
             equation: Equation::Scalar(equation.to_string(), None),
             documentation: String::new(),
-            units: None,
+            units: units.map(|s| s.to_string()),
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
@@ -94,17 +120,15 @@ impl ArrayTestProject {
         self
     }
 
-    /// Add an array constant (all elements have the same value)
-    pub fn array_const(mut self, name_with_dims: &str, value: f64) -> Self {
-        // Parse name[dim1,dim2] format
-        let (name, dims) = parse_array_declaration(name_with_dims);
-
-        self.variables.push(Variable::Aux(datamodel::Aux {
-            ident: name,
-            equation: Equation::ApplyToAll(dims, value.to_string(), None),
+    /// Add a flow variable
+    pub fn flow(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
+        self.variables.push(Variable::Flow(datamodel::Flow {
+            ident: name.to_string(),
+            equation: Equation::Scalar(equation.to_string(), None),
             documentation: String::new(),
-            units: None,
+            units: units.map(|s| s.to_string()),
             gf: None,
+            non_negative: false,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
@@ -112,43 +136,127 @@ impl ArrayTestProject {
         self
     }
 
-    /// Add an array auxiliary variable with an equation
-    pub fn array_aux(mut self, name_with_dims: &str, equation: &str) -> Self {
-        // Parse name[dim1,dim2] format
-        let (name, dims) = parse_array_declaration(name_with_dims);
-
-        self.variables.push(Variable::Aux(datamodel::Aux {
-            ident: name,
-            equation: Equation::ApplyToAll(dims, equation.to_string(), None),
-            documentation: String::new(),
-            units: None,
-            gf: None,
-            can_be_module_input: false,
-            visibility: datamodel::Visibility::Private,
-            ai_state: None,
-        }));
-        self
-    }
-
-    /// Add an array with different equations for different subscript ranges
-    #[allow(dead_code)]
-    pub fn array_with_ranges(
+    /// Add a stock variable
+    pub fn stock(
         mut self,
+        name: &str,
+        initial: &str,
+        inflows: &[&str],
+        outflows: &[&str],
+        units: Option<&str>,
+    ) -> Self {
+        self.variables.push(Variable::Stock(datamodel::Stock {
+            ident: name.to_string(),
+            equation: Equation::Scalar(initial.to_string(), None),
+            documentation: String::new(),
+            units: units.map(|s| s.to_string()),
+            inflows: inflows.iter().map(|s| s.to_string()).collect(),
+            outflows: outflows.iter().map(|s| s.to_string()).collect(),
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+        }));
+        self
+    }
+
+    // Array-specific convenience methods
+
+    /// Add a scalar constant (convenience for aux with constant value)
+    pub fn scalar_const(self, name: &str, value: f64) -> Self {
+        self.aux(name, &value.to_string(), None)
+    }
+
+    /// Add a scalar auxiliary variable (convenience for aux without units)
+    pub fn scalar_aux(self, name: &str, equation: &str) -> Self {
+        self.aux(name, equation, None)
+    }
+
+    /// Add an array constant using "name[dims]" notation
+    pub fn array_const(self, name_with_dims: &str, value: f64) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        self.array_aux_direct(&name, dims, &value.to_string(), None)
+    }
+
+    /// Add an array auxiliary using "name[dims]" notation
+    pub fn array_aux(self, name_with_dims: &str, equation: &str) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        self.array_aux_direct(&name, dims, equation, None)
+    }
+
+    /// Add an array with different equations for different subscript ranges using "name[dims]" notation
+    pub fn array_with_ranges(
+        self,
         name_with_dims: &str,
         equations: Vec<(&str, &str)>, // (element_name, equation)
     ) -> Self {
         let (name, dims) = parse_array_declaration(name_with_dims);
+        self.array_with_ranges_direct(&name, dims, equations, None)
+    }
 
+    // Unit-specific convenience methods
+
+    /// Add an auxiliary variable with units (convenience)
+    pub fn aux_with_units(self, name: &str, equation: &str, units: Option<&str>) -> Self {
+        self.aux(name, equation, units)
+    }
+
+    /// Add a flow variable with units (convenience)
+    pub fn flow_with_units(self, name: &str, equation: &str, units: Option<&str>) -> Self {
+        self.flow(name, equation, units)
+    }
+
+    /// Add a stock variable with units (convenience)
+    pub fn stock_with_units(
+        self,
+        name: &str,
+        initial: &str,
+        inflows: &[&str],
+        outflows: &[&str],
+        units: Option<&str>,
+    ) -> Self {
+        self.stock(name, initial, inflows, outflows, units)
+    }
+
+    /// Add an array auxiliary variable with apply-to-all equation
+    pub fn array_aux_direct(
+        mut self,
+        name: &str,
+        dims: Vec<String>,
+        equation: &str,
+        units: Option<&str>,
+    ) -> Self {
+        self.variables.push(Variable::Aux(datamodel::Aux {
+            ident: name.to_string(),
+            equation: Equation::ApplyToAll(dims, equation.to_string(), None),
+            documentation: String::new(),
+            units: units.map(|s| s.to_string()),
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+        }));
+        self
+    }
+
+    /// Add an array variable with different equations for different subscript ranges
+    pub fn array_with_ranges_direct(
+        mut self,
+        name: &str,
+        dims: Vec<String>,
+        equations: Vec<(&str, &str)>, // (element_name, equation)
+        units: Option<&str>,
+    ) -> Self {
         let arrayed_equations = equations
             .into_iter()
             .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None))
             .collect();
 
         self.variables.push(Variable::Aux(datamodel::Aux {
-            ident: name,
+            ident: name.to_string(),
             equation: Equation::Arrayed(dims, arrayed_equations),
             documentation: String::new(),
-            units: None,
+            units: units.map(|s| s.to_string()),
             gf: None,
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
@@ -163,7 +271,7 @@ impl ArrayTestProject {
             name: self.name.clone(),
             sim_specs: self.sim_specs.clone(),
             dimensions: self.dimensions.clone(),
-            units: vec![],
+            units: self.units.clone(),
             models: vec![datamodel::Model {
                 name: "main".to_string(),
                 variables: self.variables.clone(),
@@ -179,7 +287,6 @@ impl ArrayTestProject {
         let datamodel = self.build_datamodel();
         let compiled = Rc::new(CompiledProject::from(datamodel));
 
-        // Collect any compilation errors
         let mut errors = Vec::new();
 
         // Check project-level errors
@@ -197,7 +304,7 @@ impl ArrayTestProject {
                 }
             }
 
-            // Check variable-level errors
+            // Check variable-level errors (including unit errors)
             for (var_name, var_errors) in model.get_variable_errors() {
                 for err in var_errors {
                     errors.push((format!("{}.{}", model_name, var_name), err.code));
@@ -300,17 +407,13 @@ impl ArrayTestProject {
             }
         }
 
-        // Note: We don't modify non-array variables here because some might be
-        // true scalars that need last-timestep-only handling, but we can't
-        // distinguish them from arrays that have been flattened
-
         Ok(output)
     }
 
     /// Test that compilation succeeds
     pub fn assert_compiles(&self) {
         match self.compile() {
-            Ok(_compiled) => {}
+            Ok(_) => {}
             Err(errors) => {
                 let error_msg = errors
                     .iter()
@@ -324,6 +427,15 @@ impl ArrayTestProject {
 
     /// Test that compilation fails with specific error
     pub fn assert_compile_error(&self, expected_error: ErrorCode) {
+        self.assert_compile_error_impl(expected_error)
+    }
+
+    /// Test that compilation fails with unit mismatch (convenience)
+    pub fn assert_unit_error(&self) {
+        self.assert_compile_error(ErrorCode::UnitMismatch)
+    }
+
+    fn assert_compile_error_impl(&self, expected_error: ErrorCode) {
         match self.compile() {
             Ok(_) => panic!(
                 "Expected compilation to fail with {:?}, but it succeeded",
@@ -411,7 +523,7 @@ impl ArrayTestProject {
 
 /// Helper to parse array declarations like "name[dim1,dim2]"
 #[cfg(test)]
-fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
+pub fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
     if let Some(bracket_pos) = decl.find('[') {
         let name = decl[..bracket_pos].to_string();
         let dims_str = &decl[bracket_pos + 1..decl.len() - 1];
@@ -419,51 +531,5 @@ fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
         (name, dims)
     } else {
         (decl.to_string(), vec![])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_scalar_constant() {
-        ArrayTestProject::new("test")
-            .scalar_const("x", 42.0)
-            .assert_compiles();
-    }
-
-    #[test]
-    fn test_array_constant() {
-        ArrayTestProject::new("test")
-            .indexed_dimension("Time", 5)
-            .array_const("values[Time]", 10.0)
-            .assert_compiles();
-    }
-
-    #[test]
-    fn test_named_dimension() {
-        ArrayTestProject::new("test")
-            .named_dimension("Location", &["Boston", "NYC", "LA"])
-            .array_const("population[Location]", 1000000.0)
-            .assert_compiles();
-    }
-
-    #[test]
-    fn test_array_equation() {
-        ArrayTestProject::new("test")
-            .indexed_dimension("Index", 3)
-            .scalar_const("base", 10.0)
-            .array_aux("derived[Index]", "base * 2")
-            .assert_compiles();
-    }
-
-    #[test]
-    fn test_multi_dimensional_array() {
-        ArrayTestProject::new("test")
-            .indexed_dimension("Row", 2)
-            .indexed_dimension("Col", 3)
-            .array_const("matrix[Row,Col]", 1.0)
-            .assert_compiles();
     }
 }

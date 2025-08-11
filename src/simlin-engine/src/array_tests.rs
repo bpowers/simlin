@@ -10,12 +10,12 @@
 #[cfg(test)]
 mod wildcard_tests {
     use crate::ErrorCode;
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     fn wildcard_preserves_dimension() {
         // Test that arr[*] preserves the array dimension
-        let project = ArrayTestProject::new("wildcard_basic")
+        let project = TestProject::new("wildcard_basic")
             .indexed_dimension("args", 3)
             .array_const("source[args]", 10.0)
             .array_aux("result[args]", "source[*]");
@@ -28,7 +28,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_with_named_dimension() {
         // Test wildcard with named dimensions
-        let project = ArrayTestProject::new("wildcard_named")
+        let project = TestProject::new("wildcard_named")
             .named_dimension("City", &["Boston", "NYC", "LA"])
             .array_const("population[City]", 1000.0)
             .array_aux("copy[City]", "population[*]");
@@ -41,7 +41,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_with_arithmetic() {
         // Test wildcard in arithmetic expressions
-        let project = ArrayTestProject::new("wildcard_arithmetic")
+        let project = TestProject::new("wildcard_arithmetic")
             .indexed_dimension("Index", 4)
             .array_const("base[Index]", 5.0)
             .array_aux("doubled[Index]", "base[*] * 2")
@@ -56,7 +56,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_chained() {
         // Test chained wildcards
-        let project = ArrayTestProject::new("wildcard_chained")
+        let project = TestProject::new("wildcard_chained")
             .indexed_dimension("Dim", 3)
             .array_const("a[Dim]", 2.0)
             .array_aux("b[Dim]", "a[*] * 3")
@@ -71,7 +71,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_all_dims_2d() {
         // Test wildcards for all dimensions in 2D arrays (this should work)
-        let project = ArrayTestProject::new("wildcard_all_2d")
+        let project = TestProject::new("wildcard_all_2d")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 3)
             .array_const("source[X,Y]", 10.0) // All elements = 10
@@ -85,7 +85,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_all_dims_3d() {
         // Test wildcards for all dimensions in 3D arrays
-        let project = ArrayTestProject::new("wildcard_all_3d")
+        let project = TestProject::new("wildcard_all_3d")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 2)
             .indexed_dimension("Z", 2)
@@ -100,7 +100,7 @@ mod wildcard_tests {
     #[test]
     fn simple_index() {
         // Test numeric indexing per XMILE spec
-        let project = ArrayTestProject::new("simple_index")
+        let project = TestProject::new("simple_index")
             .indexed_dimension("A", 2)
             .array_const("m[A]", 5.0) // All elements = 5
             .scalar_aux("first_item", "m[1]"); // XMILE uses simple numeric indices
@@ -113,7 +113,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_simple_2d() {
         // Simpler test for 2D arrays with wildcards
-        let project = ArrayTestProject::new("wildcard_simple_2d")
+        let project = TestProject::new("wildcard_simple_2d")
             .indexed_dimension("A", 2)
             .indexed_dimension("B", 2)
             .array_const("m[A,B]", 5.0) // All elements = 5
@@ -127,7 +127,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_in_multidim_fixed_first() {
         // Test wildcard in multi-dimensional arrays with first dimension fixed
-        let project = ArrayTestProject::new("wildcard_multidim_fixed_first")
+        let project = TestProject::new("wildcard_multidim_fixed_first")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -153,7 +153,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_in_multidim_fixed_second() {
         // Test wildcard in multi-dimensional arrays with second dimension fixed
-        let project = ArrayTestProject::new("wildcard_multidim_fixed_second")
+        let project = TestProject::new("wildcard_multidim_fixed_second")
             .indexed_dimension("Row", 3)
             .indexed_dimension("Col", 2)
             .array_with_ranges(
@@ -179,7 +179,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_with_named_and_indexed_dims() {
         // Test wildcard with mixed named and indexed dimensions
-        let project = ArrayTestProject::new("wildcard_mixed_dims")
+        let project = TestProject::new("wildcard_mixed_dims")
             .named_dimension("City", &["Boston", "NYC", "LA"])
             .indexed_dimension("Year", 2)
             .array_with_ranges(
@@ -205,7 +205,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_three_dimensions() {
         // Test wildcard in 3D arrays
-        let project = ArrayTestProject::new("wildcard_3d")
+        let project = TestProject::new("wildcard_3d")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 2)
             .indexed_dimension("Z", 2)
@@ -236,7 +236,7 @@ mod wildcard_tests {
     #[test]
     fn wildcard_multiple_in_expression() {
         // Test multiple wildcards in the same expression (both operands)
-        let project = ArrayTestProject::new("wildcard_multiple")
+        let project = TestProject::new("wildcard_multiple")
             .indexed_dimension("Blerg", 3)
             .indexed_dimension("Product", 2)
             .array_with_ranges(
@@ -273,7 +273,7 @@ mod wildcard_tests {
 
     #[test]
     fn wildcard_interpreter_basic() {
-        ArrayTestProject::new("wildcard_interpreter")
+        TestProject::new("wildcard_interpreter")
             .indexed_dimension("Widgets", 3)
             .array_const("source[Widgets]", 10.0)
             .array_aux("result[Widgets]", "source[*]")
@@ -282,7 +282,7 @@ mod wildcard_tests {
 
     #[test]
     fn wildcard_interpreter_expression_indexed() {
-        let project = ArrayTestProject::new("wildcard_expr")
+        let project = TestProject::new("wildcard_expr")
             .indexed_dimension("Index", 3)
             .array_aux("values[Index]", "1 + Index") // Assuming Index gives position
             .array_aux("doubled[Index]", "values[*] * 2");
@@ -294,7 +294,7 @@ mod wildcard_tests {
 
     #[test]
     fn wildcard_interpreter_expression_named() {
-        let project = ArrayTestProject::new("wildcard_expr")
+        let project = TestProject::new("wildcard_expr")
             .named_dimension("Cities", &["Boston", "NYC"])
             .array_aux("values[Cities]", "1 + Cities") // Assuming Index gives position
             .array_aux("doubled[Cities]", "values[*] * 2");
@@ -307,7 +307,7 @@ mod wildcard_tests {
     #[test]
     fn dimension_as_index() {
         // Test that dimension names evaluate to indices in A2A context
-        let project = ArrayTestProject::new("dim_index")
+        let project = TestProject::new("dim_index")
             .named_dimension("Cities", &["Boston", "NYC", "LA"])
             .array_aux("indices[Cities]", "Cities"); // Should be [1, 2, 3]
 
@@ -318,7 +318,7 @@ mod wildcard_tests {
 
     #[test]
     fn wildcard_interpreter_expression_scalar_fails() {
-        let project = ArrayTestProject::new("wildcard_expr")
+        let project = TestProject::new("wildcard_expr")
             .named_dimension("Cities", &["Boston", "NYC"])
             .scalar_aux("value", "1 + Cities");
 
@@ -328,12 +328,12 @@ mod wildcard_tests {
 
 #[cfg(test)]
 mod dimension_position_tests {
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     fn dimension_position_single() {
         // Test @1 syntax for accessing first element of a dimension
-        let project = ArrayTestProject::new("dim_pos_single")
+        let project = TestProject::new("dim_pos_single")
             .indexed_dimension("Items", 3)
             .array_with_ranges("arr[Items]", vec![("1", "10"), ("2", "20"), ("3", "30")])
             .scalar_aux("first_elem", "arr[@1]"); // Should get first element = 10
@@ -346,7 +346,7 @@ mod dimension_position_tests {
     #[test]
     fn dimension_position_reorder() {
         // Test reordering dimensions with @2, @1
-        let project = ArrayTestProject::new("dim_pos_reorder")
+        let project = TestProject::new("dim_pos_reorder")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -372,7 +372,7 @@ mod dimension_position_tests {
     #[test]
     fn dimension_position_3d() {
         // Test dimension position with 3D arrays
-        let project = ArrayTestProject::new("dim_pos_3d")
+        let project = TestProject::new("dim_pos_3d")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 2)
             .indexed_dimension("Z", 2)
@@ -405,7 +405,7 @@ mod dimension_position_tests {
     #[test]
     fn dimension_position_partial() {
         // Test mixing dimension position with wildcards
-        let project = ArrayTestProject::new("dim_pos_partial")
+        let project = TestProject::new("dim_pos_partial")
             .indexed_dimension("A", 2)
             .indexed_dimension("B", 3)
             .indexed_dimension("C", 2)
@@ -438,12 +438,12 @@ mod dimension_position_tests {
 
 #[cfg(test)]
 mod transpose_tests {
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     fn transpose_2d_array() {
         // Test transpose operator on 2D array
-        let project = ArrayTestProject::new("transpose_2d")
+        let project = TestProject::new("transpose_2d")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -471,7 +471,7 @@ mod transpose_tests {
     #[test]
     fn transpose_2d_array_bare() {
         // Test transpose operator on bare 2D array variable
-        let project = ArrayTestProject::new("transpose_2d_bare")
+        let project = TestProject::new("transpose_2d_bare")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -497,7 +497,7 @@ mod transpose_tests {
     #[test]
     fn transpose_3d_array_bare() {
         // Test transpose on 3D array
-        let project = ArrayTestProject::new("transpose_3d_bare")
+        let project = TestProject::new("transpose_3d_bare")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 2)
             .indexed_dimension("Z", 2)
@@ -530,7 +530,7 @@ mod transpose_tests {
     #[ignore]
     fn transpose_with_operations() {
         // Test transpose in expressions
-        let project = ArrayTestProject::new("transpose_with_ops")
+        let project = TestProject::new("transpose_with_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -556,7 +556,7 @@ mod transpose_tests {
     #[test]
     fn transpose_sum() {
         // Test using transpose with aggregate functions
-        let project = ArrayTestProject::new("transpose_sum")
+        let project = TestProject::new("transpose_sum")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -581,7 +581,7 @@ mod transpose_tests {
     #[test]
     fn transpose_1d_array() {
         // Transpose of 1D array should be no-op
-        let project = ArrayTestProject::new("transpose_1d")
+        let project = TestProject::new("transpose_1d")
             .indexed_dimension("Points", 5)
             .array_with_ranges(
                 "vec[Points]",
@@ -604,7 +604,7 @@ mod transpose_tests {
     #[test]
     fn transpose_3d_array() {
         // Test transpose on 3D array - should reverse all dimensions
-        let project = ArrayTestProject::new("transpose_3d")
+        let project = TestProject::new("transpose_3d")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 2)
             .indexed_dimension("Z", 2)
@@ -638,7 +638,7 @@ mod transpose_tests {
     #[ignore]
     fn transpose_chain() {
         // Test that (A')' = A
-        let project = ArrayTestProject::new("transpose_chain")
+        let project = TestProject::new("transpose_chain")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 3)
             .array_with_ranges(
@@ -664,7 +664,7 @@ mod transpose_tests {
     #[test]
     fn transpose_with_arithmetic() {
         // Test transpose in arithmetic expressions
-        let project = ArrayTestProject::new("transpose_arithmetic")
+        let project = TestProject::new("transpose_arithmetic")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_with_ranges(
@@ -687,7 +687,7 @@ mod transpose_tests {
     #[test]
     fn transpose_scalar_result() {
         // Test transpose used in a scalar context (e.g., SUM)
-        let project = ArrayTestProject::new("transpose_scalar")
+        let project = TestProject::new("transpose_scalar")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -713,12 +713,12 @@ mod transpose_tests {
 
 #[cfg(test)]
 mod range_tests {
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     #[ignore]
     fn range_sum_1d_w_ops() {
-        let project = ArrayTestProject::new("range_sum_1d_w_ops")
+        let project = TestProject::new("range_sum_1d_w_ops")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -733,7 +733,7 @@ mod range_tests {
 
     #[test]
     fn range_sum_1d() {
-        let project = ArrayTestProject::new("range_sum_1d")
+        let project = TestProject::new("range_sum_1d")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -749,7 +749,7 @@ mod range_tests {
     #[test]
     fn range_basic_a() {
         // Test basic range subscript [1:3]
-        let project = ArrayTestProject::new("range_basic")
+        let project = TestProject::new("range_basic")
             .indexed_dimension("A", 5)
             .indexed_dimension("B", 3)
             .array_with_ranges(
@@ -766,7 +766,7 @@ mod range_tests {
     #[test]
     fn range_2d_first_dim() {
         // Test slicing the first dimension of a 2D array: source[2:3, *]
-        let project = ArrayTestProject::new("range_2d_first")
+        let project = TestProject::new("range_2d_first")
             .indexed_dimension("Row", 4)
             .indexed_dimension("Col", 3)
             .array_with_ranges(
@@ -799,7 +799,7 @@ mod range_tests {
     #[test]
     fn range_2d_second_dim() {
         // Test slicing the second dimension of a 2D array: source[*, 2:3]
-        let project = ArrayTestProject::new("range_2d_second")
+        let project = TestProject::new("range_2d_second")
             .indexed_dimension("Row", 3)
             .indexed_dimension("Col", 4)
             .array_with_ranges(
@@ -832,7 +832,7 @@ mod range_tests {
     #[test]
     fn range_2d_both_dims() {
         // Test slicing both dimensions: source[2:3, 2:4]
-        let project = ArrayTestProject::new("range_2d_both")
+        let project = TestProject::new("range_2d_both")
             .indexed_dimension("Row", 4)
             .indexed_dimension("Col", 5)
             .array_with_ranges(
@@ -874,7 +874,7 @@ mod range_tests {
     #[test]
     fn range_3d_single_dim() {
         // Test slicing one dimension of a 3D array
-        let project = ArrayTestProject::new("range_3d_single")
+        let project = TestProject::new("range_3d_single")
             .indexed_dimension("X", 3)
             .indexed_dimension("Y", 3)
             .indexed_dimension("Z", 3)
@@ -933,7 +933,7 @@ mod range_tests {
     #[test]
     fn range_with_single_index_mix() {
         // Test mixing range with single index: source[2, 3:5]
-        let project = ArrayTestProject::new("range_mixed")
+        let project = TestProject::new("range_mixed")
             .indexed_dimension("Row", 3)
             .indexed_dimension("Col", 5)
             .array_with_ranges(
@@ -969,7 +969,7 @@ mod range_tests {
     #[test]
     fn named_range_basic() {
         // Test basic named dimension range [City.Boston:City.LA]
-        let project = ArrayTestProject::new("named_range_basic")
+        let project = TestProject::new("named_range_basic")
             .named_dimension("City", &["Boston", "NYC", "LA", "SF", "Seattle"])
             .array_with_ranges(
                 "population[City]",
@@ -991,7 +991,7 @@ mod range_tests {
 
     #[test]
     fn range_mean_1d() {
-        let project = ArrayTestProject::new("range_mean_1d")
+        let project = TestProject::new("range_mean_1d")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1013,7 +1013,7 @@ mod range_tests {
     #[test]
     #[ignore]
     fn range_mean_1d_w_ops() {
-        let project = ArrayTestProject::new("range_mean_1d_w_ops")
+        let project = TestProject::new("range_mean_1d_w_ops")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1028,7 +1028,7 @@ mod range_tests {
 
     #[test]
     fn range_stddev_1d() {
-        let project = ArrayTestProject::new("range_stddev_1d")
+        let project = TestProject::new("range_stddev_1d")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1044,7 +1044,7 @@ mod range_tests {
     #[test]
     #[ignore]
     fn range_stddev_1d_w_ops() {
-        let project = ArrayTestProject::new("range_stddev_1d_w_ops")
+        let project = TestProject::new("range_stddev_1d_w_ops")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1061,7 +1061,7 @@ mod range_tests {
 
     #[test]
     fn range_min_1d() {
-        let project = ArrayTestProject::new("range_min_1d")
+        let project = TestProject::new("range_min_1d")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1083,7 +1083,7 @@ mod range_tests {
     #[test]
     #[ignore]
     fn range_min_1d_w_ops() {
-        let project = ArrayTestProject::new("range_min_1d_w_ops")
+        let project = TestProject::new("range_min_1d_w_ops")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1098,7 +1098,7 @@ mod range_tests {
 
     #[test]
     fn range_max_1d() {
-        let project = ArrayTestProject::new("range_max_1d")
+        let project = TestProject::new("range_max_1d")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1120,7 +1120,7 @@ mod range_tests {
     #[test]
     #[ignore]
     fn range_max_1d_w_ops() {
-        let project = ArrayTestProject::new("range_max_1d_w_ops")
+        let project = TestProject::new("range_max_1d_w_ops")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1135,7 +1135,7 @@ mod range_tests {
 
     #[test]
     fn range_size_1d() {
-        let project = ArrayTestProject::new("range_size_1d")
+        let project = TestProject::new("range_size_1d")
             .indexed_dimension("A", 5)
             .array_with_ranges(
                 "source[A]",
@@ -1150,7 +1150,7 @@ mod range_tests {
 
     #[test]
     fn range_size_2d() {
-        let project = ArrayTestProject::new("range_size_2d")
+        let project = TestProject::new("range_size_2d")
             .indexed_dimension("Row", 3)
             .indexed_dimension("Col", 4)
             .array_with_ranges(
@@ -1180,7 +1180,7 @@ mod range_tests {
     #[test]
     fn named_range_sum() {
         // Test SUM with named dimension range
-        let project = ArrayTestProject::new("named_range_sum")
+        let project = TestProject::new("named_range_sum")
             .named_dimension("Month", &["Jan", "Feb", "Mar", "Apr", "May", "Jun"])
             .array_with_ranges(
                 "sales[Month]",
@@ -1203,7 +1203,7 @@ mod range_tests {
     #[test]
     fn named_range_2d() {
         // Test named range in 2D array
-        let project = ArrayTestProject::new("named_range_2d")
+        let project = TestProject::new("named_range_2d")
             .named_dimension("City", &["Boston", "NYC", "LA", "SF"])
             .indexed_dimension("Year", 3)
             .array_with_ranges(
@@ -1235,7 +1235,7 @@ mod range_tests {
     #[test]
     fn named_range_mixed_dimensions() {
         // Test mixing named range with numeric range
-        let project = ArrayTestProject::new("named_range_mixed")
+        let project = TestProject::new("named_range_mixed")
             .named_dimension("Product", &["A", "B", "C", "D", "E"])
             .indexed_dimension("Quarter", 4)
             .array_with_ranges(
@@ -1277,7 +1277,7 @@ mod range_tests {
     #[ignore]
     fn range_basic() {
         // Test basic range subscript [1:3]
-        ArrayTestProject::new("range_basic")
+        TestProject::new("range_basic")
             .indexed_dimension("Periods", 5)
             .array_aux("source[Periods]", "Periods")
             .array_aux("slice[Periods]", "source[1:3]")
@@ -1289,7 +1289,7 @@ mod range_tests {
     #[ignore]
     fn range_with_expressions() {
         // Test range with expressions [start:end]
-        ArrayTestProject::new("range_expr")
+        TestProject::new("range_expr")
             .indexed_dimension("Index", 10)
             .scalar_const("start", 2.0)
             .scalar_const("end", 5.0)
@@ -1305,13 +1305,13 @@ mod range_tests {
 
 #[cfg(test)]
 mod combined_operations_tests {
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     #[ignore] // Enable when all operations are implemented
     fn transpose_and_slice() {
         // Combine transpose with slicing
-        ArrayTestProject::new("combined_transpose_slice")
+        TestProject::new("combined_transpose_slice")
             .indexed_dimension("Row", 3)
             .indexed_dimension("Col", 4)
             .array_aux("matrix[Row,Col]", "Row * 10 + Col")
@@ -1323,7 +1323,7 @@ mod combined_operations_tests {
     #[ignore] // Enable when all operations are implemented
     fn dimension_position_and_wildcard() {
         // Combine dimension position with wildcard
-        ArrayTestProject::new("combined_dimpos_wildcard")
+        TestProject::new("combined_dimpos_wildcard")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 3)
             .indexed_dimension("Z", 4)
@@ -1336,7 +1336,7 @@ mod combined_operations_tests {
     #[ignore] // Enable when all operations are implemented
     fn complex_expression() {
         // Test complex array expression
-        ArrayTestProject::new("complex_expr")
+        TestProject::new("complex_expr")
             .indexed_dimension("Period", 5)
             .indexed_dimension("Product", 3)
             .array_aux("sales[Period,Product]", "Period * Product")
@@ -1353,7 +1353,7 @@ mod error_handling_tests {
     #[ignore] // Enable when dimension checking is fully implemented
     fn dimension_mismatch() {
         // Test that dimension mismatches are caught
-        // ArrayTestProject::new("dim_mismatch")
+        // TestProject::new("dim_mismatch")
         //     .indexed_dimension("X", 3)
         //     .indexed_dimension("Y", 4)
         //     .array_const("arr1[X]", 1.0)
@@ -1366,7 +1366,7 @@ mod error_handling_tests {
     #[ignore] // Enable when bounds checking is implemented
     fn out_of_bounds_index() {
         // Test out of bounds access
-        // ArrayTestProject::new("out_of_bounds")
+        // TestProject::new("out_of_bounds")
         //     .indexed_dimension("Small", 3)
         //     .array_const("arr[Small]", 10.0)
         //     .scalar_aux("bad_access", "arr[5]")  // Index 5 out of bounds for size 3
@@ -1375,13 +1375,13 @@ mod error_handling_tests {
 }
 
 mod implicit_transpose_tests {
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     fn implicit_2d_transpose() {
         // Test implicit dimension reordering for 2D arrays
         // source: [Row, Col], target: [Col, Row] - should work automatically
-        ArrayTestProject::new("implicit_2d")
+        TestProject::new("implicit_2d")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_aux("source[Row, Col]", "Row * 10 + Col")
@@ -1399,7 +1399,7 @@ mod implicit_transpose_tests {
     #[test]
     fn implicit_3d_reordering() {
         // Test implicit dimension reordering for 3D arrays
-        ArrayTestProject::new("implicit_3d")
+        TestProject::new("implicit_3d")
             .indexed_dimension("X", 2)
             .indexed_dimension("Y", 2)
             .indexed_dimension("Z", 2)
@@ -1421,7 +1421,7 @@ mod implicit_transpose_tests {
     #[test]
     fn implicit_transpose_in_binary_ops() {
         // Test implicit transpose in binary operations
-        ArrayTestProject::new("implicit_binary")
+        TestProject::new("implicit_binary")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             .array_aux("matrix1[Row, Col]", "Row + Col")
@@ -1437,7 +1437,7 @@ mod implicit_transpose_tests {
     #[test]
     fn implicit_transpose_all_binary_ops() {
         // Test implicit transpose works with all binary operations
-        ArrayTestProject::new("implicit_all_ops")
+        TestProject::new("implicit_all_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_aux("a[Row, Col]", "(Row + 1) * 2 + Col") // [3,4; 5,6]
@@ -1458,7 +1458,7 @@ mod implicit_transpose_tests {
         // Test each result separately
         // a: [5,6; 7,8]
         // b: [7,8; 10,11] -> transposed: [7,10; 8,11]
-        ArrayTestProject::new("implicit_all_ops")
+        TestProject::new("implicit_all_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_aux("a[Row, Col]", "(Row + 1) * 2 + Col")
@@ -1467,7 +1467,7 @@ mod implicit_transpose_tests {
             .assert_interpreter_result("add_result", &[12.0, 16.0, 15.0, 19.0]);
 
         // a - b': [5-7, 6-10; 7-8, 8-11] = [-2, -4; -1, -3]
-        ArrayTestProject::new("implicit_all_ops")
+        TestProject::new("implicit_all_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_aux("a[Row, Col]", "(Row + 1) * 2 + Col")
@@ -1476,7 +1476,7 @@ mod implicit_transpose_tests {
             .assert_interpreter_result("sub_result", &[-2.0, -4.0, -1.0, -3.0]);
 
         // a * b': [5*7, 6*10; 7*8, 8*11] = [35, 60; 56, 88]
-        ArrayTestProject::new("implicit_all_ops")
+        TestProject::new("implicit_all_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_aux("a[Row, Col]", "(Row + 1) * 2 + Col")
@@ -1485,7 +1485,7 @@ mod implicit_transpose_tests {
             .assert_interpreter_result("mul_result", &[35.0, 60.0, 56.0, 88.0]);
 
         // a / b': [5/7, 6/10; 7/8, 8/11]
-        ArrayTestProject::new("implicit_all_ops")
+        TestProject::new("implicit_all_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_aux("a[Row, Col]", "(Row + 1) * 2 + Col")
@@ -1497,7 +1497,7 @@ mod implicit_transpose_tests {
             );
 
         // a > b': [5>7, 6>10; 7>8, 8>11] = [0, 0; 0, 0]
-        ArrayTestProject::new("implicit_all_ops")
+        TestProject::new("implicit_all_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_aux("a[Row, Col]", "(Row + 1) * 2 + Col")
@@ -1506,7 +1506,7 @@ mod implicit_transpose_tests {
             .assert_interpreter_result("gt_result", &[0.0, 0.0, 0.0, 0.0]);
 
         // a < b': [5<7, 6<10; 7<8, 8<11] = [1, 1; 1, 1]
-        ArrayTestProject::new("implicit_all_ops")
+        TestProject::new("implicit_all_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 2)
             .array_aux("a[Row, Col]", "(Row + 1) * 2 + Col")
@@ -1522,7 +1522,7 @@ mod implicit_transpose_tests {
         // This test should verify that the simulation fails to build
         // when dimensions cannot be reordered to match
 
-        // ArrayTestProject::new("dim_mismatch")
+        // TestProject::new("dim_mismatch")
         //     .indexed_dimension("A", 2)
         //     .indexed_dimension("B", 3)
         //     .indexed_dimension("C", 2)
@@ -1533,13 +1533,13 @@ mod implicit_transpose_tests {
 }
 
 mod a2a_assignment_tests {
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     fn a2a_with_bare_transpose_and_operations() {
         // Test that A2A assignments with bare transpose + operations work correctly
         // This specifically tests that the compiler properly handles the expression rewriting
-        ArrayTestProject::new("a2a_transpose_ops")
+        TestProject::new("a2a_transpose_ops")
             .indexed_dimension("Row", 2)
             .indexed_dimension("Col", 3)
             // Create matrix with individual equations
@@ -1554,7 +1554,7 @@ mod a2a_assignment_tests {
     #[test]
     fn a2a_with_complex_expression() {
         // Test A2A with complex expression involving multiple operations
-        ArrayTestProject::new("a2a_complex")
+        TestProject::new("a2a_complex")
             .indexed_dimension("X", 3)
             .indexed_dimension("Y", 2)
             // source[1,1]=1, source[1,2]=2, source[2,1]=3, source[2,2]=4, source[3,1]=5, source[3,2]=6
@@ -1570,13 +1570,13 @@ mod a2a_assignment_tests {
 
 #[cfg(test)]
 mod star_range_subdimension_tests {
-    use crate::array_test_helpers::ArrayTestProject;
+    use crate::test_common::TestProject;
 
     #[test]
     #[ignore]
     fn star_to_subdimension_simple() {
         // Simpler test: just check if *:SubA resolves correctly as a subscript
-        let project = ArrayTestProject::new("star_simple")
+        let project = TestProject::new("star_simple")
             .named_dimension("DimA", &["A1", "A2", "A3"])
             .named_dimension("SubA", &["A2", "A3"])
             .array_const("b_2[DimA]", 10.0) // Use a simple constant instead
@@ -1593,7 +1593,7 @@ mod star_range_subdimension_tests {
     #[ignore]
     fn star_to_subdimension() {
         // Test that *:SubDim creates a range from the first element to the last element of SubDim
-        let project = ArrayTestProject::new("star_to_subdim")
+        let project = TestProject::new("star_to_subdim")
             .named_dimension("DimA", &["A1", "A2", "A3"])
             .named_dimension("SubA", &["A2", "A3"])
             // Use array_aux instead of array_with_ranges to have a simple equation
@@ -1611,7 +1611,7 @@ mod star_range_subdimension_tests {
     #[ignore]
     fn star_to_subdimension_with_sum() {
         // Test star range with SUM builtin
-        let project = ArrayTestProject::new("star_to_subdim_sum")
+        let project = TestProject::new("star_to_subdim_sum")
             .named_dimension("DimA", &["A1", "A2", "A3", "A4"])
             .named_dimension("SubA", &["A2", "A3"])
             .array_with_ranges(
@@ -1631,7 +1631,7 @@ mod star_range_subdimension_tests {
     #[ignore]
     fn star_to_indexed_subdimension() {
         // Test star range with indexed dimensions
-        let project = ArrayTestProject::new("star_to_indexed_subdim")
+        let project = TestProject::new("star_to_indexed_subdim")
             .indexed_dimension("Index", 5)
             .indexed_dimension("SubIndex", 3) // Represents indices 2, 3, 4
             .array_const("arr[Index]", 10.0)
@@ -1648,7 +1648,7 @@ mod star_range_subdimension_tests {
     #[ignore]
     fn star_range_with_multidim() {
         // Test star range in multi-dimensional context
-        let project = ArrayTestProject::new("star_multidim")
+        let project = TestProject::new("star_multidim")
             .named_dimension("Row", &["R1", "R2", "R3"])
             .named_dimension("Col", &["C1", "C2", "C3", "C4"])
             .named_dimension("SubCol", &["C2", "C3"])
@@ -1684,7 +1684,7 @@ mod star_range_subdimension_tests {
         // This test reproduces the issue from simulates_sum test
         // We have a 2D array m[DimD, DimE] and want to compute msum[DimD] = SUM(m[DimD, *])
         // For each element of DimD, we sum across all elements of DimE
-        let project = ArrayTestProject::new("sum_active_dim")
+        let project = TestProject::new("sum_active_dim")
             .named_dimension("DimD", &["D1", "D2"])
             .named_dimension("DimE", &["E1", "E2"])
             .array_with_ranges(
@@ -1711,7 +1711,7 @@ mod star_range_subdimension_tests {
     fn sum_with_dimension_name_as_subscript() {
         // Even more minimal test - use dimension name directly as subscript
         // This is exactly what fails in simulates_sum
-        let project = ArrayTestProject::new("sum_dim_name")
+        let project = TestProject::new("sum_dim_name")
             .named_dimension("DimD", &["D1", "D2"])
             .named_dimension("DimE", &["E1", "E2"])
             .scalar_const("m_11", 11.0)

@@ -30,15 +30,17 @@ mod stdlib {
 }
 pub mod ai_info;
 #[cfg(test)]
-mod array_test_helpers;
-#[cfg(test)]
 mod array_tests;
 mod builder;
 mod bytecode;
 pub mod interpreter;
 mod project;
 #[cfg(test)]
+mod test_common;
+#[cfg(test)]
 mod testutils;
+#[cfg(test)]
+mod unit_checking_test;
 mod units;
 mod units_check;
 mod units_infer;
