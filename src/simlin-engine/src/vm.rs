@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Op2, Opcode,
 };
-use crate::common::{CanonicalIdent, Ident, Result};
+use crate::common::{CanonicalIdent, Result};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 use crate::dimensions::Dimension;
 use crate::sim_err;
@@ -235,7 +235,7 @@ impl Stack {
 #[derive(Clone, Debug)]
 struct CompiledModuleSlice {
     #[allow(dead_code)]
-    ident: Ident,
+    ident: CanonicalIdent,
     context: Rc<ByteCodeContext>,
     bytecode: Rc<ByteCode>,
     part: StepPart,

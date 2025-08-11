@@ -17,7 +17,6 @@ use std::borrow::Cow;
 use wasm_bindgen::prelude::*;
 
 // Legacy type aliases - to be deprecated
-pub type Ident = String;
 pub type DimensionName = String;
 pub type ElementName = String;
 
@@ -219,12 +218,12 @@ impl fmt::Display for UnitError {
     }
 }
 
-impl From<(Ident, EquationError)> for Error {
-    fn from(err: (Ident, EquationError)) -> Self {
+impl From<(CanonicalIdent, EquationError)> for Error {
+    fn from(err: (CanonicalIdent, EquationError)) -> Self {
         Error {
             kind: ErrorKind::Variable,
             code: err.1.code,
-            details: Some(err.0),
+            details: Some(err.0.as_str().to_owned()),
         }
     }
 }
@@ -427,8 +426,8 @@ fn test_canonical_ident() {
     assert_eq!(canonical3.as_str(), "a·b");
     assert_eq!(canonical3.quoteize(), "a.b");
 
-    // Test conversion to legacy type
-    let legacy: Ident = canonical.to_ident();
+    // Test conversion to String (using Display trait)
+    let legacy: String = canonical.to_string();
     assert_eq!(legacy, "hello_world");
 }
 
@@ -474,8 +473,8 @@ fn test_stdlib_model_name_canonicalization() {
     let canonical = CanonicalIdent::from_raw(stdlib_name);
     assert_eq!(canonical.as_str(), "stdlib⁚smth1");
 
-    // Test that the to_ident conversion preserves the name
-    assert_eq!(canonical.to_ident(), "stdlib⁚smth1");
+    // Test that the Display trait's to_string() preserves the name
+    assert_eq!(canonical.to_string(), "stdlib⁚smth1");
 }
 
 #[test]
@@ -521,11 +520,6 @@ impl CanonicalIdent {
     /// Get the underlying canonical string
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    /// Convert to the legacy Ident type (for gradual migration)
-    pub fn to_ident(&self) -> Ident {
-        self.0.clone()
     }
 
     /// Get a quoteized version for display
@@ -673,8 +667,8 @@ impl fmt::Display for RawElementName {
     }
 }
 
-// Conversion from legacy types for migration
-impl From<CanonicalIdent> for Ident {
+// Conversion to String
+impl From<CanonicalIdent> for String {
     fn from(canonical: CanonicalIdent) -> Self {
         canonical.0
     }

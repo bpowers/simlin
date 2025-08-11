@@ -157,7 +157,7 @@ fn test_opcode_size() {
 
 #[derive(Clone, Debug)]
 pub struct CompiledModule {
-    pub(crate) ident: String,
+    pub(crate) ident: CanonicalIdent,
     pub(crate) n_slots: usize,
     pub(crate) context: Rc<ByteCodeContext>,
     pub(crate) compiled_initials: Rc<ByteCode>,

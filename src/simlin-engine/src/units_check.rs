@@ -8,7 +8,7 @@ use std::result::Result as StdResult;
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{
-    CanonicalIdent, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize,
+    CanonicalIdent, EquationError, ErrorCode, Result, UnitError, UnitResult, canonicalize,
 };
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
@@ -19,7 +19,7 @@ struct UnitEvaluator<'a> {
     #[allow(dead_code)]
     ctx: &'a Context,
     model: &'a ModelStage1,
-    inferred_units: &'a HashMap<Ident, UnitMap>,
+    inferred_units: &'a HashMap<CanonicalIdent, UnitMap>,
     // units for module inputs
     time: Variable,
 }
@@ -43,7 +43,7 @@ impl UnitEvaluator<'_> {
                         .variables
                         .get(ident)
                         .and_then(|var| var.units())
-                        .or_else(|| self.inferred_units.get(ident.as_str()))
+                        .or_else(|| self.inferred_units.get(ident))
                         .ok_or_else(|| {
                             ConsistencyError(
                                 ErrorCode::DoesNotExist,
@@ -74,7 +74,7 @@ impl UnitEvaluator<'_> {
                         .variables
                         .get(&CanonicalIdent::from_raw(ident))
                         .and_then(|var| var.units())
-                        .or_else(|| self.inferred_units.get(ident))
+                        .or_else(|| self.inferred_units.get(&CanonicalIdent::from_raw(ident)))
                     {
                         Ok(Units::Explicit(units.clone()))
                     } else {
@@ -261,11 +261,11 @@ impl UnitEvaluator<'_> {
 // returns a list of unit problems, if there was one.
 pub fn check(
     ctx: &Context,
-    inferred_units: &HashMap<Ident, UnitMap>,
+    inferred_units: &HashMap<CanonicalIdent, UnitMap>,
     model: &ModelStage1,
-) -> Result<StdResult<(), Vec<(Ident, UnitError)>>> {
+) -> Result<StdResult<(), Vec<(CanonicalIdent, UnitError)>>> {
     use UnitError::{ConsistencyError, DefinitionError};
-    let mut errors: Vec<(Ident, UnitError)> = vec![];
+    let mut errors: Vec<(CanonicalIdent, UnitError)> = vec![];
 
     // TODO: modules
 
@@ -327,7 +327,7 @@ pub fn check(
                                         "expected units '{units}' to match the units expected by the attached stock {stock_ident} ({expected_flow_units})"
                                     );
                                     errors.push((
-                                        var.ident().to_owned(),
+                                        CanonicalIdent::from_raw(var.ident()),
                                         DefinitionError(
                                             EquationError {
                                                 code: ErrorCode::UnitMismatch,
@@ -356,7 +356,7 @@ pub fn check(
                                 );
                                 let loc = expr.get_loc();
                                 errors.push((
-                                    ident.to_ident(),
+                                    ident.clone(),
                                     ConsistencyError(
                                         ErrorCode::UnitMismatch,
                                         Loc::new(loc.start.into(), loc.end.into()),
@@ -369,7 +369,7 @@ pub fn check(
                             // definitionally we're fine
                         }
                         Err(err) => {
-                            errors.push((ident.to_ident(), err));
+                            errors.push((ident.clone(), err));
                         }
                     },
                     Ast::ApplyToAll(_, _) => {}

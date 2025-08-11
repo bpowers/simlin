@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use prost::alloc::rc::Rc;
 
-use crate::common::{CanonicalIdent, Error, Ident};
+use crate::common::{CanonicalIdent, Error};
 use crate::datamodel;
 use crate::dimensions::DimensionsContext;
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
@@ -93,10 +93,10 @@ impl Project {
                 .map(|m| ModelStage0::new(m, &project_datamodel.dimensions, &units_ctx, false)),
         );
 
-        let models: HashMap<Ident, ModelStage0> = models_list
+        let models: HashMap<CanonicalIdent, ModelStage0> = models_list
             .iter()
             .cloned()
-            .map(|m| (m.ident.to_ident(), m))
+            .map(|m| (m.ident.clone(), m))
             .collect();
 
         let dims_ctx = DimensionsContext::from(&project_datamodel.dimensions);
@@ -126,14 +126,12 @@ impl Project {
             model_runlist
                 .into_iter()
                 .enumerate()
-                .map(|(i, n)| (n.to_ident(), i))
-                .collect::<HashMap<Ident, usize>>()
+                .map(|(i, n)| (n.clone(), i))
+                .collect::<HashMap<CanonicalIdent, usize>>()
         };
 
         // sort our model list so that the dependency resolution below works
-        models_list.sort_unstable_by(|a, b| {
-            model_order[a.name.as_str()].cmp(&model_order[b.name.as_str()])
-        });
+        models_list.sort_unstable_by(|a, b| model_order[&a.name].cmp(&model_order[&b.name]));
 
         let module_instantiations = {
             let models = models_list.iter().map(|m| (m.name.as_str(), m)).collect();

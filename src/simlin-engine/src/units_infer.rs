@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::BuiltinFn;
-use crate::common::{CanonicalIdent, Ident, Result, UnitResult, canonicalize};
+use crate::common::{CanonicalIdent, Result, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::model_err;
@@ -387,8 +387,8 @@ impl UnitInferer<'_> {
     fn unify(
         &self,
         mut constraints: Vec<UnitMap>,
-    ) -> Result<(HashMap<Ident, UnitMap>, Option<Vec<UnitMap>>)> {
-        let mut resolved_fvs: HashMap<Ident, UnitMap> = HashMap::new();
+    ) -> Result<(HashMap<CanonicalIdent, UnitMap>, Option<Vec<UnitMap>>)> {
+        let mut resolved_fvs: HashMap<CanonicalIdent, UnitMap> = HashMap::new();
         let mut final_constraints: Vec<UnitMap> = Vec::with_capacity(constraints.len());
 
         // FIXME: I think this is O(n^3) worst case; we could do better
@@ -405,7 +405,10 @@ impl UnitInferer<'_> {
                     let units = solve_for(&var, c);
                     constraints = substitute(&var, &units, constraints);
                     final_constraints = substitute(&var, &units, final_constraints);
-                    if let Some(existing_units) = resolved_fvs.get(&var) {
+                    let var_key = var.strip_prefix('@').unwrap();
+                    if let Some(existing_units) =
+                        resolved_fvs.get(&CanonicalIdent::from_canonical_str_unchecked(var_key))
+                    {
                         if *existing_units != units {
                             return model_err!(
                                 UnitMismatch,
@@ -416,8 +419,8 @@ impl UnitInferer<'_> {
                             );
                         }
                     } else {
-                        let var = var.strip_prefix('@').unwrap().to_owned();
-                        resolved_fvs.insert(var, units);
+                        resolved_fvs
+                            .insert(CanonicalIdent::from_canonical_str_unchecked(var_key), units);
                     }
                 } else {
                     final_constraints.push(c);
@@ -440,7 +443,7 @@ impl UnitInferer<'_> {
         Ok((resolved_fvs, final_constraints))
     }
 
-    fn infer(&self, model: &ModelStage1) -> Result<HashMap<String, UnitMap>> {
+    fn infer(&self, model: &ModelStage1) -> Result<HashMap<CanonicalIdent, UnitMap>> {
         // use rand::seq::SliceRandom;
         // use rand::thread_rng;
 
@@ -520,7 +523,7 @@ fn test_inference() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: Result<HashMap<Ident, UnitMap>> =
+            let mut results: Result<HashMap<CanonicalIdent, UnitMap>> =
                 model_err!(UnitMismatch, "".to_owned());
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
@@ -534,7 +537,7 @@ fn test_inference() {
                     crate::units::parse_units(&units_ctx, Some(expected_units))
                         .unwrap()
                         .unwrap();
-                if let Some(computed_units) = results.get(*ident) {
+                if let Some(computed_units) = results.get(&CanonicalIdent::from_raw(*ident)) {
                     assert_eq!(expected_units, *computed_units);
                 } else {
                     panic!("inference results don't contain variable '{ident}'");
@@ -595,7 +598,7 @@ fn test_inference_negative() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: Result<HashMap<Ident, UnitMap>> =
+            let mut results: Result<HashMap<CanonicalIdent, UnitMap>> =
                 model_err!(UnitMismatch, "".to_owned());
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
@@ -612,7 +615,7 @@ pub(crate) fn infer(
     models: &HashMap<CanonicalIdent, &ModelStage1>,
     units_ctx: &Context,
     model: &ModelStage1,
-) -> Result<HashMap<String, UnitMap>> {
+) -> Result<HashMap<CanonicalIdent, UnitMap>> {
     let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
 
     let units = UnitInferer {

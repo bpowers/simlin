@@ -11,7 +11,7 @@ use crate::bytecode::{
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{
-    CanonicalElementName, CanonicalIdent, ErrorCode, ErrorKind, Ident, Result, canonicalize,
+    CanonicalElementName, CanonicalIdent, ErrorCode, ErrorKind, Result, canonicalize,
 };
 use crate::dimensions::Dimension;
 use crate::model::ModelStage1;
@@ -2015,9 +2015,9 @@ pub struct Module {
     pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
-    pub(crate) offsets: HashMap<CanonicalIdent, HashMap<Ident, (usize, usize)>>,
+    pub(crate) offsets: HashMap<CanonicalIdent, HashMap<CanonicalIdent, (usize, usize)>>,
     pub(crate) runlist_order: Vec<CanonicalIdent>,
-    pub(crate) tables: HashMap<Ident, Table>,
+    pub(crate) tables: HashMap<CanonicalIdent, Table>,
 }
 
 /// Create a temporary for an array expression
@@ -2338,7 +2338,7 @@ impl Module {
         let runlist_flows: Vec<Expr> = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
         let runlist_stocks = runlist_stocks.into_iter().flat_map(|v| v.ast).collect();
 
-        let tables: Result<HashMap<String, Table>> = var_names
+        let tables: Result<HashMap<CanonicalIdent, Table>> = var_names
             .iter()
             .map(|id| {
                 let canonical_id = CanonicalIdent::from_raw(id);
@@ -2347,7 +2347,7 @@ impl Module {
             .filter(|(_, v)| v.table().is_some())
             .map(|(id, v)| (id, Table::new(id, v.table().unwrap())))
             .map(|(id, t)| match t {
-                Ok(table) => Ok((id.to_string(), table)),
+                Ok(table) => Ok((CanonicalIdent::from_raw(id), table)),
                 Err(err) => Err(err),
             })
             .collect();
@@ -2359,7 +2359,7 @@ impl Module {
                 (
                     k,
                     v.iter()
-                        .map(|(k, v)| (k.to_string(), (v.offset, v.size)))
+                        .map(|(k, v)| (k.clone(), (v.offset, v.size)))
                         .collect(),
                 )
             })
@@ -2474,7 +2474,7 @@ impl<'module> Compiler<'module> {
             Expr::App(builtin, _) => {
                 // lookups are special
                 if let BuiltinFn::Lookup(ident, index, _loc) = builtin {
-                    let table = &self.module.tables[ident];
+                    let table = &self.module.tables[&CanonicalIdent::from_raw(ident)];
                     self.graphical_functions.push(table.data.clone());
                     let gf = (self.graphical_functions.len() - 1) as GraphicalFunctionId;
                     self.walk_expr(index)?.unwrap();
@@ -2660,7 +2660,7 @@ impl<'module> Compiler<'module> {
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 self.module_decls.push(ModuleDeclaration {
                     model_name: model_name.clone(),
-                    off: module_offsets[ident.as_str()].0,
+                    off: module_offsets[ident].0,
                 });
                 let id = (self.module_decls.len() - 1) as ModuleId;
 
@@ -2754,7 +2754,7 @@ impl<'module> Compiler<'module> {
         let compiled_stocks = Rc::new(self.walk(&self.module.runlist_stocks)?);
 
         Ok(CompiledModule {
-            ident: self.module.ident.as_str().to_string(),
+            ident: self.module.ident.clone(),
             n_slots: self.module.n_slots,
             context: Rc::new(ByteCodeContext {
                 graphical_functions: self.graphical_functions,

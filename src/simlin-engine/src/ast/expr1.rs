@@ -160,7 +160,7 @@ impl Expr1 {
                 let builtin = match id.as_str() {
                     "lookup" => {
                         if let Some(Expr1::Var(ident, loc)) = args.first() {
-                            BuiltinFn::Lookup(ident.to_ident(), Box::new(args[1].clone()), *loc)
+                            BuiltinFn::Lookup(ident.to_string(), Box::new(args[1].clone()), *loc)
                         } else {
                             return eqn_err!(BadTable, loc.start, loc.end);
                         }
@@ -176,7 +176,7 @@ impl Expr1 {
                     "int" => check_arity!(Int, 1),
                     "ismoduleinput" => {
                         if let Some(Expr1::Var(ident, loc)) = args.first() {
-                            BuiltinFn::IsModuleInput(ident.to_ident(), *loc)
+                            BuiltinFn::IsModuleInput(ident.to_string(), *loc)
                         } else {
                             return eqn_err!(ExpectedIdent, loc.start, loc.end);
                         }
@@ -239,7 +239,7 @@ impl Expr1 {
             Expr1::Const(s, n, loc) => Expr1::Const(s, n, loc),
             Expr1::Var(id, loc) => {
                 if let Some(off) = scope.dimensions.lookup(id.as_str()) {
-                    Expr1::Const(id.to_ident(), off as f64, loc)
+                    Expr1::Const(id.to_string(), off as f64, loc)
                 } else {
                     Expr1::Var(id, loc)
                 }

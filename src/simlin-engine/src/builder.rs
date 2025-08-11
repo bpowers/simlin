@@ -29,7 +29,7 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
         let mut found_var_error = false;
         for (ident, errors) in model.get_variable_errors() {
             assert!(!errors.is_empty());
-            let var = model_datamodel.get_variable(&ident).unwrap();
+            let var = model_datamodel.get_variable(ident.as_str()).unwrap();
             found_var_error = true;
             for error in errors {
                 eprintln!();
@@ -47,7 +47,7 @@ pub fn build_sim_with_stderrors(project: &DatamodelProject) -> Option<Simulation
         }
         for (ident, errors) in model.get_unit_errors() {
             assert!(!errors.is_empty());
-            let var = model_datamodel.get_variable(&ident).unwrap();
+            let var = model_datamodel.get_variable(ident.as_str()).unwrap();
             for error in errors {
                 eprintln!();
                 let (eqn, loc, details) = match error {

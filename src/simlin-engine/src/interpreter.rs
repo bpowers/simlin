@@ -176,7 +176,7 @@ impl ModuleEvaluator<'_> {
             Expr::EvalModule(ident, model_name, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
                 let module_offsets = &self.module.offsets[&self.module.ident];
-                let off = self.off + module_offsets[ident.as_str()].0;
+                let off = self.off + module_offsets[ident].0;
                 let module = &self.sim.modules[model_name];
 
                 self.sim
@@ -363,11 +363,12 @@ impl ModuleEvaluator<'_> {
                         }
                     }
                     BuiltinFn::Lookup(id, index, _) => {
-                        if !self.module.tables.contains_key(id) {
+                        let canonical_id = CanonicalIdent::from_raw(id);
+                        if !self.module.tables.contains_key(&canonical_id) {
                             eprintln!("bad lookup for {id}");
                             unreachable!();
                         }
-                        let table = &self.module.tables[id].data;
+                        let table = &self.module.tables[&canonical_id].data;
                         if table.is_empty() {
                             return f64::NAN;
                         }

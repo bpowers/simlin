@@ -8,8 +8,8 @@ use std::result::Result as StdResult;
 
 use crate::ast::{Expr0, lower_ast};
 use crate::common::{
-    CanonicalIdent, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Ident, Result,
-    UnitError, topo_sort,
+    CanonicalIdent, EquationError, EquationResult, Error, ErrorCode, ErrorKind, Result, UnitError,
+    topo_sort,
 };
 use crate::datamodel::{Dimension, UnitMap};
 use crate::dimensions::DimensionsContext;
@@ -18,7 +18,7 @@ use crate::testutils::{aux, flow, stock, x_aux, x_flow, x_model, x_module, x_sto
 use crate::units::Context;
 use crate::variable::{ModuleInput, Variable, identifier_set, parse_var};
 use crate::vm::StepPart;
-use crate::{canonicalize, datamodel, eqn_err, model_err, units_check, var_eqn_err};
+use crate::{datamodel, eqn_err, model_err, units_check, var_eqn_err};
 
 pub type ModuleInputSet = BTreeSet<CanonicalIdent>;
 pub type DependencySet = BTreeSet<CanonicalIdent>;
@@ -255,13 +255,13 @@ struct DepContext<'a> {
 fn all_deps<'a, Iter>(
     ctx: &DepContext,
     vars: Iter,
-) -> StdResult<HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>, (Ident, EquationError)>
+) -> StdResult<HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>, (CanonicalIdent, EquationError)>
 where
     Iter: Iterator<Item = &'a Variable>,
 {
     // we need to use vars multiple times, so collect it into a Vec once
     let vars = vars.collect::<Vec<_>>();
-    let mut processing: BTreeSet<Ident> = BTreeSet::new();
+    let mut processing: BTreeSet<CanonicalIdent> = BTreeSet::new();
     let mut all_vars: HashMap<&'a str, &'a Variable> =
         vars.iter().map(|v| (v.ident(), *v)).collect();
     let mut all_var_deps: HashMap<CanonicalIdent, Option<BTreeSet<CanonicalIdent>>> = vars
@@ -272,10 +272,10 @@ where
     fn all_deps_inner<'a>(
         ctx: &DepContext,
         id: &str,
-        processing: &mut BTreeSet<Ident>,
+        processing: &mut BTreeSet<CanonicalIdent>,
         all_vars: &mut HashMap<&'a str, &'a Variable>,
         all_var_deps: &mut HashMap<CanonicalIdent, Option<BTreeSet<CanonicalIdent>>>,
-    ) -> StdResult<(), (Ident, EquationError)> {
+    ) -> StdResult<(), (CanonicalIdent, EquationError)> {
         let var = all_vars[id];
 
         // short circuit if we've already figured this out
@@ -292,7 +292,7 @@ where
             return Ok(());
         }
 
-        processing.insert(id.to_owned());
+        processing.insert(canonical_id.clone());
 
         // all deps start out as the direct deps
         let mut all_deps: BTreeSet<CanonicalIdent> = BTreeSet::new();
@@ -307,7 +307,7 @@ where
                     .get_var_loc(dep.as_str())
                     .unwrap_or_default();
                 return var_eqn_err!(
-                    var.ident().to_owned(),
+                    CanonicalIdent::from_raw(var.ident()),
                     NoAbsoluteReferences,
                     loc.start,
                     loc.end
@@ -330,7 +330,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        var.ident().to_owned(),
+                        CanonicalIdent::from_raw(var.ident()),
                         UnknownDependency,
                         loc.start,
                         loc.end
@@ -347,7 +347,7 @@ where
                     match module_output_deps(ctx, model_name, output_ident, inputs, module_ident) {
                         Ok(deps) => deps.into_iter().map(CanonicalIdent::from_raw).collect(),
                         Err(err) => {
-                            return Err((var.ident().to_owned(), err.into()));
+                            return Err((CanonicalIdent::from_raw(var.ident()), err.into()));
                         }
                     }
                 } else {
@@ -357,7 +357,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        var.ident().to_owned(),
+                        CanonicalIdent::from_raw(var.ident()),
                         ExpectedModule,
                         loc.start,
                         loc.end
@@ -375,7 +375,7 @@ where
                         .get_var_loc(dep.as_str())
                         .unwrap_or_default();
                     return var_eqn_err!(
-                        var.ident().to_owned(),
+                        CanonicalIdent::from_raw(var.ident()),
                         UnknownDependency,
                         loc.start,
                         loc.end
@@ -386,13 +386,13 @@ where
                     all_deps.insert(dep.clone());
 
                     // ensure we don't blow the stack
-                    if processing.contains(dep.as_str()) {
+                    if processing.contains(&dep) {
                         let loc = match var.ast() {
                             Some(ast) => ast.get_var_loc(dep.as_str()).unwrap_or_default(),
                             None => Default::default(),
                         };
                         return var_eqn_err!(
-                            var.ident().to_owned(),
+                            CanonicalIdent::from_raw(var.ident()),
                             CircularDependency,
                             loc.start,
                             loc.end
@@ -413,7 +413,7 @@ where
             }
         }
 
-        processing.remove(id);
+        processing.remove(&canonical_id);
 
         all_var_deps.insert(canonical_id, Some(all_deps));
 
@@ -440,7 +440,7 @@ where
 }
 
 fn resolve_relative<'a>(
-    models: &'a HashMap<Ident, ModelStage0>,
+    models: &'a HashMap<CanonicalIdent, ModelStage0>,
     model_name: &str,
     ident: &str,
 ) -> Option<&'a VariableStage0> {
@@ -449,7 +449,7 @@ fn resolve_relative<'a>(
     } else {
         ident
     };
-    let model = models.get(model_name)?;
+    let model = models.get(&CanonicalIdent::from_raw(model_name))?;
 
     let input_prefix = format!("{model_name}·");
     // TODO: this is weird to do here and not before we call into this fn
@@ -625,7 +625,7 @@ pub(crate) fn lower_variable(scope: &ScopeStage0, var_s0: &VariableStage0) -> Va
 // parent_module_name is the name of the model that has the module instantiation,
 // _not_ the name of the model this module instantiates
 pub(crate) fn resolve_module_input<'a>(
-    models: &HashMap<String, ModelStage0>,
+    models: &HashMap<CanonicalIdent, ModelStage0>,
     parent_model_name: &str,
     ident: &str,
     orig_src: &'a str,
@@ -639,36 +639,30 @@ pub(crate) fn resolve_module_input<'a>(
             s
         }
     };
-    let src: Ident = canonicalize(maybe_strip_leading_dot(orig_src));
-    let dst: Ident = canonicalize(maybe_strip_leading_dot(orig_dst));
+    let src = CanonicalIdent::from_raw(maybe_strip_leading_dot(orig_src));
+    let dst = CanonicalIdent::from_raw(maybe_strip_leading_dot(orig_dst));
 
     // Stella has a bug where if you have one module feeding into another,
     // it writes identical tags to both.  So skip the tag that is non-local
     // but don't report it as an error
-    if src.starts_with(&input_prefix) {
+    if src.as_str().starts_with(&input_prefix) {
         return Ok(None);
     }
 
-    let dst = dst.strip_prefix(&input_prefix);
-    if dst.is_none() {
+    let dst_stripped = dst.as_str().strip_prefix(&input_prefix);
+    if dst_stripped.is_none() {
         return eqn_err!(BadModuleInputDst, 0, 0);
     }
-    let dst = dst.unwrap().to_string();
+    let dst = CanonicalIdent::from_raw(dst_stripped.unwrap());
 
     // TODO: reevaluate if this is really the best option here
     // if the source is a temporary created by the engine, assume it is OK
-    if src.starts_with("$⁚") {
-        return Ok(Some(ModuleInput {
-            src: CanonicalIdent::from_raw(&src),
-            dst: CanonicalIdent::from_raw(&dst),
-        }));
+    if src.as_str().starts_with("$⁚") {
+        return Ok(Some(ModuleInput { src, dst }));
     }
 
-    match resolve_relative(models, parent_model_name, &src) {
-        Some(_) => Ok(Some(ModuleInput {
-            src: CanonicalIdent::from_raw(&src),
-            dst: CanonicalIdent::from_raw(&dst),
-        })),
+    match resolve_relative(models, parent_model_name, src.as_str()) {
+        Some(_) => Ok(Some(ModuleInput { src, dst })),
         None => eqn_err!(BadModuleInputSrc, 0, 0),
     }
 }
@@ -789,7 +783,7 @@ impl ModelStage0 {
 }
 
 pub(crate) struct ScopeStage0<'a> {
-    pub models: &'a HashMap<Ident, ModelStage0>,
+    pub models: &'a HashMap<CanonicalIdent, ModelStage0>,
     pub dimensions: &'a DimensionsContext,
     pub model_name: &'a str,
 }
@@ -834,13 +828,13 @@ impl ModelStage1 {
     pub(crate) fn check_units(
         &mut self,
         units_ctx: &Context,
-        inferred_units: &HashMap<Ident, UnitMap>,
+        inferred_units: &HashMap<CanonicalIdent, UnitMap>,
     ) {
         match units_check::check(units_ctx, inferred_units, self) {
             Ok(Ok(())) => {}
             Ok(Err(errors)) => {
                 for (ident, err) in errors.into_iter() {
-                    if let Some(var) = self.variables.get_mut(&CanonicalIdent::from_raw(&ident)) {
+                    if let Some(var) = self.variables.get_mut(&ident) {
                         var.push_unit_error(err);
                     }
                 }
@@ -887,10 +881,7 @@ impl ModelStage1 {
                 let dt_deps = match all_deps(&ctx, self.variables.values()) {
                     Ok(deps) => Some(deps),
                     Err((ident, err)) => {
-                        var_errors
-                            .entry(CanonicalIdent::from_raw(&ident))
-                            .or_default()
-                            .insert(err);
+                        var_errors.entry(ident).or_default().insert(err);
                         None
                     }
                 };
@@ -900,10 +891,7 @@ impl ModelStage1 {
                 let initial_deps = match all_deps(&ctx, self.variables.values()) {
                     Ok(deps) => Some(deps),
                     Err((ident, err)) => {
-                        var_errors
-                            .entry(CanonicalIdent::from_raw(&ident))
-                            .or_default()
-                            .insert(err);
+                        var_errors.entry(ident).or_default().insert(err);
                         None
                     }
                 };
@@ -1019,17 +1007,17 @@ impl ModelStage1 {
         self.errors = maybe_errors;
     }
 
-    pub fn get_unit_errors(&self) -> HashMap<Ident, Vec<UnitError>> {
+    pub fn get_unit_errors(&self) -> HashMap<CanonicalIdent, Vec<UnitError>> {
         self.variables
             .iter()
-            .flat_map(|(ident, var)| var.unit_errors().map(|errs| (ident.to_ident(), errs)))
+            .flat_map(|(ident, var)| var.unit_errors().map(|errs| (ident.clone(), errs)))
             .collect()
     }
 
-    pub fn get_variable_errors(&self) -> HashMap<Ident, Vec<EquationError>> {
+    pub fn get_variable_errors(&self) -> HashMap<CanonicalIdent, Vec<EquationError>> {
         self.variables
             .iter()
-            .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.to_ident(), errs)))
+            .flat_map(|(ident, var)| var.equation_errors().map(|errs| (ident.clone(), errs)))
             .collect()
     }
 }
@@ -1127,13 +1115,18 @@ fn test_module_parse() {
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();
     let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
 
-    let models: HashMap<Ident, ModelStage0> = vec![
+    let models: HashMap<CanonicalIdent, ModelStage0> = vec![
         ("main".to_string(), &main_model),
         ("lynxes".to_string(), &lynxes_model),
         ("hares".to_string(), &hares_model),
     ]
     .into_iter()
-    .map(|(name, m)| (name, ModelStage0::new(m, &[], &units_ctx, false)))
+    .map(|(name, m)| {
+        (
+            CanonicalIdent::from_raw(&name),
+            ModelStage0::new(m, &[], &units_ctx, false),
+        )
+    })
     .collect();
 
     let hares_var = &main_model.variables[2];
@@ -1154,9 +1147,14 @@ fn test_errors() {
         "main",
         vec![x_aux("aux_3", "unknown_variable * 3.14", None)],
     );
-    let models: HashMap<String, ModelStage0> = vec![("main".to_string(), &main_model)]
+    let models: HashMap<CanonicalIdent, ModelStage0> = vec![("main".to_string(), &main_model)]
         .into_iter()
-        .map(|(name, m)| (name, ModelStage0::new(m, &[], &units_ctx, false)))
+        .map(|(name, m)| {
+            (
+                CanonicalIdent::from_raw(&name),
+                ModelStage0::new(m, &[], &units_ctx, false),
+            )
+        })
         .collect();
 
     let model = {
@@ -1167,7 +1165,7 @@ fn test_errors() {
             dimensions: &Default::default(),
             model_name: "main",
         };
-        let mut model = ModelStage1::new(&scope, &models["main"]);
+        let mut model = ModelStage1::new(&scope, &models[&CanonicalIdent::from_raw("main")]);
         model.set_dependencies(&HashMap::new(), &[], &default_instantiation);
         model
     };
@@ -1180,9 +1178,10 @@ fn test_errors() {
 
     let var_errors = model.get_variable_errors();
     assert_eq!(1, var_errors.len());
-    assert!(var_errors.contains_key("aux_3"));
-    assert_eq!(1, var_errors["aux_3"].len());
-    let err = &var_errors["aux_3"][0];
+    let aux_3_key = CanonicalIdent::from_raw("aux_3");
+    assert!(var_errors.contains_key(&aux_3_key));
+    assert_eq!(1, var_errors[&aux_3_key].len());
+    let err = &var_errors[&aux_3_key][0];
     assert_eq!(
         &EquationError {
             start: 0,
@@ -1283,18 +1282,23 @@ fn test_all_deps() {
         ],
     );
     let units_ctx = Context::new(&[], &Default::default()).unwrap();
-    let x_models: HashMap<String, ModelStage0> = vec![
+    let x_models: HashMap<CanonicalIdent, ModelStage0> = vec![
         ("mod_1".to_owned(), &mod_1_model),
         ("main".to_owned(), &main_model),
     ]
     .into_iter()
-    .map(|(name, m)| (name, ModelStage0::new(m, &[], &units_ctx, false)))
+    .map(|(name, m)| {
+        (
+            CanonicalIdent::from_raw(&name),
+            ModelStage0::new(m, &[], &units_ctx, false),
+        )
+    })
     .collect();
 
     let mut model_list = vec!["mod_1", "main"]
         .into_iter()
         .map(|name| {
-            let model_s0 = &x_models[name];
+            let model_s0 = &x_models[&CanonicalIdent::from_raw(name)];
             let scope = ScopeStage0 {
                 models: &x_models,
                 dimensions: &Default::default(),
