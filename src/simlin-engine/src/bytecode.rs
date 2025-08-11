@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::common::CanonicalIdent;
 use ordered_float::OrderedFloat;
 
 pub type LiteralId = u16;
@@ -76,7 +77,7 @@ pub(crate) enum Opcode {
 
 #[derive(Clone, Debug)]
 pub struct ModuleDeclaration {
-    pub(crate) model_name: String,
+    pub(crate) model_name: CanonicalIdent,
     pub(crate) off: usize, // offset within the parent module
 }
 

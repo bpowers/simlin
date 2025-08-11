@@ -7,6 +7,7 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
+use crate::common::CanonicalIdent;
 #[cfg(test)]
 use crate::common::ErrorCode;
 #[cfg(test)]
@@ -364,20 +365,26 @@ impl TestProject {
                 let idx = step * results.step_size + offset;
                 values.push(results.data[idx]);
             }
-            output.insert(name.clone(), values);
+            output.insert(name.to_string(), values);
         }
 
         // Now collect array variables by their base name
         // Array elements are stored as "varname[subscript]", we want to collect them as "varname"
         // We need to preserve the original offset order, not sort alphabetically
-        let mut array_results: HashMap<String, Vec<(usize, String, Vec<f64>)>> = HashMap::new();
+        let mut array_results: HashMap<CanonicalIdent, Vec<(usize, String, Vec<f64>)>> =
+            HashMap::new();
         for (name, values) in &output {
-            if let Some(bracket_pos) = name.find('[') {
-                let base_name = &name[..bracket_pos];
+            if let Some(bracket_pos) = name.as_str().find('[') {
+                let base_name =
+                    CanonicalIdent::from_canonical_str_unchecked(&name.as_str()[..bracket_pos]);
                 // Get the offset for this element to maintain proper ordering
-                let offset = results.offsets.get(name).copied().unwrap_or(usize::MAX);
-                let entry = array_results.entry(base_name.to_string()).or_default();
-                entry.push((offset, name.clone(), values.clone()));
+                let offset = results
+                    .offsets
+                    .get(&CanonicalIdent::from_canonical_str_unchecked(name))
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                let entry = array_results.entry(base_name.clone()).or_default();
+                entry.push((offset, name.to_string(), values.clone()));
             }
         }
 
@@ -403,7 +410,7 @@ impl TestProject {
                 }
 
                 // Store with base name (without brackets)
-                output.insert(base_name, combined);
+                output.insert(base_name.to_string(), combined);
             }
         }
 

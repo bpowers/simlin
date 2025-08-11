@@ -10,6 +10,7 @@ use std::rc::Rc;
 use float_cmp::approx_eq;
 
 use simlin_compat::{load_csv, load_dat, xmile};
+use simlin_engine::common::CanonicalIdent;
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
 use simlin_engine::{Project, Results, Vm};
@@ -169,7 +170,11 @@ fn ensure_results(expected: &Results, results: &Results) {
 
     // UNKNOWN is a sentinal value we use -- it should never show up
     // unless we've wrongly sized our data slices
-    assert!(!results.offsets.contains_key("UNKNOWN"));
+    assert!(
+        !results
+            .offsets
+            .contains_key(&CanonicalIdent::from_canonical_str_unchecked("UNKNOWN"))
+    );
 }
 
 fn simulate_path(xmile_path: &str) {

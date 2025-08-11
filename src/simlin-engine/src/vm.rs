@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Op2, Opcode,
 };
-use crate::common::{Ident, Result};
+use crate::common::{CanonicalIdent, Ident, Result};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 use crate::dimensions::Dimension;
 use crate::sim_err;
@@ -30,17 +30,17 @@ pub(crate) fn is_truthy(n: f64) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct CompiledSimulation {
-    pub(crate) modules: HashMap<Ident, CompiledModule>,
+    pub(crate) modules: HashMap<CanonicalIdent, CompiledModule>,
     pub(crate) specs: Specs,
-    pub(crate) root: String,
-    pub(crate) offsets: HashMap<Ident, usize>,
+    pub(crate) root: CanonicalIdent,
+    pub(crate) offsets: HashMap<CanonicalIdent, usize>,
 }
 
 #[derive(Clone, Debug)]
 struct CompiledSlicedSimulation {
-    initial_modules: HashMap<Ident, CompiledModuleSlice>,
-    flow_modules: HashMap<Ident, CompiledModuleSlice>,
-    stock_modules: HashMap<Ident, CompiledModuleSlice>,
+    initial_modules: HashMap<CanonicalIdent, CompiledModuleSlice>,
+    flow_modules: HashMap<CanonicalIdent, CompiledModuleSlice>,
+    stock_modules: HashMap<CanonicalIdent, CompiledModuleSlice>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +99,7 @@ impl Specs {
 
 #[derive(Debug)]
 pub struct Results {
-    pub offsets: HashMap<String, usize>,
+    pub offsets: HashMap<CanonicalIdent, usize>,
     // one large allocation
     pub data: Box<[f64]>,
     pub step_size: usize,
@@ -113,15 +113,16 @@ impl Results {
         self.print_tsv_comparison(None)
     }
     pub fn print_tsv_comparison(&self, reference: Option<&Results>) {
+        let unknown = CanonicalIdent::from_canonical_str_unchecked("UNKNOWN");
         let var_names = {
-            let offset_name_map: HashMap<usize, &str> =
-                self.offsets.iter().map(|(k, v)| (*v, k.as_str())).collect();
-            let mut var_names: Vec<&str> = Vec::with_capacity(self.step_size);
+            let offset_name_map: HashMap<usize, &CanonicalIdent> =
+                self.offsets.iter().map(|(k, v)| (*v, k)).collect();
+            let mut var_names: Vec<&CanonicalIdent> = Vec::with_capacity(self.step_size);
             for i in 0..(self.step_size) {
                 let name = if offset_name_map.contains_key(&i) {
                     offset_name_map[&i]
                 } else {
-                    "UNKNOWN"
+                    &unknown
                 };
                 var_names.push(name);
             }
@@ -200,8 +201,8 @@ impl Results {
 #[derive(Clone, Debug)]
 pub struct Vm {
     specs: Specs,
-    root: Ident,
-    offsets: HashMap<Ident, usize>,
+    root: CanonicalIdent,
+    offsets: HashMap<CanonicalIdent, usize>,
     sliced_sim: CompiledSlicedSimulation,
     n_slots: usize,
     n_chunks: usize,
@@ -394,7 +395,7 @@ impl Vm {
         id: ModuleId,
     ) {
         let new_module_decl = &parent_module.context.modules[id as usize];
-        let model_name = new_module_decl.model_name.as_str();
+        let model_name = &new_module_decl.model_name;
         let sliced_sim = &self.sliced_sim;
         let module = match parent_module.part {
             StepPart::Initials => &sliced_sim.initial_modules[model_name],

@@ -14,7 +14,7 @@ use crate::vm::{
     CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, Specs,
     StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
 };
-use crate::{Ident, Project, Results, Variable, compiler, quoteize};
+use crate::{Project, Results, Variable, compiler, quoteize};
 use float_cmp::approx_eq;
 use std::borrow::BorrowMut;
 use std::cell::RefCell;
@@ -175,9 +175,9 @@ impl ModuleEvaluator<'_> {
             Expr::ModuleInput(off, _) => self.inputs[*off],
             Expr::EvalModule(ident, model_name, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
-                let module_offsets = &self.module.offsets[self.module.ident.as_str()];
+                let module_offsets = &self.module.offsets[&self.module.ident];
                 let off = self.off + module_offsets[ident.as_str()].0;
-                let module = &self.sim.modules[model_name.as_str()];
+                let module = &self.sim.modules[model_name];
 
                 self.sim
                     .calc(self.step_part, module, off, &args, self.curr, self.next);
@@ -594,20 +594,18 @@ impl ModuleEvaluator<'_> {
 
 #[derive(Debug)]
 pub struct Simulation {
-    pub(crate) modules: HashMap<Ident, Module>,
+    pub(crate) modules: HashMap<CanonicalIdent, Module>,
     specs: Specs,
-    root: String,
-    offsets: HashMap<Ident, usize>,
+    root: CanonicalIdent,
+    offsets: HashMap<CanonicalIdent, usize>,
     temps: Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
     temp_offsets: Vec<usize>,     // Offset of each temporary in the temps vector
 }
 
 impl Simulation {
     pub fn new(project: &Project, main_model_name: &str) -> crate::Result<Self> {
-        if !project
-            .models
-            .contains_key(&CanonicalIdent::from_raw(main_model_name))
-        {
+        let main_model_ident = CanonicalIdent::from_raw(main_model_name);
+        if !project.models.contains_key(&main_model_ident) {
             return sim_err!(
                 NotSimulatable,
                 format!("no model named '{}' to simulate", main_model_name)
@@ -624,30 +622,34 @@ impl Simulation {
             enumerate_modules(&project_models, main_model_name, |model| model.name.clone())?
         };
 
-        let module_names: Vec<&str> = {
-            let mut module_names: Vec<&str> = modules.keys().map(|id| id.as_str()).collect();
+        let module_names: Vec<&CanonicalIdent> = {
+            let mut module_names: Vec<_> = modules.keys().collect();
             module_names.sort_unstable();
 
-            let mut sorted_names = vec![main_model_name];
-            sorted_names.extend(module_names.into_iter().filter(|n| *n != main_model_name));
+            let mut sorted_names = vec![&main_model_ident];
+            sorted_names.extend(
+                module_names
+                    .into_iter()
+                    .filter(|n| n.as_str() != main_model_name),
+            );
             sorted_names
         };
 
-        let mut compiled_modules: HashMap<Ident, Module> = HashMap::new();
+        let mut compiled_modules: HashMap<CanonicalIdent, Module> = HashMap::new();
         for name in module_names {
-            let distinct_inputs = &modules[&CanonicalIdent::from_raw(name)];
+            let distinct_inputs = &modules[name];
             for inputs in distinct_inputs.iter() {
-                let model = Rc::clone(&project.models[&CanonicalIdent::from_raw(name)]);
-                let is_root = name == main_model_name;
+                let model = Rc::clone(&project.models[name]);
+                let is_root = name.as_str() == main_model_ident.as_str();
                 let module = Module::new(project, model, inputs, is_root)?;
-                compiled_modules.insert(name.to_string(), module);
+                compiled_modules.insert(name.clone(), module);
             }
         }
 
         let specs = Specs::from(&project.datamodel.sim_specs);
 
         let offsets = calc_flattened_offsets(project, main_model_name);
-        let offsets: HashMap<Ident, usize> =
+        let offsets: HashMap<CanonicalIdent, usize> =
             offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
 
         // Calculate temporary storage requirements
@@ -674,7 +676,7 @@ impl Simulation {
         Ok(Simulation {
             modules: compiled_modules,
             specs,
-            root: main_model_name.to_string(),
+            root: CanonicalIdent::from_raw(main_model_name),
             offsets,
             temps,
             temp_offsets,
@@ -682,7 +684,7 @@ impl Simulation {
     }
 
     pub fn compile(&self) -> crate::Result<CompiledSimulation> {
-        let modules: crate::Result<HashMap<String, CompiledModule>> = self
+        let modules: crate::Result<HashMap<CanonicalIdent, CompiledModule>> = self
             .modules
             .iter()
             .map(|(name, module)| module.compile().map(|module| (name.clone(), module)))
@@ -696,8 +698,8 @@ impl Simulation {
         })
     }
 
-    pub fn runlist_order(&self) -> Vec<Ident> {
-        calc_flattened_order(self, "main")
+    pub fn runlist_order(&self) -> Vec<CanonicalIdent> {
+        calc_flattened_order(self, &CanonicalIdent::from_raw("main"))
     }
 
     pub fn debug_print_runlists(&self, _model_name: &str) {
@@ -763,7 +765,7 @@ impl Simulation {
         }
     }
 
-    fn n_slots(&self, module_name: &str) -> usize {
+    fn n_slots(&self, module_name: &CanonicalIdent) -> usize {
         self.modules[module_name].n_slots
     }
 
@@ -849,16 +851,16 @@ impl Simulation {
 pub fn calc_flattened_offsets(
     project: &Project,
     model_name: &str,
-) -> HashMap<Ident, (usize, usize)> {
+) -> HashMap<CanonicalIdent, (usize, usize)> {
     let is_root = model_name == "main";
 
-    let mut offsets: HashMap<Ident, (usize, usize)> = HashMap::new();
+    let mut offsets: HashMap<CanonicalIdent, (usize, usize)> = HashMap::new();
     let mut i = 0;
     if is_root {
-        offsets.insert("time".to_string(), (0, 1));
-        offsets.insert("dt".to_string(), (1, 1));
-        offsets.insert("initial_time".to_string(), (2, 1));
-        offsets.insert("final_time".to_string(), (3, 1));
+        offsets.insert(CanonicalIdent::from_raw("time"), (0, 1));
+        offsets.insert(CanonicalIdent::from_raw("dt"), (1, 1));
+        offsets.insert(CanonicalIdent::from_raw("initial_time"), (2, 1));
+        offsets.insert(CanonicalIdent::from_raw("final_time"), (3, 1));
         i += IMPLICIT_VAR_COUNT;
     }
 
@@ -874,12 +876,16 @@ pub fn calc_flattened_offsets(
             &model.variables[&CanonicalIdent::from_raw(ident)]
         {
             let sub_offsets = calc_flattened_offsets(project, model_name.as_str());
-            let mut sub_var_names: Vec<&str> = sub_offsets.keys().map(|v| v.as_str()).collect();
+            let mut sub_var_names: Vec<&CanonicalIdent> = sub_offsets.keys().collect();
             sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
                 let (sub_off, sub_size) = sub_offsets[sub_name];
                 offsets.insert(
-                    format!("{}.{}", quoteize(ident), quoteize(sub_name)),
+                    CanonicalIdent::from_canonical_unchecked(format!(
+                        "{}.{}",
+                        quoteize(ident),
+                        quoteize(sub_name.as_str())
+                    )),
                     (i + sub_off, sub_size),
                 );
             }
@@ -890,7 +896,11 @@ pub fn calc_flattened_offsets(
         {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
+                let subscripted_ident = CanonicalIdent::from_canonical_unchecked(format!(
+                    "{}[{}]",
+                    quoteize(ident),
+                    subscript
+                ));
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
@@ -899,12 +909,19 @@ pub fn calc_flattened_offsets(
         {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let subscripted_ident = format!("{}[{}]", quoteize(ident), subscript);
+                let subscripted_ident = CanonicalIdent::from_canonical_unchecked(format!(
+                    "{}[{}]",
+                    quoteize(ident),
+                    subscript
+                ));
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
         } else {
-            offsets.insert(quoteize(ident), (i, 1));
+            offsets.insert(
+                CanonicalIdent::from_canonical_unchecked(quoteize(ident)),
+                (i, 1),
+            );
             1
         };
         i += size;
@@ -913,30 +930,32 @@ pub fn calc_flattened_offsets(
     offsets
 }
 
-fn calc_flattened_order(sim: &Simulation, model_name: &str) -> Vec<Ident> {
-    let is_root = model_name == "main";
+fn calc_flattened_order(sim: &Simulation, model_name: &CanonicalIdent) -> Vec<CanonicalIdent> {
+    let is_root = model_name.as_str() == "main";
 
     let module = &sim.modules[model_name];
 
-    let mut offsets: Vec<Ident> = Vec::with_capacity(module.runlist_order.len() + 1);
+    let mut offsets: Vec<CanonicalIdent> = Vec::with_capacity(module.runlist_order.len() + 1);
 
     if is_root {
-        offsets.push("time".to_owned());
+        offsets.push(CanonicalIdent::from_raw("time"));
     }
 
     for ident in module.runlist_order.iter() {
-        // FIXME: this isnt' quite right (assumes no regular var has same name as module)
-        if sim.modules.contains_key(ident.as_str()) {
-            let sub_var_names = calc_flattened_order(sim, ident.as_str());
+        // FIXME: this isn't quite right (assumes no regular var has same name as module)
+        if sim.modules.contains_key(ident) {
+            let sub_var_names = calc_flattened_order(sim, ident);
             for sub_name in sub_var_names.iter() {
-                offsets.push(format!(
+                offsets.push(CanonicalIdent::from_canonical_unchecked(format!(
                     "{}.{}",
                     quoteize(ident.as_str()),
-                    quoteize(sub_name)
-                ));
+                    quoteize(sub_name.as_str())
+                )));
             }
         } else {
-            offsets.push(quoteize(ident.as_str()));
+            offsets.push(CanonicalIdent::from_canonical_unchecked(quoteize(
+                ident.as_str(),
+            )));
         }
     }
 
@@ -1132,18 +1151,18 @@ fn test_arrays() {
     {
         let actual = calc_flattened_offsets(&parsed_project, "main");
         let expected: HashMap<_, _> = vec![
-            ("time".to_owned(), (0, 1)),
-            ("dt".to_owned(), (1, 1)),
-            ("initial_time".to_owned(), (2, 1)),
-            ("final_time".to_owned(), (3, 1)),
-            ("aux[a]".to_owned(), (4, 1)),
-            ("aux[b]".to_owned(), (5, 1)),
-            ("aux[c]".to_owned(), (6, 1)),
-            ("constants[a]".to_owned(), (7, 1)),
-            ("constants[b]".to_owned(), (8, 1)),
-            ("constants[c]".to_owned(), (9, 1)),
-            ("picked".to_owned(), (10, 1)),
-            ("picked2".to_owned(), (11, 1)),
+            (CanonicalIdent::from_raw("time"), (0, 1)),
+            (CanonicalIdent::from_raw("dt"), (1, 1)),
+            (CanonicalIdent::from_raw("initial_time"), (2, 1)),
+            (CanonicalIdent::from_raw("final_time"), (3, 1)),
+            (CanonicalIdent::from_raw("aux[a]"), (4, 1)),
+            (CanonicalIdent::from_raw("aux[b]"), (5, 1)),
+            (CanonicalIdent::from_raw("aux[c]"), (6, 1)),
+            (CanonicalIdent::from_raw("constants[a]"), (7, 1)),
+            (CanonicalIdent::from_raw("constants[b]"), (8, 1)),
+            (CanonicalIdent::from_raw("constants[c]"), (9, 1)),
+            (CanonicalIdent::from_raw("picked"), (10, 1)),
+            (CanonicalIdent::from_raw("picked2"), (11, 1)),
         ]
         .into_iter()
         .collect();

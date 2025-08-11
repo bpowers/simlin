@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::result::Result as StdResult;
 
+use simlin_engine::common::CanonicalIdent;
 use simlin_engine::datamodel::Project;
 pub use simlin_engine::{self as engine, Result, Results, prost};
 use simlin_engine::{Method, SimSpecs, canonicalize, quoteize};
@@ -78,10 +79,10 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
         unprocessed
     };
 
-    let offsets: HashMap<String, usize> = unprocessed
+    let offsets: HashMap<CanonicalIdent, usize> = unprocessed
         .keys()
         .enumerate()
-        .map(|(i, r)| (r.clone(), i))
+        .map(|(i, r)| (CanonicalIdent::from_canonical_str_unchecked(r.as_str()), i))
         .collect();
 
     let initial_time = unprocessed["initial_time"][0].1;
@@ -94,7 +95,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
     step_data.extend(std::iter::repeat_n(f64::NAN, step_count * step_size));
 
     for (ident, var_off) in offsets.iter() {
-        let data = &unprocessed[ident];
+        let data = &unprocessed[ident.as_str()];
         let mut data_iter = data.iter().cloned();
         let mut curr: Option<(f64, f64)> = data_iter.next();
         let mut next: Option<(f64, f64)> = data_iter.next();
@@ -155,14 +156,17 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         .from_path(file_path)?;
 
     let header = rdr.headers().unwrap();
-    let offsets: HashMap<String, usize> = header
+    let offsets: HashMap<CanonicalIdent, usize> = header
         .iter()
         .enumerate()
         .map(|(i, r)| {
             // stella outputs the first 'time' column as the time _units_, which is bonkers
             let name = if i == 0 { "time" } else { r };
             let ident = canonicalize(name);
-            (quoteize(&ident), i)
+            (
+                CanonicalIdent::from_canonical_unchecked(quoteize(&ident)),
+                i,
+            )
         })
         .collect();
 

@@ -678,7 +678,11 @@ impl Engine {
             return empty.into_iter().map(JsValue::from).collect();
         }
         let results = self.results.as_ref().unwrap();
-        results.offsets.keys().map(JsValue::from).collect()
+        results
+            .offsets
+            .keys()
+            .map(|k| JsValue::from(k.as_str()))
+            .collect()
     }
 
     #[wasm_bindgen(js_name = simSeries)]
@@ -686,12 +690,13 @@ impl Engine {
         if self.results.is_none() {
             return vec![];
         }
+        let ident = CanonicalIdent::from_raw(ident);
         let results = self.results.as_ref().unwrap();
-        if !results.offsets.contains_key(ident) {
+        if !results.offsets.contains_key(&ident) {
             return vec![];
         }
 
-        let off = results.offsets[ident];
+        let off = results.offsets[&ident];
         results.iter().map(|curr| curr[off]).collect()
     }
 

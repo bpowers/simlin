@@ -500,7 +500,7 @@ impl CanonicalIdent {
     /// # Safety
     /// Caller must guarantee the string is already in canonical form
     #[allow(dead_code)]
-    pub(crate) fn from_canonical_unchecked(s: String) -> Self {
+    pub fn from_canonical_unchecked(s: String) -> Self {
         CanonicalIdent(s)
     }
 
@@ -509,7 +509,7 @@ impl CanonicalIdent {
     /// # Safety
     /// Caller must guarantee the string is already in canonical form
     #[allow(dead_code)]
-    pub(crate) fn from_canonical_str_unchecked(s: &str) -> Self {
+    pub fn from_canonical_str_unchecked(s: &str) -> Self {
         CanonicalIdent(s.to_string())
     }
 

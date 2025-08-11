@@ -2015,7 +2015,7 @@ pub struct Module {
     pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
-    pub(crate) offsets: HashMap<Ident, HashMap<Ident, (usize, usize)>>,
+    pub(crate) offsets: HashMap<CanonicalIdent, HashMap<Ident, (usize, usize)>>,
     pub(crate) runlist_order: Vec<CanonicalIdent>,
     pub(crate) tables: HashMap<Ident, Table>,
 }
@@ -2357,7 +2357,7 @@ impl Module {
             .into_iter()
             .map(|(k, v)| {
                 (
-                    k.to_string(),
+                    k,
                     v.iter()
                         .map(|(k, v)| (k.to_string(), (v.offset, v.size)))
                         .collect(),
@@ -2657,9 +2657,9 @@ impl<'module> Compiler<'module> {
                 for arg in args.iter() {
                     self.walk_expr(arg).unwrap().unwrap()
                 }
-                let module_offsets = &self.module.offsets[self.module.ident.as_str()];
+                let module_offsets = &self.module.offsets[&self.module.ident];
                 self.module_decls.push(ModuleDeclaration {
-                    model_name: model_name.as_str().to_string(),
+                    model_name: model_name.clone(),
                     off: module_offsets[ident.as_str()].0,
                 });
                 let id = (self.module_decls.len() - 1) as ModuleId;
