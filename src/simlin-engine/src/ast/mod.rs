@@ -6,7 +6,7 @@ pub use crate::builtins::Loc;
 use std::collections::HashMap;
 
 use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
-use crate::common::{CanonicalElementName, CanonicalIdent, EquationResult};
+use crate::common::{CanonicalElementName, EquationResult, canonicalize};
 use crate::dimensions::Dimension;
 use crate::model::{ModelStage0, ScopeStage0};
 use crate::variable::Variable;
@@ -80,7 +80,7 @@ impl<'a> ArrayContext<'a> {
     }
 
     fn get_model(&self, model_name: &str) -> Option<&'a ModelStage0> {
-        self.scope.models.get(&CanonicalIdent::from_raw(model_name))
+        self.scope.models.get(&canonicalize(model_name))
     }
 
     fn get_variable(
@@ -97,7 +97,7 @@ impl<'a> ArrayContext<'a> {
             let module_var = self
                 .get_model(model_name)?
                 .variables
-                .get(&CanonicalIdent::from_raw(submodel_module_name))?;
+                .get(&canonicalize(submodel_module_name))?;
             if let Variable::Module {
                 model_name: submodel_name,
                 ..
@@ -109,7 +109,7 @@ impl<'a> ArrayContext<'a> {
         } else {
             self.get_model(model_name)?
                 .variables
-                .get(&CanonicalIdent::from_raw(ident))
+                .get(&canonicalize(ident))
         }
     }
 }
@@ -258,7 +258,9 @@ impl Visitor<String> for PrintVisitor {
     fn walk_index(&mut self, expr: &IndexExpr0) -> String {
         match expr {
             IndexExpr0::Wildcard(_) => "*".to_string(),
-            IndexExpr0::StarRange(id, _) => format!("*:{}", crate::canonicalize(id.as_str())),
+            IndexExpr0::StarRange(id, _) => {
+                format!("*:{}", crate::canonicalize(id.as_str()).as_str())
+            }
             IndexExpr0::Range(l, r, _) => format!("{}:{}", self.walk(l), self.walk(r)),
             IndexExpr0::DimPosition(n, _) => format!("@{n}"),
             IndexExpr0::Expr(e) => self.walk(e),
@@ -270,7 +272,7 @@ impl Visitor<String> for PrintVisitor {
             Expr0::Const(s, _, _) => s.clone(),
             Expr0::Var(id, _) => {
                 // Canonicalize for display (lowercase, etc.)
-                crate::canonicalize(id.as_str())
+                crate::canonicalize(id.as_str()).as_str().to_string()
             }
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
@@ -279,7 +281,11 @@ impl Visitor<String> for PrintVisitor {
             Expr0::Subscript(id, args, _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk_index(e)).collect();
                 // Canonicalize identifier for display
-                format!("{}[{}]", crate::canonicalize(id.as_str()), args.join(", "))
+                format!(
+                    "{}[{}]",
+                    crate::canonicalize(id.as_str()).as_str(),
+                    args.join(", ")
+                )
             }
             Expr0::Op1(op, l, _) => {
                 match op {
@@ -526,21 +532,13 @@ pub fn latex_eqn(expr: &Expr2) -> String {
 
 #[test]
 fn test_latex_eqn() {
-    use crate::common::CanonicalIdent;
+    use crate::common::canonicalize;
     assert_eq!(
         "\\mathrm{a\\_c} + \\mathrm{b}",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Add,
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("a_c"),
-                None,
-                Loc::new(1, 2)
-            )),
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("b"),
-                None,
-                Loc::new(5, 6)
-            )),
+            Box::new(Expr2::Var(canonicalize("a_c"), None, Loc::new(1, 2))),
+            Box::new(Expr2::Var(canonicalize("b"), None, Loc::new(5, 6))),
             None,
             Loc::new(0, 7),
         ))
@@ -549,16 +547,8 @@ fn test_latex_eqn() {
         "\\mathrm{a\\_c} \\cdot \\mathrm{b}",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("a_c"),
-                None,
-                Loc::new(1, 2)
-            )),
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("b"),
-                None,
-                Loc::new(5, 6)
-            )),
+            Box::new(Expr2::Var(canonicalize("a_c"), None, Loc::new(1, 2))),
+            Box::new(Expr2::Var(canonicalize("b"), None, Loc::new(5, 6))),
             None,
             Loc::new(0, 7),
         ))
@@ -569,20 +559,12 @@ fn test_latex_eqn() {
             BinaryOp::Mul,
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr2::Var(
-                    CanonicalIdent::from_raw("a_c"),
-                    None,
-                    Loc::new(0, 0)
-                )),
+                Box::new(Expr2::Var(canonicalize("a_c"), None, Loc::new(0, 0))),
                 Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 None,
                 Loc::new(0, 0),
             )),
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("b"),
-                None,
-                Loc::new(5, 6)
-            )),
+            Box::new(Expr2::Var(canonicalize("b"), None, Loc::new(5, 6))),
             None,
             Loc::new(0, 7),
         ))
@@ -591,18 +573,10 @@ fn test_latex_eqn() {
         "\\mathrm{b} \\cdot (\\mathrm{a\\_c} - 1)",
         latex_eqn(&Expr2::Op2(
             BinaryOp::Mul,
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("b"),
-                None,
-                Loc::new(5, 6)
-            )),
+            Box::new(Expr2::Var(canonicalize("b"), None, Loc::new(5, 6))),
             Box::new(Expr2::Op2(
                 BinaryOp::Sub,
-                Box::new(Expr2::Var(
-                    CanonicalIdent::from_raw("a_c"),
-                    None,
-                    Loc::new(0, 0)
-                )),
+                Box::new(Expr2::Var(canonicalize("a_c"), None, Loc::new(0, 0))),
                 Box::new(Expr2::Const("1".to_string(), 1.0, Loc::new(0, 0))),
                 None,
                 Loc::new(0, 0),
@@ -615,11 +589,7 @@ fn test_latex_eqn() {
         "-\\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Negative,
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("a"),
-                None,
-                Loc::new(1, 2)
-            )),
+            Box::new(Expr2::Var(canonicalize("a"), None, Loc::new(1, 2))),
             None,
             Loc::new(0, 2),
         ))
@@ -628,11 +598,7 @@ fn test_latex_eqn() {
         "\\neg \\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Not,
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("a"),
-                None,
-                Loc::new(1, 2)
-            )),
+            Box::new(Expr2::Var(canonicalize("a"), None, Loc::new(1, 2))),
             None,
             Loc::new(0, 2),
         ))
@@ -641,11 +607,7 @@ fn test_latex_eqn() {
         "+\\mathrm{a}",
         latex_eqn(&Expr2::Op1(
             UnaryOp::Positive,
-            Box::new(Expr2::Var(
-                CanonicalIdent::from_raw("a"),
-                None,
-                Loc::new(1, 2)
-            )),
+            Box::new(Expr2::Var(canonicalize("a"), None, Loc::new(1, 2))),
             None,
             Loc::new(0, 2),
         ))
@@ -684,7 +646,7 @@ mod ast_tests {
             vec!["north".to_string(), "south".to_string()],
         );
         let array_var = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("population"),
+            ident: canonicalize("population").as_str().to_string(),
             equation: datamodel::Equation::ApplyToAll(
                 vec!["region".to_string()],
                 "100".to_string(),
@@ -708,7 +670,7 @@ mod ast_tests {
         let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
 
         let mut models = HashMap::new();
-        models.insert(CanonicalIdent::from_raw("test_model"), model_s0);
+        models.insert(canonicalize("test_model"), model_s0);
 
         let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim]);
         let scope = ScopeStage0 {
@@ -740,7 +702,7 @@ mod ast_tests {
     fn test_expr2_dimension_mismatch_errors() {
         use crate::ast::BinaryOp;
         use crate::ast::expr1::Expr1;
-        use crate::common::{CanonicalIdent, ErrorCode};
+        use crate::common::{ErrorCode, canonicalize};
 
         // Create a model with array variables of different dimensions
         let dim1 = datamodel::Dimension::Named(
@@ -753,7 +715,7 @@ mod ast_tests {
         );
 
         let array_var1 = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("regional_data"),
+            ident: canonicalize("regional_data").as_str().to_string(),
             equation: datamodel::Equation::ApplyToAll(
                 vec!["region".to_string()],
                 "100".to_string(),
@@ -767,7 +729,7 @@ mod ast_tests {
             ai_state: None,
         });
         let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
-            ident: canonicalize("product_data"),
+            ident: canonicalize("product_data").as_str().to_string(),
             equation: datamodel::Equation::ApplyToAll(
                 vec!["product".to_string()],
                 "50".to_string(),
@@ -796,7 +758,7 @@ mod ast_tests {
         );
 
         let mut models = HashMap::new();
-        models.insert(CanonicalIdent::from_raw("test_model"), model_s0);
+        models.insert(canonicalize("test_model"), model_s0);
 
         let dims_ctx = crate::dimensions::DimensionsContext::from(&[dim1, dim2]);
         let scope = ScopeStage0 {
@@ -810,14 +772,8 @@ mod ast_tests {
         // Test binary op with mismatched dimensions
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("regional_data"),
-                Loc::default(),
-            )),
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("product_data"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("regional_data"), Loc::default())),
+            Box::new(Expr1::Var(canonicalize("product_data"), Loc::default())),
             Loc::new(0, 10),
         );
         let result = Expr2::from(add_expr, &mut ctx);
@@ -828,14 +784,8 @@ mod ast_tests {
         // Test if expression with mismatched dimensions
         let if_expr = Expr1::If(
             Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("regional_data"),
-                Loc::default(),
-            )),
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("product_data"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("regional_data"), Loc::default())),
+            Box::new(Expr1::Var(canonicalize("product_data"), Loc::default())),
             Loc::new(0, 20),
         );
         let result = Expr2::from(if_expr, &mut ctx);

@@ -4,7 +4,7 @@
 
 use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
-use crate::common::CanonicalIdent;
+use crate::common::{Canonical, Ident, canonicalize};
 #[cfg(test)]
 use crate::compiler::ArrayView;
 use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
@@ -14,7 +14,7 @@ use crate::vm::{
     CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, Specs,
     StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
 };
-use crate::{Project, Results, Variable, compiler, quoteize};
+use crate::{Project, Results, Variable, compiler};
 use float_cmp::approx_eq;
 use std::borrow::BorrowMut;
 use std::cell::RefCell;
@@ -298,11 +298,11 @@ impl ModuleEvaluator<'_> {
                     BuiltinFn::Inf => f64::INFINITY,
                     BuiltinFn::Pi => std::f64::consts::PI,
                     BuiltinFn::Int(a) => self.eval(a).floor(),
-                    BuiltinFn::IsModuleInput(ident, _) => self
-                        .module
-                        .inputs
-                        .contains(&CanonicalIdent::from_raw(ident))
-                        as i8 as f64,
+                    BuiltinFn::IsModuleInput(ident, _) => self.module.inputs.contains(&Ident::<
+                        Canonical,
+                    >::from_raw(
+                        ident
+                    )) as i8 as f64,
                     BuiltinFn::Ln(a) => self.eval(a).ln(),
                     BuiltinFn::Log10(a) => self.eval(a).log10(),
                     BuiltinFn::SafeDiv(a, b, default) => {
@@ -363,7 +363,7 @@ impl ModuleEvaluator<'_> {
                         }
                     }
                     BuiltinFn::Lookup(id, index, _) => {
-                        let canonical_id = CanonicalIdent::from_raw(id);
+                        let canonical_id = canonicalize(id);
                         if !self.module.tables.contains_key(&canonical_id) {
                             eprintln!("bad lookup for {id}");
                             unreachable!();
@@ -595,17 +595,17 @@ impl ModuleEvaluator<'_> {
 
 #[derive(Debug)]
 pub struct Simulation {
-    pub(crate) modules: HashMap<CanonicalIdent, Module>,
+    pub(crate) modules: HashMap<Ident<Canonical>, Module>,
     specs: Specs,
-    root: CanonicalIdent,
-    offsets: HashMap<CanonicalIdent, usize>,
+    root: Ident<Canonical>,
+    offsets: HashMap<Ident<Canonical>, usize>,
     temps: Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
     temp_offsets: Vec<usize>,     // Offset of each temporary in the temps vector
 }
 
 impl Simulation {
     pub fn new(project: &Project, main_model_name: &str) -> crate::Result<Self> {
-        let main_model_ident = CanonicalIdent::from_raw(main_model_name);
+        let main_model_ident = canonicalize(main_model_name);
         if !project.models.contains_key(&main_model_ident) {
             return sim_err!(
                 NotSimulatable,
@@ -623,7 +623,7 @@ impl Simulation {
             enumerate_modules(&project_models, main_model_name, |model| model.name.clone())?
         };
 
-        let module_names: Vec<&CanonicalIdent> = {
+        let module_names: Vec<&Ident<Canonical>> = {
             let mut module_names: Vec<_> = modules.keys().collect();
             module_names.sort_unstable();
 
@@ -636,7 +636,7 @@ impl Simulation {
             sorted_names
         };
 
-        let mut compiled_modules: HashMap<CanonicalIdent, Module> = HashMap::new();
+        let mut compiled_modules: HashMap<Ident<Canonical>, Module> = HashMap::new();
         for name in module_names {
             let distinct_inputs = &modules[name];
             for inputs in distinct_inputs.iter() {
@@ -650,7 +650,7 @@ impl Simulation {
         let specs = Specs::from(&project.datamodel.sim_specs);
 
         let offsets = calc_flattened_offsets(project, main_model_name);
-        let offsets: HashMap<CanonicalIdent, usize> =
+        let offsets: HashMap<Ident<Canonical>, usize> =
             offsets.into_iter().map(|(k, (off, _))| (k, off)).collect();
 
         // Calculate temporary storage requirements
@@ -677,7 +677,7 @@ impl Simulation {
         Ok(Simulation {
             modules: compiled_modules,
             specs,
-            root: CanonicalIdent::from_raw(main_model_name),
+            root: canonicalize(main_model_name),
             offsets,
             temps,
             temp_offsets,
@@ -685,7 +685,7 @@ impl Simulation {
     }
 
     pub fn compile(&self) -> crate::Result<CompiledSimulation> {
-        let modules: crate::Result<HashMap<CanonicalIdent, CompiledModule>> = self
+        let modules: crate::Result<HashMap<Ident<Canonical>, CompiledModule>> = self
             .modules
             .iter()
             .map(|(name, module)| module.compile().map(|module| (name.clone(), module)))
@@ -699,8 +699,8 @@ impl Simulation {
         })
     }
 
-    pub fn runlist_order(&self) -> Vec<CanonicalIdent> {
-        calc_flattened_order(self, &CanonicalIdent::from_raw("main"))
+    pub fn runlist_order(&self) -> Vec<Ident<Canonical>> {
+        calc_flattened_order(self, &canonicalize("main"))
     }
 
     pub fn debug_print_runlists(&self, _model_name: &str) {
@@ -766,7 +766,7 @@ impl Simulation {
         }
     }
 
-    fn n_slots(&self, module_name: &CanonicalIdent) -> usize {
+    fn n_slots(&self, module_name: &Ident<Canonical>) -> usize {
         self.modules[module_name].n_slots
     }
 
@@ -852,20 +852,20 @@ impl Simulation {
 pub fn calc_flattened_offsets(
     project: &Project,
     model_name: &str,
-) -> HashMap<CanonicalIdent, (usize, usize)> {
+) -> HashMap<Ident<Canonical>, (usize, usize)> {
     let is_root = model_name == "main";
 
-    let mut offsets: HashMap<CanonicalIdent, (usize, usize)> = HashMap::new();
+    let mut offsets: HashMap<Ident<Canonical>, (usize, usize)> = HashMap::new();
     let mut i = 0;
     if is_root {
-        offsets.insert(CanonicalIdent::from_raw("time"), (0, 1));
-        offsets.insert(CanonicalIdent::from_raw("dt"), (1, 1));
-        offsets.insert(CanonicalIdent::from_raw("initial_time"), (2, 1));
-        offsets.insert(CanonicalIdent::from_raw("final_time"), (3, 1));
+        offsets.insert(canonicalize("time"), (0, 1));
+        offsets.insert(canonicalize("dt"), (1, 1));
+        offsets.insert(canonicalize("initial_time"), (2, 1));
+        offsets.insert(canonicalize("final_time"), (3, 1));
         i += IMPLICIT_VAR_COUNT;
     }
 
-    let model = Rc::clone(&project.models[&CanonicalIdent::from_raw(model_name)]);
+    let model = Rc::clone(&project.models[&canonicalize(model_name)]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
         var_names.sort_unstable();
@@ -874,53 +874,55 @@ pub fn calc_flattened_offsets(
 
     for ident in var_names.iter() {
         let size = if let Variable::Module { model_name, .. } =
-            &model.variables[&CanonicalIdent::from_raw(ident)]
+            &model.variables[&canonicalize(ident)]
         {
             let sub_offsets = calc_flattened_offsets(project, model_name.as_str());
-            let mut sub_var_names: Vec<&CanonicalIdent> = sub_offsets.keys().collect();
+            let mut sub_var_names: Vec<&Ident<Canonical>> = sub_offsets.keys().collect();
             sub_var_names.sort_unstable();
             for sub_name in sub_var_names {
                 let (sub_off, sub_size) = sub_offsets[sub_name];
+                let ident_canonical = canonicalize(ident);
+                let sub_canonical = canonicalize(sub_name.as_str());
                 offsets.insert(
-                    CanonicalIdent::from_canonical_unchecked(format!(
+                    Ident::<Canonical>::from_unchecked(format!(
                         "{}.{}",
-                        quoteize(ident),
-                        quoteize(sub_name.as_str())
+                        ident_canonical.to_source_repr(),
+                        sub_canonical.to_source_repr()
                     )),
                     (i + sub_off, sub_size),
                 );
             }
             let sub_size: usize = sub_offsets.iter().map(|(_, (_, size))| size).sum();
             sub_size
-        } else if let Some(Ast::ApplyToAll(dims, _)) =
-            &model.variables[&CanonicalIdent::from_raw(ident)].ast()
+        } else if let Some(Ast::ApplyToAll(dims, _)) = &model.variables[&canonicalize(ident)].ast()
         {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let subscripted_ident = CanonicalIdent::from_canonical_unchecked(format!(
+                let ident_canonical = canonicalize(ident);
+                let subscripted_ident = Ident::<Canonical>::from_unchecked(format!(
                     "{}[{}]",
-                    quoteize(ident),
+                    ident_canonical.to_source_repr(),
                     subscript
                 ));
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
-        } else if let Some(Ast::Arrayed(dims, _)) =
-            &model.variables[&CanonicalIdent::from_raw(ident)].ast()
-        {
+        } else if let Some(Ast::Arrayed(dims, _)) = &model.variables[&canonicalize(ident)].ast() {
             for (j, subscripts) in SubscriptIterator::new(dims).enumerate() {
                 let subscript = subscripts.join(",");
-                let subscripted_ident = CanonicalIdent::from_canonical_unchecked(format!(
+                let ident_canonical = canonicalize(ident);
+                let subscripted_ident = Ident::<Canonical>::from_unchecked(format!(
                     "{}[{}]",
-                    quoteize(ident),
+                    ident_canonical.to_source_repr(),
                     subscript
                 ));
                 offsets.insert(subscripted_ident, (i + j, 1));
             }
             dims.iter().map(|dim| dim.len()).product()
         } else {
+            let ident_canonical = canonicalize(ident);
             offsets.insert(
-                CanonicalIdent::from_canonical_unchecked(quoteize(ident)),
+                Ident::<Canonical>::from_unchecked(ident_canonical.to_source_repr()),
                 (i, 1),
             );
             1
@@ -931,15 +933,15 @@ pub fn calc_flattened_offsets(
     offsets
 }
 
-fn calc_flattened_order(sim: &Simulation, model_name: &CanonicalIdent) -> Vec<CanonicalIdent> {
+fn calc_flattened_order(sim: &Simulation, model_name: &Ident<Canonical>) -> Vec<Ident<Canonical>> {
     let is_root = model_name.as_str() == "main";
 
     let module = &sim.modules[model_name];
 
-    let mut offsets: Vec<CanonicalIdent> = Vec::with_capacity(module.runlist_order.len() + 1);
+    let mut offsets: Vec<Ident<Canonical>> = Vec::with_capacity(module.runlist_order.len() + 1);
 
     if is_root {
-        offsets.push(CanonicalIdent::from_raw("time"));
+        offsets.push(canonicalize("time"));
     }
 
     for ident in module.runlist_order.iter() {
@@ -947,16 +949,14 @@ fn calc_flattened_order(sim: &Simulation, model_name: &CanonicalIdent) -> Vec<Ca
         if sim.modules.contains_key(ident) {
             let sub_var_names = calc_flattened_order(sim, ident);
             for sub_name in sub_var_names.iter() {
-                offsets.push(CanonicalIdent::from_canonical_unchecked(format!(
+                offsets.push(Ident::<Canonical>::from_unchecked(format!(
                     "{}.{}",
-                    quoteize(ident.as_str()),
-                    quoteize(sub_name.as_str())
+                    ident.to_source_repr(),
+                    sub_name.to_source_repr()
                 )));
             }
         } else {
-            offsets.push(CanonicalIdent::from_canonical_unchecked(quoteize(
-                ident.as_str(),
-            )));
+            offsets.push(Ident::<Canonical>::from_unchecked(ident.to_source_repr()));
         }
     }
 
@@ -1055,8 +1055,7 @@ mod transpose_tests {
             let back_to_original = transpose_flat_index(transposed_idx, transposed_dims_2d);
             assert_eq!(
                 back_to_original, i,
-                "Transpose should be its own inverse: {} -> {} -> {}",
-                i, transposed_idx, back_to_original
+                "Transpose should be its own inverse: {i} -> {transposed_idx} -> {back_to_original}"
             );
         }
     }
@@ -1152,52 +1151,40 @@ fn test_arrays() {
     {
         let actual = calc_flattened_offsets(&parsed_project, "main");
         let expected: HashMap<_, _> = vec![
-            (CanonicalIdent::from_raw("time"), (0, 1)),
-            (CanonicalIdent::from_raw("dt"), (1, 1)),
-            (CanonicalIdent::from_raw("initial_time"), (2, 1)),
-            (CanonicalIdent::from_raw("final_time"), (3, 1)),
-            (CanonicalIdent::from_raw("aux[a]"), (4, 1)),
-            (CanonicalIdent::from_raw("aux[b]"), (5, 1)),
-            (CanonicalIdent::from_raw("aux[c]"), (6, 1)),
-            (CanonicalIdent::from_raw("constants[a]"), (7, 1)),
-            (CanonicalIdent::from_raw("constants[b]"), (8, 1)),
-            (CanonicalIdent::from_raw("constants[c]"), (9, 1)),
-            (CanonicalIdent::from_raw("picked"), (10, 1)),
-            (CanonicalIdent::from_raw("picked2"), (11, 1)),
+            (canonicalize("time"), (0, 1)),
+            (canonicalize("dt"), (1, 1)),
+            (canonicalize("initial_time"), (2, 1)),
+            (canonicalize("final_time"), (3, 1)),
+            (canonicalize("aux[a]"), (4, 1)),
+            (canonicalize("aux[b]"), (5, 1)),
+            (canonicalize("aux[c]"), (6, 1)),
+            (canonicalize("constants[a]"), (7, 1)),
+            (canonicalize("constants[b]"), (8, 1)),
+            (canonicalize("constants[c]"), (9, 1)),
+            (canonicalize("picked"), (10, 1)),
+            (canonicalize("picked2"), (11, 1)),
         ]
         .into_iter()
         .collect();
         assert_eq!(actual, expected);
     }
 
-    let main_ident = CanonicalIdent::from_raw("main");
+    let main_ident = canonicalize("main");
     let metadata = compiler::build_metadata(&parsed_project, &main_ident, true);
     let main_metadata = &metadata[&main_ident];
-    assert_eq!(main_metadata[&CanonicalIdent::from_raw("aux")].offset, 4);
-    assert_eq!(main_metadata[&CanonicalIdent::from_raw("aux")].size, 3);
-    assert_eq!(
-        main_metadata[&CanonicalIdent::from_raw("constants")].offset,
-        7
-    );
-    assert_eq!(
-        main_metadata[&CanonicalIdent::from_raw("constants")].size,
-        3
-    );
-    assert_eq!(
-        main_metadata[&CanonicalIdent::from_raw("picked")].offset,
-        10
-    );
-    assert_eq!(main_metadata[&CanonicalIdent::from_raw("picked")].size, 1);
-    assert_eq!(
-        main_metadata[&CanonicalIdent::from_raw("picked2")].offset,
-        11
-    );
-    assert_eq!(main_metadata[&CanonicalIdent::from_raw("picked2")].size, 1);
+    assert_eq!(main_metadata[&canonicalize("aux")].offset, 4);
+    assert_eq!(main_metadata[&canonicalize("aux")].size, 3);
+    assert_eq!(main_metadata[&canonicalize("constants")].offset, 7);
+    assert_eq!(main_metadata[&canonicalize("constants")].size, 3);
+    assert_eq!(main_metadata[&canonicalize("picked")].offset, 10);
+    assert_eq!(main_metadata[&canonicalize("picked")].size, 1);
+    assert_eq!(main_metadata[&canonicalize("picked2")].offset, 11);
+    assert_eq!(main_metadata[&canonicalize("picked2")].size, 1);
 
     let module_models = compiler::calc_module_model_map(&parsed_project, &main_ident);
 
     let arrayed_constants_var =
-        &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("constants")];
+        &parsed_project.models[&main_ident].variables[&canonicalize("constants")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1221,7 +1208,7 @@ fn test_arrays() {
     assert!(parsed_var.is_ok());
 
     let expected = Var {
-        ident: CanonicalIdent::from_raw(arrayed_constants_var.ident()),
+        ident: canonicalize(arrayed_constants_var.ident()),
         ast: vec![
             Expr::AssignCurr(7, Box::new(Expr::Const(9.0, Loc::default()))),
             Expr::AssignCurr(8, Box::new(Expr::Const(7.0, Loc::default()))),
@@ -1234,8 +1221,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let arrayed_aux_var =
-        &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("aux")];
+    let arrayed_aux_var = &parsed_project.models[&main_ident].variables[&canonicalize("aux")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1258,7 +1244,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: CanonicalIdent::from_raw(arrayed_aux_var.ident()),
+        ident: canonicalize(arrayed_aux_var.ident()),
         ast: vec![
             Expr::AssignCurr(4, Box::new(Expr::Var(7, Loc::default()))),
             Expr::AssignCurr(5, Box::new(Expr::Var(8, Loc::default()))),
@@ -1271,7 +1257,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let var = &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("picked2")];
+    let var = &parsed_project.models[&main_ident].variables[&canonicalize("picked2")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1294,7 +1280,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: CanonicalIdent::from_raw(var.ident()),
+        ident: canonicalize(var.ident()),
         ast: vec![Expr::AssignCurr(
             11,
             Box::new(Expr::StaticSubscript(
@@ -1315,7 +1301,7 @@ fn test_arrays() {
     }
     assert_eq!(expected, parsed_var);
 
-    let var = &parsed_project.models[&main_ident].variables[&CanonicalIdent::from_raw("picked")];
+    let var = &parsed_project.models[&main_ident].variables[&canonicalize("picked")];
     let parsed_var = Var::new(
         &Context {
             dimensions: parsed_project
@@ -1338,7 +1324,7 @@ fn test_arrays() {
 
     assert!(parsed_var.is_ok());
     let expected = Var {
-        ident: CanonicalIdent::from_raw(var.ident()),
+        ident: canonicalize(var.ident()),
         ast: vec![Expr::AssignCurr(
             10,
             Box::new(Expr::Subscript(

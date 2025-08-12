@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::common::CanonicalIdent;
+use crate::common::{Canonical, Ident};
 use ordered_float::OrderedFloat;
 
 pub type LiteralId = u16;
@@ -77,7 +77,7 @@ pub(crate) enum Opcode {
 
 #[derive(Clone, Debug)]
 pub struct ModuleDeclaration {
-    pub(crate) model_name: CanonicalIdent,
+    pub(crate) model_name: Ident<Canonical>,
     pub(crate) off: usize, // offset within the parent module
 }
 
@@ -157,7 +157,7 @@ fn test_opcode_size() {
 
 #[derive(Clone, Debug)]
 pub struct CompiledModule {
-    pub(crate) ident: CanonicalIdent,
+    pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,
     pub(crate) context: Rc<ByteCodeContext>,
     pub(crate) compiled_initials: Rc<ByteCode>,

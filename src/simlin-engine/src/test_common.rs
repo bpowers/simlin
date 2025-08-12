@@ -7,9 +7,9 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::CanonicalIdent;
 #[cfg(test)]
 use crate::common::ErrorCode;
+use crate::common::{Canonical, Ident};
 #[cfg(test)]
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 #[cfg(test)]
@@ -308,7 +308,7 @@ impl TestProject {
             // Check variable-level errors (including unit errors)
             for (var_name, var_errors) in model.get_variable_errors() {
                 for err in var_errors {
-                    errors.push((format!("{}.{}", model_name, var_name), err.code));
+                    errors.push((format!("{model_name}.{var_name}"), err.code));
                 }
             }
         }
@@ -331,7 +331,7 @@ impl TestProject {
             has_errors = true;
         }
 
-        for (_model_name, model) in &compiled.models {
+        for model in compiled.models.values() {
             if model.errors.is_some() || !model.get_variable_errors().is_empty() {
                 has_errors = true;
                 break;
@@ -343,7 +343,7 @@ impl TestProject {
         }
 
         Simulation::new(&compiled, "main")
-            .map_err(|e| format!("Failed to create simulation: {:?}", e))
+            .map_err(|e| format!("Failed to create simulation: {e:?}"))
     }
 
     /// Run the interpreter and get results
@@ -353,7 +353,7 @@ impl TestProject {
         // Run the simulation using the tree-walking interpreter
         let results = sim
             .run_to_end()
-            .map_err(|e| format!("Simulation failed: {:?}", e))?;
+            .map_err(|e| format!("Simulation failed: {e:?}"))?;
 
         // Extract results
         let mut output = HashMap::new();
@@ -371,16 +371,16 @@ impl TestProject {
         // Now collect array variables by their base name
         // Array elements are stored as "varname[subscript]", we want to collect them as "varname"
         // We need to preserve the original offset order, not sort alphabetically
-        let mut array_results: HashMap<CanonicalIdent, Vec<(usize, String, Vec<f64>)>> =
-            HashMap::new();
+        type ArrayElement = (usize, String, Vec<f64>);
+        let mut array_results: HashMap<Ident<Canonical>, Vec<ArrayElement>> = HashMap::new();
         for (name, values) in &output {
             if let Some(bracket_pos) = name.as_str().find('[') {
                 let base_name =
-                    CanonicalIdent::from_canonical_str_unchecked(&name.as_str()[..bracket_pos]);
+                    Ident::<Canonical>::from_str_unchecked(&name.as_str()[..bracket_pos]);
                 // Get the offset for this element to maintain proper ordering
                 let offset = results
                     .offsets
-                    .get(&CanonicalIdent::from_canonical_str_unchecked(name))
+                    .get(&Ident::<Canonical>::from_str_unchecked(name))
                     .copied()
                     .unwrap_or(usize::MAX);
                 let entry = array_results.entry(base_name.clone()).or_default();
@@ -424,10 +424,10 @@ impl TestProject {
             Err(errors) => {
                 let error_msg = errors
                     .iter()
-                    .map(|(loc, code)| format!("{}: {:?}", loc, code))
+                    .map(|(loc, code)| format!("{loc}: {code:?}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                panic!("Compilation failed with errors: {}", error_msg);
+                panic!("Compilation failed with errors: {error_msg}");
             }
         }
     }
@@ -444,22 +444,18 @@ impl TestProject {
 
     fn assert_compile_error_impl(&self, expected_error: ErrorCode) {
         match self.compile() {
-            Ok(_) => panic!(
-                "Expected compilation to fail with {:?}, but it succeeded",
-                expected_error
-            ),
+            Ok(_) => {
+                panic!("Expected compilation to fail with {expected_error:?}, but it succeeded")
+            }
             Err(errors) => {
                 let has_expected = errors.iter().any(|(_, code)| *code == expected_error);
                 if !has_expected {
                     let error_msg = errors
                         .iter()
-                        .map(|(loc, code)| format!("{}: {:?}", loc, code))
+                        .map(|(loc, code)| format!("{loc}: {code:?}"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    panic!(
-                        "Expected error {:?}, but got: {}",
-                        expected_error, error_msg
-                    );
+                    panic!("Expected error {expected_error:?}, but got: {error_msg}");
                 }
             }
         }
@@ -474,19 +470,16 @@ impl TestProject {
 
         let actual = results
             .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {} not found in results", var_name));
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in results"));
 
         let final_value = actual
             .last()
             .copied()
-            .unwrap_or_else(|| panic!("Variable {} has no values", var_name));
+            .unwrap_or_else(|| panic!("Variable {var_name} has no values"));
 
         assert!(
             (final_value - expected).abs() < 1e-6,
-            "Value mismatch for {}: expected {}, got {}",
-            var_name,
-            expected,
-            final_value
+            "Value mismatch for {var_name}: expected {expected}, got {final_value}"
         );
     }
 
@@ -498,13 +491,12 @@ impl TestProject {
 
         let actual = results
             .get(var_name)
-            .unwrap_or_else(|| panic!("Variable {} not found in results", var_name));
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in results"));
 
         assert_eq!(
             actual.len(),
             expected.len(),
-            "Result length mismatch for {}: expected {}, got {}",
-            var_name,
+            "Result length mismatch for {var_name}: expected {}, got {}",
             expected.len(),
             actual.len()
         );
@@ -512,11 +504,7 @@ impl TestProject {
         for (i, (actual_val, expected_val)) in actual.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (actual_val - expected_val).abs() < 1e-6,
-                "Value mismatch for {} at index {}: expected {}, got {}",
-                var_name,
-                i,
-                expected_val,
-                actual_val
+                "Value mismatch for {var_name} at index {i}: expected {expected_val}, got {actual_val}"
             );
         }
     }

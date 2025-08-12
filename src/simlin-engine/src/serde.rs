@@ -69,8 +69,7 @@ fn test_sim_method_roundtrip() {
     let cases: &[SimMethod] = &[SimMethod::Euler, SimMethod::RungeKutta4];
     for expected in cases {
         let expected = expected.clone();
-        let actual =
-            SimMethod::from(project_io::SimMethod::try_from(expected.clone()).unwrap_or_default());
+        let actual = SimMethod::from(project_io::SimMethod::from(expected.clone()));
         assert_eq!(expected, actual);
     }
 
@@ -172,9 +171,8 @@ fn test_graphical_function_kind_roundtrip() {
     ];
     for expected in cases {
         let expected = *expected;
-        let actual = GraphicalFunctionKind::from(
-            project_io::graphical_function::Kind::try_from(expected).unwrap_or_default(),
-        );
+        let actual =
+            GraphicalFunctionKind::from(project_io::graphical_function::Kind::from(expected));
         assert_eq!(expected, actual);
     }
 
@@ -389,9 +387,7 @@ fn test_visibility_roundtrip() {
     let cases: &[Visibility] = &[Visibility::Private, Visibility::Public];
     for expected in cases {
         let expected = *expected;
-        let actual = Visibility::from(
-            project_io::variable::Visibility::try_from(expected).unwrap_or_default(),
-        );
+        let actual = Visibility::from(project_io::variable::Visibility::from(expected));
         assert_eq!(expected, actual);
     }
 
@@ -842,9 +838,8 @@ fn test_label_side_roundtrip() {
     ];
     for expected in cases {
         let expected = *expected;
-        let actual = view_element::LabelSide::from(
-            project_io::view_element::LabelSide::try_from(expected).unwrap_or_default(),
-        );
+        let actual =
+            view_element::LabelSide::from(project_io::view_element::LabelSide::from(expected));
         assert_eq!(expected, actual);
     }
 

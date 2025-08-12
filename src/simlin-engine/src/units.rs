@@ -95,9 +95,9 @@ impl Context {
         let mut aliases = HashMap::new();
         let mut parsed_units = HashMap::new();
         for unit in units.iter().filter(|unit| unit.equation.is_none()) {
-            let unit_name = canonicalize(&unit.name);
+            let unit_name = canonicalize(&unit.name).as_str().to_string();
             for alias in unit.aliases.iter() {
-                let alias = canonicalize(alias);
+                let alias = canonicalize(alias).as_str().to_string();
                 if let Entry::Vacant(e) = aliases.entry(alias) {
                     e.insert(unit_name.clone());
                 } else {
@@ -136,9 +136,9 @@ impl Context {
 
         // step 2: use this base context to parse our units with equations
         for unit in units.iter().filter(|unit| unit.equation.is_some()) {
-            let unit_name = canonicalize(&unit.name);
+            let unit_name = canonicalize(&unit.name).as_str().to_string();
             for alias in unit.aliases.iter() {
-                let alias = canonicalize(alias);
+                let alias = canonicalize(alias).as_str().to_string();
                 if let Entry::Vacant(e) = ctx.aliases.entry(alias) {
                     e.insert(unit_name.clone());
                 } else {

@@ -12,7 +12,7 @@ use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use simlin_engine::common::{Result, canonicalize, quoteize};
+use simlin_engine::common::{Result, canonicalize};
 use simlin_engine::datamodel;
 use simlin_engine::datamodel::{Equation, Rect, ViewElement};
 
@@ -673,13 +673,13 @@ impl ToXml<XmlWriter> for Dimension {
 
 impl From<Dimension> for datamodel::Dimension {
     fn from(dimension: Dimension) -> Self {
-        let name = canonicalize(&dimension.name);
+        let name = canonicalize(&dimension.name).as_str().to_string();
         if let Some(elements) = dimension.elements {
             datamodel::Dimension::Named(
                 name,
                 elements
                     .into_iter()
-                    .map(|i| canonicalize(&i.name))
+                    .map(|i| canonicalize(&i.name).as_str().to_string())
                     .collect(),
             )
         } else {
@@ -1142,7 +1142,7 @@ impl Model {
 
         for var in self.variables.as_ref().unwrap().variables.iter() {
             let name = var.get_noncanonical_name();
-            if ident == name || ident == canonicalize(name) {
+            if ident == name || ident == canonicalize(name).as_str() {
                 return Some(var);
             }
         }
@@ -2244,11 +2244,11 @@ impl ViewObject {
 
     pub fn ident(&self) -> Option<String> {
         match self {
-            ViewObject::Aux(aux) => Some(canonicalize(&aux.name)),
-            ViewObject::Stock(stock) => Some(canonicalize(&stock.name)),
-            ViewObject::Flow(flow) => Some(canonicalize(&flow.name)),
+            ViewObject::Aux(aux) => Some(canonicalize(&aux.name).as_str().to_string()),
+            ViewObject::Stock(stock) => Some(canonicalize(&stock.name).as_str().to_string()),
+            ViewObject::Flow(flow) => Some(canonicalize(&flow.name).as_str().to_string()),
             ViewObject::Link(_link) => None,
-            ViewObject::Module(module) => Some(canonicalize(&module.name)),
+            ViewObject::Module(module) => Some(canonicalize(&module.name).as_str().to_string()),
             ViewObject::Cloud(_cloud) => None,
             ViewObject::Alias(_alias) => None,
             ViewObject::Unhandled => None,
@@ -2399,17 +2399,17 @@ impl View {
         for o in self.objects.iter_mut() {
             if let ViewObject::Link(link) = o {
                 link.from_uid = match &link.from {
-                    LinkEnd::Named(name) => uid_map.get(&canonicalize(name)).cloned(),
+                    LinkEnd::Named(name) => uid_map.get(canonicalize(name).as_str()).cloned(),
                     LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
                 };
                 link.to_uid = match &link.to {
-                    LinkEnd::Named(name) => uid_map.get(&canonicalize(name)).cloned(),
+                    LinkEnd::Named(name) => uid_map.get(canonicalize(name).as_str()).cloned(),
                     LinkEnd::Alias(orig_alias) => orig_uid_map.get(&orig_alias.uid).cloned(),
                 };
             } else if let ViewObject::Alias(alias) = o {
                 let of_ident = canonicalize(&alias.of);
-                alias.of_uid = if !of_ident.is_empty() {
-                    uid_map.get(&of_ident).cloned()
+                alias.of_uid = if !of_ident.as_str().is_empty() {
+                    uid_map.get(of_ident.as_str()).cloned()
                 } else {
                     None
                 };
@@ -2454,7 +2454,7 @@ impl View {
             if let Var::Stock(stock) = model.get_var(&ident).unwrap() {
                 if stock.outflows.is_some() {
                     for outflow in stock.outflows.as_ref().unwrap() {
-                        let outflow_ident = canonicalize(outflow);
+                        let outflow_ident = canonicalize(outflow).as_str().to_string();
                         if !uid_map.contains_key(&outflow_ident) {
                             continue;
                         }
@@ -2465,7 +2465,7 @@ impl View {
                 }
                 if stock.inflows.is_some() {
                     for inflow in stock.inflows.as_ref().unwrap() {
-                        let inflow_ident = canonicalize(inflow);
+                        let inflow_ident = canonicalize(inflow).as_str().to_string();
                         if !uid_map.contains_key(&inflow_ident) {
                             continue;
                         }
@@ -2781,8 +2781,8 @@ impl From<Module> for datamodel::Module {
             .map(|r| {
                 if let Reference::Connect(r) = r {
                     datamodel::ModuleReference {
-                        src: canonicalize(&r.src),
-                        dst: canonicalize(&r.dst),
+                        src: canonicalize(&r.src).as_str().to_string(),
+                        dst: canonicalize(&r.dst).as_str().to_string(),
                     }
                 } else {
                     unreachable!();
@@ -2792,8 +2792,8 @@ impl From<Module> for datamodel::Module {
         datamodel::Module {
             ident,
             model_name: match module.model_name {
-                Some(model_name) => canonicalize(&model_name),
-                None => canonicalize(&module.name),
+                Some(model_name) => canonicalize(&model_name).as_str().to_string(),
+                None => canonicalize(&module.name).as_str().to_string(),
             },
             documentation: module.doc.unwrap_or_default(),
             units: module.units,
@@ -2812,8 +2812,8 @@ impl From<datamodel::Module> for Module {
             .into_iter()
             .map(|mi| {
                 Reference::Connect(Connect {
-                    src: quoteize(&mi.src),
-                    dst: quoteize(&mi.dst),
+                    src: canonicalize(&mi.src).to_source_repr(),
+                    dst: canonicalize(&mi.dst).to_source_repr(),
                 })
             })
             .collect();
@@ -2958,16 +2958,16 @@ macro_rules! convert_equation(
     ($var:expr) => {{
         if let Some(elements) = $var.elements {
             let dimensions = match $var.dimensions {
-                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name)).collect(),
+                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect(),
                 None => vec![],
             };
             let elements = elements.into_iter().map(|e| {
-                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim())).collect();
+                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).as_str().to_string()).collect();
                 (canonical_subscripts.join(","), e.eqn, e.initial_eqn)
             }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
-            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name)).collect();
+            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect();
             datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), $var.initial_eqn)
         } else {
             datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), $var.initial_eqn)
@@ -2980,16 +2980,16 @@ macro_rules! convert_stock_equation(
     ($var:expr) => {{
         if let Some(elements) = $var.elements {
             let dimensions = match $var.dimensions {
-                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name)).collect(),
+                Some(dimensions) => dimensions.dimensions.unwrap().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect(),
                 None => vec![],
             };
             let elements = elements.into_iter().map(|e| {
-                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim())).collect();
+                let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).as_str().to_string()).collect();
                 (canonical_subscripts.join(","), e.eqn, e.initial_eqn)
             }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
-            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name)).collect();
+            let dimensions = dimensions.dimensions.unwrap_or_default().into_iter().map(|e| canonicalize(&e.name).as_str().to_string()).collect();
             datamodel::Equation::ApplyToAll(dimensions, $var.eqn.unwrap_or_default(), None)
         } else {
             datamodel::Equation::Scalar($var.eqn.unwrap_or_default(), None)
@@ -3020,13 +3020,13 @@ impl From<Stock> for datamodel::Stock {
             .inflows
             .unwrap_or_default()
             .into_iter()
-            .map(|id| canonicalize(&id))
+            .map(|id| canonicalize(&id).as_str().to_string())
             .collect();
         let outflows = stock
             .outflows
             .unwrap_or_default()
             .into_iter()
-            .map(|id| canonicalize(&id))
+            .map(|id| canonicalize(&id).as_str().to_string())
             .collect();
         datamodel::Stock {
             ident: stock.name.clone(),

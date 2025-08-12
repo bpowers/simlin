@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::marker::PhantomData;
 use std::{error, result};
 
 use crate::ast::Loc;
@@ -20,17 +21,15 @@ use wasm_bindgen::prelude::*;
 pub type DimensionName = String;
 pub type ElementName = String;
 
-/// A canonicalized identifier - guaranteed to be in canonical form
+/// A canonicalized identifier - guaranteed to be in canonical form (OLD - being replaced)
 ///
 /// Canonical form means:
 /// - Lowercase
 /// - Spaces/newlines replaced with underscores
 /// - Dots outside quotes replaced with middle dot (·)
 /// - Properly handles quoted sections
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CanonicalIdent(String);
-
-/// A raw, non-canonicalized identifier as it appears in source
+///
+/// A raw, non-canonicalized identifier as it appears in source.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RawIdent(String);
 
@@ -218,16 +217,6 @@ impl fmt::Display for UnitError {
     }
 }
 
-impl From<(CanonicalIdent, EquationError)> for Error {
-    fn from(err: (CanonicalIdent, EquationError)) -> Self {
-        Error {
-            kind: ErrorKind::Variable,
-            code: err.1.code,
-            details: Some(err.0.as_str().to_owned()),
-        }
-    }
-}
-
 // from https://stackoverflow.com/questions/27588416/how-to-send-output-to-stderr
 #[macro_export]
 macro_rules! eprintln(
@@ -350,7 +339,7 @@ pub type Result<T> = result::Result<T, Error>;
 pub type EquationResult<T> = result::Result<T, EquationError>;
 pub type UnitResult<T> = result::Result<T, UnitError>;
 
-pub fn canonicalize(name: &str) -> String {
+pub fn canonicalize(name: &str) -> Ident<Canonical> {
     // remove leading and trailing whitespace, do this before testing
     // for quotedness as we should treat a quoted string as sacrosanct
     let name = name.trim();
@@ -372,6 +361,10 @@ pub fn canonicalize(name: &str) -> String {
         let part = if quoted {
             Cow::Borrowed(&part[1..bytes.len() - 1])
         } else {
+            // Replace periods with middle dots (·) for module hierarchy separators.
+            // This allows us to distinguish between:
+            // - Module separators: model.variable -> model·variable
+            // - Literal periods in quoted names: "a.b" -> a.b
             Cow::Owned(part.replace('.', "·"))
         };
 
@@ -382,32 +375,24 @@ pub fn canonicalize(name: &str) -> String {
         canonicalized_name.push_str(&part);
     }
 
-    canonicalized_name
+    Ident::from_unchecked(canonicalized_name)
 }
 
 #[test]
 fn test_canonicalize() {
-    assert_eq!("a.b", canonicalize("\"a.b\""));
-    assert_eq!("a/d·b_\\\"c\\\"", canonicalize("\"a/d\".\"b \\\"c\\\"\""));
-    assert_eq!("a/d·b_c", canonicalize("\"a/d\".\"b c\""));
-    assert_eq!("a·b_c", canonicalize("a.\"b c\""));
-    assert_eq!("a/d·b", canonicalize("\"a/d\".b"));
-    assert_eq!("quoted", canonicalize("\"quoted\""));
-    assert_eq!("a_b", canonicalize("   a b"));
-    assert_eq!("å_b", canonicalize("Å\nb"));
-    assert_eq!("a_b", canonicalize("a \n b"));
-    assert_eq!("a·b", canonicalize("a.b"));
-}
-
-pub fn quoteize(ident: &str) -> String {
-    // FIXME: this needs to be smarter
-    ident.replace('·', ".")
-}
-
-#[test]
-fn test_quoteize() {
-    assert_eq!("a_b", quoteize("a_b"));
-    assert_eq!("a.b", quoteize("a·b"));
+    assert_eq!("a.b", canonicalize("\"a.b\"").as_str());
+    assert_eq!(
+        "a/d·b_\\\"c\\\"",
+        canonicalize("\"a/d\".\"b \\\"c\\\"\"").as_str()
+    );
+    assert_eq!("a/d·b_c", canonicalize("\"a/d\".\"b c\"").as_str());
+    assert_eq!("a·b_c", canonicalize("a.\"b c\"").as_str());
+    assert_eq!("a/d·b", canonicalize("\"a/d\".b").as_str());
+    assert_eq!("quoted", canonicalize("\"quoted\"").as_str());
+    assert_eq!("a_b", canonicalize("   a b").as_str());
+    assert_eq!("å_b", canonicalize("Å\nb").as_str());
+    assert_eq!("a_b", canonicalize("a \n b").as_str());
+    assert_eq!("a·b", canonicalize("a.b").as_str());
 }
 
 #[test]
@@ -417,14 +402,14 @@ fn test_canonical_ident() {
     let canonical = raw.canonicalize();
     assert_eq!(canonical.as_str(), "hello_world");
 
-    // Test direct creation
-    let canonical2 = CanonicalIdent::from_raw("Hello World");
-    assert_eq!(canonical, canonical2);
+    // Test direct creation with new type
+    let canonical2 = canonicalize("Hello World");
+    assert_eq!(canonical.as_str(), canonical2.as_str());
 
-    // Test quoteize
-    let canonical3 = CanonicalIdent::from_raw("a.b");
+    // Test to_source_repr with new type
+    let canonical3 = canonicalize("a.b");
     assert_eq!(canonical3.as_str(), "a·b");
-    assert_eq!(canonical3.quoteize(), "a.b");
+    assert_eq!(canonical3.to_source_repr(), "a.b");
 
     // Test conversion to String (using Display trait)
     let legacy: String = canonical.to_string();
@@ -454,15 +439,15 @@ fn test_canonical_element_name() {
 #[test]
 fn test_canonical_ident_with_dots() {
     // Test that dots outside quotes become middle dots
-    let c1 = CanonicalIdent::from_raw("a.d");
+    let c1 = canonicalize("a.d");
     assert_eq!(c1.as_str(), "a·d");
 
     // Test that quoted identifiers with dots keep them as middle dots after canonicalization
-    let c2 = CanonicalIdent::from_raw("\"a.d\"");
+    let c2 = canonicalize("\"a.d\"");
     assert_eq!(c2.as_str(), "a.d");
 
     // Test mixed case
-    let c3 = CanonicalIdent::from_raw("a.\"b.c\"");
+    let c3 = canonicalize("a.\"b.c\"");
     assert_eq!(c3.as_str(), "a·b.c");
 }
 
@@ -470,7 +455,7 @@ fn test_canonical_ident_with_dots() {
 fn test_stdlib_model_name_canonicalization() {
     // Test canonicalization of stdlib model names
     let stdlib_name = "stdlib⁚smth1";
-    let canonical = CanonicalIdent::from_raw(stdlib_name);
+    let canonical = canonicalize(stdlib_name);
     assert_eq!(canonical.as_str(), "stdlib⁚smth1");
 
     // Test that the Display trait's to_string() preserves the name
@@ -482,51 +467,253 @@ fn test_stdlib_variable_canonicalization() {
     // Test that stdlib variable names are canonicalized correctly
     let names = vec!["input", "output", "Output", "delay_time", "initial_value"];
     for name in names {
-        let canonical = CanonicalIdent::from_raw(name);
+        let canonical = canonicalize(name);
         let expected = canonicalize(name);
-        assert_eq!(canonical.as_str(), expected, "Failed for {}", name);
+        assert_eq!(canonical.as_str(), expected.as_str(), "Failed for {name}");
     }
 
     // Specifically test Output -> output conversion
-    assert_eq!(CanonicalIdent::from_raw("Output").as_str(), "output");
+    assert_eq!(canonicalize("Output").as_str(), "output");
+}
+
+#[test]
+fn test_new_ident_basic_operations() {
+    // Test basic creation and conversion
+    let ident = canonicalize("Hello World");
+    assert_eq!(ident.as_str(), "hello_world");
+
+    // Test source representation conversion
+    let ident2 = canonicalize("a.b");
+    assert_eq!(ident2.as_str(), "a·b");
+    assert_eq!(ident2.to_source_repr(), "a.b");
+
+    // Test that quoted sections are preserved
+    let ident3 = canonicalize("\"a.b\"");
+    assert_eq!(ident3.as_str(), "a.b");
+}
+
+#[test]
+fn test_ident_join_operation() {
+    // Test joining two canonical identifiers
+    let module = CanonicalStr::from_canonical_unchecked("model");
+    let var = CanonicalStr::from_canonical_unchecked("variable");
+    let joined = Ident::<Canonical>::join(&module, &var);
+    assert_eq!(joined.as_str(), "model·variable");
+    assert_eq!(joined.to_source_repr(), "model.variable");
+}
+
+#[test]
+fn test_ident_with_subscript() {
+    let ident = canonicalize("my_array");
+    let subscripted = ident.with_subscript("1,2");
+    assert_eq!(subscripted.as_str(), "my_array[1,2]");
+    assert_eq!(subscripted.to_source_repr(), "my_array[1,2]");
+
+    // Test with identifier containing middle dot
+    let ident2 = canonicalize("model.var");
+    let subscripted2 = ident2.with_subscript("i");
+    assert_eq!(subscripted2.as_str(), "model.var[i]");
+    assert_eq!(subscripted2.to_source_repr(), "model.var[i]");
+}
+
+#[test]
+fn test_ident_strip_prefix() {
+    let ident = canonicalize("model.variable");
+
+    // Test successful prefix stripping
+    if let Some(stripped) = ident.strip_prefix("model·") {
+        assert_eq!(stripped.as_str(), "variable");
+    } else {
+        panic!("Expected successful prefix strip");
+    }
+
+    // Test unsuccessful prefix stripping
+    assert!(ident.strip_prefix("other·").is_none());
+
+    // Test stripping empty prefix
+    if let Some(stripped) = ident.strip_prefix("") {
+        assert_eq!(stripped.as_str(), "model·variable");
+    } else {
+        panic!("Expected successful empty prefix strip");
+    }
+}
+
+#[test]
+fn test_canonical_str_operations() {
+    let canonical = canonicalize("module.sub.variable");
+    let canonical_str = canonical.as_canonical_str();
+
+    // Test split_at_dot
+    if let Some((before, after)) = canonical_str.split_at_dot() {
+        assert_eq!(before.as_str(), "module");
+        assert_eq!(after.as_str(), "sub·variable");
+
+        // Test nested split on the after part
+        if let Some((first, rest)) = after.split_at_dot() {
+            assert_eq!(first.as_str(), "sub");
+            assert_eq!(rest.as_str(), "variable");
+        } else {
+            panic!("Expected successful nested split");
+        }
+    } else {
+        panic!("Expected successful split");
+    }
+
+    // Test with no dots
+    let no_dots = canonicalize("simple");
+    assert!(no_dots.as_canonical_str().split_at_dot().is_none());
+}
+
+#[test]
+fn test_canonical_str_strip_prefix() {
+    let ident = canonicalize("stdlib⁚smooth");
+    let canonical_str = ident.as_canonical_str();
+
+    if let Some(stripped) = canonical_str.strip_prefix("stdlib⁚") {
+        assert_eq!(stripped.as_str(), "smooth");
+    } else {
+        panic!("Expected successful prefix strip");
+    }
+
+    // Test that stripped result maintains canonical form
+    let ident2 = canonicalize("model.Sub Module");
+    let canonical_str2 = ident2.as_canonical_str();
+    if let Some(stripped) = canonical_str2.strip_prefix("model·") {
+        assert_eq!(stripped.as_str(), "sub_module");
+    } else {
+        panic!("Expected successful prefix strip");
+    }
+}
+
+#[test]
+fn test_ident_ref_operations() {
+    let owned = canonicalize("model.variable");
+    let borrowed = owned.as_ref();
+
+    // Test basic operations
+    assert_eq!(borrowed.as_str(), "model·variable");
+    assert_eq!(borrowed.to_source_repr(), Cow::Borrowed("model.variable"));
+
+    // Test strip_prefix on borrowed
+    if let Some(stripped) = borrowed.strip_prefix("model·") {
+        assert_eq!(stripped.as_str(), "variable");
+
+        // Test that we can convert back to owned
+        let owned_again = stripped.to_owned();
+        assert_eq!(owned_again.as_str(), "variable");
+    } else {
+        panic!("Expected successful prefix strip");
+    }
+}
+
+#[test]
+fn test_ident_ref_zero_copy() {
+    // This test verifies that IdentRef provides zero-copy substring operations
+    let owned = canonicalize("very.long.module.path.to.variable");
+    let borrowed = owned.as_ref();
+
+    // Strip multiple prefixes without allocation
+    let mut current = borrowed;
+    let prefixes = ["very·", "long·", "module·", "path·", "to·"];
+
+    for prefix in &prefixes {
+        if let Some(stripped) = current.strip_prefix(prefix) {
+            current = stripped;
+        } else {
+            panic!("Expected successful strip of {prefix}");
+        }
+    }
+
+    assert_eq!(current.as_str(), "variable");
+}
+
+#[test]
+fn test_canonical_str_utility_methods() {
+    let ident = canonicalize("model.variable");
+    let canonical_str = ident.as_canonical_str();
+
+    // Test starts_with
+    assert!(canonical_str.starts_with("model·"));
+    assert!(!canonical_str.starts_with("other·"));
+
+    // Test find
+    // The string is "model·variable" where · is at byte position 5
+    assert_eq!(canonical_str.find("·"), Some(5));
+
+    // First let's verify what the actual string is
+    let s = canonical_str.as_str();
+    assert_eq!(s, "model·variable");
+
+    // str::find() returns byte positions, and "·" is 3 bytes in UTF-8
+    // "model" = bytes 0-4, "·" = bytes 5-7, "variable" starts at byte 8
+    // But wait - str::find() actually returns the byte index!
+    let var_pos = s.find("var").unwrap();
+    assert_eq!(canonical_str.find("var"), Some(var_pos));
+    assert_eq!(canonical_str.find("notfound"), None);
+}
+
+#[test]
+fn test_display_format_edge_cases() {
+    // Test empty string
+    let empty = canonicalize("");
+    assert_eq!(empty.as_str(), "");
+    assert_eq!(empty.to_source_repr(), "");
+
+    // Test string with only spaces
+    let spaces = canonicalize("   ");
+    assert_eq!(spaces.as_str(), "");
+
+    // Test string with mixed dots and quotes
+    let complex = canonicalize("a.\"b.c\".d");
+    assert_eq!(complex.as_str(), "a·b.c·d");
+    assert_eq!(complex.to_source_repr(), "a.b.c.d");
+}
+
+#[test]
+fn test_unchecked_constructors() {
+    // Test unchecked construction of Ident
+    let canonical_string = "already_canonical".to_string();
+    let ident = Ident::<Canonical>::from_unchecked(canonical_string.clone());
+    assert_eq!(ident.as_str(), "already_canonical");
+
+    // Test unchecked construction of IdentRef
+    let canonical_str = "also_canonical";
+    let ident_ref = IdentRef::<Canonical>::from_canonical_unchecked(canonical_str);
+    assert_eq!(ident_ref.as_str(), "also_canonical");
+
+    // Test unchecked construction of CanonicalStr
+    let canonical_slice = CanonicalStr::from_canonical_unchecked("canonical·str");
+    assert_eq!(canonical_slice.as_str(), "canonical·str");
+}
+
+#[test]
+fn test_as_ref_implementations() {
+    let ident = canonicalize("test");
+    let _str_ref: &str = <Ident<Canonical> as AsRef<str>>::as_ref(&ident);
+    assert_eq!(_str_ref, "test");
+
+    let ident_ref = ident.as_ref();
+    let _str_ref2: &str = <IdentRef<'_, Canonical> as AsRef<str>>::as_ref(&ident_ref);
+    assert_eq!(_str_ref2, "test");
+
+    let canonical_str = ident.as_canonical_str();
+    let _str_ref3: &str = canonical_str.as_ref();
+    assert_eq!(_str_ref3, "test");
+}
+
+#[test]
+fn test_fmt_display_implementations() {
+    let ident = canonicalize("Model.Var");
+    assert_eq!(format!("{ident}"), "model·var");
+
+    let ident_ref = ident.as_ref();
+    assert_eq!(format!("{ident_ref}"), "model·var");
+
+    let canonical_str = ident.as_canonical_str();
+    assert_eq!(format!("{canonical_str}"), "model·var");
 }
 
 // Implementations for identifier types
-
-impl CanonicalIdent {
-    /// Create from an already-canonicalized string (internal use only)
-    ///
-    /// # Safety
-    /// Caller must guarantee the string is already in canonical form
-    #[allow(dead_code)]
-    pub fn from_canonical_unchecked(s: String) -> Self {
-        CanonicalIdent(s)
-    }
-
-    /// Create from an already-canonicalized string (internal use only)
-    ///
-    /// # Safety
-    /// Caller must guarantee the string is already in canonical form
-    #[allow(dead_code)]
-    pub fn from_canonical_str_unchecked(s: &str) -> Self {
-        CanonicalIdent(s.to_string())
-    }
-
-    /// Create from a raw string, canonicalizing it
-    pub fn from_raw(s: &str) -> Self {
-        CanonicalIdent(canonicalize(s))
-    }
-
-    /// Get the underlying canonical string
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Get a quoteized version for display
-    pub fn quoteize(&self) -> String {
-        quoteize(&self.0)
-    }
-}
 
 impl RawIdent {
     /// Create a new raw identifier
@@ -539,9 +726,9 @@ impl RawIdent {
         RawIdent(s.to_string())
     }
 
-    /// Canonicalize this identifier
-    pub fn canonicalize(&self) -> CanonicalIdent {
-        CanonicalIdent(canonicalize(&self.0))
+    /// Canonicalize this identifier (returns new type)
+    pub fn canonicalize(&self) -> Ident<Canonical> {
+        canonicalize(&self.0)
     }
 
     /// Get the underlying raw string
@@ -559,7 +746,7 @@ impl CanonicalDimensionName {
 
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
-        CanonicalDimensionName(canonicalize(s))
+        CanonicalDimensionName(canonicalize(s).as_str().to_string())
     }
 
     /// Get the underlying canonical string
@@ -581,7 +768,7 @@ impl RawDimensionName {
 
     /// Canonicalize this dimension name
     pub fn canonicalize(&self) -> CanonicalDimensionName {
-        CanonicalDimensionName(canonicalize(&self.0))
+        CanonicalDimensionName(canonicalize(&self.0).as_str().to_string())
     }
 
     /// Get the underlying raw string
@@ -599,7 +786,7 @@ impl CanonicalElementName {
 
     /// Create from a raw string, canonicalizing it
     pub fn from_raw(s: &str) -> Self {
-        CanonicalElementName(canonicalize(s))
+        CanonicalElementName(canonicalize(s).as_str().to_string())
     }
 
     /// Get the underlying canonical string
@@ -621,7 +808,7 @@ impl RawElementName {
 
     /// Canonicalize this element name
     pub fn canonicalize(&self) -> CanonicalElementName {
-        CanonicalElementName(canonicalize(&self.0))
+        CanonicalElementName(canonicalize(&self.0).as_str().to_string())
     }
 
     /// Get the underlying raw string
@@ -631,11 +818,6 @@ impl RawElementName {
 }
 
 // Display implementations for better debugging
-impl fmt::Display for CanonicalIdent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 impl fmt::Display for RawIdent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -667,13 +849,6 @@ impl fmt::Display for RawElementName {
     }
 }
 
-// Conversion to String
-impl From<CanonicalIdent> for String {
-    fn from(canonical: CanonicalIdent) -> Self {
-        canonical.0
-    }
-}
-
 impl From<CanonicalDimensionName> for DimensionName {
     fn from(canonical: CanonicalDimensionName) -> Self {
         canonical.0
@@ -687,11 +862,6 @@ impl From<CanonicalElementName> for ElementName {
 }
 
 // AsRef implementations for convenient use in APIs
-impl AsRef<str> for CanonicalIdent {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
 
 impl AsRef<str> for RawIdent {
     fn as_ref(&self) -> &str {
@@ -723,24 +893,290 @@ impl AsRef<str> for RawElementName {
     }
 }
 
+// ===== New Phantom Type-based Identifier System =====
+// This system provides zero-copy substring operations while maintaining
+// canonicalization guarantees through the type system.
+
+/// Marker type for canonical identifiers
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Canonical;
+
+/// Marker type for raw (non-canonical) identifiers  
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Raw;
+
+/// An owned identifier with state tracking (canonical or raw)
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Ident<State = Canonical> {
+    inner: String,
+    _phantom: PhantomData<State>,
+}
+
+/// A borrowed identifier reference with state tracking
+/// This is the key type that enables zero-copy substring operations
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IdentRef<'a, State = Canonical> {
+    inner: &'a str,
+    _phantom: PhantomData<State>,
+}
+
+/// A borrowed canonical string slice wrapper
+/// This type guarantees the string is in canonical form
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct CanonicalStr<'a> {
+    inner: &'a str,
+}
+
+impl<'a> CanonicalStr<'a> {
+    /// Create a CanonicalStr from a string known to be canonical
+    ///
+    /// Note: Caller must guarantee that the string is already in canonical form
+    pub fn from_canonical_unchecked(s: &'a str) -> Self {
+        CanonicalStr { inner: s }
+    }
+
+    /// Get the underlying string slice
+    pub fn as_str(&self) -> &str {
+        self.inner
+    }
+
+    /// Convert canonical identifier to source code representation.
+    ///
+    /// Replaces middle dots (·) used internally for module hierarchy separators
+    /// back to periods (.) for display in source code or user-facing output.
+    pub fn to_source_repr(&self) -> Cow<'_, str> {
+        if self.inner.contains('·') {
+            Cow::Owned(self.inner.replace('·', "."))
+        } else {
+            Cow::Borrowed(self.inner)
+        }
+    }
+
+    /// Find and split at the first middle dot, maintaining canonical guarantee
+    pub fn split_at_dot(&self) -> Option<(CanonicalStr<'a>, CanonicalStr<'a>)> {
+        self.inner.find('·').map(|pos| {
+            let before = CanonicalStr::from_canonical_unchecked(&self.inner[..pos]);
+            let after = CanonicalStr::from_canonical_unchecked(&self.inner[pos + '·'.len_utf8()..]);
+            (before, after)
+        })
+    }
+
+    /// Strip a prefix if present, maintaining canonical guarantee
+    pub fn strip_prefix(&self, prefix: &str) -> Option<CanonicalStr<'a>> {
+        self.inner
+            .strip_prefix(prefix)
+            .map(CanonicalStr::from_canonical_unchecked)
+    }
+
+    /// Check if this identifier starts with a given prefix
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.inner.starts_with(prefix)
+    }
+
+    /// Find the position of a substring
+    pub fn find(&self, pat: &str) -> Option<usize> {
+        self.inner.find(pat)
+    }
+}
+
+impl Ident<Canonical> {
+    /// Create a canonical identifier from a raw string
+    pub fn from_raw(s: &str) -> Self {
+        canonicalize(s)
+    }
+
+    /// Create from an already-canonicalized string
+    ///
+    /// Note: Caller must guarantee the string is already canonical
+    pub fn from_unchecked(s: String) -> Self {
+        Ident {
+            inner: s,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Create from an already-canonicalized string slice
+    ///
+    /// Note: Caller must guarantee the string is already canonical
+    pub fn from_str_unchecked(s: &str) -> Self {
+        Ident {
+            inner: s.to_string(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Get a borrowed reference to this identifier
+    pub fn as_ref(&self) -> IdentRef<'_, Canonical> {
+        IdentRef {
+            inner: &self.inner,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Get as a CanonicalStr
+    pub fn as_canonical_str(&self) -> CanonicalStr<'_> {
+        CanonicalStr::from_canonical_unchecked(&self.inner)
+    }
+
+    /// Join two canonical identifiers with a middle dot separator
+    pub fn join(module: &CanonicalStr, var: &CanonicalStr) -> Self {
+        Ident {
+            inner: format!("{}·{}", module.as_str(), var.as_str()),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Create an identifier with array subscript notation
+    pub fn with_subscript(&self, subscript: &str) -> Self {
+        Ident {
+            inner: format!("{}[{}]", self.to_source_repr(), subscript),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Get the underlying canonical string
+    pub fn as_str(&self) -> &str {
+        &self.inner
+    }
+
+    /// Convert canonical identifier to source code representation.
+    ///
+    /// Replaces middle dots (·) used internally for module hierarchy separators
+    /// back to periods (.) for display in source code or user-facing output.
+    ///
+    /// For example:
+    /// - Internal canonical: "model·variable"
+    /// - Source representation: "model.variable"
+    ///
+    /// This is the inverse of the canonicalization process that converts
+    /// periods to middle dots to distinguish module separators from literal
+    /// periods in quoted identifiers.
+    pub fn to_source_repr(&self) -> String {
+        self.inner.replace('·', ".")
+    }
+
+    /// Strip a prefix, returning a borrowed view if successful
+    pub fn strip_prefix<'a>(&'a self, prefix: &str) -> Option<IdentRef<'a, Canonical>> {
+        self.inner.strip_prefix(prefix).map(|s| IdentRef {
+            inner: s,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<'a> IdentRef<'a, Canonical> {
+    /// Create from a string slice known to be canonical
+    ///
+    /// Note: Caller must guarantee the string is already canonical
+    pub fn from_canonical_unchecked(s: &'a str) -> Self {
+        IdentRef {
+            inner: s,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Get the underlying string slice
+    pub fn as_str(&self) -> &'a str {
+        self.inner
+    }
+
+    /// Get as a CanonicalStr
+    pub fn as_canonical_str(&self) -> CanonicalStr<'a> {
+        CanonicalStr::from_canonical_unchecked(self.inner)
+    }
+
+    /// Convert to an owned Ident
+    pub fn to_owned(&self) -> Ident<Canonical> {
+        Ident {
+            inner: self.inner.to_string(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Strip a prefix, maintaining the canonical guarantee
+    pub fn strip_prefix(&self, prefix: &str) -> Option<IdentRef<'a, Canonical>> {
+        self.inner.strip_prefix(prefix).map(|s| IdentRef {
+            inner: s,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Convert canonical identifier to source code representation.
+    ///
+    /// Replaces middle dots (·) used internally for module hierarchy separators
+    /// back to periods (.) for display in source code or user-facing output.
+    pub fn to_source_repr(&self) -> Cow<'a, str> {
+        if self.inner.contains('·') {
+            Cow::Owned(self.inner.replace('·', "."))
+        } else {
+            Cow::Borrowed(self.inner)
+        }
+    }
+}
+
+// Implement AsRef for convenient usage
+impl AsRef<str> for Ident<Canonical> {
+    fn as_ref(&self) -> &str {
+        &self.inner
+    }
+}
+
+// Implement Borrow for HashMap lookups
+impl std::borrow::Borrow<str> for Ident<Canonical> {
+    fn borrow(&self) -> &str {
+        &self.inner
+    }
+}
+
+impl<'a> AsRef<str> for IdentRef<'a, Canonical> {
+    fn as_ref(&self) -> &str {
+        self.inner
+    }
+}
+
+impl<'a> AsRef<str> for CanonicalStr<'a> {
+    fn as_ref(&self) -> &str {
+        self.inner
+    }
+}
+
+// Display implementations
+impl fmt::Display for Ident<Canonical> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl<'a> fmt::Display for IdentRef<'a, Canonical> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl<'a> fmt::Display for CanonicalStr<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
 pub fn topo_sort<'out>(
-    runlist: Vec<&'out CanonicalIdent>,
-    dependencies: &'out HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>,
-) -> Vec<&'out CanonicalIdent> {
+    runlist: Vec<&'out Ident<Canonical>>,
+    dependencies: &'out HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+) -> Vec<&'out Ident<Canonical>> {
     use std::collections::HashSet;
 
     let runlist_len = runlist.len();
-    let mut result: Vec<&'out CanonicalIdent> = Vec::with_capacity(runlist_len);
-    let mut used: HashSet<&CanonicalIdent> = HashSet::new();
+    let mut result: Vec<&'out Ident<Canonical>> = Vec::with_capacity(runlist_len);
+    let mut used: HashSet<&Ident<Canonical>> = HashSet::new();
 
     // We want to do a postorder, recursive traversal of variables to ensure
     // dependencies are calculated before the variables that reference them.
     // By this point, we have already errored out if we have e.g. a cycle
     fn add<'a>(
-        dependencies: &'a HashMap<CanonicalIdent, BTreeSet<CanonicalIdent>>,
-        result: &mut Vec<&'a CanonicalIdent>,
-        used: &mut HashSet<&'a CanonicalIdent>,
-        ident: &'a CanonicalIdent,
+        dependencies: &'a HashMap<Ident<Canonical>, BTreeSet<Ident<Canonical>>>,
+        result: &mut Vec<&'a Ident<Canonical>>,
+        used: &mut HashSet<&'a Ident<Canonical>>,
+        ident: &'a Ident<Canonical>,
     ) {
         if used.contains(ident) {
             return;

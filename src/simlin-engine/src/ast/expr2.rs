@@ -5,7 +5,7 @@
 use crate::ast::expr0::{BinaryOp, UnaryOp};
 use crate::ast::expr1::{Expr1, IndexExpr1};
 use crate::builtins::{BuiltinContents, BuiltinFn, Loc, walk_builtin_expr};
-use crate::common::{CanonicalDimensionName, CanonicalIdent, EquationResult};
+use crate::common::{Canonical, CanonicalDimensionName, EquationResult, Ident};
 use crate::dimensions::Dimension;
 use crate::eqn_err;
 
@@ -123,9 +123,9 @@ impl IndexExpr2 {
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr2 {
     Const(String, f64, Loc),
-    Var(CanonicalIdent, Option<ArrayBounds>, Loc),
+    Var(Ident<Canonical>, Option<ArrayBounds>, Loc),
     App(BuiltinFn<Expr2>, Option<ArrayBounds>, Loc),
-    Subscript(CanonicalIdent, Vec<IndexExpr2>, Option<ArrayBounds>, Loc),
+    Subscript(Ident<Canonical>, Vec<IndexExpr2>, Option<ArrayBounds>, Loc),
     Op1(UnaryOp, Box<Expr2>, Option<ArrayBounds>, Loc),
     Op2(BinaryOp, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
     If(Box<Expr2>, Box<Expr2>, Box<Expr2>, Option<ArrayBounds>, Loc),
@@ -638,7 +638,7 @@ fn const_int_eval(ast: &Expr2) -> EquationResult<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::CanonicalIdent;
+    use crate::common::canonicalize;
     use std::collections::HashMap;
     use std::iter::Iterator;
 
@@ -772,14 +772,7 @@ mod tests {
 
         // Test error case
         assert!(const_int_eval(&const_expr(3.5)).is_err());
-        assert!(
-            const_int_eval(&Expr2::Var(
-                CanonicalIdent::from_raw("foo"),
-                None,
-                Loc::default()
-            ))
-            .is_err()
-        );
+        assert!(const_int_eval(&Expr2::Var(canonicalize("foo"), None, Loc::default())).is_err());
 
         // Test unary operations
         let unary_cases = vec![
@@ -909,12 +902,12 @@ mod tests {
     #[test]
     fn test_expr2_from_scalar_var() {
         use crate::ast::expr1::Expr1;
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
         // Test scalar variable (no dimensions)
-        let var_expr = Expr1::Var(CanonicalIdent::from_raw("scalar_var"), Loc::default());
+        let var_expr = Expr1::Var(canonicalize("scalar_var"), Loc::default());
         let expr2 = Expr2::from(var_expr, &mut ctx).unwrap();
 
         match expr2 {
@@ -929,7 +922,7 @@ mod tests {
     #[test]
     fn test_expr2_from_array_var() {
         use crate::ast::expr1::Expr1;
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -938,7 +931,7 @@ mod tests {
             .insert("array_var".to_string(), indexed_dims(&[3, 4]));
 
         // Test array variable with dimensions
-        let var_expr = Expr1::Var(CanonicalIdent::from_raw("array_var"), Loc::default());
+        let var_expr = Expr1::Var(canonicalize("array_var"), Loc::default());
         let expr2 = Expr2::from(var_expr, &mut ctx).unwrap();
 
         match expr2 {
@@ -961,7 +954,7 @@ mod tests {
     #[test]
     fn test_expr2_subscript_reduces_dimensions() {
         use crate::ast::expr1::{Expr1, IndexExpr1};
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -971,7 +964,7 @@ mod tests {
 
         // Test subscript with one index reduces dimension
         let subscript_expr = Expr1::Subscript(
-            CanonicalIdent::from_raw("matrix"),
+            canonicalize("matrix"),
             vec![
                 IndexExpr1::Expr(Expr1::Const("1".to_string(), 1.0, Loc::default())),
                 IndexExpr1::Wildcard(Loc::default()),
@@ -1001,7 +994,7 @@ mod tests {
     #[test]
     fn test_expr2_subscript_scalar_result() {
         use crate::ast::expr1::{Expr1, IndexExpr1};
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -1011,7 +1004,7 @@ mod tests {
 
         // Test subscript that results in scalar
         let subscript_expr = Expr1::Subscript(
-            CanonicalIdent::from_raw("vector"),
+            canonicalize("vector"),
             vec![IndexExpr1::Expr(Expr1::Const(
                 "2".to_string(),
                 2.0,
@@ -1035,7 +1028,7 @@ mod tests {
     fn test_expr2_unary_op_preserves_array() {
         use crate::ast::UnaryOp;
         use crate::ast::expr1::Expr1;
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -1046,10 +1039,7 @@ mod tests {
         // Test unary negative preserves array dimensions
         let neg_expr = Expr1::Op1(
             UnaryOp::Negative,
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array_var"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("array_var"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(neg_expr, &mut ctx).unwrap();
@@ -1074,7 +1064,7 @@ mod tests {
     fn test_expr2_transpose_reverses_dims() {
         use crate::ast::UnaryOp;
         use crate::ast::expr1::Expr1;
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -1085,10 +1075,7 @@ mod tests {
         // Test transpose reverses dimensions
         let transpose_expr = Expr1::Op1(
             UnaryOp::Transpose,
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("matrix"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("matrix"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(transpose_expr, &mut ctx).unwrap();
@@ -1113,7 +1100,7 @@ mod tests {
     fn test_expr2_binary_op_array_scalar() {
         use crate::ast::BinaryOp;
         use crate::ast::expr1::Expr1;
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -1124,10 +1111,7 @@ mod tests {
         // Test array + scalar (broadcasting)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array_var"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("array_var"), Loc::default())),
             Box::new(Expr1::Const("10".to_string(), 10.0, Loc::default())),
             Loc::default(),
         );
@@ -1153,7 +1137,7 @@ mod tests {
     fn test_expr2_binary_op_matching_arrays() {
         use crate::ast::BinaryOp;
         use crate::ast::expr1::Expr1;
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -1166,14 +1150,8 @@ mod tests {
         // Test array + array (matching dimensions)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array1"),
-                Loc::default(),
-            )),
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array2"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("array1"), Loc::default())),
+            Box::new(Expr1::Var(canonicalize("array2"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(add_expr, &mut ctx).unwrap();
@@ -1197,7 +1175,7 @@ mod tests {
     #[test]
     fn test_expr2_if_array_branches() {
         use crate::ast::expr1::Expr1;
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -1208,14 +1186,8 @@ mod tests {
         // Test if expression with array in both branches
         let if_expr = Expr1::If(
             Box::new(Expr1::Const("1".to_string(), 1.0, Loc::default())),
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array_var"),
-                Loc::default(),
-            )),
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array_var"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("array_var"), Loc::default())),
+            Box::new(Expr1::Var(canonicalize("array_var"), Loc::default())),
             Loc::default(),
         );
         let expr2 = Expr2::from(if_expr, &mut ctx).unwrap();
@@ -1240,7 +1212,7 @@ mod tests {
     fn test_expr2_temp_id_allocation() {
         use crate::ast::expr1::Expr1;
         use crate::ast::{BinaryOp, UnaryOp};
-        use crate::common::CanonicalIdent;
+        use crate::common::canonicalize;
 
         let mut ctx = TestContext::new();
 
@@ -1254,10 +1226,7 @@ mod tests {
         // First operation: -array1 (should get temp_id 0)
         let neg_expr = Expr1::Op1(
             UnaryOp::Negative,
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array1"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("array1"), Loc::default())),
             Loc::default(),
         );
         let expr2_1 = Expr2::from(neg_expr, &mut ctx).unwrap();
@@ -1265,14 +1234,8 @@ mod tests {
         // Second operation: array1 + array2 (should get temp_id 1)
         let add_expr = Expr1::Op2(
             BinaryOp::Add,
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array1"),
-                Loc::default(),
-            )),
-            Box::new(Expr1::Var(
-                CanonicalIdent::from_raw("array2"),
-                Loc::default(),
-            )),
+            Box::new(Expr1::Var(canonicalize("array1"), Loc::default())),
+            Box::new(Expr1::Var(canonicalize("array2"), Loc::default())),
             Loc::default(),
         );
         let expr2_2 = Expr2::from(add_expr, &mut ctx).unwrap();

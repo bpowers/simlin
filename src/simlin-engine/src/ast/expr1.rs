@@ -5,7 +5,7 @@
 use crate::ast::expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use crate::builtins::Loc;
 use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
-use crate::common::{CanonicalIdent, EquationResult};
+use crate::common::{Canonical, EquationResult, Ident};
 use crate::eqn_err;
 use crate::model::ScopeStage0;
 
@@ -15,7 +15,7 @@ use crate::model::ScopeStage0;
 pub enum IndexExpr1 {
     Wildcard(Loc),
     // *:dimension_name
-    StarRange(CanonicalIdent, Loc),
+    StarRange(Ident<Canonical>, Loc),
     Range(Expr1, Expr1, Loc),
     DimPosition(u32, Loc),
     Expr(Expr1),
@@ -56,9 +56,9 @@ impl IndexExpr1 {
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr1 {
     Const(String, f64, Loc),
-    Var(CanonicalIdent, Loc),
+    Var(Ident<Canonical>, Loc),
     App(BuiltinFn<Expr1>, Loc),
-    Subscript(CanonicalIdent, Vec<IndexExpr1>, Loc),
+    Subscript(Ident<Canonical>, Vec<IndexExpr1>, Loc),
     Op1(UnaryOp, Box<Expr1>, Loc),
     Op2(BinaryOp, Box<Expr1>, Box<Expr1>, Loc),
     If(Box<Expr1>, Box<Expr1>, Box<Expr1>, Loc),

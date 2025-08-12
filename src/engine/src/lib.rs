@@ -14,7 +14,7 @@ use js_sys::{Array, Function, Map};
 use prost::Message;
 
 use simlin_engine as engine;
-use simlin_engine::common::{CanonicalIdent, ErrorCode, ErrorKind};
+use simlin_engine::common::{ErrorCode, ErrorKind};
 use simlin_engine::datamodel::{Extension, GraphicalFunction, Source, Variable, Visibility};
 use simlin_engine::{Error, Vm, canonicalize, datamodel, project_io, prost, serde};
 
@@ -198,11 +198,7 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getModelVariableErrors)]
     pub fn get_model_variable_errors(&self, model_name: &str) -> EquationErrorMap {
-        let model = &self
-            .project
-            .models
-            .get(&CanonicalIdent::from_raw(model_name))
-            .unwrap();
+        let model = &self.project.models.get(&canonicalize(model_name)).unwrap();
 
         let mut result = Map::new();
         for (ident, errors) in model.get_variable_errors() {
@@ -215,11 +211,7 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getModelVariableUnitErrors)]
     pub fn get_model_variable_unit_errors(&self, model_name: &str) -> EquationErrorMap {
-        let model = &self
-            .project
-            .models
-            .get(&CanonicalIdent::from_raw(model_name))
-            .unwrap();
+        let model = &self.project.models.get(&canonicalize(model_name)).unwrap();
 
         let mut result = Map::new();
         for (ident, errors) in model.get_unit_errors() {
@@ -236,11 +228,7 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getModelErrors)]
     pub fn get_model_errors(&self, model_name: &str) -> MaybeErrorArray {
-        let model = &self
-            .project
-            .models
-            .get(&CanonicalIdent::from_raw(model_name))
-            .unwrap();
+        let model = &self.project.models.get(&canonicalize(model_name)).unwrap();
 
         if model.errors.is_none() {
             return Array::new();
@@ -267,7 +255,7 @@ impl Engine {
         let mut project = self.project.datamodel.clone();
         let model = project.get_model_mut(model_name).unwrap();
         let ident = canonicalize(name);
-        if model.get_variable_mut(&ident).is_some() {
+        if model.get_variable_mut(ident.as_str()).is_some() {
             return Some(Error::new(
                 ErrorKind::Model,
                 ErrorCode::DuplicateVariable,
@@ -277,7 +265,7 @@ impl Engine {
 
         let var = match kind {
             "aux" => datamodel::Variable::Aux(datamodel::Aux {
-                ident,
+                ident: ident.as_str().to_string(),
                 equation: datamodel::Equation::Scalar("".to_owned(), None),
                 documentation: "".to_string(),
                 units: None,
@@ -287,7 +275,7 @@ impl Engine {
                 ai_state: None,
             }),
             "flow" => datamodel::Variable::Flow(datamodel::Flow {
-                ident,
+                ident: ident.as_str().to_string(),
                 equation: datamodel::Equation::Scalar("".to_owned(), None),
                 documentation: "".to_string(),
                 units: None,
@@ -298,7 +286,7 @@ impl Engine {
                 ai_state: None,
             }),
             "stock" => datamodel::Variable::Stock(datamodel::Stock {
-                ident,
+                ident: ident.as_str().to_string(),
                 equation: datamodel::Equation::Scalar("".to_owned(), None),
                 documentation: "".to_string(),
                 units: None,
@@ -447,11 +435,8 @@ impl Engine {
 
     #[wasm_bindgen(js_name = getLatexEquation)]
     pub fn get_latex_equation(&self, model_name: &str, ident: &str) -> Option<String> {
-        let model = self
-            .project
-            .models
-            .get(&CanonicalIdent::from_raw(model_name))?;
-        let var = model.variables.get(&CanonicalIdent::from_raw(ident))?;
+        let model = self.project.models.get(&canonicalize(model_name))?;
+        let var = model.variables.get(&canonicalize(ident))?;
         let ast = var.ast()?;
         Some(ast.to_latex())
     }
@@ -552,7 +537,7 @@ impl Engine {
         let model = project.get_model_mut(model_name).unwrap();
 
         // if there is already a variable by that name, its an error
-        if model.get_variable_mut(&new_ident).is_some() {
+        if model.get_variable_mut(new_ident.as_str()).is_some() {
             return Some(Error::new(
                 ErrorKind::Model,
                 ErrorCode::DuplicateVariable,
@@ -561,10 +546,10 @@ impl Engine {
         }
 
         let is_flow;
-        match model.get_variable_mut(&old_ident) {
+        match model.get_variable_mut(old_ident.as_str()) {
             Some(var) => {
                 is_flow = matches!(var, Variable::Flow(_));
-                var.set_ident(new_ident.clone());
+                var.set_ident(new_ident.as_str().to_string());
             }
             _ => {
                 return None;
@@ -575,13 +560,13 @@ impl Engine {
             for var in model.variables.iter_mut() {
                 if let Variable::Stock(stock) = var {
                     for inflow in stock.inflows.iter_mut() {
-                        if inflow == &old_ident {
-                            inflow.clone_from(&new_ident);
+                        if inflow == old_ident.as_str() {
+                            *inflow = new_ident.as_str().to_string();
                         }
                     }
                     for outflow in stock.outflows.iter_mut() {
-                        if outflow == &old_ident {
-                            outflow.clone_from(&new_ident);
+                        if outflow == old_ident.as_str() {
+                            *outflow = new_ident.as_str().to_string();
                         }
                     }
                 }
@@ -690,7 +675,7 @@ impl Engine {
         if self.results.is_none() {
             return vec![];
         }
-        let ident = CanonicalIdent::from_raw(ident);
+        let ident = canonicalize(ident);
         let results = self.results.as_ref().unwrap();
         if !results.offsets.contains_key(&ident) {
             return vec![];

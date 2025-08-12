@@ -8,18 +8,21 @@ use std::result::Result as StdResult;
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::{BuiltinFn, Loc};
 use crate::common::{
-    CanonicalIdent, EquationError, ErrorCode, Result, UnitError, UnitResult, canonicalize,
+    Canonical, EquationError, ErrorCode, Ident, Result, UnitError, UnitResult, canonicalize,
 };
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::Variable;
 
+// Type alias to reduce complexity
+type UnitErrorList = Vec<(Ident<Canonical>, UnitError)>;
+
 struct UnitEvaluator<'a> {
     #[allow(dead_code)]
     ctx: &'a Context,
     model: &'a ModelStage1,
-    inferred_units: &'a HashMap<CanonicalIdent, UnitMap>,
+    inferred_units: &'a HashMap<Ident<Canonical>, UnitMap>,
     // units for module inputs
     time: Variable,
 }
@@ -72,9 +75,9 @@ impl UnitEvaluator<'_> {
                     if let Some(units) = self
                         .model
                         .variables
-                        .get(&CanonicalIdent::from_raw(ident))
+                        .get(&canonicalize(ident))
                         .and_then(|var| var.units())
-                        .or_else(|| self.inferred_units.get(&CanonicalIdent::from_raw(ident)))
+                        .or_else(|| self.inferred_units.get(&canonicalize(ident)))
                     {
                         Ok(Units::Explicit(units.clone()))
                     } else {
@@ -261,11 +264,11 @@ impl UnitEvaluator<'_> {
 // returns a list of unit problems, if there was one.
 pub fn check(
     ctx: &Context,
-    inferred_units: &HashMap<CanonicalIdent, UnitMap>,
+    inferred_units: &HashMap<Ident<Canonical>, UnitMap>,
     model: &ModelStage1,
-) -> Result<StdResult<(), Vec<(CanonicalIdent, UnitError)>>> {
+) -> Result<StdResult<(), UnitErrorList>> {
     use UnitError::{ConsistencyError, DefinitionError};
-    let mut errors: Vec<(CanonicalIdent, UnitError)> = vec![];
+    let mut errors: Vec<(Ident<Canonical>, UnitError)> = vec![];
 
     // TODO: modules
 
@@ -274,7 +277,9 @@ pub fn check(
     // for each variable, evaluate the equation given the unit context
     // if the result doesn't match the expected thing, accumulate an error
 
-    let time_units_name = canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
+    let time_units_name = canonicalize(ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
+        .as_str()
+        .to_string();
     let time_units: UnitMap = ctx
         .lookup(&time_units_name)
         .cloned()
@@ -286,7 +291,7 @@ pub fn check(
         model,
         inferred_units,
         time: Variable::Var {
-            ident: CanonicalIdent::from_raw("time"),
+            ident: canonicalize("time"),
             ast: None,
             init_ast: None,
             eqn: None,
@@ -318,7 +323,7 @@ pub fn check(
                 let stock_ident = ident;
                 let expected_flow_units =
                     combine(UnitOp::Mul, expected.clone(), one_over_time.clone());
-                let mut check_flows = |flows: &Vec<CanonicalIdent>| {
+                let mut check_flows = |flows: &Vec<Ident<Canonical>>| {
                     for ident in flows.iter() {
                         if let Some(var) = model.variables.get(ident) {
                             if let Some(units) = var.units() {
@@ -327,7 +332,7 @@ pub fn check(
                                         "expected units '{units}' to match the units expected by the attached stock {stock_ident} ({expected_flow_units})"
                                     );
                                     errors.push((
-                                        CanonicalIdent::from_raw(var.ident()),
+                                        canonicalize(var.ident()),
                                         DefinitionError(
                                             EquationError {
                                                 code: ErrorCode::UnitMismatch,

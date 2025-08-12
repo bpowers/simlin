@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
 use crate::builtins::BuiltinFn;
-use crate::common::{CanonicalIdent, Result, UnitResult, canonicalize};
+use crate::common::{Canonical, Ident, Result, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
 use crate::model_err;
@@ -17,7 +17,7 @@ use crate::variable::Variable;
 
 struct UnitInferer<'a> {
     ctx: &'a Context,
-    models: &'a HashMap<CanonicalIdent, &'a ModelStage1>,
+    models: &'a HashMap<Ident<Canonical>, &'a ModelStage1>,
     // units for module inputs
     time: Variable,
 }
@@ -287,7 +287,9 @@ impl UnitInferer<'_> {
         prefix: &str,
         constraints: &mut Vec<UnitMap>,
     ) {
-        let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
+        let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
+            .as_str()
+            .to_string();
 
         for (id, var) in model.variables.iter() {
             if let Variable::Stock {
@@ -306,7 +308,7 @@ impl UnitInferer<'_> {
                 .cloned()
                 .collect::<UnitMap>()
                 .push_ctx(format!("stock@{prefix}{stock_ident}"));
-                let mut check_flows = |flows: &Vec<CanonicalIdent>| {
+                let mut check_flows = |flows: &Vec<Ident<Canonical>>| {
                     for ident in flows.iter() {
                         let flow_units: UnitMap =
                             [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
@@ -387,8 +389,8 @@ impl UnitInferer<'_> {
     fn unify(
         &self,
         mut constraints: Vec<UnitMap>,
-    ) -> Result<(HashMap<CanonicalIdent, UnitMap>, Option<Vec<UnitMap>>)> {
-        let mut resolved_fvs: HashMap<CanonicalIdent, UnitMap> = HashMap::new();
+    ) -> Result<(HashMap<Ident<Canonical>, UnitMap>, Option<Vec<UnitMap>>)> {
+        let mut resolved_fvs: HashMap<Ident<Canonical>, UnitMap> = HashMap::new();
         let mut final_constraints: Vec<UnitMap> = Vec::with_capacity(constraints.len());
 
         // FIXME: I think this is O(n^3) worst case; we could do better
@@ -407,7 +409,7 @@ impl UnitInferer<'_> {
                     final_constraints = substitute(&var, &units, final_constraints);
                     let var_key = var.strip_prefix('@').unwrap();
                     if let Some(existing_units) =
-                        resolved_fvs.get(&CanonicalIdent::from_canonical_str_unchecked(var_key))
+                        resolved_fvs.get(&Ident::<Canonical>::from_str_unchecked(var_key))
                     {
                         if *existing_units != units {
                             return model_err!(
@@ -419,8 +421,7 @@ impl UnitInferer<'_> {
                             );
                         }
                     } else {
-                        resolved_fvs
-                            .insert(CanonicalIdent::from_canonical_str_unchecked(var_key), units);
+                        resolved_fvs.insert(Ident::<Canonical>::from_str_unchecked(var_key), units);
                     }
                 } else {
                     final_constraints.push(c);
@@ -443,7 +444,7 @@ impl UnitInferer<'_> {
         Ok((resolved_fvs, final_constraints))
     }
 
-    fn infer(&self, model: &ModelStage1) -> Result<HashMap<CanonicalIdent, UnitMap>> {
+    fn infer(&self, model: &ModelStage1) -> Result<HashMap<Ident<Canonical>, UnitMap>> {
         // use rand::seq::SliceRandom;
         // use rand::thread_rng;
 
@@ -523,7 +524,7 @@ fn test_inference() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: Result<HashMap<CanonicalIdent, UnitMap>> =
+            let mut results: Result<HashMap<Ident<Canonical>, UnitMap>> =
                 model_err!(UnitMismatch, "".to_owned());
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
@@ -537,7 +538,7 @@ fn test_inference() {
                     crate::units::parse_units(&units_ctx, Some(expected_units))
                         .unwrap()
                         .unwrap();
-                if let Some(computed_units) = results.get(&CanonicalIdent::from_raw(*ident)) {
+                if let Some(computed_units) = results.get(&canonicalize(ident)) {
                     assert_eq!(expected_units, *computed_units);
                 } else {
                     panic!("inference results don't contain variable '{ident}'");
@@ -598,7 +599,7 @@ fn test_inference_negative() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: Result<HashMap<CanonicalIdent, UnitMap>> =
+            let mut results: Result<HashMap<Ident<Canonical>, UnitMap>> =
                 model_err!(UnitMismatch, "".to_owned());
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
@@ -612,17 +613,19 @@ fn test_inference_negative() {
 }
 
 pub(crate) fn infer(
-    models: &HashMap<CanonicalIdent, &ModelStage1>,
+    models: &HashMap<Ident<Canonical>, &ModelStage1>,
     units_ctx: &Context,
     model: &ModelStage1,
-) -> Result<HashMap<CanonicalIdent, UnitMap>> {
-    let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"));
+) -> Result<HashMap<Ident<Canonical>, UnitMap>> {
+    let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
+        .as_str()
+        .to_string();
 
     let units = UnitInferer {
         ctx: units_ctx,
         models,
         time: Variable::Var {
-            ident: CanonicalIdent::from_raw("time"),
+            ident: canonicalize("time"),
             ast: None,
             init_ast: None,
             eqn: None,
@@ -641,7 +644,7 @@ pub(crate) fn infer(
 
 #[test]
 fn test_constraint_generation_consistency() {
-    use crate::common::CanonicalIdent;
+    use crate::common::canonicalize;
 
     // Test that constraint generation produces consistent variable names
     // This simulates what happens when stdlib models are processed
@@ -649,17 +652,17 @@ fn test_constraint_generation_consistency() {
     // In the stdlib XMILE file, the variable might be "Output" (capitalized)
     let xmile_var_name = "Output";
 
-    // When it becomes a CanonicalIdent key in the HashMap
-    let map_key = CanonicalIdent::from_raw(xmile_var_name);
+    // When it becomes an Ident<Canonical> key in the HashMap
+    let map_key = canonicalize(xmile_var_name);
     assert_eq!(map_key.as_str(), "output", "Map key should be lowercase");
 
     // When used in constraint generation in line 366/376
-    let constraint_var = format!("@{}", map_key);
+    let constraint_var = format!("@{map_key}");
     assert_eq!(constraint_var, "@output");
 
     // But if the AST still references the canonical form...
-    let ast_reference = CanonicalIdent::from_raw("output");
-    let ast_constraint = format!("@{}", ast_reference);
+    let ast_reference = canonicalize("output");
+    let ast_constraint = format!("@{ast_reference}");
     assert_eq!(ast_constraint, "@output");
 
     // They should match!

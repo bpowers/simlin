@@ -24,8 +24,8 @@ fn test_inner(input: &str, expected: Vec<(&str, Token)>, lexer_type: LexerType) 
         assert_eq!(Ok((expected_start, expected_tok, expected_end)), token);
     }
 
-    let tokenizer = Lexer::new(input, lexer_type);
-    assert_eq!(None, tokenizer.skip(len).next());
+    let mut tokenizer = Lexer::new(input, lexer_type);
+    assert_eq!(None, tokenizer.nth(len));
 }
 
 fn test_err(input: &str, expected: (&str, ErrorCode)) {

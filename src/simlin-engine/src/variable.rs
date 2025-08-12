@@ -10,7 +10,8 @@ use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
 use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::instantiate_implicit_modules;
 use crate::common::{
-    CanonicalElementName, CanonicalIdent, DimensionName, EquationError, EquationResult, UnitError,
+    Canonical, CanonicalElementName, DimensionName, EquationError, EquationResult, Ident,
+    UnitError, canonicalize,
 };
 use crate::datamodel;
 use crate::dimensions::Dimension;
@@ -18,7 +19,7 @@ use crate::dimensions::Dimension;
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
 use crate::units::parse_units;
-use crate::{ErrorCode, canonicalize, eqn_err, units};
+use crate::{ErrorCode, eqn_err, units};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Table {
@@ -31,26 +32,26 @@ pub struct Table {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModuleInput {
     // the Variable identifier in the current model we will use for input
-    pub src: CanonicalIdent,
+    pub src: Ident<Canonical>,
     // the Variable identifier in the module's model we will override
-    pub dst: CanonicalIdent,
+    pub dst: Ident<Canonical>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Variable<MI = ModuleInput, E = Expr2> {
     Stock {
-        ident: CanonicalIdent,
+        ident: Ident<Canonical>,
         init_ast: Option<Ast<E>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
-        inflows: Vec<CanonicalIdent>,
-        outflows: Vec<CanonicalIdent>,
+        inflows: Vec<Ident<Canonical>>,
+        outflows: Vec<Ident<Canonical>>,
         non_negative: bool,
         errors: Vec<EquationError>,
         unit_errors: Vec<UnitError>,
     },
     Var {
-        ident: CanonicalIdent,
+        ident: Ident<Canonical>,
         ast: Option<Ast<E>>,
         init_ast: Option<Ast<E>>,
         eqn: Option<datamodel::Equation>,
@@ -64,8 +65,8 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
     },
     Module {
         // the current spec has ident == model name
-        ident: CanonicalIdent,
-        model_name: CanonicalIdent,
+        ident: Ident<Canonical>,
+        model_name: Ident<Canonical>,
         units: Option<datamodel::UnitMap>,
         inputs: Vec<MI>,
         errors: Vec<EquationError>,
@@ -82,7 +83,7 @@ impl<MI, E> Variable<MI, E> {
         }
     }
 
-    pub fn canonical_ident(&self) -> &CanonicalIdent {
+    pub fn canonical_ident(&self) -> &Ident<Canonical> {
         match self {
             Variable::Stock { ident: name, .. }
             | Variable::Var { ident: name, .. }
@@ -388,27 +389,19 @@ where
                 }
             };
             Variable::Stock {
-                ident: CanonicalIdent::from_raw(&ident),
+                ident: canonicalize(&ident),
                 init_ast: ast,
                 eqn: Some(v.equation.clone()),
                 units,
-                inflows: v
-                    .inflows
-                    .iter()
-                    .map(|i| CanonicalIdent::from_raw(i))
-                    .collect(),
-                outflows: v
-                    .outflows
-                    .iter()
-                    .map(|o| CanonicalIdent::from_raw(o))
-                    .collect(),
+                inflows: v.inflows.iter().map(|i| canonicalize(i)).collect(),
+                outflows: v.outflows.iter().map(|o| canonicalize(o)).collect(),
                 non_negative: v.non_negative,
                 errors,
                 unit_errors,
             }
         }
         datamodel::Variable::Flow(v) => {
-            let ident = CanonicalIdent::from_raw(&v.ident);
+            let ident = canonicalize(&v.ident);
 
             let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, true);
@@ -447,7 +440,7 @@ where
             }
         }
         datamodel::Variable::Aux(v) => {
-            let ident = CanonicalIdent::from_raw(&v.ident);
+            let ident = canonicalize(&v.ident);
 
             let (ast, mut errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, false);
             let (init_ast, init_errors) = parse_and_lower_eqn(ident.as_str(), &v.equation, true);
@@ -486,7 +479,7 @@ where
             }
         }
         datamodel::Variable::Module(v) => {
-            let ident = CanonicalIdent::from_raw(&v.ident);
+            let ident = canonicalize(&v.ident);
             let inputs = v.references.iter().map(module_input_mapper);
             let (inputs, errors): (Vec<_>, Vec<_>) = inputs.partition(EquationResult::is_ok);
             let inputs: Vec<MI> = inputs.into_iter().flat_map(|i| i.unwrap()).collect();
@@ -503,7 +496,7 @@ where
             };
 
             Variable::Module {
-                model_name: CanonicalIdent::from_raw(&v.model_name),
+                model_name: canonicalize(&v.model_name),
                 ident,
                 units,
                 inputs,
@@ -515,9 +508,9 @@ where
 }
 
 struct IdentifierSetVisitor<'a> {
-    identifiers: HashSet<CanonicalIdent>,
+    identifiers: HashSet<Ident<Canonical>>,
     dimensions: &'a [Dimension],
-    module_inputs: Option<&'a BTreeSet<CanonicalIdent>>,
+    module_inputs: Option<&'a BTreeSet<Ident<Canonical>>>,
 }
 
 impl IdentifierSetVisitor<'_> {
@@ -532,7 +525,7 @@ impl IdentifierSetVisitor<'_> {
                     let mut is_subscript_or_dimension = false;
                     // TODO: this should be optimized
                     for dim in self.dimensions.iter() {
-                        if arg_ident.as_str() == canonicalize(dim.name()) {
+                        if arg_ident.as_str() == canonicalize(dim.name()).as_str() {
                             is_subscript_or_dimension = true;
                         } else if let Dimension::Named(_, named_dim) = dim {
                             // Check if arg_ident matches any element (case-insensitive)
@@ -568,7 +561,7 @@ impl IdentifierSetVisitor<'_> {
                 // If so, don't add it as a dependency since it will be resolved during compilation
                 let is_dimension = self.dimensions.iter().any(|dim| {
                     let canonicalized_dim = canonicalize(dim.name());
-                    id.as_str() == canonicalized_dim
+                    id.as_str() == canonicalized_dim.as_str()
                 });
 
                 if !is_dimension {
@@ -578,7 +571,7 @@ impl IdentifierSetVisitor<'_> {
             Expr2::App(builtin, _, _) => {
                 walk_builtin_expr(builtin, |contents| match contents {
                     BuiltinContents::Ident(id, _loc) => {
-                        self.identifiers.insert(CanonicalIdent::from_raw(id));
+                        self.identifiers.insert(canonicalize(id));
                     }
                     BuiltinContents::Expr(expr) => self.walk(expr),
                 });
@@ -597,7 +590,7 @@ impl IdentifierSetVisitor<'_> {
             Expr2::If(cond, t, f, _, _) => {
                 if let Some(module_inputs) = self.module_inputs {
                     if let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref() {
-                        if module_inputs.contains(&CanonicalIdent::from_raw(ident)) {
+                        if module_inputs.contains(&canonicalize(ident)) {
                             self.walk(t);
                         } else {
                             self.walk(f);
@@ -617,8 +610,8 @@ impl IdentifierSetVisitor<'_> {
 pub fn identifier_set(
     ast: &Ast<Expr2>,
     dimensions: &[Dimension],
-    module_inputs: Option<&BTreeSet<CanonicalIdent>>,
-) -> HashSet<CanonicalIdent> {
+    module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
+) -> HashSet<Ident<Canonical>> {
     let mut id_visitor = IdentifierSetVisitor {
         identifiers: HashSet::new(),
         dimensions,
@@ -655,8 +648,8 @@ fn test_identifier_sets() {
     ))];
 
     let module_inputs: &[ModuleInput] = &[ModuleInput {
-        src: CanonicalIdent::from_raw("whatever"),
-        dst: CanonicalIdent::from_raw("input"),
+        src: canonicalize("whatever"),
+        dst: canonicalize("input"),
     }];
 
     use crate::ast::lower_ast;
@@ -675,26 +668,26 @@ fn test_identifier_sets() {
             model_name: "test_model",
         };
         let ast = lower_ast(&scope, ast.unwrap()).unwrap();
-        let id_set_expected: HashSet<CanonicalIdent> = id_list
+        let id_set_expected: HashSet<Ident<Canonical>> = id_list
             .iter()
             .map(|s| {
                 // If the test expectation already contains a middle dot, use it directly
                 // Otherwise canonicalize it
                 if s.contains('·') {
-                    CanonicalIdent::from_canonical_unchecked(s.to_string())
+                    Ident::<Canonical>::from_unchecked(s.to_string())
                 } else {
                     // For test expectations like "a.d", we treat them as already canonical
                     // (as they would be after parsing a quoted identifier)
-                    CanonicalIdent::from_canonical_unchecked(s.to_string())
+                    Ident::<Canonical>::from_unchecked(s.to_string())
                 }
             })
             .collect();
         let module_input_names = module_inputs.iter().map(|mi| mi.dst.clone()).collect();
         let id_set_test = identifier_set(&ast, &dimensions, Some(&module_input_names));
         if id_set_expected != id_set_test {
-            eprintln!("Test case failed: {}", eqn);
-            eprintln!("Expected: {:?}", id_set_expected);
-            eprintln!("Got: {:?}", id_set_test);
+            eprintln!("Test case failed: {eqn}");
+            eprintln!("Expected: {id_set_expected:?}");
+            eprintln!("Got: {id_set_test:?}");
         }
         assert_eq!(id_set_expected, id_set_test);
     }
@@ -704,7 +697,7 @@ fn test_identifier_sets() {
 fn test_tables() {
     use crate::common::canonicalize;
     let input = datamodel::Variable::Aux(datamodel::Aux {
-        ident: canonicalize("lookup function table"),
+        ident: canonicalize("lookup function table").as_str().to_string(),
         equation: datamodel::Equation::Scalar("0".to_string(), None),
         documentation: "".to_string(),
         units: None,
@@ -727,7 +720,7 @@ fn test_tables() {
     });
 
     let expected = Variable::Var {
-        ident: CanonicalIdent::from_raw("lookup_function_table"),
+        ident: canonicalize("lookup_function_table"),
         ast: Some(Ast::Scalar(Expr0::Const(
             "0".to_string(),
             0.0,

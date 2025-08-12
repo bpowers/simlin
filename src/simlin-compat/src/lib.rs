@@ -8,10 +8,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::result::Result as StdResult;
 
-use simlin_engine::common::CanonicalIdent;
+use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::datamodel::Project;
 pub use simlin_engine::{self as engine, Result, Results, prost};
-use simlin_engine::{Method, SimSpecs, canonicalize, quoteize};
+use simlin_engine::{Method, SimSpecs, canonicalize};
 
 pub mod xmile;
 
@@ -70,7 +70,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
                     assert!(unprocessed.insert(id, std::mem::take(&mut curr)).is_none());
                 }
                 let name = canonicalize(line.trim());
-                ident = Some(quoteize(&name));
+                ident = Some(name.to_source_repr());
             }
         }
         if let Some(id) = ident.take() {
@@ -79,10 +79,10 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
         unprocessed
     };
 
-    let offsets: HashMap<CanonicalIdent, usize> = unprocessed
+    let offsets: HashMap<Ident<Canonical>, usize> = unprocessed
         .keys()
         .enumerate()
-        .map(|(i, r)| (CanonicalIdent::from_canonical_str_unchecked(r.as_str()), i))
+        .map(|(i, r)| (Ident::<Canonical>::from_str_unchecked(r.as_str()), i))
         .collect();
 
     let initial_time = unprocessed["initial_time"][0].1;
@@ -156,7 +156,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
         .from_path(file_path)?;
 
     let header = rdr.headers().unwrap();
-    let offsets: HashMap<CanonicalIdent, usize> = header
+    let offsets: HashMap<Ident<Canonical>, usize> = header
         .iter()
         .enumerate()
         .map(|(i, r)| {
@@ -164,7 +164,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
             let name = if i == 0 { "time" } else { r };
             let ident = canonicalize(name);
             (
-                CanonicalIdent::from_canonical_unchecked(quoteize(&ident)),
+                Ident::<Canonical>::from_unchecked(ident.to_source_repr()),
                 i,
             )
         })

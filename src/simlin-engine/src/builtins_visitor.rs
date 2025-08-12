@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Ast, Expr0, IndexExpr0, print_eqn};
 use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
-use crate::common::{CanonicalIdent, EquationError, RawIdent};
+use crate::common::{Canonical, EquationError, Ident, RawIdent, canonicalize};
 use crate::datamodel::Visibility;
 use crate::{datamodel, eqn_err};
 
@@ -26,7 +26,7 @@ fn stdlib_args(name: &str) -> Option<&'static [&'static str]> {
 
 pub struct BuiltinVisitor<'a> {
     variable_name: &'a str,
-    vars: HashMap<CanonicalIdent, datamodel::Variable>,
+    vars: HashMap<Ident<Canonical>, datamodel::Variable>,
     n: usize,
     self_allowed: bool,
 }
@@ -102,7 +102,7 @@ impl<'a> BuiltinVisitor<'a> {
                             visibility: datamodel::Visibility::Private,
                             ai_state: None,
                         });
-                        self.vars.insert(CanonicalIdent::from_raw(&id), x_var);
+                        self.vars.insert(canonicalize(&id), x_var);
                         id
                     }
                 });
@@ -126,8 +126,7 @@ impl<'a> BuiltinVisitor<'a> {
                     ai_state: None,
                 });
                 let module_output_name = format!("{module_name}·output");
-                self.vars
-                    .insert(CanonicalIdent::from_raw(&module_name), x_module);
+                self.vars.insert(canonicalize(&module_name), x_module);
 
                 self.n += 1;
                 Var(RawIdent::new_from_str(&module_output_name), loc)

@@ -11,7 +11,7 @@ use crate::bytecode::{
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
 };
 use crate::common::{
-    CanonicalElementName, CanonicalIdent, ErrorCode, ErrorKind, Result, canonicalize,
+    Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
 };
 use crate::dimensions::Dimension;
 use crate::model::ModelStage1;
@@ -21,6 +21,9 @@ use crate::vm::{
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, SubscriptIterator, TIME_OFF,
 };
 use crate::{Error, sim_err};
+
+// Type alias to reduce complexity
+type VariableOffsetMap = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -131,7 +134,7 @@ pub enum Expr {
     TempArrayElement(u32, ArrayView, usize, Loc), // temp id, view, element index, location
     Dt(Loc),
     App(BuiltinFn, Loc),
-    EvalModule(CanonicalIdent, CanonicalIdent, Vec<Expr>),
+    EvalModule(Ident<Canonical>, Ident<Canonical>, Vec<Expr>),
     ModuleInput(usize, Loc),
     Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
     Op1(UnaryOp, Box<Expr>, Loc),
@@ -284,28 +287,29 @@ pub(crate) struct VariableMetadata {
 #[derive(Clone, Debug)]
 pub(crate) struct Context<'a> {
     pub(crate) dimensions: Vec<Dimension>,
-    pub(crate) model_name: &'a CanonicalIdent,
+    pub(crate) model_name: &'a Ident<Canonical>,
     #[allow(dead_code)]
-    pub(crate) ident: &'a CanonicalIdent,
+    pub(crate) ident: &'a Ident<Canonical>,
     pub(crate) active_dimension: Option<Vec<Dimension>>,
     pub(crate) active_subscript: Option<Vec<CanonicalElementName>>,
-    pub(crate) metadata: &'a HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>>,
-    pub(crate) module_models: &'a HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>>,
+    pub(crate) metadata: &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>>,
+    pub(crate) module_models:
+        &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
     pub(crate) is_initial: bool,
-    pub(crate) inputs: &'a BTreeSet<CanonicalIdent>,
+    pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
 }
 
 impl Context<'_> {
-    fn get_offset(&self, ident: &CanonicalIdent) -> Result<usize> {
+    fn get_offset(&self, ident: &Ident<Canonical>) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, false)
     }
 
     /// get_base_offset ignores arrays and should only be used from Var::new and Expr::Subscript
-    fn get_base_offset(&self, ident: &CanonicalIdent) -> Result<usize> {
+    fn get_base_offset(&self, ident: &Ident<Canonical>) -> Result<usize> {
         self.get_submodel_offset(self.model_name, ident, true)
     }
 
-    fn get_metadata(&self, ident: &CanonicalIdent) -> Result<&VariableMetadata> {
+    fn get_metadata(&self, ident: &Ident<Canonical>) -> Result<&VariableMetadata> {
         self.get_submodel_metadata(self.model_name, ident)
     }
 
@@ -406,18 +410,18 @@ impl Context<'_> {
 
     fn get_submodel_metadata(
         &self,
-        model: &CanonicalIdent,
-        ident: &CanonicalIdent,
+        model: &Ident<Canonical>,
+        ident: &Ident<Canonical>,
     ) -> Result<&VariableMetadata> {
         let metadata = &self.metadata[model];
         if let Some(pos) = ident.as_str().find('·') {
             let submodel_module_name = &ident.as_str()[..pos];
             let submodel_name = &self.module_models[model]
-                [&CanonicalIdent::from_canonical_str_unchecked(submodel_module_name)];
+                [&Ident::<Canonical>::from_str_unchecked(submodel_module_name)];
             let submodel_var = &ident.as_str()[pos + '·'.len_utf8()..];
             self.get_submodel_metadata(
                 submodel_name,
-                &CanonicalIdent::from_canonical_str_unchecked(submodel_var),
+                &Ident::<Canonical>::from_str_unchecked(submodel_var),
             )
         } else {
             Ok(&metadata[ident])
@@ -426,8 +430,8 @@ impl Context<'_> {
 
     fn get_submodel_offset(
         &self,
-        model: &CanonicalIdent,
-        ident: &CanonicalIdent,
+        model: &Ident<Canonical>,
+        ident: &Ident<Canonical>,
         ignore_arrays: bool,
     ) -> Result<usize> {
         let metadata = &self.metadata[model];
@@ -435,15 +439,14 @@ impl Context<'_> {
         if let Some(pos) = ident_str.find('·') {
             let submodel_module_name = &ident_str[..pos];
             let submodel_name = &self.module_models[model]
-                [&CanonicalIdent::from_canonical_str_unchecked(submodel_module_name)];
+                [&Ident::<Canonical>::from_str_unchecked(submodel_module_name)];
             let submodel_var = &ident_str[pos + '·'.len_utf8()..];
-            let submodel_off = metadata
-                [&CanonicalIdent::from_canonical_str_unchecked(submodel_module_name)]
-                .offset;
+            let submodel_off =
+                metadata[&Ident::<Canonical>::from_str_unchecked(submodel_module_name)].offset;
             Ok(submodel_off
                 + self.get_submodel_offset(
                     submodel_name,
-                    &CanonicalIdent::from_canonical_str_unchecked(submodel_var),
+                    &Ident::<Canonical>::from_str_unchecked(submodel_var),
                     ignore_arrays,
                 )?)
         } else if !ignore_arrays {
@@ -469,7 +472,7 @@ impl Context<'_> {
                 let is_dimension = self
                     .dimensions
                     .iter()
-                    .any(|dim| id.as_str() == canonicalize(dim.name()));
+                    .any(|dim| id.as_str() == canonicalize(dim.name()).as_str());
 
                 if is_dimension {
                     // This is a dimension name
@@ -478,7 +481,7 @@ impl Context<'_> {
                             // We're in an array context - find the matching dimension
                             for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
                             {
-                                if id.as_str() == canonicalize(dim.name()) {
+                                if id.as_str() == canonicalize(dim.name()).as_str() {
                                     // Convert to the subscript index (0-based)
                                     let index = match dim {
                                         Dimension::Indexed(_, _) => {
@@ -1310,7 +1313,7 @@ impl Context<'_> {
         Ok(expr)
     }
 
-    fn fold_flows(&self, flows: &[CanonicalIdent]) -> Option<Expr> {
+    fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Option<Expr> {
         if flows.is_empty() {
             return None;
         }
@@ -1486,23 +1489,15 @@ impl Context<'_> {
 
 #[test]
 fn test_lower() {
-    use crate::common::CanonicalIdent;
+    use crate::common::{Canonical, Ident};
     let input = {
         use ast::BinaryOp::*;
         use ast::Expr2::*;
         Box::new(If(
             Box::new(Op2(
                 And,
-                Box::new(Var(
-                    CanonicalIdent::from_raw("true_input"),
-                    None,
-                    Loc::default(),
-                )),
-                Box::new(Var(
-                    CanonicalIdent::from_raw("false_input"),
-                    None,
-                    Loc::default(),
-                )),
+                Box::new(Var(canonicalize("true_input"), None, Loc::default())),
+                Box::new(Var(canonicalize("false_input"), None, Loc::default())),
                 None,
                 Loc::default(),
             )),
@@ -1514,16 +1509,16 @@ fn test_lower() {
     };
 
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
-    let mut metadata: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
     metadata.insert(
-        CanonicalIdent::from_raw("true_input"),
+        canonicalize("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1538,12 +1533,12 @@ fn test_lower() {
         },
     );
     metadata.insert(
-        CanonicalIdent::from_raw("false_input"),
+        canonicalize("false_input"),
         VariableMetadata {
             offset: 8,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1558,8 +1553,8 @@ fn test_lower() {
         },
     );
     let mut metadata2 = HashMap::new();
-    let main_ident = CanonicalIdent::from_raw("main");
-    let test_ident = CanonicalIdent::from_raw("test");
+    let main_ident = canonicalize("main");
+    let test_ident = canonicalize("test");
     metadata2.insert(main_ident.clone(), metadata);
     let context = Context {
         dimensions: vec![],
@@ -1594,16 +1589,8 @@ fn test_lower() {
         Box::new(If(
             Box::new(Op2(
                 Or,
-                Box::new(Var(
-                    CanonicalIdent::from_raw("true_input"),
-                    None,
-                    Loc::default(),
-                )),
-                Box::new(Var(
-                    CanonicalIdent::from_raw("false_input"),
-                    None,
-                    Loc::default(),
-                )),
+                Box::new(Var(canonicalize("true_input"), None, Loc::default())),
+                Box::new(Var(canonicalize("false_input"), None, Loc::default())),
                 None,
                 Loc::default(),
             )),
@@ -1615,16 +1602,16 @@ fn test_lower() {
     };
 
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
-    let mut metadata: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
     metadata.insert(
-        CanonicalIdent::from_raw("true_input"),
+        canonicalize("true_input"),
         VariableMetadata {
             offset: 7,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1639,12 +1626,12 @@ fn test_lower() {
         },
     );
     metadata.insert(
-        CanonicalIdent::from_raw("false_input"),
+        canonicalize("false_input"),
         VariableMetadata {
             offset: 8,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1659,8 +1646,8 @@ fn test_lower() {
         },
     );
     let mut metadata2 = HashMap::new();
-    let main_ident = CanonicalIdent::from_raw("main");
-    let test_ident = CanonicalIdent::from_raw("test");
+    let main_ident = canonicalize("main");
+    let test_ident = canonicalize("test");
     metadata2.insert(main_ident.clone(), metadata);
     let context = Context {
         dimensions: vec![],
@@ -1692,23 +1679,23 @@ fn test_lower() {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Var {
-    pub(crate) ident: CanonicalIdent,
+    pub(crate) ident: Ident<Canonical>,
     pub(crate) ast: Vec<Expr>,
 }
 
 #[test]
 fn test_fold_flows() {
     let inputs = &BTreeSet::new();
-    let module_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+    let module_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
-    let mut metadata: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
+    let mut metadata: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
     metadata.insert(
-        CanonicalIdent::from_raw("a"),
+        canonicalize("a"),
         VariableMetadata {
             offset: 1,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1723,12 +1710,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        CanonicalIdent::from_raw("b"),
+        canonicalize("b"),
         VariableMetadata {
             offset: 2,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1743,12 +1730,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        CanonicalIdent::from_raw("c"),
+        canonicalize("c"),
         VariableMetadata {
             offset: 3,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1763,12 +1750,12 @@ fn test_fold_flows() {
         },
     );
     metadata.insert(
-        CanonicalIdent::from_raw("d"),
+        canonicalize("d"),
         VariableMetadata {
             offset: 4,
             size: 1,
             var: Variable::Var {
-                ident: CanonicalIdent::from_raw(""),
+                ident: canonicalize(""),
                 ast: None,
                 init_ast: None,
                 eqn: None,
@@ -1783,8 +1770,8 @@ fn test_fold_flows() {
         },
     );
     let mut metadata2 = HashMap::new();
-    let main_ident = CanonicalIdent::from_raw("main");
-    let test_ident = CanonicalIdent::from_raw("test");
+    let main_ident = canonicalize("main");
+    let test_ident = canonicalize("test");
     metadata2.insert(main_ident.clone(), metadata);
     let ctx = Context {
         dimensions: vec![],
@@ -1801,7 +1788,7 @@ fn test_fold_flows() {
     assert_eq!(None, ctx.fold_flows(&[]));
     assert_eq!(
         Some(Expr::Var(1, Loc::default())),
-        ctx.fold_flows(&[CanonicalIdent::from_raw("a")])
+        ctx.fold_flows(&[canonicalize("a")])
     );
     assert_eq!(
         Some(Expr::Op2(
@@ -1810,7 +1797,7 @@ fn test_fold_flows() {
             Box::new(Expr::Var(4, Loc::default())),
             Loc::default(),
         )),
-        ctx.fold_flows(&[CanonicalIdent::from_raw("a"), CanonicalIdent::from_raw("d")])
+        ctx.fold_flows(&[canonicalize("a"), canonicalize("d")])
     );
 }
 
@@ -1824,7 +1811,7 @@ impl Var {
             .find(|(_i, n)| n.as_str() == var.ident())
         {
             vec![Expr::AssignCurr(
-                ctx.get_offset(&CanonicalIdent::from_raw(var.ident()))?,
+                ctx.get_offset(&canonicalize(var.ident()))?,
                 Box::new(Expr::ModuleInput(off, Loc::default())),
             )]
         } else {
@@ -1844,7 +1831,7 @@ impl Var {
                     vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
                 }
                 Variable::Stock { init_ast: ast, .. } => {
-                    let off = ctx.get_base_offset(&CanonicalIdent::from_raw(var.ident()))?;
+                    let off = ctx.get_base_offset(&canonicalize(var.ident()))?;
                     if ctx.is_initial {
                         if ast.is_none() {
                             return sim_err!(EmptyEquation, var.ident().to_string());
@@ -1915,7 +1902,7 @@ impl Var {
                                         // when building the stock update expression, we need
                                         // the specific index of this subscript, not the base offset
                                         let update_expr = ctx.build_stock_update_expr(
-                                            ctx.get_offset(&CanonicalIdent::from_raw(var.ident()))?,
+                                            ctx.get_offset(&canonicalize(var.ident()))?,
                                             var,
                                         );
                                         Ok(Expr::AssignNext(off + i, Box::new(update_expr)))
@@ -1927,7 +1914,7 @@ impl Var {
                     }
                 }
                 Variable::Var { ident, table, .. } => {
-                    let off = ctx.get_base_offset(&CanonicalIdent::from_raw(var.ident()))?;
+                    let off = ctx.get_base_offset(&canonicalize(var.ident()))?;
                     let ast = if ctx.is_initial {
                         var.init_ast()
                     } else {
@@ -1999,7 +1986,7 @@ impl Var {
             }
         };
         Ok(Var {
-            ident: CanonicalIdent::from_raw(var.ident()),
+            ident: canonicalize(var.ident()),
             ast,
         })
     }
@@ -2007,17 +1994,17 @@ impl Var {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Module {
-    pub(crate) ident: CanonicalIdent,
-    pub(crate) inputs: HashSet<CanonicalIdent>,
+    pub(crate) ident: Ident<Canonical>,
+    pub(crate) inputs: HashSet<Ident<Canonical>>,
     pub(crate) n_slots: usize,         // number of f64s we need storage for
     pub(crate) n_temps: usize,         // number of temporary arrays
     pub(crate) temp_sizes: Vec<usize>, // size of each temporary array
     pub(crate) runlist_initials: Vec<Expr>,
     pub(crate) runlist_flows: Vec<Expr>,
     pub(crate) runlist_stocks: Vec<Expr>,
-    pub(crate) offsets: HashMap<CanonicalIdent, HashMap<CanonicalIdent, (usize, usize)>>,
-    pub(crate) runlist_order: Vec<CanonicalIdent>,
-    pub(crate) tables: HashMap<CanonicalIdent, Table>,
+    pub(crate) offsets: VariableOffsetMap,
+    pub(crate) runlist_order: Vec<Ident<Canonical>>,
+    pub(crate) tables: HashMap<Ident<Canonical>, Table>,
 }
 
 /// Create a temporary for an array expression
@@ -2081,9 +2068,9 @@ fn get_array_view(expr: &Expr) -> Option<ArrayView> {
 // calculate a mapping of module variable name -> module model name
 pub(crate) fn calc_module_model_map(
     project: &Project,
-    model_name: &CanonicalIdent,
-) -> HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> {
-    let mut all_models: HashMap<CanonicalIdent, HashMap<CanonicalIdent, CanonicalIdent>> =
+    model_name: &Ident<Canonical>,
+) -> HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> {
+    let mut all_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
 
     let model = Rc::clone(&project.models[model_name]);
@@ -2093,10 +2080,10 @@ pub(crate) fn calc_module_model_map(
         var_names
     };
 
-    let mut current_mapping: HashMap<CanonicalIdent, CanonicalIdent> = HashMap::new();
+    let mut current_mapping: HashMap<Ident<Canonical>, Ident<Canonical>> = HashMap::new();
 
     for ident in var_names.iter() {
-        let canonical_ident = CanonicalIdent::from_raw(ident);
+        let canonical_ident = canonicalize(ident);
         if let Variable::Module {
             model_name: module_model_name,
             ..
@@ -2116,22 +2103,22 @@ pub(crate) fn calc_module_model_map(
 // TODO: this should memoize
 pub(crate) fn build_metadata(
     project: &Project,
-    model_name: &CanonicalIdent,
+    model_name: &Ident<Canonical>,
     is_root: bool,
-) -> HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>> {
-    let mut all_offsets: HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>> =
+) -> HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>> {
+    let mut all_offsets: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>> =
         HashMap::new();
 
-    let mut offsets: HashMap<CanonicalIdent, VariableMetadata> = HashMap::new();
+    let mut offsets: HashMap<Ident<Canonical>, VariableMetadata> = HashMap::new();
     let mut i = 0;
     if is_root {
         offsets.insert(
-            CanonicalIdent::from_raw("time"),
+            canonicalize("time"),
             VariableMetadata {
                 offset: 0,
                 size: 1,
                 var: Variable::Var {
-                    ident: CanonicalIdent::from_raw("time"),
+                    ident: canonicalize("time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2146,12 +2133,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            CanonicalIdent::from_raw("dt"),
+            canonicalize("dt"),
             VariableMetadata {
                 offset: 1,
                 size: 1,
                 var: Variable::Var {
-                    ident: CanonicalIdent::from_raw("dt"),
+                    ident: canonicalize("dt"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2166,12 +2153,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            CanonicalIdent::from_raw("initial_time"),
+            canonicalize("initial_time"),
             VariableMetadata {
                 offset: 2,
                 size: 1,
                 var: Variable::Var {
-                    ident: CanonicalIdent::from_raw("initial_time"),
+                    ident: canonicalize("initial_time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2186,12 +2173,12 @@ pub(crate) fn build_metadata(
             },
         );
         offsets.insert(
-            CanonicalIdent::from_raw("final_time"),
+            canonicalize("final_time"),
             VariableMetadata {
                 offset: 3,
                 size: 1,
                 var: Variable::Var {
-                    ident: CanonicalIdent::from_raw("final_time"),
+                    ident: canonicalize("final_time"),
                     ast: None,
                     init_ast: None,
                     eqn: None,
@@ -2209,7 +2196,7 @@ pub(crate) fn build_metadata(
     }
 
     let model = Rc::clone(&project.models[model_name]);
-    let var_names: Vec<&CanonicalIdent> = {
+    let var_names: Vec<&Ident<Canonical>> = {
         let mut var_names: Vec<_> = model.variables.keys().collect();
         var_names.sort_unstable();
         var_names
@@ -2246,8 +2233,8 @@ pub(crate) fn build_metadata(
 }
 
 fn calc_n_slots(
-    all_metadata: &HashMap<CanonicalIdent, HashMap<CanonicalIdent, VariableMetadata>>,
-    model_name: &CanonicalIdent,
+    all_metadata: &HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, VariableMetadata>>,
+    model_name: &Ident<Canonical>,
 ) -> usize {
     let metadata = &all_metadata[model_name];
 
@@ -2258,7 +2245,7 @@ impl Module {
     pub(crate) fn new(
         project: &Project,
         model: Rc<ModelStage1>,
-        inputs: &BTreeSet<CanonicalIdent>,
+        inputs: &BTreeSet<Ident<Canonical>>,
         is_root: bool,
     ) -> Result<Self> {
         let instantiation = model
@@ -2276,7 +2263,7 @@ impl Module {
             return sim_err!(NotSimulatable, model.name.to_string());
         }
 
-        let model_name: &CanonicalIdent = &model.name;
+        let model_name: &Ident<Canonical> = &model.name;
         let metadata = build_metadata(project, model_name, is_root);
 
         let n_slots = calc_n_slots(&metadata, model_name);
@@ -2294,7 +2281,7 @@ impl Module {
             .map(|d| Dimension::from(d.clone()))
             .collect();
 
-        let build_var = |ident: &CanonicalIdent, is_initial| {
+        let build_var = |ident: &Ident<Canonical>, is_initial| {
             Var::new(
                 &Context {
                     dimensions: converted_dims.clone(),
@@ -2338,16 +2325,16 @@ impl Module {
         let runlist_flows: Vec<Expr> = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
         let runlist_stocks = runlist_stocks.into_iter().flat_map(|v| v.ast).collect();
 
-        let tables: Result<HashMap<CanonicalIdent, Table>> = var_names
+        let tables: Result<HashMap<Ident<Canonical>, Table>> = var_names
             .iter()
             .map(|id| {
-                let canonical_id = CanonicalIdent::from_raw(id);
+                let canonical_id = canonicalize(id);
                 (id, &model.variables[&canonical_id])
             })
             .filter(|(_, v)| v.table().is_some())
             .map(|(id, v)| (id, Table::new(id, v.table().unwrap())))
             .map(|(id, t)| match t {
-                Ok(table) => Ok((CanonicalIdent::from_raw(id), table)),
+                Ok(table) => Ok((canonicalize(id), table)),
                 Err(err) => Err(err),
             })
             .collect();
@@ -2474,7 +2461,7 @@ impl<'module> Compiler<'module> {
             Expr::App(builtin, _) => {
                 // lookups are special
                 if let BuiltinFn::Lookup(ident, index, _loc) = builtin {
-                    let table = &self.module.tables[&CanonicalIdent::from_raw(ident)];
+                    let table = &self.module.tables[&canonicalize(ident)];
                     self.graphical_functions.push(table.data.clone());
                     let gf = (self.graphical_functions.len() - 1) as GraphicalFunctionId;
                     self.walk_expr(index)?.unwrap();
@@ -2484,11 +2471,7 @@ impl<'module> Compiler<'module> {
 
                 // so are module builtins
                 if let BuiltinFn::IsModuleInput(ident, _loc) = builtin {
-                    let id = if self
-                        .module
-                        .inputs
-                        .contains(&CanonicalIdent::from_raw(ident))
-                    {
+                    let id = if self.module.inputs.contains(&canonicalize(ident)) {
                         self.curr_code.intern_literal(1.0)
                     } else {
                         self.curr_code.intern_literal(0.0)
