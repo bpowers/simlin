@@ -107,10 +107,10 @@ fn generate_module_link_score_equation(
     // Check if 'from' is a module
     if let Some(Variable::Module { .. }) = variables.get(from) {
         // Link from module output to regular variable
-        // For now, use a placeholder that references the module's internal link score
-        // In a full implementation, this would reference the exported link score
+        // The module instance itself IS the output value in the parent model
+        // For LTM, we need to import the relevant internal link score
         return format!(
-            "0 {{!! TODO: import link score from module {} !!}}",
+            "0 {{!! TODO: import link score from module {} output !!}}",
             from.as_str()
         );
     }
