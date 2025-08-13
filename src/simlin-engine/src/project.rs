@@ -7,10 +7,11 @@ use std::collections::{BTreeSet, HashMap};
 use prost::alloc::rc::Rc;
 
 use crate::common::{Canonical, Error, Ident};
-use crate::datamodel;
+use crate::datamodel::{self, Equation};
 use crate::dimensions::DimensionsContext;
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
+use crate::variable::Variable;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
@@ -32,21 +33,30 @@ impl Project {
         // Generate the synthetic variables
         let ltm_vars = crate::ltm_augment::generate_ltm_variables(&self)?;
 
-        // For now, we just return the original project
-        // In a full implementation, we would reconstruct the project with the new variables
-        // This requires rebuilding the datamodel and re-parsing
-
-        // TODO: Implement proper project reconstruction with LTM variables
-        eprintln!("Generated {} models with LTM variables", ltm_vars.len());
-        for (model_name, vars) in &ltm_vars {
-            eprintln!(
-                "  Model '{}': {} LTM variables",
-                model_name.as_str(),
-                vars.len()
-            );
+        if ltm_vars.is_empty() {
+            // No loops detected, return original project
+            return Ok(self);
         }
 
-        Ok(self)
+        // Create a new datamodel with the LTM variables added
+        let mut new_datamodel = self.datamodel.clone();
+
+        // Add synthetic variables to each model in the datamodel
+        for model in &mut new_datamodel.models {
+            let model_name = crate::common::canonicalize(&model.name);
+
+            if let Some(synthetic_vars) = ltm_vars.get(&model_name) {
+                // Convert our internal Variable representation to datamodel::Variable
+                for (_var_name, var) in synthetic_vars {
+                    if let Some(datamodel_var) = convert_to_datamodel_variable(var) {
+                        model.variables.push(datamodel_var);
+                    }
+                }
+            }
+        }
+
+        // Reconstruct the project with the new datamodel
+        Ok(Project::from(new_datamodel))
     }
 }
 
@@ -197,5 +207,128 @@ impl Project {
             model_order: ordered_models,
             errors: project_errors,
         }
+    }
+}
+
+/// Convert internal Variable representation to datamodel Variable
+fn convert_to_datamodel_variable(var: &Variable) -> Option<datamodel::Variable> {
+    match var {
+        Variable::Var { ident, eqn, .. } => {
+            // LTM variables are always auxiliaries
+            let equation = match eqn {
+                Some(Equation::Scalar(eq, _)) => Equation::Scalar(eq.clone(), None),
+                _ => Equation::Scalar("0".to_string(), None),
+            };
+
+            Some(datamodel::Variable::Aux(datamodel::Aux {
+                ident: ident.as_str().to_string(),
+                equation,
+                documentation: "LTM synthetic variable".to_string(),
+                units: None, // LTM scores are dimensionless
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+            }))
+        }
+        _ => None, // LTM only generates Var types
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_project_with_ltm() {
+        use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
+
+        // Create a simple model with a reinforcing loop
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("population", "100", &["births"], &[], None),
+                x_flow("births", "population * birth_rate", None),
+                x_aux("birth_rate", "0.02", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project_datamodel = x_project(sim_specs, &[model]);
+        let project = Project::from(project_datamodel);
+
+        // Apply LTM instrumentation
+        let ltm_project = project.with_ltm().unwrap();
+
+        // Check that the project has been augmented with LTM variables
+        let main_model = ltm_project
+            .datamodel
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("Should have main model");
+
+        // Count LTM variables
+        let ltm_var_count = main_model
+            .variables
+            .iter()
+            .filter(|v| v.get_ident().starts_with("_ltm_"))
+            .count();
+
+        // We should have link score and loop score variables
+        assert!(ltm_var_count > 0, "Should have added LTM variables");
+
+        // Check for specific types of LTM variables
+        let has_link_scores = main_model
+            .variables
+            .iter()
+            .any(|v| v.get_ident().starts_with("_ltm_link_"));
+        let has_loop_scores = main_model
+            .variables
+            .iter()
+            .any(|v| v.get_ident().starts_with("_ltm_loop_"));
+
+        assert!(has_link_scores, "Should have link score variables");
+        assert!(has_loop_scores, "Should have loop score variables");
+    }
+
+    #[test]
+    fn test_project_with_ltm_no_loops() {
+        use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
+
+        // Create a model with no loops
+        let model = x_model(
+            "main",
+            vec![
+                x_aux("input", "10", None),
+                x_aux("output", "input * 2", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project_datamodel = x_project(sim_specs, &[model]);
+        let project = Project::from(project_datamodel);
+
+        // Apply LTM instrumentation
+        let ltm_project = project.with_ltm().unwrap();
+
+        // Check that no LTM variables were added (no loops to instrument)
+        let main_model = ltm_project
+            .datamodel
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("Should have main model");
+
+        let ltm_var_count = main_model
+            .variables
+            .iter()
+            .filter(|v| v.get_ident().starts_with("_ltm_"))
+            .count();
+
+        assert_eq!(
+            ltm_var_count, 0,
+            "Should not add LTM variables when no loops exist"
+        );
     }
 }
