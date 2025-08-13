@@ -347,7 +347,7 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
 /// Generate the equation for a relative loop score variable
 fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
     // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
-    let loop_score_var = format!("_ltm_loop_{}", loop_id);
+    let loop_score_var = format!("_ltm_loop_{loop_id}");
 
     // Build sum of absolute values of all loop scores
     let all_loop_scores: Vec<String> = all_loops
@@ -364,12 +364,10 @@ fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> S
     // Relative score formula with protection against division by zero
     format!(
         "IF THEN ELSE(\
-            ({sum}) = 0, \
+            ({sum_expr}) = 0, \
             0, \
-            ABS({loop_score}) / ({sum})\
-        )",
-        loop_score = loop_score_var,
-        sum = sum_expr
+            ABS({loop_score_var}) / ({sum_expr})\
+        )"
     )
 }
 

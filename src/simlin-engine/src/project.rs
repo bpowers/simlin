@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use prost::alloc::rc::Rc;
 
-use crate::common::{Canonical, Error, Ident};
+use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident};
 use crate::datamodel::{self, Equation};
 use crate::dimensions::DimensionsContext;
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
@@ -30,6 +30,9 @@ impl Project {
 
     /// Create a new project with LTM instrumentation
     pub fn with_ltm(self) -> crate::common::Result<Self> {
+        // First check if any model has array variables
+        check_for_arrays(&self)?;
+
         // Generate the synthetic variables
         let ltm_vars = crate::ltm_augment::generate_ltm_variables(&self)?;
 
@@ -235,6 +238,45 @@ fn convert_to_datamodel_variable(var: &Variable) -> Option<datamodel::Variable> 
     }
 }
 
+/// Check if any model in the project contains array variables
+fn check_for_arrays(project: &Project) -> crate::common::Result<()> {
+    for (model_name, model) in &project.models {
+        // Skip implicit (stdlib) models
+        if model.implicit {
+            continue;
+        }
+
+        // Check each variable for array dimensions
+        for (var_name, var) in &model.variables {
+            let has_arrays = match var {
+                Variable::Stock { eqn, .. } | Variable::Var { eqn, .. } => {
+                    matches!(
+                        eqn,
+                        Some(Equation::ApplyToAll(..)) | Some(Equation::Arrayed(..))
+                    )
+                }
+                _ => false,
+            };
+
+            if has_arrays {
+                return Err(Error {
+                    kind: ErrorKind::Model,
+                    code: ErrorCode::NotSimulatable,
+                    details: Some(format!(
+                        "LTM analysis does not currently support array variables. \
+                        Model '{}' contains array variable '{}'. \
+                        Please use a version of the model without arrays.",
+                        model_name.as_str(),
+                        var_name.as_str()
+                    )),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +372,40 @@ mod tests {
             ltm_var_count, 0,
             "Should not add LTM variables when no loops exist"
         );
+    }
+
+    #[test]
+    fn test_project_with_ltm_arrays_error() {
+        use crate::datamodel::{Aux, Variable as DatamodelVariable};
+        use crate::testutils::{sim_specs_with_units, x_model, x_project};
+
+        // Create a model with an array variable
+        let mut model = x_model("main", vec![]);
+
+        // Add an array variable manually
+        model.variables.push(DatamodelVariable::Aux(Aux {
+            ident: "array_var".to_string(),
+            equation: Equation::ApplyToAll(vec!["dimension1".to_string()], "10".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: datamodel::Visibility::Private,
+            ai_state: None,
+        }));
+
+        let sim_specs = sim_specs_with_units("years");
+        let project_datamodel = x_project(sim_specs, &[model]);
+        let project = Project::from(project_datamodel);
+
+        // Try to apply LTM instrumentation - should fail
+        let result = project.with_ltm();
+
+        assert!(result.is_err(), "Should error when arrays are present");
+
+        if let Err(e) = result {
+            assert!(e.details.as_ref().unwrap().contains("array variables"));
+            assert!(e.details.as_ref().unwrap().contains("array_var"));
+        }
     }
 }
