@@ -32,6 +32,7 @@ pub(crate) enum BuiltinId {
     Pulse,
     Ramp,
     SafeDiv,
+    Sign,
     Sin,
     Sqrt,
     Step,

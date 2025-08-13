@@ -74,6 +74,7 @@ pub enum BuiltinFn<Expr> {
     Pulse(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Ramp(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     SafeDiv(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    Sign(Box<Expr>),
     Sin(Box<Expr>),
     Sqrt(Box<Expr>),
     Step(Box<Expr>, Box<Expr>),
@@ -112,6 +113,7 @@ impl<Expr> BuiltinFn<Expr> {
             Pulse(_, _, _) => "pulse",
             Ramp(_, _, _) => "ramp",
             SafeDiv(_, _, _) => "safediv",
+            Sign(_) => "sign",
             Sin(_) => "sin",
             Sqrt(_) => "sqrt",
             Step(_, _) => "step",
@@ -158,6 +160,7 @@ pub fn is_builtin_fn(name: &str) -> bool {
         | "pulse"
         | "ramp"
         | "safediv"
+        | "sign"
         | "sin"
         | "sqrt"
         | "step"
@@ -200,6 +203,7 @@ where
         | BuiltinFn::Int(a)
         | BuiltinFn::Ln(a)
         | BuiltinFn::Log10(a)
+        | BuiltinFn::Sign(a)
         | BuiltinFn::Sin(a)
         | BuiltinFn::Sqrt(a)
         | BuiltinFn::Tan(a)

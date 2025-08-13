@@ -34,6 +34,7 @@ mod array_tests;
 mod builder;
 mod bytecode;
 pub mod interpreter;
+pub mod ltm;
 mod project;
 #[cfg(test)]
 mod test_common;

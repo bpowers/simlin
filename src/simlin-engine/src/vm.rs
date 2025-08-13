@@ -625,6 +625,15 @@ fn apply(func: BuiltinId, time: f64, dt: f64, a: f64, b: f64, c: f64) -> f64 {
                 c
             }
         }
+        BuiltinId::Sign => {
+            if a > 0.0 {
+                1.0
+            } else if a < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        }
         BuiltinId::Sin => a.sin(),
         BuiltinId::Sqrt => a.sqrt(),
         BuiltinId::Step => {

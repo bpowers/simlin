@@ -208,6 +208,7 @@ impl Expr {
                     BuiltinFn::Mean(args) => {
                         BuiltinFn::Mean(args.into_iter().map(|arg| arg.strip_loc()).collect())
                     }
+                    BuiltinFn::Sign(a) => BuiltinFn::Sign(Box::new(a.strip_loc())),
                     BuiltinFn::Sin(a) => BuiltinFn::Sin(Box::new(a.strip_loc())),
                     BuiltinFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(a.strip_loc())),
                     BuiltinFn::Tan(a) => BuiltinFn::Tan(Box::new(a.strip_loc())),
@@ -687,6 +688,7 @@ impl Context<'_> {
                         };
                         BuiltinFn::SafeDiv(Box::new(self.lower(a)?), Box::new(self.lower(b)?), c)
                     }
+                    BFn::Sign(a) => BuiltinFn::Sign(Box::new(self.lower(a)?)),
                     BFn::Sin(a) => BuiltinFn::Sin(Box::new(self.lower(a)?)),
                     BFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(self.lower(a)?)),
                     BFn::Step(a, b) => {
@@ -2515,6 +2517,7 @@ impl<'module> Compiler<'module> {
                     | BuiltinFn::Int(a)
                     | BuiltinFn::Ln(a)
                     | BuiltinFn::Log10(a)
+                    | BuiltinFn::Sign(a)
                     | BuiltinFn::Sin(a)
                     | BuiltinFn::Sqrt(a)
                     | BuiltinFn::Tan(a) => {
@@ -2616,6 +2619,7 @@ impl<'module> Compiler<'module> {
                     BuiltinFn::Pulse(_, _, _) => BuiltinId::Pulse,
                     BuiltinFn::Ramp(_, _, _) => BuiltinId::Ramp,
                     BuiltinFn::SafeDiv(_, _, _) => BuiltinId::SafeDiv,
+                    BuiltinFn::Sign(_) => BuiltinId::Sign,
                     BuiltinFn::Sin(_) => BuiltinId::Sin,
                     BuiltinFn::Sqrt(_) => BuiltinId::Sqrt,
                     BuiltinFn::Step(_, _) => BuiltinId::Step,
@@ -2900,6 +2904,7 @@ pub fn pretty(expr: &Expr) -> String {
                     .map(|expr| pretty(expr))
                     .unwrap_or_else(|| "<None>".to_string())
             ),
+            BuiltinFn::Sign(l) => format!("sign({})", pretty(l)),
             BuiltinFn::Sin(l) => format!("sin({})", pretty(l)),
             BuiltinFn::Sqrt(l) => format!("sqrt({})", pretty(l)),
             BuiltinFn::Step(a, b) => {

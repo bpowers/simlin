@@ -289,6 +289,16 @@ impl ModuleEvaluator<'_> {
                     }
                     BuiltinFn::Abs(a) => self.eval(a).abs(),
                     BuiltinFn::Cos(a) => self.eval(a).cos(),
+                    BuiltinFn::Sign(a) => {
+                        let v = self.eval(a);
+                        if v > 0.0 {
+                            1.0
+                        } else if v < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        }
+                    }
                     BuiltinFn::Sin(a) => self.eval(a).sin(),
                     BuiltinFn::Tan(a) => self.eval(a).tan(),
                     BuiltinFn::Arccos(a) => self.eval(a).acos(),

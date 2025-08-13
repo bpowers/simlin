@@ -324,4 +324,5 @@ enum BuiltinId {
     Sqrt = 18;
     Step = 19;
     Tan = 20;
+    Sign = 21;
 };

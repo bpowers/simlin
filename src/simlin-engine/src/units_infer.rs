@@ -127,6 +127,7 @@ impl UnitInferer<'_> {
                 | BuiltinFn::Int(a)
                 | BuiltinFn::Ln(a)
                 | BuiltinFn::Log10(a)
+                | BuiltinFn::Sign(a)
                 | BuiltinFn::Sin(a)
                 | BuiltinFn::Sqrt(a)
                 | BuiltinFn::Tan(a)

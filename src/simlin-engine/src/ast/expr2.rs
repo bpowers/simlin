@@ -368,6 +368,7 @@ impl Expr2 {
                         Box::new(Expr2::from(*e2, ctx)?),
                         e3.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
+                    Sign(e) => Sign(Box::new(Expr2::from(*e, ctx)?)),
                     Sin(e) => Sin(Box::new(Expr2::from(*e, ctx)?)),
                     Sqrt(e) => Sqrt(Box::new(Expr2::from(*e, ctx)?)),
                     Step(e1, e2) => Step(
