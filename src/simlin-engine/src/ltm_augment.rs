@@ -78,17 +78,65 @@ fn generate_link_score_variables(
             sanitize_for_var_name(link.to.as_str())
         );
 
-        // Get the equation of the 'to' variable
-        if let Some(to_var) = variables.get(&link.to) {
-            let equation = generate_link_score_equation(&link.from, &link.to, to_var, variables);
+        // Check if the link involves a module variable
+        let is_module_link = variables.get(&link.from).map_or(false, |v| v.is_module())
+            || variables.get(&link.to).map_or(false, |v| v.is_module());
 
-            // Create the synthetic variable
+        if is_module_link {
+            // Generate module-aware link score
+            let equation = generate_module_link_score_equation(&link.from, &link.to, variables);
+            let ltm_var = create_aux_variable(&var_name, &equation);
+            link_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
+        } else if let Some(to_var) = variables.get(&link.to) {
+            // Generate regular link score
+            let equation = generate_link_score_equation(&link.from, &link.to, to_var, variables);
             let ltm_var = create_aux_variable(&var_name, &equation);
             link_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
         }
     }
 
     link_vars
+}
+
+/// Generate link score equation for links involving modules
+fn generate_module_link_score_equation(
+    from: &Ident<Canonical>,
+    to: &Ident<Canonical>,
+    variables: &HashMap<Ident<Canonical>, Variable>,
+) -> String {
+    // Check if 'from' is a module
+    if let Some(Variable::Module { .. }) = variables.get(from) {
+        // Link from module output to regular variable
+        // For now, use a placeholder that references the module's internal link score
+        // In a full implementation, this would reference the exported link score
+        return format!(
+            "0 {{!! TODO: import link score from module {} !!}}",
+            from.as_str()
+        );
+    }
+
+    // Check if 'to' is a module
+    if let Some(Variable::Module { inputs, .. }) = variables.get(to) {
+        // Link from regular variable to module input
+        // Find which input this connects to
+        for input in inputs {
+            if input.src == *from {
+                // Generate a link score for this module input connection
+                return format!(
+                    "IF THEN ELSE(\
+                        ({} - PREVIOUS({})) = 0, \
+                        0, \
+                        1 {{!! simplified module input link score !!}}\
+                    )",
+                    from.as_str(),
+                    from.as_str()
+                );
+            }
+        }
+    }
+
+    // Default case - shouldn't normally reach here
+    "0".to_string()
 }
 
 /// Generate loop score variables for all loops
@@ -329,11 +377,17 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
         .links
         .iter()
         .map(|link| {
-            format!(
+            // Check if this is a module link that needs special handling
+            let link_name = format!(
                 "_ltm_link_{}_{}",
                 sanitize_for_var_name(link.from.as_str()),
                 sanitize_for_var_name(link.to.as_str())
-            )
+            );
+
+            // If the link crosses module boundaries, we might need to reference
+            // an imported/exported link score variable
+            // For now, use the standard naming
+            link_name
         })
         .collect();
 
@@ -725,6 +779,70 @@ mod tests {
         assert!(
             has_relative_scores,
             "Should have relative loop score variables when multiple loops exist"
+        );
+    }
+
+    #[test]
+    fn test_module_link_scores() {
+        // Test link score generation for module connections
+        use crate::datamodel::Equation;
+        use crate::ltm::{Link, LinkPolarity};
+        use crate::variable::ModuleInput;
+        use std::collections::{HashMap, HashSet};
+
+        let mut variables = HashMap::new();
+
+        // Create a module variable
+        let module_var = Variable::Module {
+            ident: crate::common::canonicalize("smoother"),
+            model_name: crate::common::canonicalize("smooth"),
+            units: None,
+            inputs: vec![ModuleInput {
+                src: crate::common::canonicalize("raw_input"),
+                dst: crate::common::canonicalize("input"),
+            }],
+            errors: vec![],
+            unit_errors: vec![],
+        };
+
+        variables.insert(crate::common::canonicalize("smoother"), module_var);
+
+        // Create an input variable
+        let input_var = Variable::Var {
+            ident: crate::common::canonicalize("raw_input"),
+            ast: None,
+            init_ast: None,
+            eqn: Some(Equation::Scalar("10 + SIN(TIME)".to_string(), None)),
+            units: None,
+            table: None,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+
+        variables.insert(crate::common::canonicalize("raw_input"), input_var);
+
+        // Create a link from raw_input to the module
+        let mut links = HashSet::new();
+        links.insert(Link {
+            from: crate::common::canonicalize("raw_input"),
+            to: crate::common::canonicalize("smoother"),
+            polarity: LinkPolarity::Positive,
+        });
+
+        // Generate link score variables
+        let link_vars = generate_link_score_variables(&links, &variables);
+
+        // Check that a link score variable was created
+        assert!(!link_vars.is_empty(), "Should generate module link score");
+
+        // Check the variable name
+        let expected_name = crate::common::canonicalize("_ltm_link_raw_input_smoother");
+        assert!(
+            link_vars.contains_key(&expected_name),
+            "Should have link score for module connection"
         );
     }
 
