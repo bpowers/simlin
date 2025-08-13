@@ -92,7 +92,7 @@ impl CausalGraph {
                 // Create edge from dependency to variable
                 edges
                     .entry(dep.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(var_name.clone());
             }
 
@@ -104,7 +104,7 @@ impl CausalGraph {
                 for flow in inflows.iter().chain(outflows.iter()) {
                     edges
                         .entry(flow.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(var_name.clone());
                 }
             }
@@ -138,9 +138,9 @@ impl CausalGraph {
 
                     loop_id += 1;
                     let id = if polarity == LoopPolarity::Reinforcing {
-                        format!("R{}", loop_id)
+                        format!("R{loop_id}")
                     } else {
-                        format!("B{}", loop_id)
+                        format!("B{loop_id}")
                     };
 
                     loops.push(Loop {

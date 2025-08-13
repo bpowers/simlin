@@ -26,6 +26,28 @@ impl Project {
     pub fn name(&self) -> &str {
         &self.datamodel.name
     }
+
+    /// Create a new project with LTM instrumentation
+    pub fn with_ltm(self) -> crate::common::Result<Self> {
+        // Generate the synthetic variables
+        let ltm_vars = crate::ltm_augment::generate_ltm_variables(&self)?;
+
+        // For now, we just return the original project
+        // In a full implementation, we would reconstruct the project with the new variables
+        // This requires rebuilding the datamodel and re-parsing
+
+        // TODO: Implement proper project reconstruction with LTM variables
+        eprintln!("Generated {} models with LTM variables", ltm_vars.len());
+        for (model_name, vars) in &ltm_vars {
+            eprintln!(
+                "  Model '{}': {} LTM variables",
+                model_name.as_str(),
+                vars.len()
+            );
+        }
+
+        Ok(self)
+    }
 }
 
 impl From<datamodel::Project> for Project {
