@@ -90,10 +90,7 @@ impl CausalGraph {
             let deps = get_variable_dependencies(var);
             for dep in deps {
                 // Create edge from dependency to variable
-                edges
-                    .entry(dep.clone())
-                    .or_default()
-                    .push(var_name.clone());
+                edges.entry(dep.clone()).or_default().push(var_name.clone());
             }
 
             // For stocks, also add edges from inflows and outflows

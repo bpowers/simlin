@@ -95,6 +95,7 @@ fn generate_link_score_variables(
 fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, Variable> {
     let mut loop_vars = HashMap::new();
 
+    // First, generate absolute loop scores
     for loop_item in loops {
         let var_name = format!("_ltm_loop_{}", loop_item.id);
 
@@ -104,6 +105,20 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, Va
         // Create the synthetic variable
         let ltm_var = create_aux_variable(&var_name, &equation);
         loop_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
+    }
+
+    // Then, generate relative loop scores if there are multiple loops
+    if loops.len() > 1 {
+        for loop_item in loops {
+            let var_name = format!("_ltm_rel_loop_{}", loop_item.id);
+
+            // Generate equation for relative loop score
+            let equation = generate_relative_loop_score_equation(&loop_item.id, loops);
+
+            // Create the synthetic variable
+            let ltm_var = create_aux_variable(&var_name, &equation);
+            loop_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
+        }
     }
 
     loop_vars
@@ -329,6 +344,35 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
     }
 }
 
+/// Generate the equation for a relative loop score variable
+fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
+    // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
+    let loop_score_var = format!("_ltm_loop_{}", loop_id);
+
+    // Build sum of absolute values of all loop scores
+    let all_loop_scores: Vec<String> = all_loops
+        .iter()
+        .map(|loop_item| format!("ABS(_ltm_loop_{})", loop_item.id))
+        .collect();
+
+    let sum_expr = if all_loop_scores.is_empty() {
+        "1".to_string() // Avoid division by zero
+    } else {
+        all_loop_scores.join(" + ")
+    };
+
+    // Relative score formula with protection against division by zero
+    format!(
+        "IF THEN ELSE(\
+            ({sum}) = 0, \
+            0, \
+            ABS({loop_score}) / ({sum})\
+        )",
+        loop_score = loop_score_var,
+        sum = sum_expr
+    )
+}
+
 /// Create an auxiliary variable with the given equation
 fn create_aux_variable(name: &str, equation: &str) -> Variable {
     // For now, create a simplified Variable directly
@@ -400,6 +444,35 @@ mod tests {
 
         let equation = generate_loop_score_equation(&loop_item);
         assert_eq!(equation, "_ltm_link_x_y * _ltm_link_y_x");
+    }
+
+    #[test]
+    fn test_generate_relative_loop_score_equation() {
+        use crate::ltm::LoopPolarity;
+
+        let loops = vec![
+            Loop {
+                id: "R1".to_string(),
+                links: vec![],
+                stocks: vec![],
+                polarity: LoopPolarity::Reinforcing,
+            },
+            Loop {
+                id: "B1".to_string(),
+                links: vec![],
+                stocks: vec![],
+                polarity: LoopPolarity::Balancing,
+            },
+        ];
+
+        let equation = generate_relative_loop_score_equation("R1", &loops);
+
+        // Should contain IF THEN ELSE for division by zero protection
+        assert!(equation.contains("IF THEN ELSE"));
+        // Should reference the specific loop score
+        assert!(equation.contains("_ltm_loop_R1"));
+        // Should have sum of all loop scores in denominator
+        assert!(equation.contains("ABS(_ltm_loop_R1) + ABS(_ltm_loop_B1)"));
     }
 
     #[test]
@@ -610,6 +683,51 @@ mod tests {
         assert!(equation.contains("PREVIOUS(PREVIOUS("));
         // Should have negative sign for outflow
         assert!(equation.contains("-((outflow_rate"));
+    }
+
+    #[test]
+    fn test_relative_loop_scores_generation() {
+        // Create a model with multiple loops
+        use crate::project::Project;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
+
+        let model = x_model(
+            "main",
+            vec![
+                // First loop: population -> births -> population (R)
+                x_stock("population", "100", &["births"], &["deaths"], None),
+                x_flow("births", "population * birth_rate", None),
+                x_aux("birth_rate", "0.02", None),
+                // Second loop: population -> deaths -> population (B)
+                x_flow("deaths", "population * death_rate", None),
+                x_aux("death_rate", "0.01", None),
+                // Additional variable to create a third loop
+                x_aux("growth_factor", "1 + (population - 100) / 100", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+
+        // Generate LTM variables
+        let ltm_vars = generate_ltm_variables(&project).unwrap();
+
+        let main_ident = crate::common::canonicalize("main");
+        assert!(ltm_vars.contains_key(&main_ident));
+
+        let vars = &ltm_vars[&main_ident];
+
+        // Check for relative loop score variables (only generated when multiple loops exist)
+        let has_relative_scores = vars
+            .iter()
+            .any(|(name, _)| name.as_str().starts_with("_ltm_rel_loop_"));
+
+        // We expect relative scores since we have multiple loops
+        assert!(
+            has_relative_scores,
+            "Should have relative loop score variables when multiple loops exist"
+        );
     }
 
     #[test]
