@@ -462,11 +462,38 @@ fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> S
 
 /// Create an auxiliary variable with the given equation
 fn create_aux_variable(name: &str, equation: &str) -> Variable {
-    // For now, create a simplified Variable directly
-    // In a full implementation, this would properly parse the equation
+    use crate::ast::{Ast, Expr0, lower_ast};
+    use crate::model::ScopeStage0;
+    use crate::token::LexerType;
+
+    // Parse the equation to create the AST
+    let (ast_expr0, mut parse_errors) = match Expr0::new(equation, LexerType::Equation) {
+        Ok(expr) => (expr, vec![]),
+        Err(errors) => (None, errors),
+    };
+
+    // Convert Expr0 to Expr2 if we successfully parsed
+    let ast = if let Some(expr0) = ast_expr0 {
+        // Create a minimal scope for LTM variables (they don't need model/dimension lookups)
+        let scope = ScopeStage0 {
+            models: &Default::default(),
+            dimensions: &Default::default(),
+            model_name: "main",
+        };
+        match lower_ast(&scope, Ast::Scalar(expr0)) {
+            Ok(ast2) => Some(ast2),
+            Err(err) => {
+                parse_errors.push(err);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Variable::Var {
         ident: crate::common::canonicalize(name),
-        ast: None, // Would be parsed from equation
+        ast,
         init_ast: None,
         eqn: Some(Equation::Scalar(equation.to_string(), None)),
         units: None,
@@ -474,7 +501,7 @@ fn create_aux_variable(name: &str, equation: &str) -> Variable {
         non_negative: false,
         is_flow: false,
         is_table_only: false,
-        errors: vec![],
+        errors: parse_errors,
         unit_errors: vec![],
     }
 }
