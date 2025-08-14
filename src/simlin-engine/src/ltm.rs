@@ -105,7 +105,6 @@ impl CausalGraph {
         let mut stocks = HashSet::new();
         let mut variables = HashMap::new();
         let mut module_graphs = HashMap::new();
-        let mut _module_models = HashMap::new();
 
         // Build edges from variable dependencies
         for (var_name, var) in &model.variables {
@@ -122,9 +121,6 @@ impl CausalGraph {
                 model_name, inputs, ..
             } = var
             {
-                // Store module model mapping
-                _module_models.insert(var_name.clone(), model_name.clone());
-
                 // Build internal graph for this module instance if we have the model
                 if let Some(module_model) = project.models.get(model_name) {
                     if !module_model.implicit {
@@ -142,13 +138,6 @@ impl CausalGraph {
                         .push(var_name.clone());
                 }
             } else {
-                // Get dependencies and create edges for non-module variables
-                let deps = get_variable_dependencies(var);
-                for dep in deps {
-                    // Create edge from dependency to variable
-                    edges.entry(dep.clone()).or_default().push(var_name.clone());
-                }
-
                 // For stocks, also add edges from inflows and outflows
                 if let Variable::Stock {
                     inflows, outflows, ..
@@ -159,6 +148,15 @@ impl CausalGraph {
                             .entry(flow.clone())
                             .or_default()
                             .push(var_name.clone());
+                    }
+                } else {
+                    // Get dependencies and create edges for flows + auxes.  We don't want to
+                    // do this for stocks because get_variable_dependencies() only looks at the
+                    // equation for the stock's initial value
+                    let deps = get_variable_dependencies(var);
+                    for dep in deps {
+                        // Create edge from dependency to variable
+                        edges.entry(dep.clone()).or_default().push(var_name.clone());
                     }
                 }
             }
