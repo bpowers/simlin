@@ -624,153 +624,106 @@ mod tests {
 
     #[test]
     fn test_link_score_equation_generation() {
-        use crate::datamodel::Equation;
-        use std::collections::HashMap;
+        // Create a test project with dependent variables
+        let project = TestProject::new("test_link_score")
+            .aux("x", "10", None)
+            .aux("z", "5", None)
+            .aux("y", "x * 2 + z", None)
+            .compile()
+            .expect("Project should compile");
 
-        // Create a simple set of variables for testing
-        let mut variables = HashMap::new();
-
-        // y = x * 2 + z
-        let y_var = Variable::Var {
-            ident: crate::common::canonicalize("y"),
-            ast: None, // Would normally have AST
-            init_ast: None,
-            eqn: Some(Equation::Scalar("x * 2 + z".to_string(), None)),
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: false,
-            is_table_only: false,
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        variables.insert(crate::common::canonicalize("y"), y_var.clone());
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
 
         let from = crate::common::canonicalize("x");
         let to = crate::common::canonicalize("y");
+        let y_var = all_vars.get(&to).expect("Y variable should exist");
 
-        let equation = generate_link_score_equation(&from, &to, &y_var, &variables);
+        let equation = generate_link_score_equation(&from, &to, y_var, all_vars);
 
-        // The equation should contain IF THEN ELSE logic
-        assert!(equation.contains("IF THEN ELSE"));
-        // Should reference both x and y
-        assert!(equation.contains("y"));
-        assert!(equation.contains("x"));
-        // Should use PREVIOUS for time-based calculations
-        assert!(equation.contains("PREVIOUS"));
-        // Should use SIGN for polarity
-        assert!(equation.contains("SIGN"));
+        // Verify the EXACT equation structure
+        let expected = "IF THEN ELSE(\
+            ((y - PREVIOUS(y)) = 0) :OR: ((x - PREVIOUS(x)) = 0), \
+            0, \
+            ABS(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (y - PREVIOUS(y)), 0)) * \
+            SIGN(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (x - PREVIOUS(x)), 0))\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Link score equation must match exact format"
+        );
     }
 
     #[test]
     fn test_flow_to_stock_link_score() {
-        use crate::datamodel::Equation;
-        use std::collections::HashMap;
+        // Create a test project with stock and inflow
+        let project = TestProject::new("test_flow_to_stock")
+            .stock("water_in_tank", "100", &["inflow_rate"], &[], None)
+            .flow("inflow_rate", "10", None)
+            .compile()
+            .expect("Project should compile");
 
-        // Create a stock with an inflow
-        let stock_var = Variable::Stock {
-            ident: crate::common::canonicalize("water_in_tank"),
-            init_ast: None,
-            eqn: Some(Equation::Scalar("100".to_string(), None)),
-            units: None,
-            inflows: vec![crate::common::canonicalize("inflow_rate")],
-            outflows: vec![],
-            non_negative: false,
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        // Create an inflow variable
-        let flow_var = Variable::Var {
-            ident: crate::common::canonicalize("inflow_rate"),
-            ast: None,
-            init_ast: None,
-            eqn: Some(Equation::Scalar("10".to_string(), None)),
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: true, // Mark as flow
-            is_table_only: false,
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        let mut variables = HashMap::new();
-        variables.insert(
-            crate::common::canonicalize("water_in_tank"),
-            stock_var.clone(),
-        );
-        variables.insert(crate::common::canonicalize("inflow_rate"), flow_var);
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
 
         let from = crate::common::canonicalize("inflow_rate");
         let to = crate::common::canonicalize("water_in_tank");
+        let stock_var = all_vars.get(&to).expect("Stock variable should exist");
 
-        let equation = generate_link_score_equation(&from, &to, &stock_var, &variables);
+        let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
-        // Should use flow-to-stock formula with SAFEDIV
-        assert!(equation.contains("SAFEDIV"));
-        assert!(equation.contains("water_in_tank"));
-        assert!(equation.contains("inflow_rate"));
-        // Flow-to-stock uses second-order change (PREVIOUS(PREVIOUS()))
-        assert!(equation.contains("PREVIOUS(PREVIOUS("));
-        // Should not have negative sign for inflow
-        assert!(!equation.contains("-((inflow_rate"));
+        // Verify the EXACT equation structure for flow-to-stock
+        let expected = "SAFEDIV(\
+            (inflow_rate - PREVIOUS(inflow_rate)), \
+            ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
+            0\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Flow-to-stock equation must match exact format with second-order difference"
+        );
     }
 
     #[test]
     fn test_outflow_to_stock_link_score() {
-        use crate::datamodel::Equation;
-        use std::collections::HashMap;
+        // Create a test project with stock and outflow
+        let project = TestProject::new("test_outflow_to_stock")
+            .stock("water_in_tank", "100", &[], &["outflow_rate"], None)
+            .flow("outflow_rate", "5", None)
+            .compile()
+            .expect("Project should compile");
 
-        // Create a stock with an outflow
-        let stock_var = Variable::Stock {
-            ident: crate::common::canonicalize("water_in_tank"),
-            init_ast: None,
-            eqn: Some(Equation::Scalar("100".to_string(), None)),
-            units: None,
-            inflows: vec![],
-            outflows: vec![crate::common::canonicalize("outflow_rate")],
-            non_negative: false,
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        // Create an outflow variable
-        let flow_var = Variable::Var {
-            ident: crate::common::canonicalize("outflow_rate"),
-            ast: None,
-            init_ast: None,
-            eqn: Some(Equation::Scalar("5".to_string(), None)),
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: true, // Mark as flow
-            is_table_only: false,
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        let mut variables = HashMap::new();
-        variables.insert(
-            crate::common::canonicalize("water_in_tank"),
-            stock_var.clone(),
-        );
-        variables.insert(crate::common::canonicalize("outflow_rate"), flow_var);
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
 
         let from = crate::common::canonicalize("outflow_rate");
         let to = crate::common::canonicalize("water_in_tank");
+        let stock_var = all_vars.get(&to).expect("Stock variable should exist");
 
-        let equation = generate_link_score_equation(&from, &to, &stock_var, &variables);
+        let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
-        // Should use flow-to-stock formula with SAFEDIV
-        assert!(equation.contains("SAFEDIV"));
-        assert!(equation.contains("water_in_tank"));
-        assert!(equation.contains("outflow_rate"));
-        // Flow-to-stock uses second-order change
-        assert!(equation.contains("PREVIOUS(PREVIOUS("));
-        // Should have negative sign for outflow (check the actual format)
-        assert!(equation.contains("-(outflow_rate") || equation.contains("-((outflow_rate"));
+        // Verify the EXACT equation structure for outflow-to-stock (negative sign)
+        let expected = "SAFEDIV(\
+            -(outflow_rate - PREVIOUS(outflow_rate)), \
+            ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
+            0\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Outflow-to-stock equation must have negative sign and second-order difference"
+        );
     }
 
     #[test]
@@ -923,12 +876,22 @@ mod tests {
 
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
-        // Should contain the black box transfer score formula
-        assert!(equation.contains("IF THEN ELSE"));
-        assert!(equation.contains("smoother"));
-        assert!(equation.contains("processed"));
-        assert!(equation.contains("PREVIOUS"));
-        assert!(equation.contains("SIGN"));
+        // Verify the EXACT equation structure for module-to-variable link
+        let expected = "IF THEN ELSE(\
+            ((processed - PREVIOUS(processed)) = 0) :OR: ((smoother - PREVIOUS(smoother)) = 0), \
+            0, \
+            ABS(((processed - PREVIOUS(processed))) / (processed - PREVIOUS(processed))) * \
+            IF THEN ELSE(\
+                (smoother - PREVIOUS(smoother)) = 0, \
+                0, \
+                SIGN(((processed - PREVIOUS(processed))) / (smoother - PREVIOUS(smoother)))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Module-to-variable link score equation must match exact format"
+        );
     }
 
     #[test]
@@ -976,12 +939,22 @@ mod tests {
 
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
-        // Should contain the black box transfer score formula
-        assert!(equation.contains("IF THEN ELSE"));
-        assert!(equation.contains("processor"));
-        assert!(equation.contains("raw_data"));
-        assert!(equation.contains("PREVIOUS"));
-        assert!(equation.contains("SIGN"));
+        // Verify the EXACT equation structure for variable-to-module link
+        let expected = "IF THEN ELSE(\
+            ((processor - PREVIOUS(processor)) = 0) :OR: ((raw_data - PREVIOUS(raw_data)) = 0), \
+            0, \
+            ABS(((processor - PREVIOUS(processor))) / (processor - PREVIOUS(processor))) * \
+            IF THEN ELSE(\
+                (raw_data - PREVIOUS(raw_data)) = 0, \
+                0, \
+                SIGN(((processor - PREVIOUS(processor))) / (raw_data - PREVIOUS(raw_data)))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Variable-to-module link score equation must match exact format"
+        );
     }
 
     #[test]
@@ -1023,12 +996,22 @@ mod tests {
 
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
-        // Should contain the black box transfer score formula for module chain
-        assert!(equation.contains("IF THEN ELSE"));
-        assert!(equation.contains("filter_a"));
-        assert!(equation.contains("filter_b"));
-        assert!(equation.contains("PREVIOUS"));
-        assert!(equation.contains("SIGN"));
+        // Verify the EXACT equation structure for module-to-module link
+        let expected = "IF THEN ELSE(\
+            ((filter_b - PREVIOUS(filter_b)) = 0) :OR: ((filter_a - PREVIOUS(filter_a)) = 0), \
+            0, \
+            ABS(((filter_b - PREVIOUS(filter_b))) / (filter_b - PREVIOUS(filter_b))) * \
+            IF THEN ELSE(\
+                (filter_a - PREVIOUS(filter_a)) = 0, \
+                0, \
+                SIGN(((filter_b - PREVIOUS(filter_b))) / (filter_a - PREVIOUS(filter_a)))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Module-to-module link score equation must match exact format"
+        );
     }
 
     #[test]
@@ -1155,56 +1138,40 @@ mod tests {
 
     #[test]
     fn test_stock_to_flow_link_score() {
-        use crate::datamodel::Equation;
-        use std::collections::HashMap;
+        // Create a test project with stock and dependent flow
+        let project = TestProject::new("test_stock_to_flow")
+            .stock("population", "1000", &[], &["deaths"], None)
+            .flow("deaths", "population * death_rate", None)
+            .aux("death_rate", "0.01", None)
+            .compile()
+            .expect("Project should compile");
 
-        // Create a stock
-        let stock_var = Variable::Stock {
-            ident: crate::common::canonicalize("population"),
-            init_ast: None,
-            eqn: Some(Equation::Scalar("1000".to_string(), None)),
-            units: None,
-            inflows: vec![],
-            outflows: vec![crate::common::canonicalize("deaths")],
-            non_negative: false,
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        // Create a flow that depends on the stock (deaths = population * death_rate)
-        let flow_var = Variable::Var {
-            ident: crate::common::canonicalize("deaths"),
-            ast: None,
-            init_ast: None,
-            eqn: Some(Equation::Scalar(
-                "population * death_rate".to_string(),
-                None,
-            )),
-            units: None,
-            table: None,
-            non_negative: false,
-            is_flow: true,
-            is_table_only: false,
-            errors: vec![],
-            unit_errors: vec![],
-        };
-
-        let mut variables = HashMap::new();
-        variables.insert(crate::common::canonicalize("population"), stock_var.clone());
-        variables.insert(crate::common::canonicalize("deaths"), flow_var.clone());
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
 
         let from = crate::common::canonicalize("population");
         let to = crate::common::canonicalize("deaths");
+        let flow_var = all_vars.get(&to).expect("Flow variable should exist");
 
-        let equation = generate_link_score_equation(&from, &to, &flow_var, &variables);
+        let equation = generate_link_score_equation(&from, &to, flow_var, all_vars);
 
-        // Should use stock-to-flow formula
-        assert!(equation.contains("IF THEN ELSE"));
-        assert!(equation.contains("population"));
-        assert!(equation.contains("deaths"));
-        assert!(equation.contains("PREVIOUS"));
-        // Check for SIGN function for polarity
-        assert!(equation.contains("SIGN"));
+        // Verify the EXACT equation structure for stock-to-flow
+        let expected = "IF THEN ELSE(\
+            ((deaths - PREVIOUS(deaths)) = 0) :OR: \
+            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0), \
+            0, \
+            ABS(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), (deaths - PREVIOUS(deaths)), 0)) * \
+            SIGN(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), \
+                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Stock-to-flow equation must match exact format with second-order difference"
+        );
     }
 
     #[test]
