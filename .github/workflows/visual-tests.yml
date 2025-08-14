@@ -9,6 +9,10 @@ on:
 jobs:
   visual-tests:
     runs-on: ubuntu-latest
+
+    env:
+      RUSTFLAGS: -D warnings
+      RUST_BACKTRACE: 1
     
     steps:
       - name: Checkout code
@@ -19,11 +23,9 @@ jobs:
         with:
           node-version: '18'
           cache: 'yarn'
-      
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
+
+      - name: Install Rust toolchain
+        run: rustup show
       
       - name: Cache Rust dependencies
         uses: actions/cache@v3
@@ -38,20 +40,14 @@ jobs:
       
       - name: Install wasm-bindgen-cli
         run: |
-          cargo install wasm-bindgen-cli --version 0.2.92 || true
+          cargo install wasm-bindgen-cli
       
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
-      
-      - name: Build WASM modules
+      - name: Install dependencies and build project
         run: |
-          cd src/engine && ./build.sh && cd ../..
-          cd src/importer && ./build.sh && cd ../..
-          cd src/xmutil && cargo build --release --target wasm32-unknown-unknown && cd ../..
-      
-      - name: Build application
-        run: yarn build
-      
+          rustup target add wasm32-unknown-unknown
+          yarn install --frozen-lockfile
+          DISABLE_WASM_OPT=1 yarn build
+
       - name: Install Playwright browsers
         run: npx playwright install chromium
       
