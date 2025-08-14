@@ -628,6 +628,7 @@ pub fn detect_loops(project: &Project) -> Result<HashMap<Ident<Canonical>, Vec<L
 mod tests {
     use super::*;
     use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn test_simple_reinforcing_loop() {
@@ -925,6 +926,515 @@ mod tests {
         let polarity = analyze_link_polarity(&ast, &x_var);
         assert_eq!(polarity, LinkPolarity::Negative);
     }
+
+    #[test]
+    fn test_format_path_empty_loop() {
+        // Test format_path() with empty links (covers line 44)
+        let loop_item = Loop {
+            id: "R1".to_string(),
+            links: vec![],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+        };
+
+        let path = loop_item.format_path();
+        assert_eq!(path, "", "Empty loop should return empty string");
+        assert!(path.is_empty(), "Path must be empty for loop with no links");
+    }
+
+    #[test]
+    fn test_get_variable_dependencies_module() {
+        // Test get_variable_dependencies for Module type (covers lines 70-72)
+        use crate::variable::ModuleInput;
+
+        let input_var = crate::common::canonicalize("input_signal");
+        let module = Variable::Module {
+            ident: crate::common::canonicalize("processor"),
+            model_name: crate::common::canonicalize("process_model"),
+            units: None,
+            inputs: vec![
+                ModuleInput {
+                    src: input_var.clone(),
+                    dst: crate::common::canonicalize("input"),
+                },
+                ModuleInput {
+                    src: crate::common::canonicalize("control"),
+                    dst: crate::common::canonicalize("param"),
+                },
+            ],
+            errors: vec![],
+            unit_errors: vec![],
+        };
+
+        let deps = get_variable_dependencies(&module);
+        assert_eq!(deps.len(), 2, "Module should have 2 dependencies");
+        assert!(deps.contains(&input_var), "Should contain input_signal");
+        assert!(
+            deps.contains(&crate::common::canonicalize("control")),
+            "Should contain control"
+        );
+    }
+
+    #[test]
+    fn test_get_variable_dependencies_no_ast() {
+        // Test get_variable_dependencies when AST is None (covers line 83)
+        let var = Variable::Var {
+            ident: crate::common::canonicalize("empty_var"),
+            ast: None,
+            init_ast: None,
+            eqn: None,
+            units: None,
+            table: None,
+            non_negative: false,
+            is_flow: false,
+            is_table_only: false,
+            errors: vec![],
+            unit_errors: vec![],
+        };
+
+        let deps = get_variable_dependencies(&var);
+        assert_eq!(
+            deps.len(),
+            0,
+            "Variable with no AST should have no dependencies"
+        );
+        assert!(
+            deps.is_empty(),
+            "Dependencies must be empty for variable without AST"
+        );
+    }
+
+    #[test]
+    fn test_causal_graph_get_loop_key() {
+        // Test the get_loop_key function (covers lines 428-436)
+        let graph = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+            _module_models: HashMap::new(),
+        };
+
+        let loop_item = Loop {
+            id: "R1".to_string(),
+            links: vec![
+                Link {
+                    from: crate::common::canonicalize("z"),
+                    to: crate::common::canonicalize("x"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: crate::common::canonicalize("x"),
+                    to: crate::common::canonicalize("y"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: crate::common::canonicalize("y"),
+                    to: crate::common::canonicalize("z"),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+        };
+
+        let key = graph.get_loop_key(&loop_item);
+        // Key should have sorted, deduplicated variables
+        assert_eq!(
+            key, "x,y,z",
+            "Loop key should be sorted, deduplicated variables"
+        );
+
+        // Test with duplicate variables (shouldn't happen but tests dedup)
+        let loop_with_dups = Loop {
+            id: "R2".to_string(),
+            links: vec![
+                Link {
+                    from: crate::common::canonicalize("a"),
+                    to: crate::common::canonicalize("b"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: crate::common::canonicalize("b"),
+                    to: crate::common::canonicalize("a"),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+        };
+
+        let key2 = graph.get_loop_key(&loop_with_dups);
+        assert_eq!(key2, "a,b", "Should deduplicate variables");
+    }
+
+    #[test]
+    fn test_causal_graph_is_connected_through_parent() {
+        // Test is_connected_through_parent function (covers lines 412-424)
+        let mut graph = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+            _module_models: HashMap::new(),
+        };
+
+        let module_var = crate::common::canonicalize("smoother");
+        let output_var = crate::common::canonicalize("smoothed_output");
+        let unconnected_var = crate::common::canonicalize("unrelated");
+
+        // Add edge from module to output
+        graph
+            .edges
+            .entry(module_var.clone())
+            .or_insert_with(Vec::new)
+            .push(output_var.clone());
+
+        // Test connected case
+        assert!(
+            graph.is_connected_through_parent(&module_var, &output_var),
+            "Module should be connected to output"
+        );
+
+        // Test unconnected case
+        assert!(
+            !graph.is_connected_through_parent(&module_var, &unconnected_var),
+            "Module should not be connected to unrelated variable"
+        );
+
+        // Test non-existent module
+        let non_existent = crate::common::canonicalize("non_existent");
+        assert!(
+            !graph.is_connected_through_parent(&non_existent, &output_var),
+            "Non-existent module should not be connected"
+        );
+    }
+
+    #[test]
+    fn test_flip_polarity() {
+        // Test flip_polarity function (covers lines 1049-1054)
+        assert_eq!(
+            flip_polarity(LinkPolarity::Positive),
+            LinkPolarity::Negative
+        );
+        assert_eq!(
+            flip_polarity(LinkPolarity::Negative),
+            LinkPolarity::Positive
+        );
+        assert_eq!(flip_polarity(LinkPolarity::Unknown), LinkPolarity::Unknown);
+    }
+
+    #[test]
+    fn test_is_positive_constant() {
+        // Test is_positive_constant function (covers lines 1058-1062)
+        use crate::ast::{Expr2, Loc};
+
+        let pos_const = Expr2::Const("5".to_string(), 5.0, Loc::default());
+        assert!(is_positive_constant(&pos_const), "5.0 should be positive");
+
+        let neg_const = Expr2::Const("-5".to_string(), -5.0, Loc::default());
+        assert!(
+            !is_positive_constant(&neg_const),
+            "-5.0 should not be positive"
+        );
+
+        let zero_const = Expr2::Const("0".to_string(), 0.0, Loc::default());
+        assert!(
+            !is_positive_constant(&zero_const),
+            "0.0 should not be positive"
+        );
+
+        let var_expr = Expr2::Var(crate::common::canonicalize("x"), None, Loc::default());
+        assert!(
+            !is_positive_constant(&var_expr),
+            "Variable should not be positive constant"
+        );
+    }
+
+    #[test]
+    fn test_is_negative_constant() {
+        // Test is_negative_constant function (covers lines 1066-1070)
+        use crate::ast::{Expr2, Loc};
+
+        let neg_const = Expr2::Const("-3".to_string(), -3.0, Loc::default());
+        assert!(is_negative_constant(&neg_const), "-3.0 should be negative");
+
+        let pos_const = Expr2::Const("3".to_string(), 3.0, Loc::default());
+        assert!(
+            !is_negative_constant(&pos_const),
+            "3.0 should not be negative"
+        );
+
+        let zero_const = Expr2::Const("0".to_string(), 0.0, Loc::default());
+        assert!(
+            !is_negative_constant(&zero_const),
+            "0.0 should not be negative"
+        );
+
+        let var_expr = Expr2::Var(crate::common::canonicalize("y"), None, Loc::default());
+        assert!(
+            !is_negative_constant(&var_expr),
+            "Variable should not be negative constant"
+        );
+    }
+
+    #[test]
+    fn test_analyze_link_polarity_arrayed() {
+        // Test analyze_link_polarity with Arrayed AST (covers lines 935-947)
+        use crate::ast::{Ast, Expr2, Loc};
+        use crate::common::CanonicalElementName;
+        use std::collections::HashMap;
+
+        let x_var = crate::common::canonicalize("x");
+
+        // Create arrayed AST with consistent positive polarity
+        let mut elements = HashMap::new();
+        elements.insert(
+            CanonicalElementName::from_raw("dim1"),
+            Expr2::Op2(
+                BinaryOp::Mul,
+                Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+                Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
+                None,
+                Loc::default(),
+            ),
+        );
+        elements.insert(
+            CanonicalElementName::from_raw("dim2"),
+            Expr2::Op2(
+                BinaryOp::Add,
+                Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+                Box::new(Expr2::Const("10".to_string(), 10.0, Loc::default())),
+                None,
+                Loc::default(),
+            ),
+        );
+
+        let ast = Ast::Arrayed(vec![], elements);
+        let polarity = analyze_link_polarity(&ast, &x_var);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Consistent positive elements should be positive"
+        );
+
+        // Test with mixed polarities
+        let mut mixed_elements = HashMap::new();
+        mixed_elements.insert(
+            CanonicalElementName::from_raw("dim1"),
+            Expr2::Var(x_var.clone(), None, Loc::default()),
+        );
+        mixed_elements.insert(
+            CanonicalElementName::from_raw("dim2"),
+            Expr2::Op1(
+                crate::ast::UnaryOp::Negative,
+                Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+                None,
+                Loc::default(),
+            ),
+        );
+
+        let mixed_ast = Ast::Arrayed(vec![], mixed_elements);
+        let mixed_polarity = analyze_link_polarity(&mixed_ast, &x_var);
+        assert_eq!(
+            mixed_polarity,
+            LinkPolarity::Unknown,
+            "Mixed polarities should be Unknown"
+        );
+    }
+
+    #[test]
+    fn test_analyze_expr_polarity_if_then_else() {
+        // Test analyze_expr_polarity with If-Then-Else (covers lines 1033-1042)
+        use crate::ast::{Expr2, Loc};
+
+        let x_var = crate::common::canonicalize("x");
+
+        // If with same polarity in both branches
+        let if_expr = Expr2::If(
+            Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+            Box::new(Expr2::Op2(
+                BinaryOp::Mul,
+                Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+                Box::new(Expr2::Const("2".to_string(), 2.0, Loc::default())),
+                None,
+                Loc::default(),
+            )),
+            None,
+            Loc::default(),
+        );
+
+        let polarity = analyze_expr_polarity(&if_expr, &x_var, LinkPolarity::Positive);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Same polarity branches should return that polarity"
+        );
+
+        // If with different polarities in branches
+        let mixed_if = Expr2::If(
+            Box::new(Expr2::Const("1".to_string(), 1.0, Loc::default())),
+            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+            Box::new(Expr2::Op1(
+                crate::ast::UnaryOp::Negative,
+                Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+                None,
+                Loc::default(),
+            )),
+            None,
+            Loc::default(),
+        );
+
+        let mixed_polarity = analyze_expr_polarity(&mixed_if, &x_var, LinkPolarity::Positive);
+        assert_eq!(
+            mixed_polarity,
+            LinkPolarity::Unknown,
+            "Different polarity branches should be Unknown"
+        );
+    }
+
+    #[test]
+    fn test_analyze_expr_polarity_unary_not() {
+        // Test analyze_expr_polarity with unary NOT operator (covers lines 1026-1031)
+        use crate::ast::{Expr2, Loc, UnaryOp};
+
+        let x_var = crate::common::canonicalize("x");
+
+        let not_expr = Expr2::Op1(
+            UnaryOp::Not,
+            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+            None,
+            Loc::default(),
+        );
+
+        let polarity = analyze_expr_polarity(&not_expr, &x_var, LinkPolarity::Positive);
+        assert_eq!(
+            polarity,
+            LinkPolarity::Negative,
+            "NOT should flip polarity from positive to negative"
+        );
+    }
+
+    #[test]
+    fn test_check_loop_crosses_boundary() {
+        // Test check_loop_crosses_boundary (covers lines 440-450)
+        use crate::variable::ModuleInput;
+
+        let mut graph = CausalGraph {
+            edges: HashMap::new(),
+            stocks: HashSet::new(),
+            variables: HashMap::new(),
+            module_graphs: HashMap::new(),
+            _module_models: HashMap::new(),
+        };
+
+        // Create a module with inputs
+        let input_dst = crate::common::canonicalize("input");
+        let module_var = Variable::Module {
+            ident: crate::common::canonicalize("processor"),
+            model_name: crate::common::canonicalize("process_model"),
+            units: None,
+            inputs: vec![ModuleInput {
+                src: crate::common::canonicalize("external_input"),
+                dst: input_dst.clone(),
+            }],
+            errors: vec![],
+            unit_errors: vec![],
+        };
+
+        let module_ident = crate::common::canonicalize("processor");
+        graph.variables.insert(module_ident.clone(), module_var);
+
+        // Create a loop that includes the module input
+        let loop_crossing = Loop {
+            id: "R1".to_string(),
+            links: vec![
+                Link {
+                    from: input_dst.clone(),
+                    to: crate::common::canonicalize("internal_var"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: crate::common::canonicalize("internal_var"),
+                    to: input_dst.clone(),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+        };
+
+        assert!(
+            graph.check_loop_crosses_boundary(&loop_crossing, &module_ident),
+            "Loop with module input should cross boundary"
+        );
+
+        // Create a loop that doesn't cross boundary
+        let loop_internal = Loop {
+            id: "R2".to_string(),
+            links: vec![
+                Link {
+                    from: crate::common::canonicalize("var1"),
+                    to: crate::common::canonicalize("var2"),
+                    polarity: LinkPolarity::Positive,
+                },
+                Link {
+                    from: crate::common::canonicalize("var2"),
+                    to: crate::common::canonicalize("var1"),
+                    polarity: LinkPolarity::Positive,
+                },
+            ],
+            stocks: vec![],
+            polarity: LoopPolarity::Reinforcing,
+        };
+
+        assert!(
+            !graph.check_loop_crosses_boundary(&loop_internal, &module_ident),
+            "Loop without module input should not cross boundary"
+        );
+    }
+
+    #[test]
+    fn test_analyze_expr_polarity_division_edge_cases() {
+        // Test division polarity analysis edge cases (covers lines 1013-1022)
+        use crate::ast::{Expr2, Loc};
+
+        let x_var = crate::common::canonicalize("x");
+        let y_var = crate::common::canonicalize("y");
+
+        // Division with variable in numerator
+        let div_num = Expr2::Op2(
+            BinaryOp::Div,
+            Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
+            Box::new(Expr2::Const("10".to_string(), 10.0, Loc::default())),
+            None,
+            Loc::default(),
+        );
+
+        let pol_num = analyze_expr_polarity(&div_num, &x_var, LinkPolarity::Positive);
+        assert_eq!(
+            pol_num,
+            LinkPolarity::Positive,
+            "Variable in numerator should keep polarity"
+        );
+
+        // Division with different variable in denominator (not the one we're tracking)
+        let div_other = Expr2::Op2(
+            BinaryOp::Div,
+            Box::new(Expr2::Const("100".to_string(), 100.0, Loc::default())),
+            Box::new(Expr2::Var(y_var.clone(), None, Loc::default())),
+            None,
+            Loc::default(),
+        );
+
+        let pol_other = analyze_expr_polarity(&div_other, &x_var, LinkPolarity::Positive);
+        assert_eq!(
+            pol_other,
+            LinkPolarity::Unknown,
+            "Unrelated variable should give Unknown"
+        );
+    }
 }
 
 /// Analyze the polarity of how a variable appears in an equation
@@ -1027,6 +1537,7 @@ fn analyze_expr_polarity(
             let operand_pol = analyze_expr_polarity(operand, from_var, current_polarity);
             match op {
                 crate::ast::UnaryOp::Not => flip_polarity(operand_pol),
+                crate::ast::UnaryOp::Negative => flip_polarity(operand_pol),
                 _ => LinkPolarity::Unknown,
             }
         }
