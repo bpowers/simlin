@@ -153,6 +153,21 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
     // If LTM is requested, use the engine::Project with LTM and compile directly
     if enable_ltm {
         let engine_project = Project::from(project.clone());
+
+        // First detect and output loops
+        use simlin_compat::engine::ltm;
+        if let Ok(loops_by_model) = ltm::detect_loops(&engine_project) {
+            // Output loop information to stderr
+            for (model_name, loops) in &loops_by_model {
+                if !loops.is_empty() {
+                    eprintln!("# Loops in model '{}':", model_name);
+                    for loop_item in loops {
+                        eprintln!("{} := {}", loop_item.id, loop_item.format_path());
+                    }
+                }
+            }
+        }
+
         match engine_project.with_ltm() {
             Ok(ltm_project) => {
                 // Use the LTM-instrumented Project directly with Simulation

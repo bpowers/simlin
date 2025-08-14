@@ -37,6 +37,26 @@ pub struct Loop {
     pub polarity: LoopPolarity,
 }
 
+impl Loop {
+    /// Format the loop as a string showing the variable path
+    pub fn format_path(&self) -> String {
+        if self.links.is_empty() {
+            return String::new();
+        }
+
+        // Build the path by following links
+        let mut path = Vec::new();
+        let current = &self.links[0].from;
+        path.push(current.as_str());
+
+        for link in &self.links {
+            path.push(link.to.as_str());
+        }
+
+        path.join(" -> ")
+    }
+}
+
 /// Loop polarity (Reinforcing or Balancing)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopPolarity {
@@ -158,7 +178,6 @@ impl CausalGraph {
     /// Find all elementary circuits (feedback loops) using Johnson's algorithm
     pub fn find_loops(&self) -> Vec<Loop> {
         let mut loops = Vec::new();
-        let mut loop_id = 0;
 
         // Get all nodes, including those that are module instances
         let mut nodes: Vec<_> = self.edges.keys().cloned().collect();
@@ -174,15 +193,8 @@ impl CausalGraph {
                     let stocks = self.find_stocks_in_loop(&circuit);
                     let polarity = self.calculate_polarity(&links);
 
-                    loop_id += 1;
-                    let id = if polarity == LoopPolarity::Reinforcing {
-                        format!("R{loop_id}")
-                    } else {
-                        format!("B{loop_id}")
-                    };
-
                     loops.push(Loop {
-                        id,
+                        id: String::new(), // Will be assigned later
                         links,
                         stocks,
                         polarity,
@@ -191,12 +203,18 @@ impl CausalGraph {
             }
         }
 
-        // Also find loops that cross module boundaries
-        let cross_module_loops = self.find_cross_module_loops(&mut loop_id);
+        // Also find loops that cross module boundaries (with placeholder for loop_id)
+        let mut dummy_id = 0;
+        let cross_module_loops = self.find_cross_module_loops(&mut dummy_id);
         loops.extend(cross_module_loops);
 
         // Remove duplicate loops (same set of nodes)
-        self.deduplicate_loops(loops)
+        let mut unique_loops = self.deduplicate_loops(loops);
+
+        // Now assign deterministic IDs based on sorted loop content
+        self.assign_deterministic_loop_ids(&mut unique_loops);
+
+        unique_loops
     }
 
     /// Find all circuits starting from a given node using DFS
@@ -533,6 +551,38 @@ impl CausalGraph {
         }
     }
 
+    /// Assign deterministic IDs to loops based on their content
+    fn assign_deterministic_loop_ids(&self, loops: &mut [Loop]) {
+        // Sort loops by a deterministic key based on their content
+        loops.sort_by_key(|loop_item| {
+            // Create a deterministic key from the loop's variables
+            let mut vars: Vec<String> = loop_item
+                .links
+                .iter()
+                .flat_map(|link| vec![link.from.as_str().to_string(), link.to.as_str().to_string()])
+                .collect();
+            vars.sort();
+            vars.dedup();
+            vars.join("_")
+        });
+
+        // Now assign IDs based on polarity and position in sorted order
+        let mut r_counter = 1;
+        let mut b_counter = 1;
+
+        for loop_item in loops.iter_mut() {
+            loop_item.id = if loop_item.polarity == LoopPolarity::Reinforcing {
+                let id = format!("r{r_counter}");
+                r_counter += 1;
+                id
+            } else {
+                let id = format!("b{b_counter}");
+                b_counter += 1;
+                id
+            };
+        }
+    }
+
     /// Remove duplicate loops (same set of nodes in different order)
     fn deduplicate_loops(&self, loops: Vec<Loop>) -> Vec<Loop> {
         let mut unique_loops = Vec::new();
@@ -606,6 +656,58 @@ mod tests {
         assert_eq!(loop_item.links.len(), 2);
         assert_eq!(loop_item.stocks.len(), 1);
         assert_eq!(loop_item.stocks[0].as_str(), "population");
+
+        // Check that the loop has a deterministic ID
+        assert_eq!(loop_item.id, "r1");
+
+        // Check that the path formatting works
+        let path = loop_item.format_path();
+        assert!(path.contains("population"));
+        assert!(path.contains("births"));
+    }
+
+    #[test]
+    fn test_deterministic_loop_naming() {
+        // Create a model with multiple loops to test deterministic naming
+        let model = x_model(
+            "main",
+            vec![
+                x_stock("population", "100", &["births"], &["deaths"], None),
+                x_flow("births", "population * birth_rate", None),
+                x_flow("deaths", "population * death_rate", None),
+                x_aux("birth_rate", "0.02", None),
+                x_aux("death_rate", "0.01", None),
+            ],
+        );
+
+        let sim_specs = sim_specs_with_units("years");
+        let project = x_project(sim_specs.clone(), &[model.clone()]);
+        let project1 = Project::from(project);
+
+        // Create the same project again
+        let project = x_project(sim_specs, &[model]);
+        let project2 = Project::from(project);
+
+        // Detect loops in both projects
+        let loops1 = detect_loops(&project1).unwrap();
+        let loops2 = detect_loops(&project2).unwrap();
+
+        let main_ident = crate::common::canonicalize("main");
+        let main_loops1 = loops1.get(&main_ident).unwrap();
+        let main_loops2 = loops2.get(&main_ident).unwrap();
+
+        // Should have the same number of loops
+        assert_eq!(main_loops1.len(), main_loops2.len());
+
+        // Loop IDs should be identical
+        for (loop1, loop2) in main_loops1.iter().zip(main_loops2.iter()) {
+            assert_eq!(loop1.id, loop2.id, "Loop IDs should be deterministic");
+            assert_eq!(
+                loop1.format_path(),
+                loop2.format_path(),
+                "Loop paths should be identical"
+            );
+        }
     }
 
     #[test]
