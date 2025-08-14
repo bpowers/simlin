@@ -5,10 +5,11 @@
 use std::collections::{BTreeSet, HashMap};
 
 use prost::alloc::rc::Rc;
-
+use crate::canonicalize;
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident};
 use crate::datamodel::{self, Equation};
 use crate::dimensions::DimensionsContext;
+use crate::ltm_augment::generate_ltm_variables;
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
 use crate::variable::Variable;
@@ -30,33 +31,29 @@ impl Project {
 
     /// Create a new project with LTM instrumentation
     pub fn with_ltm(self) -> crate::common::Result<Self> {
-        // First check if any model has array variables
-        check_for_arrays(&self)?;
+        // TODO: the current LTM implementation needs extensions to work with arrayed models.
+        abort_if_arrayed(&self)?;
 
-        // Generate the synthetic variables
-        let ltm_vars = crate::ltm_augment::generate_ltm_variables(&self)?;
-
+        let ltm_vars = generate_ltm_variables(&self)?;
         if ltm_vars.is_empty() {
-            // No loops detected, return original project
+            // No loops detected, return original Project
             return Ok(self);
         }
 
-        // Create a new datamodel with the LTM variables added
         let mut new_datamodel = self.datamodel.clone();
 
-        // Add synthetic variables to each model in the datamodel
+        // Augment all the models with their synthetic LTM variables
         for model in &mut new_datamodel.models {
-            let model_name = crate::common::canonicalize(&model.name);
+            let model_name = canonicalize(&model.name);
 
             if let Some(synthetic_vars) = ltm_vars.get(&model_name) {
-                // Add the LTM variables directly to the model
-                for (_var_name, var) in synthetic_vars {
+                for (_, var) in synthetic_vars {
                     model.variables.push(var.clone());
                 }
             }
         }
 
-        // Reconstruct the project with the new datamodel
+        // Rebuild the Project with the added LTM variables
         Ok(Project::from(new_datamodel))
     }
 }
@@ -212,7 +209,7 @@ impl Project {
 }
 
 /// Check if any model in the project contains array variables
-fn check_for_arrays(project: &Project) -> crate::common::Result<()> {
+fn abort_if_arrayed(project: &Project) -> crate::common::Result<()> {
     for (model_name, model) in &project.models {
         // Skip implicit (stdlib) models
         if model.implicit {
