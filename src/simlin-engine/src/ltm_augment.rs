@@ -285,20 +285,30 @@ fn generate_auxiliary_to_auxiliary_equation(
         }
     }
 
+    // Using SAFEDIV for both divisions
+    // Note: We still need the outer check for when EITHER is zero, since we multiply the results
+    let abs_part = format!(
+        "ABS(SAFEDIV((({partial_eq}) - PREVIOUS({to})), ({to} - PREVIOUS({to})), 0))",
+        partial_eq = partial_eq,
+        to = to.as_str()
+    );
+    let sign_part = format!(
+        "SIGN(SAFEDIV((({partial_eq}) - PREVIOUS({to})), ({from} - PREVIOUS({from})), 0))",
+        partial_eq = partial_eq,
+        to = to.as_str(),
+        from = from.as_str()
+    );
+
     format!(
         "IF THEN ELSE(\
             (({to} - PREVIOUS({to})) = 0) :OR: (({from} - PREVIOUS({from})) = 0), \
             0, \
-            ABS((({partial_eq}) - PREVIOUS({to})) / ({to} - PREVIOUS({to}))) * \
-            IF THEN ELSE(\
-                ({from} - PREVIOUS({from})) = 0, \
-                0, \
-                SIGN((({partial_eq}) - PREVIOUS({to})) / ({from} - PREVIOUS({from})))\
-            )\
+            {abs_part} * {sign_part}\
         )",
         to = to.as_str(),
         from = from.as_str(),
-        partial_eq = partial_eq
+        abs_part = abs_part,
+        sign_part = sign_part
     )
 }
 
@@ -313,14 +323,13 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
 
     let sign = if is_inflow { "" } else { "-" };
 
-    format!(
-        "IF THEN ELSE(\
-            (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0, \
-            0, \
-            {sign}(({flow} - PREVIOUS({flow})) / \
-                (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))))\
-        )"
-    )
+    // Using SAFEDIV to handle division by zero
+    let numerator = format!("{sign}({flow} - PREVIOUS({flow}))");
+    let denominator = format!(
+        "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
+    );
+
+    format!("SAFEDIV({numerator}, {denominator}, 0)")
 }
 
 /// Generate stock-to-flow link score equation
@@ -366,7 +375,7 @@ fn generate_stock_to_flow_equation(
 
     // Check if this flow affects the stock (is it an inflow or outflow?)
     let stock_var = all_vars.get(stock);
-    let is_affecting_stock = if let Some(Variable::Stock {
+    let _is_affecting_stock = if let Some(Variable::Stock {
         inflows, outflows, ..
     }) = stock_var
     {
@@ -375,43 +384,31 @@ fn generate_stock_to_flow_equation(
         false
     };
 
-    if is_affecting_stock {
-        // Use a formula that considers the feedback nature
-        // Per 2023 paper Eqn (3): use second-order difference for stock change (change in net flow)
-        format!(
-            "IF THEN ELSE(\
-                (({flow} - PREVIOUS({flow})) = 0) :OR: ((({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0), \
-                0, \
-                ABS((({partial_eq}) - PREVIOUS({flow})) / ({flow} - PREVIOUS({flow}))) * \
-                IF THEN ELSE(\
-                    (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0, \
-                    0, \
-                    SIGN((({partial_eq}) - PREVIOUS({flow})) / (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))))\
-                )\
-            )",
-            flow = flow.as_str(),
-            stock = stock.as_str(),
-            partial_eq = partial_eq
-        )
-    } else {
-        // Stock influences flow but flow doesn't feed back to stock
-        // Still use second-order difference per 2023 paper
-        format!(
-            "IF THEN ELSE(\
-                (({flow} - PREVIOUS({flow})) = 0) :OR: ((({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0), \
-                0, \
-                ABS((({partial_eq}) - PREVIOUS({flow})) / ({flow} - PREVIOUS({flow}))) * \
-                IF THEN ELSE(\
-                    (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0, \
-                    0, \
-                    SIGN((({partial_eq}) - PREVIOUS({flow})) / (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))))\
-                )\
-            )",
-            flow = flow.as_str(),
-            stock = stock.as_str(),
-            partial_eq = partial_eq
-        )
-    }
+    // Using SAFEDIV for both divisions
+    // Per 2023 paper Eqn (3): use second-order difference for stock change (change in net flow)
+    let flow_diff = format!("({flow} - PREVIOUS({flow}))", flow = flow.as_str());
+    let stock_second_diff = format!(
+        "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))",
+        stock = stock.as_str()
+    );
+    let partial_change = format!(
+        "(({partial_eq}) - PREVIOUS({flow}))",
+        partial_eq = partial_eq,
+        flow = flow.as_str()
+    );
+
+    let abs_part = format!("ABS(SAFEDIV({partial_change}, {flow_diff}, 0))");
+    let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_second_diff}, 0))");
+
+    // We still need the outer check because we're multiplying ABS and SIGN parts
+    // and want the result to be 0 when either denominator is 0
+    format!(
+        "IF THEN ELSE(\
+            ({flow_diff} = 0) :OR: ({stock_second_diff} = 0), \
+            0, \
+            {abs_part} * {sign_part}\
+        )"
+    )
 }
 
 /// Generate the equation for a loop score variable
@@ -459,14 +456,8 @@ fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> S
         all_loop_scores.join(" + ")
     };
 
-    // Relative score formula with protection against division by zero
-    format!(
-        "IF THEN ELSE(\
-            ({sum_expr}) = 0, \
-            0, \
-            {loop_score_var} / ({sum_expr})\
-        )"
-    )
+    // Relative score formula using SAFEDIV for division by zero protection
+    format!("SAFEDIV({loop_score_var}, ({sum_expr}), 0)")
 }
 
 /// Create an auxiliary variable with the given equation
@@ -564,8 +555,8 @@ mod tests {
 
         let equation = generate_relative_loop_score_equation("R1", &loops);
 
-        // Should contain IF THEN ELSE for division by zero protection
-        assert!(equation.contains("IF THEN ELSE"));
+        // Should use SAFEDIV for division by zero protection
+        assert!(equation.contains("SAFEDIV"));
         // Should reference the specific loop score
         assert!(equation.contains("_ltm_loop_R1"));
         // Should have sum of all loop scores in denominator
@@ -717,8 +708,8 @@ mod tests {
 
         let equation = generate_link_score_equation(&from, &to, &stock_var, &variables);
 
-        // Should use flow-to-stock formula
-        assert!(equation.contains("IF THEN ELSE"));
+        // Should use flow-to-stock formula with SAFEDIV
+        assert!(equation.contains("SAFEDIV"));
         assert!(equation.contains("water_in_tank"));
         assert!(equation.contains("inflow_rate"));
         // Flow-to-stock uses second-order change (PREVIOUS(PREVIOUS()))
@@ -772,14 +763,14 @@ mod tests {
 
         let equation = generate_link_score_equation(&from, &to, &stock_var, &variables);
 
-        // Should use flow-to-stock formula
-        assert!(equation.contains("IF THEN ELSE"));
+        // Should use flow-to-stock formula with SAFEDIV
+        assert!(equation.contains("SAFEDIV"));
         assert!(equation.contains("water_in_tank"));
         assert!(equation.contains("outflow_rate"));
         // Flow-to-stock uses second-order change
         assert!(equation.contains("PREVIOUS(PREVIOUS("));
-        // Should have negative sign for outflow
-        assert!(equation.contains("-((outflow_rate"));
+        // Should have negative sign for outflow (check the actual format)
+        assert!(equation.contains("-(outflow_rate") || equation.contains("-((outflow_rate"));
     }
 
     #[test]
@@ -1238,18 +1229,14 @@ mod tests {
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
-        // Verify the EXACT equation structure per 2023 paper Equation (3)
+        // Verify the EXACT equation structure using SAFEDIV
         let expected = "IF THEN ELSE(\
             ((production - PREVIOUS(production)) = 0) :OR: \
             (((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))) = 0), \
             0, \
-            ABS(((inventory * 0.1) - PREVIOUS(production)) / (production - PREVIOUS(production))) * \
-            IF THEN ELSE(\
-                ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))) = 0, \
-                0, \
-                SIGN(((inventory * 0.1) - PREVIOUS(production)) / \
-                    ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))))\
-            )\
+            ABS(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
+            SIGN(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), \
+                ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))), 0))\
         )";
 
         assert_eq!(
@@ -1279,18 +1266,14 @@ mod tests {
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
-        // Verify the EXACT equation structure
+        // Verify the EXACT equation structure using SAFEDIV
         let expected = "IF THEN ELSE(\
             ((drainage - PREVIOUS(drainage)) = 0) :OR: \
             (((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))) = 0), \
             0, \
-            ABS(((water_tank / 10) - PREVIOUS(drainage)) / (drainage - PREVIOUS(drainage))) * \
-            IF THEN ELSE(\
-                ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))) = 0, \
-                0, \
-                SIGN(((water_tank / 10) - PREVIOUS(drainage)) / \
-                    ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))))\
-            )\
+            ABS(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
+            SIGN(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), \
+                ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))), 0))\
         )";
 
         assert_eq!(
@@ -1322,19 +1305,15 @@ mod tests {
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
-        // Verify the EXACT equation - note that non-stock dependencies get PREVIOUS()
+        // Verify the EXACT equation using SAFEDIV - note that non-stock dependencies get PREVIOUS()
         let expected = "IF THEN ELSE(\
             ((births - PREVIOUS(births)) = 0) :OR: \
             (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0), \
             0, \
-            ABS(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)) / \
-                (births - PREVIOUS(births))) * \
-            IF THEN ELSE(\
-                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0, \
-                0, \
-                SIGN(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)) / \
-                    ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))))\
-            )\
+            ABS(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
+                (births - PREVIOUS(births)), 0)) * \
+            SIGN(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
+                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))\
         )";
 
         assert_eq!(
@@ -1369,13 +1348,9 @@ mod tests {
             ((constant_flow - PREVIOUS(constant_flow)) = 0) :OR: \
             (((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))) = 0), \
             0, \
-            ABS(((10) - PREVIOUS(constant_flow)) / (constant_flow - PREVIOUS(constant_flow))) * \
-            IF THEN ELSE(\
-                ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))) = 0, \
-                0, \
-                SIGN(((10) - PREVIOUS(constant_flow)) / \
-                    ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))))\
-            )\
+            ABS(SAFEDIV(((10) - PREVIOUS(constant_flow)), (constant_flow - PREVIOUS(constant_flow)), 0)) * \
+            SIGN(SAFEDIV(((10) - PREVIOUS(constant_flow)), \
+                ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))), 0))\
         )";
 
         assert_eq!(
@@ -1416,13 +1391,9 @@ mod tests {
             ((inflow - PREVIOUS(inflow)) = 0) :OR: \
             (((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))) = 0), \
             0, \
-            ABS(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)) / (inflow - PREVIOUS(inflow))) * \
-            IF THEN ELSE(\
-                ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))) = 0, \
-                0, \
-                SIGN(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)) / \
-                    ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))))\
-            )\
+            ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
+            SIGN(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
+                ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))), 0))\
         )";
 
         assert_eq!(
