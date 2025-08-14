@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use prost::alloc::rc::Rc;
 use crate::canonicalize;
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident};
 use crate::datamodel::{self, Equation};
@@ -13,6 +12,7 @@ use crate::ltm_augment::generate_ltm_variables;
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
 use crate::variable::Variable;
+use prost::alloc::rc::Rc;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {

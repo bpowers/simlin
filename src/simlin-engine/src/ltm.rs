@@ -96,8 +96,6 @@ pub struct CausalGraph {
     variables: HashMap<Ident<Canonical>, Variable>,
     /// Module instances and their internal graphs
     module_graphs: HashMap<Ident<Canonical>, Box<CausalGraph>>,
-    /// Map from module instance to its model name
-    _module_models: HashMap<Ident<Canonical>, Ident<Canonical>>,
 }
 
 impl CausalGraph {
@@ -171,7 +169,6 @@ impl CausalGraph {
             stocks,
             variables,
             module_graphs,
-            _module_models,
         })
     }
 
@@ -1012,7 +1009,6 @@ mod tests {
             stocks: HashSet::new(),
             variables: HashMap::new(),
             module_graphs: HashMap::new(),
-            _module_models: HashMap::new(),
         };
 
         let loop_item = Loop {
@@ -1076,7 +1072,6 @@ mod tests {
             stocks: HashSet::new(),
             variables: HashMap::new(),
             module_graphs: HashMap::new(),
-            _module_models: HashMap::new(),
         };
 
         let module_var = crate::common::canonicalize("smoother");
@@ -1326,7 +1321,6 @@ mod tests {
             stocks: HashSet::new(),
             variables: HashMap::new(),
             module_graphs: HashMap::new(),
-            _module_models: HashMap::new(),
         };
 
         // Create a module with inputs
