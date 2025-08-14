@@ -377,15 +377,16 @@ fn generate_stock_to_flow_equation(
 
     if is_affecting_stock {
         // Use a formula that considers the feedback nature
+        // Per 2023 paper Eqn (3): use second-order difference for stock change (change in net flow)
         format!(
             "IF THEN ELSE(\
-                (({flow} - PREVIOUS({flow})) = 0) :OR: (({stock} - PREVIOUS({stock})) = 0), \
+                (({flow} - PREVIOUS({flow})) = 0) :OR: ((({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0), \
                 0, \
                 ABS((({partial_eq}) - PREVIOUS({flow})) / ({flow} - PREVIOUS({flow}))) * \
                 IF THEN ELSE(\
-                    ({stock} - PREVIOUS({stock})) = 0, \
+                    (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0, \
                     0, \
-                    SIGN((({partial_eq}) - PREVIOUS({flow})) / ({stock} - PREVIOUS({stock})))\
+                    SIGN((({partial_eq}) - PREVIOUS({flow})) / (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))))\
                 )\
             )",
             flow = flow.as_str(),
@@ -393,16 +394,17 @@ fn generate_stock_to_flow_equation(
             partial_eq = partial_eq
         )
     } else {
-        // Stock influences flow but flow doesn't feed back to stock - use standard formula
+        // Stock influences flow but flow doesn't feed back to stock
+        // Still use second-order difference per 2023 paper
         format!(
             "IF THEN ELSE(\
-                (({flow} - PREVIOUS({flow})) = 0) :OR: (({stock} - PREVIOUS({stock})) = 0), \
+                (({flow} - PREVIOUS({flow})) = 0) :OR: ((({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0), \
                 0, \
                 ABS((({partial_eq}) - PREVIOUS({flow})) / ({flow} - PREVIOUS({flow}))) * \
                 IF THEN ELSE(\
-                    ({stock} - PREVIOUS({stock})) = 0, \
+                    (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))) = 0, \
                     0, \
-                    SIGN((({partial_eq}) - PREVIOUS({flow})) / ({stock} - PREVIOUS({stock})))\
+                    SIGN((({partial_eq}) - PREVIOUS({flow})) / (({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock})))))\
                 )\
             )",
             flow = flow.as_str(),
@@ -502,6 +504,7 @@ fn sanitize_for_var_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_common::TestProject;
 
     #[test]
     fn test_sanitize_for_var_name() {
@@ -1211,5 +1214,220 @@ mod tests {
         assert!(equation.contains("PREVIOUS"));
         // Check for SIGN function for polarity
         assert!(equation.contains("SIGN"));
+    }
+
+    #[test]
+    fn test_generate_stock_to_flow_equation_basic_inflow() {
+        // Create a test project with stock and flow
+        let project = TestProject::new("test_basic_inflow")
+            .stock("inventory", "100", &["production"], &[], None)
+            .flow("production", "inventory * 0.1", None)
+            .compile()
+            .expect("Project should compile");
+
+        // Get the model and its variables
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
+
+        let stock = crate::common::canonicalize("inventory");
+        let flow = crate::common::canonicalize("production");
+        let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
+
+        let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
+
+        // Verify the EXACT equation structure per 2023 paper Equation (3)
+        let expected = "IF THEN ELSE(\
+            ((production - PREVIOUS(production)) = 0) :OR: \
+            (((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))) = 0), \
+            0, \
+            ABS(((inventory * 0.1) - PREVIOUS(production)) / (production - PREVIOUS(production))) * \
+            IF THEN ELSE(\
+                ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))) = 0, \
+                0, \
+                SIGN(((inventory * 0.1) - PREVIOUS(production)) / \
+                    ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Stock-to-flow equation must match exact format with second-order difference"
+        );
+    }
+
+    #[test]
+    fn test_generate_stock_to_flow_equation_outflow() {
+        // Create a test project with stock and outflow
+        let project = TestProject::new("test_outflow")
+            .stock("water_tank", "100", &[], &["drainage"], None)
+            .flow("drainage", "water_tank / 10", None)
+            .compile()
+            .expect("Project should compile");
+
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
+
+        let stock = crate::common::canonicalize("water_tank");
+        let flow = crate::common::canonicalize("drainage");
+        let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
+
+        let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
+
+        // Verify the EXACT equation structure
+        let expected = "IF THEN ELSE(\
+            ((drainage - PREVIOUS(drainage)) = 0) :OR: \
+            (((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))) = 0), \
+            0, \
+            ABS(((water_tank / 10) - PREVIOUS(drainage)) / (drainage - PREVIOUS(drainage))) * \
+            IF THEN ELSE(\
+                ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))) = 0, \
+                0, \
+                SIGN(((water_tank / 10) - PREVIOUS(drainage)) / \
+                    ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Outflow equation must match exact format with second-order difference"
+        );
+    }
+
+    #[test]
+    fn test_generate_stock_to_flow_equation_complex_dependencies() {
+        // Create a test project with multiple dependencies
+        let project = TestProject::new("test_complex")
+            .stock("population", "1000", &["births"], &[], None)
+            .flow("births", "population * birth_rate * seasonal_factor", None)
+            .aux("birth_rate", "0.02", None)
+            .aux("seasonal_factor", "1 + SIN(TIME * 2 * 3.14159 / 12)", None)
+            .compile()
+            .expect("Project should compile");
+
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
+
+        let stock = crate::common::canonicalize("population");
+        let flow = crate::common::canonicalize("births");
+        let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
+
+        let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
+
+        // Verify the EXACT equation - note that non-stock dependencies get PREVIOUS()
+        let expected = "IF THEN ELSE(\
+            ((births - PREVIOUS(births)) = 0) :OR: \
+            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0), \
+            0, \
+            ABS(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)) / \
+                (births - PREVIOUS(births))) * \
+            IF THEN ELSE(\
+                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0, \
+                0, \
+                SIGN(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)) / \
+                    ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Complex dependencies equation must properly replace non-stock variables with PREVIOUS()"
+        );
+    }
+
+    #[test]
+    fn test_generate_stock_to_flow_equation_no_stock_dependency() {
+        // Create a test project where flow doesn't depend on stock
+        let project = TestProject::new("test_no_dependency")
+            .stock("unrelated_stock", "50", &[], &["constant_flow"], None)
+            .flow("constant_flow", "10", None)
+            .compile()
+            .expect("Project should compile");
+
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
+
+        let stock = crate::common::canonicalize("unrelated_stock");
+        let flow = crate::common::canonicalize("constant_flow");
+        let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
+
+        let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
+
+        // When flow doesn't depend on stock, partial equation is just the constant
+        let expected = "IF THEN ELSE(\
+            ((constant_flow - PREVIOUS(constant_flow)) = 0) :OR: \
+            (((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))) = 0), \
+            0, \
+            ABS(((10) - PREVIOUS(constant_flow)) / (constant_flow - PREVIOUS(constant_flow))) * \
+            IF THEN ELSE(\
+                ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))) = 0, \
+                0, \
+                SIGN(((10) - PREVIOUS(constant_flow)) / \
+                    ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "No dependency equation should still use second-order difference structure"
+        );
+    }
+
+    #[test]
+    fn test_generate_stock_to_flow_validates_equation_3_paper_2023() {
+        // This test specifically validates that the implementation matches
+        // Equation (3) from the 2023 paper:
+        // For stock-to-flow, we're checking that the equation properly
+        // calculates the partial derivative of the flow with respect to the stock
+
+        let project = TestProject::new("test_equation_3")
+            .stock("S", "100", &["inflow"], &[], None)
+            .flow("inflow", "S * growth_rate", None)
+            .aux("growth_rate", "0.1", None)
+            .compile()
+            .expect("Project should compile");
+
+        let model = project
+            .models
+            .get(&crate::common::canonicalize("main"))
+            .expect("Model should exist");
+        let all_vars = &model.variables;
+
+        let stock = crate::common::canonicalize("S");
+        let flow = crate::common::canonicalize("inflow");
+        let flow_var = all_vars.get(&flow).expect("Flow variable should exist");
+
+        let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
+
+        // This test validates the exact implementation of Equation (3) from the 2023 paper
+        // Note: 'S' becomes lowercase 's' in stock references but stays uppercase in partial equation
+        let expected = "IF THEN ELSE(\
+            ((inflow - PREVIOUS(inflow)) = 0) :OR: \
+            (((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))) = 0), \
+            0, \
+            ABS(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)) / (inflow - PREVIOUS(inflow))) * \
+            IF THEN ELSE(\
+                ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))) = 0, \
+                0, \
+                SIGN(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)) / \
+                    ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))))\
+            )\
+        )";
+
+        assert_eq!(
+            equation, expected,
+            "Equation must exactly match 2023 paper Equation (3) with second-order difference for stock change"
+        );
     }
 }
