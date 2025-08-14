@@ -308,6 +308,82 @@ mod tests {
     }
 
     #[test]
+    fn test_project_with_ltm_simulation() {
+        use crate::test_common::TestProject;
+        use std::rc::Rc;
+
+        // Create a project with a simple reinforcing loop
+        let project = TestProject::new("test_ltm_simulation")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * birth_rate", None)
+            .aux("birth_rate", "0.02", None)
+            .compile()
+            .expect("Project should compile");
+
+        // Apply LTM augmentation
+        let ltm_project = project.with_ltm().expect("Should augment with LTM");
+
+        // Debug: Print the generated LTM equations
+        for model in &ltm_project.datamodel.models {
+            for var in &model.variables {
+                if var.get_ident().starts_with("$⁚ltm⁚") {
+                    println!(
+                        "LTM variable: {} = {:?}",
+                        var.get_ident(),
+                        var.get_equation()
+                    );
+                }
+            }
+        }
+
+        // Build and run the simulation
+        let project_rc = Rc::new(ltm_project);
+        let sim = crate::interpreter::Simulation::new(&project_rc, "main")
+            .expect("Should create simulation");
+
+        let results = sim
+            .run_to_end()
+            .expect("Simulation should run successfully");
+
+        // Check that LTM variables are in the results
+        let var_names: Vec<_> = results.offsets.keys().map(|k| k.as_str()).collect();
+
+        // Should have link score variables
+        let link_score_vars: Vec<_> = var_names
+            .iter()
+            .filter(|name| name.starts_with("$⁚ltm⁚link_score⁚"))
+            .collect();
+        assert!(
+            !link_score_vars.is_empty(),
+            "Should have link score variables in simulation results"
+        );
+
+        // Should have loop score variables
+        let loop_score_vars: Vec<_> = var_names
+            .iter()
+            .filter(|name| name.starts_with("$⁚ltm⁚abs_loop_score⁚"))
+            .collect();
+        assert!(
+            !loop_score_vars.is_empty(),
+            "Should have loop score variables in simulation results"
+        );
+
+        // Verify specific link scores exist
+        let has_pop_to_births = var_names
+            .iter()
+            .any(|name| name.contains("link_score⁚population⁚births"));
+        let has_births_to_pop = var_names
+            .iter()
+            .any(|name| name.contains("link_score⁚births⁚population"));
+
+        assert!(
+            has_pop_to_births || has_births_to_pop,
+            "Should have specific link score variables for the feedback loop"
+        );
+    }
+
+    #[test]
     fn test_project_with_ltm_no_loops() {
         use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_project};
 
