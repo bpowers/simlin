@@ -220,17 +220,17 @@ fn convert_to_datamodel_variable(var: &Variable) -> Option<datamodel::Variable> 
             // LTM variables are always auxiliaries
             let equation = match eqn {
                 Some(Equation::Scalar(eq, _)) => Equation::Scalar(eq.clone(), None),
-                _ => Equation::Scalar("0".to_string(), None),
+                _ => unreachable!(),
             };
 
             Some(datamodel::Variable::Aux(datamodel::Aux {
                 ident: ident.as_str().to_string(),
                 equation,
-                documentation: "LTM synthetic variable".to_string(),
-                units: None, // LTM scores are dimensionless
+                documentation: "LTM".to_string(),
+                units: Some("dmnl".to_string()), // LTM scores are dimensionless
                 gf: None,
                 can_be_module_input: false,
-                visibility: datamodel::Visibility::Private,
+                visibility: datamodel::Visibility::Public,
                 ai_state: None,
             }))
         }
