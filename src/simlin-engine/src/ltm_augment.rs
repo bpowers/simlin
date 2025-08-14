@@ -7,13 +7,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{Canonical, Ident, Result};
-use crate::datamodel::Equation;
+use crate::datamodel::{self, Equation};
 use crate::ltm::{Link, Loop, detect_loops};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 
 // Type alias for clarity
-type SyntheticVariables = Vec<(Ident<Canonical>, Variable)>;
+type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
 
 /// Augment a project with LTM synthetic variables
 /// Returns a map of model name to synthetic variables to add
@@ -71,7 +71,7 @@ pub fn generate_ltm_variables(
 fn generate_link_score_variables(
     links: &HashSet<Link>,
     variables: &HashMap<Ident<Canonical>, Variable>,
-) -> HashMap<Ident<Canonical>, Variable> {
+) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut link_vars = HashMap::new();
 
     for link in links {
@@ -182,7 +182,7 @@ fn generate_module_link_score_equation(
 }
 
 /// Generate loop score variables for all loops
-fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, Variable> {
+fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, datamodel::Variable> {
     let mut loop_vars = HashMap::new();
 
     // First, generate absolute loop scores
@@ -461,49 +461,19 @@ fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> S
 }
 
 /// Create an auxiliary variable with the given equation
-fn create_aux_variable(name: &str, equation: &str) -> Variable {
-    use crate::ast::{Ast, Expr0, lower_ast};
-    use crate::model::ScopeStage0;
-    use crate::token::LexerType;
+fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable {
+    use crate::datamodel;
 
-    // Parse the equation to create the AST
-    let (ast_expr0, mut parse_errors) = match Expr0::new(equation, LexerType::Equation) {
-        Ok(expr) => (expr, vec![]),
-        Err(errors) => (None, errors),
-    };
-
-    // Convert Expr0 to Expr2 if we successfully parsed
-    let ast = if let Some(expr0) = ast_expr0 {
-        // Create a minimal scope for LTM variables (they don't need model/dimension lookups)
-        let scope = ScopeStage0 {
-            models: &Default::default(),
-            dimensions: &Default::default(),
-            model_name: "main",
-        };
-        match lower_ast(&scope, Ast::Scalar(expr0)) {
-            Ok(ast2) => Some(ast2),
-            Err(err) => {
-                parse_errors.push(err);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    Variable::Var {
-        ident: crate::common::canonicalize(name),
-        ast,
-        init_ast: None,
-        eqn: Some(Equation::Scalar(equation.to_string(), None)),
-        units: None,
-        table: None,
-        non_negative: false,
-        is_flow: false,
-        is_table_only: false,
-        errors: parse_errors,
-        unit_errors: vec![],
-    }
+    datamodel::Variable::Aux(datamodel::Aux {
+        ident: name.to_string(),
+        equation: datamodel::Equation::Scalar(equation.to_string(), None),
+        documentation: "LTM".to_string(),
+        units: Some("dmnl".to_string()), // LTM scores are dimensionless
+        gf: None,
+        can_be_module_input: false,
+        visibility: datamodel::Visibility::Public,
+        ai_state: None,
+    })
 }
 
 #[cfg(test)]
@@ -1121,20 +1091,18 @@ mod tests {
         // Check that the equations use the black box formula
         // Remove debug output
         for (_name, var) in &link_vars {
-            if let Variable::Var {
-                eqn: Some(crate::datamodel::Equation::Scalar(eq, _)),
-                ..
-            } = var
-            {
-                // Module link scores should use the black box formula
-                assert!(
-                    eq.contains("SIGN"),
-                    "Module link should include SIGN for polarity"
-                );
-                assert!(
-                    eq.contains("PREVIOUS"),
-                    "Module link should use PREVIOUS for time-based calc"
-                );
+            if let datamodel::Variable::Aux(aux) = var {
+                if let datamodel::Equation::Scalar(eq, _) = &aux.equation {
+                    // Module link scores should use the black box formula
+                    assert!(
+                        eq.contains("SIGN"),
+                        "Module link should include SIGN for polarity"
+                    );
+                    assert!(
+                        eq.contains("PREVIOUS"),
+                        "Module link should use PREVIOUS for time-based calc"
+                    );
+                }
             }
         }
     }

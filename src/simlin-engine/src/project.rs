@@ -49,11 +49,9 @@ impl Project {
             let model_name = crate::common::canonicalize(&model.name);
 
             if let Some(synthetic_vars) = ltm_vars.get(&model_name) {
-                // Convert our internal Variable representation to datamodel::Variable
+                // Add the LTM variables directly to the model
                 for (_var_name, var) in synthetic_vars {
-                    if let Some(datamodel_var) = convert_to_datamodel_variable(var) {
-                        model.variables.push(datamodel_var);
-                    }
+                    model.variables.push(var.clone());
                 }
             }
         }
@@ -210,31 +208,6 @@ impl Project {
             model_order: ordered_models,
             errors: project_errors,
         }
-    }
-}
-
-/// Convert internal Variable representation to datamodel Variable
-fn convert_to_datamodel_variable(var: &Variable) -> Option<datamodel::Variable> {
-    match var {
-        Variable::Var { ident, eqn, .. } => {
-            // LTM variables are always auxiliaries
-            let equation = match eqn {
-                Some(Equation::Scalar(eq, _)) => Equation::Scalar(eq.clone(), None),
-                _ => unreachable!(),
-            };
-
-            Some(datamodel::Variable::Aux(datamodel::Aux {
-                ident: ident.as_str().to_string(),
-                equation,
-                documentation: "LTM".to_string(),
-                units: Some("dmnl".to_string()), // LTM scores are dimensionless
-                gf: None,
-                can_be_module_input: false,
-                visibility: datamodel::Visibility::Public,
-                ai_state: None,
-            }))
-        }
-        _ => None, // LTM only generates Var types
     }
 }
 
