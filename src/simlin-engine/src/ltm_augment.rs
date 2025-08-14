@@ -462,7 +462,7 @@ fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> S
         "IF THEN ELSE(\
             ({sum_expr}) = 0, \
             0, \
-            ABS({loop_score_var}) / ({sum_expr})\
+            {loop_score_var} / ({sum_expr})\
         )"
     )
 }
