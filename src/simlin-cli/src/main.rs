@@ -12,8 +12,8 @@ use pico_args::Arguments;
 use simlin_compat::engine::common::ErrorKind;
 use simlin_compat::engine::datamodel::Project as DatamodelProject;
 use simlin_compat::engine::{
-    Error, ErrorCode, Project, Result, Results, Variable, Vm, build_sim_with_stderrors, datamodel,
-    eprintln, project_io, serde,
+    Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, build_sim_with_stderrors,
+    datamodel, eprintln, project_io, serde,
 };
 use simlin_compat::prost::Message;
 use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
@@ -50,6 +50,7 @@ fn usage() -> ! {
             "    --output FILE    path to write output file\n",
             "    --reference FILE reference TSV for debug subcommand\n",
             "    --no-output      don't print the output (for benchmarking)\n",
+            "    --ltm            enable Loops That Matter analysis\n",
             "\n\
          SUBCOMMANDS:\n",
             "    simulate         Simulate a model and display output\n",
@@ -75,6 +76,7 @@ struct Args {
     is_no_output: bool,
     is_equations: bool,
     is_debug: bool,
+    is_ltm: bool,
 }
 
 fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
@@ -111,6 +113,7 @@ fn parse_args() -> StdResult<Args, Box<dyn std::error::Error>> {
     args.is_to_xmile = parsed.contains("--to-xmile");
     args.is_vensim = parsed.contains("--vensim");
     args.is_pb_input = parsed.contains("--pb-input");
+    args.is_ltm = parsed.contains("--ltm");
 
     let free_arguments = parsed.finish();
     if free_arguments.is_empty() {
@@ -146,7 +149,50 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
     Ok(project)
 }
 
-fn simulate(project: &DatamodelProject) -> Results {
+fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
+    // If LTM is requested, use the engine::Project with LTM and compile directly
+    if enable_ltm {
+        let engine_project = Project::from(project.clone());
+
+        // First detect and output loops
+        use simlin_compat::engine::ltm;
+        if let Ok(loops_by_model) = ltm::detect_loops(&engine_project) {
+            // Output loop information to stderr
+            for (model_name, loops) in &loops_by_model {
+                if !loops.is_empty() {
+                    eprintln!("# Loops in model '{}':", model_name);
+                    for loop_item in loops {
+                        eprintln!("{} := {}", loop_item.id, loop_item.format_path());
+                    }
+                }
+            }
+        }
+
+        match engine_project.with_ltm() {
+            Ok(ltm_project) => {
+                // Use the LTM-instrumented Project directly with Simulation
+                let ltm_project = Rc::new(ltm_project);
+                match Simulation::new(&ltm_project, "main") {
+                    Ok(sim) => {
+                        let compiled = sim.compile().unwrap();
+                        let mut vm = Vm::new(compiled).unwrap();
+                        vm.run_to_end().unwrap();
+                        return vm.into_results();
+                    }
+                    Err(err) => {
+                        eprintln!("Error creating simulation with LTM: {}", err);
+                        // Fall back to regular simulation
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("Warning: Failed to enable LTM: {}", err);
+                // Continue with the original project
+            }
+        }
+    }
+
+    // Regular simulation without LTM
     let sim = build_sim_with_stderrors(project).unwrap();
     let compiled = sim.compile().unwrap();
     let mut vm = Vm::new(compiled).unwrap();
@@ -301,11 +347,11 @@ fn main() {
         } else {
             load_csv(&ref_path, b'\t').unwrap()
         };
-        let results = simulate(&project);
+        let results = simulate(&project, args.is_ltm);
 
         results.print_tsv_comparison(Some(&reference));
     } else {
-        let results = simulate(&project);
+        let results = simulate(&project, args.is_ltm);
         if !args.is_no_output {
             results.print_tsv();
         }

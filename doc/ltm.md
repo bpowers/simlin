@@ -113,7 +113,7 @@ The implementation in `src/simlin-engine/src/ltm_augment.rs` generates:
 
 #### Link Score Variables
 For each causal link (x → y):
-- Variable name: `_ltm_link_{x}_{y}` (with sanitized names)
+- Variable name: `$⁚ltm⁚link_score⁚{x}⁚{y}`
 - Equation: Implements the appropriate link score calculation based on link type:
   - Auxiliary-to-auxiliary: Standard partial derivative approximation
   - Flow-to-stock: Uses the 2023 corrected formula with second-order stock changes
@@ -122,8 +122,8 @@ For each causal link (x → y):
 
 #### Loop Score Variables  
 For each loop L:
-- Absolute score: `_ltm_loop_{loop_id}` - Product of constituent link scores
-- Relative score: `_ltm_rel_loop_{loop_id}` - Normalized for dominance analysis
+- Absolute score: `$⁚ltm⁚abs_loop_score⁚{loop_id}` - Product of constituent link scores
+- Relative score: `$⁚ltm⁚rel_loop_score⁚{loop_id}` - Normalized for dominance analysis
 
 ### 4. Equation Generation
 
@@ -171,9 +171,9 @@ When loops cross module boundaries:
 ### 6. Variable Ordering
 
 LTM variables must be calculated in proper dependency order:
-1. Link scores (`_ltm_link_{x}_to_{y}`)
+1. Link scores (`$⁚ltm⁚link_score⁚{x}⁚{y}`)
 2. Imports of link scores from module instances
-3. Loop scores (`_ltm_loop_{id}`)
+3. Loop scores (`$⁚ltm⁚abs_loop_score⁚{id}`)
 
 
 ### 7. Special Cases
@@ -202,9 +202,9 @@ let sim = Simulation::new(&instrumented_project, "main")?;
 let results = sim.run_to_end()?;
 
 // Access LTM results through standard variable lookup
-let loop_score = results.get_series("_ltm_loop_R1")?;
-let link_score = results.get_series("_ltm_link_population_births")?;
-let relative_score = results.get_series("_ltm_rel_loop_R1")?;
+let loop_score = results.get_series("$⁚ltm⁚abs_loop_score⁚R1")?;
+let link_score = results.get_series("$⁚ltm⁚link_score⁚population⁚births")?;
+let relative_score = results.get_series("$⁚ltm⁚rel_loop_score⁚R1")?;
 ```
 
 
