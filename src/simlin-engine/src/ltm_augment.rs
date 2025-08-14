@@ -76,9 +76,9 @@ fn generate_link_score_variables(
 
     for link in links {
         let var_name = format!(
-            "_ltm_link_{}_{}",
-            sanitize_for_var_name(link.from.as_str()),
-            sanitize_for_var_name(link.to.as_str())
+            "$⁚ltm⁚link_score⁚{}⁚{}",
+            link.from.as_str(),
+            link.to.as_str()
         );
 
         // Check if the link involves a module variable
@@ -187,7 +187,7 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, Va
 
     // First, generate absolute loop scores
     for loop_item in loops {
-        let var_name = format!("_ltm_loop_{}", loop_item.id);
+        let var_name = format!("$⁚ltm⁚abs_loop_score⁚{}", loop_item.id);
 
         // Generate equation as product of link scores
         let equation = generate_loop_score_equation(loop_item);
@@ -200,7 +200,7 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, Va
     // Then, generate relative loop scores if there are multiple loops
     if loops.len() > 1 {
         for loop_item in loops {
-            let var_name = format!("_ltm_rel_loop_{}", loop_item.id);
+            let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
 
             // Generate equation for relative loop score
             let equation = generate_relative_loop_score_equation(&loop_item.id, loops);
@@ -420,9 +420,9 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
         .map(|link| {
             // Check if this is a module link that needs special handling
             let link_name = format!(
-                "_ltm_link_{}_{}",
-                sanitize_for_var_name(link.from.as_str()),
-                sanitize_for_var_name(link.to.as_str())
+                "$⁚ltm⁚link_score⁚{}⁚{}",
+                link.from.as_str(),
+                link.to.as_str()
             );
 
             // If the link crosses module boundaries, we might need to reference
@@ -442,12 +442,12 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
 /// Generate the equation for a relative loop score variable
 fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
     // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
-    let loop_score_var = format!("_ltm_loop_{loop_id}");
+    let loop_score_var = format!("$⁚ltm⁚abs_loop_score⁚{loop_id}");
 
     // Build sum of absolute values of all loop scores
     let all_loop_scores: Vec<String> = all_loops
         .iter()
-        .map(|loop_item| format!("ABS(_ltm_loop_{})", loop_item.id))
+        .map(|loop_item| format!("ABS($⁚ltm⁚abs_loop_score⁚{})", loop_item.id))
         .collect();
 
     let sum_expr = if all_loop_scores.is_empty() {
@@ -479,34 +479,10 @@ fn create_aux_variable(name: &str, equation: &str) -> Variable {
     }
 }
 
-/// Sanitize a variable name for use in generated variable names
-fn sanitize_for_var_name(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_common::TestProject;
-
-    #[test]
-    fn test_sanitize_for_var_name() {
-        assert_eq!(sanitize_for_var_name("simple"), "simple");
-        assert_eq!(sanitize_for_var_name("with space"), "with_space");
-        assert_eq!(
-            sanitize_for_var_name("dots.and.dashes-here"),
-            "dots_and_dashes_here"
-        );
-        assert_eq!(sanitize_for_var_name("special!@#$%"), "special_____");
-    }
 
     #[test]
     fn test_generate_loop_score_equation() {
@@ -531,7 +507,7 @@ mod tests {
         };
 
         let equation = generate_loop_score_equation(&loop_item);
-        assert_eq!(equation, "_ltm_link_x_y * _ltm_link_y_x");
+        assert_eq!(equation, "$⁚ltm⁚link_score⁚x⁚y * $⁚ltm⁚link_score⁚y⁚x");
     }
 
     #[test]
@@ -558,9 +534,9 @@ mod tests {
         // Should use SAFEDIV for division by zero protection
         assert!(equation.contains("SAFEDIV"));
         // Should reference the specific loop score
-        assert!(equation.contains("_ltm_loop_R1"));
+        assert!(equation.contains("$⁚ltm⁚abs_loop_score⁚R1"));
         // Should have sum of all loop scores in denominator
-        assert!(equation.contains("ABS(_ltm_loop_R1) + ABS(_ltm_loop_B1)"));
+        assert!(equation.contains("ABS($⁚ltm⁚abs_loop_score⁚R1) + ABS($⁚ltm⁚abs_loop_score⁚B1)"));
     }
 
     #[test]
@@ -605,10 +581,10 @@ mod tests {
         // Check for specific link score variables
         let has_pop_to_births = vars
             .iter()
-            .any(|(name, _)| name.as_str().contains("_ltm_link_population_births"));
+            .any(|(name, _)| name.as_str().contains("$⁚ltm⁚link_score⁚population⁚births"));
         let has_births_to_pop = vars
             .iter()
-            .any(|(name, _)| name.as_str().contains("_ltm_link_births_population"));
+            .any(|(name, _)| name.as_str().contains("$⁚ltm⁚link_score⁚births⁚population"));
 
         assert!(
             has_pop_to_births || has_births_to_pop,
@@ -618,7 +594,7 @@ mod tests {
         // Check for loop score variable
         let has_loop_score = vars
             .iter()
-            .any(|(name, _)| name.as_str().starts_with("_ltm_loop_"));
+            .any(|(name, _)| name.as_str().starts_with("$⁚ltm⁚abs_loop_score⁚"));
         assert!(has_loop_score, "Should have loop score variable");
     }
 
@@ -762,7 +738,7 @@ mod tests {
         // Check for relative loop score variables (only generated when multiple loops exist)
         let has_relative_scores = vars
             .iter()
-            .any(|(name, _)| name.as_str().starts_with("_ltm_rel_loop_"));
+            .any(|(name, _)| name.as_str().starts_with("$⁚ltm⁚rel_loop_score⁚"));
 
         // We expect relative scores since we have multiple loops
         assert!(
@@ -828,7 +804,7 @@ mod tests {
         assert!(!link_vars.is_empty(), "Should generate module link score");
 
         // Check the variable name
-        let expected_name = crate::common::canonicalize("_ltm_link_raw_input_smoother");
+        let expected_name = crate::common::canonicalize("$⁚ltm⁚link_score⁚raw_input⁚smoother");
         assert!(
             link_vars.contains_key(&expected_name),
             "Should have link score for module connection"
@@ -1100,10 +1076,10 @@ mod tests {
         assert_eq!(link_vars.len(), 2, "Should generate 2 link score variables");
 
         let has_input_link = link_vars.contains_key(&crate::common::canonicalize(
-            "_ltm_link_input_value_processor",
+            "$⁚ltm⁚link_score⁚input_value⁚processor",
         ));
         let has_output_link = link_vars.contains_key(&crate::common::canonicalize(
-            "_ltm_link_processor_output_value",
+            "$⁚ltm⁚link_score⁚processor⁚output_value",
         ));
 
         assert!(

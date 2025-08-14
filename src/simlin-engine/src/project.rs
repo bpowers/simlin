@@ -314,7 +314,7 @@ mod tests {
         let ltm_var_count = main_model
             .variables
             .iter()
-            .filter(|v| v.get_ident().starts_with("_ltm_"))
+            .filter(|v| v.get_ident().starts_with("$⁚ltm⁚"))
             .count();
 
         // We should have link score and loop score variables
@@ -324,11 +324,11 @@ mod tests {
         let has_link_scores = main_model
             .variables
             .iter()
-            .any(|v| v.get_ident().starts_with("_ltm_link_"));
+            .any(|v| v.get_ident().starts_with("$⁚ltm⁚link_score⁚"));
         let has_loop_scores = main_model
             .variables
             .iter()
-            .any(|v| v.get_ident().starts_with("_ltm_loop_"));
+            .any(|v| v.get_ident().starts_with("$⁚ltm⁚abs_loop_score⁚"));
 
         assert!(has_link_scores, "Should have link score variables");
         assert!(has_loop_scores, "Should have loop score variables");
@@ -365,7 +365,7 @@ mod tests {
         let ltm_var_count = main_model
             .variables
             .iter()
-            .filter(|v| v.get_ident().starts_with("_ltm_"))
+            .filter(|v| v.get_ident().starts_with("$⁚ltm⁚"))
             .count();
 
         assert_eq!(
