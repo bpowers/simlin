@@ -339,6 +339,30 @@ mod tests {
 
         // Build and run the simulation
         let project_rc = Rc::new(ltm_project);
+
+        // Check all variables for errors before building simulation
+        for (model_name, model) in &project_rc.models {
+            println!("Checking model: {}", model_name);
+            for (var_name, var) in &model.variables {
+                println!("  Variable: {}", var_name);
+                if let Some(_ast) = var.ast() {
+                    println!("    Has AST: yes");
+                } else {
+                    println!("    Has AST: no");
+                }
+                if let Some(errors) = var.equation_errors() {
+                    if !errors.is_empty() {
+                        println!("    EQUATION ERRORS: {:?}", errors);
+                    }
+                }
+                if let Some(unit_errors) = var.unit_errors() {
+                    if !unit_errors.is_empty() {
+                        println!("    UNIT ERRORS: {:?}", unit_errors);
+                    }
+                }
+            }
+        }
+
         let sim = crate::interpreter::Simulation::new(&project_rc, "main")
             .expect("Should create simulation");
 

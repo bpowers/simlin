@@ -4,13 +4,13 @@
 
 //! LTM project augmentation - adds synthetic variables for link and loop scores
 
-use std::collections::{HashMap, HashSet};
-
+use crate::canonicalize;
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{self, Equation};
 use crate::ltm::{Link, Loop, detect_loops};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
+use std::collections::{HashMap, HashSet};
 
 // Type alias for clarity
 type SyntheticVariables = Vec<(Ident<Canonical>, datamodel::Variable)>;
@@ -115,16 +115,14 @@ fn generate_module_link_score_equation(
         // Module output transfer score: (Δto_due_to_module / Δto) × sign(Δto/Δmodule)
         // Since the module instance itself is the output value
         return format!(
-            "IF THEN ELSE(\
-                (({to} - PREVIOUS({to})) = 0) :OR: (({from} - PREVIOUS({from})) = 0), \
-                0, \
-                ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                IF THEN ELSE(\
-                    ({from} - PREVIOUS({from})) = 0, \
-                    0, \
-                    SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))\
-                )\
-            )",
+            "if \
+                (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
+                then 0 \
+                else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
+                if \
+                    ({from} - PREVIOUS({from})) = 0 \
+                    then 0 \
+                    else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
             to = to.as_str(),
             from = from.as_str()
         );
@@ -138,16 +136,14 @@ fn generate_module_link_score_equation(
                 // Module input transfer score: measure contribution of input to module's change
                 // Black box: assume unit transfer initially (module will process internally)
                 return format!(
-                    "IF THEN ELSE(\
-                        (({to} - PREVIOUS({to})) = 0) :OR: (({from} - PREVIOUS({from})) = 0), \
-                        0, \
-                        ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                        IF THEN ELSE(\
-                            ({from} - PREVIOUS({from})) = 0, \
-                            0, \
-                            SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))\
-                        )\
-                    )",
+                    "if \
+                        (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
+                        then 0 \
+                        else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
+                        if \
+                            ({from} - PREVIOUS({from})) = 0 \
+                            then 0 \
+                            else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
                     to = to.as_str(),
                     from = from.as_str()
                 );
@@ -162,16 +158,14 @@ fn generate_module_link_score_equation(
     {
         // Chain transfer score: product of individual transfer scores
         return format!(
-            "IF THEN ELSE(\
-                (({to} - PREVIOUS({to})) = 0) :OR: (({from} - PREVIOUS({from})) = 0), \
-                0, \
-                ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                IF THEN ELSE(\
-                    ({from} - PREVIOUS({from})) = 0, \
-                    0, \
-                    SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))\
-                )\
-            )",
+            "if \
+                (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
+                then 0 \
+                else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
+                if \
+                    ({from} - PREVIOUS({from})) = 0 \
+                    then 0 \
+                    else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
             to = to.as_str(),
             from = from.as_str()
         );
@@ -300,11 +294,10 @@ fn generate_auxiliary_to_auxiliary_equation(
     );
 
     format!(
-        "IF THEN ELSE(\
-            (({to} - PREVIOUS({to})) = 0) :OR: (({from} - PREVIOUS({from})) = 0), \
-            0, \
-            {abs_part} * {sign_part}\
-        )",
+        "if \
+            (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
+            then 0 \
+            else {abs_part} * {sign_part}",
         to = to.as_str(),
         from = from.as_str(),
         abs_part = abs_part,
@@ -403,32 +396,27 @@ fn generate_stock_to_flow_equation(
     // We still need the outer check because we're multiplying ABS and SIGN parts
     // and want the result to be 0 when either denominator is 0
     format!(
-        "IF THEN ELSE(\
-            ({flow_diff} = 0) :OR: ({stock_second_diff} = 0), \
-            0, \
-            {abs_part} * {sign_part}\
-        )"
+        "if \
+            ({flow_diff} = 0) OR ({stock_second_diff} = 0) \
+            then 0 \
+            else {abs_part} * {sign_part}"
     )
 }
 
 /// Generate the equation for a loop score variable
 fn generate_loop_score_equation(loop_item: &Loop) -> String {
     // Product of all link scores in the loop
+    // Use double quotes around variable names with $ to make them parseable
     let link_score_names: Vec<String> = loop_item
         .links
         .iter()
         .map(|link| {
-            // Check if this is a module link that needs special handling
-            let link_name = format!(
-                "$⁚ltm⁚link_score⁚{}⁚{}",
+            // Double-quote the variable name so it can be parsed
+            format!(
+                "\"$⁚ltm⁚link_score⁚{}⁚{}\"",
                 link.from.as_str(),
                 link.to.as_str()
-            );
-
-            // If the link crosses module boundaries, we might need to reference
-            // an imported/exported link score variable
-            // For now, use the standard naming
-            link_name
+            )
         })
         .collect();
 
@@ -442,12 +430,13 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
 /// Generate the equation for a relative loop score variable
 fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
     // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
-    let loop_score_var = format!("$⁚ltm⁚abs_loop_score⁚{loop_id}");
+    // Use double quotes around variable names with $
+    let loop_score_var = format!("\"$⁚ltm⁚abs_loop_score⁚{loop_id}\"");
 
     // Build sum of absolute values of all loop scores
     let all_loop_scores: Vec<String> = all_loops
         .iter()
-        .map(|loop_item| format!("ABS($⁚ltm⁚abs_loop_score⁚{})", loop_item.id))
+        .map(|loop_item| format!("ABS(\"$⁚ltm⁚abs_loop_score⁚{}\")", loop_item.id))
         .collect();
 
     let sum_expr = if all_loop_scores.is_empty() {
@@ -465,7 +454,7 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
     use crate::datamodel;
 
     datamodel::Variable::Aux(datamodel::Aux {
-        ident: name.to_string(),
+        ident: canonicalize(name).to_string(),
         equation: datamodel::Equation::Scalar(equation.to_string(), None),
         documentation: "LTM".to_string(),
         units: Some("dmnl".to_string()), // LTM scores are dimensionless
@@ -504,7 +493,11 @@ mod tests {
         };
 
         let equation = generate_loop_score_equation(&loop_item);
-        assert_eq!(equation, "$⁚ltm⁚link_score⁚x⁚y * $⁚ltm⁚link_score⁚y⁚x");
+        // The equation should use double-quoted variable names for parseability
+        assert_eq!(
+            equation,
+            "\"$⁚ltm⁚link_score⁚x⁚y\" * \"$⁚ltm⁚link_score⁚y⁚x\""
+        );
     }
 
     #[test]
@@ -530,10 +523,13 @@ mod tests {
 
         // Should use SAFEDIV for division by zero protection
         assert!(equation.contains("SAFEDIV"));
-        // Should reference the specific loop score
-        assert!(equation.contains("$⁚ltm⁚abs_loop_score⁚R1"));
-        // Should have sum of all loop scores in denominator
-        assert!(equation.contains("ABS($⁚ltm⁚abs_loop_score⁚R1) + ABS($⁚ltm⁚abs_loop_score⁚B1)"));
+        // Should reference the specific loop score (with double quotes and $ prefix)
+        assert!(equation.contains("\"$⁚ltm⁚abs_loop_score⁚R1\""));
+        // Should have sum of all loop scores in denominator (with double quotes and $ prefix)
+        assert!(
+            equation
+                .contains("ABS(\"$⁚ltm⁚abs_loop_score⁚R1\") + ABS(\"$⁚ltm⁚abs_loop_score⁚B1\")")
+        );
     }
 
     #[test]
@@ -618,12 +614,11 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, y_var, all_vars);
 
         // Verify the EXACT equation structure
-        let expected = "IF THEN ELSE(\
-            ((y - PREVIOUS(y)) = 0) :OR: ((x - PREVIOUS(x)) = 0), \
-            0, \
-            ABS(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (y - PREVIOUS(y)), 0)) * \
-            SIGN(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (x - PREVIOUS(x)), 0))\
-        )";
+        let expected = "if \
+            ((y - PREVIOUS(y)) = 0) OR ((x - PREVIOUS(x)) = 0) \
+            then 0 \
+            else ABS(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (y - PREVIOUS(y)), 0)) * \
+            SIGN(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (x - PREVIOUS(x)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -850,16 +845,14 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for module-to-variable link
-        let expected = "IF THEN ELSE(\
-            ((processed - PREVIOUS(processed)) = 0) :OR: ((smoother - PREVIOUS(smoother)) = 0), \
-            0, \
-            ABS(((processed - PREVIOUS(processed))) / (processed - PREVIOUS(processed))) * \
-            IF THEN ELSE(\
-                (smoother - PREVIOUS(smoother)) = 0, \
-                0, \
-                SIGN(((processed - PREVIOUS(processed))) / (smoother - PREVIOUS(smoother)))\
-            )\
-        )";
+        let expected = "if \
+            ((processed - PREVIOUS(processed)) = 0) OR ((smoother - PREVIOUS(smoother)) = 0) \
+            then 0 \
+            else ABS(((processed - PREVIOUS(processed))) / (processed - PREVIOUS(processed))) * \
+            if \
+                (smoother - PREVIOUS(smoother)) = 0 \
+                then 0 \
+                else SIGN(((processed - PREVIOUS(processed))) / (smoother - PREVIOUS(smoother)))";
 
         assert_eq!(
             equation, expected,
@@ -913,16 +906,14 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for variable-to-module link
-        let expected = "IF THEN ELSE(\
-            ((processor - PREVIOUS(processor)) = 0) :OR: ((raw_data - PREVIOUS(raw_data)) = 0), \
-            0, \
-            ABS(((processor - PREVIOUS(processor))) / (processor - PREVIOUS(processor))) * \
-            IF THEN ELSE(\
-                (raw_data - PREVIOUS(raw_data)) = 0, \
-                0, \
-                SIGN(((processor - PREVIOUS(processor))) / (raw_data - PREVIOUS(raw_data)))\
-            )\
-        )";
+        let expected = "if \
+            ((processor - PREVIOUS(processor)) = 0) OR ((raw_data - PREVIOUS(raw_data)) = 0) \
+            then 0 \
+            else ABS(((processor - PREVIOUS(processor))) / (processor - PREVIOUS(processor))) * \
+            if \
+                (raw_data - PREVIOUS(raw_data)) = 0 \
+                then 0 \
+                else SIGN(((processor - PREVIOUS(processor))) / (raw_data - PREVIOUS(raw_data)))";
 
         assert_eq!(
             equation, expected,
@@ -970,16 +961,14 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for module-to-module link
-        let expected = "IF THEN ELSE(\
-            ((filter_b - PREVIOUS(filter_b)) = 0) :OR: ((filter_a - PREVIOUS(filter_a)) = 0), \
-            0, \
-            ABS(((filter_b - PREVIOUS(filter_b))) / (filter_b - PREVIOUS(filter_b))) * \
-            IF THEN ELSE(\
-                (filter_a - PREVIOUS(filter_a)) = 0, \
-                0, \
-                SIGN(((filter_b - PREVIOUS(filter_b))) / (filter_a - PREVIOUS(filter_a)))\
-            )\
-        )";
+        let expected = "if \
+            ((filter_b - PREVIOUS(filter_b)) = 0) OR ((filter_a - PREVIOUS(filter_a)) = 0) \
+            then 0 \
+            else ABS(((filter_b - PREVIOUS(filter_b))) / (filter_b - PREVIOUS(filter_b))) * \
+            if \
+                (filter_a - PREVIOUS(filter_a)) = 0 \
+                then 0 \
+                else SIGN(((filter_b - PREVIOUS(filter_b))) / (filter_a - PREVIOUS(filter_a)))";
 
         assert_eq!(
             equation, expected,
@@ -1130,14 +1119,13 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, flow_var, all_vars);
 
         // Verify the EXACT equation structure for stock-to-flow
-        let expected = "IF THEN ELSE(\
-            ((deaths - PREVIOUS(deaths)) = 0) :OR: \
-            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0), \
-            0, \
-            ABS(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), (deaths - PREVIOUS(deaths)), 0)) * \
+        let expected = "if \
+            ((deaths - PREVIOUS(deaths)) = 0) OR \
+            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0) \
+            then 0 \
+            else ABS(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), (deaths - PREVIOUS(deaths)), 0)) * \
             SIGN(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), \
-                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))\
-        )";
+                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1168,14 +1156,13 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // Verify the EXACT equation structure using SAFEDIV
-        let expected = "IF THEN ELSE(\
-            ((production - PREVIOUS(production)) = 0) :OR: \
-            (((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))) = 0), \
-            0, \
-            ABS(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
+        let expected = "if \
+            ((production - PREVIOUS(production)) = 0) OR \
+            (((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))) = 0) \
+            then 0 \
+            else ABS(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
             SIGN(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), \
-                ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))), 0))\
-        )";
+                ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1205,14 +1192,13 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // Verify the EXACT equation structure using SAFEDIV
-        let expected = "IF THEN ELSE(\
-            ((drainage - PREVIOUS(drainage)) = 0) :OR: \
-            (((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))) = 0), \
-            0, \
-            ABS(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
+        let expected = "if \
+            ((drainage - PREVIOUS(drainage)) = 0) OR \
+            (((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))) = 0) \
+            then 0 \
+            else ABS(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
             SIGN(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), \
-                ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))), 0))\
-        )";
+                ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1244,15 +1230,14 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // Verify the EXACT equation using SAFEDIV - note that non-stock dependencies get PREVIOUS()
-        let expected = "IF THEN ELSE(\
-            ((births - PREVIOUS(births)) = 0) :OR: \
-            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0), \
-            0, \
-            ABS(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
+        let expected = "if \
+            ((births - PREVIOUS(births)) = 0) OR \
+            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0) \
+            then 0 \
+            else ABS(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
                 (births - PREVIOUS(births)), 0)) * \
             SIGN(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
-                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))\
-        )";
+                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1282,18 +1267,65 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // When flow doesn't depend on stock, partial equation is just the constant
-        let expected = "IF THEN ELSE(\
-            ((constant_flow - PREVIOUS(constant_flow)) = 0) :OR: \
-            (((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))) = 0), \
-            0, \
-            ABS(SAFEDIV(((10) - PREVIOUS(constant_flow)), (constant_flow - PREVIOUS(constant_flow)), 0)) * \
+        let expected = "if \
+            ((constant_flow - PREVIOUS(constant_flow)) = 0) OR \
+            (((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))) = 0) \
+            then 0 \
+            else ABS(SAFEDIV(((10) - PREVIOUS(constant_flow)), (constant_flow - PREVIOUS(constant_flow)), 0)) * \
             SIGN(SAFEDIV(((10) - PREVIOUS(constant_flow)), \
-                ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))), 0))\
-        )";
+                ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))), 0))";
 
         assert_eq!(
             equation, expected,
             "No dependency equation should still use second-order difference structure"
+        );
+    }
+
+    #[test]
+    fn test_equation_with_dollar_sign_variables() {
+        // Test that equations with $ in variable names can be parsed using double quotes
+        use crate::ast::{Expr0, print_eqn};
+        use crate::builtins::Loc;
+        use crate::common::{RawIdent, canonicalize};
+        use crate::token::LexerType;
+
+        println!("\n=== Testing $ variable parsing with double quotes ===");
+
+        // Test 1: Double quoted variable parses successfully
+        let equation = "\"$⁚ltm⁚link_score⁚x⁚y\"";
+        let result = Expr0::new(equation, LexerType::Equation);
+        assert!(result.is_ok(), "Double quoted $ variable should parse");
+
+        if let Ok(Some(Expr0::Var(id, _))) = &result {
+            println!("Parsed variable RawIdent: {:?}", id.as_str());
+            println!("Canonicalized: {}", canonicalize(id.as_str()));
+
+            // Check if quotes are included in the identifier
+            assert_eq!(id.as_str(), "\"$⁚ltm⁚link_score⁚x⁚y\"");
+        }
+
+        // Test 2: Complex equation with quoted variables
+        let equation = "\"$⁚ltm⁚link_score⁚x⁚y\" * \"$⁚ltm⁚link_score⁚y⁚x\"";
+        let result = Expr0::new(equation, LexerType::Equation);
+        assert!(
+            result.is_ok(),
+            "Multiplication of quoted $ variables should parse"
+        );
+
+        // Test 3: What happens when we create AST with quoted names and print it
+        let var_ast = Expr0::Var(
+            RawIdent::new_from_str("\"$⁚ltm⁚link_score⁚x⁚y\""),
+            Loc::default(),
+        );
+        let printed = print_eqn(&var_ast);
+        println!("AST with quoted $ variable printed as: '{}'", printed);
+
+        // Note: print_eqn outputs single quotes but parser needs double quotes
+        // This is a known limitation but doesn't affect our use case since we generate
+        // equations directly with double quotes, not through print_eqn
+        assert_eq!(
+            printed, "$⁚ltm⁚link_score⁚x⁚y",
+            "print_eqn strips quotes from canonicalized name"
         );
     }
 
@@ -1325,14 +1357,13 @@ mod tests {
 
         // This test validates the exact implementation of Equation (3) from the 2023 paper
         // Note: 'S' becomes lowercase 's' in stock references but stays uppercase in partial equation
-        let expected = "IF THEN ELSE(\
-            ((inflow - PREVIOUS(inflow)) = 0) :OR: \
-            (((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))) = 0), \
-            0, \
-            ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
+        let expected = "if \
+            ((inflow - PREVIOUS(inflow)) = 0) OR \
+            (((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))) = 0) \
+            then 0 \
+            else ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
             SIGN(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
-                ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))), 0))\
-        )";
+                ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))), 0))";
 
         assert_eq!(
             equation, expected,
