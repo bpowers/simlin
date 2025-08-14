@@ -25,6 +25,7 @@ node_modules
 /playwright-report
 /ui-tests/visual/**/*.png
 !/ui-tests/visual/**/*-expected.png
+!/ui-tests/visual/**/*-visual-*.png
 
 # production
 /build

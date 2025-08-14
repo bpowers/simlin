@@ -7,7 +7,8 @@
   },
   "include": [
     "**/*.ts",
-    "**/*.tsx"
+    "**/*.tsx",
+    "schemas/**/*.js"
   ],
   "exclude": [
     "lib",

@@ -78,10 +78,18 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 120 * 1000,
     },
-  ] : {
-    command: 'yarn start:frontend',
-    port: 3000,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120 * 1000,
-  },
+  ] : [
+    {
+      command: './scripts/start-backend-for-tests.sh',
+      port: 3030,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120 * 1000,
+    },
+    {
+      command: 'yarn start:frontend',
+      port: 3000,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120 * 1000,
+    },
+  ],
 });
