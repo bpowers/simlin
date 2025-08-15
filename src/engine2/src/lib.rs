@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
@@ -897,5 +898,46 @@ mod tests {
 
             simlin_project_unref(proj);
         }
+    }
+}
+
+// Memory management functions for WASM
+// We use a simple approach where we store the size before the allocated memory
+#[no_mangle]
+pub extern "C" fn simlin_malloc(size: usize) -> *mut u8 {
+    unsafe {
+        // Allocate extra space to store the size
+        let total_size = size + std::mem::size_of::<usize>();
+        let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
+        let ptr = alloc(layout);
+        
+        if ptr.is_null() {
+            return ptr;
+        }
+        
+        // Store the size at the beginning
+        *(ptr as *mut usize) = size;
+        
+        // Return pointer to the user data (after the size)
+        ptr.add(std::mem::size_of::<usize>())
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn simlin_free(ptr: *mut u8) {
+    unsafe {
+        if ptr.is_null() {
+            return;
+        }
+        
+        // Get the actual allocation pointer (before the user data)
+        let actual_ptr = ptr.sub(std::mem::size_of::<usize>());
+        
+        // Read the size
+        let size = *(actual_ptr as *mut usize);
+        let total_size = size + std::mem::size_of::<usize>();
+        
+        let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
+        dealloc(actual_ptr, layout);
     }
 }
