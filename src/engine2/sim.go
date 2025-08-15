@@ -186,63 +186,69 @@ func (s *Sim) GetVarCount() (int, error) {
 
 // GetVarNames returns the names of all variables
 func (s *Sim) GetVarNames() ([]string, error) {
-	s.engine.mu.Lock()
-	defer s.engine.mu.Unlock()
-	
-	// First get the count
-	varCount, err := s.GetVarCount()
-	if err != nil {
-		return nil, err
-	}
-	
-	if varCount == 0 {
-		return []string{}, nil
-	}
-	
-	// Allocate array for string pointers
-	ptrSize := uint32(varCount * 4) // 4 bytes per pointer
-	resultPtr, err := s.engine.malloc(ptrSize)
-	if err != nil {
-		return nil, fmt.Errorf("failed to allocate result array: %w", err)
-	}
-	defer s.engine.free(resultPtr)
-	
-	// Call simlin_sim_get_varnames
-	results, err := s.engine.fnSimGetVarnames.Call(s.engine.ctx, uint64(s.ptr), uint64(resultPtr), uint64(varCount))
-	if err != nil {
-		return nil, fmt.Errorf("simlin_sim_get_varnames failed: %w", err)
-	}
-	if len(results) != 1 {
-		return nil, errors.New("simlin_sim_get_varnames returned unexpected number of results")
-	}
-	
-	count := int32(results[0])
-	if count < 0 {
-		return nil, errors.New("failed to get variable names")
-	}
-	
-	// Read the string pointers and strings
-	var names []string
-	for i := 0; i < int(count); i++ {
-		// Read string pointer
-		ptrOffset := resultPtr + uint32(i*4)
-		ptrBytes, ok := s.engine.mod.Memory().Read(ptrOffset, 4)
-		if !ok {
-			return nil, fmt.Errorf("failed to read string pointer %d", i)
-		}
-		
-		strPtr := uint32(ptrBytes[0]) | uint32(ptrBytes[1])<<8 | uint32(ptrBytes[2])<<16 | uint32(ptrBytes[3])<<24
-		name, err := s.engine.readString(strPtr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read variable name %d: %w", i, err)
-		}
-		names = append(names, name)
-		
-		// Free the string
-		s.engine.fnFreeString.Call(s.engine.ctx, uint64(strPtr))
-	}
-	
-	return names, nil
+    s.engine.mu.Lock()
+    defer s.engine.mu.Unlock()
+
+    // Fetch count directly to avoid nested locks
+    rVarCount, err := s.engine.fnSimGetVarcount.Call(s.engine.ctx, uint64(s.ptr))
+    if err != nil {
+        return nil, fmt.Errorf("simlin_sim_get_varcount failed: %w", err)
+    }
+    if len(rVarCount) != 1 {
+        return nil, errors.New("simlin_sim_get_varcount returned unexpected number of results")
+    }
+    varCount := int32(rVarCount[0])
+    if varCount < 0 {
+        return nil, errors.New("variable count not available")
+    }
+    if varCount == 0 {
+        return []string{}, nil
+    }
+
+    // Allocate array for string pointers
+    ptrSize := uint32(varCount) * 4 // 4 bytes per pointer
+    resultPtr, err := s.engine.malloc(ptrSize)
+    if err != nil {
+        return nil, fmt.Errorf("failed to allocate result array: %w", err)
+    }
+    defer s.engine.free(resultPtr)
+
+    // Call simlin_sim_get_varnames
+    results, err := s.engine.fnSimGetVarnames.Call(s.engine.ctx, uint64(s.ptr), uint64(resultPtr), uint64(varCount))
+    if err != nil {
+        return nil, fmt.Errorf("simlin_sim_get_varnames failed: %w", err)
+    }
+    if len(results) != 1 {
+        return nil, errors.New("simlin_sim_get_varnames returned unexpected number of results")
+    }
+
+    count := int32(results[0])
+    if count < 0 {
+        return nil, errors.New("failed to get variable names")
+    }
+
+    // Read the string pointers and strings
+    var names []string
+    for i := 0; i < int(count); i++ {
+        // Read string pointer
+        ptrOffset := resultPtr + uint32(i*4)
+        ptrBytes, ok := s.engine.mod.Memory().Read(ptrOffset, 4)
+        if !ok {
+            return nil, fmt.Errorf("failed to read string pointer %d", i)
+        }
+
+        strPtr := uint32(ptrBytes[0]) | uint32(ptrBytes[1])<<8 | uint32(ptrBytes[2])<<16 | uint32(ptrBytes[3])<<24
+        name, err := s.engine.readString(strPtr)
+        if err != nil {
+            return nil, fmt.Errorf("failed to read variable name %d: %w", i, err)
+        }
+        names = append(names, name)
+
+        // Free the string
+        s.engine.fnFreeString.Call(s.engine.ctx, uint64(strPtr))
+    }
+
+    return names, nil
 }
 
 // GetValue gets a single value from the simulation
@@ -318,18 +324,24 @@ func (s *Sim) SetValue(name string, value float64) error {
 
 // GetSeries gets a time series for a variable
 func (s *Sim) GetSeries(name string) ([]float64, error) {
-	s.engine.mu.Lock()
-	defer s.engine.mu.Unlock()
-	
-	// Get step count first
-	stepCount, err := s.GetStepCount()
-	if err != nil {
-		return nil, err
-	}
-	
-	if stepCount == 0 {
-		return []float64{}, nil
-	}
+    s.engine.mu.Lock()
+    defer s.engine.mu.Unlock()
+
+    // Get step count directly to avoid nested locks
+    rSteps, err := s.engine.fnSimGetStepcount.Call(s.engine.ctx, uint64(s.ptr))
+    if err != nil {
+        return nil, fmt.Errorf("simlin_sim_get_stepcount failed: %w", err)
+    }
+    if len(rSteps) != 1 {
+        return nil, errors.New("simlin_sim_get_stepcount returned unexpected number of results")
+    }
+    stepCount := int32(rSteps[0])
+    if stepCount < 0 {
+        return nil, errors.New("no results available")
+    }
+    if stepCount == 0 {
+        return []float64{}, nil
+    }
 	
 	namePtr, err := s.engine.writeString(name)
 	if err != nil {
@@ -346,7 +358,7 @@ func (s *Sim) GetSeries(name string) ([]float64, error) {
 	defer s.engine.free(resultPtr)
 	
 	// Call simlin_sim_get_series
-	results, err := s.engine.fnSimGetSeries.Call(s.engine.ctx, uint64(s.ptr), uint64(namePtr), uint64(resultPtr), uint64(stepCount))
+    results, err := s.engine.fnSimGetSeries.Call(s.engine.ctx, uint64(s.ptr), uint64(namePtr), uint64(resultPtr), uint64(stepCount))
 	if err != nil {
 		return nil, fmt.Errorf("simlin_sim_get_series failed: %w", err)
 	}
@@ -360,28 +372,34 @@ func (s *Sim) GetSeries(name string) ([]float64, error) {
 	}
 	
 	// Read the results
-	values, err := s.engine.readFloat64Slice(resultPtr, int(count))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read series: %w", err)
-	}
-	
-	return values, nil
+    values, err := s.engine.readFloat64Slice(resultPtr, int(count))
+    if err != nil {
+        return nil, fmt.Errorf("failed to read series: %w", err)
+    }
+
+    return values, nil
 }
 
 // GetRelLoopScore gets the relative loop score time series for a specific loop
 func (s *Sim) GetRelLoopScore(loopID string) ([]float64, error) {
-	s.engine.mu.Lock()
-	defer s.engine.mu.Unlock()
-	
-	// Get step count first
-	stepCount, err := s.GetStepCount()
-	if err != nil {
-		return nil, err
-	}
-	
-	if stepCount == 0 {
-		return []float64{}, nil
-	}
+    s.engine.mu.Lock()
+    defer s.engine.mu.Unlock()
+
+    // Get step count directly to avoid nested locks
+    rSteps, err := s.engine.fnSimGetStepcount.Call(s.engine.ctx, uint64(s.ptr))
+    if err != nil {
+        return nil, fmt.Errorf("simlin_sim_get_stepcount failed: %w", err)
+    }
+    if len(rSteps) != 1 {
+        return nil, errors.New("simlin_sim_get_stepcount returned unexpected number of results")
+    }
+    stepCount := int32(rSteps[0])
+    if stepCount < 0 {
+        return nil, errors.New("no results available")
+    }
+    if stepCount == 0 {
+        return []float64{}, nil
+    }
 	
 	loopIDPtr, err := s.engine.writeString(loopID)
 	if err != nil {
@@ -398,7 +416,7 @@ func (s *Sim) GetRelLoopScore(loopID string) ([]float64, error) {
 	defer s.engine.free(resultPtr)
 	
 	// Call simlin_analyze_get_rel_loop_score
-	results, err := s.engine.fnAnalyzeGetRelLoopScore.Call(s.engine.ctx, uint64(s.ptr), uint64(loopIDPtr), uint64(resultPtr), uint64(stepCount))
+    results, err := s.engine.fnAnalyzeGetRelLoopScore.Call(s.engine.ctx, uint64(s.ptr), uint64(loopIDPtr), uint64(resultPtr), uint64(stepCount))
 	if err != nil {
 		return nil, fmt.Errorf("simlin_analyze_get_rel_loop_score failed: %w", err)
 	}
@@ -412,10 +430,10 @@ func (s *Sim) GetRelLoopScore(loopID string) ([]float64, error) {
 	}
 	
 	// Read the results
-	values, err := s.engine.readFloat64Slice(resultPtr, int(count))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read loop scores: %w", err)
-	}
-	
-	return values, nil
+    values, err := s.engine.readFloat64Slice(resultPtr, int(count))
+    if err != nil {
+        return nil, fmt.Errorf("failed to read loop scores: %w", err)
+    }
+
+    return values, nil
 }

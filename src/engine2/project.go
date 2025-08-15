@@ -129,40 +129,40 @@ func (p *Project) GetLoops() ([]Loop, error) {
 		p.engine.fnFreeLoops.Call(p.engine.ctx, uint64(loopsPtr))
 	}()
 	
-	// Read the SimlinLoops structure
-	// struct SimlinLoops { loops: *mut SimlinLoop, count: usize }
-	loopsBytes, ok := p.engine.mod.Memory().Read(loopsPtr, 16) // 8 bytes ptr + 8 bytes count
-	if !ok {
-		return nil, errors.New("failed to read loops structure")
-	}
-	
-	// Parse the structure (assuming 64-bit pointers)
-	loopArrayPtr := uint32(loopsBytes[0]) | uint32(loopsBytes[1])<<8 | uint32(loopsBytes[2])<<16 | uint32(loopsBytes[3])<<24
-	loopCount := uint64(loopsBytes[8]) | uint64(loopsBytes[9])<<8 | uint64(loopsBytes[10])<<16 | uint64(loopsBytes[11])<<24 |
-		uint64(loopsBytes[12])<<32 | uint64(loopsBytes[13])<<40 | uint64(loopsBytes[14])<<48 | uint64(loopsBytes[15])<<56
-	
-	if loopCount == 0 {
-		return []Loop{}, nil
-	}
+    // Read the SimlinLoops structure
+    // WASM32 layout: struct SimlinLoops { loops: *mut SimlinLoop (u32), count: usize (u32) }
+    loopsBytes, ok := p.engine.mod.Memory().Read(loopsPtr, 8) // 4 bytes ptr + 4 bytes count
+    if !ok {
+        return nil, errors.New("failed to read loops structure")
+    }
+
+    // Parse the structure for 32-bit pointers/usize
+    loopArrayPtr := uint32(loopsBytes[0]) | uint32(loopsBytes[1])<<8 | uint32(loopsBytes[2])<<16 | uint32(loopsBytes[3])<<24
+    loopCount := uint32(loopsBytes[4]) | uint32(loopsBytes[5])<<8 | uint32(loopsBytes[6])<<16 | uint32(loopsBytes[7])<<24
+
+    if loopCount == 0 {
+        return []Loop{}, nil
+    }
 	
 	var loops []Loop
 	
-	// Read each loop structure
-	// struct SimlinLoop { id: *mut c_char, variables: *mut *mut c_char, var_count: usize, polarity: SimlinLoopPolarity }
-	loopStructSize := uint32(24) // 8 + 8 + 8 bytes (assuming 64-bit)
-	
-	for i := uint64(0); i < loopCount; i++ {
-		offset := loopArrayPtr + uint32(i)*loopStructSize
-		loopBytes, ok := p.engine.mod.Memory().Read(offset, loopStructSize)
-		if !ok {
-			return nil, fmt.Errorf("failed to read loop %d", i)
-		}
-		
-		// Parse loop structure
-		idPtr := uint32(loopBytes[0]) | uint32(loopBytes[1])<<8 | uint32(loopBytes[2])<<16 | uint32(loopBytes[3])<<24
-		varsPtr := uint32(loopBytes[8]) | uint32(loopBytes[9])<<8 | uint32(loopBytes[10])<<16 | uint32(loopBytes[11])<<24
-		varCount := uint64(loopBytes[16]) | uint64(loopBytes[17])<<8 | uint64(loopBytes[18])<<16 | uint64(loopBytes[19])<<24
-		polarity := LoopPolarity(loopBytes[20])
+    // Read each loop structure
+    // WASM32 layout: struct SimlinLoop { id: *mut c_char (u32), variables: *mut *mut c_char (u32), var_count: usize (u32), polarity: u32 }
+    loopStructSize := uint32(16)
+
+    for i := uint32(0); i < loopCount; i++ {
+        offset := loopArrayPtr + i*loopStructSize
+        loopBytes, ok := p.engine.mod.Memory().Read(offset, loopStructSize)
+        if !ok {
+            return nil, fmt.Errorf("failed to read loop %d", i)
+        }
+        
+        // Parse loop structure
+        idPtr := uint32(loopBytes[0]) | uint32(loopBytes[1])<<8 | uint32(loopBytes[2])<<16 | uint32(loopBytes[3])<<24
+        varsPtr := uint32(loopBytes[4]) | uint32(loopBytes[5])<<8 | uint32(loopBytes[6])<<16 | uint32(loopBytes[7])<<24
+        varCount := uint32(loopBytes[8]) | uint32(loopBytes[9])<<8 | uint32(loopBytes[10])<<16 | uint32(loopBytes[11])<<24
+        polRaw := uint32(loopBytes[12]) | uint32(loopBytes[13])<<8 | uint32(loopBytes[14])<<16 | uint32(loopBytes[15])<<24
+        polarity := LoopPolarity(polRaw)
 		
 		// Read loop ID
 		id, err := p.engine.readString(idPtr)
@@ -172,23 +172,23 @@ func (p *Project) GetLoops() ([]Loop, error) {
 		
 		// Read variable names
 		var variables []string
-		if varsPtr != 0 && varCount > 0 {
-			for j := uint64(0); j < varCount; j++ {
-				// Read pointer to string
-				ptrOffset := varsPtr + uint32(j)*4
-				ptrBytes, ok := p.engine.mod.Memory().Read(ptrOffset, 4)
-				if !ok {
-					return nil, fmt.Errorf("failed to read variable pointer %d", j)
-				}
-				
-				varPtr := uint32(ptrBytes[0]) | uint32(ptrBytes[1])<<8 | uint32(ptrBytes[2])<<16 | uint32(ptrBytes[3])<<24
-				varName, err := p.engine.readString(varPtr)
-				if err != nil {
-					return nil, fmt.Errorf("failed to read variable name: %w", err)
-				}
-				variables = append(variables, varName)
-			}
-		}
+        if varsPtr != 0 && varCount > 0 {
+            for j := uint32(0); j < varCount; j++ {
+                // Read pointer to string
+                ptrOffset := varsPtr + uint32(j)*4
+                ptrBytes, ok := p.engine.mod.Memory().Read(ptrOffset, 4)
+                if !ok {
+                    return nil, fmt.Errorf("failed to read variable pointer %d", j)
+                }
+                
+                varPtr := uint32(ptrBytes[0]) | uint32(ptrBytes[1])<<8 | uint32(ptrBytes[2])<<16 | uint32(ptrBytes[3])<<24
+                varName, err := p.engine.readString(varPtr)
+                if err != nil {
+                    return nil, fmt.Errorf("failed to read variable name: %w", err)
+                }
+                variables = append(variables, varName)
+            }
+        }
 		
 		loops = append(loops, Loop{
 			ID:        id,

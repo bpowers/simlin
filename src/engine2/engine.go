@@ -23,14 +23,15 @@ var engineWasm []byte
 
 // Error codes from the C API
 const (
-	ErrNoError      = 0
-	ErrNoMem        = -1
-	ErrBadFile      = -2
-	ErrUnspecified  = -3
-	ErrBadXml       = -4
-	ErrBadLex       = -5
-	ErrEof          = -6
-	ErrCircular     = -7
+    ErrNoError      = 0
+    ErrNoMem        = -1
+    ErrBadFile      = -2
+    ErrUnspecified  = -3
+    ErrBadXml       = -4
+    ErrBadLex       = -5
+    ErrEof          = -6
+    ErrCircular     = -7
+    ErrNotSimulatable = -8
 )
 
 // LoopPolarity represents the polarity of a feedback loop
@@ -160,10 +161,37 @@ func (e *Engine) cacheFunctions() error {
 
 // Close cleans up the engine resources
 func (e *Engine) Close() error {
-	if e.rt != nil {
-		return e.rt.Close(e.ctx)
-	}
-	return nil
+    if e.rt != nil {
+        return e.rt.Close(e.ctx)
+    }
+    return nil
+}
+
+// errorString maps error codes to human-readable strings without calling into WASM.
+// This avoids re-entrant locking and reduces overhead on error paths.
+func (e *Engine) errorString(errCode int32) string {
+    switch errCode {
+    case ErrNoError:
+        return "no error"
+    case ErrNoMem:
+        return "out of memory"
+    case ErrBadFile:
+        return "bad file"
+    case ErrUnspecified:
+        return "unspecified error"
+    case ErrBadXml:
+        return "bad XML"
+    case ErrBadLex:
+        return "lexer error"
+    case ErrEof:
+        return "unexpected end of file"
+    case ErrCircular:
+        return "circular dependency"
+    case ErrNotSimulatable:
+        return "not simulatable"
+    default:
+        return "unknown error"
+    }
 }
 
 // Helper functions for memory management
@@ -279,16 +307,5 @@ func (e *Engine) writeFloat64Slice(data []float64) (uint32, error) {
 
 // GetErrorString returns the string representation of an error code
 func (e *Engine) GetErrorString(errCode int32) (string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	
-	results, err := e.fnErrorStr.Call(e.ctx, uint64(errCode))
-	if err != nil {
-		return "", err
-	}
-	if len(results) != 1 {
-		return "", errors.New("simlin_error_str returned unexpected number of results")
-	}
-	
-	return e.readString(uint32(results[0]))
+    return e.errorString(errCode), nil
 }
