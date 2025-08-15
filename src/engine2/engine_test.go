@@ -243,7 +243,54 @@ func TestLTM(t *testing.T) {
 	}
 	defer engine.Close()
 
-	// We need a model with loops for this test
-	// For now, we'll skip if we don't have one
-	t.Skip("Need a model with loops for LTM testing")
+	// Load simulatable SIR Project (expected to have feedback loops)
+	data, err := os.ReadFile("testdata/SIR_project.pb")
+	if err != nil {
+		t.Skipf("SIR_project.pb fixture not found: %v", err)
+	}
+
+	// Open project
+	project, err := engine.OpenProject(data)
+	if err != nil {
+		t.Fatalf("failed to open project: %v", err)
+	}
+	defer project.Close()
+
+	// Enable LTM
+	if err := project.EnableLTM(); err != nil {
+		t.Skipf("EnableLTM not available: %v", err)
+	}
+
+	// Get loops
+	loops, err := project.GetLoops()
+	if err != nil {
+		t.Skipf("GetLoops not available: %v", err)
+	}
+	if len(loops) == 0 {
+		t.Skip("No loops detected in this model")
+	}
+
+	// Create simulation and run
+	sim, err := project.NewSim("")
+	if err != nil {
+		t.Fatalf("failed to create sim: %v", err)
+	}
+	defer sim.Close()
+
+	if err := sim.RunToEnd(); err != nil {
+		t.Fatalf("failed to run sim: %v", err)
+	}
+
+	// Get loop score for first loop
+	stepCount, err := sim.GetStepCount()
+	if err != nil {
+		t.Fatalf("GetStepCount: %v", err)
+	}
+	scores, err := sim.GetRelLoopScore(loops[0].ID)
+	if err != nil {
+		t.Fatalf("GetRelLoopScore: %v", err)
+	}
+	if len(scores) != stepCount {
+		t.Fatalf("loop score length mismatch: got %d want %d", len(scores), stepCount)
+	}
 }
