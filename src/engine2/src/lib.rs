@@ -545,12 +545,9 @@ pub unsafe extern "C" fn simlin_sim_set_value(
         Err(_) => return SimlinError::Unspecified as c_int,
     };
 
-    if let Some(ref mut _vm) = sim.vm {
-        // TODO: Need to implement value setter in VM
-        SimlinError::Unspecified as c_int
-    } else {
-        SimlinError::Unspecified as c_int
-    }
+    // Setting values at runtime is not yet supported in the VM API.
+    // Return explicit error for clarity.
+    SimlinError::NotSimulatable as c_int
 }
 
 /// Gets a time series for a variable
