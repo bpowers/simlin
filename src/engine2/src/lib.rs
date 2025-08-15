@@ -123,32 +123,14 @@ pub unsafe extern "C" fn simlin_project_open(
 
     let slice = std::slice::from_raw_parts(data, len);
 
-    // First, try to decode as a full Project protobuf
+    // Only accept full Project protobufs
     let project: engine::Project = match engine::project_io::Project::decode(slice) {
         Ok(pb_project) => serde::deserialize(pb_project).into(),
         Err(_) => {
-            // Fallback: try to decode as a single Model protobuf (e.g., stdlib .pb files)
-            match engine::project_io::Model::decode(slice) {
-                Ok(pb_model) => {
-                    let dm_model: engine::datamodel::Model = pb_model.into();
-                    let dm_project = engine::datamodel::Project {
-                        name: "".to_string(),
-                        sim_specs: Default::default(),
-                        dimensions: vec![],
-                        units: vec![],
-                        models: vec![dm_model],
-                        source: None,
-                        ai_information: None,
-                    };
-                    dm_project.into()
-                }
-                Err(_) => {
-                    if !err.is_null() {
-                        *err = SimlinError::BadFile as c_int;
-                    }
-                    return ptr::null_mut();
-                }
+            if !err.is_null() {
+                *err = SimlinError::BadFile as c_int;
             }
+            return ptr::null_mut();
         }
     };
 
@@ -803,47 +785,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn decode_previous_pb() {
-        let path = std::path::Path::new("../../src/simlin-engine/src/stdlib/previous.pb");
-        if !path.exists() {
-            return; // skip when path not available
-        }
-        let data = std::fs::read(path).unwrap();
-        // This stdlib file should decode as a Model, not a full Project
-        let proj_res = engine::project_io::Project::decode(&*data);
-        assert!(proj_res.is_err());
-        let model_res = engine::project_io::Model::decode(&*data);
-        assert!(model_res.is_ok());
-    }
-
-    #[test]
-    fn simulate_previous_pb() {
-        let path = std::path::Path::new("../../src/simlin-engine/src/stdlib/previous.pb");
-        if !path.exists() {
-            return; // skip when path not available
-        }
-        let data = std::fs::read(path).unwrap();
-        let model = engine::project_io::Model::decode(&*data).unwrap();
-        let dm_model: engine::datamodel::Model = model.into();
-        let dm_project = engine::datamodel::Project {
-            name: "".to_string(),
-            sim_specs: Default::default(),
-            dimensions: vec![],
-            units: vec![],
-            models: vec![dm_model.clone()],
-            source: None,
-            ai_information: None,
-        };
-        let project: engine::Project = dm_project.into();
-        // choose the model name from the pb
-        let model_name = dm_model.name.clone();
-        let compiler = engine::Simulation::new(&project, &model_name).unwrap();
-        let compiled = compiler.compile().unwrap();
-        let mut vm = engine::Vm::new(compiled).unwrap();
-        assert!(vm.run_to_end().is_ok());
-        let _results = vm.into_results();
-    }
+    // Model-only protobufs are not supported at the ABI layer; only Projects are accepted.
 
     #[test]
     fn test_project_lifecycle() {

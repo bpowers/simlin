@@ -44,10 +44,10 @@ func TestProject(t *testing.T) {
 	}
 	defer engine.Close()
 
-	// Load SIR model protobuf fixture (simulatable)
-	data, err := os.ReadFile("testdata/SIR.pb")
+	// Load SIR Project protobuf fixture (simulatable)
+	data, err := os.ReadFile("testdata/SIR_project.pb")
 	if err != nil {
-		t.Skipf("SIR.pb fixture not found: %v", err)
+		t.Skipf("SIR_project.pb fixture not found: %v", err)
 	}
 
 	// Open project
@@ -79,10 +79,10 @@ func TestSimulation(t *testing.T) {
 	}
 	defer engine.Close()
 
-	// Load simulatable SIR model
-	data, err := os.ReadFile("testdata/SIR.pb")
+	// Load simulatable SIR Project
+	data, err := os.ReadFile("testdata/SIR_project.pb")
 	if err != nil {
-		t.Skipf("SIR.pb fixture not found: %v", err)
+		t.Skipf("SIR_project.pb fixture not found: %v", err)
 	}
 
 	// Open project
