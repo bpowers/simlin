@@ -339,9 +339,9 @@ mod tests {
 
         // Check all variables for errors before building simulation
         for (model_name, model) in &project_rc.models {
-            println!("Checking model: {}", model_name);
+            println!("Checking model: {model_name}");
             for (var_name, var) in &model.variables {
-                println!("  Variable: {}", var_name);
+                println!("  Variable: {var_name}");
                 if let Some(_ast) = var.ast() {
                     println!("    Has AST: yes");
                 } else {
@@ -349,12 +349,12 @@ mod tests {
                 }
                 if let Some(errors) = var.equation_errors() {
                     if !errors.is_empty() {
-                        println!("    EQUATION ERRORS: {:?}", errors);
+                        println!("    EQUATION ERRORS: {errors:?}");
                     }
                 }
                 if let Some(unit_errors) = var.unit_errors() {
                     if !unit_errors.is_empty() {
-                        println!("    UNIT ERRORS: {:?}", unit_errors);
+                        println!("    UNIT ERRORS: {unit_errors:?}");
                     }
                 }
             }

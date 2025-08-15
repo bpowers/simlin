@@ -353,8 +353,7 @@ mod tests {
         for i in 1..prev_a_values.len() {
             assert_ne!(
                 prev_a_values[i], 666.0,
-                "At timestep {}, PREVIOUS should no longer return initial value",
-                i
+                "At timestep {i}, PREVIOUS should no longer return initial value"
             );
         }
     }
@@ -380,8 +379,7 @@ mod tests {
         for i in 1..prev_const.len() {
             assert_eq!(
                 prev_const[i], 42.0,
-                "At timestep {}, PREVIOUS of constant 42 should be 42",
-                i
+                "At timestep {i}, PREVIOUS of constant 42 should be 42"
             );
         }
     }
@@ -441,8 +439,7 @@ mod tests {
             let expected = x[i - 1] + y[i - 1];
             assert_eq!(
                 prev_sum[i], expected,
-                "At timestep {}, PREVIOUS(x+y) should be {}",
-                i, expected
+                "At timestep {i}, PREVIOUS(x+y) should be {expected}"
             );
         }
     }
@@ -479,8 +476,8 @@ mod tests {
             .expect("Should have prev_counter values");
 
         println!("With dt=0.25, save_step=1.0:");
-        println!("TIME values at save steps: {:?}", counter);
-        println!("PREVIOUS(TIME, 999): {:?}", prev_counter);
+        println!("TIME values at save steps: {counter:?}");
+        println!("PREVIOUS(TIME, 999): {prev_counter:?}");
 
         // At save step t=1 (first save): PREVIOUS should return initial value
         assert_eq!(

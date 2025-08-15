@@ -1,17 +1,14 @@
 // Copyright 2025 The Simlin Authors. All rights reserved.
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
-
+use prost::Message;
+use simlin_engine::ltm::{detect_loops, LoopPolarity};
+use simlin_engine::{self as engine, canonicalize, serde, Vm};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-use prost::Message;
-use simlin_engine::ltm::{detect_loops, LoopPolarity};
-use simlin_engine::{self as engine, canonicalize, serde, Vm};
-
 /// Error codes matching the C API specification
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +23,6 @@ pub enum SimlinError {
     Circular = -7,
     NotSimulatable = -8,
 }
-
 impl From<engine::Error> for SimlinError {
     fn from(err: engine::Error) -> Self {
         use engine::ErrorCode;
@@ -42,14 +38,12 @@ impl From<engine::Error> for SimlinError {
         }
     }
 }
-
 /// Opaque project structure
 pub struct SimlinProject {
     project: engine::Project,
     ltm_project: Option<engine::Project>,
     ref_count: AtomicUsize,
 }
-
 /// Opaque simulation structure
 pub struct SimlinSim {
     project: *const SimlinProject,
@@ -58,7 +52,6 @@ pub struct SimlinSim {
     results: Option<engine::Results>,
     ref_count: AtomicUsize,
 }
-
 /// Loop polarity for C API
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +59,6 @@ pub enum SimlinLoopPolarity {
     Reinforcing = 0,
     Balancing = 1,
 }
-
 /// A single feedback loop
 #[repr(C)]
 pub struct SimlinLoop {
@@ -75,14 +67,12 @@ pub struct SimlinLoop {
     pub var_count: usize,
     pub polarity: SimlinLoopPolarity,
 }
-
 /// List of loops returned by analysis
 #[repr(C)]
 pub struct SimlinLoops {
     pub loops: *mut SimlinLoop,
     pub count: usize,
 }
-
 /// Returns a string representation of an error code
 #[no_mangle]
 pub extern "C" fn simlin_error_str(err: c_int) -> *const c_char {
@@ -98,11 +88,9 @@ pub extern "C" fn simlin_error_str(err: c_int) -> *const c_char {
         -8 => "not simulatable\0",
         _ => "unknown error\0",
     };
-
     // These strings are static and safe to return as const pointers
     err_str.as_ptr() as *const c_char
 }
-
 /// Opens a project from protobuf data
 ///
 /// # Safety
@@ -120,9 +108,7 @@ pub unsafe extern "C" fn simlin_project_open(
         }
         return ptr::null_mut();
     }
-
     let slice = std::slice::from_raw_parts(data, len);
-
     // Only accept full Project protobufs
     let project: engine::Project = match engine::project_io::Project::decode(slice) {
         Ok(pb_project) => serde::deserialize(pb_project).into(),
@@ -133,20 +119,16 @@ pub unsafe extern "C" fn simlin_project_open(
             return ptr::null_mut();
         }
     };
-
     let boxed = Box::new(SimlinProject {
-        project: project.into(),
+        project,
         ltm_project: None,
         ref_count: AtomicUsize::new(1),
     });
-
     if !err.is_null() {
         *err = SimlinError::NoError as c_int;
     }
-
     Box::into_raw(boxed)
 }
-
 /// Increments the reference count of a project
 ///
 /// # Safety
@@ -157,7 +139,6 @@ pub unsafe extern "C" fn simlin_project_ref(project: *mut SimlinProject) {
         (*project).ref_count.fetch_add(1, Ordering::Relaxed);
     }
 }
-
 /// Decrements the reference count and frees the project if it reaches zero
 ///
 /// # Safety
@@ -167,14 +148,12 @@ pub unsafe extern "C" fn simlin_project_unref(project: *mut SimlinProject) {
     if project.is_null() {
         return;
     }
-
     let prev_count = (*project).ref_count.fetch_sub(1, Ordering::Release);
     if prev_count == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
         let _ = Box::from_raw(project);
     }
 }
-
 /// Enables LTM (Loops That Matter) analysis on a project
 ///
 /// # Safety
@@ -184,14 +163,11 @@ pub unsafe extern "C" fn simlin_project_enable_ltm(project: *mut SimlinProject) 
     if project.is_null() {
         return SimlinError::Unspecified as c_int;
     }
-
     let proj = &mut *project;
-
     // If LTM is already enabled, return success
     if proj.ltm_project.is_some() {
         return SimlinError::NoError as c_int;
     }
-
     // Create LTM-augmented project
     match proj.project.clone().with_ltm() {
         Ok(ltm_proj) => {
@@ -201,7 +177,6 @@ pub unsafe extern "C" fn simlin_project_enable_ltm(project: *mut SimlinProject) 
         Err(_) => SimlinError::Unspecified as c_int,
     }
 }
-
 /// Creates a new simulation context
 ///
 /// # Safety
@@ -215,7 +190,6 @@ pub unsafe extern "C" fn simlin_sim_new(
     if project.is_null() {
         return ptr::null_mut();
     }
-
     let mut model_name = if model_name.is_null() {
         "main".to_string()
     } else {
@@ -224,10 +198,8 @@ pub unsafe extern "C" fn simlin_sim_new(
             Err(_) => return ptr::null_mut(),
         }
     };
-
     // Increment project reference count
     (*project).ref_count.fetch_add(1, Ordering::Relaxed);
-
     let mut sim = Box::new(SimlinSim {
         project,
         model_name: model_name.clone(),
@@ -235,22 +207,19 @@ pub unsafe extern "C" fn simlin_sim_new(
         results: None,
         ref_count: AtomicUsize::new(1),
     });
-
     // Initialize the VM - use LTM project if available
     let proj_to_use = if let Some(ref ltm_proj) = (*project).ltm_project {
         ltm_proj
     } else {
         &(*project).project
     };
-
     // Resolve model name: if requested model is not present, but there is exactly one
     // user model in the datamodel, use that as the root.
-    if proj_to_use.datamodel.get_model(&model_name).is_none() {
-        if proj_to_use.datamodel.models.len() == 1 {
-            model_name = proj_to_use.datamodel.models[0].name.clone();
-        }
+    if proj_to_use.datamodel.get_model(&model_name).is_none()
+        && proj_to_use.datamodel.models.len() == 1
+    {
+        model_name = proj_to_use.datamodel.models[0].name.clone();
     }
-
     let compiler = engine::Simulation::new(proj_to_use, &model_name);
     if let Ok(compiler) = compiler {
         if let Ok(compiled) = compiler.compile() {
@@ -259,10 +228,8 @@ pub unsafe extern "C" fn simlin_sim_new(
             }
         }
     }
-
     Box::into_raw(sim)
 }
-
 /// Increments the reference count of a simulation
 ///
 /// # Safety
@@ -273,7 +240,6 @@ pub unsafe extern "C" fn simlin_sim_ref(sim: *mut SimlinSim) {
         (*sim).ref_count.fetch_add(1, Ordering::Relaxed);
     }
 }
-
 /// Decrements the reference count and frees the simulation if it reaches zero
 ///
 /// # Safety
@@ -283,7 +249,6 @@ pub unsafe extern "C" fn simlin_sim_unref(sim: *mut SimlinSim) {
     if sim.is_null() {
         return;
     }
-
     let prev_count = (*sim).ref_count.fetch_sub(1, Ordering::Release);
     if prev_count == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
@@ -292,7 +257,6 @@ pub unsafe extern "C" fn simlin_sim_unref(sim: *mut SimlinSim) {
         simlin_project_unref(sim.project as *mut SimlinProject);
     }
 }
-
 /// Runs the simulation to a specified time
 ///
 /// # Safety
@@ -302,9 +266,7 @@ pub unsafe extern "C" fn simlin_sim_run_to(sim: *mut SimlinSim, time: c_double) 
     if sim.is_null() {
         return SimlinError::Unspecified as c_int;
     }
-
     let sim = &mut *sim;
-
     if let Some(ref mut vm) = sim.vm {
         match vm.run_to(time) {
             Ok(_) => SimlinError::NoError as c_int,
@@ -314,7 +276,6 @@ pub unsafe extern "C" fn simlin_sim_run_to(sim: *mut SimlinSim, time: c_double) 
         SimlinError::Unspecified as c_int
     }
 }
-
 /// Runs the simulation to completion
 ///
 /// # Safety
@@ -324,9 +285,7 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(sim: *mut SimlinSim) -> c_int {
     if sim.is_null() {
         return SimlinError::Unspecified as c_int;
     }
-
     let sim = &mut *sim;
-
     if let Some(mut vm) = sim.vm.take() {
         match vm.run_to_end() {
             Ok(_) => {
@@ -345,7 +304,6 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(sim: *mut SimlinSim) -> c_int {
         SimlinError::Unspecified as c_int
     }
 }
-
 /// Gets the number of time steps in the results
 ///
 /// # Safety
@@ -355,16 +313,13 @@ pub unsafe extern "C" fn simlin_sim_get_stepcount(sim: *mut SimlinSim) -> c_int 
     if sim.is_null() {
         return -1;
     }
-
     let sim = &*sim;
-
     if let Some(ref results) = sim.results {
         results.step_count as c_int
     } else {
         -1
     }
 }
-
 /// Gets the number of variables in the model
 ///
 /// # Safety
@@ -374,20 +329,15 @@ pub unsafe extern "C" fn simlin_sim_get_varcount(sim: *mut SimlinSim) -> c_int {
     if sim.is_null() {
         return -1;
     }
-
     let sim = &*sim;
-
     if let Some(ref results) = sim.results {
-        results.offsets.len() as c_int
-    } else if let Some(ref _vm) = sim.vm {
-        // TODO: Need to get variable count from VM or project
-        // For now, return -1 to indicate not available
-        -1
-    } else {
-        -1
+        return results.offsets.len() as c_int;
     }
+    if let Some(ref vm) = sim.vm {
+        return vm.names_as_strs().len() as c_int;
+    }
+    -1
 }
-
 /// Gets the variable names
 ///
 /// # Safety
@@ -403,26 +353,26 @@ pub unsafe extern "C" fn simlin_sim_get_varnames(
     if sim.is_null() || result.is_null() {
         return -1;
     }
-
     let sim = &mut *sim;
-
     if let Some(ref results) = sim.results {
         let count = std::cmp::min(results.offsets.len(), max);
-
-        // We need to store CStrings somewhere that will outlive this function
-        // This is a design challenge - we need a way to manage string lifetimes
-        // For now, we'll leak the memory (not ideal, but safe)
         for (i, name) in results.offsets.keys().take(count).enumerate() {
             let c_string = CString::new(name.as_str()).unwrap();
             *result.add(i) = c_string.into_raw() as *const c_char;
         }
-
-        count as c_int
-    } else {
-        -1
+        return count as c_int;
     }
+    if let Some(ref vm) = sim.vm {
+        let names = vm.names_as_strs();
+        let count = std::cmp::min(names.len(), max);
+        for (i, name) in names.iter().take(count).enumerate() {
+            let c_string = CString::new(name.as_str()).unwrap();
+            *result.add(i) = c_string.into_raw() as *const c_char;
+        }
+        return count as c_int;
+    }
+    -1
 }
-
 /// Resets the simulation to its initial state
 ///
 /// # Safety
@@ -432,12 +382,9 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
     if sim.is_null() {
         return SimlinError::Unspecified as c_int;
     }
-
     let sim = &mut *sim;
-
     // Clear results
     sim.results = None;
-
     // Re-create the VM - use LTM project if available
     let proj_to_use = if let Some(ref ltm_proj) = (*sim.project).ltm_project {
         ltm_proj
@@ -445,7 +392,6 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
         &(*sim.project).project
     };
     let compiler = engine::Simulation::new(proj_to_use, &sim.model_name);
-
     match compiler {
         Ok(compiler) => match compiler.compile() {
             Ok(compiled) => match Vm::new(compiled) {
@@ -460,7 +406,6 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
         Err(e) => SimlinError::from(e) as c_int,
     }
 }
-
 /// Gets a single value from the simulation
 ///
 /// # Safety
@@ -476,21 +421,25 @@ pub unsafe extern "C" fn simlin_sim_get_value(
     if sim.is_null() || name.is_null() || result.is_null() {
         return SimlinError::Unspecified as c_int;
     }
-
     let sim = &*sim;
-
-    let name = match CStr::from_ptr(name).to_str() {
+    let canon_name = match CStr::from_ptr(name).to_str() {
         Ok(s) => canonicalize(s),
         Err(_) => return SimlinError::Unspecified as c_int,
     };
-
-    if let Some(ref _vm) = sim.vm {
-        // Get current value from VM
-        // TODO: Need to implement value getter in VM
+    if let Some(ref vm) = sim.vm {
+        // Get current value from VM current timestep
+        if let Some(off) = vm.get_offset(&canon_name) {
+            *result = vm.get_value_now(off);
+            return SimlinError::NoError as c_int;
+        }
+        if let Some(off) = vm.find_offset_suffix(canon_name.as_str()) {
+            *result = vm.get_value_now(off);
+            return SimlinError::NoError as c_int;
+        }
         SimlinError::Unspecified as c_int
     } else if let Some(ref results) = sim.results {
-        // Get final value from results
-        if let Some(&offset) = results.offsets.get(&name) {
+        // Prefer exact canonical match; fall back to suffix match
+        if let Some(&offset) = results.offsets.get(&canon_name) {
             if let Some(last_row) = results.iter().next_back() {
                 *result = last_row[offset];
                 SimlinError::NoError as c_int
@@ -498,13 +447,29 @@ pub unsafe extern "C" fn simlin_sim_get_value(
                 SimlinError::Unspecified as c_int
             }
         } else {
-            SimlinError::Unspecified as c_int
+            let needle = canon_name.as_str();
+            let mut found = None;
+            for (ident, &off) in results.offsets.iter() {
+                if ident.as_str().ends_with(needle) {
+                    found = Some(off);
+                    break;
+                }
+            }
+            if let Some(offset) = found {
+                if let Some(last_row) = results.iter().next_back() {
+                    *result = last_row[offset];
+                    SimlinError::NoError as c_int
+                } else {
+                    SimlinError::Unspecified as c_int
+                }
+            } else {
+                SimlinError::Unspecified as c_int
+            }
         }
     } else {
         SimlinError::Unspecified as c_int
     }
 }
-
 /// Sets a value in the simulation
 ///
 /// # Safety
@@ -514,31 +479,123 @@ pub unsafe extern "C" fn simlin_sim_get_value(
 pub unsafe extern "C" fn simlin_sim_set_value(
     sim: *mut SimlinSim,
     name: *const c_char,
-    _val: c_double,
+    val: c_double,
 ) -> c_int {
     if sim.is_null() || name.is_null() {
         return SimlinError::Unspecified as c_int;
     }
-
     let sim = &mut *sim;
-
-    let _name = match CStr::from_ptr(name).to_str() {
+    let canon_name = match CStr::from_ptr(name).to_str() {
         Ok(s) => canonicalize(s),
         Err(_) => return SimlinError::Unspecified as c_int,
     };
-
-    // Setting values at runtime is not yet supported in the VM API.
-    // Return explicit error for clarity.
-    SimlinError::NotSimulatable as c_int
+    // Allow setting only when results exist; mutate the last saved value.
+    if let Some(ref mut vm) = sim.vm {
+        // Set current value in VM current timestep
+        if let Some(off) = vm.get_offset(&canon_name) {
+            vm.set_value_now(off, val);
+            return SimlinError::NoError as c_int;
+        }
+        if let Some(off) = vm.find_offset_suffix(canon_name.as_str()) {
+            vm.set_value_now(off, val);
+            return SimlinError::NoError as c_int;
+        }
+        return SimlinError::Unspecified as c_int;
+    } else if let Some(ref mut results) = sim.results {
+        // Prefer exact canonical match; fall back to suffix match
+        let mut found_off = results.offsets.get(&canon_name).copied();
+        if found_off.is_none() {
+            let needle = canon_name.as_str();
+            for (ident, &off) in results.offsets.iter() {
+                if ident.as_str().ends_with(needle) {
+                    found_off = Some(off);
+                    break;
+                }
+            }
+        }
+        if let Some(off) = found_off {
+            if results.step_count == 0 {
+                return SimlinError::Unspecified as c_int;
+            }
+            let idx = (results.step_count - 1) * results.step_size + off;
+            if let Some(slot) = results.data.get_mut(idx) {
+                *slot = val;
+                return SimlinError::NoError as c_int;
+            }
+        }
+        return SimlinError::Unspecified as c_int;
+    }
+    SimlinError::Unspecified as c_int
 }
-
+/// Sets the value for a variable at the last saved timestep by offset
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
+    sim: *mut SimlinSim,
+    offset: usize,
+    val: c_double,
+) -> c_int {
+    if sim.is_null() {
+        return SimlinError::Unspecified as c_int;
+    }
+    let sim = &mut *sim;
+    if let Some(ref mut results) = sim.results {
+        if results.step_count == 0 || offset >= results.step_size {
+            return SimlinError::Unspecified as c_int;
+        }
+        let idx = (results.step_count - 1) * results.step_size + offset;
+        if let Some(slot) = results.data.get_mut(idx) {
+            *slot = val;
+            return SimlinError::NoError as c_int;
+        }
+    }
+    SimlinError::Unspecified as c_int
+}
 /// Gets a time series for a variable
 ///
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
 /// - `name` must be a valid C string
 /// - `results` must be a valid pointer to an array of at least `len` doubles
+/// Returns the column offset for a variable name at the current context, or -1 if not found
+///
+/// This canonicalizes the name and resolves in the VM if present, otherwise in results.
+/// Intended for debugging/tests to verify name→offset resolution.
 #[no_mangle]
+pub unsafe extern "C" fn simlin_sim_get_offset(sim: *mut SimlinSim, name: *const c_char) -> c_int {
+    if sim.is_null() || name.is_null() {
+        return -1;
+    }
+    let sim = &*sim;
+    let canon_name = match CStr::from_ptr(name).to_str() {
+        Ok(s) => canonicalize(s),
+        Err(_) => return -1,
+    };
+    if let Some(ref vm) = sim.vm {
+        if let Some(off) = vm.get_offset(&canon_name) {
+            return off as c_int;
+        }
+        if let Some(off) = vm.find_offset_suffix(canon_name.as_str()) {
+            return off as c_int;
+        }
+        return -1;
+    }
+    if let Some(ref results) = sim.results {
+        if let Some(&off) = results.offsets.get(&canon_name) {
+            return off as c_int;
+        }
+        let needle = canon_name.as_str();
+        for (ident, &off) in results.offsets.iter() {
+            if ident.as_str().ends_with(needle) {
+                return off as c_int;
+            }
+        }
+        return -1;
+    }
+    -1
+}
 pub unsafe extern "C" fn simlin_sim_get_series(
     sim: *mut SimlinSim,
     name: *const c_char,
@@ -548,14 +605,11 @@ pub unsafe extern "C" fn simlin_sim_get_series(
     if sim.is_null() || name.is_null() || results_ptr.is_null() {
         return -1;
     }
-
     let sim = &*sim;
-
     let name = match CStr::from_ptr(name).to_str() {
         Ok(s) => canonicalize(s),
         Err(_) => return -1,
     };
-
     if let Some(ref results) = sim.results {
         if let Some(&offset) = results.offsets.get(&name) {
             let count = std::cmp::min(results.step_count, len);
@@ -570,7 +624,6 @@ pub unsafe extern "C" fn simlin_sim_get_series(
         -1
     }
 }
-
 /// Frees a string returned by the API
 ///
 /// # Safety
@@ -581,7 +634,6 @@ pub unsafe extern "C" fn simlin_free_string(s: *mut c_char) {
         let _ = CString::from_raw(s);
     }
 }
-
 /// Gets all feedback loops in the project
 ///
 /// # Safety
@@ -592,21 +644,17 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(project: *mut SimlinProject) -
     if project.is_null() {
         return ptr::null_mut();
     }
-
     let project = &(*project).project;
-
     // Detect loops in the project
     let loops_by_model = match detect_loops(project) {
         Ok(loops) => loops,
         Err(_) => return ptr::null_mut(),
     };
-
     // Collect all loops from all models
     let mut all_loops = Vec::new();
     for (_model_name, model_loops) in loops_by_model {
         all_loops.extend(model_loops);
     }
-
     if all_loops.is_empty() {
         // Return empty result
         let result = Box::new(SimlinLoops {
@@ -615,17 +663,13 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(project: *mut SimlinProject) -
         });
         return Box::into_raw(result);
     }
-
     // Convert to C structures
     let mut c_loops = Vec::with_capacity(all_loops.len());
-
     for loop_item in all_loops {
         // Convert loop ID to C string
         let id = CString::new(loop_item.id).unwrap();
-
         // Convert variable names to C strings
         let mut var_names = Vec::with_capacity(loop_item.links.len() + 1);
-
         // Collect unique variables from the loop path
         let mut seen = std::collections::HashSet::new();
         if !loop_item.links.is_empty() {
@@ -635,7 +679,6 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(project: *mut SimlinProject) -
                 let c_str = CString::new(first.as_str()).unwrap();
                 var_names.push(c_str.into_raw());
             }
-
             // Add all 'to' variables
             for link in &loop_item.links {
                 if seen.insert(link.to.clone()) {
@@ -644,7 +687,6 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(project: *mut SimlinProject) -
                 }
             }
         }
-
         let var_count = var_names.len();
         let variables = if var_count > 0 {
             let mut vars = var_names.into_boxed_slice();
@@ -654,13 +696,11 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(project: *mut SimlinProject) -
         } else {
             ptr::null_mut()
         };
-
         // Convert polarity
         let polarity = match loop_item.polarity {
             LoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
             LoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
         };
-
         c_loops.push(SimlinLoop {
             id: id.into_raw(),
             variables,
@@ -668,20 +708,16 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(project: *mut SimlinProject) -
             polarity,
         });
     }
-
     let count = c_loops.len();
     let mut loops = c_loops.into_boxed_slice();
     let loops_ptr = loops.as_mut_ptr();
     std::mem::forget(loops);
-
     let result = Box::new(SimlinLoops {
         loops: loops_ptr,
         count,
     });
-
     Box::into_raw(result)
 }
-
 /// Frees a SimlinLoops structure
 ///
 /// # Safety
@@ -691,18 +727,14 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
     if loops.is_null() {
         return;
     }
-
     let loops = Box::from_raw(loops);
-
     if !loops.loops.is_null() && loops.count > 0 {
         let loop_slice = std::slice::from_raw_parts_mut(loops.loops, loops.count);
-
         for loop_item in loop_slice {
             // Free the loop ID
             if !loop_item.id.is_null() {
                 let _ = CString::from_raw(loop_item.id);
             }
-
             // Free the variable names
             if !loop_item.variables.is_null() && loop_item.var_count > 0 {
                 let vars = std::slice::from_raw_parts_mut(loop_item.variables, loop_item.var_count);
@@ -717,11 +749,9 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
                 ));
             }
         }
-
         let _ = Box::from_raw(std::slice::from_raw_parts_mut(loops.loops, loops.count));
     }
 }
-
 /// Gets the relative loop score time series for a specific loop
 ///
 /// # Safety
@@ -738,18 +768,14 @@ pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
     if sim.is_null() || loop_id.is_null() || results_ptr.is_null() {
         return -1;
     }
-
     let sim = &*sim;
-
     let loop_id = match CStr::from_ptr(loop_id).to_str() {
         Ok(s) => s,
         Err(_) => return -1,
     };
-
     // The relative loop score variable name format
     let var_name = format!("$⁚ltm⁚rel_loop_score⁚{loop_id}");
     let var_ident = canonicalize(&var_name);
-
     if let Some(ref results) = sim.results {
         if let Some(&offset) = results.offsets.get(&var_ident) {
             let count = std::cmp::min(results.step_count, len);
@@ -765,11 +791,42 @@ pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
         -1
     }
 }
-
+// Memory management functions for WASM
+// We use a simple approach where we store the size before the allocated memory
+#[no_mangle]
+pub extern "C" fn simlin_malloc(size: usize) -> *mut u8 {
+    unsafe {
+        // Allocate extra space to store the size
+        let total_size = size + std::mem::size_of::<usize>();
+        let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
+        let ptr = alloc(layout);
+        if ptr.is_null() {
+            return ptr;
+        }
+        // Store the size at the beginning
+        *(ptr as *mut usize) = size;
+        // Return pointer to the user data (after the size)
+        ptr.add(std::mem::size_of::<usize>())
+    }
+}
+#[no_mangle]
+pub extern "C" fn simlin_free(ptr: *mut u8) {
+    unsafe {
+        if ptr.is_null() {
+            return;
+        }
+        // Get the actual allocation pointer (before the user data)
+        let actual_ptr = ptr.sub(std::mem::size_of::<usize>());
+        // Read the size
+        let size = *(actual_ptr as *mut usize);
+        let total_size = size + std::mem::size_of::<usize>();
+        let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
+        dealloc(actual_ptr, layout);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_error_str() {
         unsafe {
@@ -777,7 +834,6 @@ mod tests {
             assert!(!err_str.is_null());
             let s = CStr::from_ptr(err_str);
             assert_eq!(s.to_str().unwrap(), "no error");
-
             let err_str = simlin_error_str(-1);
             assert!(!err_str.is_null());
             let s = CStr::from_ptr(err_str);
@@ -785,8 +841,81 @@ mod tests {
         }
     }
 
-    // Model-only protobufs are not supported at the ABI layer; only Projects are accepted.
+    #[test]
+    fn test_interactive_set_get() {
+        // Load the SIR project fixture
+        let pb_path = std::path::Path::new("../../src/engine2/testdata/SIR_project.pb");
+        if !pb_path.exists() {
+            eprintln!("missing SIR_project.pb fixture; skipping");
+            return;
+        }
+        let data = std::fs::read(pb_path).unwrap();
 
+        unsafe {
+            // Open project
+            let mut err_code: c_int = 0;
+            let proj = simlin_project_open(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
+            assert!(!proj.is_null(), "project open failed: {err_code}");
+
+            // Create sim
+            let sim = simlin_sim_new(proj, std::ptr::null());
+            assert!(!sim.is_null());
+
+            // Run to a partial time
+            let rc = simlin_sim_run_to(sim, 0.125);
+            assert_eq!(rc, SimlinError::NoError as c_int);
+
+            // Fetch var names (from VM when no results yet)
+            let count = simlin_sim_get_varcount(sim);
+            assert!(count > 0, "expected varcount > 0");
+            let mut name_ptrs: Vec<*const c_char> = vec![std::ptr::null(); count as usize];
+            let got = simlin_sim_get_varnames(sim, name_ptrs.as_mut_ptr(), name_ptrs.len());
+            assert!(got > 0);
+
+            // Find canonical name that ends with "infectious"
+            let mut infectious_name: Option<String> = None;
+            for &p in &name_ptrs {
+                if p.is_null() {
+                    continue;
+                }
+                let s = std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+                // free the leaked CString from get_varnames
+                simlin_free_string(p as *mut c_char);
+                if s.to_ascii_lowercase().ends_with("infectious") {
+                    infectious_name = Some(s);
+                }
+            }
+            let infectious = infectious_name.expect("infectious not found in names");
+
+            // Read current value using canonical name
+            let c_infectious = CString::new(infectious.clone()).unwrap();
+            let mut out: c_double = 0.0;
+            let rc = simlin_sim_get_value(sim, c_infectious.as_ptr(), &mut out as *mut c_double);
+            assert_eq!(rc, SimlinError::NoError as c_int, "get_value rc={rc}");
+
+            // Set to a new value and read it back
+            let new_val: f64 = 42.0;
+            let rc = simlin_sim_set_value(sim, c_infectious.as_ptr(), new_val as c_double);
+            assert_eq!(rc, SimlinError::NoError as c_int, "set_value rc={rc}");
+
+            let mut out2: c_double = 0.0;
+            let rc = simlin_sim_get_value(sim, c_infectious.as_ptr(), &mut out2 as *mut c_double);
+            assert_eq!(
+                rc,
+                SimlinError::NoError as c_int,
+                "get_value(after set) rc={rc}"
+            );
+            assert!(
+                (out2 - new_val).abs() <= 1e-9,
+                "expected {new_val} got {out2}"
+            );
+
+            // Cleanup
+            simlin_sim_unref(sim);
+            simlin_project_unref(proj);
+        }
+    }
+    // Model-only protobufs are not supported at the ABI layer; only Projects are accepted.
     #[test]
     fn test_project_lifecycle() {
         // Create a minimal valid protobuf project
@@ -812,28 +941,22 @@ mod tests {
             units: vec![],
             source: None,
         };
-
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
-
         unsafe {
             let mut err: c_int = 0;
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
             assert_eq!(err, 0);
-
             // Test reference counting
             simlin_project_ref(proj);
             assert_eq!((*proj).ref_count.load(Ordering::Relaxed), 2);
-
             simlin_project_unref(proj);
             assert_eq!((*proj).ref_count.load(Ordering::Relaxed), 1);
-
             simlin_project_unref(proj);
             // Project should be freed now
         }
     }
-
     #[test]
     fn test_sim_lifecycle() {
         // Create a minimal valid protobuf project
@@ -880,75 +1003,26 @@ mod tests {
             units: vec![],
             source: None,
         };
-
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
-
         unsafe {
             let mut err: c_int = 0;
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
             assert_eq!(err, 0);
-
             let sim = simlin_sim_new(proj, ptr::null());
             assert!(!sim.is_null());
-
             // Project ref count should have increased
             assert_eq!((*proj).ref_count.load(Ordering::Relaxed), 2);
-
             // Test reference counting
             simlin_sim_ref(sim);
             assert_eq!((*sim).ref_count.load(Ordering::Relaxed), 2);
-
             simlin_sim_unref(sim);
             assert_eq!((*sim).ref_count.load(Ordering::Relaxed), 1);
-
             simlin_sim_unref(sim);
             // Sim should be freed now, project ref count should decrease
             assert_eq!((*proj).ref_count.load(Ordering::Relaxed), 1);
-
             simlin_project_unref(proj);
         }
-    }
-}
-
-// Memory management functions for WASM
-// We use a simple approach where we store the size before the allocated memory
-#[no_mangle]
-pub extern "C" fn simlin_malloc(size: usize) -> *mut u8 {
-    unsafe {
-        // Allocate extra space to store the size
-        let total_size = size + std::mem::size_of::<usize>();
-        let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
-        let ptr = alloc(layout);
-
-        if ptr.is_null() {
-            return ptr;
-        }
-
-        // Store the size at the beginning
-        *(ptr as *mut usize) = size;
-
-        // Return pointer to the user data (after the size)
-        ptr.add(std::mem::size_of::<usize>())
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn simlin_free(ptr: *mut u8) {
-    unsafe {
-        if ptr.is_null() {
-            return;
-        }
-
-        // Get the actual allocation pointer (before the user data)
-        let actual_ptr = ptr.sub(std::mem::size_of::<usize>());
-
-        // Read the size
-        let size = *(actual_ptr as *mut usize);
-        let total_size = size + std::mem::size_of::<usize>();
-
-        let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
-        dealloc(actual_ptr, layout);
     }
 }

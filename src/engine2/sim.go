@@ -189,7 +189,7 @@ func (s *Sim) GetVarNames() ([]string, error) {
 	s.engine.mu.Lock()
 	defer s.engine.mu.Unlock()
 
-	// Fetch count directly to avoid nested locks
+	// Try to obtain count; if unavailable, probe with an upper bound
 	rVarCount, err := s.engine.fnSimGetVarcount.Call(s.engine.ctx, uint64(s.ptr))
 	if err != nil {
 		return nil, fmt.Errorf("simlin_sim_get_varcount failed: %w", err)
@@ -198,16 +198,13 @@ func (s *Sim) GetVarNames() ([]string, error) {
 		return nil, errors.New("simlin_sim_get_varcount returned unexpected number of results")
 	}
 	varCount := int32(rVarCount[0])
-	if varCount < 0 {
-		return nil, errors.New("variable count not available")
-	}
-	if varCount == 0 {
-		return []string{}, nil
+	if varCount <= 0 {
+		varCount = 1024
 	}
 
 	// Allocate array for string pointers
 	ptrSize := uint32(varCount) * 4 // 4 bytes per pointer
-	resultPtr, err := s.engine.malloc(ptrSize)
+	resultPtr, err := s.engine.malloc(uint32(ptrSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate result array: %w", err)
 	}
@@ -228,7 +225,7 @@ func (s *Sim) GetVarNames() ([]string, error) {
 	}
 
 	// Read the string pointers and strings
-	var names []string
+	names := make([]string, 0, count)
 	for i := 0; i < int(count); i++ {
 		// Read string pointer
 		ptrOffset := resultPtr + uint32(i*4)
@@ -250,6 +247,8 @@ func (s *Sim) GetVarNames() ([]string, error) {
 
 	return names, nil
 }
+
+// GetValue gets a single value
 
 // GetValue gets a single value from the simulation
 func (s *Sim) GetValue(name string) (float64, error) {
@@ -320,6 +319,28 @@ func (s *Sim) SetValue(name string, value float64) error {
 	}
 
 	return nil
+}
+
+// debugOffset returns the resolved offset for a variable name via the WASM helper.
+// Used only in tests for debugging name→offset resolution.
+func (s *Sim) debugOffset(name string) (int, error) {
+	fn := s.engine.mod.ExportedFunction("simlin_sim_get_offset")
+	if fn == nil {
+		return -1, fmt.Errorf("simlin_sim_get_offset not exported")
+	}
+	namePtr, err := s.engine.writeString(name)
+	if err != nil {
+		return -1, fmt.Errorf("writeString: %w", err)
+	}
+	defer s.engine.free(namePtr)
+	res, err := fn.Call(s.engine.ctx, uint64(s.ptr), uint64(namePtr))
+	if err != nil {
+		return -1, err
+	}
+	if len(res) != 1 {
+		return -1, fmt.Errorf("unexpected result len: %d", len(res))
+	}
+	return int(int32(res[0])), nil
 }
 
 // GetSeries gets a time series for a variable

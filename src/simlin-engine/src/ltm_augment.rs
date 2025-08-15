@@ -569,7 +569,7 @@ mod tests {
         // And loop score variables for the loop
 
         // Check that we have at least some variables generated
-        assert!(vars.len() > 0, "Should have generated some LTM variables");
+        assert!(!vars.is_empty(), "Should have generated some LTM variables");
 
         // Check for specific link score variables
         let has_pop_to_births = vars
@@ -1079,7 +1079,7 @@ mod tests {
 
         // Check that the equations use the black box formula
         // Remove debug output
-        for (_name, var) in &link_vars {
+        for var in link_vars.values() {
             if let datamodel::Variable::Aux(aux) = var {
                 if let datamodel::Equation::Scalar(eq, _) = &aux.equation {
                     // Module link scores should use the black box formula
@@ -1318,7 +1318,7 @@ mod tests {
             Loc::default(),
         );
         let printed = print_eqn(&var_ast);
-        println!("AST with quoted $ variable printed as: '{}'", printed);
+        println!("AST with quoted $ variable printed as: '{printed}'");
 
         // Note: print_eqn outputs single quotes but parser needs double quotes
         // This is a known limitation but doesn't affect our use case since we generate

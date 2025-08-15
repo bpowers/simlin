@@ -619,6 +619,150 @@ pub fn detect_loops(project: &Project) -> Result<HashMap<Ident<Canonical>, Vec<L
     Ok(all_loops)
 }
 
+/// Analyze the polarity of how a variable appears in an equation
+fn analyze_link_polarity(ast: &Ast<Expr2>, from_var: &Ident<Canonical>) -> LinkPolarity {
+    match ast {
+        Ast::Scalar(expr) => analyze_expr_polarity(expr, from_var, LinkPolarity::Positive),
+        Ast::ApplyToAll(_, expr) => analyze_expr_polarity(expr, from_var, LinkPolarity::Positive),
+        Ast::Arrayed(_, elements) => {
+            // For arrayed equations, check all elements
+            let mut polarity = LinkPolarity::Unknown;
+            for expr in elements.values() {
+                let elem_polarity = analyze_expr_polarity(expr, from_var, LinkPolarity::Positive);
+                if polarity == LinkPolarity::Unknown {
+                    polarity = elem_polarity;
+                } else if polarity != elem_polarity && elem_polarity != LinkPolarity::Unknown {
+                    // Mixed polarities
+                    return LinkPolarity::Unknown;
+                }
+            }
+            polarity
+        }
+    }
+}
+
+/// Recursively analyze expression polarity
+fn analyze_expr_polarity(
+    expr: &Expr2,
+    from_var: &Ident<Canonical>,
+    current_polarity: LinkPolarity,
+) -> LinkPolarity {
+    match expr {
+        Expr2::Const(_, _, _) => LinkPolarity::Unknown,
+        Expr2::Var(ident, _, _) => {
+            if ident == from_var {
+                current_polarity
+            } else {
+                LinkPolarity::Unknown
+            }
+        }
+        Expr2::Op2(op, left, right, _, _) => {
+            let left_pol = analyze_expr_polarity(left, from_var, current_polarity);
+            let right_pol = analyze_expr_polarity(right, from_var, current_polarity);
+
+            match op {
+                BinaryOp::Add => {
+                    // Addition preserves polarity
+                    if left_pol != LinkPolarity::Unknown {
+                        left_pol
+                    } else {
+                        right_pol
+                    }
+                }
+                BinaryOp::Sub => {
+                    // Subtraction flips polarity of right operand
+                    if left_pol != LinkPolarity::Unknown {
+                        left_pol
+                    } else if right_pol != LinkPolarity::Unknown {
+                        flip_polarity(right_pol)
+                    } else {
+                        LinkPolarity::Unknown
+                    }
+                }
+                BinaryOp::Mul => {
+                    // Multiplication: need to check sign of other operand
+                    // For simplicity, assume positive if constant > 0
+                    if left_pol != LinkPolarity::Unknown {
+                        if is_positive_constant(right) {
+                            left_pol
+                        } else if is_negative_constant(right) {
+                            flip_polarity(left_pol)
+                        } else {
+                            LinkPolarity::Unknown
+                        }
+                    } else if right_pol != LinkPolarity::Unknown {
+                        if is_positive_constant(left) {
+                            right_pol
+                        } else if is_negative_constant(left) {
+                            flip_polarity(right_pol)
+                        } else {
+                            LinkPolarity::Unknown
+                        }
+                    } else {
+                        LinkPolarity::Unknown
+                    }
+                }
+                BinaryOp::Div => {
+                    // Division by variable in denominator flips polarity
+                    if left_pol != LinkPolarity::Unknown {
+                        left_pol
+                    } else if right_pol != LinkPolarity::Unknown {
+                        flip_polarity(right_pol)
+                    } else {
+                        LinkPolarity::Unknown
+                    }
+                }
+                _ => LinkPolarity::Unknown,
+            }
+        }
+        Expr2::Op1(op, operand, _, _) => {
+            let operand_pol = analyze_expr_polarity(operand, from_var, current_polarity);
+            match op {
+                crate::ast::UnaryOp::Not => flip_polarity(operand_pol),
+                crate::ast::UnaryOp::Negative => flip_polarity(operand_pol),
+                _ => LinkPolarity::Unknown,
+            }
+        }
+        Expr2::If(_, true_branch, false_branch, _, _) => {
+            // For IF-THEN-ELSE, check both branches
+            let true_pol = analyze_expr_polarity(true_branch, from_var, current_polarity);
+            let false_pol = analyze_expr_polarity(false_branch, from_var, current_polarity);
+
+            if true_pol == false_pol {
+                true_pol
+            } else {
+                LinkPolarity::Unknown
+            }
+        }
+        _ => LinkPolarity::Unknown,
+    }
+}
+
+/// Flip the polarity
+fn flip_polarity(pol: LinkPolarity) -> LinkPolarity {
+    match pol {
+        LinkPolarity::Positive => LinkPolarity::Negative,
+        LinkPolarity::Negative => LinkPolarity::Positive,
+        LinkPolarity::Unknown => LinkPolarity::Unknown,
+    }
+}
+
+/// Check if expression is a positive constant
+fn is_positive_constant(expr: &Expr2) -> bool {
+    match expr {
+        Expr2::Const(_, n, _) => *n > 0.0,
+        _ => false,
+    }
+}
+
+/// Check if expression is a negative constant
+fn is_negative_constant(expr: &Expr2) -> bool {
+    match expr {
+        Expr2::Const(_, n, _) => *n < 0.0,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,7 +897,7 @@ mod tests {
         let model_loops = &loops[&main_ident];
 
         // Should find the balancing loop
-        assert!(model_loops.len() > 0);
+        assert!(!model_loops.is_empty());
 
         // Check that at least one loop is balancing
         let has_balancing = model_loops
@@ -1080,7 +1224,7 @@ mod tests {
         graph
             .edges
             .entry(module_var.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(output_var.clone());
 
         // Test connected case
@@ -1426,149 +1570,5 @@ mod tests {
             LinkPolarity::Unknown,
             "Unrelated variable should give Unknown"
         );
-    }
-}
-
-/// Analyze the polarity of how a variable appears in an equation
-fn analyze_link_polarity(ast: &Ast<Expr2>, from_var: &Ident<Canonical>) -> LinkPolarity {
-    match ast {
-        Ast::Scalar(expr) => analyze_expr_polarity(expr, from_var, LinkPolarity::Positive),
-        Ast::ApplyToAll(_, expr) => analyze_expr_polarity(expr, from_var, LinkPolarity::Positive),
-        Ast::Arrayed(_, elements) => {
-            // For arrayed equations, check all elements
-            let mut polarity = LinkPolarity::Unknown;
-            for expr in elements.values() {
-                let elem_polarity = analyze_expr_polarity(expr, from_var, LinkPolarity::Positive);
-                if polarity == LinkPolarity::Unknown {
-                    polarity = elem_polarity;
-                } else if polarity != elem_polarity && elem_polarity != LinkPolarity::Unknown {
-                    // Mixed polarities
-                    return LinkPolarity::Unknown;
-                }
-            }
-            polarity
-        }
-    }
-}
-
-/// Recursively analyze expression polarity
-fn analyze_expr_polarity(
-    expr: &Expr2,
-    from_var: &Ident<Canonical>,
-    current_polarity: LinkPolarity,
-) -> LinkPolarity {
-    match expr {
-        Expr2::Const(_, _, _) => LinkPolarity::Unknown,
-        Expr2::Var(ident, _, _) => {
-            if ident == from_var {
-                current_polarity
-            } else {
-                LinkPolarity::Unknown
-            }
-        }
-        Expr2::Op2(op, left, right, _, _) => {
-            let left_pol = analyze_expr_polarity(left, from_var, current_polarity);
-            let right_pol = analyze_expr_polarity(right, from_var, current_polarity);
-
-            match op {
-                BinaryOp::Add => {
-                    // Addition preserves polarity
-                    if left_pol != LinkPolarity::Unknown {
-                        left_pol
-                    } else {
-                        right_pol
-                    }
-                }
-                BinaryOp::Sub => {
-                    // Subtraction flips polarity of right operand
-                    if left_pol != LinkPolarity::Unknown {
-                        left_pol
-                    } else if right_pol != LinkPolarity::Unknown {
-                        flip_polarity(right_pol)
-                    } else {
-                        LinkPolarity::Unknown
-                    }
-                }
-                BinaryOp::Mul => {
-                    // Multiplication: need to check sign of other operand
-                    // For simplicity, assume positive if constant > 0
-                    if left_pol != LinkPolarity::Unknown {
-                        if is_positive_constant(right) {
-                            left_pol
-                        } else if is_negative_constant(right) {
-                            flip_polarity(left_pol)
-                        } else {
-                            LinkPolarity::Unknown
-                        }
-                    } else if right_pol != LinkPolarity::Unknown {
-                        if is_positive_constant(left) {
-                            right_pol
-                        } else if is_negative_constant(left) {
-                            flip_polarity(right_pol)
-                        } else {
-                            LinkPolarity::Unknown
-                        }
-                    } else {
-                        LinkPolarity::Unknown
-                    }
-                }
-                BinaryOp::Div => {
-                    // Division by variable in denominator flips polarity
-                    if left_pol != LinkPolarity::Unknown {
-                        left_pol
-                    } else if right_pol != LinkPolarity::Unknown {
-                        flip_polarity(right_pol)
-                    } else {
-                        LinkPolarity::Unknown
-                    }
-                }
-                _ => LinkPolarity::Unknown,
-            }
-        }
-        Expr2::Op1(op, operand, _, _) => {
-            let operand_pol = analyze_expr_polarity(operand, from_var, current_polarity);
-            match op {
-                crate::ast::UnaryOp::Not => flip_polarity(operand_pol),
-                crate::ast::UnaryOp::Negative => flip_polarity(operand_pol),
-                _ => LinkPolarity::Unknown,
-            }
-        }
-        Expr2::If(_, true_branch, false_branch, _, _) => {
-            // For IF-THEN-ELSE, check both branches
-            let true_pol = analyze_expr_polarity(true_branch, from_var, current_polarity);
-            let false_pol = analyze_expr_polarity(false_branch, from_var, current_polarity);
-
-            if true_pol == false_pol {
-                true_pol
-            } else {
-                LinkPolarity::Unknown
-            }
-        }
-        _ => LinkPolarity::Unknown,
-    }
-}
-
-/// Flip the polarity
-fn flip_polarity(pol: LinkPolarity) -> LinkPolarity {
-    match pol {
-        LinkPolarity::Positive => LinkPolarity::Negative,
-        LinkPolarity::Negative => LinkPolarity::Positive,
-        LinkPolarity::Unknown => LinkPolarity::Unknown,
-    }
-}
-
-/// Check if expression is a positive constant
-fn is_positive_constant(expr: &Expr2) -> bool {
-    match expr {
-        Expr2::Const(_, n, _) => *n > 0.0,
-        _ => false,
-    }
-}
-
-/// Check if expression is a negative constant
-fn is_negative_constant(expr: &Expr2) -> bool {
-    match expr {
-        Expr2::Const(_, n, _) => *n < 0.0,
-        _ => false,
     }
 }

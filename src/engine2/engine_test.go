@@ -130,6 +130,7 @@ func TestSimulation(t *testing.T) {
 	if len(names) != varCount {
 		t.Errorf("expected %d names, got %d", varCount, len(names))
 	}
+	t.Logf("var names: %v", names)
 
 	// Validate series for a few key variables against expected CSV
 	expectedPath := "testdata/SIR_output.csv"
@@ -217,9 +218,27 @@ func TestSimulation(t *testing.T) {
 		t.Fatalf("GetValue mismatch: expected %.6g, got %.6g", lastInfected, gotVal)
 	}
 
-	// Test SetValue returns explicit unsupported error for now
-	if err := sim.SetValue("infected", 0.0); err == nil {
-		t.Fatalf("expected SetValue to error for now")
+	// Interactive SetValue test on a fresh sim instance
+	sim2, err := project.NewSim("")
+	if err != nil {
+		t.Fatalf("failed to create simulation2: %v", err)
+	}
+	defer sim2.Close()
+	// Partially run, then set current value, then verify immediate get
+	if err := sim2.RunTo(0.125); err != nil {
+		t.Fatalf("RunTo(partial) error: %v", err)
+	}
+	// Set directly using the same name used in results (engInfectious)
+	newVal := 42.0
+	if err := sim2.SetValue(engInfectious, newVal); err != nil {
+		t.Fatalf("SetValue (interactive) error: %v", err)
+	}
+	gotNow, err := sim2.GetValue(engInfectious)
+	if err != nil {
+		t.Fatalf("GetValue(after SetValue interactive) error: %v", err)
+	}
+	if !almostEq(newVal, gotNow, 1e-9) {
+		t.Fatalf("interactive GetValue mismatch: expected %.9g, got %.9g", newVal, gotNow)
 	}
 }
 
