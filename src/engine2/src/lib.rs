@@ -8,6 +8,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use prost::Message;
+use simlin_engine::ltm::{detect_loops, LoopPolarity};
 use simlin_engine::{self as engine, canonicalize, serde, Vm};
 
 /// Error codes matching the C API specification
@@ -42,6 +43,7 @@ impl From<engine::Error> for SimlinError {
 /// Opaque project structure
 pub struct SimlinProject {
     project: engine::Project,
+    ltm_project: Option<engine::Project>,
     ref_count: AtomicUsize,
 }
 
@@ -52,6 +54,30 @@ pub struct SimlinSim {
     vm: Option<Vm>,
     results: Option<engine::Results>,
     ref_count: AtomicUsize,
+}
+
+/// Loop polarity for C API
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimlinLoopPolarity {
+    Reinforcing = 0,
+    Balancing = 1,
+}
+
+/// A single feedback loop
+#[repr(C)]
+pub struct SimlinLoop {
+    pub id: *mut c_char,
+    pub variables: *mut *mut c_char,
+    pub var_count: usize,
+    pub polarity: SimlinLoopPolarity,
+}
+
+/// List of loops returned by analysis
+#[repr(C)]
+pub struct SimlinLoops {
+    pub loops: *mut SimlinLoop,
+    pub count: usize,
 }
 
 /// Returns a string representation of an error code
@@ -105,6 +131,7 @@ pub unsafe extern "C" fn simlin_project_open(
 
     let boxed = Box::new(SimlinProject {
         project: project.into(),
+        ltm_project: None,
         ref_count: AtomicUsize::new(1),
     });
 
@@ -143,6 +170,33 @@ pub unsafe extern "C" fn simlin_project_unref(project: *mut SimlinProject) {
     }
 }
 
+/// Enables LTM (Loops That Matter) analysis on a project
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_enable_ltm(project: *mut SimlinProject) -> c_int {
+    if project.is_null() {
+        return SimlinError::Unspecified as c_int;
+    }
+
+    let proj = &mut *project;
+
+    // If LTM is already enabled, return success
+    if proj.ltm_project.is_some() {
+        return SimlinError::NoError as c_int;
+    }
+
+    // Create LTM-augmented project
+    match proj.project.clone().with_ltm() {
+        Ok(ltm_proj) => {
+            proj.ltm_project = Some(ltm_proj);
+            SimlinError::NoError as c_int
+        }
+        Err(_) => SimlinError::Unspecified as c_int,
+    }
+}
+
 /// Creates a new simulation context
 ///
 /// # Safety
@@ -177,8 +231,14 @@ pub unsafe extern "C" fn simlin_sim_new(
         ref_count: AtomicUsize::new(1),
     });
 
-    // Initialize the VM
-    let compiler = engine::Simulation::new(&(*project).project, &model_name);
+    // Initialize the VM - use LTM project if available
+    let proj_to_use = if let Some(ref ltm_proj) = (*project).ltm_project {
+        ltm_proj
+    } else {
+        &(*project).project
+    };
+
+    let compiler = engine::Simulation::new(proj_to_use, &model_name);
     if let Ok(compiler) = compiler {
         if let Ok(compiled) = compiler.compile() {
             if let Ok(vm) = Vm::new(compiled) {
@@ -365,9 +425,13 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
     // Clear results
     sim.results = None;
 
-    // Re-create the VM
-    let project = &(*sim.project).project;
-    let compiler = engine::Simulation::new(project, &sim.model_name);
+    // Re-create the VM - use LTM project if available
+    let proj_to_use = if let Some(ref ltm_proj) = (*sim.project).ltm_project {
+        ltm_proj
+    } else {
+        &(*sim.project).project
+    };
+    let compiler = engine::Simulation::new(proj_to_use, &sim.model_name);
 
     match compiler {
         Ok(compiler) => match compiler.compile() {
@@ -505,6 +569,190 @@ pub unsafe extern "C" fn simlin_sim_get_series(
 pub unsafe extern "C" fn simlin_free_string(s: *mut c_char) {
     if !s.is_null() {
         let _ = CString::from_raw(s);
+    }
+}
+
+/// Gets all feedback loops in the project
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - The returned SimlinLoops must be freed with simlin_free_loops
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_get_loops(project: *mut SimlinProject) -> *mut SimlinLoops {
+    if project.is_null() {
+        return ptr::null_mut();
+    }
+
+    let project = &(*project).project;
+
+    // Detect loops in the project
+    let loops_by_model = match detect_loops(project) {
+        Ok(loops) => loops,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    // Collect all loops from all models
+    let mut all_loops = Vec::new();
+    for (_model_name, model_loops) in loops_by_model {
+        all_loops.extend(model_loops);
+    }
+
+    if all_loops.is_empty() {
+        // Return empty result
+        let result = Box::new(SimlinLoops {
+            loops: ptr::null_mut(),
+            count: 0,
+        });
+        return Box::into_raw(result);
+    }
+
+    // Convert to C structures
+    let mut c_loops = Vec::with_capacity(all_loops.len());
+
+    for loop_item in all_loops {
+        // Convert loop ID to C string
+        let id = CString::new(loop_item.id).unwrap();
+
+        // Convert variable names to C strings
+        let mut var_names = Vec::with_capacity(loop_item.links.len() + 1);
+
+        // Collect unique variables from the loop path
+        let mut seen = std::collections::HashSet::new();
+        if !loop_item.links.is_empty() {
+            // Add the first variable
+            let first = &loop_item.links[0].from;
+            if seen.insert(first.clone()) {
+                let c_str = CString::new(first.as_str()).unwrap();
+                var_names.push(c_str.into_raw());
+            }
+
+            // Add all 'to' variables
+            for link in &loop_item.links {
+                if seen.insert(link.to.clone()) {
+                    let c_str = CString::new(link.to.as_str()).unwrap();
+                    var_names.push(c_str.into_raw());
+                }
+            }
+        }
+
+        let var_count = var_names.len();
+        let variables = if var_count > 0 {
+            let mut vars = var_names.into_boxed_slice();
+            let ptr = vars.as_mut_ptr();
+            std::mem::forget(vars);
+            ptr
+        } else {
+            ptr::null_mut()
+        };
+
+        // Convert polarity
+        let polarity = match loop_item.polarity {
+            LoopPolarity::Reinforcing => SimlinLoopPolarity::Reinforcing,
+            LoopPolarity::Balancing => SimlinLoopPolarity::Balancing,
+        };
+
+        c_loops.push(SimlinLoop {
+            id: id.into_raw(),
+            variables,
+            var_count,
+            polarity,
+        });
+    }
+
+    let count = c_loops.len();
+    let mut loops = c_loops.into_boxed_slice();
+    let loops_ptr = loops.as_mut_ptr();
+    std::mem::forget(loops);
+
+    let result = Box::new(SimlinLoops {
+        loops: loops_ptr,
+        count,
+    });
+
+    Box::into_raw(result)
+}
+
+/// Frees a SimlinLoops structure
+///
+/// # Safety
+/// - `loops` must be a valid pointer returned by simlin_analyze_get_loops
+#[no_mangle]
+pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
+    if loops.is_null() {
+        return;
+    }
+
+    let loops = Box::from_raw(loops);
+
+    if !loops.loops.is_null() && loops.count > 0 {
+        let loop_slice = std::slice::from_raw_parts_mut(loops.loops, loops.count);
+
+        for loop_item in loop_slice {
+            // Free the loop ID
+            if !loop_item.id.is_null() {
+                let _ = CString::from_raw(loop_item.id);
+            }
+
+            // Free the variable names
+            if !loop_item.variables.is_null() && loop_item.var_count > 0 {
+                let vars = std::slice::from_raw_parts_mut(loop_item.variables, loop_item.var_count);
+                for var in vars {
+                    if !var.is_null() {
+                        let _ = CString::from_raw(*var);
+                    }
+                }
+                let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                    loop_item.variables,
+                    loop_item.var_count,
+                ));
+            }
+        }
+
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(loops.loops, loops.count));
+    }
+}
+
+/// Gets the relative loop score time series for a specific loop
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim that has been run to completion
+/// - `loop_id` must be a valid C string
+/// - `results` must be a valid pointer to an array of at least `len` doubles
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
+    sim: *mut SimlinSim,
+    loop_id: *const c_char,
+    results_ptr: *mut c_double,
+    len: usize,
+) -> c_int {
+    if sim.is_null() || loop_id.is_null() || results_ptr.is_null() {
+        return -1;
+    }
+
+    let sim = &*sim;
+
+    let loop_id = match CStr::from_ptr(loop_id).to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // The relative loop score variable name format
+    let var_name = format!("$⁚ltm⁚rel_loop_score⁚{loop_id}");
+    let var_ident = canonicalize(&var_name);
+
+    if let Some(ref results) = sim.results {
+        if let Some(&offset) = results.offsets.get(&var_ident) {
+            let count = std::cmp::min(results.step_count, len);
+            for (i, row) in results.iter().take(count).enumerate() {
+                *results_ptr.add(i) = row[offset];
+            }
+            count as c_int
+        } else {
+            // Variable not found - project might not have LTM enabled
+            -1
+        }
+    } else {
+        -1
     }
 }
 
