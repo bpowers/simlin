@@ -1,0 +1,20 @@
+[package]
+name = "engine2"
+version = "0.1.0"
+description = "C-compatible FFI interface to the System Dynamics engine"
+repository = "https://github.com/bpowers/simlin"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+simlin-engine = { version = "0.1", path = "../simlin-engine" }
+prost = "0.13"
+
+[dev-dependencies]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
