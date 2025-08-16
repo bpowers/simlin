@@ -309,7 +309,12 @@ func (e *Engine) writeFloat64Slice(data []float64) (uint32, error) {
 func (e *Engine) GetErrorString(errCode int32) (string, error) {
     e.mu.Lock()
     defer e.mu.Unlock()
+    return e.getErrorStringLocked(errCode)
+}
 
+// getErrorStringLocked returns the string representation of an error code via WASM.
+// Caller must hold e.mu.
+func (e *Engine) getErrorStringLocked(errCode int32) (string, error) {
     // Call exported simlin_error_str(errCode) which returns a const char*
     res, err := e.fnErrorStr.Call(e.ctx, uint64(uint32(errCode)))
     if err != nil {

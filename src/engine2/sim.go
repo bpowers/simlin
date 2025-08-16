@@ -91,7 +91,7 @@ func (s *Sim) RunTo(time float64) error {
 
 	errCode := int32(results[0])
 	if errCode != ErrNoError {
-		errStr, _ := s.engine.GetErrorString(errCode)
+		errStr, _ := s.engine.getErrorStringLocked(errCode)
 		return fmt.Errorf("simulation failed: %s (code %d)", errStr, errCode)
 	}
 
@@ -113,7 +113,7 @@ func (s *Sim) RunToEnd() error {
 
 	errCode := int32(results[0])
 	if errCode != ErrNoError {
-		errStr, _ := s.engine.GetErrorString(errCode)
+		errStr, _ := s.engine.getErrorStringLocked(errCode)
 		return fmt.Errorf("simulation failed: %s (code %d)", errStr, errCode)
 	}
 
@@ -135,7 +135,7 @@ func (s *Sim) Reset() error {
 
 	errCode := int32(results[0])
 	if errCode != ErrNoError {
-		errStr, _ := s.engine.GetErrorString(errCode)
+		errStr, _ := s.engine.getErrorStringLocked(errCode)
 		return fmt.Errorf("reset failed: %s (code %d)", errStr, errCode)
 	}
 
@@ -279,7 +279,7 @@ func (s *Sim) GetValue(name string) (float64, error) {
 
 	errCode := int32(results[0])
 	if errCode != ErrNoError {
-		errStr, _ := s.engine.GetErrorString(errCode)
+		errStr, _ := s.engine.getErrorStringLocked(errCode)
 		return 0, fmt.Errorf("failed to get value: %s (code %d)", errStr, errCode)
 	}
 
@@ -314,7 +314,7 @@ func (s *Sim) SetValue(name string, value float64) error {
 
 	errCode := int32(results[0])
 	if errCode != ErrNoError {
-		errStr, _ := s.engine.GetErrorString(errCode)
+		errStr, _ := s.engine.getErrorStringLocked(errCode)
 		return fmt.Errorf("failed to set value: %s (code %d)", errStr, errCode)
 	}
 

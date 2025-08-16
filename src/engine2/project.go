@@ -49,7 +49,7 @@ func (e *Engine) OpenProject(data []byte) (*Project, error) {
 		errBytes, ok := e.mod.Memory().Read(errPtr, 4)
 		if ok && len(errBytes) == 4 {
 			errCode := int32(errBytes[0]) | int32(errBytes[1])<<8 | int32(errBytes[2])<<16 | int32(errBytes[3])<<24
-			errStr, _ := e.GetErrorString(errCode)
+			errStr, _ := e.getErrorStringLocked(errCode)
 			return nil, fmt.Errorf("failed to open project: %s (code %d)", errStr, errCode)
 		}
 		return nil, errors.New("failed to open project")
@@ -99,7 +99,7 @@ func (p *Project) EnableLTM() error {
 
 	errCode := int32(results[0])
 	if errCode != ErrNoError {
-		errStr, _ := p.engine.GetErrorString(errCode)
+		errStr, _ := p.engine.getErrorStringLocked(errCode)
 		return fmt.Errorf("failed to enable LTM: %s (code %d)", errStr, errCode)
 	}
 
