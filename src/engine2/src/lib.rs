@@ -9,35 +9,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Error codes matching the C API specification
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimlinError {
-    NoError = 0,
-    NoMem = -1,
-    BadFile = -2,
-    Unspecified = -3,
-    BadXml = -4,
-    BadLex = -5,
-    Eof = -6,
-    Circular = -7,
-    NotSimulatable = -8,
-}
-impl From<engine::Error> for SimlinError {
-    fn from(err: engine::Error) -> Self {
-        use engine::ErrorCode;
-        match err.code {
-            ErrorCode::XmlDeserialization => SimlinError::BadXml,
-            ErrorCode::InvalidToken | ErrorCode::UnrecognizedToken | ErrorCode::ExtraToken => {
-                SimlinError::BadLex
-            }
-            ErrorCode::UnrecognizedEof => SimlinError::Eof,
-            ErrorCode::CircularDependency => SimlinError::Circular,
-            ErrorCode::NotSimulatable => SimlinError::NotSimulatable,
-            _ => SimlinError::Unspecified,
-        }
-    }
-}
+// We expose engine::ErrorCode values directly through the C ABI.
+// All exported functions that return an error code now return the integer
+// discriminant of engine::ErrorCode.
 /// Opaque project structure
 pub struct SimlinProject {
     project: engine::Project,
@@ -76,20 +50,69 @@ pub struct SimlinLoops {
 /// Returns a string representation of an error code
 #[no_mangle]
 pub extern "C" fn simlin_error_str(err: c_int) -> *const c_char {
-    let err_str = match err {
-        0 => "no error\0",
-        -1 => "out of memory\0",
-        -2 => "bad file\0",
-        -3 => "unspecified error\0",
-        -4 => "bad XML\0",
-        -5 => "lexer error\0",
-        -6 => "unexpected end of file\0",
-        -7 => "circular dependency\0",
-        -8 => "not simulatable\0",
-        _ => "unknown error\0",
+    // Map an engine::ErrorCode discriminant to its string form.
+    // Unknown values map to "unknown_error".
+    let s: &'static str = match err {
+        x if x == engine::ErrorCode::NoError as c_int => "no_error\0",
+        x if x == engine::ErrorCode::DoesNotExist as c_int => "does_not_exist\0",
+        x if x == engine::ErrorCode::XmlDeserialization as c_int => "xml_deserialization\0",
+        x if x == engine::ErrorCode::VensimConversion as c_int => "vensim_conversion\0",
+        x if x == engine::ErrorCode::ProtobufDecode as c_int => "protobuf_decode\0",
+        x if x == engine::ErrorCode::InvalidToken as c_int => "invalid_token\0",
+        x if x == engine::ErrorCode::UnrecognizedEof as c_int => "unrecognized_eof\0",
+        x if x == engine::ErrorCode::UnrecognizedToken as c_int => "unrecognized_token\0",
+        x if x == engine::ErrorCode::ExtraToken as c_int => "extra_token\0",
+        x if x == engine::ErrorCode::UnclosedComment as c_int => "unclosed_comment\0",
+        x if x == engine::ErrorCode::UnclosedQuotedIdent as c_int => "unclosed_quoted_ident\0",
+        x if x == engine::ErrorCode::ExpectedNumber as c_int => "expected_number\0",
+        x if x == engine::ErrorCode::UnknownBuiltin as c_int => "unknown_builtin\0",
+        x if x == engine::ErrorCode::BadBuiltinArgs as c_int => "bad_builtin_args\0",
+        x if x == engine::ErrorCode::EmptyEquation as c_int => "empty_equation\0",
+        x if x == engine::ErrorCode::BadModuleInputDst as c_int => "bad_module_input_dst\0",
+        x if x == engine::ErrorCode::BadModuleInputSrc as c_int => "bad_module_input_src\0",
+        x if x == engine::ErrorCode::NotSimulatable as c_int => "not_simulatable\0",
+        x if x == engine::ErrorCode::BadTable as c_int => "bad_table\0",
+        x if x == engine::ErrorCode::BadSimSpecs as c_int => "bad_sim_specs\0",
+        x if x == engine::ErrorCode::NoAbsoluteReferences as c_int => "no_absolute_references\0",
+        x if x == engine::ErrorCode::CircularDependency as c_int => "circular_dependency\0",
+        x if x == engine::ErrorCode::ArraysNotImplemented as c_int => "arrays_not_implemented\0",
+        x if x == engine::ErrorCode::MultiDimensionalArraysNotImplemented as c_int => {
+            "multi_dimensional_arrays_not_implemented\0"
+        }
+        x if x == engine::ErrorCode::BadDimensionName as c_int => "bad_dimension_name\0",
+        x if x == engine::ErrorCode::BadModelName as c_int => "bad_model_name\0",
+        x if x == engine::ErrorCode::MismatchedDimensions as c_int => "mismatched_dimensions\0",
+        x if x == engine::ErrorCode::ArrayReferenceNeedsExplicitSubscripts as c_int => {
+            "array_reference_needs_explicit_subscripts\0"
+        }
+        x if x == engine::ErrorCode::DuplicateVariable as c_int => "duplicate_variable\0",
+        x if x == engine::ErrorCode::UnknownDependency as c_int => "unknown_dependency\0",
+        x if x == engine::ErrorCode::VariablesHaveErrors as c_int => "variables_have_errors\0",
+        x if x == engine::ErrorCode::UnitDefinitionErrors as c_int => "unit_definition_errors\0",
+        x if x == engine::ErrorCode::Generic as c_int => "generic\0",
+        x if x == engine::ErrorCode::NoAppInUnits as c_int => "no_app_in_units\0",
+        x if x == engine::ErrorCode::NoSubscriptInUnits as c_int => "no_subscript_in_units\0",
+        x if x == engine::ErrorCode::NoIfInUnits as c_int => "no_if_in_units\0",
+        x if x == engine::ErrorCode::NoUnaryOpInUnits as c_int => "no_unary_op_in_units\0",
+        x if x == engine::ErrorCode::BadBinaryOpInUnits as c_int => "bad_binary_op_in_units\0",
+        x if x == engine::ErrorCode::NoConstInUnits as c_int => "no_const_in_units\0",
+        x if x == engine::ErrorCode::ExpectedInteger as c_int => "expected_integer\0",
+        x if x == engine::ErrorCode::ExpectedIntegerOne as c_int => "expected_integer_one\0",
+        x if x == engine::ErrorCode::DuplicateUnit as c_int => "duplicate_unit\0",
+        x if x == engine::ErrorCode::ExpectedModule as c_int => "expected_module\0",
+        x if x == engine::ErrorCode::ExpectedIdent as c_int => "expected_ident\0",
+        x if x == engine::ErrorCode::UnitMismatch as c_int => "unit_mismatch\0",
+        x if x == engine::ErrorCode::TodoWildcard as c_int => "todo_wildcard\0",
+        x if x == engine::ErrorCode::TodoStarRange as c_int => "todo_star_range\0",
+        x if x == engine::ErrorCode::TodoRange as c_int => "todo_range\0",
+        x if x == engine::ErrorCode::TodoArrayBuiltin as c_int => "todo_array_builtin\0",
+        x if x == engine::ErrorCode::CantSubscriptScalar as c_int => "cant_subscript_scalar\0",
+        x if x == engine::ErrorCode::DimensionInScalarContext as c_int => {
+            "dimension_in_scalar_context\0"
+        }
+        _ => "unknown_error\0",
     };
-    // These strings are static and safe to return as const pointers
-    err_str.as_ptr() as *const c_char
+    s.as_ptr() as *const c_char
 }
 /// Opens a project from protobuf data
 ///
@@ -104,7 +127,7 @@ pub unsafe extern "C" fn simlin_project_open(
 ) -> *mut SimlinProject {
     if data.is_null() {
         if !err.is_null() {
-            *err = SimlinError::Unspecified as c_int;
+            *err = engine::ErrorCode::Generic as c_int;
         }
         return ptr::null_mut();
     }
@@ -114,7 +137,7 @@ pub unsafe extern "C" fn simlin_project_open(
         Ok(pb_project) => serde::deserialize(pb_project).into(),
         Err(_) => {
             if !err.is_null() {
-                *err = SimlinError::BadFile as c_int;
+                *err = engine::ErrorCode::ProtobufDecode as c_int;
             }
             return ptr::null_mut();
         }
@@ -125,7 +148,7 @@ pub unsafe extern "C" fn simlin_project_open(
         ref_count: AtomicUsize::new(1),
     });
     if !err.is_null() {
-        *err = SimlinError::NoError as c_int;
+        *err = engine::ErrorCode::NoError as c_int;
     }
     Box::into_raw(boxed)
 }
@@ -161,20 +184,20 @@ pub unsafe extern "C" fn simlin_project_unref(project: *mut SimlinProject) {
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_enable_ltm(project: *mut SimlinProject) -> c_int {
     if project.is_null() {
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
     let proj = &mut *project;
     // If LTM is already enabled, return success
     if proj.ltm_project.is_some() {
-        return SimlinError::NoError as c_int;
+        return engine::ErrorCode::NoError as c_int;
     }
     // Create LTM-augmented project
     match proj.project.clone().with_ltm() {
         Ok(ltm_proj) => {
             proj.ltm_project = Some(ltm_proj);
-            SimlinError::NoError as c_int
+            engine::ErrorCode::NoError as c_int
         }
-        Err(_) => SimlinError::Unspecified as c_int,
+        Err(e) => e.code as c_int,
     }
 }
 /// Creates a new simulation context
@@ -264,16 +287,16 @@ pub unsafe extern "C" fn simlin_sim_unref(sim: *mut SimlinSim) {
 #[no_mangle]
 pub unsafe extern "C" fn simlin_sim_run_to(sim: *mut SimlinSim, time: c_double) -> c_int {
     if sim.is_null() {
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
     let sim = &mut *sim;
     if let Some(ref mut vm) = sim.vm {
         match vm.run_to(time) {
-            Ok(_) => SimlinError::NoError as c_int,
-            Err(e) => SimlinError::from(e) as c_int,
+            Ok(_) => engine::ErrorCode::NoError as c_int,
+            Err(e) => e.code as c_int,
         }
     } else {
-        SimlinError::Unspecified as c_int
+        engine::ErrorCode::Generic as c_int
     }
 }
 /// Runs the simulation to completion
@@ -283,25 +306,25 @@ pub unsafe extern "C" fn simlin_sim_run_to(sim: *mut SimlinSim, time: c_double) 
 #[no_mangle]
 pub unsafe extern "C" fn simlin_sim_run_to_end(sim: *mut SimlinSim) -> c_int {
     if sim.is_null() {
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
     let sim = &mut *sim;
     if let Some(mut vm) = sim.vm.take() {
         match vm.run_to_end() {
             Ok(_) => {
                 sim.results = Some(vm.into_results());
-                SimlinError::NoError as c_int
+                engine::ErrorCode::NoError as c_int
             }
             Err(e) => {
                 sim.vm = Some(vm);
-                SimlinError::from(e) as c_int
+                e.code as c_int
             }
         }
     } else if sim.results.is_some() {
         // Already ran to completion
-        SimlinError::NoError as c_int
+        engine::ErrorCode::NoError as c_int
     } else {
-        SimlinError::Unspecified as c_int
+        engine::ErrorCode::Generic as c_int
     }
 }
 /// Gets the number of time steps in the results
@@ -380,7 +403,7 @@ pub unsafe extern "C" fn simlin_sim_get_varnames(
 #[no_mangle]
 pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
     if sim.is_null() {
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
     let sim = &mut *sim;
     // Clear results
@@ -397,13 +420,13 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
             Ok(compiled) => match Vm::new(compiled) {
                 Ok(vm) => {
                     sim.vm = Some(vm);
-                    SimlinError::NoError as c_int
+                    engine::ErrorCode::NoError as c_int
                 }
-                Err(e) => SimlinError::from(e) as c_int,
+                Err(e) => e.code as c_int,
             },
-            Err(e) => SimlinError::from(e) as c_int,
+            Err(e) => e.code as c_int,
         },
-        Err(e) => SimlinError::from(e) as c_int,
+        Err(e) => e.code as c_int,
     }
 }
 /// Gets a single value from the simulation
@@ -419,32 +442,32 @@ pub unsafe extern "C" fn simlin_sim_get_value(
     result: *mut c_double,
 ) -> c_int {
     if sim.is_null() || name.is_null() || result.is_null() {
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
     let sim = &*sim;
     let canon_name = match CStr::from_ptr(name).to_str() {
         Ok(s) => canonicalize(s),
-        Err(_) => return SimlinError::Unspecified as c_int,
+        Err(_) => return engine::ErrorCode::Generic as c_int,
     };
     if let Some(ref vm) = sim.vm {
         // Get current value from VM current timestep
         if let Some(off) = vm.get_offset(&canon_name) {
             *result = vm.get_value_now(off);
-            return SimlinError::NoError as c_int;
+            return engine::ErrorCode::NoError as c_int;
         }
         if let Some(off) = vm.find_offset_suffix(canon_name.as_str()) {
             *result = vm.get_value_now(off);
-            return SimlinError::NoError as c_int;
+            return engine::ErrorCode::NoError as c_int;
         }
-        SimlinError::Unspecified as c_int
+        engine::ErrorCode::Generic as c_int
     } else if let Some(ref results) = sim.results {
         // Prefer exact canonical match; fall back to suffix match
         if let Some(&offset) = results.offsets.get(&canon_name) {
             if let Some(last_row) = results.iter().next_back() {
                 *result = last_row[offset];
-                SimlinError::NoError as c_int
+                engine::ErrorCode::NoError as c_int
             } else {
-                SimlinError::Unspecified as c_int
+                engine::ErrorCode::Generic as c_int
             }
         } else {
             let needle = canon_name.as_str();
@@ -458,16 +481,16 @@ pub unsafe extern "C" fn simlin_sim_get_value(
             if let Some(offset) = found {
                 if let Some(last_row) = results.iter().next_back() {
                     *result = last_row[offset];
-                    SimlinError::NoError as c_int
+                    engine::ErrorCode::NoError as c_int
                 } else {
-                    SimlinError::Unspecified as c_int
+                    engine::ErrorCode::Generic as c_int
                 }
             } else {
-                SimlinError::Unspecified as c_int
+                engine::ErrorCode::Generic as c_int
             }
         }
     } else {
-        SimlinError::Unspecified as c_int
+        engine::ErrorCode::Generic as c_int
     }
 }
 /// Sets a value in the simulation
@@ -482,25 +505,25 @@ pub unsafe extern "C" fn simlin_sim_set_value(
     val: c_double,
 ) -> c_int {
     if sim.is_null() || name.is_null() {
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
     let sim = &mut *sim;
     let canon_name = match CStr::from_ptr(name).to_str() {
         Ok(s) => canonicalize(s),
-        Err(_) => return SimlinError::Unspecified as c_int,
+        Err(_) => return engine::ErrorCode::Generic as c_int,
     };
     // Allow setting only when results exist; mutate the last saved value.
     if let Some(ref mut vm) = sim.vm {
         // Set current value in VM current timestep
         if let Some(off) = vm.get_offset(&canon_name) {
             vm.set_value_now(off, val);
-            return SimlinError::NoError as c_int;
+            return engine::ErrorCode::NoError as c_int;
         }
         if let Some(off) = vm.find_offset_suffix(canon_name.as_str()) {
             vm.set_value_now(off, val);
-            return SimlinError::NoError as c_int;
+            return engine::ErrorCode::NoError as c_int;
         }
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     } else if let Some(ref mut results) = sim.results {
         // Prefer exact canonical match; fall back to suffix match
         let mut found_off = results.offsets.get(&canon_name).copied();
@@ -515,17 +538,17 @@ pub unsafe extern "C" fn simlin_sim_set_value(
         }
         if let Some(off) = found_off {
             if results.step_count == 0 {
-                return SimlinError::Unspecified as c_int;
+                return engine::ErrorCode::Generic as c_int;
             }
             let idx = (results.step_count - 1) * results.step_size + off;
             if let Some(slot) = results.data.get_mut(idx) {
                 *slot = val;
-                return SimlinError::NoError as c_int;
+                return engine::ErrorCode::NoError as c_int;
             }
         }
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
-    SimlinError::Unspecified as c_int
+    engine::ErrorCode::Generic as c_int
 }
 /// Sets the value for a variable at the last saved timestep by offset
 ///
@@ -538,20 +561,20 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
     val: c_double,
 ) -> c_int {
     if sim.is_null() {
-        return SimlinError::Unspecified as c_int;
+        return engine::ErrorCode::Generic as c_int;
     }
     let sim = &mut *sim;
     if let Some(ref mut results) = sim.results {
         if results.step_count == 0 || offset >= results.step_size {
-            return SimlinError::Unspecified as c_int;
+            return engine::ErrorCode::Generic as c_int;
         }
         let idx = (results.step_count - 1) * results.step_size + offset;
         if let Some(slot) = results.data.get_mut(idx) {
             *slot = val;
-            return SimlinError::NoError as c_int;
+            return engine::ErrorCode::NoError as c_int;
         }
     }
-    SimlinError::Unspecified as c_int
+    engine::ErrorCode::Generic as c_int
 }
 /// Gets a time series for a variable
 ///
@@ -833,11 +856,7 @@ mod tests {
             let err_str = simlin_error_str(0);
             assert!(!err_str.is_null());
             let s = CStr::from_ptr(err_str);
-            assert_eq!(s.to_str().unwrap(), "no error");
-            let err_str = simlin_error_str(-1);
-            assert!(!err_str.is_null());
-            let s = CStr::from_ptr(err_str);
-            assert_eq!(s.to_str().unwrap(), "out of memory");
+            assert_eq!(s.to_str().unwrap(), "no_error");
         }
     }
 
@@ -863,7 +882,7 @@ mod tests {
 
             // Run to a partial time
             let rc = simlin_sim_run_to(sim, 0.125);
-            assert_eq!(rc, SimlinError::NoError as c_int);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
 
             // Fetch var names (from VM when no results yet)
             let count = simlin_sim_get_varcount(sim);
@@ -891,18 +910,18 @@ mod tests {
             let c_infectious = CString::new(infectious.clone()).unwrap();
             let mut out: c_double = 0.0;
             let rc = simlin_sim_get_value(sim, c_infectious.as_ptr(), &mut out as *mut c_double);
-            assert_eq!(rc, SimlinError::NoError as c_int, "get_value rc={rc}");
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int, "get_value rc={rc}");
 
             // Set to a new value and read it back
             let new_val: f64 = 42.0;
             let rc = simlin_sim_set_value(sim, c_infectious.as_ptr(), new_val as c_double);
-            assert_eq!(rc, SimlinError::NoError as c_int, "set_value rc={rc}");
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int, "set_value rc={rc}");
 
             let mut out2: c_double = 0.0;
             let rc = simlin_sim_get_value(sim, c_infectious.as_ptr(), &mut out2 as *mut c_double);
             assert_eq!(
                 rc,
-                SimlinError::NoError as c_int,
+                engine::ErrorCode::NoError as c_int,
                 "get_value(after set) rc={rc}"
             );
             assert!(
@@ -947,7 +966,7 @@ mod tests {
             let mut err: c_int = 0;
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
-            assert_eq!(err, 0);
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
             // Test reference counting
             simlin_project_ref(proj);
             assert_eq!((*proj).ref_count.load(Ordering::Relaxed), 2);
@@ -1009,7 +1028,7 @@ mod tests {
             let mut err: c_int = 0;
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
-            assert_eq!(err, 0);
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
             let sim = simlin_sim_new(proj, ptr::null());
             assert!(!sim.is_null());
             // Project ref count should have increased
