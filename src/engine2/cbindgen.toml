@@ -4,9 +4,10 @@ language = "C"
 cpp_compat = true
 include_guard = "SIMLIN_ENGINE2_H"
 header = "// Copyright 2025 The Simlin Authors. All rights reserved.\n// Use of this source code is governed by the Apache License,\n// Version 2.0, that can be found in the LICENSE file."
-autogen_warning = "/* Generated with cbindgen. Do not modify by hand. */"
+autogen_warning = "// Generated with cbindgen. Do not modify by hand."
 include_version = false
 style = "type"
+documentation_style = "c99"  # Use // style comments
 
 sys_includes = ["stddef.h", "stdint.h"]
 no_includes = false
