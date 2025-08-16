@@ -29,9 +29,9 @@ func TestEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get error string: %v", err)
 	}
-	if errStr != "no error" {
-		t.Errorf("expected 'no error', got %q", errStr)
-	}
+    if errStr != "no_error" {
+        t.Errorf("expected 'no_error', got %q", errStr)
+    }
 }
 
 func TestProject(t *testing.T) {

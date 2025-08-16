@@ -305,7 +305,23 @@ func (e *Engine) writeFloat64Slice(data []float64) (uint32, error) {
 	return ptr, nil
 }
 
-// GetErrorString returns the string representation of an error code
+// GetErrorString returns the string representation of an error code via WASM.
 func (e *Engine) GetErrorString(errCode int32) (string, error) {
-	return e.errorString(errCode), nil
+    e.mu.Lock()
+    defer e.mu.Unlock()
+
+    // Call exported simlin_error_str(errCode) which returns a const char*
+    res, err := e.fnErrorStr.Call(e.ctx, uint64(uint32(errCode)))
+    if err != nil {
+        return "", fmt.Errorf("simlin_error_str failed: %w", err)
+    }
+    if len(res) != 1 {
+        return "", errors.New("simlin_error_str returned unexpected number of results")
+    }
+    ptr := uint32(res[0])
+    s, rerr := e.readString(ptr)
+    if rerr != nil {
+        return "", fmt.Errorf("failed to read error string: %w", rerr)
+    }
+    return s, nil
 }
