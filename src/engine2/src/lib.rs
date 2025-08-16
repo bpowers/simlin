@@ -576,16 +576,15 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
     }
     engine::ErrorCode::Generic as c_int
 }
-/// Gets a time series for a variable
+/// Gets the column offset for a variable by name
+///
+/// Returns the column offset for a variable name at the current context, or -1 if not found.
+/// This canonicalizes the name and resolves in the VM if present, otherwise in results.
+/// Intended for debugging/tests to verify name→offset resolution.
 ///
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
 /// - `name` must be a valid C string
-/// - `results` must be a valid pointer to an array of at least `len` doubles
-/// Returns the column offset for a variable name at the current context, or -1 if not found
-///
-/// This canonicalizes the name and resolves in the VM if present, otherwise in results.
-/// Intended for debugging/tests to verify name→offset resolution.
 #[no_mangle]
 pub unsafe extern "C" fn simlin_sim_get_offset(sim: *mut SimlinSim, name: *const c_char) -> c_int {
     if sim.is_null() || name.is_null() {
@@ -839,20 +838,23 @@ pub extern "C" fn simlin_malloc(size: usize) -> *mut u8 {
         ptr.add(std::mem::size_of::<usize>())
     }
 }
+/// Frees memory allocated by simlin_malloc
+///
+/// # Safety
+/// - `ptr` must be a valid pointer returned by simlin_malloc, or null
+/// - The pointer must not be used after calling this function
 #[no_mangle]
-pub extern "C" fn simlin_free(ptr: *mut u8) {
-    unsafe {
-        if ptr.is_null() {
-            return;
-        }
-        // Get the actual allocation pointer (before the user data)
-        let actual_ptr = ptr.sub(std::mem::size_of::<usize>());
-        // Read the size
-        let size = *(actual_ptr as *mut usize);
-        let total_size = size + std::mem::size_of::<usize>();
-        let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
-        dealloc(actual_ptr, layout);
+pub unsafe extern "C" fn simlin_free(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
     }
+    // Get the actual allocation pointer (before the user data)
+    let actual_ptr = ptr.sub(std::mem::size_of::<usize>());
+    // Read the size
+    let size = *(actual_ptr as *mut usize);
+    let total_size = size + std::mem::size_of::<usize>();
+    let layout = Layout::from_size_align_unchecked(total_size, std::mem::align_of::<usize>());
+    dealloc(actual_ptr, layout);
 }
 #[cfg(test)]
 mod tests {
