@@ -95,6 +95,7 @@ First is the Rust workspace with these packages:
 - `src/simlin-cli` - a command line tool for simulating system dynamics models, mostly for testing/debugging.
 - `src/xmutil` - Rust wrapper around Bob Eberlein's tool to convert Vensim models to XMILE format, including diagrams.
 - `src/engine` - Expose simlin-engine functionality to JavaScript with wasm-bindgen
+- `src/engine2` - C-compatible FFI interface to simlin-engine for language-agnostic access via WebAssembly
 - `src/simlin-engine` - Core simulation engine
 
 This is a yarn workspace with these packages:
@@ -157,3 +158,41 @@ Follow these steps when working on code changes in Rust crates like `src/simlin-
 9. Invoke the code-quality-reviewer sub agent, and iterate until they are satisfied with your proposed changes.
 10. Run `cargo fmt` one last time.
 11. Commit your changes following the above commit message style guidance.
+
+# Working with FFI and WebAssembly
+
+When working on FFI code (like engine2):
+
+## Debugging Tips
+- If Go/language bindings fail to find a WASM function, check for missing `#[no_mangle]` attribute
+- Remember WASM is 32-bit: pointers and usize are 4 bytes, not 8
+- Use direct Rust unit tests for `extern "C"` functions to isolate FFI issues
+- Variable names are canonicalized internally (lowercase, spaces→underscores)
+- Build WASM modules with `./build.sh` in the crate directory
+- Use `nm -g module.wasm | grep simlin_` to verify exported symbols
+
+## Concurrency Patterns
+- When language bindings use mutexes, implement locked/unlocked function pairs to avoid deadlocks
+- Public functions acquire locks and call `*Locked` variants
+- Internal `*Locked` functions assume the caller holds the mutex
+- Document this pattern clearly in the README
+
+## Error Handling
+- Return engine::ErrorCode values directly through FFI (as c_int)
+- Provide error string lookup functions for human-readable messages
+- Test error paths comprehensively
+- Map error codes to language-specific error types in bindings
+
+## Memory Management
+- Always mark functions taking raw pointers as `unsafe`
+- Document safety requirements in doc comments
+- Use reference counting for objects crossing FFI boundaries
+- Provide explicit free functions for allocated memory
+- Test reference counting edge cases (multiple refs/unrefs)
+
+## Testing FFI Code
+- Write comprehensive tests for all exported APIs
+- Test boundary conditions (null pointers, empty strings, negative values)
+- Verify simulation results match expected outputs (CSV files)
+- Include tests for partial runs, resets, and value modification
+- Test LTM (Loop Thinking Method) functionality if available

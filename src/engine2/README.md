@@ -150,3 +150,35 @@ Test data and examples are provided in `testdata/`:
 - `SIR_output.csv`: Expected simulation results
 
 Run tests with: `cargo test -p engine2` (Rust) or `go test` (Go bindings)
+
+### Test Coverage
+
+The Go bindings include comprehensive test coverage:
+- `engine_test.go`: Core functionality tests
+- `comprehensive_test.go`: Extensive API coverage including edge cases
+
+Key test scenarios:
+- Creating simulations with empty vs named models
+- Partial simulation runs with intermediate value access
+- Reset and re-run capabilities
+- Error handling for non-existent variables
+- Reference counting validation
+- LTM loop analysis and score calculation
+- Boundary condition testing
+
+## Development Notes
+
+### Debugging FFI Issues
+
+When debugging Go → Rust interactions through WASM:
+1. Add direct Rust unit tests for `extern "C"` APIs to isolate issues
+2. Use `simlin_sim_get_offset` helper function to verify variable name resolution
+3. Remember WASM is 32-bit: pointers are 4 bytes wide
+4. Check that all exported functions have `#[no_mangle]` attribute
+
+### Variable Name Resolution
+
+The engine uses canonicalized names internally (lowercase, spaces → underscores). The FFI layer handles canonicalization automatically, but be aware that:
+- `"Infectious"` and `"infectious"` resolve to the same variable
+- The API tries exact matches first, then suffix matches for module-qualified names
+- Use `GetVarNames()` to see the exact names the engine recognizes
