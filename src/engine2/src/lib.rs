@@ -9,10 +9,20 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+mod ffi;
+pub use ffi::{SimlinLoop, SimlinLoopPolarity, SimlinLoops};
+
+#[cfg(feature = "header")]
+mod c_api;
+
 /// Error codes for the C API
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
 pub enum SimlinErrorCode {
+    /// Success - no error
+    #[cbindgen(rename = "SIMLIN_ERR_NO_ERROR")]
     NoError = 0,
     DoesNotExist = 1,
     XmlDeserialization = 2,
@@ -123,28 +133,8 @@ pub struct SimlinSim {
     results: Option<engine::Results>,
     ref_count: AtomicUsize,
 }
-/// Loop polarity for C API
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimlinLoopPolarity {
-    Reinforcing = 0,
-    Balancing = 1,
-}
-/// A single feedback loop
-#[repr(C)]
-pub struct SimlinLoop {
-    pub id: *mut c_char,
-    pub variables: *mut *mut c_char,
-    pub var_count: usize,
-    pub polarity: SimlinLoopPolarity,
-}
-/// List of loops returned by analysis
-#[repr(C)]
-pub struct SimlinLoops {
-    pub loops: *mut SimlinLoop,
-    pub count: usize,
-}
-/// Returns a string representation of an error code
+/// simlin_error_str returns a string representation of an error code.
+/// The returned string must not be freed or modified.
 #[no_mangle]
 pub extern "C" fn simlin_error_str(err: c_int) -> *const c_char {
     // Map an engine::ErrorCode discriminant to its string form.
@@ -211,7 +201,9 @@ pub extern "C" fn simlin_error_str(err: c_int) -> *const c_char {
     };
     s.as_ptr() as *const c_char
 }
-/// Opens a project from protobuf data
+/// simlin_project_open opens a project from protobuf data.
+/// If an error occurs, the function returns NULL and if the err parameter
+/// is not NULL, details of the error are placed in it.
 ///
 /// # Safety
 /// - `data` must be a valid pointer to at least `len` bytes
