@@ -126,6 +126,16 @@ The library uses reference counting to ensure memory safety across the FFI bound
 - Free strings returned by the API using `simlin_free_string`
 - Free loop analysis results using `simlin_free_loops`
 
+## Go Bindings Concurrency Pattern
+
+The Go bindings use a mutex to serialize access to the WebAssembly runtime. To avoid deadlocks, functions that need to call other mutex-protected functions use a locked/unlocked pattern:
+
+- Public methods acquire the mutex and call internal `*Locked` methods
+- Internal `*Locked` methods assume the caller holds the mutex
+- This prevents deadlock when error handling or other internal operations need to call protected functions
+
+Example: `GetErrorString` acquires the lock and calls `getErrorStringLocked`, which can be safely called from within other mutex-protected functions.
+
 ## Platform Support
 
 The WebAssembly module targets `wasm32-wasip1` for maximum compatibility:
