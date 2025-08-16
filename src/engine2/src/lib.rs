@@ -619,6 +619,13 @@ pub unsafe extern "C" fn simlin_sim_get_offset(sim: *mut SimlinSim, name: *const
     }
     -1
 }
+/// Gets a time series for a variable
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+/// - `name` must be a valid C string
+/// - `results_ptr` must point to allocated memory of at least `len` doubles
+#[no_mangle]
 pub unsafe extern "C" fn simlin_sim_get_series(
     sim: *mut SimlinSim,
     name: *const c_char,
