@@ -21,17 +21,31 @@ import (
 //go:embed engine2.wasm
 var engineWasm []byte
 
-// Error codes from the C API
+// Error codes from the Rust engine::ErrorCode enum
 const (
-	ErrNoError        = 0
-	ErrNoMem          = -1
-	ErrBadFile        = -2
-	ErrUnspecified    = -3
-	ErrBadXml         = -4
-	ErrBadLex         = -5
-	ErrEof            = -6
-	ErrCircular       = -7
-	ErrNotSimulatable = -8
+	ErrNoError              = 0
+	ErrDoesNotExist         = 1
+	ErrXmlDeserialization   = 2
+	ErrVensimConversion     = 3
+	ErrProtobufDecode       = 4
+	ErrInvalidToken         = 5
+	ErrUnrecognizedEof      = 6
+	ErrUnrecognizedToken    = 7
+	ErrExtraToken           = 8
+	ErrUnclosedComment      = 9
+	ErrUnclosedQuotedIdent  = 10
+	ErrExpectedNumber       = 11
+	ErrUnknownBuiltin       = 12
+	ErrBadBuiltinArgs       = 13
+	ErrEmptyEquation        = 14
+	ErrBadModuleInputDst    = 15
+	ErrBadModuleInputSrc    = 16
+	ErrNotSimulatable       = 17
+	ErrBadTable             = 18
+	ErrBadSimSpecs          = 19
+	ErrNoAbsoluteReferences = 20
+	ErrCircularDependency   = 21
+	ErrGeneric              = 32 // Note: enum order differs from numeric order
 )
 
 // LoopPolarity represents the polarity of a feedback loop
@@ -167,32 +181,6 @@ func (e *Engine) Close() error {
 	return nil
 }
 
-// errorString maps error codes to human-readable strings without calling into WASM.
-// This avoids re-entrant locking and reduces overhead on error paths.
-func (e *Engine) errorString(errCode int32) string {
-	switch errCode {
-	case ErrNoError:
-		return "no error"
-	case ErrNoMem:
-		return "out of memory"
-	case ErrBadFile:
-		return "bad file"
-	case ErrUnspecified:
-		return "unspecified error"
-	case ErrBadXml:
-		return "bad XML"
-	case ErrBadLex:
-		return "lexer error"
-	case ErrEof:
-		return "unexpected end of file"
-	case ErrCircular:
-		return "circular dependency"
-	case ErrNotSimulatable:
-		return "not simulatable"
-	default:
-		return "unknown error"
-	}
-}
 
 // Helper functions for memory management
 
