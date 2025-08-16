@@ -182,6 +182,7 @@ When working on FFI code (like engine2):
 - Provide error string lookup functions for human-readable messages
 - Test error paths comprehensively
 - Map error codes to language-specific error types in bindings
+- **IMPORTANT**: When creating FFI enum mappings, make the match statement exhaustive (no `_` catchall) to ensure compile-time safety when new variants are added
 
 ## Memory Management
 - Always mark functions taking raw pointers as `unsafe`
@@ -196,3 +197,21 @@ When working on FFI code (like engine2):
 - Verify simulation results match expected outputs (CSV files)
 - Include tests for partial runs, resets, and value modification
 - Test LTM (Loop Thinking Method) functionality if available
+
+## C Header Generation with cbindgen
+- Use cbindgen to generate C headers for FFI interfaces
+- Create a `cbindgen.toml` configuration file for customization
+- Use `#[repr(C)]` on enums and structs that need to be exposed
+- Prefer explicit enum values over auto-incrementing
+- Document all exported functions with doc comments (becomes C header documentation)
+- Add build script or make target to regenerate headers automatically
+- Test generated headers with actual C code to verify correctness
+
+## Best Practices for FFI Design
+- Keep FFI surface area minimal - expose only what's necessary
+- Use opaque pointers for complex internal structures
+- Provide both ref/unref functions for reference counted objects
+- Return error codes consistently (0 for success, non-zero for errors)
+- Use C-compatible types only (no Rust-specific types like Option, Result)
+- Prefix all exported symbols to avoid naming conflicts (e.g., `simlin_`)
+- When refactoring, boldly improve both Go and Rust code to be as simple and maintainable as possible

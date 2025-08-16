@@ -9,9 +9,106 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-// We expose engine::ErrorCode values directly through the C ABI.
-// All exported functions that return an error code now return the integer
-// discriminant of engine::ErrorCode.
+/// Error codes for the C API
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimlinErrorCode {
+    NoError = 0,
+    DoesNotExist = 1,
+    XmlDeserialization = 2,
+    VensimConversion = 3,
+    ProtobufDecode = 4,
+    InvalidToken = 5,
+    UnrecognizedEof = 6,
+    UnrecognizedToken = 7,
+    ExtraToken = 8,
+    UnclosedComment = 9,
+    UnclosedQuotedIdent = 10,
+    ExpectedNumber = 11,
+    UnknownBuiltin = 12,
+    BadBuiltinArgs = 13,
+    EmptyEquation = 14,
+    BadModuleInputDst = 15,
+    BadModuleInputSrc = 16,
+    NotSimulatable = 17,
+    BadTable = 18,
+    BadSimSpecs = 19,
+    NoAbsoluteReferences = 20,
+    CircularDependency = 21,
+    ArraysNotImplemented = 22,
+    MultiDimensionalArraysNotImplemented = 23,
+    BadDimensionName = 24,
+    BadModelName = 25,
+    MismatchedDimensions = 26,
+    ArrayReferenceNeedsExplicitSubscripts = 27,
+    DuplicateVariable = 28,
+    UnknownDependency = 29,
+    VariablesHaveErrors = 30,
+    UnitDefinitionErrors = 31,
+    Generic = 32,
+}
+
+impl From<engine::ErrorCode> for SimlinErrorCode {
+    fn from(code: engine::ErrorCode) -> Self {
+        match code {
+            engine::ErrorCode::NoError => SimlinErrorCode::NoError,
+            engine::ErrorCode::DoesNotExist => SimlinErrorCode::DoesNotExist,
+            engine::ErrorCode::XmlDeserialization => SimlinErrorCode::XmlDeserialization,
+            engine::ErrorCode::VensimConversion => SimlinErrorCode::VensimConversion,
+            engine::ErrorCode::ProtobufDecode => SimlinErrorCode::ProtobufDecode,
+            engine::ErrorCode::InvalidToken => SimlinErrorCode::InvalidToken,
+            engine::ErrorCode::UnrecognizedEof => SimlinErrorCode::UnrecognizedEof,
+            engine::ErrorCode::UnrecognizedToken => SimlinErrorCode::UnrecognizedToken,
+            engine::ErrorCode::ExtraToken => SimlinErrorCode::ExtraToken,
+            engine::ErrorCode::UnclosedComment => SimlinErrorCode::UnclosedComment,
+            engine::ErrorCode::UnclosedQuotedIdent => SimlinErrorCode::UnclosedQuotedIdent,
+            engine::ErrorCode::ExpectedNumber => SimlinErrorCode::ExpectedNumber,
+            engine::ErrorCode::UnknownBuiltin => SimlinErrorCode::UnknownBuiltin,
+            engine::ErrorCode::BadBuiltinArgs => SimlinErrorCode::BadBuiltinArgs,
+            engine::ErrorCode::EmptyEquation => SimlinErrorCode::EmptyEquation,
+            engine::ErrorCode::BadModuleInputDst => SimlinErrorCode::BadModuleInputDst,
+            engine::ErrorCode::BadModuleInputSrc => SimlinErrorCode::BadModuleInputSrc,
+            engine::ErrorCode::NotSimulatable => SimlinErrorCode::NotSimulatable,
+            engine::ErrorCode::BadTable => SimlinErrorCode::BadTable,
+            engine::ErrorCode::BadSimSpecs => SimlinErrorCode::BadSimSpecs,
+            engine::ErrorCode::NoAbsoluteReferences => SimlinErrorCode::NoAbsoluteReferences,
+            engine::ErrorCode::CircularDependency => SimlinErrorCode::CircularDependency,
+            engine::ErrorCode::ArraysNotImplemented => SimlinErrorCode::ArraysNotImplemented,
+            engine::ErrorCode::MultiDimensionalArraysNotImplemented => {
+                SimlinErrorCode::MultiDimensionalArraysNotImplemented
+            }
+            engine::ErrorCode::BadDimensionName => SimlinErrorCode::BadDimensionName,
+            engine::ErrorCode::BadModelName => SimlinErrorCode::BadModelName,
+            engine::ErrorCode::MismatchedDimensions => SimlinErrorCode::MismatchedDimensions,
+            engine::ErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
+                SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts
+            }
+            engine::ErrorCode::DuplicateVariable => SimlinErrorCode::DuplicateVariable,
+            engine::ErrorCode::UnknownDependency => SimlinErrorCode::UnknownDependency,
+            engine::ErrorCode::VariablesHaveErrors => SimlinErrorCode::VariablesHaveErrors,
+            engine::ErrorCode::UnitDefinitionErrors => SimlinErrorCode::UnitDefinitionErrors,
+            engine::ErrorCode::Generic => SimlinErrorCode::Generic,
+            engine::ErrorCode::NoAppInUnits => SimlinErrorCode::Generic,
+            engine::ErrorCode::NoSubscriptInUnits => SimlinErrorCode::Generic,
+            engine::ErrorCode::NoIfInUnits => SimlinErrorCode::Generic,
+            engine::ErrorCode::NoUnaryOpInUnits => SimlinErrorCode::Generic,
+            engine::ErrorCode::BadBinaryOpInUnits => SimlinErrorCode::Generic,
+            engine::ErrorCode::NoConstInUnits => SimlinErrorCode::Generic,
+            engine::ErrorCode::ExpectedInteger => SimlinErrorCode::Generic,
+            engine::ErrorCode::ExpectedIntegerOne => SimlinErrorCode::Generic,
+            engine::ErrorCode::DuplicateUnit => SimlinErrorCode::Generic,
+            engine::ErrorCode::ExpectedModule => SimlinErrorCode::Generic,
+            engine::ErrorCode::ExpectedIdent => SimlinErrorCode::Generic,
+            engine::ErrorCode::UnitMismatch => SimlinErrorCode::Generic,
+            engine::ErrorCode::TodoWildcard => SimlinErrorCode::Generic,
+            engine::ErrorCode::TodoStarRange => SimlinErrorCode::Generic,
+            engine::ErrorCode::TodoRange => SimlinErrorCode::Generic,
+            engine::ErrorCode::TodoArrayBuiltin => SimlinErrorCode::Generic,
+            engine::ErrorCode::CantSubscriptScalar => SimlinErrorCode::Generic,
+            engine::ErrorCode::DimensionInScalarContext => SimlinErrorCode::Generic,
+        }
+    }
+}
 /// Opaque project structure
 pub struct SimlinProject {
     project: engine::Project,
