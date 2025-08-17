@@ -426,15 +426,6 @@ impl Vm {
         self.offsets.get(ident).copied()
     }
 
-    pub fn find_offset_suffix(&self, needle: &str) -> Option<usize> {
-        for (ident, &off) in self.offsets.iter() {
-            if ident.as_str().ends_with(needle) {
-                return Some(off);
-            }
-        }
-        None
-    }
-
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn eval_module(

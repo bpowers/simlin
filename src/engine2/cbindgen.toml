@@ -1,0 +1,46 @@
+# cbindgen configuration for engine2
+
+language = "C"
+cpp_compat = true
+include_guard = "SIMLIN_ENGINE2_H"
+header = "// Copyright 2025 The Simlin Authors. All rights reserved.\n// Use of this source code is governed by the Apache License,\n// Version 2.0, that can be found in the LICENSE file."
+autogen_warning = "// Generated with cbindgen. Do not modify by hand."
+include_version = false
+style = "type"
+documentation_style = "c99"  # Use // style comments
+
+sys_includes = ["stddef.h", "stdint.h"]
+no_includes = false
+
+[parse]
+parse_deps = false
+include = []
+
+[export]
+# Explicitly include the types we want
+include = ["SimlinErrorCode", "SimlinLoopPolarity", "SimlinLoop", "SimlinLoops", "SimlinProject", "SimlinSim"]
+exclude = []
+item_types = ["enums", "structs", "unions", "typedefs", "opaque", "functions"]
+
+[export.rename]
+# Keep type names unchanged
+"SimlinErrorCode" = "SimlinErrorCode"
+"SimlinLoopPolarity" = "SimlinLoopPolarity"
+"SimlinLoop" = "SimlinLoop"
+"SimlinLoops" = "SimlinLoops"
+"SimlinProject" = "SimlinProject"
+"SimlinSim" = "SimlinSim"
+
+[enum]
+# Use the enum name as prefix
+rename_variants = "ScreamingSnakeCase"
+prefix_with_name = true
+add_sentinel = false
+
+[struct]
+rename_fields = "None"
+derive_constructor = false
+
+[fn]
+# Don't use prefix here since functions already have simlin_ in their names
+rename_args = "None"
