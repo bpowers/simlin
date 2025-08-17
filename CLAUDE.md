@@ -95,6 +95,7 @@ First is the Rust workspace with these packages:
 - `src/simlin-cli` - a command line tool for simulating system dynamics models, mostly for testing/debugging.
 - `src/xmutil` - Rust wrapper around Bob Eberlein's tool to convert Vensim models to XMILE format, including diagrams.
 - `src/engine` - Expose simlin-engine functionality to JavaScript with wasm-bindgen
+- `src/engine2` - C-compatible FFI interface to simlin-engine for language-agnostic access via WebAssembly
 - `src/simlin-engine` - Core simulation engine
 
 This is a yarn workspace with these packages:
@@ -106,6 +107,7 @@ This is a yarn workspace with these packages:
 - `@system-dynamics/importer` - WASM model import utilities
 - `@system-dynamics/xmutil` - WASM XML utilities
 
+
 ### Prerequisites for Development
 
 - Google Cloud CLI with Firestore emulator
@@ -113,21 +115,24 @@ This is a yarn workspace with these packages:
 - Node.js and Yarn
 - Rust toolchain (specified in `rust-toolchain.toml`)
 
+
 # Testing Strategy
 
 - Rust: Unit tests in `src/*/tests/` and integration tests in `test/` directory.
 - TypeScript: Workspace-level linting and type checking
 - Models: Extensive test suite in `test/` with expected outputs.  This is very important and ensures the engine behavior matches known-good results from other software.
 
+
 # General guidelines
 
 * Prefer `rg` (ripgrep) to `grep`.
-* Especially when working on the TypeScript side of the project, do NOT manually copy files around to get builds or tests passing.  If there is some sort of regression or error where source files are not able to imported or used, ultrathink to understand why and fix the build scripts.
+* Especially when working on the TypeScript side of the project, do NOT manually copy files around to get builds or tests passing.
+  If there is some sort of regression or error where source files are not able to imported or used, ultrathink to understand why and fix the build scripts.
 
 
 # Commit Message Style
 
-- Format: component: description
+- First line format: component: description
 - Component prefix: Use the module/directory name with the "simlin-" prefix removed if it exists (e.g., engine, diagram, core, doc, build)
 - Description: Start with lowercase, present tense verb, no period
 - Length: Keep the initial line concise, typically under 60 characters
@@ -135,25 +140,28 @@ This is a yarn workspace with these packages:
   - engine: fix failing test due to bad helper
   - diagram: display equations as LaTeX
   - testing: add basic visual regression tests
-- Add 1 to 2 paragraphs of the "why" of the change in the body of the commit message.  Especially highlight any assumptions you made or non-obvious pieces to the work in question.
+- Add 1 to 2 paragraphs of the "why" of the change in the body of the commit message.  Especially highlight any assumptions you made or non-obvious decisions or tricky implementation details.
+- DO NOT use "fixes" or "resolves" in the commit message.  Use the issue tracker for that.
 - DO NOT use any emoji in the commit message.
 
 
-# Required development strategy for working on Rust code
+# REQUIRED development strategy for working on Rust code
 
 Follow these steps when working on code changes in Rust crates like `src/simlin-engine`:
-1. Run `git status` to ensure there are no uncommitted changes or untracked files.  If there are, let the user know and do not continue until either they have committed the changes (verify with `git status`) or told you to proceed anyway.
-2. Run `cargo test` and `cargo clippy` to understand if there are any pre-existing test or linter failures.  If there are more than 1 or 2 and your task is not related to fixing these, inform the user and get confirmation about what to do.
-3. To run specific tests use the form `RUST_BACKTRACE=1 cargo test -p $crate_name $test_name`.  This command form is allowlisted, deviating from this is strongly discouraged and will slow progress.
+ 
+- Run `git status` to ensure there are no uncommitted changes or untracked files.  If there are, let the user know and do not continue until either they have committed the changes (verify with `git status`) or told you to proceed anyway.
+- Run `cargo test` and `cargo clippy` to understand if there are any pre-existing test or linter failures.  If there are more than 1 or 2 and your task is not related to fixing these, inform the user and get confirmation about what to do.
+- To run specific tests use the form `RUST_BACKTRACE=1 cargo test -p $crate_name $test_name`.  This command form is allowlisted, deviating from this is strongly discouraged and will slow progress.
   3a. DO NOT write one-off rust files and compile them with `rustc` to test hypotheses and assumptions.  Instead, write new unit tests as close to the source of the problem as possible.  These unit tests are valuable additions to the test suite and should be left at the end of the task so that the user can review your assumptions.
-4. **Strongly** prefer `.unwrap()` over `.unwrap_or_default()` (or one of the other ways to provide a value when unwrap fails).  During this phase of development, it is valuable to understand when our assumptions are wrong, and using a default/0/1 fixed value hides that.
-5. If a case (for example in a match arm) is expected to be unreachable, use the `unreachable!()` macro not a code comment.
-6. Code should never have comments like "this is a placeholder".  If you have stubbed something out, that should be documented in code via the use of the `todo!()` or `unimplemented!()` macros.  But generally this means your current task is not complete!  Continue working until you have a general-purpose, maintainable solution that can be confidently deployed to a production environment.
-7. When you think you have reached the end of the task:
-  7a. Run `cargo fmt` to ensure the code is appropriately formatted.
-  7b. Run `cargo clippy`, and fix any lints that weren't already being reported at the start of the task, directly and without shortcuts.
-  7c. Run `cargo test` at the root of the workspace to ensure we haven't regressed on any behavior.  If there are new failing tests that weren't pre-existing before you started this task, it means your work introduced regressions.  Ultrathink and deeply understand what is causing the failures and fix them, DO NOT simply ignore or comment out the tests.
-8. Iterate running `cargo clippy` and `cargo test` until there are no failing tests.
-9. Invoke the code-quality-reviewer sub agent, and iterate until they are satisfied with your proposed changes.
-10. Run `cargo fmt` one last time.
-11. Commit your changes following the above commit message style guidance.
+- **Strongly** prefer `.unwrap()` over `.unwrap_or_default()` (or one of the other ways to provide a value when unwrap fails).  During this phase of development, it is valuable to understand when our assumptions are wrong, and using a default/0/1 fixed value hides that.
+- If a case (for example in a match arm) is expected to be unreachable, use the `unreachable!()` macro not a code comment.
+- Code should never have comments like "this is a placeholder".  If you have stubbed something out, that should be documented in code via the use of the `todo!()` or `unimplemented!()` macros.  But generally this means your current task is not complete!  Continue working until you have a general-purpose, maintainable solution that can be confidently deployed to a production environment.
+- Similarly, tests should err on the side of brittleness.  For example, if you are missing a required test file, loudly fail the test rather than skipping the test.
+- When you think you have reached the end of the task:
+  - Run `cargo fmt` to ensure the code is appropriately formatted.
+  - Run `cargo clippy`, and fix any lints that weren't already being reported at the start of the task, directly and without shortcuts.
+  - Run `cargo test` at the root of the workspace to ensure we haven't regressed on any behavior.  If there are new failing tests that weren't pre-existing before you started this task, it means your work introduced regressions.  Ultrathink and deeply understand what is causing the failures and fix them, DO NOT simply ignore or comment out the tests.
+- Iterate running `cargo clippy` and `cargo test` until there are no failing tests.
+- Invoke the code-quality-reviewer sub agent, and iterate until they are satisfied with your proposed changes.
+- Run `cargo fmt` one last time.
+- Commit your changes following the above commit message style guidance.
