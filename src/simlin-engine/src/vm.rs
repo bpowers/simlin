@@ -2,7 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -192,10 +191,19 @@ impl Results {
             }
         }
     }
-
     pub fn iter(&self) -> std::iter::Take<std::slice::Chunks<f64>> {
         self.data.chunks(self.step_size).take(self.step_count)
     }
+}
+
+// helper to borrow two non-overlapping chunk slices by index
+fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64], &mut [f64]) {
+    let (lo, hi, flip) = if a < b { (a, b, false) } else { (b, a, true) };
+    let split = hi * n_slots;
+    let (left, right) = buf.split_at_mut(split);
+    let left = &mut left[lo * n_slots..(lo + 1) * n_slots];
+    let right = &mut right[..n_slots];
+    if !flip { (left, right) } else { (right, left) }
 }
 
 #[derive(Clone, Debug)]
@@ -206,7 +214,15 @@ pub struct Vm {
     sliced_sim: CompiledSlicedSimulation,
     n_slots: usize,
     n_chunks: usize,
+    // simulation buffer for saved samples and working state
     data: Option<Box<[f64]>>,
+    // indices into chunks for current and next slots
+    curr_chunk: usize,
+    next_chunk: usize,
+    // have we completed initials and emitted the first state
+    did_initials: bool,
+    // step counter for save_every cadence
+    step_accum: usize,
 }
 
 #[derive(Debug)]
@@ -220,12 +236,10 @@ impl Stack {
             stack: Vec::with_capacity(32),
         }
     }
-
     #[inline(always)]
     fn push(&mut self, value: f64) {
         self.stack.push(value)
     }
-
     #[inline(always)]
     fn pop(&mut self) -> f64 {
         self.stack.pop().unwrap()
@@ -300,9 +314,12 @@ impl Vm {
             n_slots,
             n_chunks,
             data: Some(data),
+            curr_chunk: 0,
+            next_chunk: 1,
+            did_initials: false,
+            step_accum: 0,
         })
     }
-
     pub fn run_to_end(&mut self) -> Result<()> {
         let end = self.specs.stop;
         self.run_to(end)
@@ -318,56 +335,58 @@ impl Vm {
         let module_stocks = &sliced_sim.stock_modules[&self.root];
 
         let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5).floor() as usize);
-
         let dt = spec.dt;
 
+        let mut stack = Stack::new();
+        let module_inputs: &[f64] = &[0.0; 0];
         let mut data = None;
         std::mem::swap(&mut data, &mut self.data);
         let mut data = data.unwrap();
 
-        {
-            let mut stack = Stack::new();
-            let module_inputs: &[f64] = &[0.0; 0];
-
-            let mut slabs = data.chunks_mut(self.n_slots);
-            let mut curr = slabs.next().unwrap();
-            let mut next = slabs.next().unwrap();
+        // Initialize initials once
+        if !self.did_initials {
+            let (curr, next) =
+                borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
             curr[TIME_OFF] = spec.start;
             curr[DT_OFF] = dt;
             curr[INITIAL_TIME_OFF] = spec.start;
             curr[FINAL_TIME_OFF] = spec.stop;
             self.eval(module_initials, 0, module_inputs, curr, next, &mut stack);
-            let mut is_initial_timestep = true;
-            let mut step = 0;
-            while curr[TIME_OFF] <= end {
-                self.eval(module_flows, 0, module_inputs, curr, next, &mut stack);
-                self.eval(module_stocks, 0, module_inputs, curr, next, &mut stack);
-                next[TIME_OFF] = curr[TIME_OFF] + dt;
-                next[DT_OFF] = curr[DT_OFF];
-                next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
-                next[FINAL_TIME_OFF] = curr[FINAL_TIME_OFF];
-                step += 1;
-                if step != save_every && !is_initial_timestep {
-                    let curr = curr.borrow_mut();
-                    curr.copy_from_slice(next);
-                } else {
-                    curr = next;
-                    let maybe_next = slabs.next();
-                    if maybe_next.is_none() {
-                        break;
-                    }
-                    next = maybe_next.unwrap();
-                    step = 0;
-                    is_initial_timestep = false;
-                }
-            }
-            // ensure we've calculated stock + flow values for the dt <= end_time
-            assert!(curr[TIME_OFF] > end);
+            self.did_initials = true;
+            self.step_accum = 0;
         }
 
-        let mut data = Some(data);
-        std::mem::swap(&mut data, &mut self.data);
+        loop {
+            let (curr, next) =
+                borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+            if curr[TIME_OFF] > end {
+                break;
+            }
 
+            self.eval(module_flows, 0, module_inputs, curr, next, &mut stack);
+            self.eval(module_stocks, 0, module_inputs, curr, next, &mut stack);
+            next[TIME_OFF] = curr[TIME_OFF] + dt;
+            next[DT_OFF] = curr[DT_OFF];
+            next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
+            next[FINAL_TIME_OFF] = curr[FINAL_TIME_OFF];
+
+            self.step_accum += 1;
+            let is_initial_timestep = (self.curr_chunk == 0) && (curr[TIME_OFF] == spec.start);
+            if self.step_accum != save_every && !is_initial_timestep {
+                // copy next into curr
+                let (curr2, next2) =
+                    borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+                curr2.copy_from_slice(next2);
+            } else {
+                self.curr_chunk = self.next_chunk;
+                if self.next_chunk + 1 >= self.n_chunks + 2 {
+                    break;
+                }
+                self.next_chunk += 1;
+                self.step_accum = 0;
+            }
+        }
+        self.data = Some(data);
         Ok(())
     }
 
@@ -380,6 +399,40 @@ impl Vm {
             specs: self.specs,
             is_vensim: false,
         }
+    }
+
+    pub fn set_value_now(&mut self, off: usize, val: f64) {
+        let start = self.curr_chunk * self.n_slots;
+        let mut data = None;
+        std::mem::swap(&mut data, &mut self.data);
+        let mut data = data.unwrap();
+        data[start + off] = val;
+        self.data = Some(data);
+    }
+
+    pub fn get_value_now(&self, off: usize) -> f64 {
+        let start = self.curr_chunk * self.n_slots;
+        self.data.as_ref().unwrap()[start + off]
+    }
+
+    pub fn names_as_strs(&self) -> Vec<String> {
+        self.offsets
+            .keys()
+            .map(|k| k.as_str().to_string())
+            .collect()
+    }
+
+    pub fn get_offset(&self, ident: &Ident<Canonical>) -> Option<usize> {
+        self.offsets.get(ident).copied()
+    }
+
+    pub fn find_offset_suffix(&self, needle: &str) -> Option<usize> {
+        for (ident, &off) in self.offsets.iter() {
+            if ident.as_str().ends_with(needle) {
+                return Some(off);
+            }
+        }
+        None
     }
 
     #[allow(clippy::too_many_arguments)]
