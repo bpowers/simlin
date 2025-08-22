@@ -25,6 +25,8 @@ export default defineConfig({
     
     // Screenshot on failure
     screenshot: 'only-on-failure',
+
+    channel: 'chromium',
   },
 
   projects: [
@@ -33,6 +35,7 @@ export default defineConfig({
       testMatch: /visual\/.+\.spec\.ts$/,
       use: {
         ...devices['Desktop Chrome'],
+	channel: 'chromium',
         // Fixed viewport for consistent visual tests
         viewport: { width: 1280, height: 720 },
         // Disable animations for visual consistency
@@ -46,6 +49,7 @@ export default defineConfig({
       testMatch: /integration\/.+\.spec\.ts$/,
       use: {
         ...devices['Desktop Chrome'],
+	channel: 'chromium',
         viewport: { width: 1280, height: 720 },
       },
     },
