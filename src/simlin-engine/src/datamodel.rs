@@ -89,12 +89,12 @@ impl std::ops::Mul for UnitMap {
             }
         }
 
-        if let Some(rctx) = rhs.ctx.take() {
-            if !rctx.is_empty() {
-                let mut ctx = self.ctx.take().unwrap_or_default();
-                ctx.extend(rctx);
-                self.ctx = Some(ctx);
-            }
+        if let Some(rctx) = rhs.ctx.take()
+            && !rctx.is_empty()
+        {
+            let mut ctx = self.ctx.take().unwrap_or_default();
+            ctx.extend(rctx);
+            self.ctx = Some(ctx);
         }
 
         self

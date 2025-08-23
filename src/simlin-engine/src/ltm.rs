@@ -122,12 +122,12 @@ impl CausalGraph {
             } = var
             {
                 // Build internal graph for this module instance if we have the model
-                if let Some(module_model) = project.models.get(model_name) {
-                    if !module_model.implicit {
-                        // Recursively build graph for the module
-                        let module_graph = CausalGraph::from_model(module_model, project)?;
-                        module_graphs.insert(var_name.clone(), Box::new(module_graph));
-                    }
+                if let Some(module_model) = project.models.get(model_name)
+                    && !module_model.implicit
+                {
+                    // Recursively build graph for the module
+                    let module_graph = CausalGraph::from_model(module_model, project)?;
+                    module_graphs.insert(var_name.clone(), Box::new(module_graph));
                 }
 
                 // Add edges from input sources to the module
@@ -410,12 +410,12 @@ impl CausalGraph {
         to_var: &Ident<Canonical>,
     ) -> bool {
         // Check if there's a path from the module to the variable in the parent graph
-        if let Some(neighbors) = self.edges.get(from_module) {
-            if neighbors.contains(to_var) {
-                return true;
-            }
-            // Could do deeper path search here if needed
+        if let Some(neighbors) = self.edges.get(from_module)
+            && neighbors.contains(to_var)
+        {
+            return true;
         }
+        // Could do deeper path search here if needed
         false
     }
 
@@ -520,11 +520,11 @@ impl CausalGraph {
     /// Get the polarity of a single link
     fn get_link_polarity(&self, from: &Ident<Canonical>, to: &Ident<Canonical>) -> LinkPolarity {
         // Get the equation of the 'to' variable
-        if let Some(to_var) = self.variables.get(to) {
-            if let Some(ast) = to_var.ast() {
-                // Analyze how 'from' appears in the equation
-                return analyze_link_polarity(ast, from);
-            }
+        if let Some(to_var) = self.variables.get(to)
+            && let Some(ast) = to_var.ast()
+        {
+            // Analyze how 'from' appears in the equation
+            return analyze_link_polarity(ast, from);
         }
         LinkPolarity::Unknown
     }

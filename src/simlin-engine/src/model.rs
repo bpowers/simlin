@@ -107,10 +107,10 @@ fn module_deps(
                 let mut stock_deps = HashSet::<Ident<Canonical>>::new();
 
                 for var in model.variables.values() {
-                    if let Variable::Stock { .. } = var {
-                        if let Some(deps) = initial_deps.get(&canonicalize(var.ident())) {
-                            stock_deps.extend(deps.iter().cloned());
-                        }
+                    if let Variable::Stock { .. } = var
+                        && let Some(deps) = initial_deps.get(&canonicalize(var.ident()))
+                    {
+                        stock_deps.extend(deps.iter().cloned());
                     }
                 }
 

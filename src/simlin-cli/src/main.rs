@@ -259,45 +259,44 @@ fn main() {
                     ))
                     .unwrap();
 
-                if var.is_stock() {
-                    if let Variable::Stock {
+                if var.is_stock()
+                    && let Variable::Stock {
                         inflows, outflows, ..
                     } = var
-                    {
-                        let continuation = if i == var_count - 1 { "" } else { " \\\\" };
-                        let use_parens = inflows.len() + outflows.len() > 1;
-                        let mut eqn = inflows
-                            .iter()
-                            .map(|inflow| {
-                                format!("\\mathrm{{{}}}", str::replace(inflow.as_str(), "_", "\\_"))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" + ");
-                        if !outflows.is_empty() {
-                            eqn = format!(
-                                "{}-{}",
-                                eqn,
-                                outflows
-                                    .iter()
-                                    .map(|inflow| format!(
-                                        "\\mathrm{{{}}}",
-                                        str::replace(inflow.as_str(), "_", "\\_")
-                                    ))
-                                    .collect::<Vec<_>>()
-                                    .join(" - ")
-                            );
-                        }
-                        if use_parens {
-                            eqn = format!("({eqn}) ");
-                        } else {
-                            eqn = format!("{eqn} \\cdot ");
-                        }
-                        output_file
+                {
+                    let continuation = if i == var_count - 1 { "" } else { " \\\\" };
+                    let use_parens = inflows.len() + outflows.len() > 1;
+                    let mut eqn = inflows
+                        .iter()
+                        .map(|inflow| {
+                            format!("\\mathrm{{{}}}", str::replace(inflow.as_str(), "_", "\\_"))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" + ");
+                    if !outflows.is_empty() {
+                        eqn = format!(
+                            "{}-{}",
+                            eqn,
+                            outflows
+                                .iter()
+                                .map(|inflow| format!(
+                                    "\\mathrm{{{}}}",
+                                    str::replace(inflow.as_str(), "_", "\\_")
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(" - ")
+                        );
+                    }
+                    if use_parens {
+                        eqn = format!("({eqn}) ");
+                    } else {
+                        eqn = format!("{eqn} \\cdot ");
+                    }
+                    output_file
                             .write_fmt(format_args!(
                                 "\\mathrm{{{var_name}}}(t) & = \\mathrm{{{var_name}}}(t - dt) + {eqn} dt{continuation}\n"
                             ))
                             .unwrap();
-                    }
                 }
             }
 

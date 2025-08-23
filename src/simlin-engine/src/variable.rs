@@ -588,15 +588,15 @@ impl IdentifierSetVisitor<'_> {
                 self.walk(l);
             }
             Expr2::If(cond, t, f, _, _) => {
-                if let Some(module_inputs) = self.module_inputs {
-                    if let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref() {
-                        if module_inputs.contains(&canonicalize(ident)) {
-                            self.walk(t);
-                        } else {
-                            self.walk(f);
-                        }
-                        return;
+                if let Some(module_inputs) = self.module_inputs
+                    && let Expr2::App(BuiltinFn::IsModuleInput(ident, _), _, _) = cond.as_ref()
+                {
+                    if module_inputs.contains(&canonicalize(ident)) {
+                        self.walk(t);
+                    } else {
+                        self.walk(f);
                     }
+                    return;
                 }
 
                 self.walk(cond);

@@ -118,10 +118,10 @@ impl DimensionsContext {
         if let Some(pos) = element.find('·') {
             let dimension_name = CanonicalDimensionName::from_raw(&element[..pos]);
             let element_name = CanonicalElementName::from_raw(&element[pos + '·'.len_utf8()..]);
-            if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(&dimension_name) {
-                if let Some(off) = dimension.indexed_elements.get(&element_name) {
-                    return Some(*off as u32);
-                }
+            if let Some(Dimension::Named(_, dimension)) = self.dimensions.get(&dimension_name)
+                && let Some(off) = dimension.indexed_elements.get(&element_name)
+            {
+                return Some(*off as u32);
             }
         }
         None

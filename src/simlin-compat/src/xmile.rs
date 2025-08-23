@@ -2536,17 +2536,17 @@ impl View {
             .map(|vo| (vo.uid().unwrap(), vo))
             .collect();
         let maybe_fixup_takeoff = |pt1: &mut view_element::Point, pt2: &view_element::Point| {
-            if let Some(source_uid) = pt1.uid {
-                if let Some(ViewObject::Stock(stock)) = stocks.get(&source_uid) {
-                    if stock.is_right(pt2) {
-                        pt1.x = stock.x + STOCK_WIDTH / 2.0;
-                    } else if stock.is_left(pt2) {
-                        pt1.x = stock.x - STOCK_WIDTH / 2.0;
-                    } else if stock.is_above(pt2) {
-                        pt1.y = stock.y - STOCK_HEIGHT / 2.0;
-                    } else if stock.is_below(pt2) {
-                        pt1.y = stock.y + STOCK_HEIGHT / 2.0;
-                    }
+            if let Some(source_uid) = pt1.uid
+                && let Some(ViewObject::Stock(stock)) = stocks.get(&source_uid)
+            {
+                if stock.is_right(pt2) {
+                    pt1.x = stock.x + STOCK_WIDTH / 2.0;
+                } else if stock.is_left(pt2) {
+                    pt1.x = stock.x - STOCK_WIDTH / 2.0;
+                } else if stock.is_above(pt2) {
+                    pt1.y = stock.y - STOCK_HEIGHT / 2.0;
+                } else if stock.is_below(pt2) {
+                    pt1.y = stock.y + STOCK_HEIGHT / 2.0;
                 }
             }
         };

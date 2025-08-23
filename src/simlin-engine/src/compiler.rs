@@ -532,94 +532,80 @@ impl Context<'_> {
                             // If get_offset fails because it's an array without implicit subscripts,
                             // try to create a full array view
                             if matches!(err.code, ErrorCode::ArrayReferenceNeedsExplicitSubscripts)
+                                && let Ok(metadata) = self.get_metadata(id)
+                                && let Some(source_dims) = metadata.var.get_dimensions()
                             {
-                                if let Ok(metadata) = self.get_metadata(id) {
-                                    if let Some(source_dims) = metadata.var.get_dimensions() {
-                                        // This is an array variable - check if we need dimension reordering
-                                        let off = self.get_base_offset(id)?;
+                                // This is an array variable - check if we need dimension reordering
+                                let off = self.get_base_offset(id)?;
 
-                                        // Check if we're in an A2A context and need to reorder dimensions
-                                        if let Some(target_dims) = &self.active_dimension {
-                                            // Get dimension names
-                                            let source_dim_names: Vec<String> = source_dims
+                                // Check if we're in an A2A context and need to reorder dimensions
+                                if let Some(target_dims) = &self.active_dimension {
+                                    // Get dimension names
+                                    let source_dim_names: Vec<String> =
+                                        source_dims.iter().map(|d| d.name().to_string()).collect();
+                                    let target_dim_names: Vec<String> =
+                                        target_dims.iter().map(|d| d.name().to_string()).collect();
+
+                                    // Check if dimensions can be reordered
+                                    if let Some(reordering) = find_dimension_reordering(
+                                        &source_dim_names,
+                                        &target_dim_names,
+                                    ) {
+                                        // Check if reordering is needed (not identity)
+                                        let needs_reordering =
+                                            reordering.iter().enumerate().any(|(i, &idx)| i != idx);
+
+                                        if needs_reordering {
+                                            // Create a transposed view
+                                            // We need to apply the dimension reordering
+                                            let orig_dims: Vec<usize> =
+                                                source_dims.iter().map(|d| d.len()).collect();
+
+                                            // Reorder the dimensions
+                                            let reordered_dims: Vec<usize> = target_dims
                                                 .iter()
-                                                .map(|d| d.name().to_string())
-                                                .collect();
-                                            let target_dim_names: Vec<String> = target_dims
-                                                .iter()
-                                                .map(|d| d.name().to_string())
-                                                .collect();
-
-                                            // Check if dimensions can be reordered
-                                            if let Some(reordering) = find_dimension_reordering(
-                                                &source_dim_names,
-                                                &target_dim_names,
-                                            ) {
-                                                // Check if reordering is needed (not identity)
-                                                let needs_reordering = reordering
-                                                    .iter()
-                                                    .enumerate()
-                                                    .any(|(i, &idx)| i != idx);
-
-                                                if needs_reordering {
-                                                    // Create a transposed view
-                                                    // We need to apply the dimension reordering
-                                                    let orig_dims: Vec<usize> = source_dims
+                                                .map(|target_dim| {
+                                                    // Find the matching source dimension
+                                                    source_dims
                                                         .iter()
-                                                        .map(|d| d.len())
-                                                        .collect();
-
-                                                    // Reorder the dimensions
-                                                    let reordered_dims: Vec<usize> = target_dims
-                                                        .iter()
-                                                        .map(|target_dim| {
-                                                            // Find the matching source dimension
-                                                            source_dims
-                                                                .iter()
-                                                                .find(|source_dim| {
-                                                                    canonicalize(source_dim.name())
-                                                                        == canonicalize(
-                                                                            target_dim.name(),
-                                                                        )
-                                                                })
-                                                                .unwrap()
-                                                                .len()
+                                                        .find(|source_dim| {
+                                                            canonicalize(source_dim.name())
+                                                                == canonicalize(target_dim.name())
                                                         })
-                                                        .collect();
+                                                        .unwrap()
+                                                        .len()
+                                                })
+                                                .collect();
 
-                                                    // Create strides for the reordered view
-                                                    let mut strides = vec![1isize; orig_dims.len()];
-                                                    for i in (0..orig_dims.len() - 1).rev() {
-                                                        strides[i] = strides[i + 1]
-                                                            * orig_dims[i + 1] as isize;
-                                                    }
-
-                                                    // Reorder the strides according to the dimension reordering
-                                                    let reordered_strides: Vec<isize> = reordering
-                                                        .iter()
-                                                        .map(|&idx| strides[idx])
-                                                        .collect();
-
-                                                    let view = ArrayView {
-                                                        dims: reordered_dims,
-                                                        strides: reordered_strides,
-                                                        offset: 0,
-                                                    };
-
-                                                    return Ok(Expr::StaticSubscript(
-                                                        off, view, *loc,
-                                                    ));
-                                                }
+                                            // Create strides for the reordered view
+                                            let mut strides = vec![1isize; orig_dims.len()];
+                                            for i in (0..orig_dims.len() - 1).rev() {
+                                                strides[i] =
+                                                    strides[i + 1] * orig_dims[i + 1] as isize;
                                             }
-                                        }
 
-                                        // No reordering needed or not in A2A context
-                                        let orig_dims: Vec<usize> =
-                                            source_dims.iter().map(|d| d.len()).collect();
-                                        let view = ArrayView::contiguous(orig_dims);
-                                        return Ok(Expr::StaticSubscript(off, view, *loc));
+                                            // Reorder the strides according to the dimension reordering
+                                            let reordered_strides: Vec<isize> = reordering
+                                                .iter()
+                                                .map(|&idx| strides[idx])
+                                                .collect();
+
+                                            let view = ArrayView {
+                                                dims: reordered_dims,
+                                                strides: reordered_strides,
+                                                offset: 0,
+                                            };
+
+                                            return Ok(Expr::StaticSubscript(off, view, *loc));
+                                        }
                                     }
                                 }
+
+                                // No reordering needed or not in A2A context
+                                let orig_dims: Vec<usize> =
+                                    source_dims.iter().map(|d| d.len()).collect();
+                                let view = ArrayView::contiguous(orig_dims);
+                                return Ok(Expr::StaticSubscript(off, view, *loc));
                             }
                             return Err(err);
                         }
@@ -918,47 +904,46 @@ impl Context<'_> {
 
                     // Check if we're in an array iteration context
                     // If we have dimension positions, we need special handling in A2A context
-                    if let Some(active_subscripts) = &self.active_subscript {
-                        if let Some(_active_dims) = &self.active_dimension {
-                            // Check if we have any dimension positions
-                            let has_dim_positions = operations
-                                .iter()
-                                .any(|op| matches!(op, IndexOp::DimPosition(_)));
+                    if let Some(active_subscripts) = &self.active_subscript
+                        && let Some(_active_dims) = &self.active_dimension
+                    {
+                        // Check if we have any dimension positions
+                        let has_dim_positions = operations
+                            .iter()
+                            .any(|op| matches!(op, IndexOp::DimPosition(_)));
 
-                            if has_dim_positions {
-                                // For dimension positions in A2A context, we need to fall back to dynamic evaluation
-                                // because @n refers to the nth dimension of the target variable's current iteration
-                                is_static = false;
-                            } else {
-                                // Calculate the linear index in the result array based on the view
-                                let mut result_index = 0;
+                        if has_dim_positions {
+                            // For dimension positions in A2A context, we need to fall back to dynamic evaluation
+                            // because @n refers to the nth dimension of the target variable's current iteration
+                            is_static = false;
+                        } else {
+                            // Calculate the linear index in the result array based on the view
+                            let mut result_index = 0;
 
-                                // For each dimension in the view, find its value from active subscripts
-                                // The active subscripts correspond to the OUTPUT dimensions, not the input
-                                for (view_idx, stride) in view.strides.iter().enumerate() {
-                                    if view_idx < active_subscripts.len() {
-                                        // Get the dimension for this view index
-                                        let dim_idx = dim_mapping[view_idx].unwrap_or(view_idx);
-                                        if dim_idx < dims.len() {
-                                            let dim = &dims[dim_idx];
-                                            let subscript = &active_subscripts[view_idx];
+                            // For each dimension in the view, find its value from active subscripts
+                            // The active subscripts correspond to the OUTPUT dimensions, not the input
+                            for (view_idx, stride) in view.strides.iter().enumerate() {
+                                if view_idx < active_subscripts.len() {
+                                    // Get the dimension for this view index
+                                    let dim_idx = dim_mapping[view_idx].unwrap_or(view_idx);
+                                    if dim_idx < dims.len() {
+                                        let dim = &dims[dim_idx];
+                                        let subscript = &active_subscripts[view_idx];
 
-                                            // Get the offset for this subscript in the dimension
-                                            if let Some(offset) = dim.get_offset(subscript) {
-                                                result_index += offset * (*stride as usize);
-                                            } else if let Ok(idx) =
-                                                subscript.as_str().parse::<usize>()
-                                            {
-                                                // For indexed dimensions with numeric subscripts
-                                                let idx_0based = idx - 1;
-                                                result_index += idx_0based * (*stride as usize);
-                                            }
+                                        // Get the offset for this subscript in the dimension
+                                        if let Some(offset) = dim.get_offset(subscript) {
+                                            result_index += offset * (*stride as usize);
+                                        } else if let Ok(idx) = subscript.as_str().parse::<usize>()
+                                        {
+                                            // For indexed dimensions with numeric subscripts
+                                            let idx_0based = idx - 1;
+                                            result_index += idx_0based * (*stride as usize);
                                         }
                                     }
                                 }
-
-                                return Ok(Expr::Var(off + view.offset + result_index, *loc));
                             }
+
+                            return Ok(Expr::Var(off + view.offset + result_index, *loc));
                         }
                     }
 
@@ -1129,59 +1114,59 @@ impl Context<'_> {
                         // Special handling for transpose of bare array variables
                         if let ast::Expr2::Var(id, _, var_loc) = &**l {
                             // Get the variable's metadata to check if it's an array
-                            if let Ok(metadata) = self.get_metadata(id) {
-                                if let Some(dims) = metadata.var.get_dimensions() {
-                                    if self.active_dimension.is_some() {
-                                        // We're in an A2A context - need to handle bare array transpose specially
-                                        // We need to reverse the active dimensions before processing the variable
-                                        let mut ctx = self.clone();
-                                        if let Some(ref active_dims) = ctx.active_dimension {
-                                            let mut reversed_dims = active_dims.clone();
-                                            reversed_dims.reverse();
-                                            ctx.active_dimension = Some(reversed_dims);
-                                        }
-                                        if let Some(ref active_subs) = ctx.active_subscript {
-                                            let mut reversed_subs = active_subs.clone();
-                                            reversed_subs.reverse();
-                                            ctx.active_subscript = Some(reversed_subs);
-                                        }
-                                        // Process the variable with reversed dimensions
-                                        let inner = ctx.lower(l)?;
-                                        // The result already has the correct transposed access pattern
-                                        return Ok(inner);
-                                    } else {
-                                        // Not in A2A context - create a wildcard subscript to get the full array
-                                        // then apply transpose
-                                        let off = self.get_base_offset(id)?;
-                                        let orig_dims: Vec<usize> =
-                                            dims.iter().map(|d| d.len()).collect();
-                                        let orig_strides =
-                                            ArrayView::contiguous(orig_dims.clone()).strides;
-
-                                        // Create a view for the full array
-                                        let view = ArrayView {
-                                            dims: orig_dims.clone(),
-                                            strides: orig_strides,
-                                            offset: 0,
-                                        };
-
-                                        // Now transpose it
-                                        let mut transposed_dims = view.dims.clone();
-                                        transposed_dims.reverse();
-                                        let mut transposed_strides = view.strides.clone();
-                                        transposed_strides.reverse();
-                                        let transposed_view = ArrayView {
-                                            dims: transposed_dims,
-                                            strides: transposed_strides,
-                                            offset: view.offset,
-                                        };
-
-                                        return Ok(Expr::StaticSubscript(
-                                            off,
-                                            transposed_view,
-                                            *var_loc,
-                                        ));
+                            if let Ok(metadata) = self.get_metadata(id)
+                                && let Some(dims) = metadata.var.get_dimensions()
+                            {
+                                if self.active_dimension.is_some() {
+                                    // We're in an A2A context - need to handle bare array transpose specially
+                                    // We need to reverse the active dimensions before processing the variable
+                                    let mut ctx = self.clone();
+                                    if let Some(ref active_dims) = ctx.active_dimension {
+                                        let mut reversed_dims = active_dims.clone();
+                                        reversed_dims.reverse();
+                                        ctx.active_dimension = Some(reversed_dims);
                                     }
+                                    if let Some(ref active_subs) = ctx.active_subscript {
+                                        let mut reversed_subs = active_subs.clone();
+                                        reversed_subs.reverse();
+                                        ctx.active_subscript = Some(reversed_subs);
+                                    }
+                                    // Process the variable with reversed dimensions
+                                    let inner = ctx.lower(l)?;
+                                    // The result already has the correct transposed access pattern
+                                    return Ok(inner);
+                                } else {
+                                    // Not in A2A context - create a wildcard subscript to get the full array
+                                    // then apply transpose
+                                    let off = self.get_base_offset(id)?;
+                                    let orig_dims: Vec<usize> =
+                                        dims.iter().map(|d| d.len()).collect();
+                                    let orig_strides =
+                                        ArrayView::contiguous(orig_dims.clone()).strides;
+
+                                    // Create a view for the full array
+                                    let view = ArrayView {
+                                        dims: orig_dims.clone(),
+                                        strides: orig_strides,
+                                        offset: 0,
+                                    };
+
+                                    // Now transpose it
+                                    let mut transposed_dims = view.dims.clone();
+                                    transposed_dims.reverse();
+                                    let mut transposed_strides = view.strides.clone();
+                                    transposed_strides.reverse();
+                                    let transposed_view = ArrayView {
+                                        dims: transposed_dims,
+                                        strides: transposed_strides,
+                                        offset: view.offset,
+                                    };
+
+                                    return Ok(Expr::StaticSubscript(
+                                        off,
+                                        transposed_view,
+                                        *var_loc,
+                                    ));
                                 }
                             }
                         }
@@ -1259,24 +1244,24 @@ impl Context<'_> {
                             let r_dim_names = self.get_expr_dimension_names(r);
 
                             // Check if right needs reordering to match left's dimension order
-                            if let (Some(l_names), Some(r_names)) = (&l_dim_names, &r_dim_names) {
-                                if l_names != r_names {
-                                    // Check if r can be reordered to match l
-                                    if let Some(reordering) =
-                                        find_dimension_reordering(r_names, l_names)
-                                    {
-                                        // Apply reordering to r_expr
-                                        r_expr = self
-                                            .apply_dimension_reordering(r_expr, reordering, *loc)?;
-                                    }
-                                    // Otherwise check if l can be reordered to match r
-                                    else if let Some(reordering) =
-                                        find_dimension_reordering(l_names, r_names)
-                                    {
-                                        // Apply reordering to l_expr
-                                        l_expr = self
-                                            .apply_dimension_reordering(l_expr, reordering, *loc)?;
-                                    }
+                            if let (Some(l_names), Some(r_names)) = (&l_dim_names, &r_dim_names)
+                                && l_names != r_names
+                            {
+                                // Check if r can be reordered to match l
+                                if let Some(reordering) =
+                                    find_dimension_reordering(r_names, l_names)
+                                {
+                                    // Apply reordering to r_expr
+                                    r_expr =
+                                        self.apply_dimension_reordering(r_expr, reordering, *loc)?;
+                                }
+                                // Otherwise check if l can be reordered to match r
+                                else if let Some(reordering) =
+                                    find_dimension_reordering(l_names, r_names)
+                                {
+                                    // Apply reordering to l_expr
+                                    l_expr =
+                                        self.apply_dimension_reordering(l_expr, reordering, *loc)?;
                                 }
                             }
                         }
@@ -1373,27 +1358,27 @@ impl Context<'_> {
             Expr::Var(off, _) => {
                 // This is a bare array variable - create a StaticSubscript with reordered view
                 // First, get the variable metadata to get dimensions
-                if let Ok(metadata) = self.get_variable_metadata_by_offset(*off) {
-                    if let Some(dims) = metadata.var.get_dimensions() {
-                        let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+                if let Ok(metadata) = self.get_variable_metadata_by_offset(*off)
+                    && let Some(dims) = metadata.var.get_dimensions()
+                {
+                    let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
 
-                        // Create a contiguous view first
-                        let view = ArrayView::contiguous(orig_dims.clone());
+                    // Create a contiguous view first
+                    let view = ArrayView::contiguous(orig_dims.clone());
 
-                        // Apply the reordering
-                        let reordered_dims: Vec<usize> =
-                            reordering.iter().map(|&idx| orig_dims[idx]).collect();
-                        let reordered_strides: Vec<isize> =
-                            reordering.iter().map(|&idx| view.strides[idx]).collect();
+                    // Apply the reordering
+                    let reordered_dims: Vec<usize> =
+                        reordering.iter().map(|&idx| orig_dims[idx]).collect();
+                    let reordered_strides: Vec<isize> =
+                        reordering.iter().map(|&idx| view.strides[idx]).collect();
 
-                        let reordered_view = ArrayView {
-                            dims: reordered_dims,
-                            strides: reordered_strides,
-                            offset: 0,
-                        };
+                    let reordered_view = ArrayView {
+                        dims: reordered_dims,
+                        strides: reordered_strides,
+                        offset: 0,
+                    };
 
-                        return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
-                    }
+                    return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
                 }
             }
             Expr::StaticSubscript(off, view, _) => {

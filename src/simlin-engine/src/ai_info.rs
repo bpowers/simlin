@@ -146,10 +146,10 @@ fn append_ai_state(s: &mut String, mut need_initial_space: bool, project: &Proje
             s.push_str(ai_state_to_letter(ai_state));
         }
 
-        if let Variable::Module(Module { model_name, .. }) = var {
-            if let Some(model) = project.get_model(model_name) {
-                append_ai_state(s, need_initial_space, project, model);
-            }
+        if let Variable::Module(Module { model_name, .. }) = var
+            && let Some(model) = project.get_model(model_name)
+        {
+            append_ai_state(s, need_initial_space, project, model);
         }
     }
 }

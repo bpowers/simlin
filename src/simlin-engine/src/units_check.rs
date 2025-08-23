@@ -326,25 +326,24 @@ pub fn check(
                     combine(UnitOp::Mul, expected.clone(), one_over_time.clone());
                 let mut check_flows = |flows: &Vec<Ident<Canonical>>| {
                     for ident in flows.iter() {
-                        if let Some(var) = model.variables.get(ident) {
-                            if let Some(units) = var.units() {
-                                if expected_flow_units != *units {
-                                    let details = format!(
-                                        "expected units '{units}' to match the units expected by the attached stock {stock_ident} ({expected_flow_units})"
-                                    );
-                                    errors.push((
-                                        canonicalize(var.ident()),
-                                        DefinitionError(
-                                            EquationError {
-                                                code: ErrorCode::UnitMismatch,
-                                                start: 0,
-                                                end: 0,
-                                            },
-                                            Some(details),
-                                        ),
-                                    ));
-                                }
-                            }
+                        if let Some(var) = model.variables.get(ident)
+                            && let Some(units) = var.units()
+                            && expected_flow_units != *units
+                        {
+                            let details = format!(
+                                "expected units '{units}' to match the units expected by the attached stock {stock_ident} ({expected_flow_units})"
+                            );
+                            errors.push((
+                                canonicalize(var.ident()),
+                                DefinitionError(
+                                    EquationError {
+                                        code: ErrorCode::UnitMismatch,
+                                        start: 0,
+                                        end: 0,
+                                    },
+                                    Some(details),
+                                ),
+                            ));
                         }
                     }
                 };

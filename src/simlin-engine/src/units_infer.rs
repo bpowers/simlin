@@ -171,10 +171,10 @@ impl UnitInferer<'_> {
                     if let Some(b) = b {
                         let b_units = self.gen_constraints(b, prefix, constraints)?;
 
-                        if let Units::Explicit(ref lunits) = a_units {
-                            if let Units::Explicit(runits) = b_units {
-                                constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
-                            }
+                        if let Units::Explicit(ref lunits) = a_units
+                            && let Units::Explicit(runits) = b_units
+                        {
+                            constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
                         }
                     }
                     Ok(a_units)
@@ -193,18 +193,12 @@ impl UnitInferer<'_> {
                     let units = self.gen_constraints(&div, prefix, constraints)?;
 
                     // the optional argument to safediv, if specified, should match the units of a/b
-                    if let Units::Explicit(ref result_units) = units {
-                        if let Some(c) = c {
-                            if let Units::Explicit(c_units) =
-                                self.gen_constraints(c, prefix, constraints)?
-                            {
-                                constraints.push(combine(
-                                    UnitOp::Div,
-                                    c_units,
-                                    result_units.clone(),
-                                ));
-                            }
-                        }
+                    if let Units::Explicit(ref result_units) = units
+                        && let Some(c) = c
+                        && let Units::Explicit(c_units) =
+                            self.gen_constraints(c, prefix, constraints)?
+                    {
+                        constraints.push(combine(UnitOp::Div, c_units, result_units.clone()));
                     }
 
                     Ok(units)
@@ -271,10 +265,10 @@ impl UnitInferer<'_> {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
                 let runits = self.gen_constraints(r, prefix, constraints)?;
 
-                if let Units::Explicit(ref lunits) = lunits {
-                    if let Units::Explicit(runits) = runits {
-                        constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
-                    }
+                if let Units::Explicit(ref lunits) = lunits
+                    && let Units::Explicit(runits) = runits
+                {
+                    constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
                 }
 
                 Ok(lunits)
