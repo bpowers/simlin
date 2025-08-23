@@ -195,6 +195,7 @@ impl DimensionVec {
 /// - To move by 1 in the second dimension: skip 4 elements (4)
 /// - To move by 1 in the third dimension: skip 1 element
 #[derive(PartialEq, Clone, Debug)]
+#[allow(dead_code)]
 pub struct StridedDimension {
     pub dimension: Dimension,
     pub stride: isize,

@@ -191,7 +191,7 @@ impl Results {
             }
         }
     }
-    pub fn iter(&self) -> std::iter::Take<std::slice::Chunks<f64>> {
+    pub fn iter(&self) -> std::iter::Take<std::slice::Chunks<'_, f64>> {
         self.data.chunks(self.step_size).take(self.step_count)
     }
 }
