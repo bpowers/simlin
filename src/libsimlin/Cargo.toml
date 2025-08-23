@@ -1,5 +1,5 @@
 [package]
-name = "engine2"
+name = "simlin"
 version = "0.1.0"
 description = "C-compatible FFI interface to the System Dynamics engine"
 repository = "https://github.com/bpowers/simlin"

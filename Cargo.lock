@@ -313,14 +313,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine2"
-version = "0.1.0"
-dependencies = [
- "prost",
- "simlin-engine",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1142,6 +1134,14 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest",
  "rand_core",
+]
+
+[[package]]
+name = "simlin"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "simlin-engine",
 ]
 
 [[package]]

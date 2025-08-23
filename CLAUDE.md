@@ -95,7 +95,7 @@ First is the Rust workspace with these packages:
 - `src/simlin-cli` - a command line tool for simulating system dynamics models, mostly for testing/debugging.
 - `src/xmutil` - Rust wrapper around Bob Eberlein's tool to convert Vensim models to XMILE format, including diagrams.
 - `src/engine` - Expose simlin-engine functionality to JavaScript with wasm-bindgen
-- `src/engine2` - C-compatible FFI interface to simlin-engine for language-agnostic access via WebAssembly
+- `src/libsimlin` - C-compatible FFI interface to simlin-engine for language-agnostic access via WebAssembly
 - `src/simlin-engine` - Core simulation engine
 
 This is a yarn workspace with these packages:

@@ -3,7 +3,7 @@
 resolver = "2"
 members = [
     "src/engine",
-    "src/engine2",
+    "src/libsimlin",
     "src/importer",
     "src/simlin-cli",
     "src/simlin-compat",
