@@ -1,0 +1,217 @@
+{UTF-8}
+********************************************************
+	.SIR-Model
+********************************************************~
+		
+		The SIR Model of Infectious Disease
+		John Sterman (1999) Business Dynamics.  Irwin/McGraw-Hill
+		Copyright (c) 1999 John Sterman
+		
+		This is the classic SIR (Susceptible-Infectious-Recovered) model of infectious \
+		disease.	Infectious individuals remain infectious for a constant average
+		period, then recover.
+		
+		In this version, the contact rate can be set to increase linearly,
+		and the population is challenged by the arrival of a single infectious
+		individual every 50 days.  Illustrates herd immunity.  Chapter 9.
+	|
+
+Infectious Population I= INTEG (
+	Infection Rate-Recovery Rate,
+		1)
+	~	People
+	~	The infectious population accumulates the infection rate and the \
+		inmigration of infectious rate less the recovery rate.
+	|
+
+Initial Contact Rate=
+	2.5
+	~	1/Day
+	~	The initial contact rate; the actual contact rate rises at a slope \
+		determined by the user.
+	|
+
+Contact Rate c=
+	Initial Contact Rate
+	~	1/Day
+	~	People in the community interact at a certain rate (the Contact Rate, c, \
+		measured in people contacted per person per time period, or 1/time \
+		periods).  The contact rate rises at the Ramp Slope starting in day 1.
+	|
+
+Reproduction Rate=
+	Contact Rate c*Infectivity i*Average Duration of Illness d*Susceptible Population S/\
+		Total Population P
+	~	Dimensionless
+	~		|
+
+Total Population P=
+	10000
+	~	People
+	~	The total population is constant
+	|
+
+Infection Rate=
+	Contact Rate c*Infectivity i*Susceptible Population S*Infectious Population I/Total Population P
+	~	People/Day
+	~	The infection rate is the total number of encounters Sc multiplied by the \
+		probability that any of those encounters is with an infectious individual \
+		I/N, and finally multiplied by the probability that an encounter with an \
+		infectious person results in infection i.
+	|
+
+Average Duration of Illness d=
+	2
+	~	Day
+	~	The average length of time that a person is infectious.
+	|
+
+Recovered Population R= INTEG (
+	Recovery Rate,
+		0)
+	~	People
+	~	The recovered population R accumulates the recovery rate
+	|
+
+Recovery Rate=
+	Infectious Population I/Average Duration of Illness d
+	~	People/Day
+	~	The rate at which the infected population recover and become immune to the \
+		infection.
+	|
+
+Infectivity i=
+	0.25
+	~	Dimensionless
+	~	The infectivity (i) of the disease is the probability that a person will \
+		become infected after exposure to someone with the disease.
+	|
+
+Susceptible Population S= INTEG (
+	-Infection Rate,
+		Total Population P - Infectious Population I -  Recovered Population R)
+	~	People
+	~	The susceptible population, as in the simple logistic epidemic model, is \
+		reduced by the infection rate.  The initial susceptible population is the \
+		total population less the initial number of infectives and any initially \
+		recovered individuals.
+	|
+
+********************************************************
+	.Control
+********************************************************~
+		Simulation Control Paramaters
+	|
+
+FINAL TIME  = 200
+	~	Day
+	~	The final time for the simulation.
+	|
+
+INITIAL TIME  = 0
+	~	Day
+	~	The initial time for the simulation.
+	|
+
+SAVEPER  = 2
+	~	Day
+	~	The frequency with which output is stored.
+	|
+
+TIME STEP  = 0.0625
+	~	Day
+	~	The time step for the simulation.
+	|
+
+\\\---/// Sketch information - do not modify anything except names
+V300  Do not put anything below this section - it will be ignored
+*View 1
+$192-192-192,0,Helvetica|10|B|0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,100,0
+10,1,Susceptible Population S,162,192,40,20,3,3,0,0,0,0,0,0
+10,2,Infectious Population I,428,190,40,20,3,3,0,0,0,0,0,0
+1,3,5,2,4,0,0,22,0,0,0,-1--1--1,,1|(344,191)|
+1,4,5,1,100,0,0,22,0,0,0,-1--1--1,,1|(245,191)|
+11,5,444,295,191,6,8,34,3,0,0,1,0,0,0
+10,6,Infection Rate,295,228,40,29,40,3,0,0,-1,0,0,0
+1,7,1,6,1,0,43,0,0,64,0,-1--1--1,,1|(214,259)|
+1,8,2,6,1,0,43,0,0,64,0,-1--1--1,,1|(389,256)|
+10,9,Infectivity i,394,326,34,15,8,3,0,0,0,0,0,0
+10,10,Contact Rate c,168,300,31,19,8,3,0,0,0,0,0,0
+1,11,10,6,1,0,43,0,0,192,0,-1--1--1,,1|(269,270)|
+1,12,9,6,1,0,43,0,0,64,0,-1--1--1,,1|(313,268)|
+12,13,0,232,218,15,15,5,4,0,0,-1,0,0,0
+B
+12,14,0,365,216,15,15,4,4,0,0,-1,0,0,0
+R
+10,15,Recovered Population R,672,190,40,20,3,3,0,0,0,0,0,0
+1,16,18,15,4,0,0,22,0,0,0,-1--1--1,,1|(594,190)|
+1,17,18,2,100,0,0,22,0,0,0,-1--1--1,,1|(506,190)|
+11,18,492,550,190,6,8,34,3,0,0,1,0,0,0
+10,19,Recovery Rate,550,221,33,23,40,3,0,0,-1,0,0,0
+1,20,2,19,1,0,43,0,0,192,0,-1--1--1,,1|(484,256)|
+10,21,Average Duration of Illness d,571,316,40,24,8,3,0,0,0,0,0,0
+1,22,21,19,1,0,45,0,0,192,0,-1--1--1,,1|(593,264)|
+12,23,0,493,212,15,15,5,4,0,0,-1,0,0,0
+B
+10,24,Total Population P,257,325,40,20,8,3,0,0,0,0,0,0
+1,25,24,6,1,0,45,0,0,192,0,-1--1--1,,1|(292,277)|
+10,26,Reproduction Rate,383,472,51,21,8,3,0,0,0,0,0,0
+10,27,Contact Rate c,249,523,40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12|B|128-128-128
+10,28,Total Population P,374,574,40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12|B|128-128-128
+10,29,Infectivity i,504,526,50,18,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12|B|128-128-128
+10,30,Average Duration of Illness d,236,444,40,20,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12|B|128-128-128
+10,31,Susceptible Population S,530,449,49,29,8,2,0,3,-1,0,0,0,128-128-128,0-0-0,|12|B|128-128-128
+1,32,30,26,0,0,43,0,0,64,0,-1--1--1,,1|(297,455)|
+1,33,27,26,0,0,43,0,0,64,0,-1--1--1,,1|(303,502)|
+1,34,29,26,0,0,43,0,0,64,0,-1--1--1,,1|(453,503)|
+1,35,31,26,0,0,43,0,0,64,0,-1--1--1,,1|(464,458)|
+1,36,28,26,0,0,45,0,0,64,0,-1--1--1,,1|(377,530)|
+12,37,0,232,238,29,9,8,4,0,8,-1,0,0,0,0-0-0,0-0-0,|8|B|0-0-0
+Depletion
+12,38,0,365,240,30,8,8,4,0,8,-1,0,0,0,0-0-0,0-0-0,|8|B|0-0-0
+Contagion
+12,39,0,496,235,29,9,8,4,0,8,-1,0,0,0,0-0-0,0-0-0,|8|B|0-0-0
+Recovery
+10,40,Initial Contact Rate,58,364,50,25,8,3,0,0,0,0,0,0
+1,41,40,10,1,0,43,0,0,192,0,-1--1--1,,1|(112,348)|
+1,42,2,1,0,0,0,0,0,64,1,-1--1--1,,1|(301,190)|
+1,43,15,1,0,0,0,0,0,64,1,-1--1--1,,1|(423,190)|
+1,44,24,1,0,0,0,0,0,64,1,-1--1--1,,1|(213,264)|
+///---\\\
+:L<%^E!@
+1:sir.vdf
+9:sir
+15:0,0,0,0,0,0
+19:100,0
+27:2,
+34:0,
+4:Time
+5:Reproduction Rate
+35:Date
+36:YYYY-MM-DD
+37:2000
+38:1
+39:1
+40:2
+41:0
+42:0
+24:0
+25:200
+26:200
+57:1
+54:0
+55:0
+59:0
+56:0
+58:0
+44:65001
+46:0
+45:0
+49:0
+50:0
+51:
+52:
+53:
+43:sir
+47:sir
+48:

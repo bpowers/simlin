@@ -1141,6 +1141,7 @@ name = "simlin"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "simlin-compat",
  "simlin-engine",
 ]
 

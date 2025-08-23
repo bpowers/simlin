@@ -253,6 +253,33 @@ uint8_t *simlin_malloc(uintptr_t size);
 // - The pointer must not be used after calling this function
 void simlin_free(uint8_t *ptr);
 
+// simlin_import_xmile opens a project from XMILE/STMX format data.
+// If an error occurs, the function returns NULL and if the err parameter
+// is not NULL, details of the error are placed in it.
+//
+// # Safety
+// - `data` must be a valid pointer to at least `len` bytes
+// - `err` may be null
+SimlinProject *simlin_import_xmile(const uint8_t *data, uintptr_t len, int *err);
+
+// simlin_import_mdl opens a project from Vensim MDL format data.
+// If an error occurs, the function returns NULL and if the err parameter
+// is not NULL, details of the error are placed in it.
+//
+// # Safety
+// - `data` must be a valid pointer to at least `len` bytes
+// - `err` may be null
+SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, int *err);
+
+// simlin_export_xmile exports a project to XMILE format.
+// Returns 0 on success, error code on failure.
+// Caller must free output with simlin_free().
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `output` and `output_len` must be valid pointers
+int simlin_export_xmile(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

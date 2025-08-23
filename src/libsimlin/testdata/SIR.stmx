@@ -1,0 +1,179 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Day" isee:sim_duration="0" isee:save_interval="2.000000">
+        <start>0</start>
+        <stop>200</stop>
+        <dt>0.0625</dt>
+    </sim_specs>
+    <model_units/>
+    <dimensions/>
+    <model>
+        <variables>
+            <stock name="Recovered Population R">
+                <doc>	The recovered population R accumulates the recovery rate</doc>
+                <inflow>Recovery_Rate</inflow>
+                <eqn>0</eqn>
+                <units>People</units>
+            </stock>
+            <aux name="Average Duration of Illness d">
+                <doc>	The average length of time that a person is infectious.</doc>
+                <eqn>2</eqn>
+                <units>Day</units>
+            </aux>
+            <aux name="Infectivity i">
+                <doc>	The infectivity (i) of the disease is the probability that a person will become infected after exposure to someone with the disease.</doc>
+                <eqn>0.25</eqn>
+                <units>Dimensionless</units>
+            </aux>
+            <aux name="Reproduction Rate">
+                <eqn>Contact_Rate_c*Infectivity_i*Average_Duration_of_Illness_d*Susceptible_Population_S/Total_Population_P</eqn>
+                <units>Dimensionless</units>
+            </aux>
+            <flow name="Infection Rate">
+                <doc>	The infection rate is the total number of encounters Sc multiplied by the probability that any of those encounters is with an infectious individual I/N, and finally multiplied by the probability that an encounter with an infectious person results in infection i.</doc>
+                <eqn>Contact_Rate_c*Infectivity_i*Susceptible_Population_S*Infectious_Population_I/Total_Population_P</eqn>
+                <units>People/Day</units>
+            </flow>
+            <aux name="Initial Contact Rate">
+                <doc>	The initial contact rate; the actual contact rate rises at a slope determined by the user.</doc>
+                <eqn>2.5</eqn>
+                <units>1/Day</units>
+            </aux>
+            <aux name="Contact Rate c">
+                <doc>	People in the community interact at a certain rate (the Contact Rate, c, measured in people contacted per person per time period, or 1/time periods).  The contact rate rises at the Ramp Slope starting in day 1.</doc>
+                <eqn>Initial_Contact_Rate</eqn>
+                <units>1/Day</units>
+            </aux>
+            <flow name="Recovery Rate">
+                <doc>	The rate at which the infected population recover and become immune to the infection.</doc>
+                <eqn>Infectious_Population_I/Average_Duration_of_Illness_d</eqn>
+                <units>People/Day</units>
+            </flow>
+            <stock name="Infectious Population I">
+                <doc>	The infectious population accumulates the infection rate and the inmigration of infectious rate less the recovery rate.</doc>
+                <inflow>Infection_Rate</inflow>
+                <outflow>Recovery_Rate</outflow>
+                <eqn>1</eqn>
+                <units>People</units>
+            </stock>
+            <aux name="Total Population P">
+                <doc>	The total population is constant</doc>
+                <eqn>10000</eqn>
+                <units>People</units>
+            </aux>
+            <stock name="Susceptible Population S">
+                <doc>	The susceptible population, as in the simple logistic epidemic model, is reduced by the infection rate.  The initial susceptible population is the total population less the initial number of infectives and any initially recovered individuals.</doc>
+                <outflow>Infection_Rate</outflow>
+                <eqn>Total_Population_P-Infectious_Population_I-Recovered_Population_R</eqn>
+                <units>People</units>
+            </stock>
+        </variables>
+        <views>
+            <view>
+                <stock name="Susceptible_Population_S" x="204" y="122"/>
+                <stock name="Infectious_Population_I" x="470" y="120"/>
+                <flow name="Infection_Rate" x="337" y="121">
+                    <pts>
+                        <pt x="204" y="121"/>
+                        <pt x="470" y="121"/>
+                    </pts>
+                </flow>
+                <connector uid="7" angle="-88.272624086845525">
+                    <from>Susceptible_Population_S</from>
+                    <to>Infection_Rate</to>
+                </connector>
+                <connector uid="8" angle="-88.046492414638763">
+                    <from>Infectious_Population_I</from>
+                    <to>Infection_Rate</to>
+                </connector>
+                <aux name="Infectivity_i" x="436" y="256"/>
+                <aux name="Contact_Rate_c" x="210" y="230"/>
+                <connector uid="11" angle="-12.147372491281331">
+                    <from>Contact_Rate_c</from>
+                    <to>Infection_Rate</to>
+                </connector>
+                <connector uid="12" angle="-194.54144027603684">
+                    <from>Infectivity_i</from>
+                    <to>Infection_Rate</to>
+                </connector>
+                <stock name="Recovered_Population_R" x="714" y="120"/>
+                <flow name="Recovery_Rate" x="592" y="120">
+                    <pts>
+                        <pt x="470" y="120"/>
+                        <pt x="714" y="120"/>
+                    </pts>
+                </flow>
+                <connector uid="20" angle="268.1199219743088">
+                    <from>Infectious_Population_I</from>
+                    <to>Recovery_Rate</to>
+                </connector>
+                <aux name="Average_Duration_of_Illness_d" x="613" y="246"/>
+                <connector uid="22" angle="34.532832404475045">
+                    <from>Average_Duration_of_Illness_d</from>
+                    <to>Recovery_Rate</to>
+                </connector>
+                <aux name="Total_Population_P" x="299" y="255"/>
+                <connector uid="25" angle="36.012357325694936">
+                    <from>Total_Population_P</from>
+                    <to>Infection_Rate</to>
+                </connector>
+                <aux name="Reproduction_Rate" x="425" y="402"/>
+                <alias x="291" y="453" uid="27">
+                    <of>Contact_Rate_c</of>
+                </alias>
+                <alias x="416" y="504" uid="28">
+                    <of>Total_Population_P</of>
+                </alias>
+                <alias x="546" y="456" uid="29">
+                    <of>Infectivity_i</of>
+                </alias>
+                <alias x="278" y="374" uid="30">
+                    <of>Average_Duration_of_Illness_d</of>
+                </alias>
+                <alias x="572" y="379" uid="31">
+                    <of>Susceptible_Population_S</of>
+                </alias>
+                <connector uid="32" angle="-9.8247122910019726">
+                    <from>
+                        <alias uid="30"/>
+                    </from>
+                    <to>Reproduction_Rate</to>
+                </connector>
+                <connector uid="33" angle="21.531135652493418">
+                    <from>
+                        <alias uid="27"/>
+                    </from>
+                    <to>Reproduction_Rate</to>
+                </connector>
+                <connector uid="34" angle="155.56176025759021">
+                    <from>
+                        <alias uid="29"/>
+                    </from>
+                    <to>Reproduction_Rate</to>
+                </connector>
+                <connector uid="35" angle="186.85162196677646">
+                    <from>
+                        <alias uid="31"/>
+                    </from>
+                    <to>Reproduction_Rate</to>
+                </connector>
+                <connector uid="36" angle="86.963196302217909">
+                    <from>
+                        <alias uid="28"/>
+                    </from>
+                    <to>Reproduction_Rate</to>
+                </connector>
+                <aux name="Initial_Contact_Rate" x="100" y="294"/>
+                <connector uid="41" angle="6.0946896977080769">
+                    <from>Initial_Contact_Rate</from>
+                    <to>Contact_Rate_c</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

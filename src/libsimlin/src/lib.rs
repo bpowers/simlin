@@ -6,6 +6,7 @@ use simlin_engine::ltm::{detect_loops, LoopPolarity};
 use simlin_engine::{self as engine, canonicalize, serde, Vm};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{CStr, CString};
+use std::io::BufReader;
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -898,6 +899,132 @@ pub unsafe extern "C" fn simlin_free(ptr: *mut u8) {
     let layout = Layout::from_size_align_unchecked(total_size, align_of::<usize>());
     dealloc(actual_ptr, layout);
 }
+/// simlin_import_xmile opens a project from XMILE/STMX format data.
+/// If an error occurs, the function returns NULL and if the err parameter
+/// is not NULL, details of the error are placed in it.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes
+/// - `err` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_import_xmile(
+    data: *const u8,
+    len: usize,
+    err: *mut c_int,
+) -> *mut SimlinProject {
+    if data.is_null() {
+        if !err.is_null() {
+            *err = engine::ErrorCode::Generic as c_int;
+        }
+        return ptr::null_mut();
+    }
+
+    let slice = std::slice::from_raw_parts(data, len);
+    let mut reader = BufReader::new(slice);
+
+    match simlin_compat::open_xmile(&mut reader) {
+        Ok(datamodel_project) => {
+            let project = datamodel_project.into();
+            let boxed = Box::new(SimlinProject {
+                project,
+                ltm_project: None,
+                ref_count: AtomicUsize::new(1),
+            });
+            if !err.is_null() {
+                *err = engine::ErrorCode::NoError as c_int;
+            }
+            Box::into_raw(boxed)
+        }
+        Err(e) => {
+            if !err.is_null() {
+                *err = e.code as c_int;
+            }
+            ptr::null_mut()
+        }
+    }
+}
+/// simlin_import_mdl opens a project from Vensim MDL format data.
+/// If an error occurs, the function returns NULL and if the err parameter
+/// is not NULL, details of the error are placed in it.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes
+/// - `err` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_import_mdl(
+    data: *const u8,
+    len: usize,
+    err: *mut c_int,
+) -> *mut SimlinProject {
+    if data.is_null() {
+        if !err.is_null() {
+            *err = engine::ErrorCode::Generic as c_int;
+        }
+        return ptr::null_mut();
+    }
+
+    let slice = std::slice::from_raw_parts(data, len);
+    let mut reader = BufReader::new(slice);
+
+    match simlin_compat::open_vensim(&mut reader) {
+        Ok(datamodel_project) => {
+            let project = datamodel_project.into();
+            let boxed = Box::new(SimlinProject {
+                project,
+                ltm_project: None,
+                ref_count: AtomicUsize::new(1),
+            });
+            if !err.is_null() {
+                *err = engine::ErrorCode::NoError as c_int;
+            }
+            Box::into_raw(boxed)
+        }
+        Err(e) => {
+            if !err.is_null() {
+                *err = e.code as c_int;
+            }
+            ptr::null_mut()
+        }
+    }
+}
+/// simlin_export_xmile exports a project to XMILE format.
+/// Returns 0 on success, error code on failure.
+/// Caller must free output with simlin_free().
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `output` and `output_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_export_xmile(
+    project: *mut SimlinProject,
+    output: *mut *mut u8,
+    output_len: *mut usize,
+) -> c_int {
+    if project.is_null() || output.is_null() || output_len.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    let proj = &(*project).project;
+
+    match simlin_compat::to_xmile(&proj.datamodel) {
+        Ok(xmile_str) => {
+            let bytes = xmile_str.into_bytes();
+            let len = bytes.len();
+
+            let buf = simlin_malloc(len);
+            if buf.is_null() {
+                return engine::ErrorCode::Generic as c_int;
+            }
+
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+
+            *output = buf;
+            *output_len = len;
+            engine::ErrorCode::NoError as c_int
+        }
+        Err(e) => e.code as c_int,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,6 +1154,213 @@ mod tests {
             // Project should be freed now
         }
     }
+    #[test]
+    fn test_import_xmile() {
+        // Load the SIR XMILE model
+        let xmile_path = std::path::Path::new("testdata/SIR.stmx");
+        if !xmile_path.exists() {
+            eprintln!("missing SIR.stmx fixture; skipping");
+            return;
+        }
+        let data = std::fs::read(xmile_path).unwrap();
+
+        unsafe {
+            // Import XMILE
+            let mut err_code: c_int = 0;
+            let proj = simlin_import_xmile(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
+            assert!(!proj.is_null(), "import_xmile failed: {err_code}");
+            assert_eq!(err_code, engine::ErrorCode::NoError as c_int);
+
+            // Verify we can create a simulation from the imported project
+            let sim = simlin_sim_new(proj, std::ptr::null());
+            assert!(!sim.is_null());
+
+            // Run simulation to verify it's valid
+            let rc = simlin_sim_run_to_end(sim);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Check we have expected variables
+            let var_count = simlin_sim_get_varcount(sim);
+            assert!(var_count > 0);
+
+            // Clean up
+            simlin_sim_unref(sim);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_import_mdl() {
+        // Load the SIR MDL model
+        let mdl_path = std::path::Path::new("testdata/SIR.mdl");
+        if !mdl_path.exists() {
+            eprintln!("missing SIR.mdl fixture; skipping");
+            return;
+        }
+        let data = std::fs::read(mdl_path).unwrap();
+
+        unsafe {
+            // Import MDL
+            let mut err_code: c_int = 0;
+            let proj = simlin_import_mdl(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
+            assert!(!proj.is_null(), "import_mdl failed: {err_code}");
+            assert_eq!(err_code, engine::ErrorCode::NoError as c_int);
+
+            // Verify we can create a simulation from the imported project
+            let sim = simlin_sim_new(proj, std::ptr::null());
+            assert!(!sim.is_null());
+
+            // Run simulation to verify it's valid
+            let rc = simlin_sim_run_to_end(sim);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Check we have expected variables
+            let var_count = simlin_sim_get_varcount(sim);
+            assert!(var_count > 0);
+
+            // Clean up
+            simlin_sim_unref(sim);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_export_xmile() {
+        // Load a project from protobuf first
+        let pb_path = std::path::Path::new("testdata/SIR_project.pb");
+        if !pb_path.exists() {
+            eprintln!("missing SIR_project.pb fixture; skipping");
+            return;
+        }
+        let data = std::fs::read(pb_path).unwrap();
+
+        unsafe {
+            // Open project
+            let mut err_code: c_int = 0;
+            let proj = simlin_project_open(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
+            assert!(!proj.is_null(), "project open failed: {err_code}");
+
+            // Export to XMILE
+            let mut output: *mut u8 = std::ptr::null_mut();
+            let mut output_len: usize = 0;
+            let rc = simlin_export_xmile(
+                proj,
+                &mut output as *mut *mut u8,
+                &mut output_len as *mut usize,
+            );
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+            assert!(!output.is_null());
+            assert!(output_len > 0);
+
+            // Verify the output is valid XMILE by trying to parse it
+            let xmile_data = std::slice::from_raw_parts(output, output_len);
+            let xmile_str = std::str::from_utf8(xmile_data).unwrap();
+            assert!(xmile_str.contains("<?xml"));
+            assert!(xmile_str.contains("<xmile"));
+
+            // Clean up
+            simlin_free(output);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_import_export_roundtrip() {
+        // Load XMILE model
+        let xmile_path = std::path::Path::new("testdata/SIR.stmx");
+        if !xmile_path.exists() {
+            eprintln!("missing SIR.stmx fixture; skipping");
+            return;
+        }
+        let data = std::fs::read(xmile_path).unwrap();
+
+        unsafe {
+            // Import XMILE
+            let mut err_code: c_int = 0;
+            let proj1 = simlin_import_xmile(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
+            assert!(!proj1.is_null());
+
+            // Export to XMILE
+            let mut output: *mut u8 = std::ptr::null_mut();
+            let mut output_len: usize = 0;
+            let rc = simlin_export_xmile(
+                proj1,
+                &mut output as *mut *mut u8,
+                &mut output_len as *mut usize,
+            );
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Import the exported XMILE
+            let proj2 = simlin_import_xmile(output, output_len, &mut err_code as *mut c_int);
+            assert!(!proj2.is_null());
+
+            // Verify both projects can simulate
+            let sim1 = simlin_sim_new(proj1, std::ptr::null());
+            let sim2 = simlin_sim_new(proj2, std::ptr::null());
+            assert!(!sim1.is_null());
+            assert!(!sim2.is_null());
+
+            let rc1 = simlin_sim_run_to_end(sim1);
+            let rc2 = simlin_sim_run_to_end(sim2);
+            assert_eq!(rc1, engine::ErrorCode::NoError as c_int);
+            assert_eq!(rc2, engine::ErrorCode::NoError as c_int);
+
+            // Clean up
+            simlin_sim_unref(sim1);
+            simlin_sim_unref(sim2);
+            simlin_free(output);
+            simlin_project_unref(proj1);
+            simlin_project_unref(proj2);
+        }
+    }
+
+    #[test]
+    fn test_import_invalid_data() {
+        unsafe {
+            // Test with null data
+            let mut err_code: c_int = 0;
+            let proj = simlin_import_xmile(std::ptr::null(), 0, &mut err_code as *mut c_int);
+            assert!(proj.is_null());
+            assert_ne!(err_code, engine::ErrorCode::NoError as c_int);
+
+            // Test with invalid XML
+            let bad_data = b"not xml at all";
+            err_code = 0;
+            let proj = simlin_import_xmile(
+                bad_data.as_ptr(),
+                bad_data.len(),
+                &mut err_code as *mut c_int,
+            );
+            assert!(proj.is_null());
+            assert_ne!(err_code, engine::ErrorCode::NoError as c_int);
+
+            // Test with invalid MDL
+            err_code = 0;
+            let proj = simlin_import_mdl(
+                bad_data.as_ptr(),
+                bad_data.len(),
+                &mut err_code as *mut c_int,
+            );
+            assert!(proj.is_null());
+            assert_ne!(err_code, engine::ErrorCode::NoError as c_int);
+        }
+    }
+
+    #[test]
+    fn test_export_null_project() {
+        unsafe {
+            let mut output: *mut u8 = std::ptr::null_mut();
+            let mut output_len: usize = 0;
+            let rc = simlin_export_xmile(
+                std::ptr::null_mut(),
+                &mut output as *mut *mut u8,
+                &mut output_len as *mut usize,
+            );
+            assert_ne!(rc, engine::ErrorCode::NoError as c_int);
+            assert!(output.is_null());
+        }
+    }
+
     #[test]
     fn test_sim_lifecycle() {
         // Create a minimal valid protobuf project
