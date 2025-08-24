@@ -296,50 +296,23 @@ SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, int *err);
 // - `output` and `output_len` must be valid pointers
 int simlin_export_xmile(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
 
-// Get all errors in a project (model errors, variable errors, unit errors)
+// Get all errors in a project including static analysis and compilation errors
 // Returns NULL if no errors, caller must free with simlin_free_error_details
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
 SimlinErrorDetails *simlin_project_get_errors(SimlinProject *project);
 
-// Get errors for a specific model
-// Returns NULL if no errors or model doesn't exist
-//
-// # Safety
-// - `project` must be a valid pointer to a SimlinProject
-// - `model_name` must be a valid C string
-SimlinErrorDetails *simlin_project_get_model_errors(SimlinProject *project, const char *model_name);
-
-// Get equation errors for a specific variable
-// Returns NULL if no errors or variable doesn't exist
-//
-// # Safety
-// - `project` must be a valid pointer to a SimlinProject
-// - `model_name` and `variable_name` must be valid C strings
-SimlinErrorDetails *simlin_project_get_variable_errors(SimlinProject *project,
-                                                       const char *model_name,
-                                                       const char *variable_name);
-
-// Get the error that prevents simulation (if any)
-// Returns NULL if project is simulatable
-//
-// # Safety
-// - `project` must be a valid pointer to a SimlinProject
-// - `model_name` must be a valid C string (or NULL for default model)
-SimlinErrorDetail *simlin_project_get_simulation_error(SimlinProject *project,
-                                                       const char *model_name);
-
 // Free error details returned by the API
 //
 // # Safety
-// - `details` must be a valid pointer returned by simlin_project_get_errors or similar
+// - `details` must be a valid pointer returned by simlin_project_get_errors
 void simlin_free_error_details(SimlinErrorDetails *details);
 
 // Free a single error detail
 //
 // # Safety
-// - `detail` must be a valid pointer returned by simlin_project_get_simulation_error
+// - `detail` must be a valid pointer to a SimlinErrorDetail
 void simlin_free_error_detail(SimlinErrorDetail *detail);
 
 #ifdef __cplusplus

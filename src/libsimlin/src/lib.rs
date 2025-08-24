@@ -1144,10 +1144,13 @@ fn collect_unit_errors(
         .collect()
 }
 
-/// Get all errors in a project (model errors, variable errors, unit errors)
+/// Get all errors in a project including static analysis and compilation errors
 ///
-/// Returns NULL if no errors exist in the project. The caller must free the returned
-/// error details using `simlin_free_error_details`.
+/// Returns NULL if no errors exist in the project. This function collects all
+/// static errors (equation parsing, unit checking, etc.) and also attempts to
+/// compile the "main" model to find any compilation-time errors.
+///
+/// The caller must free the returned error details using `simlin_free_error_details`.
 ///
 /// # Example Usage (C)
 /// ```c
@@ -1155,9 +1158,18 @@ fn collect_unit_errors(
 /// if (errors != NULL) {
 ///     for (size_t i = 0; i < errors->count; i++) {
 ///         SimlinErrorDetail* error = &errors->errors[i];
-///         printf("Error %d in model %s\n", error->code, error->model_name);
+///         printf("Error %d", error->code);
+///         if (error->model_name != NULL) {
+///             printf(" in model %s", error->model_name);
+///         }
+///         if (error->variable_name != NULL) {
+///             printf(" for variable %s", error->variable_name);
+///         }
+///         printf("\n");
 ///     }
 ///     simlin_free_error_details(errors);
+/// } else {
+///     // Project has no errors and is ready to simulate
 /// }
 /// ```
 ///
@@ -1217,94 +1229,40 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         }
     }
 
-    if all_errors.is_empty() {
-        return ptr::null_mut();
-    }
-
-    let (errors_ptr, count) = vec_to_c_array(all_errors);
-    let result = Box::new(SimlinErrorDetails {
-        errors: errors_ptr,
-        count,
-    });
-    Box::into_raw(result)
-}
-
-/// Get errors for a specific model
-///
-/// Returns NULL if no errors exist or if the model doesn't exist.
-/// The caller must free the returned error details using `simlin_free_error_details`.
-///
-/// # Example Usage (C)
-/// ```c
-/// SimlinErrorDetails* errors = simlin_project_get_model_errors(project, "main");
-/// if (errors != NULL) {
-///     for (size_t i = 0; i < errors->count; i++) {
-///         SimlinErrorDetail* error = &errors->errors[i];
-///         if (error->variable_name != NULL) {
-///             printf("Variable %s has error at offset %d-%d\n",
-///                    error->variable_name, error->start_offset, error->end_offset);
-///         }
-///     }
-///     simlin_free_error_details(errors);
-/// }
-/// ```
-///
-/// # Safety
-/// - `project` must be a valid pointer to a SimlinProject
-/// - `model_name` must be a valid C string
-/// - The returned pointer must be freed with `simlin_free_error_details`
-#[no_mangle]
-pub unsafe extern "C" fn simlin_project_get_model_errors(
-    project: *mut SimlinProject,
-    model_name: *const c_char,
-) -> *mut SimlinErrorDetails {
-    if project.is_null() || model_name.is_null() {
-        return ptr::null_mut();
-    }
-
-    let model_name_str = match CStr::from_ptr(model_name).to_str() {
-        Ok(s) => canonicalize(s),
-        Err(_) => return ptr::null_mut(),
-    };
-
-    let proj = &(*project).project;
-    let model = match proj.models.get(&model_name_str) {
-        Some(m) => m,
-        None => return ptr::null_mut(),
-    };
-
-    let mut all_errors = Vec::new();
-
-    // Model-level errors
-    if let Some(ref errors) = model.errors {
-        for error in errors {
+    // Attempt to compile the "main" model to find compilation errors
+    let compiler = engine::Simulation::new(proj, "main");
+    match compiler {
+        Ok(compiler) => match compiler.compile() {
+            Ok(compiled) => {
+                // Try to instantiate VM to catch VM-level errors
+                if let Err(error) = Vm::new(compiled) {
+                    all_errors.push(
+                        ErrorDetailBuilder::new(error.code)
+                            .message(error.get_details())
+                            .model_name("main")
+                            .build(),
+                    );
+                }
+            }
+            Err(error) => {
+                all_errors.push(
+                    ErrorDetailBuilder::new(error.code)
+                        .message(error.get_details())
+                        .model_name("main")
+                        .build(),
+                );
+            }
+        },
+        Err(error) => {
             all_errors.push(
                 ErrorDetailBuilder::new(error.code)
                     .message(error.get_details())
-                    .model_name(model_name_str.as_str())
+                    .model_name("main")
                     .build(),
             );
         }
     }
 
-    // Variable equation errors
-    for (var_name, errors) in model.get_variable_errors() {
-        all_errors.extend(collect_equation_errors(
-            errors,
-            model_name_str.as_str(),
-            var_name.as_str(),
-        ));
-    }
-
-    // Variable unit errors
-    for (var_name, errors) in model.get_unit_errors() {
-        all_errors.extend(collect_unit_errors(
-            errors,
-            model_name_str.as_str(),
-            var_name.as_str(),
-        ));
-    }
-
     if all_errors.is_empty() {
         return ptr::null_mut();
     }
@@ -1315,164 +1273,6 @@ pub unsafe extern "C" fn simlin_project_get_model_errors(
         count,
     });
     Box::into_raw(result)
-}
-
-/// Get equation and unit errors for a specific variable
-///
-/// Returns NULL if no errors exist or if the variable doesn't exist.
-/// The caller must free the returned error details using `simlin_free_error_details`.
-///
-/// # Example Usage (C)
-/// ```c
-/// SimlinErrorDetails* errors = simlin_project_get_variable_errors(
-///     project, "main", "population");
-/// if (errors != NULL) {
-///     for (size_t i = 0; i < errors->count; i++) {
-///         SimlinErrorDetail* error = &errors->errors[i];
-///         printf("Error code %d at offset %d-%d\n",
-///                error->code, error->start_offset, error->end_offset);
-///     }
-///     simlin_free_error_details(errors);
-/// }
-/// ```
-///
-/// # Safety
-/// - `project` must be a valid pointer to a SimlinProject
-/// - `model_name` and `variable_name` must be valid C strings
-/// - The returned pointer must be freed with `simlin_free_error_details`
-#[no_mangle]
-pub unsafe extern "C" fn simlin_project_get_variable_errors(
-    project: *mut SimlinProject,
-    model_name: *const c_char,
-    variable_name: *const c_char,
-) -> *mut SimlinErrorDetails {
-    if project.is_null() || model_name.is_null() || variable_name.is_null() {
-        return ptr::null_mut();
-    }
-
-    let model_name_str = match CStr::from_ptr(model_name).to_str() {
-        Ok(s) => canonicalize(s),
-        Err(_) => return ptr::null_mut(),
-    };
-
-    let var_name_str = match CStr::from_ptr(variable_name).to_str() {
-        Ok(s) => canonicalize(s),
-        Err(_) => return ptr::null_mut(),
-    };
-
-    let proj = &(*project).project;
-    let model = match proj.models.get(&model_name_str) {
-        Some(m) => m,
-        None => return ptr::null_mut(),
-    };
-
-    let var = match model.variables.get(&var_name_str) {
-        Some(v) => v,
-        None => return ptr::null_mut(),
-    };
-
-    let mut all_errors = Vec::new();
-
-    // Equation errors
-    if let Some(errors) = var.equation_errors() {
-        all_errors.extend(collect_equation_errors(
-            errors,
-            model_name_str.as_str(),
-            var_name_str.as_str(),
-        ));
-    }
-
-    // Unit errors
-    if let Some(errors) = var.unit_errors() {
-        all_errors.extend(collect_unit_errors(
-            errors,
-            model_name_str.as_str(),
-            var_name_str.as_str(),
-        ));
-    }
-
-    if all_errors.is_empty() {
-        return ptr::null_mut();
-    }
-
-    let (errors_ptr, count) = vec_to_c_array(all_errors);
-    let result = Box::new(SimlinErrorDetails {
-        errors: errors_ptr,
-        count,
-    });
-    Box::into_raw(result)
-}
-
-/// Get the error that prevents simulation (if any)
-///
-/// Returns NULL if the project is simulatable. If an error exists, returns details
-/// about what prevents the simulation from running. The caller must free the
-/// returned error detail using `simlin_free_error_detail`.
-///
-/// # Example Usage (C)
-/// ```c
-/// SimlinErrorDetail* error = simlin_project_get_simulation_error(project, "main");
-/// if (error != NULL) {
-///     printf("Cannot simulate: error code %d\n", error->code);
-///     if (error->message != NULL) {
-///         printf("Details: %s\n", error->message);
-///     }
-///     simlin_free_error_detail(error);
-/// } else {
-///     // Project is ready to simulate
-///     SimlinSim* sim = simlin_sim_create(project, "main");
-/// }
-/// ```
-///
-/// # Safety
-/// - `project` must be a valid pointer to a SimlinProject
-/// - `model_name` must be a valid C string (or NULL for default "main" model)
-/// - The returned pointer must be freed with `simlin_free_error_detail`
-#[no_mangle]
-pub unsafe extern "C" fn simlin_project_get_simulation_error(
-    project: *mut SimlinProject,
-    model_name: *const c_char,
-) -> *mut SimlinErrorDetail {
-    if project.is_null() {
-        return ptr::null_mut();
-    }
-
-    let model_name = if model_name.is_null() {
-        "main".to_string()
-    } else {
-        match CStr::from_ptr(model_name).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => return ptr::null_mut(),
-        }
-    };
-
-    let proj = &(*project).project;
-
-    // Try to compile and see if there's an error
-    let compiler = engine::Simulation::new(proj, &model_name);
-    let error = match compiler {
-        Ok(compiler) => {
-            match compiler.compile() {
-                Ok(compiled) => {
-                    match Vm::new(compiled) {
-                        Ok(_) => return ptr::null_mut(), // No error, simulatable
-                        Err(e) => e,
-                    }
-                }
-                Err(e) => e,
-            }
-        }
-        Err(e) => e,
-    };
-
-    let detail = Box::new(
-        ErrorDetailBuilder::new(error.code)
-            .message(error.get_details())
-            .model_name(&model_name)
-            .build(),
-    );
-
-    Box::into_raw(detail)
 }
 
 /// Free error details returned by the API
@@ -2016,84 +1816,10 @@ mod tests {
     }
 
     #[test]
-    fn test_error_api_model_specific() {
-        // Create a project with model-specific errors
+    fn test_error_api_with_compilation_errors() {
+        // Create a project with compilation errors
         let project = engine::project_io::Project {
-            name: "test_model_errors".to_string(),
-            sim_specs: Some(engine::project_io::SimSpecs {
-                start: 0.0,
-                stop: 10.0,
-                dt: Some(engine::project_io::Dt {
-                    value: 1.0,
-                    is_reciprocal: false,
-                }),
-                save_step: None,
-                sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
-            }),
-            models: vec![engine::project_io::Model {
-                name: "main".to_string(),
-                variables: vec![engine::project_io::Variable {
-                    v: Some(engine::project_io::variable::V::Aux(
-                        engine::project_io::variable::Aux {
-                            ident: "var_with_error".to_string(),
-                            equation: Some(engine::project_io::variable::Equation {
-                                equation: Some(
-                                    engine::project_io::variable::equation::Equation::Scalar(
-                                        engine::project_io::variable::ScalarEquation {
-                                            equation: "unknown_var_xyz + 5".to_string(),
-                                            initial_equation: None,
-                                        },
-                                    ),
-                                ),
-                            }),
-                            documentation: String::new(),
-                            units: String::new(),
-                            gf: None,
-                            can_be_module_input: false,
-                            visibility: engine::project_io::variable::Visibility::Private as i32,
-                        },
-                    )),
-                }],
-                views: vec![],
-            }],
-            dimensions: vec![],
-            units: vec![],
-            source: None,
-        };
-        let mut buf = Vec::new();
-        project.encode(&mut buf).unwrap();
-
-        unsafe {
-            let mut err: c_int = 0;
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
-            assert!(!proj.is_null());
-
-            // Test getting model-specific errors
-            let model_name = CString::new("main").unwrap();
-            let model_errors = simlin_project_get_model_errors(proj, model_name.as_ptr());
-            assert!(
-                !model_errors.is_null(),
-                "Expected model errors but got null"
-            );
-            assert!((*model_errors).count > 0);
-
-            // Test getting errors for non-existent model
-            let bad_model = CString::new("nonexistent_model").unwrap();
-            let no_errors = simlin_project_get_model_errors(proj, bad_model.as_ptr());
-            assert!(no_errors.is_null());
-
-            // Clean up
-            simlin_free_error_details(model_errors);
-            simlin_project_unref(proj);
-        }
-    }
-
-    #[test]
-    fn test_error_api_variable_specific() {
-        // Create a project with variable-specific errors
-        let project = engine::project_io::Project {
-            name: "test_var_errors".to_string(),
+            name: "test_compilation_errors".to_string(),
             sim_specs: Some(engine::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
@@ -2108,15 +1834,16 @@ mod tests {
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
                 variables: vec![
+                    // This will cause a compilation error - circular reference
                     engine::project_io::Variable {
                         v: Some(engine::project_io::variable::V::Aux(
                             engine::project_io::variable::Aux {
-                                ident: "good_var".to_string(),
+                                ident: "a".to_string(),
                                 equation: Some(engine::project_io::variable::Equation {
                                     equation: Some(
                                         engine::project_io::variable::equation::Equation::Scalar(
                                             engine::project_io::variable::ScalarEquation {
-                                                equation: "42".to_string(),
+                                                equation: "b + 1".to_string(),
                                                 initial_equation: None,
                                             },
                                         ),
@@ -2134,12 +1861,12 @@ mod tests {
                     engine::project_io::Variable {
                         v: Some(engine::project_io::variable::V::Aux(
                             engine::project_io::variable::Aux {
-                                ident: "bad_var".to_string(),
+                                ident: "b".to_string(),
                                 equation: Some(engine::project_io::variable::Equation {
                                     equation: Some(
                                         engine::project_io::variable::equation::Equation::Scalar(
                                             engine::project_io::variable::ScalarEquation {
-                                                equation: "undefined_ref * 2".to_string(),
+                                                equation: "a + 1".to_string(),
                                                 initial_equation: None,
                                             },
                                         ),
@@ -2169,105 +1896,31 @@ mod tests {
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
-            let model_name = CString::new("main").unwrap();
+            // The project should have compilation errors due to circular reference
+            let all_errors = simlin_project_get_errors(proj);
+            assert!(!all_errors.is_null());
+            assert!((*all_errors).count > 0);
 
-            // Test getting errors for good variable (should be none)
-            let good_var = CString::new("good_var").unwrap();
-            let no_errors =
-                simlin_project_get_variable_errors(proj, model_name.as_ptr(), good_var.as_ptr());
-            assert!(no_errors.is_null());
-
-            // Test getting errors for bad variable
-            let bad_var = CString::new("bad_var").unwrap();
-            let var_errors =
-                simlin_project_get_variable_errors(proj, model_name.as_ptr(), bad_var.as_ptr());
-            assert!(!var_errors.is_null());
-            assert!((*var_errors).count > 0);
-
-            // Verify error details
-            let error_slice = std::slice::from_raw_parts((*var_errors).errors, (*var_errors).count);
+            // Verify we found the compilation error
+            let error_slice = std::slice::from_raw_parts((*all_errors).errors, (*all_errors).count);
+            let mut found_compilation_error = false;
             for error in error_slice {
-                assert_eq!(error.code, SimlinErrorCode::UnknownDependency);
-                assert!(!error.variable_name.is_null());
-                let var_name = CStr::from_ptr(error.variable_name).to_str().unwrap();
-                assert_eq!(var_name, "bad_var");
+                // Circular references or other compilation errors should be present
+                if error.code == SimlinErrorCode::CircularDependency
+                    || error.code == SimlinErrorCode::BadModelName
+                    || error.code == SimlinErrorCode::Generic
+                {
+                    found_compilation_error = true;
+                    break;
+                }
             }
-
-            // Test getting errors for non-existent variable
-            let nonexistent = CString::new("nonexistent_var").unwrap();
-            let no_var =
-                simlin_project_get_variable_errors(proj, model_name.as_ptr(), nonexistent.as_ptr());
-            assert!(no_var.is_null());
+            assert!(
+                found_compilation_error,
+                "Should have found a compilation error"
+            );
 
             // Clean up
-            simlin_free_error_details(var_errors);
-            simlin_project_unref(proj);
-        }
-    }
-
-    #[test]
-    fn test_error_api_simulation_error() {
-        // Create a project that won't simulate due to errors
-        let project = engine::project_io::Project {
-            name: "test_sim_error".to_string(),
-            sim_specs: Some(engine::project_io::SimSpecs {
-                start: 0.0,
-                stop: 10.0,
-                dt: Some(engine::project_io::Dt {
-                    value: 1.0,
-                    is_reciprocal: false,
-                }),
-                save_step: None,
-                sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
-            }),
-            models: vec![engine::project_io::Model {
-                name: "main".to_string(),
-                variables: vec![engine::project_io::Variable {
-                    v: Some(engine::project_io::variable::V::Stock(
-                        engine::project_io::variable::Stock {
-                            ident: "stock".to_string(),
-                            equation: Some(engine::project_io::variable::Equation {
-                                equation: Some(
-                                    engine::project_io::variable::equation::Equation::Scalar(
-                                        engine::project_io::variable::ScalarEquation {
-                                            equation: "bad_reference".to_string(),
-                                            initial_equation: None,
-                                        },
-                                    ),
-                                ),
-                            }),
-                            documentation: String::new(),
-                            units: String::new(),
-                            inflows: vec![],
-                            outflows: vec![],
-                            non_negative: false,
-                            can_be_module_input: false,
-                            visibility: engine::project_io::variable::Visibility::Private as i32,
-                        },
-                    )),
-                }],
-                views: vec![],
-            }],
-            dimensions: vec![],
-            units: vec![],
-            source: None,
-        };
-        let mut buf = Vec::new();
-        project.encode(&mut buf).unwrap();
-
-        unsafe {
-            let mut err: c_int = 0;
-            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
-            assert!(!proj.is_null());
-
-            // Test getting simulation error (should exist due to bad reference)
-            let sim_error = simlin_project_get_simulation_error(proj, ptr::null());
-            assert!(!sim_error.is_null());
-            assert_ne!((*sim_error).code, SimlinErrorCode::NoError);
-
-            // Clean up
-            simlin_free_error_detail(sim_error);
+            simlin_free_error_details(all_errors);
             simlin_project_unref(proj);
         }
     }
@@ -2326,13 +1979,9 @@ mod tests {
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
-            // Test that there are no errors
+            // Test that there are no errors (including compilation errors)
             let all_errors = simlin_project_get_errors(proj);
             assert!(all_errors.is_null());
-
-            // Test that simulation is possible (no error)
-            let sim_error = simlin_project_get_simulation_error(proj, ptr::null());
-            assert!(sim_error.is_null());
 
             // Clean up
             simlin_project_unref(proj);
@@ -2345,16 +1994,6 @@ mod tests {
             // Test with null project
             let errors = simlin_project_get_errors(ptr::null_mut());
             assert!(errors.is_null());
-
-            let model_errors = simlin_project_get_model_errors(ptr::null_mut(), ptr::null());
-            assert!(model_errors.is_null());
-
-            let var_errors =
-                simlin_project_get_variable_errors(ptr::null_mut(), ptr::null(), ptr::null());
-            assert!(var_errors.is_null());
-
-            let sim_error = simlin_project_get_simulation_error(ptr::null_mut(), ptr::null());
-            assert!(sim_error.is_null());
 
             // Test free functions with null (should not crash)
             simlin_free_error_details(ptr::null_mut());
@@ -2416,16 +2055,12 @@ mod tests {
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
-            let model_name = CString::new("main").unwrap();
-            let var_name = CString::new("var_with_offset_error").unwrap();
-
-            let var_errors =
-                simlin_project_get_variable_errors(proj, model_name.as_ptr(), var_name.as_ptr());
-            assert!(!var_errors.is_null());
-            assert!((*var_errors).count > 0);
+            let all_errors = simlin_project_get_errors(proj);
+            assert!(!all_errors.is_null());
+            assert!((*all_errors).count > 0);
 
             // Check that offsets are set (they should point to "unknown_var_here")
-            let error_slice = std::slice::from_raw_parts((*var_errors).errors, (*var_errors).count);
+            let error_slice = std::slice::from_raw_parts((*all_errors).errors, (*all_errors).count);
             for error in error_slice {
                 if error.code == SimlinErrorCode::UnknownDependency {
                     // The offset should point to the unknown variable reference
@@ -2437,7 +2072,7 @@ mod tests {
             }
 
             // Clean up
-            simlin_free_error_details(var_errors);
+            simlin_free_error_details(all_errors);
             simlin_project_unref(proj);
         }
     }
