@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 use prost::Message;
-use simlin_engine::common::UnitError;
+use simlin_engine::common::{EquationError, ErrorCode, UnitError};
 use simlin_engine::ltm::{detect_loops, LoopPolarity};
 use simlin_engine::{self as engine, canonicalize, serde, Vm};
 use std::alloc::{alloc, dealloc, Layout};
@@ -1027,11 +1027,143 @@ pub unsafe extern "C" fn simlin_export_xmile(
     }
 }
 
+// Helper function to convert a Rust string to a C string pointer
+fn str_to_c_ptr(s: &str) -> *mut c_char {
+    CString::new(s).unwrap().into_raw()
+}
+
+// Helper function to convert a vector into a C-compatible array
+fn vec_to_c_array<T>(vec: Vec<T>) -> (*mut T, usize) {
+    if vec.is_empty() {
+        return (ptr::null_mut(), 0);
+    }
+    let count = vec.len();
+    let mut boxed = vec.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    (ptr, count)
+}
+
+// Builder for SimlinErrorDetail to reduce boilerplate
+struct ErrorDetailBuilder {
+    code: SimlinErrorCode,
+    message: *mut c_char,
+    model_name: *mut c_char,
+    variable_name: *mut c_char,
+    start_offset: u16,
+    end_offset: u16,
+}
+
+impl ErrorDetailBuilder {
+    fn new(code: ErrorCode) -> Self {
+        Self {
+            code: SimlinErrorCode::from(code),
+            message: ptr::null_mut(),
+            model_name: ptr::null_mut(),
+            variable_name: ptr::null_mut(),
+            start_offset: 0,
+            end_offset: 0,
+        }
+    }
+
+    fn message(mut self, msg: Option<String>) -> Self {
+        self.message = msg.as_deref().map(str_to_c_ptr).unwrap_or(ptr::null_mut());
+        self
+    }
+
+    fn model_name(mut self, name: &str) -> Self {
+        self.model_name = str_to_c_ptr(name);
+        self
+    }
+
+    fn variable_name(mut self, name: &str) -> Self {
+        self.variable_name = str_to_c_ptr(name);
+        self
+    }
+
+    fn offsets(mut self, start: u16, end: u16) -> Self {
+        self.start_offset = start;
+        self.end_offset = end;
+        self
+    }
+
+    fn build(self) -> SimlinErrorDetail {
+        SimlinErrorDetail {
+            code: self.code,
+            message: self.message,
+            model_name: self.model_name,
+            variable_name: self.variable_name,
+            start_offset: self.start_offset,
+            end_offset: self.end_offset,
+        }
+    }
+}
+
+// Helper function to collect equation errors for a variable
+fn collect_equation_errors(
+    errors: Vec<EquationError>,
+    model_name: &str,
+    var_name: &str,
+) -> Vec<SimlinErrorDetail> {
+    errors
+        .into_iter()
+        .map(|error| {
+            ErrorDetailBuilder::new(error.code)
+                .model_name(model_name)
+                .variable_name(var_name)
+                .offsets(error.start, error.end)
+                .build()
+        })
+        .collect()
+}
+
+// Helper function to collect unit errors for a variable
+fn collect_unit_errors(
+    errors: Vec<UnitError>,
+    model_name: &str,
+    var_name: &str,
+) -> Vec<SimlinErrorDetail> {
+    errors
+        .into_iter()
+        .map(|error| {
+            let (code, start, end, message) = match error {
+                UnitError::DefinitionError(eq_err, details) => {
+                    (eq_err.code, eq_err.start, eq_err.end, details)
+                }
+                UnitError::ConsistencyError(err_code, loc, details) => {
+                    (err_code, loc.start, loc.end, details)
+                }
+            };
+            ErrorDetailBuilder::new(code)
+                .message(message)
+                .model_name(model_name)
+                .variable_name(var_name)
+                .offsets(start, end)
+                .build()
+        })
+        .collect()
+}
+
 /// Get all errors in a project (model errors, variable errors, unit errors)
-/// Returns NULL if no errors, caller must free with simlin_free_error_details
+///
+/// Returns NULL if no errors exist in the project. The caller must free the returned
+/// error details using `simlin_free_error_details`.
+///
+/// # Example Usage (C)
+/// ```c
+/// SimlinErrorDetails* errors = simlin_project_get_errors(project);
+/// if (errors != NULL) {
+///     for (size_t i = 0; i < errors->count; i++) {
+///         SimlinErrorDetail* error = &errors->errors[i];
+///         printf("Error %d in model %s\n", error->code, error->model_name);
+///     }
+///     simlin_free_error_details(errors);
+/// }
+/// ```
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
+/// - The returned pointer must be freed with `simlin_free_error_details`
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_get_errors(
     project: *mut SimlinProject,
@@ -1045,18 +1177,11 @@ pub unsafe extern "C" fn simlin_project_get_errors(
 
     // Collect project-level errors
     for error in &proj.errors {
-        let detail = SimlinErrorDetail {
-            code: SimlinErrorCode::from(error.code),
-            message: error
-                .get_details()
-                .map(|s| CString::new(s.as_str()).unwrap().into_raw())
-                .unwrap_or(ptr::null_mut()),
-            model_name: ptr::null_mut(),
-            variable_name: ptr::null_mut(),
-            start_offset: 0,
-            end_offset: 0,
-        };
-        all_errors.push(detail);
+        all_errors.push(
+            ErrorDetailBuilder::new(error.code)
+                .message(error.get_details())
+                .build(),
+        );
     }
 
     // Collect model and variable errors
@@ -1064,60 +1189,31 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         // Model-level errors
         if let Some(ref errors) = model.errors {
             for error in errors {
-                let detail = SimlinErrorDetail {
-                    code: SimlinErrorCode::from(error.code),
-                    message: error
-                        .get_details()
-                        .map(|s| CString::new(s.as_str()).unwrap().into_raw())
-                        .unwrap_or(ptr::null_mut()),
-                    model_name: CString::new(model_name.as_str()).unwrap().into_raw(),
-                    variable_name: ptr::null_mut(),
-                    start_offset: 0,
-                    end_offset: 0,
-                };
-                all_errors.push(detail);
+                all_errors.push(
+                    ErrorDetailBuilder::new(error.code)
+                        .message(error.get_details())
+                        .model_name(model_name.as_str())
+                        .build(),
+                );
             }
         }
 
         // Variable equation errors
         for (var_name, errors) in model.get_variable_errors() {
-            for error in errors {
-                let detail = SimlinErrorDetail {
-                    code: SimlinErrorCode::from(error.code),
-                    message: ptr::null_mut(),
-                    model_name: CString::new(model_name.as_str()).unwrap().into_raw(),
-                    variable_name: CString::new(var_name.as_str()).unwrap().into_raw(),
-                    start_offset: error.start,
-                    end_offset: error.end,
-                };
-                all_errors.push(detail);
-            }
+            all_errors.extend(collect_equation_errors(
+                errors,
+                model_name.as_str(),
+                var_name.as_str(),
+            ));
         }
 
         // Variable unit errors
         for (var_name, errors) in model.get_unit_errors() {
-            for error in errors {
-                let (code, start, end, message) = match error {
-                    UnitError::DefinitionError(eq_err, details) => {
-                        (eq_err.code, eq_err.start, eq_err.end, details)
-                    }
-                    UnitError::ConsistencyError(err_code, loc, details) => {
-                        (err_code, loc.start, loc.end, details)
-                    }
-                };
-
-                let detail = SimlinErrorDetail {
-                    code: SimlinErrorCode::from(code),
-                    message: message
-                        .map(|s| CString::new(s.as_str()).unwrap().into_raw())
-                        .unwrap_or(ptr::null_mut()),
-                    model_name: CString::new(model_name.as_str()).unwrap().into_raw(),
-                    variable_name: CString::new(var_name.as_str()).unwrap().into_raw(),
-                    start_offset: start,
-                    end_offset: end,
-                };
-                all_errors.push(detail);
-            }
+            all_errors.extend(collect_unit_errors(
+                errors,
+                model_name.as_str(),
+                var_name.as_str(),
+            ));
         }
     }
 
@@ -1125,11 +1221,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         return ptr::null_mut();
     }
 
-    let count = all_errors.len();
-    let mut errors = all_errors.into_boxed_slice();
-    let errors_ptr = errors.as_mut_ptr();
-    std::mem::forget(errors);
-
+    let (errors_ptr, count) = vec_to_c_array(all_errors);
     let result = Box::new(SimlinErrorDetails {
         errors: errors_ptr,
         count,
@@ -1138,11 +1230,29 @@ pub unsafe extern "C" fn simlin_project_get_errors(
 }
 
 /// Get errors for a specific model
-/// Returns NULL if no errors or model doesn't exist
+///
+/// Returns NULL if no errors exist or if the model doesn't exist.
+/// The caller must free the returned error details using `simlin_free_error_details`.
+///
+/// # Example Usage (C)
+/// ```c
+/// SimlinErrorDetails* errors = simlin_project_get_model_errors(project, "main");
+/// if (errors != NULL) {
+///     for (size_t i = 0; i < errors->count; i++) {
+///         SimlinErrorDetail* error = &errors->errors[i];
+///         if (error->variable_name != NULL) {
+///             printf("Variable %s has error at offset %d-%d\n",
+///                    error->variable_name, error->start_offset, error->end_offset);
+///         }
+///     }
+///     simlin_free_error_details(errors);
+/// }
+/// ```
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
 /// - `model_name` must be a valid C string
+/// - The returned pointer must be freed with `simlin_free_error_details`
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_get_model_errors(
     project: *mut SimlinProject,
@@ -1168,71 +1278,38 @@ pub unsafe extern "C" fn simlin_project_get_model_errors(
     // Model-level errors
     if let Some(ref errors) = model.errors {
         for error in errors {
-            let detail = SimlinErrorDetail {
-                code: SimlinErrorCode::from(error.code),
-                message: error
-                    .get_details()
-                    .map(|s| CString::new(s.as_str()).unwrap().into_raw())
-                    .unwrap_or(ptr::null_mut()),
-                model_name: CString::new(model_name_str.as_str()).unwrap().into_raw(),
-                variable_name: ptr::null_mut(),
-                start_offset: 0,
-                end_offset: 0,
-            };
-            all_errors.push(detail);
+            all_errors.push(
+                ErrorDetailBuilder::new(error.code)
+                    .message(error.get_details())
+                    .model_name(model_name_str.as_str())
+                    .build(),
+            );
         }
     }
 
     // Variable equation errors
     for (var_name, errors) in model.get_variable_errors() {
-        for error in errors {
-            let detail = SimlinErrorDetail {
-                code: SimlinErrorCode::from(error.code),
-                message: ptr::null_mut(),
-                model_name: CString::new(model_name_str.as_str()).unwrap().into_raw(),
-                variable_name: CString::new(var_name.as_str()).unwrap().into_raw(),
-                start_offset: error.start,
-                end_offset: error.end,
-            };
-            all_errors.push(detail);
-        }
+        all_errors.extend(collect_equation_errors(
+            errors,
+            model_name_str.as_str(),
+            var_name.as_str(),
+        ));
     }
 
     // Variable unit errors
     for (var_name, errors) in model.get_unit_errors() {
-        for error in errors {
-            let (code, start, end, message) = match error {
-                UnitError::DefinitionError(eq_err, details) => {
-                    (eq_err.code, eq_err.start, eq_err.end, details)
-                }
-                UnitError::ConsistencyError(err_code, loc, details) => {
-                    (err_code, loc.start, loc.end, details)
-                }
-            };
-
-            let detail = SimlinErrorDetail {
-                code: SimlinErrorCode::from(code),
-                message: message
-                    .map(|s| CString::new(s.as_str()).unwrap().into_raw())
-                    .unwrap_or(ptr::null_mut()),
-                model_name: CString::new(model_name_str.as_str()).unwrap().into_raw(),
-                variable_name: CString::new(var_name.as_str()).unwrap().into_raw(),
-                start_offset: start,
-                end_offset: end,
-            };
-            all_errors.push(detail);
-        }
+        all_errors.extend(collect_unit_errors(
+            errors,
+            model_name_str.as_str(),
+            var_name.as_str(),
+        ));
     }
 
     if all_errors.is_empty() {
         return ptr::null_mut();
     }
 
-    let count = all_errors.len();
-    let mut errors = all_errors.into_boxed_slice();
-    let errors_ptr = errors.as_mut_ptr();
-    std::mem::forget(errors);
-
+    let (errors_ptr, count) = vec_to_c_array(all_errors);
     let result = Box::new(SimlinErrorDetails {
         errors: errors_ptr,
         count,
@@ -1240,12 +1317,29 @@ pub unsafe extern "C" fn simlin_project_get_model_errors(
     Box::into_raw(result)
 }
 
-/// Get equation errors for a specific variable
-/// Returns NULL if no errors or variable doesn't exist
+/// Get equation and unit errors for a specific variable
+///
+/// Returns NULL if no errors exist or if the variable doesn't exist.
+/// The caller must free the returned error details using `simlin_free_error_details`.
+///
+/// # Example Usage (C)
+/// ```c
+/// SimlinErrorDetails* errors = simlin_project_get_variable_errors(
+///     project, "main", "population");
+/// if (errors != NULL) {
+///     for (size_t i = 0; i < errors->count; i++) {
+///         SimlinErrorDetail* error = &errors->errors[i];
+///         printf("Error code %d at offset %d-%d\n",
+///                error->code, error->start_offset, error->end_offset);
+///     }
+///     simlin_free_error_details(errors);
+/// }
+/// ```
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
 /// - `model_name` and `variable_name` must be valid C strings
+/// - The returned pointer must be freed with `simlin_free_error_details`
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_get_variable_errors(
     project: *mut SimlinProject,
@@ -1281,54 +1375,27 @@ pub unsafe extern "C" fn simlin_project_get_variable_errors(
 
     // Equation errors
     if let Some(errors) = var.equation_errors() {
-        for error in errors {
-            let detail = SimlinErrorDetail {
-                code: SimlinErrorCode::from(error.code),
-                message: ptr::null_mut(),
-                model_name: CString::new(model_name_str.as_str()).unwrap().into_raw(),
-                variable_name: CString::new(var_name_str.as_str()).unwrap().into_raw(),
-                start_offset: error.start,
-                end_offset: error.end,
-            };
-            all_errors.push(detail);
-        }
+        all_errors.extend(collect_equation_errors(
+            errors,
+            model_name_str.as_str(),
+            var_name_str.as_str(),
+        ));
     }
 
     // Unit errors
     if let Some(errors) = var.unit_errors() {
-        for error in errors {
-            let (code, start, end, message) = match error {
-                UnitError::DefinitionError(eq_err, details) => {
-                    (eq_err.code, eq_err.start, eq_err.end, details)
-                }
-                UnitError::ConsistencyError(err_code, loc, details) => {
-                    (err_code, loc.start, loc.end, details)
-                }
-            };
-
-            let detail = SimlinErrorDetail {
-                code: SimlinErrorCode::from(code),
-                message: message
-                    .map(|s| CString::new(s.as_str()).unwrap().into_raw())
-                    .unwrap_or(ptr::null_mut()),
-                model_name: CString::new(model_name_str.as_str()).unwrap().into_raw(),
-                variable_name: CString::new(var_name_str.as_str()).unwrap().into_raw(),
-                start_offset: start,
-                end_offset: end,
-            };
-            all_errors.push(detail);
-        }
+        all_errors.extend(collect_unit_errors(
+            errors,
+            model_name_str.as_str(),
+            var_name_str.as_str(),
+        ));
     }
 
     if all_errors.is_empty() {
         return ptr::null_mut();
     }
 
-    let count = all_errors.len();
-    let mut errors = all_errors.into_boxed_slice();
-    let errors_ptr = errors.as_mut_ptr();
-    std::mem::forget(errors);
-
+    let (errors_ptr, count) = vec_to_c_array(all_errors);
     let result = Box::new(SimlinErrorDetails {
         errors: errors_ptr,
         count,
@@ -1337,11 +1404,30 @@ pub unsafe extern "C" fn simlin_project_get_variable_errors(
 }
 
 /// Get the error that prevents simulation (if any)
-/// Returns NULL if project is simulatable
+///
+/// Returns NULL if the project is simulatable. If an error exists, returns details
+/// about what prevents the simulation from running. The caller must free the
+/// returned error detail using `simlin_free_error_detail`.
+///
+/// # Example Usage (C)
+/// ```c
+/// SimlinErrorDetail* error = simlin_project_get_simulation_error(project, "main");
+/// if (error != NULL) {
+///     printf("Cannot simulate: error code %d\n", error->code);
+///     if (error->message != NULL) {
+///         printf("Details: %s\n", error->message);
+///     }
+///     simlin_free_error_detail(error);
+/// } else {
+///     // Project is ready to simulate
+///     SimlinSim* sim = simlin_sim_create(project, "main");
+/// }
+/// ```
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
-/// - `model_name` must be a valid C string (or NULL for default model)
+/// - `model_name` must be a valid C string (or NULL for default "main" model)
+/// - The returned pointer must be freed with `simlin_free_error_detail`
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_get_simulation_error(
     project: *mut SimlinProject,
@@ -1379,25 +1465,31 @@ pub unsafe extern "C" fn simlin_project_get_simulation_error(
         Err(e) => e,
     };
 
-    let detail = Box::new(SimlinErrorDetail {
-        code: SimlinErrorCode::from(error.code),
-        message: error
-            .get_details()
-            .map(|s| CString::new(s.as_str()).unwrap().into_raw())
-            .unwrap_or(ptr::null_mut()),
-        model_name: CString::new(model_name.as_str()).unwrap().into_raw(),
-        variable_name: ptr::null_mut(),
-        start_offset: 0,
-        end_offset: 0,
-    });
+    let detail = Box::new(
+        ErrorDetailBuilder::new(error.code)
+            .message(error.get_details())
+            .model_name(&model_name)
+            .build(),
+    );
 
     Box::into_raw(detail)
 }
 
 /// Free error details returned by the API
 ///
+/// This function properly deallocates all memory associated with an error details
+/// collection, including all string fields within each error detail.
+///
+/// # Example Usage (C)
+/// ```c
+/// SimlinErrorDetails* errors = simlin_project_get_errors(project);
+/// // ... use the errors ...
+/// simlin_free_error_details(errors); // Always free when done
+/// ```
+///
 /// # Safety
 /// - `details` must be a valid pointer returned by simlin_project_get_errors or similar
+/// - The pointer must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn simlin_free_error_details(details: *mut SimlinErrorDetails) {
     if details.is_null() {
@@ -1430,8 +1522,21 @@ pub unsafe extern "C" fn simlin_free_error_details(details: *mut SimlinErrorDeta
 
 /// Free a single error detail
 ///
+/// This function properly deallocates all memory associated with a single error
+/// detail, including all string fields.
+///
+/// # Example Usage (C)
+/// ```c
+/// SimlinErrorDetail* error = simlin_project_get_simulation_error(project, NULL);
+/// if (error != NULL) {
+///     // ... use the error ...
+///     simlin_free_error_detail(error); // Always free when done
+/// }
+/// ```
+///
 /// # Safety
 /// - `detail` must be a valid pointer returned by simlin_project_get_simulation_error
+/// - The pointer must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn simlin_free_error_detail(detail: *mut SimlinErrorDetail) {
     if detail.is_null() {
