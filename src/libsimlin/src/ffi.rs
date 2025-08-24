@@ -45,3 +45,21 @@ pub struct SimlinLoops {
     pub loops: *mut SimlinLoop,
     pub count: usize,
 }
+
+/// Error detail structure containing error message and location
+#[repr(C)]
+pub struct SimlinErrorDetail {
+    pub code: crate::SimlinErrorCode,
+    pub message: *mut c_char,       // Optional error message (may be NULL)
+    pub model_name: *mut c_char,    // Model where error occurred (may be NULL)
+    pub variable_name: *mut c_char, // Variable where error occurred (may be NULL)
+    pub start_offset: u16,          // Start offset in equation (0 if not applicable)
+    pub end_offset: u16,            // End offset in equation (0 if not applicable)
+}
+
+/// Collection of error details
+#[repr(C)]
+pub struct SimlinErrorDetails {
+    pub errors: *mut SimlinErrorDetail,
+    pub count: usize,
+}
