@@ -267,12 +267,14 @@ const InnerApp = styled(
         );
       }
 
-      if (!this.state.user) {
-        return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
-      }
+      if (!/\/.*\/.*/.test(window.location.pathname)) {
+        if (!this.state.user) {
+          return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
+        }
 
-      if (this.state.isNewUser) {
-        return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
+        if (this.state.isNewUser) {
+          return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
+        }
       }
 
       return (
