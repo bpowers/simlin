@@ -1358,9 +1358,117 @@ pub unsafe extern "C" fn simlin_free_error_detail(detail: *mut SimlinErrorDetail
     }
 }
 
+/// Gets the incoming links (dependencies) for a variable
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+/// - `var_name` must be a valid C string
+/// - `result` must be a valid pointer to an array of at least `max` char pointers (or null if max is 0)
+/// - The returned strings are owned by the caller and must be freed with simlin_free_string
+///
+/// # Returns
+/// - If max == 0: returns the total number of dependencies (result can be null)
+/// - If max is too small: returns a negative error code
+/// - Otherwise: returns the number of dependencies written to result
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_get_incoming_links(
+    sim: *mut SimlinSim,
+    var_name: *const c_char,
+    result: *mut *mut c_char,
+    max: usize,
+) -> c_int {
+    if sim.is_null() || var_name.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    // Only check result for null if max > 0
+    if max > 0 && result.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    let var_name = match CStr::from_ptr(var_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return engine::ErrorCode::Generic as c_int,
+    };
+
+    let sim = &*sim;
+    let project = &(*sim.project).project;
+
+    // Get the model
+    let model = match project.models.get(&canonicalize(&sim.model_name)) {
+        Some(m) => m,
+        None => return engine::ErrorCode::BadModelName as c_int,
+    };
+
+    // Get the variable
+    let var_ident = canonicalize(var_name);
+    let variable = match model.variables.get(&var_ident) {
+        Some(v) => v,
+        None => return engine::ErrorCode::UnknownDependency as c_int,
+    };
+
+    // Extract the AST based on variable type
+    let ast = match variable {
+        engine::Variable::Stock {
+            init_ast, errors, ..
+        } => {
+            if !errors.is_empty() {
+                return engine::ErrorCode::VariablesHaveErrors as c_int;
+            }
+            init_ast.as_ref()
+        }
+        engine::Variable::Var { ast, errors, .. } => {
+            if !errors.is_empty() {
+                return engine::ErrorCode::VariablesHaveErrors as c_int;
+            }
+            ast.as_ref()
+        }
+        engine::Variable::Module { .. } => {
+            // Modules don't have equations with dependencies
+            return 0; // Return 0 dependencies
+        }
+    };
+
+    let ast = match ast {
+        Some(a) => a,
+        None => return 0, // No equation means no dependencies
+    };
+
+    // Get the dependencies using identifier_set
+    let dependencies = engine::identifier_set(
+        ast,
+        &[],  // No dimensions needed for basic dependency extraction
+        None, // No module inputs
+    );
+
+    let dep_count = dependencies.len();
+
+    // If max == 0, just return the count (query mode)
+    if max == 0 {
+        return dep_count as c_int;
+    }
+
+    // If max is too small, return an error
+    if max < dep_count {
+        return -(engine::ErrorCode::Generic as c_int); // Return negative to indicate insufficient space
+    }
+
+    // Convert to C strings and fill the result array
+    for (i, dep) in dependencies.iter().enumerate() {
+        let c_string = match CString::new(dep.as_str()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        *result.add(i) = c_string.into_raw();
+    }
+
+    dep_count as c_int
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::test_common::TestProject;
     #[test]
     fn test_error_str() {
         unsafe {
@@ -2142,6 +2250,131 @@ mod tests {
             simlin_sim_unref(sim);
             // Sim should be freed now, project ref count should decrease
             assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 1);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_get_incoming_links() {
+        // Create a project with a flow that depends on a rate and a stock using TestProject
+        let test_project = TestProject::new("test")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("Stock", "100", &["flow"], &[], None)
+            .flow("flow", "rate * Stock", None)
+            .aux("rate", "0.5", None);
+
+        // Build the datamodel and serialize to protobuf
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine::serde::serialize(&datamodel_project);
+
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            let sim = simlin_sim_new(proj, ptr::null());
+            assert!(!sim.is_null());
+
+            // Test getting incoming links for the flow
+            let flow_name = CString::new("flow").unwrap();
+
+            // Test 1: Query the number of dependencies with max=0
+            let count = simlin_sim_get_incoming_links(
+                sim,
+                flow_name.as_ptr(),
+                ptr::null_mut(), // result can be null when max=0
+                0,
+            );
+            assert_eq!(count, 2, "Expected 2 dependencies for flow when querying");
+
+            // Test 2: Try with insufficient array size (should return error)
+            let mut small_links: [*mut c_char; 1] = [ptr::null_mut(); 1];
+            let count = simlin_sim_get_incoming_links(
+                sim,
+                flow_name.as_ptr(),
+                small_links.as_mut_ptr(),
+                1, // Only room for 1, but there are 2 dependencies
+            );
+            assert!(count < 0, "Expected negative error when array too small");
+
+            // Test 3: Proper usage - query then allocate
+            let count = simlin_sim_get_incoming_links(sim, flow_name.as_ptr(), ptr::null_mut(), 0);
+            assert_eq!(count, 2);
+
+            // Allocate exact size needed
+            let mut links = vec![ptr::null_mut::<c_char>(); count as usize];
+            let count2 = simlin_sim_get_incoming_links(
+                sim,
+                flow_name.as_ptr(),
+                links.as_mut_ptr(),
+                count as usize,
+            );
+            assert_eq!(
+                count2, count,
+                "Should return same count when array is exact size"
+            );
+
+            // Collect the dependency names
+            let mut dep_names = Vec::new();
+            for i in 0..count2 as usize {
+                assert!(!links[i].is_null());
+                let dep_name = CStr::from_ptr(links[i]).to_string_lossy().into_owned();
+                dep_names.push(dep_name);
+                simlin_free_string(links[i]);
+            }
+
+            // Check that we got both "rate" and "stock" (canonicalized to lowercase)
+            assert!(
+                dep_names.contains(&"rate".to_string()),
+                "Missing 'rate' dependency"
+            );
+            assert!(
+                dep_names.contains(&"stock".to_string()),
+                "Missing 'stock' dependency"
+            );
+
+            // Test getting incoming links for rate (should have none since it's a constant)
+            let rate_name = CString::new("rate").unwrap();
+            let count = simlin_sim_get_incoming_links(sim, rate_name.as_ptr(), ptr::null_mut(), 0);
+            assert_eq!(count, 0, "Expected 0 dependencies for rate");
+
+            // Test getting incoming links for stock (initial value is constant, so no deps)
+            let stock_name = CString::new("Stock").unwrap();
+            let count = simlin_sim_get_incoming_links(sim, stock_name.as_ptr(), ptr::null_mut(), 0);
+            assert_eq!(
+                count, 0,
+                "Expected 0 dependencies for Stock's initial value"
+            );
+
+            // Test error cases
+            // Non-existent variable
+            let nonexistent = CString::new("nonexistent").unwrap();
+            let count =
+                simlin_sim_get_incoming_links(sim, nonexistent.as_ptr(), ptr::null_mut(), 0);
+            assert_eq!(count, engine::ErrorCode::UnknownDependency as c_int);
+
+            // Null pointer checks
+            let count = simlin_sim_get_incoming_links(
+                ptr::null_mut(),
+                flow_name.as_ptr(),
+                ptr::null_mut(),
+                0,
+            );
+            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+
+            let count = simlin_sim_get_incoming_links(sim, ptr::null(), ptr::null_mut(), 0);
+            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+
+            // Test that result being null with max > 0 is an error
+            let count = simlin_sim_get_incoming_links(sim, flow_name.as_ptr(), ptr::null_mut(), 10);
+            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+
+            // Clean up
+            simlin_sim_unref(sim);
             simlin_project_unref(proj);
         }
     }

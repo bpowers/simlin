@@ -7,22 +7,15 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-#[cfg(test)]
 use crate::common::ErrorCode;
 use crate::common::{Canonical, Ident};
-#[cfg(test)]
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
-#[cfg(test)]
 use crate::interpreter::Simulation;
-#[cfg(test)]
 use crate::project::Project as CompiledProject;
-#[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
 use std::rc::Rc;
 
 /// Builder for creating test projects with support for arrays, units, and all variable types
-#[cfg(test)]
 pub struct TestProject {
     pub name: String,
     pub dimensions: Vec<Dimension>,
@@ -31,7 +24,6 @@ pub struct TestProject {
     pub sim_specs: SimSpecs,
 }
 
-#[cfg(test)]
 impl TestProject {
     /// Create a new test project builder with default settings
     pub fn new(name: &str) -> Self {
@@ -517,7 +509,6 @@ impl TestProject {
 }
 
 /// Helper to parse array declarations like "name[dim1,dim2]"
-#[cfg(test)]
 pub fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
     if let Some(bracket_pos) = decl.find('[') {
         let name = decl[..bracket_pos].to_string();

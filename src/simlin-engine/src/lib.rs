@@ -37,8 +37,7 @@ pub mod interpreter;
 pub mod ltm;
 pub mod ltm_augment;
 mod project;
-#[cfg(test)]
-mod test_common;
+pub mod test_common;
 #[cfg(test)]
 mod testutils;
 #[cfg(test)]
@@ -52,7 +51,7 @@ pub use self::builder::build_sim_with_stderrors;
 pub use self::common::{Error, ErrorCode, Result, canonicalize};
 pub use self::interpreter::Simulation;
 pub use self::project::Project;
-pub use self::variable::Variable;
+pub use self::variable::{Variable, identifier_set};
 pub use self::vm::Method;
 pub use self::vm::Results;
 pub use self::vm::Specs as SimSpecs;

@@ -297,23 +297,123 @@ SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, int *err);
 int simlin_export_xmile(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
 
 // Get all errors in a project including static analysis and compilation errors
-// Returns NULL if no errors, caller must free with simlin_free_error_details
+//
+// Returns NULL if no errors exist in the project. This function collects all
+// static errors (equation parsing, unit checking, etc.) and also attempts to
+// compile the "main" model to find any compilation-time errors.
+//
+// The caller must free the returned error details using `simlin_free_error_details`.
+//
+// # Example Usage (C)
+// ```c
+// SimlinErrorDetails* errors = simlin_project_get_errors(project);
+// if (errors != NULL) {
+//     for (size_t i = 0; i < errors->count; i++) {
+//         SimlinErrorDetail* error = &errors->errors[i];
+//         printf("Error %d", error->code);
+//         if (error->model_name != NULL) {
+//             printf(" in model %s", error->model_name);
+//         }
+//         if (error->variable_name != NULL) {
+//             printf(" for variable %s", error->variable_name);
+//         }
+//         printf("\n");
+//     }
+//     simlin_free_error_details(errors);
+// } else {
+//     // Project has no errors and is ready to simulate
+// }
+// ```
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
+// - The returned pointer must be freed with `simlin_free_error_details`
 SimlinErrorDetails *simlin_project_get_errors(SimlinProject *project);
 
 // Free error details returned by the API
 //
+// This function properly deallocates all memory associated with an error details
+// collection, including all string fields within each error detail.
+//
+// # Example Usage (C)
+// ```c
+// SimlinErrorDetails* errors = simlin_project_get_errors(project);
+// // ... use the errors ...
+// simlin_free_error_details(errors); // Always free when done
+// ```
+//
 // # Safety
-// - `details` must be a valid pointer returned by simlin_project_get_errors
+// - `details` must be a valid pointer returned by simlin_project_get_errors or similar
+// - The pointer must not be used after calling this function
 void simlin_free_error_details(SimlinErrorDetails *details);
 
 // Free a single error detail
 //
+// This function properly deallocates all memory associated with a single error
+// detail, including all string fields.
+//
+// # Example Usage (C)
+// ```c
+// SimlinErrorDetail* error = simlin_project_get_simulation_error(project, NULL);
+// if (error != NULL) {
+//     // ... use the error ...
+//     simlin_free_error_detail(error); // Always free when done
+// }
+// ```
+//
 // # Safety
-// - `detail` must be a valid pointer to a SimlinErrorDetail
+// - `detail` must be a valid pointer returned by simlin_project_get_simulation_error
+// - The pointer must not be used after calling this function
 void simlin_free_error_detail(SimlinErrorDetail *detail);
+
+// Gets the incoming links (dependencies) for a variable
+//
+// This function extracts the dependencies from a variable's equation AST.
+// For flows and aux variables, it returns dependencies from their equations.
+// For stocks, it returns dependencies from their initial value equation.
+//
+// # Example Usage (C)
+// ```c
+// // First query the number of dependencies
+// int dep_count = simlin_sim_get_incoming_links(sim, "flow_rate", NULL, 0);
+// if (dep_count < 0) {
+//     // Handle error
+//     return;
+// }
+//
+// // Allocate array of exact size needed
+// char** deps = calloc(dep_count, sizeof(char*));
+// 
+// // Get the actual dependencies
+// int count = simlin_sim_get_incoming_links(sim, "flow_rate", deps, dep_count);
+// if (count != dep_count) {
+//     // Handle error
+//     free(deps);
+//     return;
+// }
+//
+// // Use the dependencies
+// for (int i = 0; i < count; i++) {
+//     printf("Dependency: %s\n", deps[i]);
+//     simlin_free_string(deps[i]);  // Free each string
+// }
+// free(deps);  // Free the array
+// ```
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+// - `var_name` must be a valid C string
+// - `result` must be a valid pointer to an array of at least `max` char pointers (or null if max is 0)
+// - The returned strings are owned by the caller and must be freed with simlin_free_string
+//
+// # Returns
+// - If max == 0: returns the total number of dependencies (result can be null)
+// - If max is too small: returns a negative error code
+// - Otherwise: returns the number of dependencies written to result
+int simlin_sim_get_incoming_links(SimlinSim *sim,
+                                  const char *var_name,
+                                  char **result,
+                                  uintptr_t max);
 
 #ifdef __cplusplus
 }  // extern "C"
