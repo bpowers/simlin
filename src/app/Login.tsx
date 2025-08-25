@@ -29,6 +29,7 @@ import Typography from '@mui/material/Typography';
 import TextField from '@mui/material/TextField';
 
 import { ModelIcon } from '@system-dynamics/diagram/ModelIcon';
+import { FormEvent, useState } from 'react';
 
 type EmailLoginStates = 'showEmail' | 'showPassword' | 'showSignup' | 'showProviderRedirect' | 'showRecover';
 
@@ -55,7 +56,11 @@ function appleProvider(): OAuthProvider {
   return provider;
 }
 
-export const GoogleIcon: React.FunctionComponent = styled((props) => {
+function getValueFromEvent(event: FormEvent<HTMLFormElement>, elementName: string) {
+  return (event.currentTarget.elements.namedItem(elementName) as HTMLInputElement).value;
+}
+
+export const GoogleIcon = styled((props) => {
   return (
     <SvgIcon {...props}>
       <path d="M12.545,10.239v3.821h5.445c-0.712,2.315-2.647,3.972-5.445,3.972c-3.332,0-6.033-2.701-6.033-6.032s2.701-6.032,6.033-6.032c1.498,0,2.866,0.549,3.921,1.453l2.814-2.814C17.503,2.988,15.139,2,12.545,2C7.021,2,2.543,6.477,2.543,12s4.478,10,10.002,10c8.396,0,10.249-7.85,9.426-11.748L12.545,10.239z" />
@@ -65,431 +70,338 @@ export const GoogleIcon: React.FunctionComponent = styled((props) => {
   fill: white;
 `);
 
-export const Login = styled(
-  class Login extends React.Component<LoginProps & { className?: string }, LoginState> {
-    state: LoginState;
+function LoginInner({ auth, disabled }: LoginProps) {
+  const [state, setState] = useState<LoginState>({
+    emailLoginFlow: undefined,
+    email: '',
+    emailError: undefined,
+    password: '',
+    passwordError: undefined,
+    fullName: '',
+    fullNameError: undefined,
+    provider: undefined,
+  });
 
-    constructor(props: LoginProps) {
-      super(props);
+  if (disabled) return <></>;
 
-      this.state = {
-        emailLoginFlow: undefined,
-        email: '',
-        emailError: undefined,
-        password: '',
-        passwordError: undefined,
-        fullName: '',
-        fullNameError: undefined,
-        provider: undefined,
-      };
+  async function appleLoginClick(event: FormEvent) {
+    event.preventDefault();
+    await signInWithRedirect(auth, appleProvider());
+  }
+
+  async function googleLoginClick(event: FormEvent) {
+    event.preventDefault();
+    const provider = new GoogleAuthProvider();
+    provider.addScope('profile');
+    await signInWithRedirect(auth, provider);
+  }
+
+  function emailLoginClick() {
+    setState((state) => ({ ...state, emailLoginFlow: 'showEmail' }));
+  }
+
+  function onEmailCancel() {
+    setState((state) => ({ ...state, emailLoginFlow: undefined }));
+  }
+  async function onSubmitEmail(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = getValueFromEvent(event, 'email').trim();
+    if (!email) {
+      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
+      return;
     }
 
-    appleLoginClick = () => {
-      const provider = appleProvider();
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
-      setTimeout(async () => {
-        await signInWithRedirect(this.props.auth, provider);
-      });
-    };
-    googleLoginClick = () => {
-      const provider = new GoogleAuthProvider();
-      provider.addScope('profile');
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
-      setTimeout(async () => {
-        await signInWithRedirect(this.props.auth, provider);
-      });
-    };
-    emailLoginClick = () => {
-      this.setState({ emailLoginFlow: 'showEmail' });
-    };
-    onFullNameChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-      this.setState({ fullName: event.target.value });
-    };
-    onPasswordChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-      this.setState({ password: event.target.value });
-    };
-    onEmailChanged = (event: React.ChangeEvent<HTMLInputElement>) => {
-      this.setState({ email: event.target.value });
-    };
-    onEmailCancel = () => {
-      this.setState({ emailLoginFlow: undefined });
-    };
-    onSubmitEmail = async () => {
-      const email = this.state.email.trim();
-      if (!email) {
-        this.setState({ emailError: 'Enter your email address to continue' });
-        return;
-      }
+    const methods = await fetchSignInMethodsForEmail(auth, email);
+    if (methods.includes('password')) setState((state) => ({ ...state, emailLoginFlow: 'showPassword' }));
+    else if (methods.length === 0) setState((state) => ({ ...state, emailLoginFlow: 'showSignup' }));
+    else {
+      // we only allow 1 method
+      const method = methods[0];
+      if (method === 'google.com' || method === 'apple.com') {
+        setState((state) => ({
+          ...state,
+          emailLoginFlow: 'showProviderRedirect',
+          provider: methods[0] as 'google.com' | 'apple.com',
+        }));
+      } else
+        setState((state) => ({ ...state, emailError: 'an unknown error occurred; try a different email address' }));
+    }
+  }
+  async function onSubmitRecovery(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = getValueFromEvent(event, 'email').trim();
+    if (!email) {
+      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
+      return;
+    }
 
-      const methods = await fetchSignInMethodsForEmail(this.props.auth, email);
-      if (methods.includes('password')) {
-        this.setState({ emailLoginFlow: 'showPassword' });
-      } else if (methods.length === 0) {
-        this.setState({ emailLoginFlow: 'showSignup' });
+    await sendPasswordResetEmail(auth, email);
+
+    setState((state) => ({ ...state, emailLoginFlow: 'showPassword', password: '', passwordError: undefined }));
+  }
+  async function onSubmitNewUser(event: FormEvent<HTMLFormElement>) {
+    const email = getValueFromEvent(event, 'email').trim();
+    if (!email) {
+      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
+      return;
+    }
+
+    const fullName = getValueFromEvent(event, 'fullName').trim();
+    if (!fullName) {
+      setState((state) => ({ ...state, fullNameError: 'Enter your name to continue' }));
+      return;
+    }
+
+    const password = getValueFromEvent(event, 'password').trim();
+    if (!password) {
+      setState((state) => ({ ...state, passwordError: 'Enter your password to continue' }));
+      return;
+    }
+
+    try {
+      const userCred = await createUserWithEmailAndPassword(auth, email, password);
+      await updateProfile(userCred.user, { displayName: fullName });
+    } catch (err) {
+      console.log(err);
+      if (err instanceof Error) {
+        setState((state) => ({ ...state, passwordError: err.message }));
       } else {
-        // we only allow 1 method
-        const method = methods[0];
-        if (method === 'google.com' || method === 'apple.com') {
-          this.setState({
-            emailLoginFlow: 'showProviderRedirect',
-            provider: methods[0] as 'google.com' | 'apple.com',
-          });
-        } else {
-          this.setState({
-            emailError: 'an unknown error occurred; try a different email address',
-          });
-        }
+        setState((state) => ({ ...state, passwordError: 'Something unknown went wrong' }));
       }
-    };
-    onSubmitRecovery = async () => {
-      const email = this.state.email.trim();
-      if (!email) {
-        this.setState({ emailError: 'Enter your email address to continue' });
-        return;
-      }
+    }
+  }
+  function onEmailHelp() {
+    setState((state) => ({ ...state, emailLoginFlow: 'showRecover' }));
+  }
+  async function onEmailLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = getValueFromEvent(event, 'email').trim();
+    if (!email) {
+      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
+      return;
+    }
 
-      await sendPasswordResetEmail(this.props.auth, email);
+    const password = getValueFromEvent(event, 'password').trim();
+    if (!password) {
+      setState((state) => ({ ...state, passwordError: 'Enter your password to continue' }));
+      return;
+    }
 
-      this.setState({
-        emailLoginFlow: 'showPassword',
-        password: '',
-        passwordError: undefined,
-      });
-    };
-    onSubmitNewUser = async () => {
-      const email = this.state.email.trim();
-      if (!email) {
-        this.setState({ emailError: 'Enter your email address to continue' });
-        return;
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (err) {
+      console.error(err);
+      if (err instanceof Error) {
+        setState((state) => ({ ...state, passwordError: err.message }));
       }
+    }
+  }
 
-      const fullName = this.state.fullName.trim();
-      if (!fullName) {
-        this.setState({ emailError: 'Enter your email address to continue' });
-        return;
-      }
+  function EmailField({ autoFocus }: { autoFocus?: boolean }) {
+    return (
+      <TextField
+        name="email"
+        label="Email"
+        value={state.email}
+        type="email"
+        margin="normal"
+        variant="standard"
+        error={!!state.emailError}
+        helperText={state.emailError}
+        fullWidth
+        autoFocus={autoFocus}
+      />
+    );
+  }
 
-      const password = this.state.password.trim();
-      if (!password) {
-        this.setState({ passwordError: 'Enter your email address to continue' });
-        return;
-      }
+  function PasswordField({ autoFocus }: { autoFocus?: boolean }) {
+    return (
+      <TextField
+        name="password"
+        label="Choose password"
+        value={state.password}
+        type="password"
+        autoComplete="current-password"
+        margin="normal"
+        variant="standard"
+        error={state.passwordError !== undefined}
+        helperText={state.passwordError}
+        fullWidth
+        autoFocus={autoFocus}
+      />
+    );
+  }
 
-      try {
-        const userCred = await createUserWithEmailAndPassword(this.props.auth, email, password);
-        await updateProfile(userCred.user, { displayName: fullName });
-      } catch (err) {
-        console.log(err);
-        if (err instanceof Error) {
-          this.setState({ passwordError: err.message });
-        } else {
-          this.setState({ passwordError: 'something unknown went wrong' });
-        }
-      }
-    };
-    onNullSubmit = (event: React.FormEvent<HTMLFormElement>): boolean => {
-      event.preventDefault();
-      return false;
-    };
-    onEmailHelp = () => {
-      this.setState({ emailLoginFlow: 'showRecover' });
-    };
-    onEmailLogin = async () => {
-      const email = this.state.email.trim();
-      if (!email) {
-        this.setState({ emailError: 'Enter your email address to continue' });
-        return;
-      }
+  if (state.emailLoginFlow === 'showEmail')
+    return (
+      <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className="simlin-login-email-form">
+        <form onSubmit={onSubmitEmail}>
+          <CardContent>
+            <Typography variant="h6" component="div">
+              Sign in with email
+            </Typography>
+            <EmailField autoFocus />
+          </CardContent>
+          <CardActions>
+            <Button sx={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="contained">
+              Next
+            </Button>
+          </CardActions>
+        </form>
+      </Card>
+    );
+  else if (state.emailLoginFlow === 'showPassword')
+    return (
+      <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className="simlin-login-email-form">
+        <form onSubmit={onEmailLogin}>
+          <CardContent>
+            <Typography variant="h6" component="div">
+              Sign in
+            </Typography>
+            <EmailField />
+            <PasswordField autoFocus />
+          </CardContent>
+          <CardActions>
+            <Typography sx={{ marginRight: 'auto' }} variant="body2">
+              <Link sx={{ cursor: 'help' }} underline="hover" onClick={onEmailHelp}>
+                Trouble signing in?
+              </Link>
+            </Typography>
+            <Button type="submit" variant="contained">
+              Sign in
+            </Button>
+          </CardActions>
+        </form>
+      </Card>
+    );
+  else if (state.emailLoginFlow === 'showSignup')
+    return (
+      <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className="simlin-login-email-form">
+        <form onSubmit={onSubmitNewUser}>
+          <CardContent>
+            <Typography variant="h6" component="div">
+              Create account
+            </Typography>
+            <EmailField />
+            <TextField
+              name="fullName"
+              label="First & last name"
+              value={state.fullName}
+              margin="normal"
+              variant="standard"
+              error={state.fullNameError !== undefined}
+              helperText={state.fullNameError}
+              fullWidth
+              autoFocus
+            />
+          </CardContent>
+          <CardActions>
+            <Button sx={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="contained">
+              Save
+            </Button>
+          </CardActions>
+        </form>
+      </Card>
+    );
+  else if (state.emailLoginFlow === 'showProviderRedirect')
+    return (
+      <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className="simlin-login-email-form">
+        <form onSubmit={state.provider === 'google.com' ? googleLoginClick : appleLoginClick}>
+          <CardContent>
+            <Typography variant="h6" component="div">
+              Sign in - you already have an account
+            </Typography>
+            <Typography className="simlin-login-recover-instructions">
+              You’ve already used {state.provider} to sign up with <b>{state.email}</b>. Sign in with {state.provider}{' '}
+              to continue.
+            </Typography>
+          </CardContent>
+          <CardActions>
+            <Button sx={{ marginLeft: 'auto' }} type="submit" variant="contained">
+              Sign in with {state.provider}
+            </Button>
+          </CardActions>
+        </form>
+      </Card>
+    );
+  else if (state.emailLoginFlow === 'showRecover')
+    return (
+      <Card variant="outlined" sx={{ minWidth: 275, maxWidth: 360, width: '100%' }} className="simlin-login-email-form">
+        <form onSubmit={onSubmitRecovery}>
+          <CardContent>
+            <Typography variant="h6" component="div">
+              Recover password
+            </Typography>
+            <Typography className="simlin-login-recover-instructions">
+              Get instructions sent to this email that explain how to reset your password
+            </Typography>
+            <EmailField autoFocus />
+          </CardContent>
+          <CardActions>
+            <Button sx={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="contained">
+              Send
+            </Button>
+          </CardActions>
+        </form>
+      </Card>
+    );
+  else
+    return (
+      <div className="simlin-login-options-buttons">
+        <Button
+          variant="contained"
+          sx={{ backgroundColor: 'black' }}
+          startIcon={<AppleIcon />}
+          onClick={appleLoginClick}
+        >
+          Sign in with Apple
+        </Button>
+        <br />
+        <Button variant="contained" color="primary" startIcon={<GoogleIcon />} onClick={googleLoginClick}>
+          Sign in with Google
+        </Button>
+        <br />
+        <Button
+          variant="contained"
+          sx={{ backgroundColor: '#db4437' }}
+          startIcon={<EmailIcon />}
+          onClick={emailLoginClick}
+        >
+          Sign in with email
+        </Button>
+        <br />
+      </div>
+    );
+}
 
-      const password = this.state.password.trim();
-      if (!password) {
-        this.setState({ passwordError: 'Enter your email address to continue' });
-        return;
-      }
+function LoginOuter({ className, auth, disabled }: LoginProps & { className?: string }) {
+  const disabledClass = disabled ? 'simlin-login-disabled' : 'simlin-login-inner-inner';
 
-      try {
-        await signInWithEmailAndPassword(this.props.auth, email, password);
-      } catch (err) {
-        console.log(err);
-        if (err instanceof Error) {
-          this.setState({ passwordError: err.message });
-        }
-      }
-    };
-    render() {
-      const { className } = this.props;
-      const disabledClass = this.props.disabled ? 'simlin-login-disabled' : 'simlin-login-inner-inner';
-
-      let loginUI: JSX.Element | undefined = undefined;
-      if (!this.props.disabled) {
-        switch (this.state.emailLoginFlow) {
-          case 'showEmail':
-            loginUI = (
-              <Card
-                variant="outlined"
-                sx={{ minWidth: 275, maxWidth: 360, width: '100%' }}
-                className="simlin-login-email-form"
-              >
-                <form onSubmit={this.onNullSubmit}>
-                  <CardContent>
-                    <Typography variant="h6" component="div">
-                      Sign in with email
-                    </Typography>
-                    <TextField
-                      label="Email"
-                      value={this.state.email}
-                      onChange={this.onEmailChanged}
-                      type="email"
-                      margin="normal"
-                      variant="standard"
-                      error={this.state.emailError !== undefined}
-                      helperText={this.state.emailError}
-                      fullWidth
-                      autoFocus
-                    />
-                  </CardContent>
-                  <CardActions>
-                    <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
-                      Cancel
-                    </Button>
-                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
-                    <Button type="submit" variant="contained" onClick={this.onSubmitEmail}>
-                      Next
-                    </Button>
-                  </CardActions>
-                </form>
-              </Card>
-            );
-            break;
-          case 'showPassword':
-            loginUI = (
-              <Card
-                variant="outlined"
-                sx={{ minWidth: 275, maxWidth: 360, width: '100%' }}
-                className="simlin-login-email-form"
-              >
-                <form onSubmit={this.onNullSubmit}>
-                  <CardContent>
-                    <Typography variant="h6" component="div">
-                      Sign in
-                    </Typography>
-                    <TextField
-                      label="Email"
-                      value={this.state.email}
-                      onChange={this.onEmailChanged}
-                      type="email"
-                      margin="normal"
-                      variant="standard"
-                      error={this.state.emailError !== undefined}
-                      helperText={this.state.emailError}
-                      fullWidth
-                    />
-                    <TextField
-                      label="Password"
-                      value={this.state.password}
-                      onChange={this.onPasswordChanged}
-                      type="password"
-                      autoComplete="current-password"
-                      margin="normal"
-                      variant="standard"
-                      error={this.state.passwordError !== undefined}
-                      helperText={this.state.passwordError}
-                      fullWidth
-                      autoFocus
-                    />
-                  </CardContent>
-                  <CardActions>
-                    <Typography sx={{ marginRight: 'auto' }} variant="body2">
-                      <Link sx={{ cursor: 'help' }} underline="hover" onClick={this.onEmailHelp}>
-                        Trouble signing in?
-                      </Link>
-                    </Typography>
-                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
-                    <Button type="submit" variant="contained" onClick={this.onEmailLogin}>
-                      Sign in
-                    </Button>
-                  </CardActions>
-                </form>
-              </Card>
-            );
-            break;
-          case 'showSignup':
-            loginUI = (
-              <Card
-                variant="outlined"
-                sx={{ minWidth: 275, maxWidth: 360, width: '100%' }}
-                className="simlin-login-email-form"
-              >
-                <form onSubmit={this.onNullSubmit}>
-                  <CardContent>
-                    <Typography variant="h6" component="div">
-                      Create account
-                    </Typography>
-                    <TextField
-                      label="Email"
-                      value={this.state.email}
-                      onChange={this.onEmailChanged}
-                      type="email"
-                      margin="normal"
-                      variant="standard"
-                      error={this.state.emailError !== undefined}
-                      helperText={this.state.emailError}
-                      fullWidth
-                    />
-                    <TextField
-                      label="First & last name"
-                      value={this.state.fullName}
-                      onChange={this.onFullNameChanged}
-                      margin="normal"
-                      variant="standard"
-                      error={this.state.fullNameError !== undefined}
-                      helperText={this.state.fullNameError}
-                      fullWidth
-                      autoFocus
-                    />
-                    <TextField
-                      label="Choose password"
-                      value={this.state.password}
-                      onChange={this.onPasswordChanged}
-                      type="password"
-                      autoComplete="current-password"
-                      margin="normal"
-                      variant="standard"
-                      error={this.state.passwordError !== undefined}
-                      helperText={this.state.passwordError}
-                      fullWidth
-                    />
-                  </CardContent>
-                  <CardActions>
-                    <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
-                      Cancel
-                    </Button>
-                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
-                    <Button type="submit" variant="contained" onClick={this.onSubmitNewUser}>
-                      Save
-                    </Button>
-                  </CardActions>
-                </form>
-              </Card>
-            );
-            break;
-          case 'showProviderRedirect':
-            const provider = this.state.provider === 'google.com' ? 'Google' : 'Apple';
-            loginUI = (
-              <Card
-                variant="outlined"
-                sx={{ minWidth: 275, maxWidth: 360, width: '100%' }}
-                className="simlin-login-email-form"
-              >
-                <form onSubmit={this.onNullSubmit}>
-                  <CardContent>
-                    <Typography variant="h6" component="div">
-                      Sign in - you already have an account
-                    </Typography>
-                    <Typography className="simlin-login-recover-instructions">
-                      You’ve already used {provider} to sign up with <b>{this.state.email}</b>. Sign in with {provider}{' '}
-                      to continue.
-                    </Typography>
-                  </CardContent>
-                  <CardActions>
-                    <Button
-                      sx={{ marginLeft: 'auto' }}
-                      type="submit"
-                      variant="contained"
-                      onClick={this.state.provider === 'google.com' ? this.googleLoginClick : this.appleLoginClick}
-                    >
-                      Sign in with {provider}
-                    </Button>
-                  </CardActions>
-                </form>
-              </Card>
-            );
-            break;
-          case 'showRecover':
-            loginUI = (
-              <Card
-                variant="outlined"
-                sx={{ minWidth: 275, maxWidth: 360, width: '100%' }}
-                className="simlin-login-email-form"
-              >
-                <form onSubmit={this.onNullSubmit}>
-                  <CardContent>
-                    <Typography variant="h6" component="div">
-                      Recover password
-                    </Typography>
-                    <Typography className="simlin-login-recover-instructions">
-                      Get instructions sent to this email that explain how to reset your password
-                    </Typography>
-                    <TextField
-                      label="Email"
-                      value={this.state.email}
-                      onChange={this.onEmailChanged}
-                      type="email"
-                      margin="normal"
-                      variant="standard"
-                      error={this.state.emailError !== undefined}
-                      helperText={this.state.emailError}
-                      fullWidth
-                      autoFocus
-                    />
-                  </CardContent>
-                  <CardActions>
-                    <Button sx={{ marginLeft: 'auto' }} onClick={this.onEmailCancel}>
-                      Cancel
-                    </Button>
-                    {/* eslint-disable-next-line @typescript-eslint/no-misused-promises */}
-                    <Button type="submit" variant="contained" onClick={this.onSubmitRecovery}>
-                      Send
-                    </Button>
-                  </CardActions>
-                </form>
-              </Card>
-            );
-            break;
-          default:
-            loginUI = (
-              <div className="simlin-login-options-buttons">
-                <Button
-                  variant="contained"
-                  sx={{ backgroundColor: 'black' }}
-                  startIcon={<AppleIcon />}
-                  onClick={this.appleLoginClick}
-                >
-                  Sign in with Apple
-                </Button>
-                <br />
-                <Button variant="contained" color="primary" startIcon={<GoogleIcon />} onClick={this.googleLoginClick}>
-                  Sign in with Google
-                </Button>
-                <br />
-                <Button
-                  variant="contained"
-                  sx={{ backgroundColor: '#db4437' }}
-                  startIcon={<EmailIcon />}
-                  onClick={this.emailLoginClick}
-                >
-                  Sign in with email
-                </Button>
-                <br />
-              </div>
-            );
-        }
-      }
-
-      return (
-        <div className={clsx(className, 'simlin-login-outer')}>
-          <div className="simlin-login-middle">
-            <div className="simlin-login-inner">
-              <ModelIcon className="simlin-login-logo" />
-              <br />
-              <div className={disabledClass}>{loginUI}</div>
-            </div>
+  return (
+    <div className={clsx(className, 'simlin-login-outer')}>
+      <div className="simlin-login-middle">
+        <div className="simlin-login-inner">
+          <ModelIcon className="simlin-login-logo" />
+          <br />
+          <div className={disabledClass}>
+            <LoginInner auth={auth} disabled={disabled} />
           </div>
         </div>
-      );
-    }
-  },
-)(({ theme }) => ({
+      </div>
+    </div>
+  );
+}
+
+export const Login = styled(LoginOuter)(({ theme }) => ({
   '&.simlin-login-outer': {
     display: 'table',
     position: 'absolute',
