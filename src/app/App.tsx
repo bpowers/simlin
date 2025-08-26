@@ -228,7 +228,16 @@ const InnerApp = styled(
 
     editor = (props: RouteComponentProps<EditorMatchParams>) => {
       const { username, projectName } = props.params;
-      return <HostedWebEditor username={username} projectName={projectName} baseURL={this.getBaseURL()} />;
+      const user = this.state.user;
+      const readOnlyMode = !user || user.id !== username;
+      return (
+        <HostedWebEditor
+          username={username}
+          projectName={projectName}
+          baseURL={this.getBaseURL()}
+          readOnlyMode={readOnlyMode}
+        />
+      );
     };
 
     home = (_props: RouteComponentProps) => {
