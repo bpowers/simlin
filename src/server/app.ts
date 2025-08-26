@@ -224,19 +224,30 @@ class App {
 
     this.app.get(
       '/:username/:projectName',
-      userAuthz,
+      async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+        const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
+        if (project?.getIsPublic()) next();
+        else userAuthz(req, res, next);
+      },
       async (req: Request, res: Response, next: NextFunction): Promise<void> => {
         const email = req.session.passport.user.email as string;
         const user = req.user as any as UserPb | undefined;
-        if (!user) {
-          logger.warn(`user not found for '${email}', but passed authz?`);
-          res.status(500).json({});
+
+        const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
+        if (!project) {
+          res.status(404).json({});
           return;
-        }
-        // TODO
-        if (user.getId() !== req.params.username) {
-          res.status(401).json({});
-          return;
+        } else if (!project.getIsPublic()) {
+          if (!user) {
+            logger.warn(`user not found for '${email}', but passed authz?`);
+            res.status(500).json({});
+            return;
+          }
+          // TODO
+          if (user.getId() !== req.params.username) {
+            res.status(401).json({});
+            return;
+          }
         }
 
         if (
@@ -248,7 +259,7 @@ class App {
         }
 
         const projectName: string = req.params.projectName;
-        const projectId = `${user.getId()}/${projectName}`;
+        const projectId = `${req.params.username}/${projectName}`;
         const projectModel = await this.app.db.project.findOne(projectId);
         if (!projectModel || !projectModel.getFileId()) {
           res.status(404).json({});
