@@ -1378,17 +1378,17 @@ pub unsafe extern "C" fn simlin_sim_get_incoming_links(
     max: usize,
 ) -> c_int {
     if sim.is_null() || var_name.is_null() {
-        return engine::ErrorCode::Generic as c_int;
+        return -(engine::ErrorCode::Generic as c_int);
     }
 
     // Only check result for null if max > 0
     if max > 0 && result.is_null() {
-        return engine::ErrorCode::Generic as c_int;
+        return -(engine::ErrorCode::Generic as c_int);
     }
 
     let var_name = match CStr::from_ptr(var_name).to_str() {
         Ok(s) => s,
-        Err(_) => return engine::ErrorCode::Generic as c_int,
+        Err(_) => return -(engine::ErrorCode::Generic as c_int),
     };
 
     let sim = &*sim;
@@ -1397,14 +1397,14 @@ pub unsafe extern "C" fn simlin_sim_get_incoming_links(
     // Get the model
     let model = match project.models.get(&canonicalize(&sim.model_name)) {
         Some(m) => m,
-        None => return engine::ErrorCode::BadModelName as c_int,
+        None => return -(engine::ErrorCode::BadModelName as c_int),
     };
 
     // Get the variable
     let var_ident = canonicalize(var_name);
     let variable = match model.variables.get(&var_ident) {
         Some(v) => v,
-        None => return engine::ErrorCode::UnknownDependency as c_int,
+        None => return -(engine::ErrorCode::UnknownDependency as c_int),
     };
 
     // Extract the AST based on variable type
@@ -1413,13 +1413,13 @@ pub unsafe extern "C" fn simlin_sim_get_incoming_links(
             init_ast, errors, ..
         } => {
             if !errors.is_empty() {
-                return engine::ErrorCode::VariablesHaveErrors as c_int;
+                return -(engine::ErrorCode::VariablesHaveErrors as c_int);
             }
             init_ast.as_ref()
         }
         engine::Variable::Var { ast, errors, .. } => {
             if !errors.is_empty() {
-                return engine::ErrorCode::VariablesHaveErrors as c_int;
+                return -(engine::ErrorCode::VariablesHaveErrors as c_int);
             }
             ast.as_ref()
         }
@@ -2355,7 +2355,11 @@ mod tests {
             let nonexistent = CString::new("nonexistent").unwrap();
             let count =
                 simlin_sim_get_incoming_links(sim, nonexistent.as_ptr(), ptr::null_mut(), 0);
-            assert_eq!(count, engine::ErrorCode::UnknownDependency as c_int);
+            assert_eq!(
+                count,
+                -(engine::ErrorCode::UnknownDependency as c_int),
+                "Expected negative UnknownDependency error code for non-existent variable"
+            );
 
             // Null pointer checks
             let count = simlin_sim_get_incoming_links(
@@ -2364,14 +2368,26 @@ mod tests {
                 ptr::null_mut(),
                 0,
             );
-            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+            assert_eq!(
+                count,
+                -(engine::ErrorCode::Generic as c_int),
+                "Expected negative Generic error code for null sim"
+            );
 
             let count = simlin_sim_get_incoming_links(sim, ptr::null(), ptr::null_mut(), 0);
-            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+            assert_eq!(
+                count,
+                -(engine::ErrorCode::Generic as c_int),
+                "Expected negative Generic error code for null var_name"
+            );
 
             // Test that result being null with max > 0 is an error
             let count = simlin_sim_get_incoming_links(sim, flow_name.as_ptr(), ptr::null_mut(), 10);
-            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+            assert_eq!(
+                count,
+                -(engine::ErrorCode::Generic as c_int),
+                "Expected negative Generic error code for null result with max > 0"
+            );
 
             // Clean up
             simlin_sim_unref(sim);
