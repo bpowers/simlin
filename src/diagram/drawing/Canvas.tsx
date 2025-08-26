@@ -421,6 +421,7 @@ export const Canvas = styled(
         from,
         to,
         isSelected,
+        isDashed: to instanceof StockViewElement,
         onSelection: this.handleEditConnector,
       };
       if (isSelected && !isSticky) {

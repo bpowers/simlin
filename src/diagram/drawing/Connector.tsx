@@ -127,6 +127,7 @@ export function circleFromPoints(p1: Point, p2: Point, p3: Point): Circle {
 
 export interface ConnectorProps {
   isSelected: boolean;
+  isDashed?: boolean;
   from: ViewElement;
   element: LinkViewElement;
   to: ViewElement;
@@ -176,7 +177,7 @@ export const Connector = styled(
     }
 
     renderStraightLine() {
-      const { from, to, isSelected, className } = this.props;
+      const { from, to, isSelected, isDashed, className } = this.props;
 
       const θ = atan2(to.cy - from.cy, to.cx - from.cx);
       const start = Conn.intersectElementStraight(from, θ);
@@ -185,12 +186,17 @@ export const Connector = styled(
       const arrowθ = radToDeg(θ);
       const path = `M${start.x},${start.y}L${end.x},${end.y}`;
 
+      let connectorClass = isSelected ? 'simlin-connector-selected' : 'simlin-connector';
+      if (isDashed && !isSelected) {
+        connectorClass = 'simlin-connector-dashed';
+      }
+
       return (
         <g key={this.props.element.uid} className={className}>
           <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
           <path
             d={path}
-            className={isSelected ? 'simlin-connector-selected' : 'simlin-connector'}
+            className={connectorClass}
             onPointerDown={this.handlePointerDownArc}
           />
           <Arrowhead
@@ -273,7 +279,7 @@ export const Connector = styled(
     }
 
     renderArc() {
-      const { className, from, to, isSelected } = this.props;
+      const { className, from, to, isSelected, isDashed } = this.props;
 
       const takeoffAngle = takeoffθ(this.props);
       const circ = Conn.arcCircle(this.props);
@@ -318,12 +324,17 @@ export const Connector = styled(
         arrowθ += 180;
       }
 
+      let connectorClass = isSelected ? 'simlin-connector-selected' : 'simlin-connector';
+      if (isDashed && !isSelected) {
+        connectorClass = 'simlin-connector-dashed';
+      }
+
       return (
         <g key={this.props.element.uid} className={className}>
           <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
           <path
             d={path}
-            className={isSelected ? 'simlin-connector-selected' : 'simlin-connector'}
+            className={connectorClass}
             onPointerDown={this.handlePointerDownArc}
           />
           <Arrowhead
@@ -383,6 +394,12 @@ export const Connector = styled(
     & .simlin-connector {
       stroke-width: 0.5px;
       stroke: gray;
+      fill: none;
+    }
+    & .simlin-connector-dashed {
+      stroke-width: 0.5px;
+      stroke: gray;
+      stroke-dasharray: 2px;
       fill: none;
     }
     & .simlin-connector-selected {
