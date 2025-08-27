@@ -168,6 +168,7 @@ interface EditorProps {
   name: string; // used when saving
   embedded?: boolean;
   onSave: (project: Readonly<Uint8Array>, currVersion: number) => Promise<number | undefined>;
+  readOnlyMode?: boolean;
 }
 
 export const Editor = styled(
@@ -208,6 +209,15 @@ export const Editor = styled(
         await this.openEngine(props.initialProjectBinary, activeProject);
         this.scheduleSimRun();
       });
+    }
+
+    componentDidMount() {
+      if (this.props.readOnlyMode)
+        this.setState({
+          modelErrors: this.state.modelErrors.push(
+            new Error("This is a read-only version. Any changes you make won't be saved."),
+          ),
+        });
     }
 
     project(): Project | undefined {

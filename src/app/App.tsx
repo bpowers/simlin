@@ -13,7 +13,7 @@ import {
   User as FirebaseUser,
 } from 'firebase/auth';
 
-import { useLocation, Route, RouteComponentProps, Switch } from 'wouter';
+import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
 import { styled } from '@mui/material/styles';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
@@ -230,6 +230,7 @@ const InnerApp = styled(
       const { username, projectName } = props.params;
       const user = this.state.user;
       const readOnlyMode = !user || user.id !== username;
+
       return (
         <HostedWebEditor
           username={username}
