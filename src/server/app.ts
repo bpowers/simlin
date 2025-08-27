@@ -21,7 +21,7 @@ import { apiRouter } from './api';
 import { defined } from '@system-dynamics/core/common';
 import { Application } from './application';
 import { authn } from './authn';
-import { authz, userAuthz } from './authz';
+import authz from './authz';
 import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
@@ -224,12 +224,12 @@ class App {
 
     this.app.get(
       '/:username/:projectName',
-      async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      async (req: Request, res: Response, next: NextFunction) => {
         const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
         if (project?.getIsPublic()) next();
-        else userAuthz(req, res, next);
+        else authz(req, res, next, (res) => res.redirect('/'));
       },
-      async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      async (req: Request, res: Response, next: NextFunction) => {
         const email = req.session.passport.user.email as string;
         const user = req.user as any as UserPb | undefined;
 
@@ -270,8 +270,7 @@ class App {
         res.set('Cache-Control', 'no-store');
         res.set('Max-Age', '0');
 
-        // eslint-disable-next-line @typescript-eslint/await-thenable
-        await next();
+        next();
       },
       staticHandler,
     );
