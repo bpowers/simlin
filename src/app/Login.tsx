@@ -26,7 +26,7 @@ import CardActions from '@mui/material/CardActions';
 import CardContent from '@mui/material/CardContent';
 import Link from '@mui/material/Link';
 import Typography from '@mui/material/Typography';
-import TextField from '@mui/material/TextField';
+import TextField, { TextFieldProps } from '@mui/material/TextField';
 
 import { ModelIcon } from '@system-dynamics/diagram/ModelIcon';
 import { FormEvent, useState } from 'react';
@@ -41,11 +41,6 @@ export interface LoginProps {
 interface LoginState {
   emailLoginFlow: EmailLoginStates | undefined;
   email: string;
-  emailError: string | undefined;
-  password: string;
-  passwordError: string | undefined;
-  fullName: string;
-  fullNameError: string | undefined;
   provider: 'google.com' | 'apple.com' | undefined;
 }
 
@@ -56,8 +51,9 @@ function appleProvider(): OAuthProvider {
   return provider;
 }
 
-function getValueFromEvent(event: FormEvent<HTMLFormElement>, elementName: string) {
-  return (event.currentTarget.elements.namedItem(elementName) as HTMLInputElement).value;
+function getInputAndValue(event: FormEvent<HTMLFormElement>, elementName: string) {
+  const input = event.currentTarget.elements.namedItem(elementName) as HTMLInputElement;
+  return { input, value: input.value };
 }
 
 export const GoogleIcon = styled((props) => {
@@ -74,11 +70,6 @@ function LoginInner({ auth, disabled }: LoginProps) {
   const [state, setState] = useState<LoginState>({
     emailLoginFlow: undefined,
     email: '',
-    emailError: undefined,
-    password: '',
-    passwordError: undefined,
-    fullName: '',
-    fullNameError: undefined,
     provider: undefined,
   });
 
@@ -103,17 +94,15 @@ function LoginInner({ auth, disabled }: LoginProps) {
   function onEmailCancel() {
     setState((state) => ({ ...state, emailLoginFlow: undefined }));
   }
+
   async function onSubmitEmail(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const email = getValueFromEvent(event, 'email').trim();
-    if (!email) {
-      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
-      return;
-    }
+
+    const { input, value: email } = getInputAndValue(event, 'email');
 
     const methods = await fetchSignInMethodsForEmail(auth, email);
-    if (methods.includes('password')) setState((state) => ({ ...state, emailLoginFlow: 'showPassword' }));
-    else if (methods.length === 0) setState((state) => ({ ...state, emailLoginFlow: 'showSignup' }));
+    if (methods.includes('password')) setState((state) => ({ ...state, email, emailLoginFlow: 'showPassword' }));
+    else if (methods.length === 0) setState((state) => ({ ...state, email, emailLoginFlow: 'showSignup' }));
     else {
       // we only allow 1 method
       const method = methods[0];
@@ -123,111 +112,95 @@ function LoginInner({ auth, disabled }: LoginProps) {
           emailLoginFlow: 'showProviderRedirect',
           provider: methods[0] as 'google.com' | 'apple.com',
         }));
-      } else
-        setState((state) => ({ ...state, emailError: 'an unknown error occurred; try a different email address' }));
+      } else {
+        input.setCustomValidity('An unknown error occurred; try a different email address');
+        input.reportValidity();
+      }
     }
   }
+
   async function onSubmitRecovery(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const email = getValueFromEvent(event, 'email').trim();
-    if (!email) {
-      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
-      return;
-    }
+
+    const { value: email } = getInputAndValue(event, 'email');
 
     await sendPasswordResetEmail(auth, email);
 
-    setState((state) => ({ ...state, emailLoginFlow: 'showPassword', password: '', passwordError: undefined }));
+    setState((state) => ({ ...state, emailLoginFlow: 'showPassword' }));
   }
+
   async function onSubmitNewUser(event: FormEvent<HTMLFormElement>) {
-    const email = getValueFromEvent(event, 'email').trim();
-    if (!email) {
-      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
-      return;
-    }
+    event.preventDefault();
 
-    const fullName = getValueFromEvent(event, 'fullName').trim();
-    if (!fullName) {
-      setState((state) => ({ ...state, fullNameError: 'Enter your name to continue' }));
-      return;
-    }
-
-    const password = getValueFromEvent(event, 'password').trim();
-    if (!password) {
-      setState((state) => ({ ...state, passwordError: 'Enter your password to continue' }));
-      return;
-    }
+    const { value: email } = getInputAndValue(event, 'email');
+    const { value: fullName } = getInputAndValue(event, 'fullName');
+    const { input: passwordInput, value: password } = getInputAndValue(event, 'password');
 
     try {
       const userCred = await createUserWithEmailAndPassword(auth, email, password);
       await updateProfile(userCred.user, { displayName: fullName });
     } catch (err) {
-      console.log(err);
+      console.error(err);
       if (err instanceof Error) {
-        setState((state) => ({ ...state, passwordError: err.message }));
+        passwordInput.setCustomValidity(err.message);
       } else {
-        setState((state) => ({ ...state, passwordError: 'Something unknown went wrong' }));
+        passwordInput.setCustomValidity('Something unknown went wrong');
       }
+      passwordInput.reportValidity();
+      passwordInput.setCustomValidity('');
     }
   }
+
   function onEmailHelp() {
     setState((state) => ({ ...state, emailLoginFlow: 'showRecover' }));
   }
+
   async function onEmailLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const email = getValueFromEvent(event, 'email').trim();
-    if (!email) {
-      setState((state) => ({ ...state, emailError: 'Enter your email address to continue' }));
-      return;
-    }
 
-    const password = getValueFromEvent(event, 'password').trim();
-    if (!password) {
-      setState((state) => ({ ...state, passwordError: 'Enter your password to continue' }));
-      return;
-    }
+    const { value: email } = getInputAndValue(event, 'email');
+    const { input: passwordInput, value: password } = getInputAndValue(event, 'password');
 
     try {
       await signInWithEmailAndPassword(auth, email, password);
     } catch (err) {
-      console.error(err);
+      console.log(err);
       if (err instanceof Error) {
-        setState((state) => ({ ...state, passwordError: err.message }));
+        passwordInput.setCustomValidity(err.message);
+      } else {
+        passwordInput.setCustomValidity('Something unknown went wrong');
       }
+      passwordInput.reportValidity();
+      passwordInput.setCustomValidity('');
     }
   }
 
-  function EmailField({ autoFocus }: { autoFocus?: boolean }) {
+  function EmailField(props: TextFieldProps) {
     return (
       <TextField
         name="email"
         label="Email"
-        value={state.email}
         type="email"
         margin="normal"
         variant="standard"
-        error={!!state.emailError}
-        helperText={state.emailError}
         fullWidth
-        autoFocus={autoFocus}
+        required
+        {...props}
       />
     );
   }
 
-  function PasswordField({ autoFocus }: { autoFocus?: boolean }) {
+  function PasswordField(props: TextFieldProps) {
     return (
       <TextField
         name="password"
-        label="Choose password"
-        value={state.password}
+        label="Password"
         type="password"
-        autoComplete="current-password"
         margin="normal"
         variant="standard"
-        error={state.passwordError !== undefined}
-        helperText={state.passwordError}
         fullWidth
-        autoFocus={autoFocus}
+        required
+        {...props}
       />
     );
   }
@@ -261,8 +234,8 @@ function LoginInner({ auth, disabled }: LoginProps) {
             <Typography variant="h6" component="div">
               Sign in
             </Typography>
-            <EmailField />
-            <PasswordField autoFocus />
+            <EmailField value={state.email} disabled />
+            <PasswordField autoFocus autoComplete="current-password" />
           </CardContent>
           <CardActions>
             <Typography sx={{ marginRight: 'auto' }} variant="body2">
@@ -285,18 +258,17 @@ function LoginInner({ auth, disabled }: LoginProps) {
             <Typography variant="h6" component="div">
               Create account
             </Typography>
-            <EmailField />
+            <EmailField value={state.email} disabled />
             <TextField
               name="fullName"
               label="First & last name"
-              value={state.fullName}
               margin="normal"
               variant="standard"
-              error={state.fullNameError !== undefined}
-              helperText={state.fullNameError}
               fullWidth
               autoFocus
+              required
             />
+            <PasswordField label="Choose password" autoComplete="new-password" />
           </CardContent>
           <CardActions>
             <Button sx={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
@@ -341,7 +313,7 @@ function LoginInner({ auth, disabled }: LoginProps) {
             <Typography className="simlin-login-recover-instructions">
               Get instructions sent to this email that explain how to reset your password
             </Typography>
-            <EmailField autoFocus />
+            <EmailField defaultValue={state.email} autoFocus />
           </CardContent>
           <CardActions>
             <Button sx={{ marginLeft: 'auto' }} onClick={onEmailCancel}>
