@@ -191,18 +191,21 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, da
         loop_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
     }
 
-    // Then, generate relative loop scores if there are multiple loops
-    if loops.len() > 1 {
-        for loop_item in loops {
-            let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
+    // Then, generate relative loop scores for all loops
+    for loop_item in loops {
+        let var_name = format!("$⁚ltm⁚rel_loop_score⁚{}", loop_item.id);
 
-            // Generate equation for relative loop score
-            let equation = generate_relative_loop_score_equation(&loop_item.id, loops);
+        // Generate equation for relative loop score
+        let equation = if loops.len() == 1 {
+            // Single loop always has relative score of 1
+            "1".to_string()
+        } else {
+            generate_relative_loop_score_equation(&loop_item.id, loops)
+        };
 
-            // Create the synthetic variable
-            let ltm_var = create_aux_variable(&var_name, &equation);
-            loop_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
-        }
+        // Create the synthetic variable
+        let ltm_var = create_aux_variable(&var_name, &equation);
+        loop_vars.insert(crate::common::canonicalize(&var_name), ltm_var);
     }
 
     loop_vars

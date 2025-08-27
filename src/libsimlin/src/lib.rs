@@ -13,7 +13,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod ffi;
-pub use ffi::{SimlinErrorDetail, SimlinErrorDetails, SimlinLoop, SimlinLoopPolarity, SimlinLoops};
+pub use ffi::{
+    SimlinErrorDetail, SimlinErrorDetails, SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop,
+    SimlinLoopPolarity, SimlinLoops,
+};
 
 /// Error codes for the C API
 #[repr(C)]
@@ -824,6 +827,206 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
         let _ = Box::from_raw(std::slice::from_raw_parts_mut(loops.loops, loops.count));
     }
 }
+/// Gets all causal links in a model
+///
+/// Returns all causal links detected in the model.
+/// This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
+/// If the simulation has been run with LTM enabled, link scores will be included.
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim
+/// - The returned SimlinLinks must be freed with simlin_free_links
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_get_links(sim: *mut SimlinSim) -> *mut SimlinLinks {
+    if sim.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let sim = &*sim;
+    let project = &(*sim.project).project;
+    
+    // Get the model
+    let model = match project.models.get(&canonicalize(&sim.model_name)) {
+        Some(m) => m,
+        None => return ptr::null_mut(),
+    };
+    
+    // Build a causal graph to get links
+    let graph = match engine::ltm::CausalGraph::from_model(model, project) {
+        Ok(g) => g,
+        Err(_) => return ptr::null_mut(),
+    };
+    
+    // Get all loops to extract links
+    let loops = graph.find_loops();
+    
+    // Collect unique links from all loops
+    let mut unique_links = std::collections::HashMap::new();
+    for loop_item in loops {
+        for link in loop_item.links {
+            let key = (link.from.clone(), link.to.clone());
+            unique_links.entry(key).or_insert(link);
+        }
+    }
+    
+    // Also add direct dependencies that might not be in loops
+    for (var_name, var) in &model.variables {
+        let deps = match var {
+            engine::Variable::Stock { inflows, outflows, .. } => {
+                let mut deps = Vec::new();
+                for flow in inflows.iter().chain(outflows.iter()) {
+                    deps.push((flow.clone(), var_name.clone()));
+                }
+                deps
+            }
+            engine::Variable::Var { ast, .. } if ast.is_some() => {
+                let deps = engine::identifier_set(ast.as_ref().unwrap(), &[], None);
+                deps.into_iter().map(|dep| (dep, var_name.clone())).collect()
+            }
+            engine::Variable::Module { inputs, .. } => {
+                inputs.iter().map(|input| (input.src.clone(), var_name.clone())).collect()
+            }
+            _ => Vec::new(),
+        };
+        
+        for (from, to) in deps {
+            let key = (from.clone(), to.clone());
+            if !unique_links.contains_key(&key) {
+                unique_links.insert(
+                    key,
+                    engine::ltm::Link {
+                        from,
+                        to,
+                        polarity: engine::ltm::LinkPolarity::Unknown,
+                    },
+                );
+            }
+        }
+    }
+    
+    if unique_links.is_empty() {
+        return Box::into_raw(Box::new(SimlinLinks {
+            links: ptr::null_mut(),
+            count: 0,
+        }));
+    }
+    
+    // Check if LTM is enabled and simulation has been run
+    let has_ltm_scores = (*sim.project).ltm_project.is_some() && sim.results.is_some();
+    
+    // Convert to C structures
+    let mut c_links = Vec::with_capacity(unique_links.len());
+    for (_, link) in unique_links {
+        let from = CString::new(link.from.as_str()).unwrap().into_raw();
+        let to = CString::new(link.to.as_str()).unwrap().into_raw();
+        
+        // Convert polarity
+        let polarity = match link.polarity {
+            engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
+            engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
+            engine::ltm::LinkPolarity::Unknown => SimlinLinkPolarity::Unknown,
+        };
+        
+        // Get link scores if available
+        let (score_ptr, score_len) = if has_ltm_scores {
+            let link_score_var = format!(
+                "$⁚ltm⁚link_score⁚{}⁚{}",
+                link.from.as_str(),
+                link.to.as_str()
+            );
+            let var_ident = canonicalize(&link_score_var);
+            
+            if let Some(ref results) = sim.results {
+                if let Some(&offset) = results.offsets.get(&var_ident) {
+                    let mut scores = Vec::with_capacity(results.step_count);
+                    for row in results.iter() {
+                        scores.push(row[offset]);
+                    }
+                    let score_len = scores.len();
+                    let mut boxed = scores.into_boxed_slice();
+                    let score_ptr = boxed.as_mut_ptr();
+                    std::mem::forget(boxed);
+                    (score_ptr, score_len)
+                } else {
+                    (ptr::null_mut(), 0)
+                }
+            } else {
+                (ptr::null_mut(), 0)
+            }
+        } else {
+            (ptr::null_mut(), 0)
+        };
+        
+        c_links.push(SimlinLink {
+            from,
+            to,
+            polarity,
+            score: score_ptr,
+            score_len,
+        });
+    }
+    
+    let count = c_links.len();
+    let mut links = c_links.into_boxed_slice();
+    let links_ptr = links.as_mut_ptr();
+    std::mem::forget(links);
+    
+    Box::into_raw(Box::new(SimlinLinks {
+        links: links_ptr,
+        count,
+    }))
+}
+
+/// Frees a SimlinLinks structure
+///
+/// # Safety
+/// - `links` must be valid pointer returned by simlin_analyze_get_links
+#[no_mangle]
+pub unsafe extern "C" fn simlin_free_links(links: *mut SimlinLinks) {
+    if links.is_null() {
+        return;
+    }
+    let links = Box::from_raw(links);
+    if !links.links.is_null() && links.count > 0 {
+        let link_slice = std::slice::from_raw_parts_mut(links.links, links.count);
+        for link in link_slice {
+            // Free the from and to strings
+            if !link.from.is_null() {
+                let _ = CString::from_raw(link.from);
+            }
+            if !link.to.is_null() {
+                let _ = CString::from_raw(link.to);
+            }
+            // Free the score array if present
+            if !link.score.is_null() && link.score_len > 0 {
+                let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                    link.score,
+                    link.score_len,
+                ));
+            }
+        }
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(links.links, links.count));
+    }
+}
+
+/// Gets the relative loop score time series for a specific loop  
+/// 
+/// Renamed for clarity from simlin_analyze_get_rel_loop_score
+///
+/// # Safety
+/// - `sim` must be a valid pointer to a SimlinSim that has been run to completion
+/// - `loop_id` must be a valid C string
+/// - `results` must be a valid pointer to an array of at least `len` doubles
+#[no_mangle]
+pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
+    sim: *mut SimlinSim,
+    loop_id: *const c_char,
+    results_ptr: *mut c_double,
+    len: usize,
+) -> c_int {
+    simlin_analyze_get_rel_loop_score(sim, loop_id, results_ptr, len)
+}
+
 /// Gets the relative loop score time series for a specific loop
 ///
 /// # Safety
@@ -1025,6 +1228,51 @@ pub unsafe extern "C" fn simlin_export_xmile(
         }
         Err(e) => e.code as c_int,
     }
+}
+
+/// Serializes a project to binary protobuf format
+///
+/// Returns the project's datamodel serialized as protobuf bytes.
+/// This is the native format expected by simlin_project_open.
+/// Useful for saving projects or transferring them between systems.
+///
+/// Returns 0 on success, error code on failure.
+/// Caller must free output with simlin_free().
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `output` and `output_len` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_serialize(
+    project: *mut SimlinProject,
+    output: *mut *mut u8,
+    output_len: *mut usize,
+) -> c_int {
+    if project.is_null() || output.is_null() || output_len.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    let proj = &(*project).project;
+    
+    // Serialize the datamodel to protobuf
+    let pb_project = engine::serde::serialize(&proj.datamodel);
+    
+    let mut bytes = Vec::new();
+    if let Err(_) = pb_project.encode(&mut bytes) {
+        return engine::ErrorCode::ProtobufDecode as c_int;
+    }
+    
+    let len = bytes.len();
+    let buf = simlin_malloc(len);
+    if buf.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+    
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+    
+    *output = buf;
+    *output_len = len;
+    engine::ErrorCode::NoError as c_int
 }
 
 // Helper function to convert a Rust string to a C string pointer
@@ -2250,6 +2498,443 @@ mod tests {
             simlin_sim_unref(sim);
             // Sim should be freed now, project ref count should decrease
             assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 1);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_analyze_get_links() {
+        // Create a project with a reinforcing loop using TestProject
+        let test_project = TestProject::new("test_links")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * birth_rate", None)
+            .aux("birth_rate", "0.02", None);
+
+        // Build the datamodel and serialize to protobuf
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine::serde::serialize(&datamodel_project);
+
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            // Test without LTM enabled - should get structural links only
+            let sim = simlin_sim_new(proj, ptr::null());
+            assert!(!sim.is_null());
+
+            let links = simlin_analyze_get_links(sim);
+            assert!(!links.is_null());
+            assert!((*links).count > 0, "Should have detected causal links");
+
+            // Verify link structure
+            let links_slice = std::slice::from_raw_parts((*links).links, (*links).count);
+            
+            // Should have links like:
+            // - birth_rate -> births
+            // - population -> births  
+            // - births -> population
+            let mut found_rate_to_births = false;
+            let mut found_pop_to_births = false;
+            let mut found_births_to_pop = false;
+
+            for link in links_slice {
+                assert!(!link.from.is_null());
+                assert!(!link.to.is_null());
+                
+                let from = CStr::from_ptr(link.from).to_str().unwrap();
+                let to = CStr::from_ptr(link.to).to_str().unwrap();
+                
+                if from == "birth_rate" && to == "births" {
+                    found_rate_to_births = true;
+                }
+                if from == "population" && to == "births" {
+                    found_pop_to_births = true;
+                }
+                if from == "births" && to == "population" {
+                    found_births_to_pop = true;
+                }
+
+                // Without LTM, scores should be null
+                assert!(link.score.is_null(), "Score should be null without LTM");
+                assert_eq!(link.score_len, 0, "Score length should be 0 without LTM");
+            }
+
+            assert!(found_rate_to_births, "Should find birth_rate -> births link");
+            assert!(found_pop_to_births, "Should find population -> births link");
+            assert!(found_births_to_pop, "Should find births -> population link");
+
+            simlin_free_links(links);
+
+            // Now test with LTM enabled
+            let rc = simlin_project_enable_ltm(proj);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Create new sim with LTM-enabled project
+            let sim_ltm = simlin_sim_new(proj, ptr::null());
+            assert!(!sim_ltm.is_null());
+
+            // Run simulation to generate score data
+            let rc = simlin_sim_run_to_end(sim_ltm);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Get links with scores
+            let links_with_scores = simlin_analyze_get_links(sim_ltm);
+            assert!(!links_with_scores.is_null());
+            assert!((*links_with_scores).count > 0);
+
+            let links_slice = std::slice::from_raw_parts(
+                (*links_with_scores).links,
+                (*links_with_scores).count,
+            );
+
+            // Verify that scores are now populated
+            for link in links_slice {
+                let from = CStr::from_ptr(link.from).to_str().unwrap();
+                let to = CStr::from_ptr(link.to).to_str().unwrap();
+                
+                // Links in the feedback loop should have scores
+                if (from == "births" && to == "population") ||
+                   (from == "population" && to == "births") {
+                    assert!(!link.score.is_null(), "Feedback loop links should have scores");
+                    assert!(link.score_len > 0, "Score length should be > 0 for feedback links");
+                    
+                    // Check that scores contain reasonable values
+                    let scores = std::slice::from_raw_parts(link.score, link.score_len);
+                    for &score in scores {
+                        assert!(score.is_finite(), "Score should be finite");
+                    }
+                }
+            }
+
+            simlin_free_links(links_with_scores);
+
+            // Clean up
+            simlin_sim_unref(sim);
+            simlin_sim_unref(sim_ltm);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_analyze_get_links_no_loops() {
+        // Create a project with no feedback loops
+        let test_project = TestProject::new("test_no_loops")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("input", "10", None)
+            .aux("output", "input * 2", None);
+
+        // Build the datamodel and serialize to protobuf
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine::serde::serialize(&datamodel_project);
+
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+
+            let sim = simlin_sim_new(proj, ptr::null());
+            assert!(!sim.is_null());
+
+            let links = simlin_analyze_get_links(sim);
+            assert!(!links.is_null());
+
+            // Should still find the causal link from input to output
+            assert!((*links).count > 0, "Should find input -> output link");
+
+            let links_slice = std::slice::from_raw_parts((*links).links, (*links).count);
+            let mut found_link = false;
+            for link in links_slice {
+                let from = CStr::from_ptr(link.from).to_str().unwrap();
+                let to = CStr::from_ptr(link.to).to_str().unwrap();
+                
+                if from == "input" && to == "output" {
+                    found_link = true;
+                    // Non-loop links will have Unknown polarity since we don't analyze them
+                    assert_eq!(link.polarity, SimlinLinkPolarity::Unknown);
+                }
+            }
+            assert!(found_link, "Should find input -> output link");
+
+            simlin_free_links(links);
+            simlin_sim_unref(sim);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_analyze_get_links_null_safety() {
+        unsafe {
+            // Test with null sim
+            let links = simlin_analyze_get_links(ptr::null_mut());
+            assert!(links.is_null());
+
+            // Test free with null (should not crash)
+            simlin_free_links(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn test_analyze_get_relative_loop_score_renamed() {
+        // Create a project with a reinforcing loop
+        let test_project = TestProject::new("test_renamed")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * 0.02", None);
+
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine::serde::serialize(&datamodel_project);
+
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+
+            // Enable LTM
+            let rc = simlin_project_enable_ltm(proj);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            let sim = simlin_sim_new(proj, ptr::null());
+            assert!(!sim.is_null());
+
+            // Run simulation
+            let rc = simlin_sim_run_to_end(sim);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Get loops to find loop ID
+            let loops = simlin_analyze_get_loops(proj);
+            assert!(!loops.is_null());
+            assert!((*loops).count > 0);
+
+            let loop_slice = std::slice::from_raw_parts((*loops).loops, (*loops).count);
+            let loop_id = CStr::from_ptr(loop_slice[0].id).to_str().unwrap();
+
+            // Test renamed function
+            let step_count = simlin_sim_get_stepcount(sim);
+            let mut scores = vec![0.0; step_count as usize];
+            
+            let loop_id_c = CString::new(loop_id).unwrap();
+            let rc = simlin_analyze_get_relative_loop_score(
+                sim,
+                loop_id_c.as_ptr(),
+                scores.as_mut_ptr(),
+                scores.len(),
+            );
+            assert_eq!(rc, 0, "Should successfully get relative loop scores");
+
+            // Verify scores are reasonable
+            // Since there's only one loop, relative score should be 1.0
+            for score in &scores {
+                assert!(score.is_finite());
+                assert_eq!(*score, 1.0, "Single loop should have relative score of 1.0");
+            }
+
+            simlin_free_loops(loops);
+            simlin_sim_unref(sim);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_serialize() {
+        // Create a project with some content
+        let test_project = TestProject::new("test_serialize")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("population", "100", &["births"], &["deaths"], None)
+            .flow("births", "population * birth_rate", None)
+            .flow("deaths", "population * death_rate", None)
+            .aux("birth_rate", "0.02", None)
+            .aux("death_rate", "0.01", None);
+
+        let datamodel_project = test_project.build_datamodel();
+        let original_pb = engine::serde::serialize(&datamodel_project);
+        
+        let mut buf = Vec::new();
+        original_pb.encode(&mut buf).unwrap();
+
+        unsafe {
+            // Open the project
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            // Serialize it back out
+            let mut output: *mut u8 = std::ptr::null_mut();
+            let mut output_len: usize = 0;
+            let rc = simlin_project_serialize(
+                proj,
+                &mut output as *mut *mut u8,
+                &mut output_len as *mut usize,
+            );
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+            assert!(!output.is_null());
+            assert!(output_len > 0);
+
+            // Verify we can open the serialized project
+            let proj2 = simlin_project_open(output, output_len, &mut err);
+            assert!(!proj2.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            // Create simulations from both projects and verify they work identically
+            let sim1 = simlin_sim_new(proj, ptr::null());
+            let sim2 = simlin_sim_new(proj2, ptr::null());
+            assert!(!sim1.is_null());
+            assert!(!sim2.is_null());
+
+            // Run both simulations
+            let rc1 = simlin_sim_run_to_end(sim1);
+            let rc2 = simlin_sim_run_to_end(sim2);
+            assert_eq!(rc1, engine::ErrorCode::NoError as c_int);
+            assert_eq!(rc2, engine::ErrorCode::NoError as c_int);
+
+            // Check they have same number of variables and steps
+            let var_count1 = simlin_sim_get_varcount(sim1);
+            let var_count2 = simlin_sim_get_varcount(sim2);
+            assert_eq!(var_count1, var_count2);
+
+            let step_count1 = simlin_sim_get_stepcount(sim1);
+            let step_count2 = simlin_sim_get_stepcount(sim2);
+            assert_eq!(step_count1, step_count2);
+
+            // Clean up
+            simlin_free(output);
+            simlin_sim_unref(sim1);
+            simlin_sim_unref(sim2);
+            simlin_project_unref(proj);
+            simlin_project_unref(proj2);
+        }
+    }
+
+    #[test]
+    fn test_project_serialize_with_ltm() {
+        // Create a project with a loop
+        let test_project = TestProject::new("test_serialize_ltm")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("stock", "100", &["inflow"], &[], None)
+            .flow("inflow", "stock * 0.1", None);
+
+        let datamodel_project = test_project.build_datamodel();
+        let original_pb = engine::serde::serialize(&datamodel_project);
+        
+        let mut buf = Vec::new();
+        original_pb.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+
+            // Enable LTM
+            let rc = simlin_project_enable_ltm(proj);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Serialize the project (should NOT include LTM variables)
+            let mut output: *mut u8 = std::ptr::null_mut();
+            let mut output_len: usize = 0;
+            let rc = simlin_project_serialize(
+                proj,
+                &mut output as *mut *mut u8,
+                &mut output_len as *mut usize,
+            );
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Open the serialized project
+            let proj2 = simlin_project_open(output, output_len, &mut err);
+            assert!(!proj2.is_null());
+
+            // Create sims from both
+            let sim1 = simlin_sim_new(proj, ptr::null());  // Has LTM
+            let sim2 = simlin_sim_new(proj2, ptr::null()); // No LTM
+
+            // Run both
+            simlin_sim_run_to_end(sim1);
+            simlin_sim_run_to_end(sim2);
+
+            // The LTM project should have more variables (due to synthetic LTM vars)
+            let var_count1 = simlin_sim_get_varcount(sim1);
+            let var_count2 = simlin_sim_get_varcount(sim2);
+            assert!(var_count1 > var_count2, "LTM project should have more variables");
+
+            // Clean up
+            simlin_free(output);
+            simlin_sim_unref(sim1);
+            simlin_sim_unref(sim2);
+            simlin_project_unref(proj);
+            simlin_project_unref(proj2);
+        }
+    }
+
+    #[test]
+    fn test_project_serialize_null_safety() {
+        unsafe {
+            // Test with null project
+            let mut output: *mut u8 = std::ptr::null_mut();
+            let mut output_len: usize = 0;
+            let rc = simlin_project_serialize(
+                ptr::null_mut(),
+                &mut output as *mut *mut u8,
+                &mut output_len as *mut usize,
+            );
+            assert_ne!(rc, engine::ErrorCode::NoError as c_int);
+            assert!(output.is_null());
+
+            // Test with null output pointer
+            let project = engine::project_io::Project {
+                name: "test".to_string(),
+                sim_specs: Some(engine::project_io::SimSpecs {
+                    start: 0.0,
+                    stop: 10.0,
+                    dt: Some(engine::project_io::Dt {
+                        value: 1.0,
+                        is_reciprocal: false,
+                    }),
+                    save_step: None,
+                    sim_method: engine::project_io::SimMethod::Euler as i32,
+                    time_units: String::new(),
+                }),
+                models: vec![engine::project_io::Model {
+                    name: "main".to_string(),
+                    variables: vec![],
+                    views: vec![],
+                }],
+                dimensions: vec![],
+                units: vec![],
+                source: None,
+            };
+            let mut buf = Vec::new();
+            project.encode(&mut buf).unwrap();
+            
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+
+            let rc = simlin_project_serialize(
+                proj,
+                ptr::null_mut(),
+                &mut output_len as *mut usize,
+            );
+            assert_ne!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Test with null output_len pointer
+            let rc = simlin_project_serialize(
+                proj,
+                &mut output as *mut *mut u8,
+                ptr::null_mut(),
+            );
+            assert_ne!(rc, engine::ErrorCode::NoError as c_int);
+
             simlin_project_unref(proj);
         }
     }

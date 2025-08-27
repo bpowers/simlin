@@ -30,6 +30,15 @@ pub enum SimlinLoopPolarity {
     Balancing = 1,
 }
 
+/// Link polarity for C API
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimlinLinkPolarity {
+    Positive = 0,
+    Negative = 1,
+    Unknown = 2,
+}
+
 /// A single feedback loop
 #[repr(C)]
 pub struct SimlinLoop {
@@ -61,5 +70,22 @@ pub struct SimlinErrorDetail {
 #[repr(C)]
 pub struct SimlinErrorDetails {
     pub errors: *mut SimlinErrorDetail,
+    pub count: usize,
+}
+
+/// Single causal link structure
+#[repr(C)]
+pub struct SimlinLink {
+    pub from: *mut c_char,
+    pub to: *mut c_char,
+    pub polarity: SimlinLinkPolarity,
+    pub score: *mut f64,
+    pub score_len: usize,
+}
+
+/// Collection of links
+#[repr(C)]
+pub struct SimlinLinks {
+    pub links: *mut SimlinLink,
     pub count: usize,
 }

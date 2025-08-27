@@ -52,6 +52,13 @@ typedef enum {
   SIMLIN_ERROR_CODE_GENERIC = 32,
 } SimlinErrorCode;
 
+// Link polarity for C API
+typedef enum {
+  SIMLIN_LINK_POLARITY_POSITIVE = 0,
+  SIMLIN_LINK_POLARITY_NEGATIVE = 1,
+  SIMLIN_LINK_POLARITY_UNKNOWN = 2,
+} SimlinLinkPolarity;
+
 // Loop polarity for C API
 typedef enum {
   SIMLIN_LOOP_POLARITY_REINFORCING = 0,
@@ -81,6 +88,21 @@ typedef struct {
   SimlinLoop *loops;
   uintptr_t count;
 } SimlinLoops;
+
+// Single causal link structure
+typedef struct {
+  char *from;
+  char *to;
+  SimlinLinkPolarity polarity;
+  double *score;
+  uintptr_t score_len;
+} SimlinLink;
+
+// Collection of links
+typedef struct {
+  SimlinLink *links;
+  uintptr_t count;
+} SimlinLinks;
 
 // Error detail structure containing error message and location
 typedef struct {
@@ -249,6 +271,36 @@ SimlinLoops *simlin_analyze_get_loops(SimlinProject *project);
 // - `loops` must be a valid pointer returned by simlin_analyze_get_loops
 void simlin_free_loops(SimlinLoops *loops);
 
+// Gets all causal links in a model
+//
+// Returns all causal links detected in the model.
+// This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
+// If the simulation has been run with LTM enabled, link scores will be included.
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim
+// - The returned SimlinLinks must be freed with simlin_free_links
+SimlinLinks *simlin_analyze_get_links(SimlinSim *sim);
+
+// Frees a SimlinLinks structure
+//
+// # Safety
+// - `links` must be valid pointer returned by simlin_analyze_get_links
+void simlin_free_links(SimlinLinks *links);
+
+// Gets the relative loop score time series for a specific loop
+//
+// Renamed for clarity from simlin_analyze_get_rel_loop_score
+//
+// # Safety
+// - `sim` must be a valid pointer to a SimlinSim that has been run to completion
+// - `loop_id` must be a valid C string
+// - `results` must be a valid pointer to an array of at least `len` doubles
+int simlin_analyze_get_relative_loop_score(SimlinSim *sim,
+                                           const char *loop_id,
+                                           double *results_ptr,
+                                           uintptr_t len);
+
 // Gets the relative loop score time series for a specific loop
 //
 // # Safety
@@ -295,6 +347,20 @@ SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, int *err);
 // - `project` must be a valid pointer to a SimlinProject
 // - `output` and `output_len` must be valid pointers
 int simlin_export_xmile(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
+
+// Serializes a project to binary protobuf format
+//
+// Returns the project's datamodel serialized as protobuf bytes.
+// This is the native format expected by simlin_project_open.
+// Useful for saving projects or transferring them between systems.
+//
+// Returns 0 on success, error code on failure.
+// Caller must free output with simlin_free().
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `output` and `output_len` must be valid pointers
+int simlin_project_serialize(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
 
 // Get all errors in a project including static analysis and compilation errors
 //
@@ -367,38 +433,6 @@ void simlin_free_error_details(SimlinErrorDetails *details);
 void simlin_free_error_detail(SimlinErrorDetail *detail);
 
 // Gets the incoming links (dependencies) for a variable
-//
-// This function extracts the dependencies from a variable's equation AST.
-// For flows and aux variables, it returns dependencies from their equations.
-// For stocks, it returns dependencies from their initial value equation.
-//
-// # Example Usage (C)
-// ```c
-// // First query the number of dependencies
-// int dep_count = simlin_sim_get_incoming_links(sim, "flow_rate", NULL, 0);
-// if (dep_count < 0) {
-//     // Handle error
-//     return;
-// }
-//
-// // Allocate array of exact size needed
-// char** deps = calloc(dep_count, sizeof(char*));
-// 
-// // Get the actual dependencies
-// int count = simlin_sim_get_incoming_links(sim, "flow_rate", deps, dep_count);
-// if (count != dep_count) {
-//     // Handle error
-//     free(deps);
-//     return;
-// }
-//
-// // Use the dependencies
-// for (int i = 0; i < count; i++) {
-//     printf("Dependency: %s\n", deps[i]);
-//     simlin_free_string(deps[i]);  // Free each string
-// }
-// free(deps);  // Free the array
-// ```
 //
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
