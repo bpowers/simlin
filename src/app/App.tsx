@@ -277,7 +277,11 @@ const InnerApp = styled(
         );
       }
 
-      // if a user is navigating to a model,
+      const urlParams = new URLSearchParams(window.location.search);
+      const projectParam = urlParams.get('project');
+      if (projectParam) return <Redirect to={projectParam} />;
+
+      // if a user is navigating to a project,
       // skip the high level auth check, to enable public models
       if (!/\/.*\/.*/.test(window.location.pathname)) {
         if (!this.state.user) {
