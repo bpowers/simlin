@@ -276,6 +276,8 @@ const InnerApp = styled(
         );
       }
 
+      // if a user is navigating to a model,
+      // skip the high level auth check, to enable public models
       if (!/\/.*\/.*/.test(window.location.pathname)) {
         if (!this.state.user) {
           return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
