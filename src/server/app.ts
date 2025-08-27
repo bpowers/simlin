@@ -216,7 +216,7 @@ class App {
     // all others should serve index.js if user is authorized
     this.app.use('/api', authz, apiRouter(this.app));
 
-    const staticHandler = express.static('public', {
+    const staticHandler = express.static('build', {
       // this doesn't seem to work on Google App Engine - always says
       // Tue, 01 Jan 1980 00:00:01 GMT, so disable it
       lastModified: false,
@@ -226,29 +226,22 @@ class App {
       '/:username/:projectName',
       async (req: Request, res: Response, next: NextFunction) => {
         const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
-        if (project?.getIsPublic()) next();
-        else authz(req, res, next, (res) => res.redirect('/'));
-      },
-      async (req: Request, res: Response, next: NextFunction) => {
-        const email = req.session.passport.user.email as string;
-        const user = req.user as any as UserPb | undefined;
 
-        const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
         if (!project) {
           res.status(404).json({});
           return;
-        } else if (!project.getIsPublic()) {
-          if (!user) {
-            logger.warn(`user not found for '${email}', but passed authz?`);
-            res.status(500).json({});
-            return;
-          }
-          // TODO
-          if (user.getId() !== req.params.username) {
-            res.status(401).json({});
-            return;
-          }
+        } else if (project.getIsPublic()) return res.redirect(encodeURI(`/?project=${project.getId()}`));
+
+        const email = req.session.passport.user.email as string;
+        const user = req.user as any as UserPb | undefined;
+
+        if (!user) {
+          logger.warn(`user not found for '${email}', but passed authz?`);
+          res.status(500).json({});
+          return;
         }
+        // TODO We may want to have a "This project is private" page?
+        if (user.getId() !== req.params.username) return res.redirect('/');
 
         if (
           req.path !== `/${req.params.username}/${req.params.projectName}` &&
