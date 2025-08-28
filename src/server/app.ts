@@ -21,7 +21,7 @@ import { apiRouter } from './api';
 import { defined } from '@system-dynamics/core/common';
 import { Application } from './application';
 import { authn } from './authn';
-import { authz, userAuthz } from './authz';
+import authz from './authz';
 import { createDatabase } from './models/db';
 import { redirectToHttps } from './redirect-to-https';
 import { requestLogger } from './request-logger';
@@ -216,7 +216,7 @@ class App {
     // all others should serve index.js if user is authorized
     this.app.use('/api', authz, apiRouter(this.app));
 
-    const staticHandler = express.static('public', {
+    const staticHandler = express.static('build', {
       // this doesn't seem to work on Google App Engine - always says
       // Tue, 01 Jan 1980 00:00:01 GMT, so disable it
       lastModified: false,
@@ -224,20 +224,24 @@ class App {
 
     this.app.get(
       '/:username/:projectName',
-      userAuthz,
-      async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      async (req: Request, res: Response, next: NextFunction) => {
+        const project = await this.app.db.project.findOne(`${req.params.username}/${req.params.projectName}`);
+
+        if (!project) {
+          res.status(404).json({});
+          return;
+        } else if (project.getIsPublic()) return res.redirect(encodeURI(`/?project=${project.getId()}`));
+
         const email = req.session.passport.user.email as string;
         const user = req.user as any as UserPb | undefined;
+
         if (!user) {
           logger.warn(`user not found for '${email}', but passed authz?`);
           res.status(500).json({});
           return;
         }
-        // TODO
-        if (user.getId() !== req.params.username) {
-          res.status(401).json({});
-          return;
-        }
+        // TODO We may want to have a "This project is private" page?
+        if (user.getId() !== req.params.username) return res.redirect('/');
 
         if (
           req.path !== `/${req.params.username}/${req.params.projectName}` &&
@@ -248,7 +252,7 @@ class App {
         }
 
         const projectName: string = req.params.projectName;
-        const projectId = `${user.getId()}/${projectName}`;
+        const projectId = `${req.params.username}/${projectName}`;
         const projectModel = await this.app.db.project.findOne(projectId);
         if (!projectModel || !projectModel.getFileId()) {
           res.status(404).json({});
@@ -259,8 +263,7 @@ class App {
         res.set('Cache-Control', 'no-store');
         res.set('Max-Age', '0');
 
-        // eslint-disable-next-line @typescript-eslint/await-thenable
-        await next();
+        next();
       },
       staticHandler,
     );

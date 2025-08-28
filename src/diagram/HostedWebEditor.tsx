@@ -25,6 +25,7 @@ interface HostedWebEditorProps {
   projectName: string;
   embedded?: boolean;
   baseURL?: string;
+  readOnlyMode?: boolean;
 }
 
 interface HostedWebEditorState {
@@ -59,10 +60,12 @@ export const HostedWebEditor = styled(
     }
 
     getBaseURL(): string {
-      return this.props.baseURL !== undefined ? this.props.baseURL : baseURL;
+      return this.props.baseURL ?? baseURL;
     }
 
     handleSave = async (project: Readonly<Uint8Array>, currVersion: number): Promise<number | undefined> => {
+      if (this.props.readOnlyMode) return;
+
       const bodyContents = {
         currVersion,
         projectPB: fromUint8Array(project as Uint8Array),
@@ -138,6 +141,7 @@ export const HostedWebEditor = styled(
             name={this.props.projectName}
             embedded={this.props.embedded}
             onSave={this.handleSave}
+            readOnlyMode={this.props.readOnlyMode}
           />
         </div>
       );

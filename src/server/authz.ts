@@ -8,11 +8,7 @@ function jsonError(res: Response): void {
   res.status(401).json({ error: 'unauthorized' });
 }
 
-function redirectError(res: Response): void {
-  res.redirect('/');
-}
-
-const doAuthz = (req: Request, res: Response, next: NextFunction, onFail: (res: Response) => void): void => {
+export default (req: Request, res: Response, next: NextFunction, onFail?: (res: Response) => void): void => {
   // allow unauthorized access to projects for embedding in blogs
   const failEarly = !(req.method === 'GET' && req.path.startsWith('/projects/'));
 
@@ -21,7 +17,7 @@ const doAuthz = (req: Request, res: Response, next: NextFunction, onFail: (res: 
     req.session = {};
 
     if (failEarly) {
-      onFail(res);
+      (onFail ?? jsonError)(res);
       return;
     }
   } else if (!req.session.passport.user) {
@@ -29,18 +25,10 @@ const doAuthz = (req: Request, res: Response, next: NextFunction, onFail: (res: 
     req.session = {};
 
     if (failEarly) {
-      onFail(res);
+      (onFail ?? jsonError)(res);
       return;
     }
   }
 
   next();
-};
-
-export const authz = (req: Request, res: Response, next: NextFunction): void => {
-  doAuthz(req, res, next, jsonError);
-};
-
-export const userAuthz = (req: Request, res: Response, next: NextFunction): void => {
-  doAuthz(req, res, next, redirectError);
 };

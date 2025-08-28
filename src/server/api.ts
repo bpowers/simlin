@@ -168,12 +168,11 @@ export const apiRouter = (app: Application): Router => {
         return;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const project: any = projectModel.toObject();
-      project.file = file.getJsonContents();
-      project.pb = file.getProjectContents_asB64();
+      const project = projectModel.toObject();
+      const jsonFile = file.getJsonContents();
+      const pb = file.getProjectContents_asB64();
 
-      res.status(200).json(project);
+      res.status(200).json({ ...project, file: jsonFile, pb });
     },
   );
 

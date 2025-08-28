@@ -13,7 +13,7 @@ import {
   User as FirebaseUser,
 } from 'firebase/auth';
 
-import { useLocation, Route, RouteComponentProps, Switch } from 'wouter';
+import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
 import { styled } from '@mui/material/styles';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
@@ -228,7 +228,17 @@ const InnerApp = styled(
 
     editor = (props: RouteComponentProps<EditorMatchParams>) => {
       const { username, projectName } = props.params;
-      return <HostedWebEditor username={username} projectName={projectName} baseURL={this.getBaseURL()} />;
+      const user = this.state.user;
+      const readOnlyMode = !user || user.id !== username;
+
+      return (
+        <HostedWebEditor
+          username={username}
+          projectName={projectName}
+          baseURL={this.getBaseURL()}
+          readOnlyMode={readOnlyMode}
+        />
+      );
     };
 
     home = (_props: RouteComponentProps) => {
@@ -267,12 +277,20 @@ const InnerApp = styled(
         );
       }
 
-      if (!this.state.user) {
-        return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
-      }
+      const urlParams = new URLSearchParams(window.location.search);
+      const projectParam = urlParams.get('project');
+      if (projectParam) return <Redirect to={projectParam} />;
 
-      if (this.state.isNewUser) {
-        return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
+      // if a user is navigating to a project,
+      // skip the high level auth check, to enable public models
+      if (!/\/.*\/.*/.test(window.location.pathname)) {
+        if (!this.state.user) {
+          return <Login disabled={this.state.authUnknown} auth={this.state.auth} />;
+        }
+
+        if (this.state.isNewUser) {
+          return <NewUser user={defined(this.state.user)} onUsernameChanged={this.handleUsernameChanged} />;
+        }
       }
 
       return (
