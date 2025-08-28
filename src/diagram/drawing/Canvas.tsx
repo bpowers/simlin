@@ -769,6 +769,53 @@ export const Canvas = styled(
         return;
       }
 
+      // Handle drag selection
+      if (this.state.isDragSelecting && this.state.dragSelectionPoint) {
+        const pointA = this.mouseDownPoint;
+        const pointB = this.state.dragSelectionPoint;
+        const canvasOffset = this.getCanvasOffset();
+        
+        // Calculate selection rectangle bounds
+        const left = Math.min(pointA.x, pointB.x) - canvasOffset.x;
+        const right = Math.max(pointA.x, pointB.x) - canvasOffset.x;
+        const top = Math.min(pointA.y, pointB.y) - canvasOffset.y;
+        const bottom = Math.max(pointA.y, pointB.y) - canvasOffset.y;
+        
+        // Find all elements within the selection rectangle
+        let selectedElements = Set<UID>();
+        for (const element of this.cachedElements) {
+          // Skip flows, stocks, and clouds for now - focus on auxes
+          if (element instanceof FlowViewElement || 
+              element instanceof StockViewElement || 
+              element instanceof CloudViewElement) {
+            continue;
+          }
+          
+          // Check if element is within selection rectangle
+          if (element instanceof AuxViewElement) {
+            if (auxContains(element, { x: left, y: top }) ||
+                auxContains(element, { x: right, y: top }) ||
+                auxContains(element, { x: left, y: bottom }) ||
+                auxContains(element, { x: right, y: bottom }) ||
+                (element.cx >= left && element.cx <= right && 
+                 element.cy >= top && element.cy <= bottom)) {
+              selectedElements = selectedElements.add(element.uid);
+            }
+          } else if (element instanceof AliasViewElement || element instanceof ModuleViewElement) {
+            // For other named elements, check if center is within rectangle
+            if (element.cx >= left && element.cx <= right && 
+                element.cy >= top && element.cy <= bottom) {
+              selectedElements = selectedElements.add(element.uid);
+            }
+          }
+        }
+        
+        // Update selection
+        this.props.onSetSelection(selectedElements);
+        this.clearPointerState(false);
+        return;
+      }
+
       const clearSelection = !this.state.isMovingCanvas;
       this.clearPointerState(clearSelection);
     };
@@ -1098,6 +1145,9 @@ export const Canvas = styled(
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
+      
+      // For multi-selection, use the click point as the offset
+      // This ensures smooth dragging from where the user clicked
       this.selectionCenterOffset = this.getCanvasPoint(e.clientX, e.clientY);
 
       if (!isEditingName) {
@@ -1149,13 +1199,31 @@ export const Canvas = styled(
         // not an action we recognize, deselect the tool and continue on
         this.props.onClearSelectedTool();
 
-        // single-element selection only for now
-        const selection = Set([element.uid]);
+        // Check for modifier keys to determine selection behavior
+        const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
+        let selection: Set<UID>;
+        
+        if (isMultiSelect) {
+          // Add to or remove from existing selection
+          if (this.props.selection.has(element.uid)) {
+            // Remove from selection
+            selection = this.props.selection.delete(element.uid);
+          } else {
+            // Add to selection
+            selection = this.props.selection.add(element.uid);
+          }
+        } else {
+          // Replace selection (single element)
+          selection = Set([element.uid]);
+        }
 
-        if (isEditingName) {
+        // Only allow editing name if single selection
+        if (isEditingName && selection.size === 1) {
           const uid = defined(selection.first());
           const editingElement = this.getElementByUid(uid) as NamedViewElement;
           editingName = plainDeserialize('label', displayName(defined(editingElement.name)));
+        } else {
+          isEditingName = false;
         }
       }
 
@@ -1170,7 +1238,22 @@ export const Canvas = styled(
         },
       });
 
-      this.props.onSetSelection(Set([element.uid]));
+      // Use the calculated selection instead of always single element
+      if (selectedTool === 'link' || selectedTool === 'flow') {
+        this.props.onSetSelection(Set([element.uid]));
+      } else {
+        const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
+        if (isMultiSelect) {
+          // Add to or remove from existing selection
+          if (this.props.selection.has(element.uid)) {
+            this.props.onSetSelection(this.props.selection.delete(element.uid));
+          } else {
+            this.props.onSetSelection(this.props.selection.add(element.uid));
+          }
+        } else {
+          this.props.onSetSelection(Set([element.uid]));
+        }
+      }
     };
 
     handleEditingNameChange = (value: Descendant[]): void => {
