@@ -21,6 +21,7 @@ import {
   Dimension as PbDimension,
   Rect as PbRect,
   Source as PbSource,
+  LoopMetadata as PbLoopMetadata,
 } from './pb/project_io_pb';
 import { canonicalize } from './canonicalize';
 
@@ -343,6 +344,7 @@ const stockDefaults = {
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
   unitErrors: undefined as List<UnitError> | undefined,
+  uid: undefined as number | undefined,
 };
 export class Stock extends Record(stockDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -362,6 +364,7 @@ export class Stock extends Record(stockDefaults) implements Variable {
       data: undefined,
       errors: undefined as List<EquationError> | undefined,
       unitErrors: undefined as List<UnitError> | undefined,
+      uid: stock.getUid() || undefined,
     });
   }
   get gf(): undefined {
@@ -385,6 +388,7 @@ const flowDefaults = {
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
   unitErrors: undefined as List<UnitError> | undefined,
+  uid: undefined as number | undefined,
 };
 export class Flow extends Record(flowDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -404,6 +408,7 @@ export class Flow extends Record(flowDefaults) implements Variable {
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
+      uid: flow.getUid() || undefined,
     });
   }
   get isArrayed(): boolean {
@@ -423,6 +428,7 @@ const auxDefaults = {
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
   unitErrors: undefined as List<UnitError> | undefined,
+  uid: undefined as number | undefined,
 };
 export class Aux extends Record(auxDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -441,6 +447,7 @@ export class Aux extends Record(auxDefaults) implements Variable {
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
+      uid: aux.getUid() || undefined,
     });
   }
   get isArrayed(): boolean {
@@ -473,6 +480,7 @@ const moduleDefaults = {
   data: undefined as Readonly<Array<Series>> | undefined,
   errors: undefined as List<EquationError> | undefined,
   unitErrors: undefined as List<UnitError> | undefined,
+  uid: undefined as number | undefined,
 };
 export class Module extends Record(moduleDefaults) implements Variable {
   // this isn't useless, as it ensures we specify the full object
@@ -490,6 +498,7 @@ export class Module extends Record(moduleDefaults) implements Variable {
       data: undefined,
       errors: undefined,
       unitErrors: undefined,
+      uid: module.getUid() || undefined,
     });
   }
   get equation(): undefined {
@@ -1149,10 +1158,31 @@ export function viewElementType(
   }
 }
 
+const loopMetadataDefaults = {
+  uids: List<number>(),
+  deleted: false,
+  name: '',
+  description: '',
+};
+export class LoopMetadata extends Record(loopMetadataDefaults) {
+  constructor(props: typeof loopMetadataDefaults) {
+    super(props);
+  }
+  static fromPb(loopMetadata: PbLoopMetadata): LoopMetadata {
+    return new LoopMetadata({
+      uids: List(loopMetadata.getUidsList()),
+      deleted: loopMetadata.getDeleted(),
+      name: loopMetadata.getName(),
+      description: loopMetadata.getDescription(),
+    });
+  }
+}
+
 const modelDefaults = {
   name: '',
   variables: Map<string, Variable>(),
   views: List<StockFlowView>(),
+  loopMetadata: List<LoopMetadata>(),
 };
 export class Model extends Record(modelDefaults) {
   // this isn't useless, as it ensures we specify the full object
@@ -1193,6 +1223,7 @@ export class Model extends Record(modelDefaults) {
           }
         }),
       ),
+      loopMetadata: List(model.getLoopMetadataList().map((lm) => LoopMetadata.fromPb(lm))),
     });
   }
 }

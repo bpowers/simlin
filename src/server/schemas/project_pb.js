@@ -78,17 +78,17 @@ proto.Project.prototype.toObject = function(opt_includeInstance) {
  */
 proto.Project.toObject = function(includeInstance, msg) {
   var f, obj = {
-    id: jspb.Message.getFieldWithDefault(msg, 1, ""),
-    displayName: jspb.Message.getFieldWithDefault(msg, 11, ""),
-    ownerId: jspb.Message.getFieldWithDefault(msg, 2, ""),
-    isPublic: jspb.Message.getBooleanFieldWithDefault(msg, 3, false),
-    description: jspb.Message.getFieldWithDefault(msg, 4, ""),
-    tagsList: (f = jspb.Message.getRepeatedField(msg, 5)) == null ? undefined : f,
-    collaboratorIdList: (f = jspb.Message.getRepeatedField(msg, 6)) == null ? undefined : f,
-    version: jspb.Message.getFieldWithDefault(msg, 7, 0),
-    fileId: jspb.Message.getFieldWithDefault(msg, 8, ""),
-    created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
-    updated: (f = msg.getUpdated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f)
+id: jspb.Message.getFieldWithDefault(msg, 1, ""),
+displayName: jspb.Message.getFieldWithDefault(msg, 11, ""),
+ownerId: jspb.Message.getFieldWithDefault(msg, 2, ""),
+isPublic: jspb.Message.getBooleanFieldWithDefault(msg, 3, false),
+description: jspb.Message.getFieldWithDefault(msg, 4, ""),
+tagsList: (f = jspb.Message.getRepeatedField(msg, 5)) == null ? undefined : f,
+collaboratorIdList: (f = jspb.Message.getRepeatedField(msg, 6)) == null ? undefined : f,
+version: jspb.Message.getFieldWithDefault(msg, 7, 0),
+fileId: jspb.Message.getFieldWithDefault(msg, 8, ""),
+created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
+updated: (f = msg.getUpdated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f)
   };
 
   if (includeInstance) {
@@ -126,15 +126,15 @@ proto.Project.deserializeBinaryFromReader = function(msg, reader) {
     var field = reader.getFieldNumber();
     switch (field) {
     case 1:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setId(value);
       break;
     case 11:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setDisplayName(value);
       break;
     case 2:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setOwnerId(value);
       break;
     case 3:
@@ -142,15 +142,15 @@ proto.Project.deserializeBinaryFromReader = function(msg, reader) {
       msg.setIsPublic(value);
       break;
     case 4:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setDescription(value);
       break;
     case 5:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.addTags(value);
       break;
     case 6:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.addCollaboratorId(value);
       break;
     case 7:
@@ -158,7 +158,7 @@ proto.Project.deserializeBinaryFromReader = function(msg, reader) {
       msg.setVersion(value);
       break;
     case 8:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setFileId(value);
       break;
     case 9:

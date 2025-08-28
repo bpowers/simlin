@@ -465,6 +465,7 @@ fn create_aux_variable(name: &str, equation: &str) -> crate::datamodel::Variable
         can_be_module_input: false,
         visibility: datamodel::Visibility::Public,
         ai_state: None,
+        uid: None,
     })
 }
 

@@ -101,6 +101,7 @@ impl<'a> BuiltinVisitor<'a> {
                             can_be_module_input: false,
                             visibility: datamodel::Visibility::Private,
                             ai_state: None,
+                            uid: None,
                         });
                         self.vars.insert(canonicalize(&id), x_var);
                         id
@@ -124,6 +125,7 @@ impl<'a> BuiltinVisitor<'a> {
                     can_be_module_input: false,
                     visibility: Visibility::Private,
                     ai_state: None,
+                    uid: None,
                 });
                 let module_output_name = format!("{module_name}·output");
                 self.vars.insert(canonicalize(&module_name), x_module);

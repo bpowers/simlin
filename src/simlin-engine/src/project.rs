@@ -462,6 +462,7 @@ mod tests {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         }));
 
         let sim_specs = sim_specs_with_units("years");

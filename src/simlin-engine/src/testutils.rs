@@ -23,6 +23,7 @@ pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::V
         can_be_module_input: false,
         visibility: Visibility::Private,
         ai_state: None,
+        uid: None,
     })
 }
 
@@ -64,6 +65,7 @@ pub(crate) fn x_stock(
         can_be_module_input: false,
         visibility: Visibility::Private,
         ai_state: None,
+        uid: None,
     })
 }
 
@@ -91,6 +93,7 @@ pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datam
         name: ident.to_string(),
         variables,
         views: vec![],
+        loop_metadata: vec![],
     }
 }
 
@@ -134,6 +137,7 @@ pub(crate) fn x_module(
         can_be_module_input: false,
         visibility: Visibility::Private,
         ai_state: None,
+        uid: None,
     })
 }
 
@@ -150,6 +154,7 @@ pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::
         can_be_module_input: false,
         visibility: Visibility::Private,
         ai_state: None,
+        uid: None,
     })
 }
 

@@ -636,10 +636,12 @@ export const VariableDetails = styled(
               // Signature neighbor matching for punctuation/operators/digits (and single-char tokens)
               const isSigChar = (ch: string) => /[A-Za-z0-9_()*+\-]/.test(ch);
               const prevSig = (() => {
-                for (let k = gidx - 1; k >= 0; k--) if (isSigChar(glyphs[k].ascii)) return glyphs[k].ascii; return '';
+                for (let k = gidx - 1; k >= 0; k--) if (isSigChar(glyphs[k].ascii)) return glyphs[k].ascii;
+                return '';
               })();
               const nextSig = (() => {
-                for (let k = gidx + 1; k < glyphs.length; k++) if (isSigChar(glyphs[k].ascii)) return glyphs[k].ascii; return '';
+                for (let k = gidx + 1; k < glyphs.length; k++) if (isSigChar(glyphs[k].ascii)) return glyphs[k].ascii;
+                return '';
               })();
               if (center && (prevSig || nextSig)) {
                 const positions: number[] = [];
@@ -647,21 +649,35 @@ export const VariableDetails = styled(
                 const matchScore = (idx: number) => {
                   let score = 0;
                   if (prevSig) {
-                    let j = idx - 1; while (j >= 0 && /\s/.test(equationStr[j])) j--; if (j >= 0 && equationStr[j] === prevSig) score += 2;
+                    let j = idx - 1;
+                    while (j >= 0 && /\s/.test(equationStr[j])) j--;
+                    if (j >= 0 && equationStr[j] === prevSig) score += 2;
                   }
                   if (nextSig) {
-                    let j = idx + 1; while (j < len && /\s/.test(equationStr[j])) j++; if (j < len && equationStr[j] === nextSig) score += 2;
+                    let j = idx + 1;
+                    while (j < len && /\s/.test(equationStr[j])) j++;
+                    if (j < len && equationStr[j] === nextSig) score += 2;
                   }
                   return score;
                 };
                 let bestIdx = -1;
                 let bestScore = -1;
-                for (const p of positions) { const s = matchScore(p); if (s > bestScore) { bestScore = s; bestIdx = p; } }
+                for (const p of positions) {
+                  const s = matchScore(p);
+                  if (s > bestScore) {
+                    bestScore = s;
+                    bestIdx = p;
+                  }
+                }
                 if (bestIdx >= 0) {
-                  try { console.log('[CaretMap] sig-neighbor match', { center, prevSig, nextSig, bestIdx, bestScore }); } catch {}
+                  try {
+                    console.log('[CaretMap] sig-neighbor match', { center, prevSig, nextSig, bestIdx, bestScore });
+                  } catch {}
                   return bestIdx + 1;
                 }
-                try { console.log('[CaretMap] sig-neighbor no match', { center, prevSig, nextSig, positions }); } catch {}
+                try {
+                  console.log('[CaretMap] sig-neighbor no match', { center, prevSig, nextSig, positions });
+                } catch {}
               }
 
               // Try contextual match: prev+center+next

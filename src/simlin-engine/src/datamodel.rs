@@ -240,6 +240,7 @@ pub struct Stock {
     pub can_be_module_input: bool,
     pub visibility: Visibility,
     pub ai_state: Option<AiState>,
+    pub uid: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -253,6 +254,7 @@ pub struct Flow {
     pub can_be_module_input: bool,
     pub visibility: Visibility,
     pub ai_state: Option<AiState>,
+    pub uid: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -265,6 +267,7 @@ pub struct Aux {
     pub can_be_module_input: bool,
     pub visibility: Visibility,
     pub ai_state: Option<AiState>,
+    pub uid: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -283,6 +286,7 @@ pub struct Module {
     pub can_be_module_input: bool,
     pub visibility: Visibility,
     pub ai_state: Option<AiState>,
+    pub uid: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -563,11 +567,20 @@ pub enum View {
     StockFlow(StockFlow),
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LoopMetadata {
+    pub uids: Vec<i32>,
+    pub deleted: bool,
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
     pub variables: Vec<Variable>,
     pub views: Vec<View>,
+    pub loop_metadata: Vec<LoopMetadata>,
 }
 
 impl Model {

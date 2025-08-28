@@ -311,6 +311,9 @@ export namespace Variable {
     getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
     setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
 
+    getUid(): number;
+    setUid(value: number): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Stock.AsObject;
     static toObject(includeInstance: boolean, msg: Stock): Stock.AsObject;
@@ -332,6 +335,7 @@ export namespace Variable {
       nonNegative: boolean;
       canBeModuleInput: boolean;
       visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
+      uid: number;
     };
   }
 
@@ -364,6 +368,9 @@ export namespace Variable {
     getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
     setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
 
+    getUid(): number;
+    setUid(value: number): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Flow.AsObject;
     static toObject(includeInstance: boolean, msg: Flow): Flow.AsObject;
@@ -384,6 +391,7 @@ export namespace Variable {
       nonNegative: boolean;
       canBeModuleInput: boolean;
       visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
+      uid: number;
     };
   }
 
@@ -413,6 +421,9 @@ export namespace Variable {
     getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
     setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
 
+    getUid(): number;
+    setUid(value: number): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Aux.AsObject;
     static toObject(includeInstance: boolean, msg: Aux): Aux.AsObject;
@@ -432,6 +443,7 @@ export namespace Variable {
       gf?: GraphicalFunction.AsObject;
       canBeModuleInput: boolean;
       visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
+      uid: number;
     };
   }
 
@@ -459,6 +471,9 @@ export namespace Variable {
     getVisibility(): Variable.VisibilityMap[keyof Variable.VisibilityMap];
     setVisibility(value: Variable.VisibilityMap[keyof Variable.VisibilityMap]): void;
 
+    getUid(): number;
+    setUid(value: number): void;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): Module.AsObject;
     static toObject(includeInstance: boolean, msg: Module): Module.AsObject;
@@ -478,6 +493,7 @@ export namespace Variable {
       referencesList: Array<Variable.Module.Reference.AsObject>;
       canBeModuleInput: boolean;
       visibility: Variable.VisibilityMap[keyof Variable.VisibilityMap];
+      uid: number;
     };
 
     export class Reference extends jspb.Message {
@@ -997,6 +1013,40 @@ export namespace View {
   export const ViewType: ViewTypeMap;
 }
 
+export class LoopMetadata extends jspb.Message {
+  clearUidsList(): void;
+  getUidsList(): Array<number>;
+  setUidsList(value: Array<number>): void;
+  addUids(value: number, index?: number): number;
+
+  getDeleted(): boolean;
+  setDeleted(value: boolean): void;
+
+  getName(): string;
+  setName(value: string): void;
+
+  getDescription(): string;
+  setDescription(value: string): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): LoopMetadata.AsObject;
+  static toObject(includeInstance: boolean, msg: LoopMetadata): LoopMetadata.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: LoopMetadata, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): LoopMetadata;
+  static deserializeBinaryFromReader(message: LoopMetadata, reader: jspb.BinaryReader): LoopMetadata;
+}
+
+export namespace LoopMetadata {
+  export type AsObject = {
+    uidsList: Array<number>;
+    deleted: boolean;
+    name: string;
+    description: string;
+  };
+}
+
 export class Model extends jspb.Message {
   getName(): string;
   setName(value: string): void;
@@ -1010,6 +1060,11 @@ export class Model extends jspb.Message {
   getViewsList(): Array<View>;
   setViewsList(value: Array<View>): void;
   addViews(value?: View, index?: number): View;
+
+  clearLoopMetadataList(): void;
+  getLoopMetadataList(): Array<LoopMetadata>;
+  setLoopMetadataList(value: Array<LoopMetadata>): void;
+  addLoopMetadata(value?: LoopMetadata, index?: number): LoopMetadata;
 
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Model.AsObject;
@@ -1026,6 +1081,7 @@ export namespace Model {
     name: string;
     variablesList: Array<Variable.AsObject>;
     viewsList: Array<View.AsObject>;
+    loopMetadataList: Array<LoopMetadata.AsObject>;
   };
 }
 
@@ -1306,3 +1362,30 @@ export interface SimMethodMap {
 }
 
 export const SimMethod: SimMethodMap;
+
+export interface BuiltinIdMap {
+  UNSPECIFIED: 0;
+  ABS: 1;
+  ARCCOS: 2;
+  ARCSIN: 3;
+  ARCTAN: 4;
+  COS: 5;
+  EXP: 6;
+  INF: 7;
+  INT: 8;
+  LN: 9;
+  LOG10: 10;
+  MAX: 11;
+  MIN: 12;
+  PI: 13;
+  PULSE: 14;
+  RAMP: 15;
+  SAFEDIV: 16;
+  SIN: 17;
+  SQRT: 18;
+  STEP: 19;
+  TAN: 20;
+  SIGN: 21;
+}
+
+export const BuiltinId: BuiltinIdMap;

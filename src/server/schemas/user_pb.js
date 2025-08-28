@@ -71,15 +71,15 @@ proto.User.prototype.toObject = function(opt_includeInstance) {
  */
 proto.User.toObject = function(includeInstance, msg) {
   var f, obj = {
-    id: jspb.Message.getFieldWithDefault(msg, 1, ""),
-    email: jspb.Message.getFieldWithDefault(msg, 2, ""),
-    displayName: jspb.Message.getFieldWithDefault(msg, 3, ""),
-    photoUrl: jspb.Message.getFieldWithDefault(msg, 4, ""),
-    provider: jspb.Message.getFieldWithDefault(msg, 5, ""),
-    created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
-    isAdmin: jspb.Message.getBooleanFieldWithDefault(msg, 6, false),
-    isDeactivated: jspb.Message.getBooleanFieldWithDefault(msg, 7, false),
-    canCreateProjects: jspb.Message.getBooleanFieldWithDefault(msg, 9, false)
+id: jspb.Message.getFieldWithDefault(msg, 1, ""),
+email: jspb.Message.getFieldWithDefault(msg, 2, ""),
+displayName: jspb.Message.getFieldWithDefault(msg, 3, ""),
+photoUrl: jspb.Message.getFieldWithDefault(msg, 4, ""),
+provider: jspb.Message.getFieldWithDefault(msg, 5, ""),
+created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
+isAdmin: jspb.Message.getBooleanFieldWithDefault(msg, 6, false),
+isDeactivated: jspb.Message.getBooleanFieldWithDefault(msg, 7, false),
+canCreateProjects: jspb.Message.getBooleanFieldWithDefault(msg, 9, false)
   };
 
   if (includeInstance) {
@@ -117,23 +117,23 @@ proto.User.deserializeBinaryFromReader = function(msg, reader) {
     var field = reader.getFieldNumber();
     switch (field) {
     case 1:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setId(value);
       break;
     case 2:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setEmail(value);
       break;
     case 3:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setDisplayName(value);
       break;
     case 4:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setPhotoUrl(value);
       break;
     case 5:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setProvider(value);
       break;
     case 8:

@@ -78,13 +78,13 @@ proto.File.prototype.toObject = function(opt_includeInstance) {
  */
 proto.File.toObject = function(includeInstance, msg) {
   var f, obj = {
-    id: jspb.Message.getFieldWithDefault(msg, 1, ""),
-    prevIdList: (f = jspb.Message.getRepeatedField(msg, 2)) == null ? undefined : f,
-    projectId: jspb.Message.getFieldWithDefault(msg, 3, ""),
-    userId: jspb.Message.getFieldWithDefault(msg, 4, ""),
-    created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
-    jsonContents: jspb.Message.getFieldWithDefault(msg, 6, ""),
-    projectContents: msg.getProjectContents_asB64()
+id: jspb.Message.getFieldWithDefault(msg, 1, ""),
+prevIdList: (f = jspb.Message.getRepeatedField(msg, 2)) == null ? undefined : f,
+projectId: jspb.Message.getFieldWithDefault(msg, 3, ""),
+userId: jspb.Message.getFieldWithDefault(msg, 4, ""),
+created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
+jsonContents: jspb.Message.getFieldWithDefault(msg, 6, ""),
+projectContents: msg.getProjectContents_asB64()
   };
 
   if (includeInstance) {
@@ -122,19 +122,19 @@ proto.File.deserializeBinaryFromReader = function(msg, reader) {
     var field = reader.getFieldNumber();
     switch (field) {
     case 1:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setId(value);
       break;
     case 2:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.addPrevId(value);
       break;
     case 3:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setProjectId(value);
       break;
     case 4:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setUserId(value);
       break;
     case 5:
@@ -143,7 +143,7 @@ proto.File.deserializeBinaryFromReader = function(msg, reader) {
       msg.setCreated(value);
       break;
     case 6:
-      var value = /** @type {string} */ (reader.readString());
+      var value = /** @type {string} */ (reader.readStringRequireUtf8());
       msg.setJsonContents(value);
       break;
     case 7:

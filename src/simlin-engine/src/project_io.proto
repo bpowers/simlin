@@ -70,6 +70,7 @@ message Variable {
     bool non_negative = 7;
     bool can_be_module_input = 9;
     Visibility visibility = 10;
+    int32 uid = 11;
   };
 
   message Flow {
@@ -81,6 +82,7 @@ message Variable {
     bool non_negative = 7;
     bool can_be_module_input = 9;
     Visibility visibility = 10;
+    int32 uid = 11;
   };
 
   message Aux {
@@ -91,6 +93,7 @@ message Variable {
     GraphicalFunction gf = 5;
     bool can_be_module_input = 7;
     Visibility visibility = 8;
+    int32 uid = 9;
   };
 
   message Module {
@@ -106,6 +109,7 @@ message Variable {
     repeated Reference references = 5;
     bool can_be_module_input = 6;
     Visibility visibility = 7;
+    int32 uid = 8;
   };
 
   oneof v {
@@ -228,12 +232,20 @@ message View {
   double zoom = 5;
 };
 
+message LoopMetadata {
+  repeated int32 uids = 1;
+  bool deleted = 2;
+  string name = 3;
+  string description = 4;
+}
+
 message Model {
   string name = 1;
   // namespaces
   // no 'resource' or sim_specs in our normalized form
   repeated Variable variables = 3;
   repeated View views = 4;
+  repeated LoopMetadata loop_metadata = 5;
 }
 
 enum SimMethod {

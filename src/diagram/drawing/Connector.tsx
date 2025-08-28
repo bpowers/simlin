@@ -194,11 +194,7 @@ export const Connector = styled(
       return (
         <g key={this.props.element.uid} className={className}>
           <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
-          <path
-            d={path}
-            className={connectorClass}
-            onPointerDown={this.handlePointerDownArc}
-          />
+          <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
           <Arrowhead
             point={end}
             angle={arrowθ}
@@ -332,11 +328,7 @@ export const Connector = styled(
       return (
         <g key={this.props.element.uid} className={className}>
           <path d={path} className="simlin-connector-bg" onPointerDown={this.handlePointerDownArc} />
-          <path
-            d={path}
-            className={connectorClass}
-            onPointerDown={this.handlePointerDownArc}
-          />
+          <path d={path} className={connectorClass} onPointerDown={this.handlePointerDownArc} />
           <Arrowhead
             point={end}
             angle={arrowθ}

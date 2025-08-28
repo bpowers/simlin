@@ -658,12 +658,14 @@ mod ast_tests {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         });
 
         let model_datamodel = datamodel::Model {
             name: "test_model".to_string(),
             variables: vec![array_var],
             views: vec![],
+            loop_metadata: vec![],
         };
 
         let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
@@ -727,6 +729,7 @@ mod ast_tests {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         });
         let array_var2 = datamodel::Variable::Aux(datamodel::Aux {
             ident: canonicalize("product_data").as_str().to_string(),
@@ -741,12 +744,14 @@ mod ast_tests {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         });
 
         let model_datamodel = datamodel::Model {
             name: "test_model".to_string(),
             variables: vec![array_var1, array_var2],
             views: vec![],
+            loop_metadata: vec![],
         };
 
         let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();

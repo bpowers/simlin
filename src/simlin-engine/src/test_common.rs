@@ -109,6 +109,7 @@ impl TestProject {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         }));
         self
     }
@@ -125,6 +126,7 @@ impl TestProject {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         }));
         self
     }
@@ -149,6 +151,7 @@ impl TestProject {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         }));
         self
     }
@@ -228,6 +231,7 @@ impl TestProject {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         }));
         self
     }
@@ -254,6 +258,7 @@ impl TestProject {
             can_be_module_input: false,
             visibility: datamodel::Visibility::Private,
             ai_state: None,
+            uid: None,
         }));
         self
     }
@@ -269,6 +274,7 @@ impl TestProject {
                 name: "main".to_string(),
                 variables: self.variables.clone(),
                 views: vec![],
+                loop_metadata: vec![],
             }],
             source: Default::default(),
             ai_information: None,

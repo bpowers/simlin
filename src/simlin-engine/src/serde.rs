@@ -6,8 +6,9 @@ use float_cmp::approx_eq;
 
 use crate::datamodel::{
     Aux, Dimension, Dt, Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, Model, Module, ModuleReference, Project, Rect, SimMethod, SimSpecs,
-    Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility, view_element,
+    GraphicalFunctionScale, LoopMetadata, Model, Module, ModuleReference, Project, Rect, SimMethod,
+    SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility,
+    view_element,
 };
 use crate::project_io;
 
@@ -409,6 +410,7 @@ impl From<Stock> for project_io::variable::Stock {
             non_negative: stock.non_negative,
             can_be_module_input: stock.can_be_module_input,
             visibility: project_io::variable::Visibility::from(stock.visibility) as i32,
+            uid: stock.uid.unwrap_or_default(),
         }
     }
 }
@@ -432,6 +434,11 @@ impl From<project_io::variable::Stock> for Stock {
                 project_io::variable::Visibility::try_from(stock.visibility).unwrap_or_default(),
             ),
             ai_state: None,
+            uid: if stock.uid == 0 {
+                None
+            } else {
+                Some(stock.uid)
+            },
         }
     }
 }
@@ -450,6 +457,7 @@ fn test_stock_roundtrip() {
             can_be_module_input: true,
             visibility: Visibility::Public,
             ai_state: None,
+            uid: Some(42),
         },
         Stock {
             ident: "blerg2".to_string(),
@@ -462,6 +470,7 @@ fn test_stock_roundtrip() {
             can_be_module_input: false,
             visibility: Visibility::Private,
             ai_state: None,
+            uid: None,
         },
     ];
     for expected in cases {
@@ -482,6 +491,7 @@ impl From<Flow> for project_io::variable::Flow {
             non_negative: flow.non_negative,
             can_be_module_input: flow.can_be_module_input,
             visibility: project_io::variable::Visibility::from(flow.visibility) as i32,
+            uid: flow.uid.unwrap_or_default(),
         }
     }
 }
@@ -504,6 +514,7 @@ impl From<project_io::variable::Flow> for Flow {
                 project_io::variable::Visibility::try_from(flow.visibility).unwrap_or_default(),
             ),
             ai_state: None,
+            uid: if flow.uid == 0 { None } else { Some(flow.uid) },
         }
     }
 }
@@ -521,6 +532,7 @@ fn test_flow_roundtrip() {
             can_be_module_input: true,
             visibility: Visibility::Private,
             ai_state: None,
+            uid: Some(100),
         },
         Flow {
             ident: "blerg2".to_string(),
@@ -544,6 +556,7 @@ fn test_flow_roundtrip() {
             can_be_module_input: false,
             visibility: Visibility::Public,
             ai_state: None,
+            uid: None,
         },
     ];
     for expected in cases {
@@ -563,6 +576,7 @@ impl From<Aux> for project_io::variable::Aux {
             gf: aux.gf.map(project_io::GraphicalFunction::from),
             can_be_module_input: aux.can_be_module_input,
             visibility: project_io::variable::Visibility::from(aux.visibility).into(),
+            uid: aux.uid.unwrap_or_default(),
         }
     }
 }
@@ -584,6 +598,7 @@ impl From<project_io::variable::Aux> for Aux {
                 project_io::variable::Visibility::try_from(aux.visibility).unwrap_or_default(),
             ),
             ai_state: None,
+            uid: if aux.uid == 0 { None } else { Some(aux.uid) },
         }
     }
 }
@@ -600,6 +615,7 @@ fn test_aux_roundtrip() {
             can_be_module_input: false,
             visibility: Visibility::Public,
             ai_state: None,
+            uid: Some(200),
         },
         Aux {
             ident: "blerg2".to_string(),
@@ -622,6 +638,7 @@ fn test_aux_roundtrip() {
             can_be_module_input: true,
             visibility: Visibility::Private,
             ai_state: None,
+            uid: None,
         },
     ];
     for expected in cases {
@@ -678,6 +695,7 @@ impl From<Module> for project_io::variable::Module {
                 .collect(),
             can_be_module_input: module.can_be_module_input,
             visibility: project_io::variable::Visibility::from(module.visibility) as i32,
+            uid: module.uid.unwrap_or_default(),
         }
     }
 }
@@ -703,6 +721,11 @@ impl From<project_io::variable::Module> for Module {
                 project_io::variable::Visibility::try_from(module.visibility).unwrap_or_default(),
             ),
             ai_state: None,
+            uid: if module.uid == 0 {
+                None
+            } else {
+                Some(module.uid)
+            },
         }
     }
 }
@@ -722,6 +745,7 @@ fn test_module_roundtrip() {
             can_be_module_input: false,
             visibility: Visibility::Private,
             ai_state: None,
+            uid: Some(300),
         },
         Module {
             ident: "blerg2".to_string(),
@@ -732,6 +756,7 @@ fn test_module_roundtrip() {
             can_be_module_input: true,
             visibility: Visibility::Public,
             ai_state: None,
+            uid: None,
         },
     ];
     for expected in cases {
@@ -784,6 +809,7 @@ fn test_variable_roundtrip() {
             can_be_module_input: false,
             visibility: Visibility::Public,
             ai_state: None,
+            uid: None,
         }),
         Variable::Module(Module {
             ident: "blerg2".to_string(),
@@ -794,6 +820,7 @@ fn test_variable_roundtrip() {
             can_be_module_input: true,
             visibility: Visibility::Private,
             ai_state: None,
+            uid: None,
         }),
     ];
     for expected in cases {
@@ -1424,6 +1451,33 @@ impl From<Model> for project_io::Model {
                 .into_iter()
                 .map(project_io::View::from)
                 .collect(),
+            loop_metadata: model
+                .loop_metadata
+                .into_iter()
+                .map(project_io::LoopMetadata::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<LoopMetadata> for project_io::LoopMetadata {
+    fn from(loop_metadata: LoopMetadata) -> Self {
+        project_io::LoopMetadata {
+            uids: loop_metadata.uids,
+            deleted: loop_metadata.deleted,
+            name: loop_metadata.name,
+            description: loop_metadata.description,
+        }
+    }
+}
+
+impl From<project_io::LoopMetadata> for LoopMetadata {
+    fn from(loop_metadata: project_io::LoopMetadata) -> Self {
+        LoopMetadata {
+            uids: loop_metadata.uids,
+            deleted: loop_metadata.deleted,
+            name: loop_metadata.name,
+            description: loop_metadata.description,
         }
     }
 }
@@ -1434,7 +1488,52 @@ impl From<project_io::Model> for Model {
             name: model.name,
             variables: model.variables.into_iter().map(Variable::from).collect(),
             views: model.views.into_iter().map(View::from).collect(),
+            loop_metadata: model
+                .loop_metadata
+                .into_iter()
+                .map(LoopMetadata::from)
+                .collect(),
         }
+    }
+}
+
+#[test]
+fn test_model_with_loop_metadata_roundtrip() {
+    let cases: &[Model] = &[Model {
+        name: "test_model".to_string(),
+        variables: vec![Variable::Stock(Stock {
+            ident: "stock1".to_string(),
+            equation: Equation::Scalar("1".to_string(), None),
+            documentation: "".to_string(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            non_negative: false,
+            can_be_module_input: false,
+            visibility: Visibility::Private,
+            ai_state: None,
+            uid: Some(1),
+        })],
+        views: vec![],
+        loop_metadata: vec![
+            LoopMetadata {
+                uids: vec![1, 2, 3, 1],
+                deleted: false,
+                name: "Reinforcing Loop".to_string(),
+                description: "This is a reinforcing feedback loop".to_string(),
+            },
+            LoopMetadata {
+                uids: vec![4, 5, 6, 4],
+                deleted: true,
+                name: "Balancing Loop".to_string(),
+                description: "This is a balancing feedback loop".to_string(),
+            },
+        ],
+    }];
+    for expected in cases {
+        let expected = expected.clone();
+        let actual = Model::from(project_io::Model::from(expected.clone()));
+        assert_eq!(expected, actual);
     }
 }
 
