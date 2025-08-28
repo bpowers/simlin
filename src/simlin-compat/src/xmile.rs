@@ -1091,6 +1091,7 @@ impl From<Model> for datamodel::Model {
                 _ => vec![],
             },
             views,
+            loop_metadata: vec![],
         }
     }
 }
@@ -2801,6 +2802,7 @@ impl From<Module> for datamodel::Module {
             can_be_module_input: can_be_module_input(&module.access),
             visibility: visibility(&module.access),
             ai_state: ai_state_from(module.ai_state),
+            uid: None,
         }
     }
 }
@@ -3039,6 +3041,7 @@ impl From<Stock> for datamodel::Stock {
             can_be_module_input: can_be_module_input(&stock.access),
             visibility: visibility(&stock.access),
             ai_state: ai_state_from(stock.ai_state),
+            uid: None,
         }
     }
 }
@@ -3208,6 +3211,7 @@ impl From<Flow> for datamodel::Flow {
             can_be_module_input: can_be_module_input(&flow.access),
             visibility: visibility(&flow.access),
             ai_state: ai_state_from(flow.ai_state),
+            uid: None,
         }
     }
 }
@@ -3368,6 +3372,7 @@ impl From<Aux> for datamodel::Aux {
             can_be_module_input: can_be_module_input(&aux.access),
             visibility: visibility(&aux.access),
             ai_state: ai_state_from(aux.ai_state),
+            uid: None,
         }
     }
 }
@@ -3531,6 +3536,7 @@ fn test_canonicalize_stock_inflows() {
         can_be_module_input: false,
         visibility: Visibility::Private,
         ai_state: None,
+        uid: None,
     });
 
     let output = datamodel::Variable::from(input);

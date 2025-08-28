@@ -273,6 +273,7 @@ impl Engine {
                 can_be_module_input: false,
                 visibility: Visibility::Private,
                 ai_state: None,
+                uid: None,
             }),
             "flow" => datamodel::Variable::Flow(datamodel::Flow {
                 ident: ident.as_str().to_string(),
@@ -284,6 +285,7 @@ impl Engine {
                 can_be_module_input: false,
                 visibility: Visibility::Private,
                 ai_state: None,
+                uid: None,
             }),
             "stock" => datamodel::Variable::Stock(datamodel::Stock {
                 ident: ident.as_str().to_string(),
@@ -296,6 +298,7 @@ impl Engine {
                 can_be_module_input: false,
                 visibility: Visibility::Private,
                 ai_state: None,
+                uid: None,
             }),
             _ => return None,
         };
