@@ -896,16 +896,11 @@ pub unsafe extern "C" fn simlin_analyze_get_links(sim: *mut SimlinSim) -> *mut S
 
         for (from, to) in deps {
             let key = (from.clone(), to.clone());
-            if !unique_links.contains_key(&key) {
-                unique_links.insert(
-                    key,
-                    engine::ltm::Link {
-                        from,
-                        to,
-                        polarity: engine::ltm::LinkPolarity::Unknown,
-                    },
-                );
-            }
+            unique_links.entry(key).or_insert(engine::ltm::Link {
+                from,
+                to,
+                polarity: engine::ltm::LinkPolarity::Unknown,
+            });
         }
     }
 
@@ -1260,7 +1255,7 @@ pub unsafe extern "C" fn simlin_project_serialize(
     let pb_project = engine::serde::serialize(&proj.datamodel);
 
     let mut bytes = Vec::new();
-    if let Err(_) = pb_project.encode(&mut bytes) {
+    if pb_project.encode(&mut bytes).is_err() {
         return engine::ErrorCode::ProtobufDecode as c_int;
     }
 
