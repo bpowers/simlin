@@ -12,6 +12,8 @@ perf.data.old
 *~
 .~*
 
+/third_party
+
 lib
 lib.browser
 lib.module
