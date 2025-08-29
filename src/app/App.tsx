@@ -66,7 +66,6 @@ class UserInfoSingleton {
     const worker = async (): Promise<[User | undefined, number]> => {
       const response = await resultPromise;
       const status = response.status;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const user = status >= 200 && status < 400 ? await response.json() : undefined;
 
       return [user, status];
@@ -130,12 +129,10 @@ const InnerApp = styled(
       // notify our app when a user logs in
       onAuthStateChanged(auth, this.authStateChanged);
 
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.getUserInfo);
     }
 
     authStateChanged = (user: FirebaseUser | null) => {
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.asyncAuthStateChanged, undefined, user);
     };
 
@@ -185,7 +182,6 @@ const InnerApp = styled(
 
       const status = response.status;
       if (!(status >= 200 && status < 400)) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const body = await response.json();
         const errorMsg =
           body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
@@ -215,7 +211,6 @@ const InnerApp = styled(
     };
 
     handleUsernameChanged = () => {
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(async () => {
         await userInfo.invalidate();
         await this.getUserInfo();

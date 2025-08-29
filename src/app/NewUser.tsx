@@ -92,7 +92,6 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
         errorMsg: 'Simlin requires a non-empty username',
       });
     } else {
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.setUsername);
     }
   };

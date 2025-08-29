@@ -104,7 +104,6 @@ export const NewProject = styled(
       if (!(status >= 200 && status < 400)) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const body = await response.json();
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         const errorMsg =
           body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;
         this.setState({
@@ -130,7 +129,6 @@ export const NewProject = styled(
           errorMsg: 'Please give your project a non-empty name',
         });
       } else {
-        // eslint-disable-next-line @typescript-eslint/no-misused-promises
         setTimeout(this.setProjectName);
       }
     };
@@ -245,7 +243,6 @@ export const NewProject = styled(
                         accept=".stmx,.itmx,.xmile,.mdl"
                         id="xmile-model-file"
                         type="file"
-                        /* eslint-disable-next-line @typescript-eslint/no-misused-promises */
                         onChange={this.uploadModel}
                       />
                     </Button>

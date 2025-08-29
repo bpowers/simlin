@@ -14,7 +14,6 @@ import { Application } from './application';
 import { Table } from './models/table';
 import { User } from './schemas/user_pb';
 
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
 interface StrategyOptions {}
 
 interface VerifyFunction {
@@ -155,7 +154,6 @@ async function getOrCreateUserFromProfile(
 }
 
 export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void => {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment,@typescript-eslint/no-unused-vars
   // const config = app.get('authentication');
 
   passport.use(
@@ -181,7 +179,6 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
     done(undefined, serializedUser);
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-misused-promises
   passport.deserializeUser(async (user: any, done: (error: any, user?: any) => void) => {
     if (!user || !user.id) {
       done(new Error(`no or incorrectly serialized User: ${user}`));
@@ -206,7 +203,6 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
 
   app.delete(
     '/session',
-    // eslint-disable-next-line @typescript-eslint/no-misused-promises
     (req: Request, res: Response): void => {
       console.log(`TODO: unset cookie`);
     },

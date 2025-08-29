@@ -7,12 +7,10 @@ import { OutgoingHttpHeaders, ServerResponse } from 'http';
 import { Response } from 'express';
 
 export function interceptWriteHeaders(res: Response, callback: (statusCode: number) => void): void {
-  // eslint-disable-next-line @typescript-eslint/unbound-method
   const realWriteHead = res.writeHead;
 
   // eslint-disable-next-line
   // @ts-ignore
-  // eslint-disable-next-line @typescript-eslint/unbound-method
   res.writeHead = (
     statusCode: number,
     reasonOrHeaders?: string | OutgoingHttpHeaders,
@@ -34,7 +32,6 @@ export function interceptWriteHeaders(res: Response, callback: (statusCode: numb
     // TODO: remove this any cast in the future -- for now,
     // typescript can't quite handle the insanity of Node's
     // writeHead's signature
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     realWriteHead.apply(res, args as any);
 
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment

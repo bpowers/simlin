@@ -56,7 +56,6 @@ const Home = styled(
         projects: List<Project>(),
       };
 
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises
       setTimeout(this.getProjects);
     }
 

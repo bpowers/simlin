@@ -71,9 +71,7 @@ class App {
   private loadConfig(): void {
     const setConfig = (filename: string): void => {
       const contents = fs.readFileSync(filename).toString();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const config = JSON.parse(contents);
-      // eslint-disable-next-line prefer-const
       for (let [key, value] of Object.entries(config)) {
         // FML
         if (key === 'port' && value === 'PORT' && process.env.PORT) {
@@ -98,12 +96,10 @@ class App {
       } else {
         let component = defined(path[0]);
         path = path.slice(1);
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         let obj: any = this.app.get(component);
         while (obj && path.length > 1) {
           component = defined(path[0]);
           path = path.slice(1);
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           obj = obj[component];
         }
         if (obj) {

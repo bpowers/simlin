@@ -8,7 +8,6 @@ import { Box } from '@system-dynamics/diagram/drawing/common';
 
 import { renderToPNG } from './render-inner';
 
-// eslint-disable-next-line @typescript-eslint/no-misused-promises
 setImmediate(async () => {
   const result = await renderToPNG(workerData.svgString as string, workerData.viewbox as Box);
   parentPort?.postMessage(result, [result.buffer]);

@@ -206,7 +206,6 @@ export const VariableDetails = styled(
       return typeof value === 'number' ? value.toFixed(3) : value.toString();
     };
 
-    // eslint-disable-next-line @typescript-eslint/ban-types
     handleTabChange = (event: React.ChangeEvent<{}>, newValue: number) => {
       this.props.onActiveTabChange(newValue);
     };
@@ -380,7 +379,6 @@ export const VariableDetails = styled(
             <div
               className="simlin-variabledetails-eqnpreview"
               onClick={(e) => this.handlePreviewClick(e, equationStr)}
-              // eslint-disable-next-line react/no-danger
               dangerouslySetInnerHTML={{ __html: latexHTML }}
             />
           ) : (
@@ -521,7 +519,6 @@ export const VariableDetails = styled(
             // ignore
           }
           try {
-            // eslint-disable-next-line no-console
             console.log('[CaretMap] glyphs', {
               count: list.length,
               ascii: list.map((g) => g.ascii).join(''),
@@ -541,7 +538,6 @@ export const VariableDetails = styled(
             const g = glyphs[i];
             if (e.clientX >= g.left && e.clientX <= g.right && e.clientY >= g.top && e.clientY <= g.bottom) {
               try {
-                // eslint-disable-next-line no-console
                 console.log('[CaretMap] exact glyph hit', { index: i, ascii: g.ascii, raw: g.raw });
               } catch {}
               return i;
@@ -565,10 +561,8 @@ export const VariableDetails = styled(
           try {
             if (best >= 0) {
               const g = glyphs[best];
-              // eslint-disable-next-line no-console
               console.log('[CaretMap] nearest glyph', { index: best, ascii: g.ascii, raw: g.raw, dist: bestDist });
             } else {
-              // eslint-disable-next-line no-console
               console.log('[CaretMap] no glyph found');
             }
           } catch {}
@@ -621,13 +615,11 @@ export const VariableDetails = styled(
                       }
                     }
                     try {
-                      // eslint-disable-next-line no-console
                       console.log('[CaretMap] token match', { token, candidates, choiceIdx, posInToken });
                     } catch {}
                     return choiceIdx + posInToken + 1;
                   } else {
                     try {
-                      // eslint-disable-next-line no-console
                       console.log('[CaretMap] token not found', { token });
                     } catch {}
                   }
@@ -685,14 +677,12 @@ export const VariableDetails = styled(
                 const idx = equationStr.indexOf(pattern);
                 if (idx >= 0) {
                   try {
-                    // eslint-disable-next-line no-console
                     console.log('[CaretMap] context match', { pattern, idx, prev, center, next });
                   } catch {}
                   const centerOffset = prev ? 1 : 0;
                   return idx + centerOffset + 1;
                 }
                 try {
-                  // eslint-disable-next-line no-console
                   console.log('[CaretMap] context not found', { pattern });
                 } catch {}
               }
@@ -707,7 +697,6 @@ export const VariableDetails = styled(
                     count++;
                     if (count === glyphOcc) {
                       try {
-                        // eslint-disable-next-line no-console
                         console.log('[CaretMap] nth occurrence fallback', { center, glyphOcc, index: i });
                       } catch {}
                       return i + 1;
@@ -715,7 +704,6 @@ export const VariableDetails = styled(
                   }
                 }
                 try {
-                  // eslint-disable-next-line no-console
                   console.log('[CaretMap] nth occurrence not found', { center, glyphOcc });
                 } catch {}
               }
@@ -735,13 +723,11 @@ export const VariableDetails = styled(
                   }
                 }
                 try {
-                  // eslint-disable-next-line no-console
                   console.log('[CaretMap] coarse fallback', { center, coarse, positions, choice });
                 } catch {}
                 return choice + 1;
               }
               try {
-                // eslint-disable-next-line no-console
                 console.log('[CaretMap] no positions for center', { center });
               } catch {}
             }
@@ -760,7 +746,6 @@ export const VariableDetails = styled(
             const cx = Math.max(0, Math.min(contentRect.width, e.clientX - contentRect.left));
             const len = equationStr.length;
             try {
-              // eslint-disable-next-line no-console
               console.log('[CaretMap] proportional over KaTeX content', { width: contentRect.width, cx, len });
             } catch {}
             return Math.max(0, Math.min(len, Math.round((cx / Math.max(1, contentRect.width)) * len)));
@@ -820,7 +805,6 @@ export const VariableDetails = styled(
           // Cleanup
           target.removeChild(ghost);
           try {
-            // eslint-disable-next-line no-console
             console.log('[CaretMap] ghost midpoint idx', { idx });
           } catch {}
           return idx;
@@ -828,7 +812,6 @@ export const VariableDetails = styled(
           // Fallback to proportional mapping
           const len = equationStr.length;
           try {
-            // eslint-disable-next-line no-console
             console.log('[CaretMap] container proportional fallback', { usableWidth, clickX, len });
           } catch {}
           return Math.max(0, Math.min(len, Math.round((clickX / usableWidth) * len)));
@@ -837,7 +820,6 @@ export const VariableDetails = styled(
 
       const offset = computeOffset();
       try {
-        // eslint-disable-next-line no-console
         console.log('[CaretMap] final offset', { offset });
       } catch {}
 

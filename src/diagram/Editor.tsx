@@ -353,7 +353,6 @@ export const Editor = styled(
       });
     };
 
-    // eslint-disable-next-line @typescript-eslint/ban-types
     handleDialClose = (e: React.SyntheticEvent<{}>, reason: CloseReason) => {
       if (reason === 'mouseLeave' || reason === 'blur') {
         return;
