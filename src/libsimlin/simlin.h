@@ -222,6 +222,11 @@ int simlin_sim_get_value(SimlinSim *sim, const char *name, double *result);
 
 // Sets a value in the simulation
 //
+// This function sets values at different phases of simulation:
+// - Before first run_to: Sets initial value to be used when simulation starts
+// - During simulation (after run_to): Sets value in current data for next iteration
+// - After run_to_end: Returns error (simulation complete)
+//
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
 // - `name` must be a valid C string
