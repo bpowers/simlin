@@ -13,13 +13,10 @@ export interface Table<T extends Message> {
   init(): Promise<void>;
 
   findOne(id: string): Promise<T | undefined>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   findOneByScan(query: any): Promise<T | undefined>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   findByScan(query: any): Promise<T[] | undefined>;
   find(idPrefix: string): Promise<T[]>;
   create(id: string, pb: T): Promise<void>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   update(id: string, cond: any, pb: T): Promise<T | null>;
   deleteOne(id: string): Promise<void>;
 }

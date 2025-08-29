@@ -278,7 +278,7 @@ export const apiRouter = (app: Application): Router => {
       setTimeout(async () => {
         try {
           await app.db.preview.deleteOne(projectModel.getId());
-        } catch (err) {
+        } catch {
           logger.warn(`unable to delete preview for ${req.params.projectName}`);
         }
       });

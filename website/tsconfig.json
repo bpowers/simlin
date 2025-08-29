@@ -21,6 +21,6 @@
       "@system-dynamics/xmutil": ["../src/xmutil-js"]
     }
   },
-  "include": ["src/", "docs/"],
+  "include": ["src/", "docs/", "rspress.config.ts"],
   "exclude": ["node_modules", "build"]
 }

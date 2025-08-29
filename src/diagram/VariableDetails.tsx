@@ -367,7 +367,7 @@ export const VariableDetails = styled(
               .replace(/,/g, ',\\allowbreak{} ');
           latex = insertBreaks(latex);
           latexHTML = katex.renderToString(latex, { throwOnError: false, displayMode: true });
-        } catch (e) {
+        } catch {
           // fall back to plain text
           latexHTML = '';
         }

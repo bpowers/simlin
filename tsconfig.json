@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./src/core" },
+    { "path": "./src/diagram" },
+    { "path": "./src/app" },
+    { "path": "./src/server" },
+    { "path": "./src/engine" },
+    { "path": "./src/importer" },
+    { "path": "./src/xmutil-js" },
+    { "path": "./website" }
+  ]
+}

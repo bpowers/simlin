@@ -84,7 +84,6 @@ export const NewProject = styled(
         description: this.state.descriptionField,
       };
       if (this.state.projectPB) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         bodyContents.projectPB = fromUint8Array(this.state.projectPB);
       }
       if (this.state.isPublic) {
@@ -102,7 +101,6 @@ export const NewProject = styled(
 
       const status = response.status;
       if (!(status >= 200 && status < 400)) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const body = await response.json();
         const errorMsg =
           body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;

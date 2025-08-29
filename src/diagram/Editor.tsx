@@ -997,7 +997,7 @@ export const Editor = styled(
           document.body.appendChild(a);
           try {
             (a as unknown as any).style = 'display: none';
-          } catch (_err) {
+          } catch {
             // oh well
           }
           a.href = url;

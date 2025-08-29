@@ -66,7 +66,6 @@ export class NewUser extends React.Component<NewUserProps, NewUserState> {
 
     const status = response.status;
     if (!(status >= 200 && status < 400)) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const body = await response.json();
       const errorMsg =
         body && body.error ? (body.error as string) : `HTTP ${status}; maybe try a different username ¯\\_(ツ)_/¯`;

@@ -56,7 +56,6 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     return this.deserialize(docSnapshot.get('value'));
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/explicit-module-boundary-types
   async findOneByScan(query: any): Promise<T | undefined> {
     const docs = await this.findByScan(query);
     if (docs === undefined) {
@@ -112,7 +111,6 @@ export class FirestoreTable<T extends Message> implements Table<T> {
       }
 
       if (key === 'jsonContents') {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const contents = value;
         // if the JSON is too big, don't expose it (as its only for debugging info anyway)
         if (contents.length > 100 * 1024) {
@@ -140,14 +138,12 @@ export class FirestoreTable<T extends Message> implements Table<T> {
     await docRef.create(this.doc(id, pb));
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/explicit-module-boundary-types
   async update(id: string, cond: any, pb: T): Promise<T | null> {
     try {
       await this.db.runTransaction(async (tx) => {
         const docRef = this.docRef(id);
         const doc = await tx.get(docRef);
         for (const [key, expected] of Object.entries(cond)) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           const current = doc.get(key);
           if (current !== expected) {
             throw new Error(`precondition ${key} failed: ${expected} != ${current}`);
@@ -155,7 +151,7 @@ export class FirestoreTable<T extends Message> implements Table<T> {
         }
         tx.update(docRef, this.doc(id, pb));
       });
-    } catch (err) {
+    } catch {
       // our precondition failed
       return null;
     }

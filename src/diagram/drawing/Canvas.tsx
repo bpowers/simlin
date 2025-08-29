@@ -231,7 +231,7 @@ export const Canvas = styled(
       let flow: FlowViewElement;
       try {
         flow = this.getElementByUid(defined(element.flowUid)) as FlowViewElement;
-      } catch (err) {
+      } catch {
         return;
       }
 

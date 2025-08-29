@@ -30,7 +30,7 @@ class FirestoreAuthStrategy extends BaseStrategy implements passport.Strategy {
     this.verify = verify;
   }
 
-  authenticate(req: Request, options?: any): void {
+  authenticate(req: Request, _options?: any): void {
     if (!req.body || !req.body.idToken) {
       this.error(new Error('no idToken in body'));
       return;
@@ -203,7 +203,7 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
 
   app.delete(
     '/session',
-    (req: Request, res: Response): void => {
+    (_req: Request, _res: Response): void => {
       console.log(`TODO: unset cookie`);
     },
   );

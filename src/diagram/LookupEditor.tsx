@@ -596,7 +596,7 @@ export const LookupEditor = styled(
       );
     }
   },
-)(({ theme }) => ({
+)(() => ({
   '.simlin-lookupeditor-yaxismax': {
     width: '30%',
     paddingRight: 4,
