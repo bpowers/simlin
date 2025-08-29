@@ -821,7 +821,7 @@ mod tests {
         );
 
         let sim_specs = sim_specs_with_units("years");
-        let project = x_project(sim_specs.clone(), &[model.clone()]);
+        let project = x_project(sim_specs.clone(), std::slice::from_ref(&model));
         let project1 = Project::from(project);
 
         // Create the same project again

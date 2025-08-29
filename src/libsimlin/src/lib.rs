@@ -3019,11 +3019,11 @@ mod tests {
 
             // Collect the dependency names
             let mut dep_names = Vec::new();
-            for i in 0..count2 as usize {
-                assert!(!links[i].is_null());
-                let dep_name = CStr::from_ptr(links[i]).to_string_lossy().into_owned();
+            for link in links.iter().take(count2 as usize) {
+                assert!(!link.is_null());
+                let dep_name = CStr::from_ptr(*link).to_string_lossy().into_owned();
                 dep_names.push(dep_name);
-                simlin_free_string(links[i]);
+                simlin_free_string(*link);
             }
 
             // Check that we got both "rate" and "stock" (canonicalized to lowercase)

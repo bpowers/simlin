@@ -347,15 +347,15 @@ mod tests {
                 } else {
                     println!("    Has AST: no");
                 }
-                if let Some(errors) = var.equation_errors() {
-                    if !errors.is_empty() {
-                        println!("    EQUATION ERRORS: {errors:?}");
-                    }
+                if let Some(errors) = var.equation_errors()
+                    && !errors.is_empty()
+                {
+                    println!("    EQUATION ERRORS: {errors:?}");
                 }
-                if let Some(unit_errors) = var.unit_errors() {
-                    if !unit_errors.is_empty() {
-                        println!("    UNIT ERRORS: {unit_errors:?}");
-                    }
+                if let Some(unit_errors) = var.unit_errors()
+                    && !unit_errors.is_empty()
+                {
+                    println!("    UNIT ERRORS: {unit_errors:?}");
                 }
             }
         }

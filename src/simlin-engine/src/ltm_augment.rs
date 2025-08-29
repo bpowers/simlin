@@ -1084,18 +1084,18 @@ mod tests {
         // Check that the equations use the black box formula
         // Remove debug output
         for var in link_vars.values() {
-            if let datamodel::Variable::Aux(aux) = var {
-                if let datamodel::Equation::Scalar(eq, _) = &aux.equation {
-                    // Module link scores should use the black box formula
-                    assert!(
-                        eq.contains("SIGN"),
-                        "Module link should include SIGN for polarity"
-                    );
-                    assert!(
-                        eq.contains("PREVIOUS"),
-                        "Module link should use PREVIOUS for time-based calc"
-                    );
-                }
+            if let datamodel::Variable::Aux(aux) = var
+                && let datamodel::Equation::Scalar(eq, _) = &aux.equation
+            {
+                // Module link scores should use the black box formula
+                assert!(
+                    eq.contains("SIGN"),
+                    "Module link should include SIGN for polarity"
+                );
+                assert!(
+                    eq.contains("PREVIOUS"),
+                    "Module link should use PREVIOUS for time-based calc"
+                );
             }
         }
     }

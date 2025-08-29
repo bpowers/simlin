@@ -1,0 +1,118 @@
+#!/bin/bash
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Determine repository root
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+echo "The project passed all pre-commit checks before your changes. Any failing checks reported are the result of your changes and need to be fixed by addressing their root cause." >&2
+
+echo "Running pre-commit checks..."
+
+cd "$REPO_ROOT"
+
+
+# 1. Check Rust formatting
+echo -n "Checking Rust code formatting... "
+if cargo fmt --check >/dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}Rust code needs formatting${NC}"
+    echo -e "${YELLOW}Run 'cargo fmt' to fix formatting${NC}"
+    exit 1
+fi
+
+# 2. Run Rust clippy
+echo -n "Running Rust clippy... "
+CLIPPY_OUTPUT="$(mktemp)"
+if cargo clippy --all-targets --all-features -- -D warnings > "$CLIPPY_OUTPUT" 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$CLIPPY_OUTPUT"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}Clippy found issues:${NC}"
+    cat "$CLIPPY_OUTPUT"
+    rm -f "$CLIPPY_OUTPUT"
+    echo -e "${YELLOW}Run 'cargo clippy --all-targets --all-features -- -D warnings' to see errors${NC}"
+    exit 1
+fi
+
+# 3. Run Rust tests
+echo -n "Running Rust tests... "
+TEST_OUTPUT="$(mktemp)"
+if RUST_BACKTRACE=1 cargo test > "$TEST_OUTPUT" 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$TEST_OUTPUT"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}Rust tests failed:${NC}"
+    cat "$TEST_OUTPUT"
+    rm -f "$TEST_OUTPUT"
+    echo -e "${YELLOW}Run 'cargo test' to see failures${NC}"
+    exit 1
+fi
+
+# Check if node_modules exists
+if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}Warning: Dependencies not installed. Run 'yarn install'${NC}"
+    echo -e "${YELLOW}Skipping TypeScript/JavaScript checks...${NC}"
+else
+    echo -n "Running TypeScript/JavaScript linting... "
+    LINT_OUTPUT="$(mktemp)"
+    if yarn lint > "$LINT_OUTPUT" 2>&1; then
+        echo -e "${GREEN}✓${NC}"
+        rm -f "$LINT_OUTPUT"
+    else
+        echo -e "${RED}✗${NC}"
+        echo -e "${RED}Linting failed:${NC}"
+        cat "$LINT_OUTPUT"
+        rm -f "$LINT_OUTPUT"
+        echo -e "${YELLOW}Run 'yarn lint' to see errors${NC}"
+        exit 1
+    fi
+
+    echo -n "Checking TypeScript types... "
+    TSC_OUTPUT="$(mktemp)"
+    if yarn tsc > "$TSC_OUTPUT" 2>&1; then
+        echo -e "${GREEN}✓${NC}"
+        rm -f "$TSC_OUTPUT"
+    else
+        echo -e "${RED}✗${NC}"
+        echo -e "${RED}TypeScript type checking failed:${NC}"
+        cat "$TSC_OUTPUT"
+        rm -f "$TSC_OUTPUT"
+        echo -e "${YELLOW}Run 'yarn tsc' to see errors${NC}"
+        exit 1
+    fi
+fi
+
+# 5. Make sure no cheating happened with tests
+# Set CLAUDE to the full path of claude if found on PATH, otherwise use local installation
+if command -v claude > /dev/null 2>&1; then
+    CLAUDE=$(command -v claude)
+else
+    CLAUDE="$HOME/.claude/local/claude"
+fi
+
+CLAUDE_SANITY_OUTPUT="$(mktemp)"
+echo -n "Running claude to check that we don't have incomplete tests..."
+"$CLAUDE" -p --allowedTools 'Bash(git:*)' LS Read --model sonnet "a user is looking to commit code - look at what parts of the diff being committed are in tests (files named like *_test.rs, *.test.ts, *.test.tsx, files in tests/, but also in functions annotated #[test] in regular rust files), and if any of the tests take shortcuts or are stubbed out (e.g. using todo!(), unimplemented!(), or comments to the effect of 'real logic to test this would go here'), start your response with 'FAIL: ' followed by a description of what is wrong, and what needs to happen. Based on the test name and surrounding code, be clear on what test functionality is missing and needs to be implemented before it can be committed. Strictly follow CLAUDE.md, provide guidance referencing CLAUDE.md, and tell the user to closely follow CLAUDE.md as they address the problem. Also tell them they MUST NOT delete the tests, the only way to succeed on the task is to fully implement the test. If the tests look reasonable you MUST respond succinctly with the 1-word message: SUCCESS" > "$CLAUDE_SANITY_OUTPUT" 2>&1
+
+if grep -q "^SUCCESS$" "$CLAUDE_SANITY_OUTPUT"; then
+    echo -e " ${GREEN}✓${NC}"
+    rm -f "$CLAUDE_SANITY_OUTPUT"
+else
+    echo -e " ${RED}✗${NC}"
+    echo -e "${RED}Test quality check failed:${NC}"
+    cat "$CLAUDE_SANITY_OUTPUT"
+    rm -f "$CLAUDE_SANITY_OUTPUT"
+    exit 1
+fi
+
+echo -e "${GREEN}All pre-commit checks passed!${NC}"

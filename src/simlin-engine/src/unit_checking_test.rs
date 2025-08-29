@@ -350,9 +350,9 @@ mod tests {
 
         // - Verify that subsequent values have changed from initial
         // (exact values depend on integration between save steps)
-        for i in 1..prev_a_values.len() {
+        for (i, value) in prev_a_values.iter().enumerate().skip(1) {
             assert_ne!(
-                prev_a_values[i], 666.0,
+                *value, 666.0,
                 "At timestep {i}, PREVIOUS should no longer return initial value"
             );
         }
@@ -376,9 +376,9 @@ mod tests {
         assert_eq!(prev_const[0], 100.0);
 
         // At all subsequent timesteps, should return 42 (the constant from previous timestep)
-        for i in 1..prev_const.len() {
+        for (i, value) in prev_const.iter().enumerate().skip(1) {
             assert_eq!(
-                prev_const[i], 42.0,
+                *value, 42.0,
                 "At timestep {i}, PREVIOUS of constant 42 should be 42"
             );
         }

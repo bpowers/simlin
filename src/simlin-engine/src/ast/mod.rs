@@ -272,7 +272,7 @@ impl Visitor<String> for PrintVisitor {
             Expr0::Const(s, _, _) => s.clone(),
             Expr0::Var(id, _) => {
                 // Canonicalize for display (lowercase, etc.)
-                crate::canonicalize(id.as_str()).as_str().to_string()
+                canonicalize(id.as_str()).as_str().to_string()
             }
             Expr0::App(UntypedBuiltinFn(func, args), _) => {
                 let args: Vec<String> = args.iter().map(|e| self.walk(e)).collect();
@@ -283,7 +283,7 @@ impl Visitor<String> for PrintVisitor {
                 // Canonicalize identifier for display
                 format!(
                     "{}[{}]",
-                    crate::canonicalize(id.as_str()).as_str(),
+                    canonicalize(id.as_str()).as_str(),
                     args.join(", ")
                 )
             }
@@ -669,7 +669,12 @@ mod ast_tests {
         };
 
         let units_ctx = crate::units::Context::new(&[], &Default::default()).unwrap();
-        let model_s0 = ModelStage0::new(&model_datamodel, &[dim.clone()], &units_ctx, false);
+        let model_s0 = ModelStage0::new(
+            &model_datamodel,
+            std::slice::from_ref(&dim),
+            &units_ctx,
+            false,
+        );
 
         let mut models = HashMap::new();
         models.insert(canonicalize("test_model"), model_s0);
