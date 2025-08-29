@@ -13,6 +13,7 @@ perf.data.old
 .~*
 
 lib
+!src/nextjs/**/lib/
 lib.browser
 lib.module
 

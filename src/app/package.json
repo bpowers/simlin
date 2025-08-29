@@ -47,7 +47,6 @@
     "typescript": "^5.7.2",
     "wouter": "^3.6.0"
   },
-  "resolutions": {},
   "scripts": {
     "needs-format": "prettier -l '**/*.ts' '**/*.tsx'",
     "format": "prettier --write '**/*.ts' '**/*.tsx'",
