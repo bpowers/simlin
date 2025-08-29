@@ -563,6 +563,11 @@ pub unsafe extern "C" fn simlin_sim_get_value(
 }
 /// Sets a value in the simulation
 ///
+/// This function sets values at different phases of simulation:
+/// - Before first run_to: Sets initial value to be used when simulation starts
+/// - During simulation (after run_to): Sets value in current data for next iteration  
+/// - After run_to_end: Returns error (simulation complete)
+///
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
 /// - `name` must be a valid C string
@@ -580,29 +585,22 @@ pub unsafe extern "C" fn simlin_sim_set_value(
         Ok(s) => canonicalize(s),
         Err(_) => return engine::ErrorCode::Generic as c_int,
     };
-    // Allow setting only when results exist; mutate the last saved value.
+
     if let Some(ref mut vm) = sim.vm {
-        // Set current value in VM current timestep
+        // VM exists - either before first run or during simulation
         if let Some(off) = vm.get_offset(&canon_name) {
+            // Set value in current timestep (works for both initial and running phases)
             vm.set_value_now(off, val);
             return engine::ErrorCode::NoError as c_int;
         }
-        return engine::ErrorCode::Generic as c_int;
-    } else if let Some(ref mut results) = sim.results {
-        // Prefer exact canonical match; fall back to suffix match
-        let found_off = results.offsets.get(&canon_name).copied();
-        if let Some(off) = found_off {
-            if results.step_count == 0 {
-                return engine::ErrorCode::Generic as c_int;
-            }
-            let idx = (results.step_count - 1) * results.step_size + off;
-            if let Some(slot) = results.data.get_mut(idx) {
-                *slot = val;
-                return engine::ErrorCode::NoError as c_int;
-            }
-        }
-        return engine::ErrorCode::Generic as c_int;
+        // Variable not found
+        return engine::ErrorCode::UnknownDependency as c_int;
+    } else if sim.results.is_some() {
+        // Simulation complete - cannot modify
+        return engine::ErrorCode::NotSimulatable as c_int;
     }
+
+    // No VM and no results - unexpected state
     engine::ErrorCode::Generic as c_int
 }
 /// Sets the value for a variable at the last saved timestep by offset
@@ -1791,6 +1789,103 @@ mod tests {
             assert!(
                 (out2 - new_val).abs() <= 1e-9,
                 "expected {new_val} got {out2}"
+            );
+
+            // Cleanup
+            simlin_sim_unref(sim);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_set_value_phases() {
+        // Load the SIR project fixture
+        let pb_path = std::path::Path::new("../../src/engine2/testdata/SIR_project.pb");
+        if !pb_path.exists() {
+            eprintln!("missing SIR_project.pb fixture; skipping");
+            return;
+        }
+        let data = std::fs::read(pb_path).unwrap();
+
+        unsafe {
+            // Open project
+            let mut err_code: c_int = 0;
+            let proj = simlin_project_open(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
+            assert!(!proj.is_null(), "project open failed: {err_code}");
+
+            // Test Phase 1: Set value before first run_to (initial value)
+            let sim = simlin_sim_new(proj, std::ptr::null());
+            assert!(!sim.is_null());
+
+            // Get variable names to find a valid variable
+            let count = simlin_sim_get_varcount(sim);
+            let mut name_ptrs: Vec<*const c_char> = vec![std::ptr::null(); count as usize];
+            simlin_sim_get_varnames(sim, name_ptrs.as_mut_ptr(), name_ptrs.len());
+
+            let mut test_var_name: Option<String> = None;
+            for &p in &name_ptrs {
+                if p.is_null() {
+                    continue;
+                }
+                let s = std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+                simlin_free_string(p as *mut c_char);
+                if s.to_ascii_lowercase().ends_with("infectious") {
+                    test_var_name = Some(s);
+                    break;
+                }
+            }
+            let test_var = test_var_name.expect("test variable not found");
+            let c_test_var = CString::new(test_var.clone()).unwrap();
+
+            // Set initial value before any run_to
+            let initial_val: f64 = 100.0;
+            let rc = simlin_sim_set_value(sim, c_test_var.as_ptr(), initial_val);
+            assert_eq!(
+                rc,
+                engine::ErrorCode::NoError as c_int,
+                "set_value before run failed"
+            );
+
+            // Verify initial value is set
+            let mut out: c_double = 0.0;
+            simlin_sim_get_value(sim, c_test_var.as_ptr(), &mut out);
+            assert!(
+                (out - initial_val).abs() <= 1e-9,
+                "initial value not set correctly"
+            );
+
+            // Test Phase 2: Set value during simulation (after partial run)
+            simlin_sim_run_to(sim, 0.5);
+            let during_val: f64 = 200.0;
+            let rc = simlin_sim_set_value(sim, c_test_var.as_ptr(), during_val);
+            assert_eq!(
+                rc,
+                engine::ErrorCode::NoError as c_int,
+                "set_value during run failed"
+            );
+
+            simlin_sim_get_value(sim, c_test_var.as_ptr(), &mut out);
+            assert!(
+                (out - during_val).abs() <= 1e-9,
+                "value during run not set correctly"
+            );
+
+            // Test Phase 3: Set value after run_to_end (should fail)
+            simlin_sim_run_to_end(sim);
+            let rc = simlin_sim_set_value(sim, c_test_var.as_ptr(), 300.0);
+            assert_eq!(
+                rc,
+                engine::ErrorCode::NotSimulatable as c_int,
+                "set_value after completion should fail with NotSimulatable"
+            );
+
+            // Test setting unknown variable (should fail)
+            let unknown = CString::new("unknown_variable_xyz").unwrap();
+            let rc = simlin_sim_set_value(sim, unknown.as_ptr(), 999.0);
+            assert_eq!(
+                rc,
+                engine::ErrorCode::UnknownDependency as c_int,
+                "set_value for unknown variable should fail with UnknownDependency"
             );
 
             // Cleanup
