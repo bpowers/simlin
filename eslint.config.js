@@ -24,5 +24,6 @@ module.exports = createConfig({
     'website/build/',
     'src/app/build/',
     'src/app/build-component/',
+    'src/nextjs/',
   ],
 });
