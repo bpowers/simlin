@@ -10,5 +10,5 @@ import { renderToPNG } from './render-inner';
 
 setImmediate(async () => {
   const result = await renderToPNG(workerData.svgString as string, workerData.viewbox as Box);
-  parentPort?.postMessage(result, [result.buffer]);
+  parentPort?.postMessage(result, [result.buffer as ArrayBuffer]);
 });

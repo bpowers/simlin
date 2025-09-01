@@ -22,7 +22,7 @@ function getWasmModule(): Promise<typeof import('./xmutil.wasm')> {
 
     fs.readFile(join(__dirname, 'xmutil.wasm'))
       .then((contents) => {
-        WebAssembly.instantiate(contents)
+        WebAssembly.instantiate(contents as BufferSource)
           .then((source) => {
             cachedWasmModule = source.instance.exports as unknown as typeof import('./xmutil.wasm');
             resolve(cachedWasmModule);
