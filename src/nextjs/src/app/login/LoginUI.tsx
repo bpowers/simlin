@@ -12,7 +12,7 @@ import { updateProfile } from '@firebase/auth';
 import { useState, FormEvent, useEffect } from 'react';
 import { TextFieldProps, TextField, Card, CardContent, Typography, CardActions, Button } from '@mui/material';
 import { Apple, Google, Email } from '@mui/icons-material';
-import useOnIdTokenChange from '@/lib/hooks/useUserSession';
+import useUserSession from '@/lib/hooks/useUserSession';
 import { useRouter } from 'next/navigation';
 
 type EmailLoginStates = 'showEmail' | 'showPassword' | 'showSignup' | 'showProviderRedirect' | 'showRecover';
@@ -35,7 +35,7 @@ export default function LoginUI() {
   // This is only needed because I cannot find a way
   // to tell firebase to redirect directly to / after
   // a successful login
-  useOnIdTokenChange();
+  useUserSession();
 
   function onEmailLoginClick() {
     setState((state) => ({ ...state, loginFlow: 'showEmail' }));

@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 
-import { getAuthenticatedAppForUser } from '@/lib/firebase/serverApp';
+import getAuthenticatedServerApp from '@/lib/firebase/serverApp';
 import Header from './Header';
 
 export default async function Home({
@@ -8,7 +8,7 @@ export default async function Home({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const { currentUser } = await getAuthenticatedAppForUser();
+  const { currentUser } = await getAuthenticatedServerApp();
 
   if (!currentUser) redirect('/login');
 

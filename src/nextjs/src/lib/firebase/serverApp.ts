@@ -1,15 +1,21 @@
 import 'server-only';
 
 import { initializeServerApp } from 'firebase/app';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { app, getAuth } from './helpers';
+import { redirect } from 'next/navigation';
 
-export async function getAuthenticatedAppForUser() {
+export default async function getAuthenticatedServerApp() {
   const authIdToken = (await cookies()).get('__session')?.value;
+  const headersObj = await headers();
 
-  const firebaseServerApp = initializeServerApp(app, { authIdToken });
+  try {
+    const firebaseServerApp = initializeServerApp(app, { authIdToken, releaseOnDeref: headersObj });
 
-  const auth = await getAuth(firebaseServerApp);
+    const auth = await getAuth(firebaseServerApp);
 
-  return { firebaseServerApp, currentUser: auth.currentUser };
+    return { firebaseServerApp, currentUser: auth.currentUser };
+  } catch {
+    redirect('/refresh-token');
+  }
 }

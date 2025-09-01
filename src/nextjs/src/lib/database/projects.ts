@@ -20,6 +20,12 @@ export async function getProjects(username: string) {
   return ref.docs.map((p) => ({ id: p.id, ...p.data() }) as Project);
 }
 
-export async function createProject(project: Omit<Project, 'id'>) {
-  return addDoc(projects, project);
+export async function createProject(newProject: {
+  ownerId: string;
+  isPublic: boolean;
+  description?: string;
+  initialProjectBinary?: Uint8Array;
+  displayName: string;
+}) {
+  return addDoc(projects, newProject);
 }

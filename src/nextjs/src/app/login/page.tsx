@@ -1,10 +1,11 @@
 import { redirect } from 'next/navigation';
 import ModelIcon from '@system-dynamics/diagram/ModelIcon';
+
+import getAuthenticatedServerApp from '@/lib/firebase/serverApp';
 import LoginUI from './LoginUI';
-import { getAuthenticatedAppForUser } from '@/lib/firebase/serverApp';
 
 export default async function Login() {
-  const { currentUser } = await getAuthenticatedAppForUser();
+  const { currentUser } = await getAuthenticatedServerApp();
 
   if (currentUser) redirect('/');
 

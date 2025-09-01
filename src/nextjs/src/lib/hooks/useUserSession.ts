@@ -1,22 +1,35 @@
-import { useEffect } from 'react';
-import { onIdTokenChanged } from '../firebase/auth';
+import { useEffect, useState } from 'react';
 import { serialize } from 'cookie';
+import { User } from 'firebase/auth';
 
-export default function useOnIdTokenChange(initialUser?: { uid: string }) {
+import { onIdTokenChanged } from '../firebase/auth';
+
+export default function useUserSession(initialUserId?: string) {
+  const [currentUser, setCurrentUser] = useState<User>();
+
   useEffect(() => {
     return onIdTokenChanged(async (user) => {
-      if (user) {
-        const idToken = await user.getIdToken();
-        const cookieStr = serialize('__session', idToken, { path: '/' });
-        document.cookie = cookieStr;
-      } else {
-        const cookieStr = serialize('__session', '', { maxAge: -1 });
-        document.cookie = cookieStr;
+      try {
+        if (user) {
+          const idToken = await user.getIdToken();
+          const cookieStr = serialize('__session', idToken, { path: '/' });
+          document.cookie = cookieStr;
+          setCurrentUser(user);
+        } else {
+          const cookieStr = serialize('__session', '', { maxAge: -1 });
+          document.cookie = cookieStr;
+          setCurrentUser(undefined);
+        }
+      } catch (err) {
+        if (err instanceof Error) console.error('Firebase connection issue');
+        return;
       }
-      if (initialUser?.uid === user?.uid) {
+      if (initialUserId === user?.uid) {
         return;
       }
       window.location.reload();
     });
-  }, [initialUser]);
+  }, [initialUserId]);
+
+  return currentUser;
 }

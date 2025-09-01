@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useRef, useState } from 'react';
 
 import { signOut } from '@/lib/firebase/auth';
-import useOnIdTokenChange from '@/lib/hooks/useUserSession';
+import useUserSession from '@/lib/hooks/useUserSession';
 
 const anchorOrigin = {
   vertical: 'bottom',
@@ -22,7 +22,7 @@ export default function Header({ user, hideNewButton }: Props) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuAnchor = useRef<HTMLButtonElement>(null);
 
-  useOnIdTokenChange(user);
+  useUserSession(user.uid);
 
   const { photoURL, displayName } = user;
 

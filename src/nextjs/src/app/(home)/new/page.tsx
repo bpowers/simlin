@@ -1,23 +1,12 @@
 import { redirect } from 'next/navigation';
 
-import { getAuthenticatedAppForUser } from '@/lib/firebase/serverApp';
+import getAuthenticatedServerApp from '@/lib/firebase/serverApp';
+import NewProjectForm from './NewProjectForm';
 
 export default async function NewProject() {
-  const { currentUser } = await getAuthenticatedAppForUser();
+  const { currentUser } = await getAuthenticatedServerApp();
 
   if (!currentUser) redirect('/login');
 
-  return (
-    <div>
-      <br />
-      <br />
-      <br />
-      <br />
-      <br />
-      <br />
-      <br />
-      <br />
-      TEST FORM FOR NEW PROJECT
-    </div>
-  );
+  return <NewProjectForm userId={currentUser.uid} />;
 }
