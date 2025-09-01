@@ -1,11 +1,8 @@
 import { Project } from '@system-dynamics/core/datamodel';
-import { fromXmile, test } from '@system-dynamics/importer';
+import { fromXmile } from '@system-dynamics/importer';
 import { convertMdlToXmile } from '@system-dynamics/xmutil-js';
 
 export default async function convertModelFileToBinary(modelFile: File) {
-  await test();
-  console.log('JS');
-
   let fileContents = await modelFile.text();
   if (modelFile.name.endsWith('.mdl')) {
     const [xmileContent, errors] = await convertMdlToXmile(fileContents, true);
