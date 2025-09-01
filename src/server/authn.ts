@@ -201,10 +201,7 @@ export const authn = (app: Application, firebaseAuthn: admin.auth.Auth): void =>
     res.sendStatus(200);
   });
 
-  app.delete(
-    '/session',
-    (_req: Request, _res: Response): void => {
-      console.log(`TODO: unset cookie`);
-    },
-  );
+  app.delete('/session', (_req: Request, _res: Response): void => {
+    console.log(`TODO: unset cookie`);
+  });
 };

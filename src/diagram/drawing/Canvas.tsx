@@ -774,42 +774,44 @@ export const Canvas = styled(
         const pointA = this.mouseDownPoint;
         const pointB = this.state.dragSelectionPoint;
         const canvasOffset = this.getCanvasOffset();
-        
+
         // Calculate selection rectangle bounds
         const left = Math.min(pointA.x, pointB.x) - canvasOffset.x;
         const right = Math.max(pointA.x, pointB.x) - canvasOffset.x;
         const top = Math.min(pointA.y, pointB.y) - canvasOffset.y;
         const bottom = Math.max(pointA.y, pointB.y) - canvasOffset.y;
-        
+
         // Find all elements within the selection rectangle
         let selectedElements = Set<UID>();
         for (const element of this.cachedElements) {
           // Skip flows, stocks, and clouds for now - focus on auxes
-          if (element instanceof FlowViewElement || 
-              element instanceof StockViewElement || 
-              element instanceof CloudViewElement) {
+          if (
+            element instanceof FlowViewElement ||
+            element instanceof StockViewElement ||
+            element instanceof CloudViewElement
+          ) {
             continue;
           }
-          
+
           // Check if element is within selection rectangle
           if (element instanceof AuxViewElement) {
-            if (auxContains(element, { x: left, y: top }) ||
-                auxContains(element, { x: right, y: top }) ||
-                auxContains(element, { x: left, y: bottom }) ||
-                auxContains(element, { x: right, y: bottom }) ||
-                (element.cx >= left && element.cx <= right && 
-                 element.cy >= top && element.cy <= bottom)) {
+            if (
+              auxContains(element, { x: left, y: top }) ||
+              auxContains(element, { x: right, y: top }) ||
+              auxContains(element, { x: left, y: bottom }) ||
+              auxContains(element, { x: right, y: bottom }) ||
+              (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom)
+            ) {
               selectedElements = selectedElements.add(element.uid);
             }
           } else if (element instanceof AliasViewElement || element instanceof ModuleViewElement) {
             // For other named elements, check if center is within rectangle
-            if (element.cx >= left && element.cx <= right && 
-                element.cy >= top && element.cy <= bottom) {
+            if (element.cx >= left && element.cx <= right && element.cy >= top && element.cy <= bottom) {
               selectedElements = selectedElements.add(element.uid);
             }
           }
         }
-        
+
         // Update selection
         this.props.onSetSelection(selectedElements);
         this.clearPointerState(false);
@@ -1145,7 +1147,7 @@ export const Canvas = styled(
       let isMovingArrow = !!isArrowhead;
 
       this.pointerId = e.pointerId;
-      
+
       // For multi-selection, use the click point as the offset
       // This ensures smooth dragging from where the user clicked
       this.selectionCenterOffset = this.getCanvasPoint(e.clientX, e.clientY);
@@ -1202,7 +1204,7 @@ export const Canvas = styled(
         // Check for modifier keys to determine selection behavior
         const isMultiSelect = e.ctrlKey || e.metaKey || e.shiftKey;
         let selection: Set<UID>;
-        
+
         if (isMultiSelect) {
           // Add to or remove from existing selection
           if (this.props.selection.has(element.uid)) {

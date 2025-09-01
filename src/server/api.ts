@@ -70,299 +70,281 @@ export const apiRouter = (app: Application): Router => {
   });
 
   // create a new project
-  api.post(
-    '/projects',
-    async (req: Request, res: Response): Promise<void> => {
-      const user = getUser(req, res);
+  api.post('/projects', async (req: Request, res: Response): Promise<void> => {
+    const user = getUser(req, res);
 
-      if (!req.body.projectName) {
-        res.status(400).json({ error: 'projectName is required' });
-        return;
-      }
+    if (!req.body.projectName) {
+      res.status(400).json({ error: 'projectName is required' });
+      return;
+    }
 
-      const projectName = (req.body.projectName as string) || '';
-      const projectDescription = (req.body.description as string) || '';
-      const isPublic = !!req.body.isPublic;
+    const projectName = (req.body.projectName as string) || '';
+    const projectDescription = (req.body.description as string) || '';
+    const isPublic = !!req.body.isPublic;
 
-      try {
-        const project = createProject(user, projectName, projectDescription, isPublic);
+    try {
+      const project = createProject(user, projectName, projectDescription, isPublic);
 
-        let sdPB: Buffer | undefined;
-        if (req.body.projectPB) {
-          sdPB = Buffer.from(req.body.projectPB, 'base64');
-        } else {
-          sdPB = Buffer.from(emptyProject(projectName, user.getDisplayName()).serializeBinary());
-        }
-
-        const filePb = createFile(project.getId(), user.getId(), undefined, sdPB);
-
-        await app.db.file.create(filePb.getId(), filePb);
-
-        project.setFileId(filePb.getId());
-        await app.db.project.create(project.getId(), project);
-
-        res.status(200).json(project.toObject());
-      } catch (error) {
-        const err = error as any;
-        if (err.code === 'wut') {
-          res.status(400).json({ error: 'project name already taken' });
-          return;
-        }
-        logger.error(':ohno:');
-        logger.error(err);
-        throw err;
-      }
-    },
-  );
-
-  api.get(
-    '/projects',
-    async (req: Request, res: Response): Promise<void> => {
-      const user = getUser(req, res);
-      const projectModels = await app.db.project.find(user.getId() + '/');
-      const projects = await Promise.all(projectModels.map((project: ProjectPb) => project.toObject()));
-      res.status(200).json(projects);
-    },
-  );
-
-  api.get(
-    '/projects/:username/:projectName',
-    async (req: Request, res: Response): Promise<void> => {
-      const requestUser = maybeGetUser(req, res);
-      // avoid doing 2 DB queries to look up the same user, if the
-      // author is the one making this request
-      let authorUser: UserPb | undefined;
-      if (requestUser && requestUser.getId() === req.params.username) {
-        authorUser = requestUser;
+      let sdPB: Buffer | undefined;
+      if (req.body.projectPB) {
+        sdPB = Buffer.from(req.body.projectPB, 'base64');
       } else {
-        authorUser = await app.db.user.findOne(req.params.username);
+        sdPB = Buffer.from(emptyProject(projectName, user.getDisplayName()).serializeBinary());
       }
-      if (!authorUser) {
-        res.status(404).json({});
+
+      const filePb = createFile(project.getId(), user.getId(), undefined, sdPB);
+
+      await app.db.file.create(filePb.getId(), filePb);
+
+      project.setFileId(filePb.getId());
+      await app.db.project.create(project.getId(), project);
+
+      res.status(200).json(project.toObject());
+    } catch (error) {
+      const err = error as any;
+      if (err.code === 'wut') {
+        res.status(400).json({ error: 'project name already taken' });
         return;
       }
+      logger.error(':ohno:');
+      logger.error(err);
+      throw err;
+    }
+  });
 
-      const projectSlug = `${req.params.username}/${req.params.projectName}`;
-      const projectModel = await app.db.project.findOne(projectSlug);
+  api.get('/projects', async (req: Request, res: Response): Promise<void> => {
+    const user = getUser(req, res);
+    const projectModels = await app.db.project.find(user.getId() + '/');
+    const projects = await Promise.all(projectModels.map((project: ProjectPb) => project.toObject()));
+    res.status(200).json(projects);
+  });
 
-      // the username check is skipped if the model exists and is public
-      if (!projectModel?.getIsPublic()) {
-        // TODO: implement collaborators
-        if (requestUser?.getId() !== authorUser.getId()) {
-          res.status(401).json({});
-          return;
-        }
-      }
+  api.get('/projects/:username/:projectName', async (req: Request, res: Response): Promise<void> => {
+    const requestUser = maybeGetUser(req, res);
+    // avoid doing 2 DB queries to look up the same user, if the
+    // author is the one making this request
+    let authorUser: UserPb | undefined;
+    if (requestUser && requestUser.getId() === req.params.username) {
+      authorUser = requestUser;
+    } else {
+      authorUser = await app.db.user.findOne(req.params.username);
+    }
+    if (!authorUser) {
+      res.status(404).json({});
+      return;
+    }
 
-      if (!projectModel || !projectModel.getFileId()) {
-        res.status(404).json({});
-        return;
-      }
+    const projectSlug = `${req.params.username}/${req.params.projectName}`;
+    const projectModel = await app.db.project.findOne(projectSlug);
 
-      const file = await app.db.file.findOne(projectModel.getFileId());
-      if (!file) {
-        res.status(404).json({});
-        return;
-      }
-
-      const project = projectModel.toObject();
-      const jsonFile = file.getJsonContents();
-      const pb = file.getProjectContents_asB64();
-
-      res.status(200).json({ ...project, file: jsonFile, pb });
-    },
-  );
-
-  api.get(
-    '/preview/:username/:projectName',
-    async (req: Request, res: Response): Promise<void> => {
-      let authorUser: UserPb | undefined = getUser(req, res);
-      if (authorUser.getId() !== req.params.username) {
-        authorUser = await app.db.user.findOne(req.params.username);
-      }
-      if (!authorUser) {
-        res.status(404).json({});
-        return;
-      }
-
-      const projectSlug = `${req.params.username}/${req.params.projectName}`;
-      const projectModel = await app.db.project.findOne(projectSlug);
-
-      // the username check is skipped if the model exists and is public
-      if (!projectModel?.getIsPublic()) {
-        // TODO: implement collaborators
-        if (
-          !req.session ||
-          !req.session.passport ||
-          !req.session.passport.user ||
-          authorUser.getId() !== req.session.passport.user.id
-        ) {
-          res.status(401).json({});
-          return;
-        }
-      }
-
-      if (!projectModel || !projectModel.getFileId()) {
-        res.status(404).json({});
-        return;
-      }
-
-      let previewModel = await app.db.preview.findOne(projectSlug);
-      if (!previewModel) {
-        try {
-          previewModel = await updatePreview(app.db, projectModel);
-        } catch (err) {
-          logger.error(`updatePreview: ${err}`);
-          res.status(500).json({});
-          return;
-        }
-      }
-
-      const png = Buffer.from(previewModel.getPng() as Uint8Array);
-
-      res.contentType('image/png');
-      res.status(200).send(png);
-    },
-  );
-
-  api.post(
-    '/projects/:username/:projectName',
-    async (req: Request, res: Response): Promise<void> => {
-      const user = getUser(req, res);
-      // TODO
-      if (user.getId() !== req.params.username) {
+    // the username check is skipped if the model exists and is public
+    if (!projectModel?.getIsPublic()) {
+      // TODO: implement collaborators
+      if (requestUser?.getId() !== authorUser.getId()) {
         res.status(401).json({});
         return;
       }
-      const projectSlug = `${req.params.username}/${req.params.projectName}`;
-      const projectModel = await app.db.project.findOne(projectSlug);
-      if (!projectModel || !projectModel.getFileId()) {
-        res.status(404).json({});
+    }
+
+    if (!projectModel || !projectModel.getFileId()) {
+      res.status(404).json({});
+      return;
+    }
+
+    const file = await app.db.file.findOne(projectModel.getFileId());
+    if (!file) {
+      res.status(404).json({});
+      return;
+    }
+
+    const project = projectModel.toObject();
+    const jsonFile = file.getJsonContents();
+    const pb = file.getProjectContents_asB64();
+
+    res.status(200).json({ ...project, file: jsonFile, pb });
+  });
+
+  api.get('/preview/:username/:projectName', async (req: Request, res: Response): Promise<void> => {
+    let authorUser: UserPb | undefined = getUser(req, res);
+    if (authorUser.getId() !== req.params.username) {
+      authorUser = await app.db.user.findOne(req.params.username);
+    }
+    if (!authorUser) {
+      res.status(404).json({});
+      return;
+    }
+
+    const projectSlug = `${req.params.username}/${req.params.projectName}`;
+    const projectModel = await app.db.project.findOne(projectSlug);
+
+    // the username check is skipped if the model exists and is public
+    if (!projectModel?.getIsPublic()) {
+      // TODO: implement collaborators
+      if (
+        !req.session ||
+        !req.session.passport ||
+        !req.session.passport.user ||
+        authorUser.getId() !== req.session.passport.user.id
+      ) {
+        res.status(401).json({});
         return;
       }
+    }
 
-      if (!req.body || !req.body.currVersion) {
-        res.status(400).json({ error: 'currVersion is required' });
+    if (!projectModel || !projectModel.getFileId()) {
+      res.status(404).json({});
+      return;
+    }
+
+    let previewModel = await app.db.preview.findOne(projectSlug);
+    if (!previewModel) {
+      try {
+        previewModel = await updatePreview(app.db, projectModel);
+      } catch (err) {
+        logger.error(`updatePreview: ${err}`);
+        res.status(500).json({});
         return;
       }
+    }
 
-      if (!req.body.projectPB) {
-        res.status(400).json({ error: 'projectPB is required' });
-        return;
+    const png = Buffer.from(previewModel.getPng() as Uint8Array);
+
+    res.contentType('image/png');
+    res.status(200).send(png);
+  });
+
+  api.post('/projects/:username/:projectName', async (req: Request, res: Response): Promise<void> => {
+    const user = getUser(req, res);
+    // TODO
+    if (user.getId() !== req.params.username) {
+      res.status(401).json({});
+      return;
+    }
+    const projectSlug = `${req.params.username}/${req.params.projectName}`;
+    const projectModel = await app.db.project.findOne(projectSlug);
+    if (!projectModel || !projectModel.getFileId()) {
+      res.status(404).json({});
+      return;
+    }
+
+    if (!req.body || !req.body.currVersion) {
+      res.status(400).json({ error: 'currVersion is required' });
+      return;
+    }
+
+    if (!req.body.projectPB) {
+      res.status(400).json({ error: 'projectPB is required' });
+      return;
+    }
+
+    const projectVersion = req.body.currVersion as number;
+    const newVersion = projectVersion + 1;
+
+    let pbContents: Buffer | undefined;
+    if (req.body.projectPB) {
+      pbContents = Buffer.from(req.body.projectPB, 'base64');
+    }
+
+    const file = createFile(projectModel.getId(), user.getId(), undefined, pbContents);
+    await app.db.file.create(file.getId(), file);
+
+    // only update if the version matches
+    projectModel.setFileId(file.getId());
+    projectModel.setVersion(newVersion);
+
+    const result = await app.db.project.update(
+      projectModel.getId(),
+      {
+        version: projectVersion,
+      },
+      projectModel,
+    );
+
+    // remove our preview
+    setTimeout(async () => {
+      try {
+        await app.db.preview.deleteOne(projectModel.getId());
+      } catch {
+        logger.warn(`unable to delete preview for ${req.params.projectName}`);
       }
+    });
 
-      const projectVersion = req.body.currVersion as number;
-      const newVersion = projectVersion + 1;
-
-      let pbContents: Buffer | undefined;
-      if (req.body.projectPB) {
-        pbContents = Buffer.from(req.body.projectPB, 'base64');
-      }
-
-      const file = createFile(projectModel.getId(), user.getId(), undefined, pbContents);
-      await app.db.file.create(file.getId(), file);
-
-      // only update if the version matches
-      projectModel.setFileId(file.getId());
-      projectModel.setVersion(newVersion);
-
-      const result = await app.db.project.update(
-        projectModel.getId(),
-        {
-          version: projectVersion,
-        },
-        projectModel,
-      );
-
-      // remove our preview
-      setTimeout(async () => {
-        try {
-          await app.db.preview.deleteOne(projectModel.getId());
-        } catch {
-          logger.warn(`unable to delete preview for ${req.params.projectName}`);
-        }
+    // if the result is null we weren't able to find a matching
+    // version in the DB, probably due to concurrent modification in
+    // a different browser tab
+    if (result === null) {
+      res.status(409).json({
+        error: `error saving model: changes based on old version. refresh page to reload`,
       });
+      return;
+    }
 
-      // if the result is null we weren't able to find a matching
-      // version in the DB, probably due to concurrent modification in
-      // a different browser tab
-      if (result === null) {
-        res.status(409).json({
-          error: `error saving model: changes based on old version. refresh page to reload`,
-        });
-        return;
-      }
+    res.status(200).json({ version: newVersion });
+  });
 
-      res.status(200).json({ version: newVersion });
-    },
-  );
+  api.patch('/user', async (req: Request, res: Response): Promise<void> => {
+    const userModel = getUser(req, res);
 
-  api.patch(
-    '/user',
-    async (req: Request, res: Response): Promise<void> => {
-      const userModel = getUser(req, res);
+    if (Object.keys(req.body).length !== 2 || !req.body.username) {
+      res.status(400).json({ error: 'only username can be patched' });
+      return;
+    }
 
-      if (Object.keys(req.body).length !== 2 || !req.body.username) {
-        res.status(400).json({ error: 'only username can be patched' });
-        return;
-      }
+    if (!req.body.agreeToTermsAndPrivacyPolicy) {
+      res.status(400).json({ error: 'must agree to Terms and Conditions and Privacy Policy' });
+      return;
+    }
 
-      if (!req.body.agreeToTermsAndPrivacyPolicy) {
-        res.status(400).json({ error: 'must agree to Terms and Conditions and Privacy Policy' });
-        return;
-      }
+    const proposedUsername = req.body.username as string;
 
-      const proposedUsername = req.body.username as string;
+    if (UsernameDenylist.has(proposedUsername)) {
+      res.status(400).json({ error: 'username already taken' });
+      return;
+    }
 
-      if (UsernameDenylist.has(proposedUsername)) {
+    if (!userModel.getId().startsWith(`temp-`)) {
+      res.status(403).json({ error: 'username already set' });
+      return;
+    }
+
+    const origUserId = userModel.getId();
+
+    userModel.setId(proposedUsername);
+    userModel.setCanCreateProjects(true);
+    try {
+      // updating the primary key of a user doesn't work in mongo
+      logger.error(`creating user ${userModel.getId()}`);
+      await app.db.user.create(userModel.getId(), userModel);
+      logger.error(`deleting old user ${origUserId}`);
+      await app.db.user.deleteOne(origUserId);
+      logger.error(`done deleting old user ${origUserId}`);
+    } catch (error) {
+      const err = error as any;
+      if (err.code === 'wut') {
         res.status(400).json({ error: 'username already taken' });
         return;
-      }
-
-      if (!userModel.getId().startsWith(`temp-`)) {
-        res.status(403).json({ error: 'username already set' });
+      } else {
+        res.status(400).json({ error: 'username is already taken' });
         return;
       }
+    }
 
-      const origUserId = userModel.getId();
+    req.session.passport.user.id = userModel.getId();
 
-      userModel.setId(proposedUsername);
-      userModel.setCanCreateProjects(true);
+    const defaultProjectsDir = app.get('defaultProjectsDir') as string;
+    // this error shouldn't ever happen, but also shouldn't be fatal
+    if (defaultProjectsDir) {
       try {
-        // updating the primary key of a user doesn't work in mongo
-        logger.error(`creating user ${userModel.getId()}`);
-        await app.db.user.create(userModel.getId(), userModel);
-        logger.error(`deleting old user ${origUserId}`);
-        await app.db.user.deleteOne(origUserId);
-        logger.error(`done deleting old user ${origUserId}`);
-      } catch (error) {
-        const err = error as any;
-        if (err.code === 'wut') {
-          res.status(400).json({ error: 'username already taken' });
-          return;
-        } else {
-          res.status(400).json({ error: 'username is already taken' });
-          return;
-        }
+        await populateExamples(app.db, userModel, defaultProjectsDir);
+      } catch (err) {
+        logger.error(`populateExamples(${userModel.getId()}, ${defaultProjectsDir}): ${err}`);
       }
+    } else {
+      logger.error('missing defaultProjectsDir in config');
+    }
 
-      req.session.passport.user.id = userModel.getId();
-
-      const defaultProjectsDir = app.get('defaultProjectsDir') as string;
-      // this error shouldn't ever happen, but also shouldn't be fatal
-      if (defaultProjectsDir) {
-        try {
-          await populateExamples(app.db, userModel, defaultProjectsDir);
-        } catch (err) {
-          logger.error(`populateExamples(${userModel.getId()}, ${defaultProjectsDir}): ${err}`);
-        }
-      } else {
-        logger.error('missing defaultProjectsDir in config');
-      }
-
-      res.status(200).json({});
-    },
-  );
+    res.status(200).json({});
+  });
 
   return api;
 };
