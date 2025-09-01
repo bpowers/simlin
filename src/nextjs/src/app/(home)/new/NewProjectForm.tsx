@@ -15,15 +15,25 @@ import { ExpandMore } from '@mui/icons-material';
 import { useActionState } from 'react';
 
 import createProjectAction from '@/lib/createProjectAction';
+import convertModelFileToBinary from '@/lib/convertModelFileToBinary';
 
 export interface Props {
   userId: string;
 }
 
 export default function NewProjectForm({ userId }: Props) {
-  // For now, model conversion is done server side, for code simplicity sake
-  // This can be easily changed in the future, though
-  const [actionState, createProject, isPending] = useActionState(createProjectAction, { formData: new FormData() });
+  async function clientAction(actionState: { errorMessage?: string; formData: FormData }, formData: FormData) {
+    const modelFile = formData.get('model-file') as File | null;
+
+    if (modelFile && modelFile.size !== 0) {
+      const initialProjectBinary = await convertModelFileToBinary(modelFile);
+      formData.set('model-file', new TextDecoder('utf-8').decode(initialProjectBinary));
+    } else formData.delete('model-file');
+
+    return createProjectAction(actionState, formData);
+  }
+
+  const [actionState, createProject, isPending] = useActionState(clientAction, { formData: new FormData() });
 
   return (
     <form action={createProject} className="TODO">

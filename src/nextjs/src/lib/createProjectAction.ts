@@ -2,11 +2,7 @@
 
 import { redirect } from 'next/navigation';
 import { createProject } from './database/projects';
-import { convertMdlToXmile } from '@system-dynamics/xmutil-js';
-import { Project } from '@system-dynamics/core/datamodel';
-import { fromXmile } from '@system-dynamics/importer';
 import getAuthenticatedServerApp from './firebase/serverApp';
-import convertModelFileToBinary from './convertModelFileToBinary';
 
 const DEFAULT_ISPUBLIC = false;
 
@@ -18,7 +14,7 @@ function validatedFormData(formData: FormData) {
   if (description instanceof File) throw new Error('Invalid description format');
 
   const modelFile = formData.get('model-file');
-  if (typeof modelFile === 'string') throw new Error('Model file not supported');
+  if (modelFile && typeof modelFile !== 'string') throw new Error('Model must be passed encoded as string');
 
   const isPublic = !!formData.get('is-public');
 
@@ -40,13 +36,7 @@ export default async function createProjectAction(
 
   const { projectName, isPublic, modelFile, description } = validatedFormData(projectData);
 
-  let initialProjectBinary: Uint8Array | undefined = undefined;
-
-  if (modelFile) {
-    if (modelFile.size !== 0) {
-      initialProjectBinary = await convertModelFileToBinary(modelFile);
-    }
-  }
+  const initialProjectBinary = modelFile ? new TextEncoder().encode(modelFile) : undefined;
 
   const newProject = {
     ownerId,
