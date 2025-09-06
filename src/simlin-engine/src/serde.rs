@@ -1438,7 +1438,14 @@ impl From<project_io::View> for View {
 }
 
 impl From<Model> for project_io::Model {
-    fn from(model: Model) -> Self {
+    fn from(mut model: Model) -> Self {
+        use crate::canonicalize;
+
+        // Sort ALL variables by their canonical identifier for deterministic ordering
+        // This ensures consistent proto serialization regardless of file order or variable type
+        model
+            .variables.sort_by_key(|a| canonicalize(a.get_ident()));
+
         project_io::Model {
             name: model.name,
             variables: model
@@ -1484,9 +1491,16 @@ impl From<project_io::LoopMetadata> for LoopMetadata {
 
 impl From<project_io::Model> for Model {
     fn from(model: project_io::Model) -> Self {
+        use crate::canonicalize;
+
+        let mut variables: Vec<Variable> =
+            model.variables.into_iter().map(Variable::from).collect();
+        // Sort variables by canonical identifier for deterministic ordering
+        variables.sort_by_key(|a| canonicalize(a.get_ident()));
+
         Model {
             name: model.name,
-            variables: model.variables.into_iter().map(Variable::from).collect(),
+            variables,
             views: model.views.into_iter().map(View::from).collect(),
             loop_metadata: model
                 .loop_metadata

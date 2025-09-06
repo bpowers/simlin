@@ -1083,11 +1083,19 @@ impl From<Model> for datamodel::Model {
             variables: match model.variables {
                 Some(Variables {
                     variables: vars, ..
-                }) => vars
-                    .into_iter()
-                    .filter(|v| !matches!(v, Var::Unhandled))
-                    .map(datamodel::Variable::from)
-                    .collect(),
+                }) => {
+                    let mut variables: Vec<datamodel::Variable> = vars
+                        .into_iter()
+                        .filter(|v| !matches!(v, Var::Unhandled))
+                        .map(datamodel::Variable::from)
+                        .collect();
+                    // Sort variables by canonical identifier for deterministic ordering
+                    variables.sort_by(|a, b| {
+                        simlin_engine::canonicalize(a.get_ident())
+                            .cmp(&simlin_engine::canonicalize(b.get_ident()))
+                    });
+                    variables
+                }
                 _ => vec![],
             },
             views,
