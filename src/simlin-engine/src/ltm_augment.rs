@@ -3,6 +3,11 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! LTM project augmentation - adds synthetic variables for link and loop scores
+//!
+//! This module generates synthetic variables for Loops That Matter (LTM) analysis.
+//! The generated equations use the PREVIOUS function, which is implemented as a
+//! module in stdlib/previous.stmx (not as a builtin function). The PREVIOUS module
+//! uses a stock-and-flow structure to store and return the previous timestep's value.
 
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, Result};
