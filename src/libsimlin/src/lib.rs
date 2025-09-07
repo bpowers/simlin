@@ -565,7 +565,7 @@ pub unsafe extern "C" fn simlin_sim_get_value(
 ///
 /// This function sets values at different phases of simulation:
 /// - Before first run_to: Sets initial value to be used when simulation starts
-/// - During simulation (after run_to): Sets value in current data for next iteration  
+/// - During simulation (after run_to): Sets value in current data for next iteration
 /// - After run_to_end: Returns error (simulation complete)
 ///
 /// # Safety
@@ -1004,7 +1004,7 @@ pub unsafe extern "C" fn simlin_free_links(links: *mut SimlinLinks) {
     }
 }
 
-/// Gets the relative loop score time series for a specific loop  
+/// Gets the relative loop score time series for a specific loop
 ///
 /// Renamed for clarity from simlin_analyze_get_rel_loop_score
 ///

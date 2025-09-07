@@ -1443,8 +1443,7 @@ impl From<Model> for project_io::Model {
 
         // Sort ALL variables by their canonical identifier for deterministic ordering
         // This ensures consistent proto serialization regardless of file order or variable type
-        model
-            .variables.sort_by_key(|a| canonicalize(a.get_ident()));
+        model.variables.sort_by_key(|a| canonicalize(a.get_ident()));
 
         project_io::Model {
             name: model.name,
