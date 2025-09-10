@@ -65,10 +65,28 @@ typedef enum {
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
 } SimlinLoopPolarity;
 
+// Opaque model structure
+typedef struct SimlinModel SimlinModel;
+
 // Opaque project structure
 typedef struct {
   uint8_t _private[0];
 } SimlinProject;
+
+// Single causal link structure
+typedef struct {
+  char *from;
+  char *to;
+  SimlinLinkPolarity polarity;
+  double *score;
+  uintptr_t score_len;
+} SimlinLink;
+
+// Collection of links
+typedef struct {
+  SimlinLink *links;
+  uintptr_t count;
+} SimlinLinks;
 
 // Opaque simulation structure
 typedef struct {
@@ -88,21 +106,6 @@ typedef struct {
   SimlinLoop *loops;
   uintptr_t count;
 } SimlinLoops;
-
-// Single causal link structure
-typedef struct {
-  char *from;
-  char *to;
-  SimlinLinkPolarity polarity;
-  double *score;
-  uintptr_t score_len;
-} SimlinLink;
-
-// Collection of links
-typedef struct {
-  SimlinLink *links;
-  uintptr_t count;
-} SimlinLinks;
 
 // Error detail structure containing error message and location
 typedef struct {
@@ -149,18 +152,86 @@ void simlin_project_ref(SimlinProject *project);
 // - `project` must be a valid pointer to a SimlinProject
 void simlin_project_unref(SimlinProject *project);
 
-// Enables LTM (Loops That Matter) analysis on a project
+// Gets the number of models in the project
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
-int simlin_project_enable_ltm(SimlinProject *project);
+int simlin_project_get_model_count(SimlinProject *project);
 
-// Creates a new simulation context
+// Gets the list of model names in the project
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `result` must be a valid pointer to an array of at least `max` char pointers
+// - The returned strings are owned by the caller and must be freed with simlin_free_string
+int simlin_project_get_model_names(SimlinProject *project, char **result, uintptr_t max);
+
+// Gets a model from a project by name
 //
 // # Safety
 // - `project` must be a valid pointer to a SimlinProject
 // - `model_name` may be null (uses default model)
-SimlinSim *simlin_sim_new(SimlinProject *project, const char *model_name);
+// - The returned model must be freed with simlin_model_unref
+SimlinModel *simlin_project_get_model(SimlinProject *project, const char *model_name);
+
+// Increments the reference count of a model
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+void simlin_model_ref(SimlinModel *model);
+
+// Decrements the reference count and frees the model if it reaches zero
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+void simlin_model_unref(SimlinModel *model);
+
+// Gets the number of variables in the model
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+int simlin_model_get_var_count(SimlinModel *model);
+
+// Gets the variable names from the model
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `result` must be a valid pointer to an array of at least `max` char pointers
+// - The returned strings are owned by the caller and must be freed with simlin_free_string
+int simlin_model_get_var_names(SimlinModel *model, char **result, uintptr_t max);
+
+// Gets the incoming links (dependencies) for a variable
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - `var_name` must be a valid C string
+// - `result` must be a valid pointer to an array of at least `max` char pointers (or null if max is 0)
+// - The returned strings are owned by the caller and must be freed with simlin_free_string
+//
+// # Returns
+// - If max == 0: returns the total number of dependencies (result can be null)
+// - If max is too small: returns a negative error code
+// - Otherwise: returns the number of dependencies written to result
+int simlin_model_get_incoming_links(SimlinModel *model,
+                                    const char *var_name,
+                                    char **result,
+                                    uintptr_t max);
+
+// Gets all causal links in a model
+//
+// Returns all causal links detected in the model.
+// This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+// - The returned SimlinLinks must be freed with simlin_free_links
+SimlinLinks *simlin_model_get_links(SimlinModel *model);
+
+// Creates a new simulation context
+//
+// # Safety
+// - `model` must be a valid pointer to a SimlinModel
+SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm);
 
 // Increments the reference count of a simulation
 //
@@ -191,20 +262,6 @@ int simlin_sim_run_to_end(SimlinSim *sim);
 // # Safety
 // - `sim` must be a valid pointer to a SimlinSim
 int simlin_sim_get_stepcount(SimlinSim *sim);
-
-// Gets the number of variables in the model
-//
-// # Safety
-// - `sim` must be a valid pointer to a SimlinSim
-int simlin_sim_get_varcount(SimlinSim *sim);
-
-// Gets the variable names
-//
-// # Safety
-// - `sim` must be a valid pointer to a SimlinSim
-// - `result` must be a valid pointer to an array of at least `max` char pointers
-// - The returned strings are owned by the simulation and must not be freed
-int simlin_sim_get_varnames(SimlinSim *sim, const char **result, uintptr_t max);
 
 // Resets the simulation to its initial state
 //
@@ -436,23 +493,6 @@ void simlin_free_error_details(SimlinErrorDetails *details);
 // - `detail` must be a valid pointer returned by simlin_project_get_simulation_error
 // - The pointer must not be used after calling this function
 void simlin_free_error_detail(SimlinErrorDetail *detail);
-
-// Gets the incoming links (dependencies) for a variable
-//
-// # Safety
-// - `sim` must be a valid pointer to a SimlinSim
-// - `var_name` must be a valid C string
-// - `result` must be a valid pointer to an array of at least `max` char pointers (or null if max is 0)
-// - The returned strings are owned by the caller and must be freed with simlin_free_string
-//
-// # Returns
-// - If max == 0: returns the total number of dependencies (result can be null)
-// - If max is too small: returns a negative error code
-// - Otherwise: returns the number of dependencies written to result
-int simlin_sim_get_incoming_links(SimlinSim *sim,
-                                  const char *var_name,
-                                  char **result,
-                                  uintptr_t max);
 
 #ifdef __cplusplus
 }  // extern "C"

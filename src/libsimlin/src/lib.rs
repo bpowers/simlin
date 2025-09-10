@@ -125,10 +125,16 @@ pub struct SimlinProject {
     ltm_project: Option<engine::Project>,
     ref_count: AtomicUsize,
 }
-/// Opaque simulation structure
-pub struct SimlinSim {
+/// Opaque model structure
+pub struct SimlinModel {
     project: *const SimlinProject,
     model_name: String,
+    ref_count: AtomicUsize,
+}
+/// Opaque simulation structure
+pub struct SimlinSim {
+    model: *const SimlinModel,
+    enable_ltm: bool,
     vm: Option<Vm>,
     results: Option<engine::Results>,
     ref_count: AtomicUsize,
@@ -266,73 +272,416 @@ pub unsafe extern "C" fn simlin_project_unref(project: *mut SimlinProject) {
         let _ = Box::from_raw(project);
     }
 }
-/// Enables LTM (Loops That Matter) analysis on a project
+
+/// Gets the number of models in the project
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
 #[no_mangle]
-pub unsafe extern "C" fn simlin_project_enable_ltm(project: *mut SimlinProject) -> c_int {
+pub unsafe extern "C" fn simlin_project_get_model_count(project: *mut SimlinProject) -> c_int {
     if project.is_null() {
+        return 0;
+    }
+    (*project).project.datamodel.models.len() as c_int
+}
+
+/// Gets the list of model names in the project
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `result` must be a valid pointer to an array of at least `max` char pointers
+/// - The returned strings are owned by the caller and must be freed with simlin_free_string
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_get_model_names(
+    project: *mut SimlinProject,
+    result: *mut *mut c_char,
+    max: usize,
+) -> c_int {
+    if project.is_null() || result.is_null() {
         return engine::ErrorCode::Generic as c_int;
     }
-    let proj = &mut *project;
-    // If LTM is already enabled, return success
-    if proj.ltm_project.is_some() {
-        return engine::ErrorCode::NoError as c_int;
+
+    let proj = &*project;
+    let models = &proj.project.datamodel.models;
+    let count = models.len().min(max);
+
+    for (i, model) in models.iter().take(count).enumerate() {
+        let c_string = match CString::new(model.name.clone()) {
+            Ok(s) => s,
+            Err(_) => return engine::ErrorCode::Generic as c_int,
+        };
+        *result.add(i) = c_string.into_raw();
     }
-    // Create LTM-augmented project
-    match proj.project.clone().with_ltm() {
-        Ok(ltm_proj) => {
-            proj.ltm_project = Some(ltm_proj);
-            engine::ErrorCode::NoError as c_int
-        }
-        Err(e) => e.code as c_int,
-    }
+
+    count as c_int
 }
-/// Creates a new simulation context
+
+/// Gets a model from a project by name
 ///
 /// # Safety
 /// - `project` must be a valid pointer to a SimlinProject
 /// - `model_name` may be null (uses default model)
+/// - The returned model must be freed with simlin_model_unref
 #[no_mangle]
-pub unsafe extern "C" fn simlin_sim_new(
+pub unsafe extern "C" fn simlin_project_get_model(
     project: *mut SimlinProject,
     model_name: *const c_char,
-) -> *mut SimlinSim {
+) -> *mut SimlinModel {
     if project.is_null() {
         return ptr::null_mut();
     }
+
     let mut model_name = if model_name.is_null() {
-        "main".to_string()
+        None
     } else {
         match CStr::from_ptr(model_name).to_str() {
-            Ok(s) => s.to_string(),
+            Ok(s) => Some(s.to_string()),
             Err(_) => return ptr::null_mut(),
         }
     };
-    // Increment project reference count
-    (*project).ref_count.fetch_add(1, Ordering::SeqCst);
-    let mut sim = Box::new(SimlinSim {
+
+    // If no model name specified or model doesn't exist, use first model
+    let proj = &*project;
+    if model_name.is_none()
+        || proj
+            .project
+            .datamodel
+            .get_model(model_name.as_deref().unwrap())
+            .is_none()
+    {
+        if proj.project.datamodel.models.is_empty() {
+            return ptr::null_mut();
+        }
+        model_name = Some(proj.project.datamodel.models[0].name.clone());
+    }
+
+    // Increment project ref count since model holds a reference
+    simlin_project_ref(project);
+
+    let model = SimlinModel {
         project,
-        model_name: model_name.clone(),
+        model_name: model_name.unwrap(),
+        ref_count: AtomicUsize::new(1),
+    };
+
+    Box::into_raw(Box::new(model))
+}
+
+/// Increments the reference count of a model
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_ref(model: *mut SimlinModel) {
+    if !model.is_null() {
+        (*model).ref_count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Decrements the reference count and frees the model if it reaches zero
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_unref(model: *mut SimlinModel) {
+    if model.is_null() {
+        return;
+    }
+    let prev_count = (*model).ref_count.fetch_sub(1, Ordering::SeqCst);
+    if prev_count == 1 {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let model = Box::from_raw(model);
+        // Decrement project reference count
+        simlin_project_unref(model.project as *mut SimlinProject);
+    }
+}
+
+/// Gets the number of variables in the model
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_var_count(model: *mut SimlinModel) -> c_int {
+    if model.is_null() {
+        return -1;
+    }
+    let model = &*model;
+    let project = &(*model.project).project;
+
+    // Calculate offsets to get variable count
+    let offsets = engine::interpreter::calc_flattened_offsets(project, &model.model_name);
+    offsets.len() as c_int
+}
+
+/// Gets the variable names from the model
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `result` must be a valid pointer to an array of at least `max` char pointers
+/// - The returned strings are owned by the caller and must be freed with simlin_free_string
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_var_names(
+    model: *mut SimlinModel,
+    result: *mut *mut c_char,
+    max: usize,
+) -> c_int {
+    if model.is_null() || result.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    let model = &*model;
+    let project = &(*model.project).project;
+
+    // Calculate offsets to get variable names
+    let offsets = engine::interpreter::calc_flattened_offsets(project, &model.model_name);
+    let count = offsets.len().min(max);
+
+    let mut names: Vec<_> = offsets.keys().collect();
+    names.sort();
+
+    for (i, name) in names.iter().take(count).enumerate() {
+        let c_string = match CString::new(name.as_str()) {
+            Ok(s) => s,
+            Err(_) => return engine::ErrorCode::Generic as c_int,
+        };
+        *result.add(i) = c_string.into_raw();
+    }
+
+    count as c_int
+}
+
+/// Gets the incoming links (dependencies) for a variable
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - `var_name` must be a valid C string
+/// - `result` must be a valid pointer to an array of at least `max` char pointers (or null if max is 0)
+/// - The returned strings are owned by the caller and must be freed with simlin_free_string
+///
+/// # Returns
+/// - If max == 0: returns the total number of dependencies (result can be null)
+/// - If max is too small: returns a negative error code
+/// - Otherwise: returns the number of dependencies written to result
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_incoming_links(
+    model: *mut SimlinModel,
+    var_name: *const c_char,
+    result: *mut *mut c_char,
+    max: usize,
+) -> c_int {
+    if model.is_null() || var_name.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    let model = &*model;
+    let project = &(*model.project).project;
+
+    let var_name = match CStr::from_ptr(var_name).to_str() {
+        Ok(s) => canonicalize(s),
+        Err(_) => return engine::ErrorCode::Generic as c_int,
+    };
+
+    // Get the model from the project
+    let eng_model = match project.models.get(&canonicalize(&model.model_name)) {
+        Some(m) => m,
+        None => return engine::ErrorCode::BadModelName as c_int,
+    };
+
+    // Get the variable to find its dependencies
+    let var = match eng_model.variables.get(&var_name) {
+        Some(v) => v,
+        None => return engine::ErrorCode::DoesNotExist as c_int,
+    };
+
+    // Get dependencies based on variable type
+    let deps = match var {
+        engine::Variable::Stock { init_ast, .. } => {
+            if let Some(ast) = init_ast {
+                engine::identifier_set(ast, &[], None)
+            } else {
+                std::collections::HashSet::new()
+            }
+        }
+        engine::Variable::Var { ast, .. } => {
+            if let Some(ast) = ast {
+                engine::identifier_set(ast, &[], None)
+            } else {
+                std::collections::HashSet::new()
+            }
+        }
+        engine::Variable::Module { inputs, .. } => {
+            inputs.iter().map(|input| input.src.clone()).collect()
+        }
+    };
+
+    // If max is 0, just return the count
+    if max == 0 {
+        return deps.len() as c_int;
+    }
+
+    // If result is null but max is not 0, error
+    if result.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    // If max is smaller than the number of dependencies, error
+    if max < deps.len() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    // Copy the dependency names to the result array
+    for (i, dep) in deps.iter().enumerate() {
+        let c_string = match CString::new(dep.as_str()) {
+            Ok(s) => s,
+            Err(_) => return engine::ErrorCode::Generic as c_int,
+        };
+        *result.add(i) = c_string.into_raw();
+    }
+
+    deps.len() as c_int
+}
+
+/// Gets all causal links in a model
+///
+/// Returns all causal links detected in the model.
+/// This includes flow-to-stock, stock-to-flow, and auxiliary-to-auxiliary links.
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+/// - The returned SimlinLinks must be freed with simlin_free_links
+#[no_mangle]
+pub unsafe extern "C" fn simlin_model_get_links(model: *mut SimlinModel) -> *mut SimlinLinks {
+    if model.is_null() {
+        return ptr::null_mut();
+    }
+
+    let model_ref = &*model;
+    let project = &(*model_ref.project).project;
+
+    // Get the model
+    let eng_model = match project.models.get(&canonicalize(&model_ref.model_name)) {
+        Some(m) => m,
+        None => return ptr::null_mut(),
+    };
+
+    // Collect all unique links (de-duplicate based on from-to pairs)
+    let mut unique_links = std::collections::HashMap::new();
+    for (var_name, var) in &eng_model.variables {
+        let deps = match var {
+            engine::Variable::Stock {
+                inflows, outflows, ..
+            } => {
+                let mut deps = Vec::new();
+                for flow in inflows.iter().chain(outflows.iter()) {
+                    deps.push((flow.clone(), var_name.clone()));
+                }
+                deps
+            }
+            engine::Variable::Var { ast, .. } if ast.is_some() => {
+                let deps = engine::identifier_set(ast.as_ref().unwrap(), &[], None);
+                deps.into_iter()
+                    .map(|dep| (dep, var_name.clone()))
+                    .collect()
+            }
+            engine::Variable::Module { inputs, .. } => inputs
+                .iter()
+                .map(|input| (input.src.clone(), var_name.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        for (from, to) in deps {
+            let key = (from.clone(), to.clone());
+            unique_links.entry(key).or_insert(engine::ltm::Link {
+                from,
+                to,
+                polarity: engine::ltm::LinkPolarity::Unknown,
+            });
+        }
+    }
+
+    if unique_links.is_empty() {
+        return Box::into_raw(Box::new(SimlinLinks {
+            links: ptr::null_mut(),
+            count: 0,
+        }));
+    }
+
+    // Convert to C structures (without LTM scores since this is model-level)
+    let mut c_links = Vec::with_capacity(unique_links.len());
+    for (_, link) in unique_links {
+        let c_link = SimlinLink {
+            from: str_to_c_ptr(link.from.as_str()),
+            to: str_to_c_ptr(link.to.as_str()),
+            polarity: match link.polarity {
+                engine::ltm::LinkPolarity::Positive => SimlinLinkPolarity::Positive,
+                engine::ltm::LinkPolarity::Negative => SimlinLinkPolarity::Negative,
+                engine::ltm::LinkPolarity::Unknown => SimlinLinkPolarity::Unknown,
+            },
+            score: ptr::null_mut(),
+            score_len: 0,
+        };
+        c_links.push(c_link);
+    }
+
+    let links = Box::new(SimlinLinks {
+        links: c_links.as_mut_ptr(),
+        count: c_links.len(),
+    });
+    std::mem::forget(c_links);
+    Box::into_raw(links)
+}
+
+/// Creates a new simulation context
+///
+/// # Safety
+/// - `model` must be a valid pointer to a SimlinModel
+#[no_mangle]
+pub unsafe extern "C" fn simlin_sim_new(
+    model: *mut SimlinModel,
+    enable_ltm: bool,
+) -> *mut SimlinSim {
+    if model.is_null() {
+        return ptr::null_mut();
+    }
+
+    let model = &*model;
+    let project = &*model.project;
+
+    // Increment model reference count
+    simlin_model_ref(model as *const _ as *mut _);
+
+    let mut sim = Box::new(SimlinSim {
+        model: model as *const _,
+        enable_ltm,
         vm: None,
         results: None,
         ref_count: AtomicUsize::new(1),
     });
-    // Initialize the VM - use LTM project if available
-    let proj_to_use = if let Some(ref ltm_proj) = (*project).ltm_project {
-        ltm_proj
+
+    // Get the appropriate project based on LTM setting
+    let proj_to_use = if enable_ltm {
+        // Create LTM project if needed
+        let project_mut = model.project as *mut SimlinProject;
+        if (*project_mut).ltm_project.is_none() {
+            match project.project.clone().with_ltm() {
+                Ok(ltm_proj) => {
+                    (*project_mut).ltm_project = Some(ltm_proj);
+                }
+                Err(_) => {
+                    // Failed to create LTM project
+                    simlin_model_unref(model as *const _ as *mut _);
+                    return ptr::null_mut();
+                }
+            }
+        }
+        (*project_mut).ltm_project.as_ref().unwrap()
     } else {
-        &(*project).project
+        &project.project
     };
-    // Resolve model name: if requested model is not present, but there is exactly one
-    // user model in the datamodel, use that as the root.
-    if proj_to_use.datamodel.get_model(&model_name).is_none()
-        && proj_to_use.datamodel.models.len() == 1
-    {
-        model_name = proj_to_use.datamodel.models[0].name.clone();
-    }
-    let compiler = engine::Simulation::new(proj_to_use, &model_name);
+
+    // Initialize the VM
+    let compiler = engine::Simulation::new(proj_to_use, &model.model_name);
     if let Ok(compiler) = compiler {
         if let Ok(compiled) = compiler.compile() {
             if let Ok(vm) = Vm::new(compiled) {
@@ -340,6 +689,7 @@ pub unsafe extern "C" fn simlin_sim_new(
             }
         }
     }
+
     Box::into_raw(sim)
 }
 /// Increments the reference count of a simulation
@@ -365,8 +715,8 @@ pub unsafe extern "C" fn simlin_sim_unref(sim: *mut SimlinSim) {
     if prev_count == 1 {
         std::sync::atomic::fence(Ordering::SeqCst);
         let sim = Box::from_raw(sim);
-        // Decrement project reference count
-        simlin_project_unref(sim.project as *mut SimlinProject);
+        // Decrement model reference count
+        simlin_model_unref(sim.model as *mut SimlinModel);
     }
 }
 /// Runs the simulation to a specified time
@@ -432,59 +782,6 @@ pub unsafe extern "C" fn simlin_sim_get_stepcount(sim: *mut SimlinSim) -> c_int 
         -1
     }
 }
-/// Gets the number of variables in the model
-///
-/// # Safety
-/// - `sim` must be a valid pointer to a SimlinSim
-#[no_mangle]
-pub unsafe extern "C" fn simlin_sim_get_varcount(sim: *mut SimlinSim) -> c_int {
-    if sim.is_null() {
-        return -1;
-    }
-    let sim = &*sim;
-    if let Some(ref results) = sim.results {
-        return results.offsets.len() as c_int;
-    }
-    if let Some(ref vm) = sim.vm {
-        return vm.names_as_strs().len() as c_int;
-    }
-    -1
-}
-/// Gets the variable names
-///
-/// # Safety
-/// - `sim` must be a valid pointer to a SimlinSim
-/// - `result` must be a valid pointer to an array of at least `max` char pointers
-/// - The returned strings are owned by the simulation and must not be freed
-#[no_mangle]
-pub unsafe extern "C" fn simlin_sim_get_varnames(
-    sim: *mut SimlinSim,
-    result: *mut *const c_char,
-    max: usize,
-) -> c_int {
-    if sim.is_null() || result.is_null() {
-        return engine::ErrorCode::Generic as c_int;
-    }
-    let sim = &mut *sim;
-    if let Some(ref results) = sim.results {
-        let count = std::cmp::min(results.offsets.len(), max);
-        for (i, name) in results.offsets.keys().take(count).enumerate() {
-            let c_string = CString::new(name.as_str()).unwrap();
-            *result.add(i) = c_string.into_raw() as *const c_char;
-        }
-        return 0; // Return 0 for success
-    }
-    if let Some(ref vm) = sim.vm {
-        let names = vm.names_as_strs();
-        let count = std::cmp::min(names.len(), max);
-        for (i, name) in names.iter().take(count).enumerate() {
-            let c_string = CString::new(name.as_str()).unwrap();
-            *result.add(i) = c_string.into_raw() as *const c_char;
-        }
-        return 0; // Return 0 for success
-    }
-    engine::ErrorCode::Generic as c_int
-}
 /// Resets the simulation to its initial state
 ///
 /// # Safety
@@ -497,13 +794,21 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
     let sim = &mut *sim;
     // Clear results
     sim.results = None;
-    // Re-create the VM - use LTM project if available
-    let proj_to_use = if let Some(ref ltm_proj) = (*sim.project).ltm_project {
-        ltm_proj
+
+    let model = &*sim.model;
+    let project = &*model.project;
+
+    // Re-create the VM - use appropriate project based on LTM setting
+    let proj_to_use = if sim.enable_ltm {
+        if let Some(ref ltm_proj) = project.ltm_project {
+            ltm_proj
+        } else {
+            &project.project
+        }
     } else {
-        &(*sim.project).project
+        &project.project
     };
-    let compiler = engine::Simulation::new(proj_to_use, &sim.model_name);
+    let compiler = engine::Simulation::new(proj_to_use, &model.model_name);
     match compiler {
         Ok(compiler) => match compiler.compile() {
             Ok(compiled) => match Vm::new(compiled) {
@@ -700,7 +1005,7 @@ pub unsafe extern "C" fn simlin_sim_get_series(
 /// Frees a string returned by the API
 ///
 /// # Safety
-/// - `s` must be a valid pointer returned by simlin_sim_get_varnames
+/// - `s` must be a valid pointer returned by simlin API functions that return strings
 #[no_mangle]
 pub unsafe extern "C" fn simlin_free_string(s: *mut c_char) {
     if !s.is_null() {
@@ -841,10 +1146,11 @@ pub unsafe extern "C" fn simlin_analyze_get_links(sim: *mut SimlinSim) -> *mut S
     }
 
     let sim = &*sim;
-    let project = &(*sim.project).project;
+    let model_ref = &*sim.model;
+    let project = &(*model_ref.project).project;
 
     // Get the model
-    let model = match project.models.get(&canonicalize(&sim.model_name)) {
+    let model = match project.models.get(&canonicalize(&model_ref.model_name)) {
         Some(m) => m,
         None => return ptr::null_mut(),
     };
@@ -910,7 +1216,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(sim: *mut SimlinSim) -> *mut S
     }
 
     // Check if LTM is enabled and simulation has been run
-    let has_ltm_scores = (*sim.project).ltm_project.is_some() && sim.results.is_some();
+    let has_ltm_scores = sim.enable_ltm && sim.results.is_some();
 
     // Convert to C structures
     let mut c_links = Vec::with_capacity(unique_links.len());
@@ -1601,113 +1907,6 @@ pub unsafe extern "C" fn simlin_free_error_detail(detail: *mut SimlinErrorDetail
     }
 }
 
-/// Gets the incoming links (dependencies) for a variable
-///
-/// # Safety
-/// - `sim` must be a valid pointer to a SimlinSim
-/// - `var_name` must be a valid C string
-/// - `result` must be a valid pointer to an array of at least `max` char pointers (or null if max is 0)
-/// - The returned strings are owned by the caller and must be freed with simlin_free_string
-///
-/// # Returns
-/// - If max == 0: returns the total number of dependencies (result can be null)
-/// - If max is too small: returns a negative error code
-/// - Otherwise: returns the number of dependencies written to result
-#[no_mangle]
-pub unsafe extern "C" fn simlin_sim_get_incoming_links(
-    sim: *mut SimlinSim,
-    var_name: *const c_char,
-    result: *mut *mut c_char,
-    max: usize,
-) -> c_int {
-    if sim.is_null() || var_name.is_null() {
-        return -(engine::ErrorCode::Generic as c_int);
-    }
-
-    // Only check result for null if max > 0
-    if max > 0 && result.is_null() {
-        return -(engine::ErrorCode::Generic as c_int);
-    }
-
-    let var_name = match CStr::from_ptr(var_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return -(engine::ErrorCode::Generic as c_int),
-    };
-
-    let sim = &*sim;
-    let project = &(*sim.project).project;
-
-    // Get the model
-    let model = match project.models.get(&canonicalize(&sim.model_name)) {
-        Some(m) => m,
-        None => return -(engine::ErrorCode::BadModelName as c_int),
-    };
-
-    // Get the variable
-    let var_ident = canonicalize(var_name);
-    let variable = match model.variables.get(&var_ident) {
-        Some(v) => v,
-        None => return -(engine::ErrorCode::UnknownDependency as c_int),
-    };
-
-    // Extract the AST based on variable type
-    let ast = match variable {
-        engine::Variable::Stock {
-            init_ast, errors, ..
-        } => {
-            if !errors.is_empty() {
-                return -(engine::ErrorCode::VariablesHaveErrors as c_int);
-            }
-            init_ast.as_ref()
-        }
-        engine::Variable::Var { ast, errors, .. } => {
-            if !errors.is_empty() {
-                return -(engine::ErrorCode::VariablesHaveErrors as c_int);
-            }
-            ast.as_ref()
-        }
-        engine::Variable::Module { .. } => {
-            // Modules don't have equations with dependencies
-            return 0; // Return 0 dependencies
-        }
-    };
-
-    let ast = match ast {
-        Some(a) => a,
-        None => return 0, // No equation means no dependencies
-    };
-
-    // Get the dependencies using identifier_set
-    let dependencies = engine::identifier_set(
-        ast,
-        &[],  // No dimensions needed for basic dependency extraction
-        None, // No module inputs
-    );
-
-    let dep_count = dependencies.len();
-
-    // If max == 0, just return the count (query mode)
-    if max == 0 {
-        return dep_count as c_int;
-    }
-
-    // If max is too small, return an error
-    if max < dep_count {
-        return -(engine::ErrorCode::Generic as c_int); // Return negative to indicate insufficient space
-    }
-
-    // Convert to C strings and fill the result array
-    for (i, dep) in dependencies.iter().enumerate() {
-        let c_string = match CString::new(dep.as_str()) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        *result.add(i) = c_string.into_raw();
-    }
-
-    dep_count as c_int
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1738,19 +1937,23 @@ mod tests {
             let proj = simlin_project_open(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
             assert!(!proj.is_null(), "project open failed: {err_code}");
 
+            // Get model
+            let model = simlin_project_get_model(proj, std::ptr::null());
+            assert!(!model.is_null());
+
             // Create sim
-            let sim = simlin_sim_new(proj, std::ptr::null());
+            let sim = simlin_sim_new(model, false);
             assert!(!sim.is_null());
 
             // Run to a partial time
             let rc = simlin_sim_run_to(sim, 0.125);
             assert_eq!(rc, engine::ErrorCode::NoError as c_int);
 
-            // Fetch var names (from VM when no results yet)
-            let count = simlin_sim_get_varcount(sim);
+            // Fetch var names from model
+            let count = simlin_model_get_var_count(model);
             assert!(count > 0, "expected varcount > 0");
-            let mut name_ptrs: Vec<*const c_char> = vec![std::ptr::null(); count as usize];
-            let err = simlin_sim_get_varnames(sim, name_ptrs.as_mut_ptr(), name_ptrs.len());
+            let mut name_ptrs: Vec<*mut c_char> = vec![std::ptr::null_mut(); count as usize];
+            let err = simlin_model_get_var_names(model, name_ptrs.as_mut_ptr(), name_ptrs.len());
             assert_eq!(0, err);
 
             // Find canonical name that ends with "infectious"
@@ -1760,7 +1963,7 @@ mod tests {
                     continue;
                 }
                 let s = std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
-                // free the leaked CString from get_varnames
+                // free the CString from get_var_names
                 simlin_free_string(p as *mut c_char);
                 if s.to_ascii_lowercase().ends_with("infectious") {
                     infectious_name = Some(s);
@@ -1793,6 +1996,7 @@ mod tests {
 
             // Cleanup
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
@@ -1813,14 +2017,18 @@ mod tests {
             let proj = simlin_project_open(data.as_ptr(), data.len(), &mut err_code as *mut c_int);
             assert!(!proj.is_null(), "project open failed: {err_code}");
 
+            // Get model
+            let model = simlin_project_get_model(proj, std::ptr::null());
+            assert!(!model.is_null());
+
             // Test Phase 1: Set value before first run_to (initial value)
-            let sim = simlin_sim_new(proj, std::ptr::null());
+            let sim = simlin_sim_new(model, false);
             assert!(!sim.is_null());
 
             // Get variable names to find a valid variable
-            let count = simlin_sim_get_varcount(sim);
-            let mut name_ptrs: Vec<*const c_char> = vec![std::ptr::null(); count as usize];
-            simlin_sim_get_varnames(sim, name_ptrs.as_mut_ptr(), name_ptrs.len());
+            let count = simlin_model_get_var_count(model);
+            let mut name_ptrs: Vec<*mut c_char> = vec![std::ptr::null_mut(); count as usize];
+            simlin_model_get_var_names(model, name_ptrs.as_mut_ptr(), name_ptrs.len());
 
             let mut test_var_name: Option<String> = None;
             for &p in &name_ptrs {
@@ -1890,6 +2098,7 @@ mod tests {
 
             // Cleanup
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
@@ -1953,8 +2162,11 @@ mod tests {
             assert!(!proj.is_null(), "import_xmile failed: {err_code}");
             assert_eq!(err_code, engine::ErrorCode::NoError as c_int);
 
-            // Verify we can create a simulation from the imported project
-            let sim = simlin_sim_new(proj, std::ptr::null());
+            // Get model and verify we can create a simulation from the imported project
+            let model = simlin_project_get_model(proj, std::ptr::null());
+            assert!(!model.is_null());
+
+            let sim = simlin_sim_new(model, false);
             assert!(!sim.is_null());
 
             // Run simulation to verify it's valid
@@ -1962,11 +2174,12 @@ mod tests {
             assert_eq!(rc, engine::ErrorCode::NoError as c_int);
 
             // Check we have expected variables
-            let var_count = simlin_sim_get_varcount(sim);
+            let var_count = simlin_model_get_var_count(model);
             assert!(var_count > 0);
 
             // Clean up
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
@@ -1988,8 +2201,11 @@ mod tests {
             assert!(!proj.is_null(), "import_mdl failed: {err_code}");
             assert_eq!(err_code, engine::ErrorCode::NoError as c_int);
 
-            // Verify we can create a simulation from the imported project
-            let sim = simlin_sim_new(proj, std::ptr::null());
+            // Get model and verify we can create a simulation from the imported project
+            let model = simlin_project_get_model(proj, std::ptr::null());
+            assert!(!model.is_null());
+
+            let sim = simlin_sim_new(model, false);
             assert!(!sim.is_null());
 
             // Run simulation to verify it's valid
@@ -1997,11 +2213,12 @@ mod tests {
             assert_eq!(rc, engine::ErrorCode::NoError as c_int);
 
             // Check we have expected variables
-            let var_count = simlin_sim_get_varcount(sim);
+            let var_count = simlin_model_get_var_count(model);
             assert!(var_count > 0);
 
             // Clean up
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
@@ -2076,9 +2293,14 @@ mod tests {
             let proj2 = simlin_import_xmile(output, output_len, &mut err_code as *mut c_int);
             assert!(!proj2.is_null());
 
-            // Verify both projects can simulate
-            let sim1 = simlin_sim_new(proj1, std::ptr::null());
-            let sim2 = simlin_sim_new(proj2, std::ptr::null());
+            // Get models and verify both projects can simulate
+            let model1 = simlin_project_get_model(proj1, std::ptr::null());
+            let model2 = simlin_project_get_model(proj2, std::ptr::null());
+            assert!(!model1.is_null());
+            assert!(!model2.is_null());
+
+            let sim1 = simlin_sim_new(model1, false);
+            let sim2 = simlin_sim_new(model2, false);
             assert!(!sim1.is_null());
             assert!(!sim2.is_null());
 
@@ -2090,6 +2312,8 @@ mod tests {
             // Clean up
             simlin_sim_unref(sim1);
             simlin_sim_unref(sim2);
+            simlin_model_unref(model1);
+            simlin_model_unref(model2);
             simlin_free(output);
             simlin_project_unref(proj1);
             simlin_project_unref(proj2);
@@ -2591,18 +2815,35 @@ mod tests {
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
             assert_eq!(err, engine::ErrorCode::NoError as c_int);
-            let sim = simlin_sim_new(proj, ptr::null());
-            assert!(!sim.is_null());
-            // Project ref count should have increased
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+            // Project ref count should have increased when model was created
             assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 2);
-            // Test reference counting
+
+            // Test model reference counting
+            simlin_model_ref(model);
+            assert_eq!((*model).ref_count.load(Ordering::SeqCst), 2);
+            simlin_model_unref(model);
+            assert_eq!((*model).ref_count.load(Ordering::SeqCst), 1);
+
+            let sim = simlin_sim_new(model, false);
+            assert!(!sim.is_null());
+            // Model ref count should have increased when sim was created
+            assert_eq!((*model).ref_count.load(Ordering::SeqCst), 2);
+
+            // Test sim reference counting
             simlin_sim_ref(sim);
             assert_eq!((*sim).ref_count.load(Ordering::SeqCst), 2);
             simlin_sim_unref(sim);
             assert_eq!((*sim).ref_count.load(Ordering::SeqCst), 1);
             simlin_sim_unref(sim);
-            // Sim should be freed now, project ref count should decrease
+            // Sim should be freed now, model ref count should decrease
+            assert_eq!((*model).ref_count.load(Ordering::SeqCst), 1);
+
+            simlin_model_unref(model);
+            // Model should be freed now, project ref count should decrease
             assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 1);
+
             simlin_project_unref(proj);
         }
     }
@@ -2630,7 +2871,9 @@ mod tests {
             assert_eq!(err, engine::ErrorCode::NoError as c_int);
 
             // Test without LTM enabled - should get structural links only
-            let sim = simlin_sim_new(proj, ptr::null());
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+            let sim = simlin_sim_new(model, false);
             assert!(!sim.is_null());
 
             let links = simlin_analyze_get_links(sim);
@@ -2680,11 +2923,10 @@ mod tests {
             simlin_free_links(links);
 
             // Now test with LTM enabled
-            let rc = simlin_project_enable_ltm(proj);
-            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
-
-            // Create new sim with LTM-enabled project
-            let sim_ltm = simlin_sim_new(proj, ptr::null());
+            // Create new sim with LTM enabled
+            let model_ltm = simlin_project_get_model(proj, ptr::null());
+            assert!(!model_ltm.is_null());
+            let sim_ltm = simlin_sim_new(model_ltm, true);
             assert!(!sim_ltm.is_null());
 
             // Run simulation to generate score data
@@ -2730,6 +2972,8 @@ mod tests {
             // Clean up
             simlin_sim_unref(sim);
             simlin_sim_unref(sim_ltm);
+            simlin_model_unref(model);
+            simlin_model_unref(model_ltm);
             simlin_project_unref(proj);
         }
     }
@@ -2754,7 +2998,9 @@ mod tests {
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
-            let sim = simlin_sim_new(proj, ptr::null());
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+            let sim = simlin_sim_new(model, false);
             assert!(!sim.is_null());
 
             let links = simlin_analyze_get_links(sim);
@@ -2779,6 +3025,7 @@ mod tests {
 
             simlin_free_links(links);
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
@@ -2814,11 +3061,11 @@ mod tests {
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
-            // Enable LTM
-            let rc = simlin_project_enable_ltm(proj);
-            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+            // Create simulation with LTM enabled
 
-            let sim = simlin_sim_new(proj, ptr::null());
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+            let sim = simlin_sim_new(model, true); // Enable LTM for relative loop scores
             assert!(!sim.is_null());
 
             // Run simulation
@@ -2855,6 +3102,7 @@ mod tests {
 
             simlin_free_loops(loops);
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }
@@ -2900,9 +3148,14 @@ mod tests {
             assert!(!proj2.is_null());
             assert_eq!(err, engine::ErrorCode::NoError as c_int);
 
-            // Create simulations from both projects and verify they work identically
-            let sim1 = simlin_sim_new(proj, ptr::null());
-            let sim2 = simlin_sim_new(proj2, ptr::null());
+            // Get models and create simulations from both projects and verify they work identically
+            let model1 = simlin_project_get_model(proj, ptr::null());
+            let model2 = simlin_project_get_model(proj2, ptr::null());
+            assert!(!model1.is_null());
+            assert!(!model2.is_null());
+
+            let sim1 = simlin_sim_new(model1, false);
+            let sim2 = simlin_sim_new(model2, false);
             assert!(!sim1.is_null());
             assert!(!sim2.is_null());
 
@@ -2913,8 +3166,8 @@ mod tests {
             assert_eq!(rc2, engine::ErrorCode::NoError as c_int);
 
             // Check they have same number of variables and steps
-            let var_count1 = simlin_sim_get_varcount(sim1);
-            let var_count2 = simlin_sim_get_varcount(sim2);
+            let var_count1 = simlin_model_get_var_count(model1);
+            let var_count2 = simlin_model_get_var_count(model2);
             assert_eq!(var_count1, var_count2);
 
             let step_count1 = simlin_sim_get_stepcount(sim1);
@@ -2925,6 +3178,8 @@ mod tests {
             simlin_free(output);
             simlin_sim_unref(sim1);
             simlin_sim_unref(sim2);
+            simlin_model_unref(model1);
+            simlin_model_unref(model2);
             simlin_project_unref(proj);
             simlin_project_unref(proj2);
         }
@@ -2949,9 +3204,7 @@ mod tests {
             let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
             assert!(!proj.is_null());
 
-            // Enable LTM
-            let rc = simlin_project_enable_ltm(proj);
-            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+            // LTM will be enabled when creating simulation
 
             // Serialize the project (should NOT include LTM variables)
             let mut output: *mut u8 = std::ptr::null_mut();
@@ -2968,25 +3221,33 @@ mod tests {
             assert!(!proj2.is_null());
 
             // Create sims from both
-            let sim1 = simlin_sim_new(proj, ptr::null()); // Has LTM
-            let sim2 = simlin_sim_new(proj2, ptr::null()); // No LTM
+            let model1 = simlin_project_get_model(proj, ptr::null());
+            let model2 = simlin_project_get_model(proj2, ptr::null());
+            assert!(!model1.is_null());
+            assert!(!model2.is_null());
+
+            let sim1 = simlin_sim_new(model1, true); // Has LTM
+            let sim2 = simlin_sim_new(model2, false); // No LTM
 
             // Run both
             simlin_sim_run_to_end(sim1);
             simlin_sim_run_to_end(sim2);
 
-            // The LTM project should have more variables (due to synthetic LTM vars)
-            let var_count1 = simlin_sim_get_varcount(sim1);
-            let var_count2 = simlin_sim_get_varcount(sim2);
-            assert!(
-                var_count1 > var_count2,
-                "LTM project should have more variables"
+            // Both original models should have the same number of variables
+            // (they're from the same serialized project without LTM augmentation)
+            let var_count1 = simlin_model_get_var_count(model1);
+            let var_count2 = simlin_model_get_var_count(model2);
+            assert_eq!(
+                var_count1, var_count2,
+                "Models from serialized projects should have same variable count"
             );
 
             // Clean up
             simlin_free(output);
             simlin_sim_unref(sim1);
             simlin_sim_unref(sim2);
+            simlin_model_unref(model1);
+            simlin_model_unref(model2);
             simlin_project_unref(proj);
             simlin_project_unref(proj2);
         }
@@ -3049,6 +3310,367 @@ mod tests {
     }
 
     #[test]
+    fn test_model_functions() {
+        // Create a project with multiple models
+        let project = engine::project_io::Project {
+            name: "test_multi_model".to_string(),
+            sim_specs: Some(engine::project_io::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: Some(engine::project_io::Dt {
+                    value: 1.0,
+                    is_reciprocal: false,
+                }),
+                save_step: None,
+                sim_method: engine::project_io::SimMethod::Euler as i32,
+                time_units: String::new(),
+            }),
+            models: vec![
+                engine::project_io::Model {
+                    name: "model1".to_string(),
+                    variables: vec![
+                        engine::project_io::Variable {
+                            v: Some(engine::project_io::variable::V::Aux(
+                                engine::project_io::variable::Aux {
+                                    ident: "var1".to_string(),
+                                    equation: Some(engine::project_io::variable::Equation {
+                                        equation: Some(
+                                            engine::project_io::variable::equation::Equation::Scalar(
+                                                engine::project_io::variable::ScalarEquation {
+                                                    equation: "1".to_string(),
+                                                    initial_equation: None,
+                                                },
+                                            ),
+                                        ),
+                                    }),
+                                    documentation: String::new(),
+                                    units: String::new(),
+                                    gf: None,
+                                    can_be_module_input: false,
+                                    visibility: engine::project_io::variable::Visibility::Private as i32,
+                                    uid: 0,
+                                },
+                            )),
+                        },
+                        engine::project_io::Variable {
+                            v: Some(engine::project_io::variable::V::Aux(
+                                engine::project_io::variable::Aux {
+                                    ident: "var2".to_string(),
+                                    equation: Some(engine::project_io::variable::Equation {
+                                        equation: Some(
+                                            engine::project_io::variable::equation::Equation::Scalar(
+                                                engine::project_io::variable::ScalarEquation {
+                                                    equation: "var1 * 2".to_string(),
+                                                    initial_equation: None,
+                                                },
+                                            ),
+                                        ),
+                                    }),
+                                    documentation: String::new(),
+                                    units: String::new(),
+                                    gf: None,
+                                    can_be_module_input: false,
+                                    visibility: engine::project_io::variable::Visibility::Private as i32,
+                                    uid: 0,
+                                },
+                            )),
+                        },
+                    ],
+                    views: vec![],
+                    loop_metadata: vec![],
+                },
+                engine::project_io::Model {
+                    name: "model2".to_string(),
+                    variables: vec![
+                        engine::project_io::Variable {
+                            v: Some(engine::project_io::variable::V::Stock(
+                                engine::project_io::variable::Stock {
+                                    ident: "stock".to_string(),
+                                    equation: Some(engine::project_io::variable::Equation {
+                                        equation: Some(
+                                            engine::project_io::variable::equation::Equation::Scalar(
+                                                engine::project_io::variable::ScalarEquation {
+                                                    equation: "100".to_string(),
+                                                    initial_equation: None,
+                                                },
+                                            ),
+                                        ),
+                                    }),
+                                    documentation: String::new(),
+                                    units: String::new(),
+                                    inflows: vec!["inflow".to_string()],
+                                    outflows: vec![],
+                                    non_negative: false,
+                                    can_be_module_input: false,
+                                    visibility: engine::project_io::variable::Visibility::Private as i32,
+                                    uid: 0,
+                                },
+                            )),
+                        },
+                        engine::project_io::Variable {
+                            v: Some(engine::project_io::variable::V::Flow(
+                                engine::project_io::variable::Flow {
+                                    ident: "inflow".to_string(),
+                                    equation: Some(engine::project_io::variable::Equation {
+                                        equation: Some(
+                                            engine::project_io::variable::equation::Equation::Scalar(
+                                                engine::project_io::variable::ScalarEquation {
+                                                    equation: "rate * stock".to_string(),
+                                                    initial_equation: None,
+                                                },
+                                            ),
+                                        ),
+                                    }),
+                                    documentation: String::new(),
+                                    units: String::new(),
+                                    gf: None,
+                                    non_negative: false,
+                                    can_be_module_input: false,
+                                    visibility: engine::project_io::variable::Visibility::Private as i32,
+                                    uid: 0,
+                                },
+                            )),
+                        },
+                        engine::project_io::Variable {
+                            v: Some(engine::project_io::variable::V::Aux(
+                                engine::project_io::variable::Aux {
+                                    ident: "rate".to_string(),
+                                    equation: Some(engine::project_io::variable::Equation {
+                                        equation: Some(
+                                            engine::project_io::variable::equation::Equation::Scalar(
+                                                engine::project_io::variable::ScalarEquation {
+                                                    equation: "0.1".to_string(),
+                                                    initial_equation: None,
+                                                },
+                                            ),
+                                        ),
+                                    }),
+                                    documentation: String::new(),
+                                    units: String::new(),
+                                    gf: None,
+                                    can_be_module_input: false,
+                                    visibility: engine::project_io::variable::Visibility::Private as i32,
+                                    uid: 0,
+                                },
+                            )),
+                        },
+                    ],
+                    views: vec![],
+                    loop_metadata: vec![],
+                },
+            ],
+            dimensions: vec![],
+            units: vec![],
+            source: None,
+        };
+
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            // Test simlin_project_get_model_count
+            let model_count = simlin_project_get_model_count(proj);
+            assert_eq!(model_count, 2, "Should have 2 models");
+
+            // Test simlin_project_get_model_names
+            let mut model_names: Vec<*mut c_char> = vec![ptr::null_mut(); 2];
+            let count = simlin_project_get_model_names(proj, model_names.as_mut_ptr(), 2);
+            assert_eq!(count, 2);
+
+            let mut names = Vec::new();
+            for name_ptr in &model_names {
+                assert!(!name_ptr.is_null());
+                let name = CStr::from_ptr(*name_ptr).to_string_lossy().into_owned();
+                names.push(name.clone());
+                simlin_free_string(*name_ptr);
+            }
+            assert!(names.contains(&"model1".to_string()));
+            assert!(names.contains(&"model2".to_string()));
+
+            // Test simlin_project_get_model with specific name
+            let model1_name = CString::new("model1").unwrap();
+            let model1 = simlin_project_get_model(proj, model1_name.as_ptr());
+            assert!(!model1.is_null());
+            assert_eq!((*model1).model_name, "model1");
+
+            // Test simlin_project_get_model with null (should get first model)
+            let model_default = simlin_project_get_model(proj, ptr::null());
+            assert!(!model_default.is_null());
+            assert_eq!((*model_default).model_name, "model1");
+
+            // Test simlin_project_get_model with non-existent name (should get first model)
+            let bad_name = CString::new("nonexistent").unwrap();
+            let model_fallback = simlin_project_get_model(proj, bad_name.as_ptr());
+            assert!(!model_fallback.is_null());
+            assert_eq!((*model_fallback).model_name, "model1");
+
+            // Test simlin_model_get_var_count
+            let model2_name = CString::new("model2").unwrap();
+            let model2 = simlin_project_get_model(proj, model2_name.as_ptr());
+            assert!(!model2.is_null());
+
+            let var_count = simlin_model_get_var_count(model2);
+            assert!(
+                var_count >= 3,
+                "model2 should have at least 3 variables (stock, inflow, rate)"
+            );
+
+            // Test simlin_model_get_var_names
+            let mut var_names: Vec<*mut c_char> = vec![ptr::null_mut(); var_count as usize];
+            let count =
+                simlin_model_get_var_names(model2, var_names.as_mut_ptr(), var_count as usize);
+            assert_eq!(count, var_count);
+
+            let mut var_name_strings = Vec::new();
+            for name_ptr in &var_names {
+                assert!(!name_ptr.is_null());
+                let name = CStr::from_ptr(*name_ptr).to_string_lossy().into_owned();
+                var_name_strings.push(name.clone());
+                simlin_free_string(*name_ptr);
+            }
+            assert!(var_name_strings.contains(&"stock".to_string()));
+            assert!(var_name_strings.contains(&"inflow".to_string()));
+            assert!(var_name_strings.contains(&"rate".to_string()));
+            // time may or may not be included depending on compilation
+
+            // Test simlin_model_get_links
+            let links = simlin_model_get_links(model2);
+            assert!(!links.is_null());
+            assert!((*links).count > 0, "Should have causal links");
+
+            // Verify link structure
+            let links_slice = std::slice::from_raw_parts((*links).links, (*links).count);
+            let mut found_rate_to_inflow = false;
+            let mut found_stock_to_inflow = false;
+            let mut found_inflow_to_stock = false;
+
+            for link in links_slice {
+                assert!(!link.from.is_null());
+                assert!(!link.to.is_null());
+
+                let from = CStr::from_ptr(link.from).to_str().unwrap();
+                let to = CStr::from_ptr(link.to).to_str().unwrap();
+
+                if from == "rate" && to == "inflow" {
+                    found_rate_to_inflow = true;
+                }
+                if from == "stock" && to == "inflow" {
+                    found_stock_to_inflow = true;
+                }
+                if from == "inflow" && to == "stock" {
+                    found_inflow_to_stock = true;
+                }
+
+                // Model-level links should not have scores
+                assert!(link.score.is_null());
+                assert_eq!(link.score_len, 0);
+            }
+
+            assert!(found_rate_to_inflow, "Should find rate -> inflow link");
+            assert!(found_stock_to_inflow, "Should find stock -> inflow link");
+            assert!(found_inflow_to_stock, "Should find inflow -> stock link");
+
+            simlin_free_links(links);
+
+            // Clean up
+            simlin_model_unref(model1);
+            simlin_model_unref(model2);
+            simlin_model_unref(model_default);
+            simlin_model_unref(model_fallback);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_model_null_safety() {
+        unsafe {
+            // Test null project
+            let count = simlin_project_get_model_count(ptr::null_mut());
+            assert_eq!(count, 0);
+
+            let mut names: [*mut c_char; 2] = [ptr::null_mut(); 2];
+            let count = simlin_project_get_model_names(ptr::null_mut(), names.as_mut_ptr(), 2);
+            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+
+            let model = simlin_project_get_model(ptr::null_mut(), ptr::null());
+            assert!(model.is_null());
+
+            // Test null model
+            simlin_model_ref(ptr::null_mut());
+            simlin_model_unref(ptr::null_mut());
+
+            let count = simlin_model_get_var_count(ptr::null_mut());
+            assert_eq!(count, -1);
+
+            let mut names: [*mut c_char; 2] = [ptr::null_mut(); 2];
+            let count = simlin_model_get_var_names(ptr::null_mut(), names.as_mut_ptr(), 2);
+            assert_eq!(count, engine::ErrorCode::Generic as c_int);
+
+            let links = simlin_model_get_links(ptr::null_mut());
+            assert!(links.is_null());
+
+            // Test null sim creation
+            let sim = simlin_sim_new(ptr::null_mut(), false);
+            assert!(sim.is_null());
+        }
+    }
+
+    #[test]
+    fn test_ltm_enabled_sim() {
+        // Create a project with a feedback loop
+        let test_project = TestProject::new("test_ltm")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .stock("population", "100", &["births"], &[], None)
+            .flow("births", "population * 0.02", None);
+
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine::serde::serialize(&datamodel_project);
+
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+
+            // Create simulation with LTM enabled
+            let sim_ltm = simlin_sim_new(model, true);
+            assert!(!sim_ltm.is_null());
+
+            // Verify LTM project was created
+            assert!((*proj).ltm_project.is_some());
+
+            // Run simulation
+            let rc = simlin_sim_run_to_end(sim_ltm);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Create another sim without LTM
+            let sim_no_ltm = simlin_sim_new(model, false);
+            assert!(!sim_no_ltm.is_null());
+
+            // Run this one too
+            let rc = simlin_sim_run_to_end(sim_no_ltm);
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Clean up
+            simlin_sim_unref(sim_ltm);
+            simlin_sim_unref(sim_no_ltm);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
     fn test_get_incoming_links() {
         // Create a project with a flow that depends on a rate and a stock using TestProject
         let test_project = TestProject::new("test")
@@ -3070,15 +3692,17 @@ mod tests {
             assert!(!proj.is_null());
             assert_eq!(err, engine::ErrorCode::NoError as c_int);
 
-            let sim = simlin_sim_new(proj, ptr::null());
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+            let sim = simlin_sim_new(model, false);
             assert!(!sim.is_null());
 
             // Test getting incoming links for the flow
             let flow_name = CString::new("flow").unwrap();
 
             // Test 1: Query the number of dependencies with max=0
-            let count = simlin_sim_get_incoming_links(
-                sim,
+            let count = simlin_model_get_incoming_links(
+                model,
                 flow_name.as_ptr(),
                 ptr::null_mut(), // result can be null when max=0
                 0,
@@ -3087,22 +3711,27 @@ mod tests {
 
             // Test 2: Try with insufficient array size (should return error)
             let mut small_links: [*mut c_char; 1] = [ptr::null_mut(); 1];
-            let count = simlin_sim_get_incoming_links(
-                sim,
+            let count = simlin_model_get_incoming_links(
+                model,
                 flow_name.as_ptr(),
                 small_links.as_mut_ptr(),
                 1, // Only room for 1, but there are 2 dependencies
             );
-            assert!(count < 0, "Expected negative error when array too small");
+            assert_eq!(
+                count,
+                engine::ErrorCode::Generic as c_int,
+                "Expected Generic error when array too small"
+            );
 
             // Test 3: Proper usage - query then allocate
-            let count = simlin_sim_get_incoming_links(sim, flow_name.as_ptr(), ptr::null_mut(), 0);
+            let count =
+                simlin_model_get_incoming_links(model, flow_name.as_ptr(), ptr::null_mut(), 0);
             assert_eq!(count, 2);
 
             // Allocate exact size needed
             let mut links = vec![ptr::null_mut::<c_char>(); count as usize];
-            let count2 = simlin_sim_get_incoming_links(
-                sim,
+            let count2 = simlin_model_get_incoming_links(
+                model,
                 flow_name.as_ptr(),
                 links.as_mut_ptr(),
                 count as usize,
@@ -3133,12 +3762,14 @@ mod tests {
 
             // Test getting incoming links for rate (should have none since it's a constant)
             let rate_name = CString::new("rate").unwrap();
-            let count = simlin_sim_get_incoming_links(sim, rate_name.as_ptr(), ptr::null_mut(), 0);
+            let count =
+                simlin_model_get_incoming_links(model, rate_name.as_ptr(), ptr::null_mut(), 0);
             assert_eq!(count, 0, "Expected 0 dependencies for rate");
 
             // Test getting incoming links for stock (initial value is constant, so no deps)
             let stock_name = CString::new("Stock").unwrap();
-            let count = simlin_sim_get_incoming_links(sim, stock_name.as_ptr(), ptr::null_mut(), 0);
+            let count =
+                simlin_model_get_incoming_links(model, stock_name.as_ptr(), ptr::null_mut(), 0);
             assert_eq!(
                 count, 0,
                 "Expected 0 dependencies for Stock's initial value"
@@ -3148,15 +3779,15 @@ mod tests {
             // Non-existent variable
             let nonexistent = CString::new("nonexistent").unwrap();
             let count =
-                simlin_sim_get_incoming_links(sim, nonexistent.as_ptr(), ptr::null_mut(), 0);
+                simlin_model_get_incoming_links(model, nonexistent.as_ptr(), ptr::null_mut(), 0);
             assert_eq!(
                 count,
-                -(engine::ErrorCode::UnknownDependency as c_int),
-                "Expected negative UnknownDependency error code for non-existent variable"
+                engine::ErrorCode::DoesNotExist as c_int,
+                "Expected DoesNotExist error code for non-existent variable"
             );
 
             // Null pointer checks
-            let count = simlin_sim_get_incoming_links(
+            let count = simlin_model_get_incoming_links(
                 ptr::null_mut(),
                 flow_name.as_ptr(),
                 ptr::null_mut(),
@@ -3164,27 +3795,29 @@ mod tests {
             );
             assert_eq!(
                 count,
-                -(engine::ErrorCode::Generic as c_int),
-                "Expected negative Generic error code for null sim"
+                engine::ErrorCode::Generic as c_int,
+                "Expected Generic error code for null model"
             );
 
-            let count = simlin_sim_get_incoming_links(sim, ptr::null(), ptr::null_mut(), 0);
+            let count = simlin_model_get_incoming_links(model, ptr::null(), ptr::null_mut(), 0);
             assert_eq!(
                 count,
-                -(engine::ErrorCode::Generic as c_int),
-                "Expected negative Generic error code for null var_name"
+                engine::ErrorCode::Generic as c_int,
+                "Expected Generic error code for null var_name"
             );
 
             // Test that result being null with max > 0 is an error
-            let count = simlin_sim_get_incoming_links(sim, flow_name.as_ptr(), ptr::null_mut(), 10);
+            let count =
+                simlin_model_get_incoming_links(model, flow_name.as_ptr(), ptr::null_mut(), 10);
             assert_eq!(
                 count,
-                -(engine::ErrorCode::Generic as c_int),
-                "Expected negative Generic error code for null result with max > 0"
+                engine::ErrorCode::Generic as c_int,
+                "Expected Generic error code for null result with max > 0"
             );
 
             // Clean up
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
             simlin_project_unref(proj);
         }
     }

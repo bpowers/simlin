@@ -18,7 +18,7 @@ include = []
 
 [export]
 # Explicitly include the types we want
-include = ["SimlinErrorCode", "SimlinLoopPolarity", "SimlinLoop", "SimlinLoops", "SimlinProject", "SimlinSim", "SimlinErrorDetail", "SimlinErrorDetails"]
+include = ["SimlinErrorCode", "SimlinLoopPolarity", "SimlinLoop", "SimlinLoops", "SimlinProject", "SimlinModel", "SimlinSim", "SimlinErrorDetail", "SimlinErrorDetails"]
 exclude = []
 item_types = ["enums", "structs", "unions", "typedefs", "opaque", "functions"]
 
@@ -29,6 +29,7 @@ item_types = ["enums", "structs", "unions", "typedefs", "opaque", "functions"]
 "SimlinLoop" = "SimlinLoop"
 "SimlinLoops" = "SimlinLoops"
 "SimlinProject" = "SimlinProject"
+"SimlinModel" = "SimlinModel"
 "SimlinSim" = "SimlinSim"
 "SimlinErrorDetail" = "SimlinErrorDetail"
 "SimlinErrorDetails" = "SimlinErrorDetails"
