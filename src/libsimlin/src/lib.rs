@@ -122,7 +122,6 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
 /// Opaque project structure
 pub struct SimlinProject {
     project: engine::Project,
-    ltm_project: Option<engine::Project>,
     ref_count: AtomicUsize,
 }
 /// Opaque model structure
@@ -239,7 +238,6 @@ pub unsafe extern "C" fn simlin_project_open(
     };
     let boxed = Box::new(SimlinProject {
         project,
-        ltm_project: None,
         ref_count: AtomicUsize::new(1),
     });
     if !err.is_null() {
@@ -632,6 +630,13 @@ pub unsafe extern "C" fn simlin_model_get_links(model: *mut SimlinModel) -> *mut
     Box::into_raw(links)
 }
 
+/// Helper function to create a VM for a given project and model
+fn create_vm(project: &engine::Project, model_name: &str) -> Result<Vm, engine::Error> {
+    let compiler = engine::Simulation::new(project, model_name)?;
+    let compiled = compiler.compile()?;
+    Vm::new(compiled)
+}
+
 /// Creates a new simulation context
 ///
 /// # Safety
@@ -660,35 +665,23 @@ pub unsafe extern "C" fn simlin_sim_new(
     });
 
     // Get the appropriate project based on LTM setting
-    let proj_to_use = if enable_ltm {
-        // Create LTM project if needed
-        let project_mut = model.project as *mut SimlinProject;
-        if (*project_mut).ltm_project.is_none() {
-            match project.project.clone().with_ltm() {
-                Ok(ltm_proj) => {
-                    (*project_mut).ltm_project = Some(ltm_proj);
-                }
-                Err(_) => {
-                    // Failed to create LTM project
-                    simlin_model_unref(model as *const _ as *mut _);
-                    return ptr::null_mut();
-                }
-            }
-        }
-        (*project_mut).ltm_project.as_ref().unwrap()
+    let proj_result = if enable_ltm {
+        project.project.clone().with_ltm()
     } else {
-        &project.project
+        Ok(project.project.clone())
+    };
+
+    let proj_to_use = match proj_result {
+        Ok(proj) => proj,
+        Err(_) => {
+            // Failed to create LTM project
+            simlin_model_unref(model as *const _ as *mut _);
+            return ptr::null_mut();
+        }
     };
 
     // Initialize the VM
-    let compiler = engine::Simulation::new(proj_to_use, &model.model_name);
-    if let Ok(compiler) = compiler {
-        if let Ok(compiled) = compiler.compile() {
-            if let Ok(vm) = Vm::new(compiled) {
-                sim.vm = Some(vm);
-            }
-        }
-    }
+    sim.vm = create_vm(&proj_to_use, &model.model_name).ok();
 
     Box::into_raw(sim)
 }
@@ -799,27 +792,23 @@ pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim) -> c_int {
     let project = &*model.project;
 
     // Re-create the VM - use appropriate project based on LTM setting
-    let proj_to_use = if sim.enable_ltm {
-        if let Some(ref ltm_proj) = project.ltm_project {
-            ltm_proj
-        } else {
-            &project.project
-        }
+    let proj_result = if sim.enable_ltm {
+        project.project.clone().with_ltm()
     } else {
-        &project.project
+        Ok(project.project.clone())
     };
-    let compiler = engine::Simulation::new(proj_to_use, &model.model_name);
-    match compiler {
-        Ok(compiler) => match compiler.compile() {
-            Ok(compiled) => match Vm::new(compiled) {
-                Ok(vm) => {
-                    sim.vm = Some(vm);
-                    engine::ErrorCode::NoError as c_int
-                }
-                Err(e) => e.code as c_int,
-            },
-            Err(e) => e.code as c_int,
-        },
+
+    let proj_to_use = match proj_result {
+        Ok(proj) => proj,
+        Err(e) => {
+            return e.code as c_int;
+        }
+    };
+    match create_vm(&proj_to_use, &model.model_name) {
+        Ok(vm) => {
+            sim.vm = Some(vm);
+            engine::ErrorCode::NoError as c_int
+        }
         Err(e) => e.code as c_int,
     }
 }
@@ -1432,7 +1421,6 @@ pub unsafe extern "C" fn simlin_import_xmile(
             let project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
                 project,
-                ltm_project: None,
                 ref_count: AtomicUsize::new(1),
             });
             if !err.is_null() {
@@ -1476,7 +1464,6 @@ pub unsafe extern "C" fn simlin_import_mdl(
             let project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
                 project,
-                ltm_project: None,
                 ref_count: AtomicUsize::new(1),
             });
             if !err.is_null() {
@@ -1779,37 +1766,13 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     }
 
     // Attempt to compile the "main" model to find compilation errors
-    let compiler = engine::Simulation::new(proj, "main");
-    match compiler {
-        Ok(compiler) => match compiler.compile() {
-            Ok(compiled) => {
-                // Try to instantiate VM to catch VM-level errors
-                if let Err(error) = Vm::new(compiled) {
-                    all_errors.push(
-                        ErrorDetailBuilder::new(error.code)
-                            .message(error.get_details())
-                            .model_name("main")
-                            .build(),
-                    );
-                }
-            }
-            Err(error) => {
-                all_errors.push(
-                    ErrorDetailBuilder::new(error.code)
-                        .message(error.get_details())
-                        .model_name("main")
-                        .build(),
-                );
-            }
-        },
-        Err(error) => {
-            all_errors.push(
-                ErrorDetailBuilder::new(error.code)
-                    .message(error.get_details())
-                    .model_name("main")
-                    .build(),
-            );
-        }
+    if let Err(error) = create_vm(proj, "main") {
+        all_errors.push(
+            ErrorDetailBuilder::new(error.code)
+                .message(error.get_details())
+                .model_name("main")
+                .build(),
+        );
     }
 
     if all_errors.is_empty() {
@@ -3646,9 +3609,6 @@ mod tests {
             // Create simulation with LTM enabled
             let sim_ltm = simlin_sim_new(model, true);
             assert!(!sim_ltm.is_null());
-
-            // Verify LTM project was created
-            assert!((*proj).ltm_project.is_some());
 
             // Run simulation
             let rc = simlin_sim_run_to_end(sim_ltm);
