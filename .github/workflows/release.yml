@@ -33,8 +33,17 @@ jobs:
             python -m pip install --upgrade pip
             pip install cffi setuptools wheel
             # Install protoc
-            if [ "$OSTYPE" = "linux-gnu" ] || [ "$(uname)" = "Linux" ]; then
-              apt-get update && apt-get install -y protobuf-compiler
+            if [ "$(uname)" = "Linux" ]; then
+              # manylinux containers use yum
+              yum install -y protobuf-compiler || \
+              # Try downloading binary if yum fails
+              (ARCH="$(uname -m)" && \
+               if [ "$ARCH" = "x86_64" ]; then PROTOC_ZIP="protoc-25.1-linux-x86_64.zip"; \
+               elif [ "$ARCH" = "aarch64" ]; then PROTOC_ZIP="protoc-25.1-linux-aarch_64.zip"; \
+               else echo "Unsupported arch: $ARCH" && exit 1; fi && \
+               curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/$PROTOC_ZIP" && \
+               unzip -o "$PROTOC_ZIP" -d /usr/local && \
+               rm "$PROTOC_ZIP")
             elif [ "$(uname)" = "Darwin" ]; then
               brew install protobuf || true
             fi
