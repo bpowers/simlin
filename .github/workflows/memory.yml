@@ -58,8 +58,7 @@ jobs:
           # Find the AddressSanitizer runtime library
           ASAN_LIB=$(gcc -print-file-name=libasan.so)
           RUST_BACKTRACE=1 \
-          ASAN_OPTIONS=detect_leaks=1:check_initialization_order=1:strict_init_order=1:halt_on_error=0:print_stats=1 \
+          ASAN_OPTIONS=detect_leaks=1:check_initialization_order=1:strict_init_order=1 \
           LD_PRELOAD=$ASAN_LIB \
           PYTHONMALLOC=malloc \
-          python -m pytest tests/test_memory.py -v --tb=short || true
-          # Note: Using || true temporarily to see if tests run at all with ASAN
+          python -m pytest tests/test_memory.py -v --tb=short
