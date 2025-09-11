@@ -144,23 +144,3 @@ jobs:
         run: |
           cd src/pysimlin
           RUST_BACKTRACE=1 pytest -q tests/
-
-  publish:
-    name: Publish to PyPI
-    needs: test-wheels
-    runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/')
-
-    steps:
-      - name: Download wheels
-        uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-*
-          path: wheelhouse
-          merge-multiple: true
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: wheelhouse/

@@ -57,8 +57,28 @@ jobs:
           cd src/pysimlin
           # Find the AddressSanitizer runtime library
           ASAN_LIB=$(gcc -print-file-name=libasan.so)
+          
+          # Run tests with verbose ASAN output and timeout
           RUST_BACKTRACE=1 \
-          ASAN_OPTIONS=detect_leaks=1:check_initialization_order=1:strict_init_order=1 \
+          ASAN_OPTIONS="detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=1:print_stats=1:halt_on_error=0:print_module_map=1:log_path=/tmp/asan.log" \
           LD_PRELOAD=$ASAN_LIB \
           PYTHONMALLOC=malloc \
-          python -m pytest tests/test_memory.py -v --tb=short
+          timeout 60 python -m pytest tests/test_memory.py -v --tb=short -x || EXIT_CODE=$?
+          
+          # Show ASAN log if it exists
+          if [ -f /tmp/asan.log.* ]; then
+            echo "=== ASAN Log ==="
+            cat /tmp/asan.log.*
+          fi
+          
+          # If specific test is failing, run it in isolation with more debug
+          if [ "${EXIT_CODE:-0}" != "0" ]; then
+            echo "=== Running failing test in isolation ==="
+            RUST_BACKTRACE=full \
+            ASAN_OPTIONS="detect_leaks=1:verbosity=3:halt_on_error=0" \
+            LD_PRELOAD=$ASAN_LIB \
+            PYTHONMALLOC=malloc \
+            timeout 10 python -m pytest tests/test_memory.py::TestErrorPathMemoryLeaks::test_import_error_no_leak -vvs || true
+          fi
+          
+          exit ${EXIT_CODE:-0}
