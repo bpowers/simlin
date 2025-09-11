@@ -92,7 +92,21 @@ else
     fi
 fi
 
-# 5. Make sure no cheating happened with tests
+# 5. Run pysimlin (Python) bindings tests on Python 3.13+
+echo -n "Running pysimlin tests (Python 3.13+)... "
+PY_OUT="$(mktemp)"
+if scripts/pysimlin-tests.sh > "$PY_OUT" 2>&1; then
+    echo -e "${GREEN}✓${NC}"
+    rm -f "$PY_OUT"
+else
+    echo -e "${RED}✗${NC}"
+    echo -e "${RED}pysimlin tests failed:${NC}"
+    cat "$PY_OUT"
+    rm -f "$PY_OUT"
+    exit 1
+fi
+
+# 6. Make sure no cheating happened with tests
 # Set CLAUDE to the full path of claude if found on PATH, otherwise use local installation
 if command -v claude > /dev/null 2>&1; then
     CLAUDE=$(command -v claude)
@@ -116,17 +130,3 @@ else
 fi
 
 echo -e "${GREEN}All pre-commit checks passed!${NC}"
-
-# 6. Run pysimlin (Python) bindings tests on Python 3.13+
-echo -n "Running pysimlin tests (Python 3.13+)... "
-PY_OUT="$(mktemp)"
-if scripts/pysimlin-tests.sh > "$PY_OUT" 2>&1; then
-    echo -e "${GREEN}✓${NC}"
-    rm -f "$PY_OUT"
-else
-    echo -e "${RED}✗${NC}"
-    echo -e "${RED}pysimlin tests failed:${NC}"
-    cat "$PY_OUT"
-    rm -f "$PY_OUT"
-    exit 1
-fi

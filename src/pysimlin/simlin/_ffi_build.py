@@ -180,6 +180,7 @@ extra_link_args = []
 
 if platform.system() == "Linux":
     extra_link_args.append("-lm")
+    extra_link_args.append("-lstdc++")
 
 if asan_enabled:
     # Ensure the CFFI module is compiled and linked with ASan when consuming a
