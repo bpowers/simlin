@@ -32,6 +32,13 @@ jobs:
           CIBW_BEFORE_BUILD: |
             python -m pip install --upgrade pip
             pip install cffi setuptools wheel
+            # Install protoc
+            if [ "$OSTYPE" = "linux-gnu" ] || [ "$(uname)" = "Linux" ]; then
+              apt-get update && apt-get install -y protobuf-compiler
+            elif [ "$(uname)" = "Darwin" ]; then
+              brew install protobuf || true
+            fi
+            # Install Rust if needed
             if ! command -v cargo >/dev/null 2>&1; then
               curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
               export PATH="$HOME/.cargo/bin:$PATH"
@@ -43,6 +50,9 @@ jobs:
             if [ "$UNAME_S" = "Linux" ] && [ "$UNAME_M" = "aarch64" ]; then RUST_TARGET=aarch64-unknown-linux-gnu; fi
             rustup target add "$RUST_TARGET"
             (cd src/libsimlin && cargo build --release --target "$RUST_TARGET")
+            # Copy library to where pysimlin expects it
+            mkdir -p src/libsimlin/target/release
+            cp target/"$RUST_TARGET"/release/libsimlin.a src/libsimlin/target/release/ || cp target/release/libsimlin.a src/libsimlin/target/release/ || true
         with:
           package-dir: src/pysimlin
 
@@ -80,7 +90,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install wheelhouse/*.whl || true
-          pip install pytest numpy pandas
+          pip install pytest pytest-cov numpy pandas
 
       - name: Run tests
         run: |
