@@ -28,7 +28,13 @@ pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
     reader
         .read_until(0, &mut contents_buf)
         .map_err(|_err| Error::new(ErrorKind::Import, ErrorCode::VensimConversion, None))?;
-    let contents: String = String::from_utf8(contents_buf).unwrap();
+    let contents: String = String::from_utf8(contents_buf).map_err(|_err| {
+        Error::new(
+            ErrorKind::Import,
+            ErrorCode::VensimConversion,
+            Some("Invalid UTF-8 in MDL file".to_owned()),
+        )
+    })?;
     let (xmile_src, _logs) = convert_vensim_mdl(&contents, false);
     if xmile_src.is_none() {
         return Err(Error::new(

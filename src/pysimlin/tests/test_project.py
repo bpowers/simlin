@@ -1,0 +1,218 @@
+"""Tests for the Project class."""
+
+import pytest
+from pathlib import Path
+import simlin
+from simlin import Project, SimlinImportError, ErrorCode
+
+
+class TestProjectLoading:
+    """Test loading projects from various formats."""
+    
+    def test_load_from_xmile(self, xmile_model_data: bytes) -> None:
+        """Test loading a project from XMILE format."""
+        project = Project.from_xmile(xmile_model_data)
+        assert project is not None
+        assert project.get_model_count() > 0
+    
+    def test_load_from_mdl(self, mdl_model_data: bytes) -> None:
+        """Test loading a project from MDL format."""
+        project = Project.from_mdl(mdl_model_data)
+        assert project is not None
+        assert project.get_model_count() > 0
+    
+    def test_load_from_file(self, xmile_model_path: Path) -> None:
+        """Test loading a project from a file."""
+        project = Project.from_file(xmile_model_path)
+        assert project is not None
+        assert project.get_model_count() > 0
+    
+    def test_load_empty_data_raises(self) -> None:
+        """Test that loading empty data raises an error."""
+        with pytest.raises(SimlinImportError, match="Empty"):
+            Project.from_xmile(b"")
+        
+        with pytest.raises(SimlinImportError, match="Empty"):
+            Project.from_mdl(b"")
+    
+    def test_load_invalid_data_raises(self) -> None:
+        """Test that loading invalid data raises an error."""
+        with pytest.raises(SimlinImportError):
+            Project.from_xmile(b"not valid xml")
+        
+        with pytest.raises(SimlinImportError):
+            Project.from_mdl(b"not a valid model")
+    
+    def test_load_nonexistent_file_raises(self) -> None:
+        """Test that loading a nonexistent file raises an error."""
+        with pytest.raises(SimlinImportError, match="not found"):
+            Project.from_file(Path("/nonexistent/file.stmx"))
+
+
+class TestProjectModels:
+    """Test working with models in a project."""
+    
+    def test_get_model_count(self, xmile_model_data: bytes) -> None:
+        """Test getting the number of models."""
+        project = Project.from_xmile(xmile_model_data)
+        count = project.get_model_count()
+        assert count >= 1
+        assert isinstance(count, int)
+    
+    def test_get_model_names(self, xmile_model_data: bytes) -> None:
+        """Test getting model names."""
+        project = Project.from_xmile(xmile_model_data)
+        names = project.get_model_names()
+        assert isinstance(names, list)
+        assert len(names) == project.get_model_count()
+        for name in names:
+            assert isinstance(name, str)
+    
+    def test_get_default_model(self, xmile_model_data: bytes) -> None:
+        """Test getting the default model."""
+        project = Project.from_xmile(xmile_model_data)
+        model = project.get_model()
+        assert model is not None
+        from simlin import Model
+        assert isinstance(model, Model)
+    
+    def test_get_named_model(self, xmile_model_data: bytes) -> None:
+        """Test getting a model by name."""
+        project = Project.from_xmile(xmile_model_data)
+        names = project.get_model_names()
+        if names:
+            model = project.get_model(names[0])
+            assert model is not None
+    
+    def test_get_nonexistent_model_raises(self, xmile_model_data: bytes) -> None:
+        """Test that getting a nonexistent model raises an error."""
+        project = Project.from_xmile(xmile_model_data)
+        with pytest.raises(SimlinImportError, match="not found"):
+            project.get_model("nonexistent_model_name_xyz")
+
+
+class TestProjectAnalysis:
+    """Test project analysis functions."""
+    
+    def test_get_loops(self, xmile_model_data: bytes) -> None:
+        """Test getting feedback loops."""
+        project = Project.from_xmile(xmile_model_data)
+        loops = project.get_loops()
+        assert isinstance(loops, list)
+        # Not all models have loops
+        for loop in loops:
+            assert hasattr(loop, 'id')
+            assert hasattr(loop, 'variables')
+            assert hasattr(loop, 'polarity')
+    
+    def test_get_errors(self, xmile_model_data: bytes) -> None:
+        """Test getting project errors."""
+        project = Project.from_xmile(xmile_model_data)
+        errors = project.get_errors()
+        assert isinstance(errors, list)
+        # Valid models might have no errors
+        for error in errors:
+            assert hasattr(error, 'code')
+            assert hasattr(error, 'message')
+
+
+class TestProjectSerialization:
+    """Test project serialization and export."""
+    
+    def test_serialize_to_protobuf(self, xmile_model_data: bytes) -> None:
+        """Test serializing a project to protobuf."""
+        project = Project.from_xmile(xmile_model_data)
+        pb_data = project.serialize()
+        assert isinstance(pb_data, bytes)
+        assert len(pb_data) > 0
+        
+        # Should be able to reload
+        project2 = Project.from_protobin(pb_data)
+        assert project2.get_model_count() == project.get_model_count()
+    
+    def test_export_to_xmile(self, xmile_model_data: bytes) -> None:
+        """Test exporting a project to XMILE."""
+        project = Project.from_xmile(xmile_model_data)
+        xmile_data = project.to_xmile()
+        assert isinstance(xmile_data, bytes)
+        assert len(xmile_data) > 0
+        assert b"<xmile" in xmile_data or b"<?xml" in xmile_data
+    
+    def test_round_trip_protobuf(self, xmile_model_data: bytes) -> None:
+        """Test round-trip through protobuf format."""
+        project1 = Project.from_xmile(xmile_model_data)
+        pb_data = project1.serialize()
+        project2 = Project.from_protobin(pb_data)
+        
+        assert project2.get_model_count() == project1.get_model_count()
+        assert project2.get_model_names() == project1.get_model_names()
+
+
+class TestProjectContextManager:
+    """Test context manager functionality for projects."""
+    
+    def test_context_manager_basic_usage(self, xmile_model_data: bytes) -> None:
+        """Test basic context manager usage."""
+        with Project.from_xmile(xmile_model_data) as project:
+            assert project is not None
+            assert project.get_model_count() > 0
+            # Project should be usable inside the context
+            model = project.get_model()
+            assert model is not None
+    
+    def test_context_manager_returns_self(self, xmile_model_data: bytes) -> None:
+        """Test that __enter__ returns self."""
+        project = Project.from_xmile(xmile_model_data)
+        with project as ctx_project:
+            assert ctx_project is project
+    
+    def test_context_manager_explicit_cleanup(self, xmile_model_data: bytes) -> None:
+        """Test that __exit__ performs explicit cleanup."""
+        from simlin._ffi import ffi
+        
+        project = Project.from_xmile(xmile_model_data)
+        original_ptr = project._ptr
+        
+        # Use as context manager
+        with project:
+            pass
+        
+        # After context exit, pointer should be NULL
+        assert project._ptr == ffi.NULL
+        assert original_ptr != ffi.NULL  # Original was valid
+    
+    def test_context_manager_with_exception(self, xmile_model_data: bytes) -> None:
+        """Test context manager cleanup when exception occurs."""
+        from simlin._ffi import ffi
+        
+        project = Project.from_xmile(xmile_model_data)
+        
+        try:
+            with project:
+                # Simulate an exception
+                raise ValueError("Test exception")
+        except ValueError:
+            pass
+        
+        # Even with exception, cleanup should occur
+        assert project._ptr == ffi.NULL
+    
+    def test_non_context_manager_usage_still_works(self, xmile_model_data: bytes) -> None:
+        """Test that objects still work without context manager."""
+        # Should work exactly as before without using 'with'
+        project = Project.from_xmile(xmile_model_data)
+        assert project.get_model_count() > 0
+        model = project.get_model()
+        assert model is not None
+        # Cleanup will still happen through finalizer
+
+
+class TestProjectRepr:
+    """Test string representation of projects."""
+    
+    def test_repr(self, xmile_model_data: bytes) -> None:
+        """Test __repr__ method."""
+        project = Project.from_xmile(xmile_model_data)
+        repr_str = repr(project)
+        assert "Project" in repr_str
+        assert "model" in repr_str.lower()

@@ -1,0 +1,114 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "cffi>=1.15.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simlin"
+version = "0.1.0"
+description = "Python bindings for the Simlin system dynamics simulation engine"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "The Simlin Authors"},
+]
+maintainers = [
+    {name = "The Simlin Authors"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "cffi>=1.15.0",
+    "pandas>=1.5.0",
+    "numpy>=1.22.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "mypy>=1.5.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "pandas-stubs>=2.0.0",
+    "types-setuptools",
+]
+
+[project.urls]
+Homepage = "https://github.com/bpowers/simlin"
+Documentation = "https://github.com/bpowers/simlin/tree/main/src/pysimlin"
+Repository = "https://github.com/bpowers/simlin"
+Issues = "https://github.com/bpowers/simlin/issues"
+
+[tool.setuptools]
+packages = ["simlin"]
+package-dir = {"" = "."}
+
+[tool.setuptools.package-data]
+simlin = ["py.typed", "*.pyi"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_unimported = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+check_untyped_defs = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = []
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--verbose --cov=simlin --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["simlin"]
+omit = ["*/tests/*", "*/_ffi_build.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

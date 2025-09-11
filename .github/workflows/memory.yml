@@ -1,0 +1,55 @@
+name: Memory Testing
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  asan:
+    name: AddressSanitizer Testing
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cffi numpy pandas pytest
+
+      - name: Build libsimlin with AddressSanitizer
+        run: |
+          cd src/libsimlin
+          RUSTFLAGS="-Z sanitizer=address" \
+          cargo +nightly build --release --target x86_64-unknown-linux-gnu
+
+  - name: Install pysimlin
+        env:
+          ASAN: '1'
+        run: |
+          cd src/pysimlin
+          pip install -e .
+
+      - name: Run memory tests with AddressSanitizer
+        run: |
+          cd src/pysimlin
+          RUST_BACKTRACE=1 \
+          ASAN_OPTIONS=detect_leaks=1:check_initialization_order=1:strict_init_order=1 \
+          PYTHONMALLOC=malloc \
+          python -m pytest tests/test_memory.py -v --tb=short

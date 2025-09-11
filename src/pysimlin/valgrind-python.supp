@@ -1,0 +1,336 @@
+# Valgrind suppression file for Python and pysimlin memory testing
+#
+# This file suppresses known false positives when running Valgrind on Python
+# code that uses C extensions. These suppressions focus on legitimate Python
+# internal allocations and CFFI-related memory that is properly managed.
+#
+# Usage: valgrind --suppressions=valgrind-python.supp <command>
+
+# Python core memory allocations that are managed by Python's garbage collector
+{
+   python_malloc_general
+   Memcheck:Leak
+   ...
+   fun:PyMem_Malloc
+}
+
+{
+   python_malloc_raw
+   Memcheck:Leak
+   ...
+   fun:PyMem_RawMalloc
+}
+
+{
+   python_realloc_general
+   Memcheck:Leak
+   ...
+   fun:PyMem_Realloc
+}
+
+{
+   python_object_malloc
+   Memcheck:Leak
+   ...
+   fun:PyObject_Malloc
+}
+
+{
+   python_object_realloc
+   Memcheck:Leak
+   ...
+   fun:PyObject_Realloc
+}
+
+# Python string and unicode object allocations
+{
+   python_unicode_malloc
+   Memcheck:Leak
+   ...
+   fun:PyUnicode_New
+}
+
+{
+   python_unicode_decode
+   Memcheck:Leak
+   ...
+   fun:PyUnicode_DecodeUTF8*
+}
+
+{
+   python_unicode_from_string
+   Memcheck:Leak
+   ...
+   fun:PyUnicode_FromString*
+}
+
+{
+   python_bytes_malloc
+   Memcheck:Leak
+   ...
+   fun:PyBytes_FromString*
+}
+
+# Python dict and list allocations
+{
+   python_dict_malloc
+   Memcheck:Leak
+   ...
+   fun:PyDict_New
+}
+
+{
+   python_list_malloc
+   Memcheck:Leak
+   ...
+   fun:PyList_New
+}
+
+{
+   python_tuple_malloc
+   Memcheck:Leak
+   ...
+   fun:PyTuple_New
+}
+
+# Python module and import system
+{
+   python_module_malloc
+   Memcheck:Leak
+   ...
+   fun:PyModule_New*
+}
+
+{
+   python_import_malloc
+   Memcheck:Leak
+   ...
+   fun:PyImport_Import*
+}
+
+{
+   python_compile_malloc
+   Memcheck:Leak
+   ...
+   fun:PyRun_String*
+}
+
+# CFFI-related allocations
+{
+   cffi_callback_malloc
+   Memcheck:Leak
+   ...
+   obj:*_cffi_*.so
+}
+
+{
+   cffi_library_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*cffi*
+}
+
+{
+   cffi_ffi_malloc
+   Memcheck:Leak
+   ...
+   fun:ffi_*
+}
+
+# Numpy allocations (if using numpy in tests)
+{
+   numpy_import_array
+   Memcheck:Leak
+   ...
+   fun:import_array
+}
+
+{
+   numpy_multiarray
+   Memcheck:Leak
+   ...
+   obj:*multiarray*
+}
+
+{
+   numpy_umath
+   Memcheck:Leak
+   ...
+   obj:*umath*
+}
+
+# Pandas allocations (if using pandas in tests)
+{
+   pandas_lib_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*pandas*
+}
+
+# Threading and GIL related
+{
+   python_thread_malloc
+   Memcheck:Leak
+   ...
+   fun:PyThread_*
+}
+
+{
+   python_gil_malloc
+   Memcheck:Leak
+   ...
+   fun:PyEval_*
+}
+
+# Dynamic library loading
+{
+   dlopen_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:dlopen*
+}
+
+{
+   dlsym_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:dlsym*
+}
+
+# Glibc internal allocations
+{
+   glibc_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:malloc
+   obj:/lib*/libc*.so*
+}
+
+{
+   glibc_calloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:calloc
+   obj:/lib*/libc*.so*
+}
+
+# Locale and character encoding
+{
+   locale_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:__libc_dlopen_mode
+}
+
+{
+   iconv_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:iconv_open
+}
+
+# Python codec system
+{
+   python_codec_malloc
+   Memcheck:Leak
+   ...
+   fun:PyCodec_*
+}
+
+# Python weakref system (used by our finalizers)
+{
+   python_weakref_malloc
+   Memcheck:Leak
+   ...
+   fun:PyWeakref_*
+}
+
+# Python type system
+{
+   python_type_malloc
+   Memcheck:Leak
+   ...
+   fun:PyType_*
+}
+
+# Python exception handling
+{
+   python_exception_malloc
+   Memcheck:Leak
+   ...
+   fun:PyErr_*
+}
+
+# Python frame objects
+{
+   python_frame_malloc
+   Memcheck:Leak
+   ...
+   fun:PyFrame_*
+}
+
+# Python generator objects  
+{
+   python_generator_malloc
+   Memcheck:Leak
+   ...
+   fun:PyGen_*
+}
+
+# OpenSSL (if loaded by requests or other network libraries)
+{
+   openssl_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*libssl*
+}
+
+{
+   openssl_crypto_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*libcrypto*
+}
+
+# Suppress possible leaks in library initialization (one-time allocations)
+{
+   library_init_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_dl_*
+}
+
+{
+   python_init_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:Py_Initialize*
+}
+
+# Suppress uninitialized value warnings in Python internals
+{
+   python_uninitialized_value
+   Memcheck:Value*
+   ...
+   obj:/usr/bin/python*
+}
+
+# Suppress conditional jump warnings in Python
+{
+   python_conditional_jump
+   Memcheck:Cond
+   ...
+   obj:/usr/bin/python*
+}

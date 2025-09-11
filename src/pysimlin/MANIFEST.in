@@ -1,0 +1,11 @@
+include README.md
+include LICENSE
+include pyproject.toml
+recursive-include simlin *.py *.pyi *.typed
+recursive-include simlin *.h
+recursive-include tests *.py
+recursive-include tests/fixtures *
+prune __pycache__
+prune *.pyc
+prune .mypy_cache
+prune .pytest_cache

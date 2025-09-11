@@ -65,3 +65,17 @@ yarn-error.log*
 
 /src/app/firebase-debug.log
 /src/app/ui-debug.log
+
+# Python virtualenvs and artifacts
+.venv*
+/.coverage
+simlin/_clib*
+/src/pysimlin/build
+/src/pysimlin/dist
+/src/pysimlin/simlin.egg-info
+src/pysimlin/simlin/_clib*.so
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc

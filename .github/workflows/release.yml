@@ -1,0 +1,108 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'pysimlin-v*'
+  workflow_dispatch:
+
+jobs:
+  build-wheels:
+    name: Build wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build wheels with cibuildwheel
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_BUILD: cp311-* cp312-* cp313-*
+          CIBW_SKIP: pp* *-musllinux*
+          CIBW_ARCHS_MACOS: arm64
+          CIBW_ARCHS_LINUX: x86_64 aarch64
+          CIBW_BEFORE_BUILD: |
+            python -m pip install --upgrade pip
+            pip install cffi setuptools wheel
+            if ! command -v cargo >/dev/null 2>&1; then
+              curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+              export PATH="$HOME/.cargo/bin:$PATH"
+            fi
+            export PATH="$HOME/.cargo/bin:$PATH"
+            UNAME_S="$(uname -s)"; UNAME_M="$(uname -m)"
+            if [ "$UNAME_S" = "Darwin" ] && [ "$UNAME_M" = "arm64" ]; then RUST_TARGET=aarch64-apple-darwin; fi
+            if [ "$UNAME_S" = "Linux" ] && [ "$UNAME_M" = "x86_64" ]; then RUST_TARGET=x86_64-unknown-linux-gnu; fi
+            if [ "$UNAME_S" = "Linux" ] && [ "$UNAME_M" = "aarch64" ]; then RUST_TARGET=aarch64-unknown-linux-gnu; fi
+            rustup target add "$RUST_TARGET"
+            (cd src/libsimlin && cargo build --release --target "$RUST_TARGET")
+        with:
+          package-dir: src/pysimlin
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  test-wheels:
+    name: Test wheels
+    needs: build-wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Install wheel
+        run: |
+          python -m pip install --upgrade pip
+          pip install wheelhouse/*.whl || true
+          pip install pytest numpy pandas
+
+      - name: Run tests
+        run: |
+          cd src/pysimlin
+          RUST_BACKTRACE=1 pytest -q tests/
+
+  publish:
+    name: Publish to PyPI
+    needs: test-wheels
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: wheelhouse/
