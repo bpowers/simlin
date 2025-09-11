@@ -39,7 +39,7 @@ jobs:
           RUSTFLAGS="-Z sanitizer=address" \
           cargo +nightly build --release --target x86_64-unknown-linux-gnu
 
-  - name: Install pysimlin
+      - name: Install pysimlin
         env:
           ASAN: '1'
         run: |
