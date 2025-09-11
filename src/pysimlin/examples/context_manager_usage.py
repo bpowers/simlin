@@ -21,7 +21,7 @@ def basic_context_manager_usage():
     model_path = Path("../tests/fixtures/eval_order.stmx")
     
     with simlin.Project.from_file(model_path) as project:
-        print(f"Number of models: {project.get_model_count()}")
+        print(f"Number of models: {len(project.get_model_names())}")
         print(f"Model names: {project.get_model_names()}")
         
         # Get the default model

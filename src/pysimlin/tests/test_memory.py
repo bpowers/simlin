@@ -560,7 +560,7 @@ class TestMemoryStressTesting:
             for j in range(0, len(projects), 3):
                 if j < len(projects):
                     try:
-                        projects[j].get_model_count()
+                        len(projects[j].get_model_names())
                     except:
                         pass
             

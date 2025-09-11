@@ -172,7 +172,7 @@ class TestModelContextManager:
         with Project.from_xmile(xmile_model_data) as project:
             with project.get_model() as model:
                 # Both should be usable inside their contexts
-                assert project.get_model_count() > 0
+                assert len(project.get_model_names()) > 0
                 assert model.get_var_count() > 0
                 sim = model.new_sim()
                 assert sim is not None

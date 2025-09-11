@@ -13,19 +13,19 @@ class TestProjectLoading:
         """Test loading a project from XMILE format."""
         project = Project.from_xmile(xmile_model_data)
         assert project is not None
-        assert project.get_model_count() > 0
+        assert len(project.get_model_names()) > 0
     
     def test_load_from_mdl(self, mdl_model_data: bytes) -> None:
         """Test loading a project from MDL format."""
         project = Project.from_mdl(mdl_model_data)
         assert project is not None
-        assert project.get_model_count() > 0
+        assert len(project.get_model_names()) > 0
     
     def test_load_from_file(self, xmile_model_path: Path) -> None:
         """Test loading a project from a file."""
         project = Project.from_file(xmile_model_path)
         assert project is not None
-        assert project.get_model_count() > 0
+        assert len(project.get_model_names()) > 0
     
     def test_load_empty_data_raises(self) -> None:
         """Test that loading empty data raises an error."""
@@ -53,18 +53,18 @@ class TestProjectModels:
     """Test working with models in a project."""
     
     def test_get_model_count(self, xmile_model_data: bytes) -> None:
-        """Test getting the number of models."""
+        """Test getting the number of models through names."""
         project = Project.from_xmile(xmile_model_data)
-        count = project.get_model_count()
-        assert count >= 1
-        assert isinstance(count, int)
+        names = project.get_model_names()
+        assert len(names) >= 1
+        assert isinstance(len(names), int)
     
     def test_get_model_names(self, xmile_model_data: bytes) -> None:
         """Test getting model names."""
         project = Project.from_xmile(xmile_model_data)
         names = project.get_model_names()
         assert isinstance(names, list)
-        assert len(names) == project.get_model_count()
+        # Names list has been validated above
         for name in names:
             assert isinstance(name, str)
     
@@ -128,7 +128,7 @@ class TestProjectSerialization:
         
         # Should be able to reload
         project2 = Project.from_protobin(pb_data)
-        assert project2.get_model_count() == project.get_model_count()
+        assert len(project2.get_model_names()) == len(project.get_model_names())
     
     def test_export_to_xmile(self, xmile_model_data: bytes) -> None:
         """Test exporting a project to XMILE."""
@@ -144,7 +144,7 @@ class TestProjectSerialization:
         pb_data = project1.serialize()
         project2 = Project.from_protobin(pb_data)
         
-        assert project2.get_model_count() == project1.get_model_count()
+        assert len(project2.get_model_names()) == len(project1.get_model_names())
         assert project2.get_model_names() == project1.get_model_names()
 
 
@@ -155,7 +155,7 @@ class TestProjectContextManager:
         """Test basic context manager usage."""
         with Project.from_xmile(xmile_model_data) as project:
             assert project is not None
-            assert project.get_model_count() > 0
+            assert len(project.get_model_names()) > 0
             # Project should be usable inside the context
             model = project.get_model()
             assert model is not None
@@ -201,7 +201,7 @@ class TestProjectContextManager:
         """Test that objects still work without context manager."""
         # Should work exactly as before without using 'with'
         project = Project.from_xmile(xmile_model_data)
-        assert project.get_model_count() > 0
+        assert len(project.get_model_names()) > 0
         model = project.get_model()
         assert model is not None
         # Cleanup will still happen through finalizer

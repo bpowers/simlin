@@ -154,8 +154,8 @@ class Project:
                 # Default to protobuf
                 return cls.from_protobin(data)
     
-    def get_model_count(self) -> int:
-        """Get the number of models in the project."""
+    def __get_model_count(self) -> int:
+        """Internal method to get the number of models in the project."""
         count = lib.simlin_project_get_model_count(self._ptr)
         if count < 0:
             raise SimlinImportError("Failed to get model count")
@@ -168,7 +168,7 @@ class Project:
         Returns:
             List of model names
         """
-        count = self.get_model_count()
+        count = self.__get_model_count()
         if count == 0:
             return []
         
@@ -355,7 +355,7 @@ class Project:
     def __repr__(self) -> str:
         """Return a string representation of the Project."""
         try:
-            model_count = self.get_model_count()
+            model_count = self.__get_model_count()
             return f"<Project with {model_count} model(s)>"
         except:
             return "<Project (invalid)>"

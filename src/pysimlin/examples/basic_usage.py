@@ -17,7 +17,7 @@ def load_and_run_model():
     project = simlin.Project.from_file(model_path)
     
     # Get information about the project
-    print(f"Number of models: {project.get_model_count()}")
+    print(f"Number of models: {len(project.get_model_names())}")
     print(f"Model names: {project.get_model_names()}")
     
     # Get the default model
@@ -211,7 +211,7 @@ def model_conversion():
     
     # Round-trip test
     project2 = simlin.Project.from_protobin(pb_data)
-    print(f"Round-trip successful: {project2.get_model_count()} models")
+    print(f"Round-trip successful: {len(project2.get_model_names())} models")
     
     return xmile_data, pb_data
 

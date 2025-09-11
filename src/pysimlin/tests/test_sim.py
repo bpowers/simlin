@@ -295,7 +295,7 @@ class TestSimContextManager:
             with project.get_model() as model:
                 with model.new_sim() as sim:
                     # All should be usable inside their contexts
-                    assert project.get_model_count() > 0
+                    assert len(project.get_model_names()) > 0
                     assert model.get_var_count() > 0
                     sim.run_to_end()
                     assert sim.get_step_count() > 0
