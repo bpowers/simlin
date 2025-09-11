@@ -1,4 +1,4 @@
-# simlin - Python bindings for Simlin
+# pysimlin - Python bindings for Simlin
 
 Python bindings for the Simlin system dynamics simulation engine.
 
@@ -14,8 +14,10 @@ Python bindings for the Simlin system dynamics simulation engine.
 ## Installation
 
 ```bash
-pip install simlin
+pip install pysimlin
 ```
+
+**Note:** Install with `pip install pysimlin` but import with `import simlin`.
 
 ## Requirements
 

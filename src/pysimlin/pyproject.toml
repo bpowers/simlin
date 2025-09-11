@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel", "cffi>=1.15.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "simlin"
+name = "pysimlin"
 version = "0.1.0"
 description = "Python bindings for the Simlin system dynamics simulation engine"
 readme = "README.md"

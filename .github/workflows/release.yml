@@ -121,13 +121,13 @@ jobs:
             PLATFORM="manylinux"
             ARCH=$(uname -m)
             if [ "$ARCH" = "x86_64" ]; then
-              WHEEL=$(ls wheelhouse/simlin-*-${PYVER}-*-${PLATFORM}*_x86_64.whl 2>/dev/null | head -1)
+              WHEEL=$(ls wheelhouse/pysimlin-*-${PYVER}-*-${PLATFORM}*_x86_64.whl 2>/dev/null | head -1)
             else
-              WHEEL=$(ls wheelhouse/simlin-*-${PYVER}-*-${PLATFORM}*_aarch64.whl 2>/dev/null | head -1)
+              WHEEL=$(ls wheelhouse/pysimlin-*-${PYVER}-*-${PLATFORM}*_aarch64.whl 2>/dev/null | head -1)
             fi
           elif [ "$RUNNER_OS" = "macOS" ]; then
             # macOS ARM64
-            WHEEL=$(ls wheelhouse/simlin-*-${PYVER}-*-macosx*_arm64.whl 2>/dev/null | head -1)
+            WHEEL=$(ls wheelhouse/pysimlin-*-${PYVER}-*-macosx*_arm64.whl 2>/dev/null | head -1)
           fi
           
           if [ -z "$WHEEL" ]; then
@@ -142,12 +142,12 @@ jobs:
           
           # Debug: Check if the module was installed correctly
           echo "Checking installed package..."
-          pip show simlin
+          pip show pysimlin
           python -c "import simlin; print('simlin imported successfully')" || {
             echo "Failed to import simlin. Checking what's installed:"
             python -c "import sys; print(sys.path)"
             python -c "import site; print(site.getsitepackages())"
-            ls -la $(python -c "import site; print(site.getsitepackages()[0])")/simlin* || true
+            ls -la $(python -c "import site; print(site.getsitepackages()[0])")/pysimlin* || true
             exit 1
           }
 
@@ -161,3 +161,23 @@ jobs:
           cp -r ${{ github.workspace }}/src/pysimlin/tests .
           # Run tests against installed package
           RUST_BACKTRACE=1 pytest -q tests/
+
+  publish:
+    name: Publish to PyPI
+    needs: test-wheels
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: wheelhouse/
