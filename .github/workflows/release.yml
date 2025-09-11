@@ -49,10 +49,12 @@ jobs:
             if [ "$UNAME_S" = "Linux" ] && [ "$UNAME_M" = "x86_64" ]; then RUST_TARGET=x86_64-unknown-linux-gnu; fi
             if [ "$UNAME_S" = "Linux" ] && [ "$UNAME_M" = "aarch64" ]; then RUST_TARGET=aarch64-unknown-linux-gnu; fi
             rustup target add "$RUST_TARGET"
-            (cd src/libsimlin && cargo build --release --target "$RUST_TARGET")
+            # Build in the project root to use workspace configuration
+            cargo build --release --target "$RUST_TARGET" -p simlin
             # Copy library to where pysimlin expects it
+            # The build output is in the workspace target directory
             mkdir -p src/libsimlin/target/release
-            cp target/"$RUST_TARGET"/release/libsimlin.a src/libsimlin/target/release/ || cp target/release/libsimlin.a src/libsimlin/target/release/ || true
+            cp target/"$RUST_TARGET"/release/libsimlin.a src/libsimlin/target/release/
         with:
           package-dir: src/pysimlin
 
