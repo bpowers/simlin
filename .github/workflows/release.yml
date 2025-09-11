@@ -30,40 +30,49 @@ jobs:
           CIBW_ARCHS_MACOS: arm64
           CIBW_ARCHS_LINUX: x86_64 aarch64
           CIBW_BEFORE_BUILD: |
+            set -ex  # Exit on error and print commands
             python -m pip install --upgrade pip
             pip install cffi setuptools wheel
             # Install protoc
             if [ "$(uname)" = "Linux" ]; then
-              # manylinux containers use yum
-              yum install -y protobuf-compiler || \
-              # Try downloading binary if yum fails
-              (ARCH="$(uname -m)" && \
-               if [ "$ARCH" = "x86_64" ]; then PROTOC_ZIP="protoc-25.1-linux-x86_64.zip"; \
-               elif [ "$ARCH" = "aarch64" ]; then PROTOC_ZIP="protoc-25.1-linux-aarch_64.zip"; \
-               else echo "Unsupported arch: $ARCH" && exit 1; fi && \
-               curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/$PROTOC_ZIP" && \
-               unzip -o "$PROTOC_ZIP" -d /usr/local && \
-               rm "$PROTOC_ZIP")
+              echo "Installing protoc for Linux..."
+              # Try downloading binary directly (yum often doesn't have protobuf-compiler)
+              ARCH="$(uname -m)"
+              if [ "$ARCH" = "x86_64" ]; then 
+                PROTOC_ZIP="protoc-25.1-linux-x86_64.zip"
+              elif [ "$ARCH" = "aarch64" ]; then 
+                PROTOC_ZIP="protoc-25.1-linux-aarch_64.zip"
+              else 
+                echo "Unsupported arch: $ARCH" && exit 1
+              fi
+              curl -LO "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/$PROTOC_ZIP"
+              unzip -o "$PROTOC_ZIP" -d /usr/local
+              rm "$PROTOC_ZIP"
+              protoc --version  # Verify installation
             elif [ "$(uname)" = "Darwin" ]; then
               brew install protobuf || true
             fi
             # Install Rust if needed
             if ! command -v cargo >/dev/null 2>&1; then
+              echo "Installing Rust..."
               curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
-              export PATH="$HOME/.cargo/bin:$PATH"
+              source "$HOME/.cargo/env"
             fi
-            export PATH="$HOME/.cargo/bin:$PATH"
+            source "$HOME/.cargo/env" || true  # Ensure cargo is in PATH
             UNAME_S="$(uname -s)"; UNAME_M="$(uname -m)"
             if [ "$UNAME_S" = "Darwin" ] && [ "$UNAME_M" = "arm64" ]; then RUST_TARGET=aarch64-apple-darwin; fi
             if [ "$UNAME_S" = "Linux" ] && [ "$UNAME_M" = "x86_64" ]; then RUST_TARGET=x86_64-unknown-linux-gnu; fi
             if [ "$UNAME_S" = "Linux" ] && [ "$UNAME_M" = "aarch64" ]; then RUST_TARGET=aarch64-unknown-linux-gnu; fi
+            echo "Adding Rust target: $RUST_TARGET"
             rustup target add "$RUST_TARGET"
             # Build in the project root to use workspace configuration
+            echo "Building libsimlin..."
             cargo build --release --target "$RUST_TARGET" -p simlin
             # Copy library to where pysimlin expects it
-            # The build output is in the workspace target directory
+            echo "Copying library..."
             mkdir -p src/libsimlin/target/release
             cp target/"$RUST_TARGET"/release/libsimlin.a src/libsimlin/target/release/
+            ls -la src/libsimlin/target/release/  # Verify copy
         with:
           package-dir: src/pysimlin
 
