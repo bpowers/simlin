@@ -18,6 +18,8 @@ lib
 lib.browser
 lib.module
 
+/src/pysimlin/pysimlin.egg-info/
+
 # dependencies
 node_modules
 
