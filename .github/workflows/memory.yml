@@ -75,7 +75,7 @@ jobs:
           if [ "${EXIT_CODE:-0}" != "0" ]; then
             echo "=== Running failing test in isolation ==="
             RUST_BACKTRACE=full \
-            ASAN_OPTIONS="detect_leaks=1:verbosity=3:halt_on_error=0" \
+            ASAN_OPTIONS="detect_leaks=1:verbosity=1:halt_on_error=0" \
             LD_PRELOAD=$ASAN_LIB \
             PYTHONMALLOC=malloc \
             timeout 10 python -m pytest tests/test_memory.py::TestErrorPathMemoryLeaks::test_import_error_no_leak -vvs || true
