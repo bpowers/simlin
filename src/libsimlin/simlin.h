@@ -166,6 +166,21 @@ int simlin_project_get_model_count(SimlinProject *project);
 // - The returned strings are owned by the caller and must be freed with simlin_free_string
 int simlin_project_get_model_names(SimlinProject *project, char **result, uintptr_t max);
 
+// Adds a new model to a project
+//
+// Creates a new empty model with the given name and adds it to the project.
+// The model will have no variables initially.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `model_name` must be a valid C string
+//
+// # Returns
+// - 0 on success
+// - SimlinErrorCode::Generic if project or model_name is null or empty
+// - SimlinErrorCode::DuplicateVariable if a model with that name already exists
+int simlin_project_add_model(SimlinProject *project, const char *model_name);
+
 // Gets a model from a project by name
 //
 // # Safety
@@ -317,7 +332,7 @@ int simlin_sim_get_series(SimlinSim *sim, const char *name, double *results_ptr,
 // Frees a string returned by the API
 //
 // # Safety
-// - `s` must be a valid pointer returned by simlin_sim_get_varnames
+// - `s` must be a valid pointer returned by simlin API functions that return strings
 void simlin_free_string(char *s);
 
 // Gets all feedback loops in the project

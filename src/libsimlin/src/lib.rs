@@ -314,6 +314,59 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
     count as c_int
 }
 
+/// Adds a new model to a project
+///
+/// Creates a new empty model with the given name and adds it to the project.
+/// The model will have no variables initially.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `model_name` must be a valid C string
+///
+/// # Returns
+/// - 0 on success
+/// - SimlinErrorCode::Generic if project or model_name is null or empty
+/// - SimlinErrorCode::DuplicateVariable if a model with that name already exists
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_add_model(
+    project: *mut SimlinProject,
+    model_name: *const c_char,
+) -> c_int {
+    if project.is_null() || model_name.is_null() {
+        return engine::ErrorCode::Generic as c_int;
+    }
+
+    let model_name_str = match CStr::from_ptr(model_name).to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return engine::ErrorCode::Generic as c_int,
+    };
+
+    let proj = &mut *project;
+
+    // Check if model already exists
+    for model in &proj.project.datamodel.models {
+        if model.name == model_name_str {
+            return engine::ErrorCode::DuplicateVariable as c_int;
+        }
+    }
+
+    // Create new empty model
+    let new_model = engine::datamodel::Model {
+        name: model_name_str.to_string(),
+        variables: vec![],
+        views: vec![],
+        loop_metadata: vec![],
+    };
+
+    // Add to datamodel
+    proj.project.datamodel.models.push(new_model);
+
+    // Rebuild the project's internal structures
+    proj.project = engine::Project::from(proj.project.datamodel.clone());
+
+    engine::ErrorCode::NoError as c_int
+}
+
 /// Gets a model from a project by name
 ///
 /// # Safety
@@ -3778,6 +3831,141 @@ mod tests {
             // Clean up
             simlin_sim_unref(sim);
             simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_add_model() {
+        use prost::Message;
+
+        // Create a minimal project with just one model
+        let project = engine::project_io::Project {
+            name: "test_project".to_string(),
+            sim_specs: Some(engine::project_io::SimSpecs {
+                start: 0.0,
+                stop: 100.0,
+                dt: Some(engine::project_io::Dt {
+                    value: 0.25,
+                    is_reciprocal: false,
+                }),
+                save_step: None,
+                sim_method: engine::project_io::SimMethod::Euler as i32,
+                time_units: String::new(),
+            }),
+            models: vec![engine::project_io::Model {
+                name: "main".to_string(),
+                variables: vec![],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            dimensions: vec![],
+            units: vec![],
+            source: None,
+        };
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            // Open the project
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            // Verify initial model count
+            let initial_count = simlin_project_get_model_count(proj);
+            assert_eq!(initial_count, 1);
+
+            // Test adding a model
+            let model_name = CString::new("new_model").unwrap();
+            let rc = simlin_project_add_model(proj, model_name.as_ptr());
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Verify model count increased
+            let new_count = simlin_project_get_model_count(proj);
+            assert_eq!(new_count, 2);
+
+            // Verify we can get the new model
+            let new_model = simlin_project_get_model(proj, model_name.as_ptr());
+            assert!(!new_model.is_null());
+            assert_eq!((*new_model).model_name, "new_model");
+
+            // Verify the new model can be used to create a simulation
+            let sim = simlin_sim_new(new_model, false);
+            assert!(!sim.is_null());
+
+            // Clean up
+            simlin_sim_unref(sim);
+            simlin_model_unref(new_model);
+
+            // Test adding another model
+            let model_name2 = CString::new("another_model").unwrap();
+            let rc = simlin_project_add_model(proj, model_name2.as_ptr());
+            assert_eq!(rc, engine::ErrorCode::NoError as c_int);
+
+            // Verify model count
+            let final_count = simlin_project_get_model_count(proj);
+            assert_eq!(final_count, 3);
+
+            // Test adding duplicate model name (should fail)
+            let duplicate_name = CString::new("new_model").unwrap();
+            let rc = simlin_project_add_model(proj, duplicate_name.as_ptr());
+            assert_eq!(rc, engine::ErrorCode::DuplicateVariable as c_int);
+
+            // Model count should not have changed
+            let count_after_dup = simlin_project_get_model_count(proj);
+            assert_eq!(count_after_dup, 3);
+
+            // Clean up
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_add_model_null_safety() {
+        unsafe {
+            // Test with null project
+            let model_name = CString::new("test").unwrap();
+            let rc = simlin_project_add_model(ptr::null_mut(), model_name.as_ptr());
+            assert_eq!(rc, engine::ErrorCode::Generic as c_int);
+
+            // Create a valid project for other null tests
+            let project = engine::project_io::Project {
+                name: "test".to_string(),
+                sim_specs: Some(engine::project_io::SimSpecs {
+                    start: 0.0,
+                    stop: 10.0,
+                    dt: Some(engine::project_io::Dt {
+                        value: 1.0,
+                        is_reciprocal: false,
+                    }),
+                    save_step: None,
+                    sim_method: engine::project_io::SimMethod::Euler as i32,
+                    time_units: String::new(),
+                }),
+                models: vec![],
+                dimensions: vec![],
+                units: vec![],
+                source: None,
+            };
+            let mut buf = Vec::new();
+            project.encode(&mut buf).unwrap();
+
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+
+            // Test with null model name
+            let rc = simlin_project_add_model(proj, ptr::null());
+            assert_eq!(rc, engine::ErrorCode::Generic as c_int);
+
+            // Test with empty model name
+            let empty_name = CString::new("").unwrap();
+            let rc = simlin_project_add_model(proj, empty_name.as_ptr());
+            assert_eq!(rc, engine::ErrorCode::Generic as c_int);
+
+            // Clean up
             simlin_project_unref(proj);
         }
     }
