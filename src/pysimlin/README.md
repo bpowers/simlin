@@ -9,7 +9,7 @@ Python bindings for the Simlin system dynamics simulation engine.
 - Get simulation results as pandas DataFrames
 - Analyze model structure and feedback loops
 - Full type hints for IDE support
-- Loop Transmission Method (LTM) analysis for feedback loop importance
+- Loops That Matter (LTM) analysis for feedback loop importance
 
 ## Installation
 
@@ -107,7 +107,7 @@ for link in links:
 ```python
 # Create simulation
 sim = model.new_sim()                # Standard simulation
-sim = model.new_sim(enable_ltm=True) # Enable Loop Transmission Method
+sim = model.new_sim(enable_ltm=True) # Enable Loops That Matter
 
 # Run simulation
 sim.run_to_end()        # Run to final time
@@ -167,7 +167,7 @@ for loop in loops:
         print(f"Population is in loop {loop.id}")
 ```
 
-### Loop Transmission Method (LTM)
+### Loops That Matter (LTM)
 
 ```python
 # Run simulation with LTM enabled

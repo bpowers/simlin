@@ -168,7 +168,7 @@ class Model:
         Create a new simulation instance from this model.
         
         Args:
-            enable_ltm: Whether to enable Loop Transmission Method analysis.
+            enable_ltm: Whether to enable Loops That Matter analysis.
                        This allows getting link scores and loop analysis after simulation.
                        
         Returns:

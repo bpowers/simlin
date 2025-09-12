@@ -125,9 +125,9 @@ def feedback_loop_analysis():
 
 
 def ltm_analysis():
-    """Example: Loop Transmission Method analysis."""
+    """Example: Loops That Matter analysis."""
     print("\n" + "=" * 60)
-    print("Example 5: Loop Transmission Method (LTM) Analysis")
+    print("Example 5: Loops That Matter (LTM) Analysis")
     print("=" * 60)
     
     # Load a model
