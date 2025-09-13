@@ -8,6 +8,7 @@
 enum Integration_Type { Integration_Type_EULER, Integration_Type_RK2, Integration_Type_RK4 };
 class View {
 public:
+  virtual ~View() = default;  // Virtual destructor for proper cleanup of derived classes
   virtual bool UpgradeGhost(Variable *var) = 0;
   virtual bool AddFlowDefinition(Variable *var, Variable *in, Variable *out) = 0;
   virtual bool AddVarDefinition(Variable *var, int x, int y) = 0;

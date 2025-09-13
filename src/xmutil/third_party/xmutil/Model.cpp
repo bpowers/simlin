@@ -21,7 +21,43 @@ Model::Model(void) {
 }
 
 Model::~Model(void) {
-  // allocation is no longer clean ClearCompEquations() ;
+  // Clean up dynamically allocated views
+  for (View *view : vViews) {
+    delete view;
+  }
+  vViews.clear();
+
+  // Clean up dynamically allocated groups
+  for (ModelGroup *group : vGroups) {
+    delete group;
+  }
+  vGroups.clear();
+
+  // Clean up dynamically allocated macro functions
+  for (MacroFunction *func : mMacroFunctions) {
+    delete func;
+  }
+  mMacroFunctions.clear();
+
+  // Clean up unnamed variables
+  for (Variable *var : vUnamedVars) {
+    delete var;
+  }
+  vUnamedVars.clear();
+
+  // Clean up any allocated arrays
+  if (dLevel) {
+    delete[] dLevel;
+    dLevel = NULL;
+  }
+  if (dRate) {
+    delete[] dRate;
+    dRate = NULL;
+  }
+  if (dAux) {
+    delete[] dAux;
+    dAux = NULL;
+  }
 }
 
 Equation *Model::AddUnnamedVariable(ExpressionFunctionMemory *e) {
@@ -56,15 +92,15 @@ void Model::ClearCompEquations(void) {
     delete v;
   }
   if (dLevel) {
-    delete dLevel;
+    delete[] dLevel;
     dLevel = NULL;
   }
   if (dRate) {
-    delete dRate;
+    delete[] dRate;
     dRate = NULL;
   }
   if (dAux) {
-    delete dAux;
+    delete[] dAux;
     dAux = NULL;
   }
 }
