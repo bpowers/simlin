@@ -18,9 +18,9 @@ import {
 import { defined, Series } from '@system-dynamics/core/common';
 
 import { Arrowhead } from './Arrowhead';
-import { displayName, Point as IPoint } from './common';
+import { displayName, Point as IPoint, Rect } from './common';
 import { AuxRadius, CloudRadius, FlowArrowheadRadius } from './default';
-import { Label } from './Label';
+import { Label, labelBounds, LabelProps } from './Label';
 import { Sparkline } from './Sparkline';
 import { StockHeight, StockWidth } from './Stock';
 
@@ -395,6 +395,49 @@ export function UpdateFlow(
     points,
   });
   return [flowEl, updatedClouds];
+}
+
+export function flowBounds(element: FlowViewElement): Rect {
+  const { cx, cy } = element;
+  // Flow valve is a circle with radius 6 (FlowWidth/2 = 12/2 = 6)
+  const r = 6;
+  const bounds = {
+    top: cy - r,
+    left: cx - r,
+    right: cx + r,
+    bottom: cy + r,
+  };
+
+  // Include label bounds if there's a label
+  if (element.name) {
+    const side = element.labelSide;
+    const labelProps: LabelProps = {
+      cx,
+      cy,
+      side,
+      rw: r,
+      rh: r,
+      text: displayName(element.name),
+    };
+    const lBounds = labelBounds(labelProps);
+
+    bounds.top = Math.min(bounds.top, lBounds.top);
+    bounds.left = Math.min(bounds.left, lBounds.left);
+    bounds.right = Math.max(bounds.right, lBounds.right);
+    bounds.bottom = Math.max(bounds.bottom, lBounds.bottom);
+  }
+
+  // Also include flow path points
+  if (element.points) {
+    for (const point of element.points) {
+      bounds.left = Math.min(bounds.left, point.x);
+      bounds.right = Math.max(bounds.right, point.x);
+      bounds.top = Math.min(bounds.top, point.y);
+      bounds.bottom = Math.max(bounds.bottom, point.y);
+    }
+  }
+
+  return bounds;
 }
 
 export interface FlowProps {

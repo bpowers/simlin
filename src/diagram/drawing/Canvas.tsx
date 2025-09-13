@@ -38,7 +38,7 @@ import { calcViewBox, displayName, plainDeserialize, plainSerialize, Point, Rect
 import { Connector, ConnectorProps } from './Connector';
 import { AuxRadius } from './default';
 import { EditableLabel } from './EditableLabel';
-import { Flow, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
+import { Flow, flowBounds, UpdateCloudAndFlow, UpdateFlow, UpdateStockAndFlows } from './Flow';
 import { Module, moduleBounds, ModuleProps } from './Module';
 import { CustomElement } from './SlateEditor';
 import { Stock, stockBounds, stockContains, StockHeight, StockProps, StockWidth } from './Stock';
@@ -472,6 +472,10 @@ export const Canvas = styled(
       const sink = this.getElementByUid(sinkId);
       if (!(sink instanceof StockViewElement || sink instanceof CloudViewElement)) {
         throw new Error('invariant broken');
+      }
+
+      if (this.computeBounds) {
+        this.elementBounds = this.elementBounds.push(flowBounds(element));
       }
 
       return (
