@@ -1130,7 +1130,7 @@ impl From<datamodel::Model> for Model {
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
-    #[serde(rename = "$value")]
+    #[serde(rename = "$value", default)]
     pub variables: Vec<Var>,
 }
 
@@ -2460,7 +2460,7 @@ impl View {
 
         for element in display_stocks {
             let ident = element.ident().unwrap();
-            if let Var::Stock(stock) = model.get_var(&ident).unwrap() {
+            if let Some(Var::Stock(stock)) = model.get_var(&ident) {
                 if stock.outflows.is_some() {
                     for outflow in stock.outflows.as_ref().unwrap() {
                         let outflow_ident = canonicalize(outflow).as_str().to_string();

@@ -15,6 +15,12 @@ use simlin_engine::{Method, SimSpecs, canonicalize};
 
 pub mod xmile;
 
+#[cfg(test)]
+mod test_sir_xmile;
+
+#[cfg(all(test, feature = "vensim"))]
+mod test_open_vensim;
+
 pub fn to_xmile(project: &Project) -> Result<String> {
     xmile::project_to_xmile(project)
 }
