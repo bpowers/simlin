@@ -73,7 +73,7 @@ public:
   }
   ~UnknownFunction() {
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
   std::string sName;
@@ -142,10 +142,10 @@ private:
     }                                                         \
     ~name(void) {                                             \
     }                                                         \
-    std::string ComputableName(void) {                        \
+    std::string ComputableName(void) override {               \
       return " ?? ";                                          \
     }                                                         \
-    bool AsKeyword(void) {                                    \
+    bool AsKeyword(void) override {                           \
       return true;                                            \
     }                                                         \
   }
@@ -158,7 +158,7 @@ private:
     }                                                         \
     ~name(void) {                                             \
     }                                                         \
-    std::string ComputableName(void) {                        \
+    std::string ComputableName(void) override {               \
       return cname;                                           \
     }                                                         \
                                                               \
@@ -176,7 +176,7 @@ private:
     }                                                          \
     ~name(void) {                                              \
     }                                                          \
-    std::string ComputableName(void) {                         \
+    std::string ComputableName(void) override {                \
       return cname;                                            \
     }                                                          \
                                                                \
@@ -215,10 +215,10 @@ private:
     }                                                         \
     ~name(void) {                                             \
     }                                                         \
-    bool IsTimeDependent(void) {                              \
+    bool IsTimeDependent(void) override {                     \
       return true;                                            \
     }                                                         \
-    std::string ComputableName(void) {                        \
+    std::string ComputableName(void) override {               \
       return cname;                                           \
     }                                                         \
                                                               \
@@ -285,15 +285,15 @@ public:
   }
   ~FunctionVectorLookup(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "VECTOR LOOKUP";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
 FSubclassStart(FunctionElmCount, "ELMCOUNT", 1, "SIZE");
-virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 }
 ;
 FSubclass(FunctionModulo, "MODULO", 2, "MODULO");
@@ -302,20 +302,20 @@ FSubclass(FunctionGetDataLastTime, "GET DATA LAST TIME", 1, "GET_DATA_LAST_TIME"
 FSubclass(FunctionLookupArea, "LOOKUP AREA", 3, "LOOKUP_AREA");
 FSubclass(FunctionLookupExtrapolate, "LOOKUP EXTRAPOLATE", 2, "LOOKUP");  // changes the graphical
 FSubclassStart(FunctionTimeBase, "TIME BASE", 2, "TIME_BASE");
-virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 }
 ;
 
 FSubclassStart(FunctionDelayN, "DELAY N", 4, "DELAYN");
 
 public:
-virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 }
 ;
 FSubclassStart(FunctionSmoothN, "SMOOTH N", 4, "SMTHN");
 
 public:
-virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 }
 ;
 
@@ -340,7 +340,7 @@ FSubclassTime(FunctionStep, "STEP", 2, "step");
 
 // allocation
 FSubclassStart(FunctionAllocateByPriority, "ALLOCATE BY PRIORITY", 5, "ALLOCATE") public
-    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 }
 ;
 
@@ -368,10 +368,10 @@ public:
   }
   ~FunctionSampleIfTrue(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "SampleIfTrue";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -382,10 +382,10 @@ public:
   }
   ~FunctionPulse(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "Pulse";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -395,10 +395,10 @@ public:
   }
   ~FunctionPulseTrain(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "PulseTrain";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -408,10 +408,10 @@ public:
   }
   ~FunctionQuantum(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "Quantum";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -421,10 +421,10 @@ public:
   }
   ~FunctionRandomNormal(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "RandomNormal";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -435,10 +435,10 @@ public:
   }
   ~FunctionRandomPoisson(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "RandomPoisson";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -450,10 +450,10 @@ public:
   }
   ~FunctionIfThenElse(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "IF";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -465,10 +465,10 @@ public:
   }
   ~FunctionLog(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "LOG10";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };

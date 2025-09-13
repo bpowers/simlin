@@ -57,7 +57,7 @@ class VensimVariableElement : public VensimViewElement {
 public:
   VensimVariableElement(VensimView *view, char *curpos, char *buf, VensimParse *parser);
   VensimVariableElement(VensimView *view, Variable *var, int x, int y);
-  ElementType Type() {
+  ElementType Type() override {
     return ElementTypeVARIABLE;
   }
   virtual Variable *GetVariable() const override {
@@ -82,7 +82,7 @@ protected:
 };
 class VensimValveElement : public VensimViewElement {
 public:
-  ElementType Type() {
+  ElementType Type() override {
     return ElementTypeVALVE;
   }
   VensimValveElement(char *curpos, char *buf, VensimParse *parser);
@@ -95,14 +95,14 @@ private:
 };
 class VensimCommentElement : public VensimViewElement {
 public:
-  ElementType Type() {
+  ElementType Type() override {
     return ElementTypeCOMMENT;
   }
   VensimCommentElement(char *curpos, char *buf, VensimParse *parser);
 };
 class VensimConnectorElement : public VensimViewElement {
 public:
-  ElementType Type() {
+  ElementType Type() override {
     return ElementTypeCONNECTOR;
   }
   VensimConnectorElement(char *curpos, char *buf, VensimParse *parser);

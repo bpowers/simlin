@@ -17,7 +17,7 @@
 
 std::string StringFromDouble(double val) {
   char buf[128];
-  sprintf(buf, "%g", val);
+  snprintf(buf, sizeof(buf), "%g", val);
   return std::string(buf);
 }
 

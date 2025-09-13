@@ -9,7 +9,7 @@ public:
   }
   ~DFunctionTable(void) {
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
   virtual bool IsTableCall() const override {
     return true;
   }
@@ -69,11 +69,11 @@ DFSubclass(DFunctionNPV, "NPV", 4, "NPV");
 FSubclass(DFunctionModulo, "MODULO", 2, "MODULO");
 
 FSubclassStart(DFunctionDelayN, "DELAY N", 4, "DELAYN") public
-    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 }
 ;
 FSubclassStart(DFunctionSmoothN, "SMOOTH N", 4, "SMTHN") public
-    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 }
 ;
 
@@ -102,10 +102,10 @@ public:
   }
   ~DFunctionPulse(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "Pulse";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
@@ -117,10 +117,10 @@ public:
   }
   ~DFunctionIfThenElse(void) {
   }
-  std::string ComputableName(void) {
+  std::string ComputableName(void) override {
     return "IF";
   }
-  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+  virtual void OutputComputable(ContextInfo *info, ExpressionList *arg) override;
 
 private:
 };
