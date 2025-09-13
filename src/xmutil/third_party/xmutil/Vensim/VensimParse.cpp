@@ -109,6 +109,8 @@ void VensimParse::ReadyFunctions() {
     new FunctionGetDirectData(pSymbolNameSpace);
     new FunctionGetDataMean(pSymbolNameSpace);
 
+    new FunctionAllocateByPriority(pSymbolNameSpace);
+
     pSymbolNameSpace->ConfirmAllAllocations();
   } catch (...) {
     log("Failed to initialize symbol table");
@@ -139,7 +141,6 @@ Equation *VensimParse::AddEq(LeftHandSide *lhs, Expression *ex, ExpressionList *
       ex = ent;
     }
   }
-
   return new Equation(pSymbolNameSpace, lhs, ex, tok);
 }
 Equation *VensimParse::AddTable(LeftHandSide *lhs, Expression *ex, ExpressionTable *tbl, bool legacy) {
@@ -171,8 +172,10 @@ Equation *VensimParse::AddTable(LeftHandSide *lhs, Expression *ex, ExpressionTab
 void VensimParse::AddFullEq(Equation *eq, UnitExpression *un) {
   pSymbolNameSpace->ConfirmAllAllocations();  // now independently allocated
   pActiveVar = eq->GetVariable();
-  if (!_model->Groups().empty() && pActiveVar->GetAllEquations().empty() && !mInMacro)
-    _model->Groups().back().vVariables.push_back(pActiveVar);
+  if (!_model->Groups().empty() && pActiveVar->GetAllEquations().empty() && !mInMacro) {
+    _model->Groups().back()->vVariables.push_back(pActiveVar);
+    pActiveVar->SetGroup(_model->Groups().back());
+  }
   pActiveVar->AddEq(eq);
   if (un) {
     if (!pActiveVar->AddUnits(un))
@@ -230,13 +233,20 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
       } else if (rval == VPTT_groupstar) {
         // log("%s\n", mVensimLex.CurToken()->c_str());
         //  only change this if a new number
-        std::string group_owner;
+        ModelGroup *group_owner = NULL;
         char c = mVensimLex.CurToken()->at(0);
-        if (_model->Groups().empty() || (_model->Groups().back().sName[0] != c && c >= '0' && c <= '9'))
-          group_owner = *mVensimLex.CurToken();
-        else
-          group_owner = _model->Groups().back().sOwner;
-        { _model->Groups().push_back(ModelGroup(*mVensimLex.CurToken(), group_owner)); }
+        if (_model->Groups().empty() || (_model->Groups().back()->sName[0] != c && c >= '0' && c <= '9')) {
+          std::string owner = *mVensimLex.CurToken();
+          for (ModelGroup *g : _model->Groups()) {
+            if (g->sName == owner) {
+              group_owner = g;
+              break;
+            }
+          }
+        }
+        if (group_owner == NULL && !_model->Groups().empty())
+          group_owner = _model->Groups().back();
+        _model->Groups().push_back(new ModelGroup(*mVensimLex.CurToken(), group_owner));
       } else if (rval != endtok) {
         log("Unknown terminal token %d\n", rval);
         if (!FindNextEq(false))
@@ -552,16 +562,16 @@ Expression *VensimParse::OperatorExpression(int oper, Expression *exp1, Expressi
   case '/':
     return new ExpressionDivide(pSymbolNameSpace, exp1, exp2);
   case '+':
-    if (!exp2 && exp1 && exp1->GetType() == EXPTYPE_Number)
-      return exp1; /* unary plus just ignore */
+    if (!exp1 && exp2 && exp2->GetType() == EXPTYPE_Number)
+      return exp2; /* unary plus just ignore */
     return new ExpressionAdd(pSymbolNameSpace, exp1, exp2);
   case '-':
-    if (!exp2) {
-      if (exp1 && exp1->GetType() == EXPTYPE_Number) {
-        exp1->FlipSign();
-        return exp1;
+    if (!exp1) {
+      if (exp2 && exp2->GetType() == EXPTYPE_Number) {
+        exp2->FlipSign();
+        return exp2;
       }
-      return new ExpressionUnaryMinus(pSymbolNameSpace, exp1, NULL);
+      return new ExpressionUnaryMinus(pSymbolNameSpace, exp2, NULL);
     }
     return new ExpressionSubtract(pSymbolNameSpace, exp1, exp2);
   case '^':

@@ -18,6 +18,9 @@ public:
   virtual bool ScalePoints(double xratio, double yratio, int offx, int offy) {
     return false;
   }
+  virtual Variable *GetVariable() const {
+    return NULL;
+  }
   int X() {
     return _x;
   }
@@ -57,7 +60,7 @@ public:
   ElementType Type() {
     return ElementTypeVARIABLE;
   }
-  Variable *GetVariable() {
+  virtual Variable *GetVariable() const override {
     return _variable;
   }
   bool Ghost(std::set<Variable *> *adds);
@@ -99,7 +102,7 @@ public:
 };
 class VensimConnectorElement : public VensimViewElement {
 public:
-  ElementType Type() override {
+  ElementType Type() {
     return ElementTypeCONNECTOR;
   }
   VensimConnectorElement(char *curpos, char *buf, VensimParse *parser);
@@ -130,12 +133,12 @@ class VensimView : public View {
 public:
   ~VensimView() {
     // Clean up dynamically allocated elements
-    for (auto* element : vElements) {
+    for (auto *element : vElements) {
       delete element;
     }
     vElements.clear();
   }
-  
+
   const std::string &Title() {
     return sTitle;
   }
@@ -147,6 +150,7 @@ public:
   VensimViewElements &Elements() {
     return vElements;
   }
+  virtual bool empty() const override;
 
   virtual bool UpgradeGhost(Variable *var) override;
   virtual bool AddFlowDefinition(Variable *var, Variable *upstream, Variable *downstream) override;

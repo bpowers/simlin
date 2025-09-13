@@ -46,6 +46,17 @@ void FunctionVectorLookup::OutputComputable(ContextInfo *info, ExpressionList *a
   Function::OutputComputable(info, arg);
 }
 
+void FunctionElmCount::OutputComputable(ContextInfo *info, ExpressionList *arg) {
+  if (arg && arg->Length() == 1 && arg->GetExp(0)->GetType() == EXPTYPE_Variable) {
+    *info << "SIZE(";
+    Variable *var = static_cast<ExpressionVariable *>(arg->GetExp(0))->GetVariable();
+    *info << var->GetName();
+    *info << ")";
+    return;
+  }
+  Function::OutputComputable(info, arg);
+}
+
 void FunctionTimeBase::OutputComputable(ContextInfo *info, ExpressionList *arg) {
   if (arg->Length() == 2) {
     Expression *exp1 = arg->GetExp(0);
@@ -72,7 +83,7 @@ void FunctionMemoryBase::OutputComputable(ContextInfo *info, ExpressionList *arg
       *info << "INIT(";
       arg->OutputComputable(info, iInitArgMark);
       *info << ")";
-    } else if (fname == "INTEG" || info->InitEqn())
+    } else if (this->IsIntegrator() || info->InitEqn())
       arg->OutputComputable(info, iInitArgMark);
     else
       arg->OutputComputable(info, iActiveArgMark);
@@ -250,6 +261,40 @@ void FunctionLog::OutputComputable(ContextInfo *info, ExpressionList *arg) {
     return;
   }
   Function::OutputComputable(info, arg);
+}
+
+void FunctionAllocateByPriority::OutputComputable(ContextInfo *info, ExpressionList *arg) {
+  if (arg->Length() == 5) {
+    *info << "ALLOCATE(";
+    Expression *supply = arg->GetExp(4);
+    supply->OutputComputable(info);
+    *info << ", ";
+    Expression *demand = arg->GetExp(0);
+    if (demand->GetType() == EXPTYPE_Variable) {
+      ExpressionVariable *expvar = static_cast<ExpressionVariable *>(demand);
+      SymbolList *subs = expvar->GetSubs();
+      if (subs) {
+        int len = subs->Length();
+        if (len > 0) {
+          const SymbolList::SymbolListEntry &blah = (*subs)[len - 1];
+          *info << blah.u.pSymbol->GetName();
+        }
+      }
+    }
+    *info << ", ";
+    info->SetWantFinalStar(true);
+    demand->OutputComputable(info);
+    *info << ", ";
+    Expression *priority = arg->GetExp(1);
+    priority->OutputComputable(info);
+    *info << ", ";
+    info->SetWantFinalStar(false);
+    Expression *width = arg->GetExp(3);
+    width->OutputComputable(info);
+    *info << ")";
+  } else {
+    Function::OutputComputable(info, arg);
+  }
 }
 
 #ifdef WANT_EVAL_STUFF

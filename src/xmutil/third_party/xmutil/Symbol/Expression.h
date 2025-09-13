@@ -68,6 +68,8 @@ public:
   }
   virtual bool TestMarkFlows(SymbolNameSpace *sns, FlowList *fl,
                              Equation *eq) = 0;  // but will also create a flow when the INTEG equation has other stuff
+  virtual void CheckTableUses(Variable *lhs) {
+  }
   virtual void GetVarsUsed(std::vector<Variable *> &vars) = 0;  // list of variables used
   virtual void MarkType(XMILE_Type type) = 0;                   // only called with flow after test returns true
   virtual Expression *GetArg(int pos) {
@@ -205,6 +207,7 @@ public:
 private:
   double value;
 };
+
 class ExpressionLiteral : public Expression {
 public:
   ExpressionLiteral(SymbolNameSpace *sns, const char *str) : Expression(sns) {
@@ -306,6 +309,7 @@ public:
   virtual bool TestMarkFlows(SymbolNameSpace *sns, FlowList *fl, Equation *eq) override {
     return false;
   }
+  virtual void CheckTableUses(Variable *lhs) override;
   virtual void GetVarsUsed(std::vector<Variable *> &vars) override;  // list of variables used
   virtual void MarkType(XMILE_Type type) override {
   }
@@ -418,6 +422,9 @@ public:
     vXVals.push_back(x);
     vYVals.push_back(y);
   }
+  void AddYVal(double y) {
+    vYVals.push_back(y);
+  }
   void AddRange(double x1, double y1, double x2, double y2) {
     bHasRange = true;
     dX2 = x2;
@@ -425,6 +432,7 @@ public:
     dX2 = x2;
     dY2 = y2;
   }
+  void SetXAxis(Variable *var, double xmin, double xmax, double xincrerment);
   virtual void CheckPlaceholderVars(Model *m, bool isfirst) {
   }
   double Eval(ContextInfo *info) {
@@ -503,6 +511,12 @@ public:
       return pE2->TestMarkFlows(sns, fl, eq);
     }
     return false;
+  }
+  virtual void CheckTableUses(Variable *lhs) {
+    if (pE1)
+      pE1->CheckTableUses(lhs);
+    if (pE2)
+      pE2->CheckTableUses(lhs);
   }
   virtual void GetVarsUsed(std::vector<Variable *> &vars) {
     if (pE1)
@@ -592,6 +606,12 @@ public:
       return pE2->TestMarkFlows(sns, fl, eq);
     }
     return false;
+  }
+  virtual void CheckTableUses(Variable *lhs) {
+    if (pE1)
+      pE1->CheckTableUses(lhs);
+    if (pE2)
+      pE2->CheckTableUses(lhs);
   }
   virtual void GetVarsUsed(std::vector<Variable *> &vars) {
     if (pE1)

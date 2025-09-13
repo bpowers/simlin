@@ -40,6 +40,7 @@ public:
     bInSubList = false;
     bSelfIsPrevious = false;
     pEquations = NULL;
+    bWantFinalStar = false;
   }
   ~ContextInfo(void) {
   }
@@ -114,6 +115,12 @@ public:
   void SetSelfIsPrevious(bool set) {
     bSelfIsPrevious = set;
   }
+  bool WantFinalStar() const {
+    return bWantFinalStar;
+  }
+  void SetWantFinalStar(bool set) {
+    bWantFinalStar = set;
+  }
   Variable *LHS() {
     return pLHS;
   }
@@ -133,6 +140,7 @@ private:
   bool bInitEqn;                         // for xmile
   bool bInSubList;
   bool bSelfIsPrevious;
+  bool bWantFinalStar;
 };
 
 #endif

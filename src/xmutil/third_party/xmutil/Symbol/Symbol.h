@@ -10,14 +10,25 @@
 class Model;  // forward declaration
 class Function;
 class Variable;
+namespace tinyxml2 {
+class XMLElement;
+}
 
 class ModelGroup {
 public:
-  ModelGroup(const std::string &name, const std::string &owner) : sName(name), sOwner(owner) {
+  ModelGroup(const std::string &name, ModelGroup *owner)
+      : sName(name), pOwner(owner), pModule(NULL), pModel(NULL), pVariables(NULL), iDepth(0) {
   }
-  std::string sName;
-  std::string sOwner;
+  ModelGroup(const std::string &name, ModelGroup *owner, int depth)
+      : sName(name), pOwner(owner), pModule(NULL), pModel(NULL), pVariables(NULL), iDepth(depth) {
+  }
   std::vector<Variable *> vVariables;
+  std::string sName;
+  ModelGroup *pOwner;
+  tinyxml2::XMLElement *pModule;     // this groups module element in the owning module
+  tinyxml2::XMLElement *pModel;      // this groups model elemen in the main document
+  tinyxml2::XMLElement *pVariables;  // variables list in the module
+  int iDepth;                        // 0 means root level 1 nested once and so on
 };
 
 /* abstract class Symbol - used for model vairblaes, models, units

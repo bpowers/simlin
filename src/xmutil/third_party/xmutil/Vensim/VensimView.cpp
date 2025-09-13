@@ -279,6 +279,20 @@ bool VensimView::UpgradeGhost(Variable *var) {
   return false;
 }
 
+bool VensimView::empty() const {
+  int i = 5;
+  if (this->sTitle == "Energy sensitivity")
+    i++;
+  for (VensimViewElement *vve : vElements) {
+    if (vve) {
+      Variable *var = vve->GetVariable();
+      if (var && var->GetView() == this && !var->Unwanted())
+        return false;
+    }
+  }
+  return true;
+}
+
 bool VensimView::AddFlowDefinition(Variable *var, Variable *upstream, Variable *downstream) {
   // for flows we are looking for any stocks that use the flow
   // for

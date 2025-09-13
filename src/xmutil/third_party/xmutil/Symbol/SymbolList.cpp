@@ -62,10 +62,12 @@ void SymbolList::OutputComputable(ContextInfo *info) {
       // use the original symbol
       Symbol *s = info->GetLHSSpecific(vSymbols[i].u.pSymbol);
       *info << SpaceToUnderBar(s->GetName());
+      if (i == vSymbols.size() - 1 && info->WantFinalStar())
+        *info << ".*";
     } else if (vSymbols[i].eType == EntryType_BANG_SYMBOL) {
       Symbol *s = vSymbols[i].u.pSymbol;
       if (s->Owner() != s) {
-        *info << "*:" << SpaceToUnderBar(s->GetName());  // new convention for XMILE to allow subrange use
+        *info << SpaceToUnderBar(s->GetName()) << ".*";  // new convention for XMILE to allow subrange use
 
         //// if this is a contiguous subrange we can use a:b notation - otherwise can't do it
         // std::vector<Symbol*> elms;

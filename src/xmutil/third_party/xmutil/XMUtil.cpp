@@ -4,6 +4,7 @@
 
 #include <cstring>
 
+#include "Dynamo/DynamoParse.h"
 #include "Model.h"
 #include "Unicode.h"
 #include "Vensim/VensimParse.h"
@@ -15,8 +16,8 @@
 #endif
 
 std::string StringFromDouble(double val) {
-  char buf[128] = {0};
-  snprintf(buf, 128, "%g", val);
+  char buf[128];
+  sprintf(buf, "%g", val);
   return std::string(buf);
 }
 
@@ -253,19 +254,29 @@ double AngleFromPoints(double startx, double starty, double pointx, double point
 extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
 char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, const char *fileName, bool isCompact,
-                                  bool isLongName, bool isAsSectors) {
+                                  int isLongName, bool isAsSectors) {
   Model m{};
-
+  std::string ext;
   if (fileName == nullptr) {
     fileName = "<in memory>";
-  }
+  } else if (strlen(fileName) > 5)
+    ext = fileName + strlen(fileName) - 3;
 
   // parse the input
   double xscale = 1.0;
   double yscale = 1.0;
-  {
+  if (ext == "dyn" || ext == "DYN") {
+    DynamoParse dp{&m};
+    dp.SetLongName(isLongName != 0);
+    m.SetAsSectors(isAsSectors);
+    if (!dp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
+      return nullptr;
+    }
+    xscale = dp.Xratio();
+    yscale = dp.Yratio();
+  } else {
     VensimParse vp{&m};
-    vp.SetLongName(isLongName);
+    vp.SetLongName(isLongName == 1);
     m.SetAsSectors(isAsSectors);
     if (!vp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
       return nullptr;
@@ -283,6 +294,7 @@ char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, 
   // involving expressions into flows (a single net flow on the first
   // pass though this)
   m.MarkVariableTypes(nullptr);
+  m.AdjustGroupNames();  // have to be unique and not elsewhere in the model
 
   for (MacroFunction *mf : m.MacroFunctions()) {
     m.MarkVariableTypes(mf->NameSpace());

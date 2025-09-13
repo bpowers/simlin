@@ -1,8 +1,9 @@
 #ifndef _XMUTIL_XMUTIL_H
 #define _XMUTIL_XMUTIL_H
 
-#include <string>
 #include <cstdint>
+#include <cstring>
+#include <string>
 
 #include "Log.h"
 
@@ -69,7 +70,7 @@ inline void __cdecl operator delete[](void *p) {
 extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
 XMUTIL_EXPORT char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, const char *fileName,
-                                                bool isCompact, bool isLongName, bool isAsSectors);
+                                                bool isCompact, int isLongName, bool isAsSectors);
 // returns a non-owned, null-terminated C-string with any log output from
 // previous xmutil_convert_mdl_to_xmile invocations
 XMUTIL_EXPORT const char *xmutil_get_log(void);

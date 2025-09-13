@@ -26,7 +26,8 @@ ExpressionTable *Equation::GetTable(void) {
 }
 
 void Equation::CheckPlaceholderVars(Model *m) {
-  pExpression->CheckPlaceholderVars(m, true);
+  if (pExpression)
+    pExpression->CheckPlaceholderVars(m, true);
 }
 
 std::string Equation::RHSFormattedXMILE(Variable *lhs, const std::vector<Symbol *> &subs,
@@ -143,14 +144,16 @@ void Equation::OutputComputable(ContextInfo *info) {
   *info << "=";
   if (info->GetComputeType() == CF_rate)
     *info << pLeftHandSide->GetVariable()->GetAlternateName() << "+dt*(";
-  pExpression->OutputComputable(info);
+  if (pExpression)
+    pExpression->OutputComputable(info);
   if (info->GetComputeType() == CF_rate)
     *info << ")";
   *info << "\n";
 }
 
 void Equation::GetVarsUsed(std::vector<Variable *> &vars) {
-  pExpression->GetVarsUsed(vars);
+  if (pExpression)
+    pExpression->GetVarsUsed(vars);
 }
 
 int Equation::SubscriptCount(std::vector<Variable *> &elmlist) {

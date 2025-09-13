@@ -14,6 +14,10 @@ Model::Model(void) {
   bAsSectors = false;
   iIntegrationType = Integration_Type_EULER;
   bLetterPolarity = false;
+  _initial_time = -1;
+  _final_time = 200;
+  _dt = 1;
+  bFromDyanmo = false;
 }
 
 Model::~Model(void) {
@@ -436,6 +440,32 @@ bool Model::MarkVariableTypes(SymbolNameSpace *ns) {
   return true;
 }
 
+void Model::AdjustGroupNames() {
+  // every group name must be unique and can't be in the global name space
+  int n = vGroups.size();
+  for (int i = 0; i < n; i++) {
+    std::string name = vGroups[i]->sName;
+    // test it
+    bool good;
+    do {
+      good = mSymbolNameSpace.Find(name) == NULL;
+      if (good) {
+        std::string *lname = SymbolNameSpace::ToLowerSpace(name);
+        for (int j = 0; good && j < i; j++) {
+          std::string *tlname = SymbolNameSpace::ToLowerSpace(vGroups[j]->sName);
+          if (*tlname == *lname)
+            good = false;
+          delete tlname;
+        }
+        delete lname;
+      }
+      if (!good)
+        name += " 1";
+    } while (!good);
+    vGroups[i]->sName = name;
+  }
+}
+
 void Model::CheckGhostOwners() {
   // now everything is defined (and only defined once) - we need to make sure there are no missing connectors
   for (View *view : vViews) {
@@ -619,6 +649,6 @@ std::vector<Variable *> Model::GetVariables(SymbolNameSpace *ns) {
 }
 
 std::string Model::PrintXMILE(bool isCompact, std::vector<std::string> &errs, double xscale, double yscale) {
-  XMILEGenerator generator(this, xscale, yscale);
+  XMILEGenerator generator(this, xscale, yscale, bFromDyanmo);
   return generator.Print(isCompact, errs, bAsSectors);
 }

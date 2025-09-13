@@ -39,6 +39,7 @@ typedef union _tag_parse_union {
   Function *fnc;
   ExpressionTable *tbl;
   double num;
+  double tol;
 
 } ParseUnion;
 

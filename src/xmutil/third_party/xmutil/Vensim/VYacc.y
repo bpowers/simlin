@@ -108,6 +108,7 @@ macroend:
 
 eqn : 
    lhs '=' exprlist {$$ = vpyy_addeq($1,NULL,$3,'=') ; }
+   | lhs '=' {$$ = vpyy_addeq($1,NULL,NULL,'=') ; } // treat as A_FUNCTION_OF nothing
    | lhs '(' tablevals ')' { $$ = vpyy_add_lookup($1,NULL,$3, 0) ; }
    | lhs '(' xytablevals ')' { $$ = vpyy_add_lookup($1,NULL,$3, 1) ; }
    | lhs '=' VPTT_with_lookup '(' exp ',' '(' tablevals ')' ')' { $$ = vpyy_add_lookup($1,$5,$8, 0) ; }

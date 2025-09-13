@@ -9,6 +9,7 @@
 #include "ExpressionList.h"
 #include "LeftHandSide.h"
 #define YYSTYPE ParseUnion
+#include "../Dynamo/DynamoFunction.h"
 #include "../Vensim/VYacc.tab.hpp"
 
 Expression::Expression(SymbolNameSpace *sns) : SymbolTableBase(sns) {
@@ -31,6 +32,36 @@ ExpressionFunction::~ExpressionFunction() {
 
 void ExpressionFunction::CheckPlaceholderVars(Model *m, bool isfirst) {
   pArgs->CheckPlaceholderVars(m);
+}
+
+void ExpressionFunction::CheckTableUses(Variable *var) {
+  if (!pArgs) {
+    return;
+  }
+  // dynamo only this same place in the call logic lets us fill in the table function info
+  if (pFunction && pFunction->IsTableCall()) {
+    std::string name = pFunction->GetName();
+    if (!static_cast<const DFunctionTable *>(pFunction)->SetTableXAxis(pArgs))
+      log("ERROR TABLE call in equation for %s not correctly formmatted.\n", var->GetName().c_str());
+
+    if (name == "TABXL") {
+      // if we get a LOOKUP_EXTRAPOLATE then try to mark the associated lookup - assume all will extrapolate
+      std::vector<Variable *> vars;
+      const_cast<Expression *>((*pArgs)[0])->GetVarsUsed(vars);
+      // the first should be a graphical
+      std::vector<Equation *> eqs = vars[0]->GetAllEquations();
+      for (Equation *eq : eqs) {
+        Expression *exp = eq->GetExpression();
+        if (exp->GetType() == EXPTYPE_Table)
+          static_cast<ExpressionTable *>(exp)->SetExtrapolate(true);
+      }
+    }
+  }
+
+  int n = pArgs->Length();
+  for (int i = 0; i < n; i++) {
+    pArgs->GetExp(i)->CheckTableUses(var);
+  }
 }
 
 void ExpressionFunction::GetVarsUsed(std::vector<Variable *> &vars) {
@@ -108,8 +139,9 @@ void ExpressionVariable::GetVarsUsed(std::vector<Variable *> &vars) {
 }  // list of variables used
 
 bool ExpressionFunctionMemory::TestMarkFlows(SymbolNameSpace *sns, FlowList *fl, Equation *eq) {
-  if (this->GetFunction()->GetName() != "INTEG" && this->GetFunction()->GetName() != "SINTEG")
+  if (!this->GetFunction()->IsIntegrator()) {
     return false;
+  }
   // only care about active part here - if it all a+b+c-d-e or similar then we are good to go otherwise
   // we need to make up a new variable and then use that as the equation in place of what was here
   Expression *e = this->GetArgs()->GetExp(0);
@@ -194,6 +226,22 @@ void ExpressionLogical::OutputComputable(ContextInfo *info) {
     pE2->OutputComputable(info);
 }
 
+void ExpressionTable::SetXAxis(Variable *var, double xmin, double xmax, double increment) {
+  if (increment > 0) {
+    if (xmax > xmin) {
+      int count = std::round((xmax - xmin) / increment + 1);
+      if (count != static_cast<int>(vYVals.size()))
+        log("Error the table function %s has %d entries but its usage suggests %d\n", var->GetName().c_str(),
+            (int)vYVals.size(), count);
+    } else
+      log("Error the table function %s is used in a table without a proper min/max\n", var->GetName().c_str());
+  } else {
+    log("Error the table function %s is used in a table without an increment\n", var->GetName().c_str());
+    increment = 1;
+  }
+  for (size_t i = 0; i < vYVals.size(); i++, xmin += increment)
+    vXVals.push_back(xmin);
+}
 void ExpressionTable::TransformLegacy() {
   assert(!(vXVals.size() % 2));
   size_t n = vXVals.size() / 2;

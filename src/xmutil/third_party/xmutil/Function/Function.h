@@ -44,6 +44,12 @@ public:
   virtual bool IsActiveInit() {
     return false;
   }
+  virtual bool IsIntegrator() const {
+    return false;
+  }
+  virtual bool IsTableCall() const {
+    return false;
+  }
   int NumberArgs(void) {
     return iNumberArgs;
   }
@@ -286,7 +292,10 @@ public:
 
 private:
 };
-FSubclass(FunctionElmCount, "ELMCOUNT", 1, "SIZE");
+FSubclassStart(FunctionElmCount, "ELMCOUNT", 1, "SIZE");
+virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+}
+;
 FSubclass(FunctionModulo, "MODULO", 2, "MODULO");
 FSubclass(FunctionGetDataAtTime, "GET DATA AT TIME", 2, "GET_DATA_AT_TIME");
 FSubclass(FunctionGetDataLastTime, "GET DATA LAST TIME", 1, "GET_DATA_LAST_TIME");
@@ -310,9 +319,14 @@ virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
 }
 ;
 
-FSubclassMemory(FunctionInteg, "INTEG", 2, 0b10, 0b01, "integ_active", "integ_init")
-    FSubclassMemoryStart(FunctionActiveInitial, "ACTIVE INITIAL", 2, 0b10, 0b01, "ai_active",
-                         "ai_init") virtual bool IsActiveInit() override {
+FSubclassMemoryStart(FunctionInteg, "INTEG", 2, 0b10, 0b01, "integ_active",
+                     "integ_init") virtual bool IsIntegrator() const override {
+  return true;
+}
+}
+;
+FSubclassMemoryStart(FunctionActiveInitial, "ACTIVE INITIAL", 2, 0b10, 0b01, "ai_active",
+                     "ai_init") virtual bool IsActiveInit() override {
   return true;
 }
 }
@@ -323,6 +337,12 @@ FSubclass(FunctionReInitial, "REINITIAL", 1, "INIT");
 FSubclassTime(FunctionRamp, "RAMP", 3, "RAMP");
 FSubclass(FunctionLn, "LN", 1, "LN");
 FSubclassTime(FunctionStep, "STEP", 2, "step");
+
+// allocation
+FSubclassStart(FunctionAllocateByPriority, "ALLOCATE BY PRIORITY", 5, "ALLOCATE") public
+    : virtual void OutputComputable(ContextInfo *info, ExpressionList *arg);
+}
+;
 
 FSubclassKeyword(FunctionTabbedArray, "TABBED ARRAY", 1);
 
