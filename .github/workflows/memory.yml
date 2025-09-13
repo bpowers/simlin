@@ -10,8 +10,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  asan:
-    name: AddressSanitizer Testing
+  asan-pysimlin:
+    name: AddressSanitizer Testing (pysimlin)
     runs-on: ubuntu-latest
 
     steps:
@@ -82,3 +82,22 @@ jobs:
           fi
           
           exit ${EXIT_CODE:-0}
+
+  asan-full:
+    name: AddressSanitizer Testing (Full Rust Suite)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Run ASAN tests
+        run: ./test-asan.sh

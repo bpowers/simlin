@@ -12,9 +12,10 @@ SymbolNameSpace::SymbolNameSpace(void) {
 
 SymbolNameSpace::~SymbolNameSpace(void) {
   /* delete the symbols which will in turn delete equations etc */
-  // for (iterator node: mHashTable) {
-  //    delete SNSitToSymbol(node) ;
-  // }
+  for (auto& pair : mHashTable) {
+    delete pair.second;
+  }
+  mHashTable.clear();
 }
 
 Symbol *SymbolNameSpace::Find(const std::string &sin) {

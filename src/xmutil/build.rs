@@ -3,12 +3,22 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 fn main() {
+    // Check if ASAN is enabled via environment variable
+    let asan_enabled = std::env::var("ASAN")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if asan_enabled {
+        println!("cargo:warning=ASAN enabled for xmutil C/C++ code");
+    }
+
     let mut xmutil_build = cc::Build::new();
     xmutil_build
         .cpp(true)
         .include("./third_party/tinyxml2")
         .include("./third_party")
         .flag_if_supported("-std=c++14")
+        .flag_if_supported("-fno-omit-frame-pointer")
         .flag_if_supported("-Wunused-private-field")
         .flag_if_supported("-Wno-attributes")
         .flag_if_supported("-Wno-unused-variable")
@@ -49,10 +59,21 @@ fn main() {
         .file("./third_party/xmutil/Symbol/Variable.cpp")
         .file("./third_party/xmutil/Symbol/UnitExpression.cpp");
 
+    // Add ASAN flags if enabled
+    if asan_enabled {
+        xmutil_build.flag_if_supported("-fsanitize=address");
+    }
+
     let mut tinyxml_build = cc::Build::new();
     tinyxml_build
         .cpp(true)
+        .flag_if_supported("-fno-omit-frame-pointer")
         .file("./third_party/tinyxml2/tinyxml2.cpp");
+
+    // Add ASAN flags if enabled
+    if asan_enabled {
+        tinyxml_build.flag_if_supported("-fsanitize=address");
+    }
 
     let target = std::env::var("TARGET").unwrap();
     if target.starts_with("wasm") {
@@ -70,7 +91,9 @@ fn main() {
     xmutil_build.compile("xmutil-native");
     tinyxml_build.compile("tinyxml-native");
 
-    cc::Build::new()
+    let mut libutf_build = cc::Build::new();
+    libutf_build
+        .flag_if_supported("-fno-omit-frame-pointer")
         .flag_if_supported("-Wno-parentheses")
         .flag_if_supported("-Wno-sign-compare")
         .file("third_party/libutf/rune.c")
@@ -92,8 +115,14 @@ fn main() {
         .file("third_party/libutf/utfnlen.c")
         .file("third_party/libutf/utfrrune.c")
         .file("third_party/libutf/utfrune.c")
-        .file("third_party/libutf/utfutf.c")
-        .compile("libutf-native");
+        .file("third_party/libutf/utfutf.c");
+
+    // Add ASAN flags if enabled
+    if asan_enabled {
+        libutf_build.flag_if_supported("-fsanitize=address");
+    }
+
+    libutf_build.compile("libutf-native");
 
     println!("cargo:rerun-if-changed=build.rs");
 
