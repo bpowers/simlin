@@ -176,7 +176,7 @@ private:
     }                                                          \
     ~name(void) {                                              \
     }                                                          \
-    std::string ComputableName(void) override {                \
+    std::string ComputableName(void) {                         \
       return cname;                                            \
     }                                                          \
                                                                \

@@ -60,7 +60,7 @@ public:
     return true;
   }
   virtual void RemoveFunctionArgs(void) {
-  }                                                      // only 1 subclass does anything
+  }  // only 1 subclass does anything
   virtual void OutputComputable(ContextInfo *info) = 0;  // again don't skip - todo modify this to make dumping
                                                          // equations easy - possibly returning std::string
   virtual bool IsActiveInit() {

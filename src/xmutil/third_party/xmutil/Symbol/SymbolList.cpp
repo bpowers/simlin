@@ -99,7 +99,7 @@ void SymbolList::OutputComputable(ContextInfo *info) {
         //	if (i == n)
         //	{
         //		*info << SpaceToUnderBar(elms.front()->GetName()) << ":" <<
-        //SpaceToUnderBar(elms.back()->GetName());
+        // SpaceToUnderBar(elms.back()->GetName());
         //	}
         //	else
         //		*info << "*" << SpaceToUnderBar(s->GetName());

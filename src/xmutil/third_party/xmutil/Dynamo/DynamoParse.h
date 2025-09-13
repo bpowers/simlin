@@ -87,7 +87,23 @@ public:
   void ParseSpecs();
   void ParseSave();
 
+  // Error state management - for C/Rust compatibility
+  bool HasError() const {
+    return has_error_;
+  }
+  const std::string &GetLastError() const {
+    return last_error_;
+  }
+  void ClearError() {
+    has_error_ = false;
+    last_error_.clear();
+  }
+
 private:
+  // Error state management members
+  bool has_error_ = false;
+  std::string last_error_;
+
   bool FindNextEq(bool want_comment);
   Model *_model;
   std::string sFilename;

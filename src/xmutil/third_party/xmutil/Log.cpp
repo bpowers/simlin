@@ -15,7 +15,7 @@
 static std::string global_log;
 
 void ATTRIBUTE_PRINTF log(const char *msg_fmt, ...) {
-  char *msg;
+  char *msg = nullptr;
   va_list args;
   int ret;
 
@@ -23,11 +23,10 @@ void ATTRIBUTE_PRINTF log(const char *msg_fmt, ...) {
   ret = vasprintf(&msg, msg_fmt, args);
   va_end(args);
 
-  if (ret != -1) {
+  if (ret != -1 && msg != nullptr) {
     global_log += msg;
+    free(msg);
   }
-
-  free(msg);
 }
 
 extern "C" {

@@ -107,8 +107,12 @@ Equation *DynamoParse::AddEq(LeftHandSide *lhs, Expression *ex, ExpressionList *
           // alloe unary minus here
           ent->AddValue(0, -ex->GetArg(1)->Eval(NULL));  // note eval does not need context for number
         } else if (ex->GetType() != EXPTYPE_Number) {
-          mSyntaxError.str = "Expecting only comma delimited numbers ";
-          throw mSyntaxError;
+          has_error_ = true;
+          last_error_ = "Expecting only comma delimited numbers ";
+          delete ex;  // Delete the current expression that caused the error
+          delete ent;
+          delete exl;
+          return nullptr;
         } else
           ent->AddValue(0, ex->Eval(NULL));  // note eval does not need context for number
         delete ex;
@@ -124,8 +128,9 @@ Equation *DynamoParse::AddStockEq(LeftHandSide *lhs, ExpressionVariable *stock, 
   if (stock) {
     // needs to match lhs or we throu an exception
     if (lhs->GetVariable() != stock->GetVariable()) {
-      mSyntaxError.str = "Level equations must be stock=stock+flow in form ";
-      throw mSyntaxError;
+      has_error_ = true;
+      last_error_ = "Level equations must be stock=stock+flow in form ";
+      return nullptr;
     }
   }
   Expression *ex = NULL;
@@ -136,16 +141,29 @@ Equation *DynamoParse::AddStockEq(LeftHandSide *lhs, ExpressionVariable *stock, 
     }
   }
   if (ex == NULL) {
-    mSyntaxError.str = "Bad level equation ";
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Bad level equation ";
+    return nullptr;
   }
   // wrap the expression/DT in INTEGRATE - the DT will probably just cancel another DT - so could be reduced
   ex = DPObject->OperatorExpression('(', ex, NULL);
   Variable *var = this->InsertVariable("DT");
+  if (!var) {
+    delete ex;
+    has_error_ = true;
+    last_error_ = "Failed to insert DT variable";
+    return nullptr;
+  }
   Expression *ex2 = DPObject->VarExpression(var, NULL);
   ex = DPObject->OperatorExpression('/', ex, ex2);
   ExpressionList *args = DPObject->ChainExpressionList(NULL, ex);
   var = DPObject->InsertVariable("INTEGRATE");
+  if (!var) {
+    delete args;
+    has_error_ = true;
+    last_error_ = "Failed to insert INTEGRATE variable";
+    return nullptr;
+  }
   ex = DPObject->FunctionExpression(static_cast<Function *>(static_cast<Symbol *>(var)), args);
 
   return new Equation(pSymbolNameSpace, lhs, ex, DPTT_dt_to_one);
@@ -193,8 +211,11 @@ void DynamoParse::AddFullEq(Equation *eq, int type) {
 }
 
 int DynamoParse::yyerror(const char *str) {
-  mSyntaxError.str = str;
-  throw mSyntaxError;
+  // Set error state instead of throwing exception
+  has_error_ = true;
+  last_error_ = str;
+  // Return 1 to signal error to the parser
+  return 1;
 }
 
 static std::string compress_whitespace(const std::string &s) {
@@ -224,6 +245,9 @@ static std::string compress_whitespace(const std::string &s) {
 bool DynamoParse::ProcessFile(const std::string &filename, const char *contents, size_t contentsLen) {
   sFilename = filename;
 
+  // Clear any previous error state
+  ClearError();
+
   if (true) {
     bool noerr = true;
     mDynamoLex.Initialize(contents, contentsLen);
@@ -235,6 +259,20 @@ bool DynamoParse::ProcessFile(const std::string &filename, const char *contents,
       try {
         mDynamoLex.GetReady();
         rval = dpyyparse();
+
+        // Check if an error occurred during parsing
+        if (has_error_) {
+          log("%s\n", last_error_.c_str());
+          log("Error at line %d position %d in file %s\n", mDynamoLex.LineNumber(), mDynamoLex.Position(),
+              sFilename.c_str());
+          log(".... skipping the associated variable and looking for the next usable content.\n");
+          pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
+          noerr = false;
+          ClearError();  // Clear for next iteration
+          if (!FindNextEq(false))
+            break;
+          continue;
+        }
         if (rval == DPTT_eoq) {  // some combination of comment and units probably follows
           if (!FindNextEq(true))
             break;
@@ -274,6 +312,10 @@ bool DynamoParse::ProcessFile(const std::string &filename, const char *contents,
           break;
 
       } catch (...) {
+        // Log unknown exceptions to aid diagnosis and ensure visibility via C API
+        log("Unknown exception while parsing (Dynamo) at line %d position %d in file %s\n", mDynamoLex.LineNumber(),
+            mDynamoLex.Position(), sFilename.c_str());
+        log(".... skipping the associated variable and looking for the next usable content.\n");
         pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
         noerr = false;
         if (!FindNextEq(false))
@@ -356,8 +398,9 @@ Variable *DynamoParse::FindVariable(const std::string &name) {
 Variable *DynamoParse::InsertVariable(const std::string &name) {
   Variable *var = static_cast<Variable *>(pSymbolNameSpace->Find(name));
   if (var && var->isType() != Symtype_Variable && var->isType() != Symtype_Function) {
-    mSyntaxError.str = "Type meaning mismatch for " + name;
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Type meaning mismatch for " + name;
+    return nullptr;
   }
   if (!var) {
     var = new Variable(pSymbolNameSpace, name);
@@ -370,8 +413,9 @@ Units *DynamoParse::InsertUnits(const std::string &name) {
                                    // units - could use a separate namespace
   Units *u = static_cast<Units *>(pSymbolNameSpace->Find(uname));
   if (u && u->isType() != Symtype_Units) {
-    mSyntaxError.str = "Type meaning mismatch for " + name;
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Type meaning mismatch for " + name;
+    return nullptr;
   }
   if (!u) {
     u = new Units(pSymbolNameSpace, uname);
@@ -426,8 +470,10 @@ SymbolList *DynamoParse::SymList(SymbolList *in, Variable *add, bool bang, Varia
     int low = atoi(start.c_str() + i);
     int high = atoi(finish.c_str() + j);
     if (i != j || start.compare(0, j, finish, 0, j) || low >= high) {
-      mSyntaxError.str = "Bad subscript range specification";
-      throw mSyntaxError;
+      has_error_ = true;
+      last_error_ = "Bad subscript range specification";
+      delete sl;
+      return nullptr;
     }
     start.erase(i, std::string::npos);
     for (i = low + 1; i < high; i++) {
@@ -458,7 +504,10 @@ UnitExpression *DynamoParse::UnitsMult(UnitExpression *f, UnitExpression *s) {
 }
 UnitExpression *DynamoParse::UnitsRange(UnitExpression *e, double minval, double maxval, double increment) {
   if (e == NULL) {
-    e = DPObject->InsertUnitExpression(DPObject->InsertUnits("1"));
+    Units *units = DPObject->InsertUnits("1");
+    if (units) {
+      e = DPObject->InsertUnitExpression(units);
+    }
   }
   e->SetRange(minval, maxval, increment);
   return e;
@@ -525,21 +574,24 @@ Expression *DynamoParse::OperatorExpression(int oper, Expression *exp1, Expressi
     assert(exp2 == NULL);
     return new ExpressionLogical(pSymbolNameSpace, NULL, exp1, oper);
   default:
-    mSyntaxError.str = "Unknown operator internal error ";
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Unknown operator internal error ";
+    return nullptr;
   }
 }
 Expression *DynamoParse::FunctionExpression(Function *func, ExpressionList *eargs) {
   if (func->IsIntegrator()) {
     if (eargs->Length() != 1) {
-      mSyntaxError.str = "Invalid Level Equation internal error";
-      throw mSyntaxError;
+      has_error_ = true;
+      last_error_ = "Invalid Level Equation internal error";
+      return nullptr;
     }
   } else if (func->NumberArgs() >= 0 &&
              ((!eargs && func->NumberArgs() > 0) || (eargs && func->NumberArgs() != eargs->Length()))) {
-    mSyntaxError.str = "Argument count mismatch for ";
-    mSyntaxError.str.append(func->GetName());
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Argument count mismatch for ";
+    last_error_.append(func->GetName());
+    return nullptr;
   }
   if (func->IsMemoryless() && !func->IsTimeDependent())
     return new ExpressionFunction(pSymbolNameSpace, func, eargs);

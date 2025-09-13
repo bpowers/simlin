@@ -3,6 +3,8 @@
 #include <assert.h>
 #include <string.h>
 
+#include <stdexcept>
+
 #include "../Unicode.h"
 #include "Symbol.h"
 
@@ -112,7 +114,7 @@ std::string *SymbolNameSpace::ToLowerSpace(const std::string &sin) {
   ws[j] = '\0';
   char *ws2 = utf8ToLower(ws, j);
   if (ws2 == nullptr) {
-    throw "Bad unicode string";
+    throw std::runtime_error("Bad unicode string");
   }
   std::string *s = new std::string(ws2);
   delete[] ws;

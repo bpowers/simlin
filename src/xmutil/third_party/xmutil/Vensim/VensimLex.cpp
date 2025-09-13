@@ -2,6 +2,8 @@
  */
 #include "VensimLex.h"
 
+#include <stdexcept>
+
 #include "VensimParse.h"
 /* try to avoid the tab.h file as it is C  */
 #define YYSTYPE ParseUnion
@@ -47,7 +49,12 @@ int VensimLex::yylex() {
     break;
   case VPTT_symbol:
     if (bInUnits) {
-      vpyylval.uni = VPObject->InsertUnitExpression(VPObject->InsertUnits(sToken));
+      Units *units = VPObject->InsertUnits(sToken);
+      if (!units) {
+        // InsertUnits failed - return tilde to stop parsing
+        return '~';
+      }
+      vpyylval.uni = VPObject->InsertUnitExpression(units);
       toktype = VPTT_units_symbol;
       break;
     }
@@ -62,6 +69,10 @@ int VensimLex::yylex() {
       toktype = VPTT_with_lookup;
     } else {
       vpyylval.sym = VPObject->InsertVariable(sToken);
+      if (!vpyylval.sym) {
+        // InsertVariable failed - return tilde to stop parsing
+        return '~';
+      }
       if (vpyylval.sym->isType() == Symtype_Function) {
         Function *f = static_cast<Function *>(static_cast<Symbol *>(vpyylval.sym));
         if (f->AsKeyword()) {
@@ -109,7 +120,7 @@ int VensimLex::ReadTabbedArray(void) {
         vpyylval.num = -vpyylval.num;
         toktype = VPTT_number;
       } else
-        throw "Bad numbers";
+        throw std::runtime_error("Bad numbers");
     }
     if (toktype == ')') {  // finished
       vpyylval.exn = ent;
@@ -251,7 +262,12 @@ int VensimLex::NextToken()  // also sets token type
     break;
   case '1':
     if (bInUnits) {
-      vpyylval.uni = VPObject->InsertUnitExpression(VPObject->InsertUnits("1"));
+      Units *units = VPObject->InsertUnits("1");
+      if (!units) {
+        // InsertUnits failed - return tilde to stop parsing
+        return '~';
+      }
+      vpyylval.uni = VPObject->InsertUnitExpression(units);
       return VPTT_units_symbol;
     }
     /* fallthrough */

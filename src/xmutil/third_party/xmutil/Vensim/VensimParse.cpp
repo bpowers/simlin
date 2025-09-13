@@ -131,8 +131,12 @@ Equation *VensimParse::AddEq(LeftHandSide *lhs, Expression *ex, ExpressionList *
           // alloe unary minus here
           ent->AddValue(0, -ex->GetArg(1)->Eval(NULL));  // note eval does not need context for number
         } else if (ex->GetType() != EXPTYPE_Number) {
-          mSyntaxError.str = "Expecting only comma delimited numbers ";
-          throw mSyntaxError;
+          has_error_ = true;
+          last_error_ = "Expecting only comma delimited numbers ";
+          delete ex;  // Delete the current expression that caused the error
+          delete ent;
+          delete exl;
+          return nullptr;
         } else
           ent->AddValue(0, ex->Eval(NULL));  // note eval does not need context for number
         delete ex;
@@ -184,8 +188,11 @@ void VensimParse::AddFullEq(Equation *eq, UnitExpression *un) {
 }
 
 int VensimParse::yyerror(const char *str) {
-  mSyntaxError.str = str;
-  throw mSyntaxError;
+  // Set error state instead of throwing exception
+  has_error_ = true;
+  last_error_ = str;
+  // Return 1 to signal error to the parser
+  return 1;
 }
 
 static std::string compress_whitespace(const std::string &s) {
@@ -215,6 +222,9 @@ static std::string compress_whitespace(const std::string &s) {
 bool VensimParse::ProcessFile(const std::string &filename, const char *contents, size_t contentsLen) {
   sFilename = filename;
 
+  // Clear any previous error state
+  ClearError();
+
   bool noerr = true;
   mVensimLex.Initialize(contents, contentsLen);
   int endtok = mVensimLex.GetEndToken();
@@ -226,6 +236,20 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
     try {
       mVensimLex.GetReady();
       rval = vpyyparse();
+
+      // Check if an error occurred during parsing
+      if (has_error_) {
+        log("%s\n", last_error_.c_str());
+        log("Error at line %d position %d in file %s\n", mVensimLex.LineNumber(), mVensimLex.Position(),
+            sFilename.c_str());
+        log(".... skipping the associated variable and looking for the next usable content.\n");
+        pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
+        noerr = false;
+        ClearError();  // Clear for next iteration
+        if (!FindNextEq(false))
+          break;
+        continue;
+      }
       if (rval == '~') {  // comment follows
         if (!FindNextEq(true))
           break;
@@ -264,6 +288,10 @@ bool VensimParse::ProcessFile(const std::string &filename, const char *contents,
         break;
 
     } catch (...) {
+      // Log unknown exceptions to aid diagnosis and ensure visibility via C API
+      log("Unknown exception while parsing (Vensim) at line %d position %d in file %s\n", mVensimLex.LineNumber(),
+          mVensimLex.Position(), sFilename.c_str());
+      log(".... skipping the associated variable and looking for the next usable content.\n");
       pSymbolNameSpace->DeleteAllUnconfirmedAllocations();
       noerr = false;
       if (!FindNextEq(false))
@@ -429,8 +457,9 @@ Variable *VensimParse::FindVariable(const std::string &name) {
 Variable *VensimParse::InsertVariable(const std::string &name) {
   Variable *var = static_cast<Variable *>(pSymbolNameSpace->Find(name));
   if (var && var->isType() != Symtype_Variable && var->isType() != Symtype_Function) {
-    mSyntaxError.str = "Type meaning mismatch for " + name;
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Type meaning mismatch for " + name;
+    return nullptr;
   }
   if (!var) {
     var = new Variable(pSymbolNameSpace, name);
@@ -443,8 +472,9 @@ Units *VensimParse::InsertUnits(const std::string &name) {
                                    // units - could use a separate namespace
   Units *u = static_cast<Units *>(pSymbolNameSpace->Find(uname));
   if (u && u->isType() != Symtype_Units) {
-    mSyntaxError.str = "Type meaning mismatch for " + name;
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Type meaning mismatch for " + name;
+    return nullptr;
   }
   if (!u) {
     u = new Units(pSymbolNameSpace, uname);
@@ -493,8 +523,10 @@ SymbolList *VensimParse::SymList(SymbolList *in, Variable *add, bool bang, Varia
     int low = atoi(start.c_str() + i);
     int high = atoi(finish.c_str() + j);
     if (i != j || start.compare(0, j, finish, 0, j) || low >= high) {
-      mSyntaxError.str = "Bad subscript range specification";
-      throw mSyntaxError;
+      has_error_ = true;
+      last_error_ = "Bad subscript range specification";
+      delete sl;
+      return nullptr;
     }
     start.erase(i, std::string::npos);
     for (i = low + 1; i < high; i++) {
@@ -525,7 +557,10 @@ UnitExpression *VensimParse::UnitsMult(UnitExpression *f, UnitExpression *s) {
 }
 UnitExpression *VensimParse::UnitsRange(UnitExpression *e, double minval, double maxval, double increment) {
   if (e == NULL) {
-    e = VPObject->InsertUnitExpression(VPObject->InsertUnits("1"));
+    Units *units = VPObject->InsertUnits("1");
+    if (units) {
+      e = VPObject->InsertUnitExpression(units);
+    }
   }
   e->SetRange(minval, maxval, increment);
   return e;
@@ -592,16 +627,18 @@ Expression *VensimParse::OperatorExpression(int oper, Expression *exp1, Expressi
     assert(exp2 == NULL);
     return new ExpressionLogical(pSymbolNameSpace, NULL, exp1, oper);
   default:
-    mSyntaxError.str = "Unknown operator internal error ";
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Unknown operator internal error ";
+    return nullptr;
   }
 }
 Expression *VensimParse::FunctionExpression(Function *func, ExpressionList *eargs) {
   if (func->NumberArgs() >= 0 &&
       ((!eargs && func->NumberArgs() > 0) || (eargs && func->NumberArgs() != eargs->Length()))) {
-    mSyntaxError.str = "Argument count mismatch for ";
-    mSyntaxError.str.append(func->GetName());
-    throw mSyntaxError;
+    has_error_ = true;
+    last_error_ = "Argument count mismatch for ";
+    last_error_.append(func->GetName());
+    return nullptr;
   }
   if (func->IsMemoryless() && !func->IsTimeDependent())
     return new ExpressionFunction(pSymbolNameSpace, func, eargs);

@@ -3,6 +3,7 @@
 #include <assert.h>
 
 #include <iostream>
+#include <stdexcept>
 
 #include "../Dynamo/DynamoFunction.h"
 #include "../Symbol/Expression.h"
@@ -315,7 +316,7 @@ void Variable::AddEq(Equation *eq, bool init) {
       pVariableContent = new VariableContentVar;
       pVariableContent->SetAlternateName(this->GetName());  // until overidden
     } catch (...) {
-      throw "Memory failure adding equations";
+      throw std::runtime_error("Memory failure adding equations");
     }
   }
   pVariableContent->AddEq(eq, init);
@@ -494,7 +495,7 @@ int VariableContentVar::SubscriptCount(std::vector<Variable *> &elmlist) {
       for (size_t i = 1; i < vEquations.size(); i++) {
         std::vector<Variable *> other;
         if (vEquations[0]->SubscriptCount(other) != count)
-          throw "Bad subscript equations";
+          throw std::runtime_error("Bad subscript equations");
       }
     }
     // we need to get to the array not the elements for elmlist - not map to parent only if multiple equations

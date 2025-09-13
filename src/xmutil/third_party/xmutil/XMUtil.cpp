@@ -255,73 +255,86 @@ extern "C" {
 // returns NULL on error or a string containing XMILE that the caller now owns
 char *xmutil_convert_mdl_to_xmile(const char *mdlSource, uint32_t mdlSourceLen, const char *fileName, bool isCompact,
                                   int isLongName, bool isAsSectors) {
-  Model m{};
-  std::string ext;
-  if (fileName == nullptr) {
-    fileName = "<in memory>";
-  } else if (strlen(fileName) > 5)
-    ext = fileName + strlen(fileName) - 3;
+  try {
+    Model m{};
+    std::string ext;
+    if (fileName == nullptr) {
+      fileName = "<in memory>";
+    } else if (strlen(fileName) > 5)
+      ext = fileName + strlen(fileName) - 3;
 
-  // parse the input
-  double xscale = 1.0;
-  double yscale = 1.0;
-  if (ext == "dyn" || ext == "DYN") {
-    DynamoParse dp{&m};
-    dp.SetLongName(isLongName != 0);
-    m.SetAsSectors(isAsSectors);
-    if (!dp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
+    // parse the input
+    double xscale = 1.0;
+    double yscale = 1.0;
+    if (ext == "dyn" || ext == "DYN") {
+      DynamoParse dp{&m};
+      dp.SetLongName(isLongName != 0);
+      m.SetAsSectors(isAsSectors);
+      if (!dp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
+        return nullptr;
+      }
+      xscale = dp.Xratio();
+      yscale = dp.Yratio();
+    } else {
+      VensimParse vp{&m};
+      vp.SetLongName(isLongName == 1);
+      m.SetAsSectors(isAsSectors);
+      if (!vp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
+        return nullptr;
+      }
+      xscale = vp.Xratio();
+      yscale = vp.Yratio();
+    }
+
+    // if(m->AnalyzeEquations()) {
+    //   m->Simulate() ;
+    //   m->OutputComputable(true);
+    // }
+
+    // mark variable types and potentially convert INTEG equations
+    // involving expressions into flows (a single net flow on the first
+    // pass though this)
+    m.MarkVariableTypes(nullptr);
+    m.AdjustGroupNames();  // have to be unique and not elsewhere in the model
+
+    for (MacroFunction *mf : m.MacroFunctions()) {
+      m.MarkVariableTypes(mf->NameSpace());
+    }
+
+    // any ghosts that are never defined make the first appearance not a ghost
+    m.CheckGhostOwners();
+
+    // if there is a view then try to make sure everything is defined in
+    // the views put unknowns in a heap in the first view at 20,20 but
+    // for things that have connections try to put them in the right
+    // place
+    bool want_complete = false;  // could pass this as an option - but let the reader handle this stuff
+    if (want_complete) {
+      m.AttachStragglers();
+    }
+
+    // Collect any errors produced while generating XMILE and log them
+    std::vector<std::string> errs;
+    std::string xmile = m.PrintXMILE(isCompact, errs, xscale, yscale);
+
+    if (!errs.empty()) {
+      for (const auto &e : errs) {
+        log("XMILE generation error: %s\n", e.c_str());
+      }
       return nullptr;
     }
-    xscale = dp.Xratio();
-    yscale = dp.Yratio();
-  } else {
-    VensimParse vp{&m};
-    vp.SetLongName(isLongName == 1);
-    m.SetAsSectors(isAsSectors);
-    if (!vp.ProcessFile(fileName, mdlSource, mdlSourceLen)) {
-      return nullptr;
-    }
-    xscale = vp.Xratio();
-    yscale = vp.Yratio();
-  }
 
-  // if(m->AnalyzeEquations()) {
-  //   m->Simulate() ;
-  //   m->OutputComputable(true);
-  // }
+    char *result = strdup(xmile.c_str());
 
-  // mark variable types and potentially convert INTEG equations
-  // involving expressions into flows (a single net flow on the first
-  // pass though this)
-  m.MarkVariableTypes(nullptr);
-  m.AdjustGroupNames();  // have to be unique and not elsewhere in the model
-
-  for (MacroFunction *mf : m.MacroFunctions()) {
-    m.MarkVariableTypes(mf->NameSpace());
-  }
-
-  // any ghosts that are never defined make the first appearance not a ghost
-  m.CheckGhostOwners();
-
-  // if there is a view then try to make sure everything is defined in
-  // the views put unknowns in a heap in the first view at 20,20 but
-  // for things that have connections try to put them in the right
-  // place
-  bool want_complete = false;  // could pass this as an option - but let the reader handle this stuff
-  if (want_complete) {
-    m.AttachStragglers();
-  }
-
-  // TODO: expose errs
-  std::vector<std::string> errs;
-  std::string xmile = m.PrintXMILE(isCompact, errs, xscale, yscale);
-
-  if (errs.size() != 0) {
+    return result;
+  } catch (const std::exception &e) {
+    // Log the exception for debugging but don't let it escape to C caller
+    log("Exception caught in xmutil_convert_mdl_to_xmile: %s\n", e.what());
+    return nullptr;
+  } catch (...) {
+    // Catch any other exceptions to protect C callers
+    log("Unknown exception caught in xmutil_convert_mdl_to_xmile\n");
     return nullptr;
   }
-
-  char *result = strdup(xmile.c_str());
-
-  return result;
 }
 }  // extern "C"

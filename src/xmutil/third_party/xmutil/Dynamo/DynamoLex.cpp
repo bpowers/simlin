@@ -67,13 +67,22 @@ int DynamoLex::yylex() {
     break;
   case DPTT_symbol:
     if (bInUnits) {
-      dpyylval.uni = DPObject->InsertUnitExpression(DPObject->InsertUnits(sToken));
+      Units *units = DPObject->InsertUnits(sToken);
+      if (!units) {
+        // InsertUnits failed - return end token to stop parsing
+        return DPTT_eoq;
+      }
+      dpyylval.uni = DPObject->InsertUnitExpression(units);
       toktype = DPTT_units_symbol;
       break;
     }
     // special things here - try to do almost everything (including INTEG) as a function but some need to call out to
     // different toktypes
     dpyylval.sym = DPObject->InsertVariable(sToken);
+    if (!dpyylval.sym) {
+      // InsertVariable failed - return end token to stop parsing
+      return DPTT_eoq;
+    }
     if (dpyylval.sym->isType() == Symtype_Function) {
       toktype = DPTT_function;
     }
@@ -199,7 +208,12 @@ int DynamoLex::NextToken()  // also sets token type
     break;
   case '1':
     if (bInUnits) {
-      dpyylval.uni = DPObject->InsertUnitExpression(DPObject->InsertUnits("1"));
+      Units *units = DPObject->InsertUnits("1");
+      if (!units) {
+        // InsertUnits failed - return end token to stop parsing
+        return DPTT_eoq;
+      }
+      dpyylval.uni = DPObject->InsertUnitExpression(units);
       return DPTT_units_symbol;
     }
     /* fallthrough */
