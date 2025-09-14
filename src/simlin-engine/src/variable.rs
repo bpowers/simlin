@@ -29,6 +29,29 @@ pub struct Table {
     y_range: datamodel::GraphicalFunctionScale,
 }
 
+impl Table {
+    #[cfg(test)]
+    pub fn new_for_test(x: Vec<f64>, y: Vec<f64>) -> Self {
+        let x_min = x.first().copied().unwrap_or(0.0);
+        let x_max = x.last().copied().unwrap_or(0.0);
+        let y_min = y.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let y_max = y.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+        Table {
+            x,
+            y,
+            x_range: datamodel::GraphicalFunctionScale {
+                min: x_min,
+                max: x_max,
+            },
+            y_range: datamodel::GraphicalFunctionScale {
+                min: y_min,
+                max: y_max,
+            },
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModuleInput {
     // the Variable identifier in the current model we will use for input

@@ -538,7 +538,7 @@ impl CausalGraph {
             // General case: analyze the equation AST
             if let Some(ast) = to_var.ast() {
                 // Analyze how 'from' appears in the equation
-                return analyze_link_polarity(ast, from);
+                return analyze_link_polarity(ast, from, &self.variables);
             }
         }
         LinkPolarity::Unknown
@@ -635,15 +635,34 @@ pub fn detect_loops(project: &Project) -> Result<HashMap<Ident<Canonical>, Vec<L
 }
 
 /// Analyze the polarity of how a variable appears in an equation
-fn analyze_link_polarity(ast: &Ast<Expr2>, from_var: &Ident<Canonical>) -> LinkPolarity {
+fn analyze_link_polarity(
+    ast: &Ast<Expr2>,
+    from_var: &Ident<Canonical>,
+    variables: &HashMap<Ident<Canonical>, Variable>,
+) -> LinkPolarity {
     match ast {
-        Ast::Scalar(expr) => analyze_expr_polarity(expr, from_var, LinkPolarity::Positive),
-        Ast::ApplyToAll(_, expr) => analyze_expr_polarity(expr, from_var, LinkPolarity::Positive),
+        Ast::Scalar(expr) => analyze_expr_polarity_with_context(
+            expr,
+            from_var,
+            LinkPolarity::Positive,
+            Some(variables),
+        ),
+        Ast::ApplyToAll(_, expr) => analyze_expr_polarity_with_context(
+            expr,
+            from_var,
+            LinkPolarity::Positive,
+            Some(variables),
+        ),
         Ast::Arrayed(_, elements) => {
             // For arrayed equations, check all elements
             let mut polarity = LinkPolarity::Unknown;
             for expr in elements.values() {
-                let elem_polarity = analyze_expr_polarity(expr, from_var, LinkPolarity::Positive);
+                let elem_polarity = analyze_expr_polarity_with_context(
+                    expr,
+                    from_var,
+                    LinkPolarity::Positive,
+                    Some(variables),
+                );
                 if polarity == LinkPolarity::Unknown {
                     polarity = elem_polarity;
                 } else if polarity != elem_polarity && elem_polarity != LinkPolarity::Unknown {
@@ -656,11 +675,12 @@ fn analyze_link_polarity(ast: &Ast<Expr2>, from_var: &Ident<Canonical>) -> LinkP
     }
 }
 
-/// Recursively analyze expression polarity
-fn analyze_expr_polarity(
+/// Recursively analyze expression polarity with optional context for looking up tables
+fn analyze_expr_polarity_with_context(
     expr: &Expr2,
     from_var: &Ident<Canonical>,
     current_polarity: LinkPolarity,
+    variables: Option<&HashMap<Ident<Canonical>, Variable>>,
 ) -> LinkPolarity {
     match expr {
         Expr2::Const(_, _, _) => LinkPolarity::Unknown,
@@ -671,9 +691,42 @@ fn analyze_expr_polarity(
                 LinkPolarity::Unknown
             }
         }
+        Expr2::App(crate::builtins::BuiltinFn::Lookup(table_name, arg_expr, _), _, _) => {
+            // Check if the argument contains our from_var
+            let arg_polarity = analyze_expr_polarity_with_context(
+                arg_expr,
+                from_var,
+                LinkPolarity::Positive,
+                variables,
+            );
+
+            if arg_polarity == LinkPolarity::Unknown {
+                return LinkPolarity::Unknown;
+            }
+
+            // Try to find the table and analyze its monotonicity
+            if let Some(vars) = variables {
+                let table_ident = crate::common::canonicalize(table_name);
+                if let Some(Variable::Var { table: Some(t), .. }) = vars.get(&table_ident) {
+                    let table_polarity = analyze_graphical_function_polarity(t);
+                    // Combine the polarities
+                    return match (arg_polarity, table_polarity) {
+                        (LinkPolarity::Positive, LinkPolarity::Positive) => LinkPolarity::Positive,
+                        (LinkPolarity::Positive, LinkPolarity::Negative) => LinkPolarity::Negative,
+                        (LinkPolarity::Negative, LinkPolarity::Positive) => LinkPolarity::Negative,
+                        (LinkPolarity::Negative, LinkPolarity::Negative) => LinkPolarity::Positive,
+                        _ => LinkPolarity::Unknown,
+                    };
+                }
+            }
+            LinkPolarity::Unknown
+        }
+        Expr2::App(_, _, _) => LinkPolarity::Unknown,
         Expr2::Op2(op, left, right, _, _) => {
-            let left_pol = analyze_expr_polarity(left, from_var, current_polarity);
-            let right_pol = analyze_expr_polarity(right, from_var, current_polarity);
+            let left_pol =
+                analyze_expr_polarity_with_context(left, from_var, current_polarity, variables);
+            let right_pol =
+                analyze_expr_polarity_with_context(right, from_var, current_polarity, variables);
 
             match op {
                 BinaryOp::Add => {
@@ -695,9 +748,30 @@ fn analyze_expr_polarity(
                     }
                 }
                 BinaryOp::Mul => {
-                    // Multiplication: need to check sign of other operand
-                    // For simplicity, assume positive if constant > 0
-                    if left_pol != LinkPolarity::Unknown {
+                    // Multiplication: combine polarities
+                    // If both have known polarity, combine them
+                    if left_pol != LinkPolarity::Unknown && right_pol != LinkPolarity::Unknown {
+                        // Positive * Positive = Positive
+                        // Positive * Negative = Negative
+                        // Negative * Positive = Negative
+                        // Negative * Negative = Positive
+                        match (left_pol, right_pol) {
+                            (LinkPolarity::Positive, LinkPolarity::Positive) => {
+                                LinkPolarity::Positive
+                            }
+                            (LinkPolarity::Positive, LinkPolarity::Negative) => {
+                                LinkPolarity::Negative
+                            }
+                            (LinkPolarity::Negative, LinkPolarity::Positive) => {
+                                LinkPolarity::Negative
+                            }
+                            (LinkPolarity::Negative, LinkPolarity::Negative) => {
+                                LinkPolarity::Positive
+                            }
+                            _ => LinkPolarity::Unknown,
+                        }
+                    } else if left_pol != LinkPolarity::Unknown {
+                        // Only left has polarity, check if right is a constant
                         if is_positive_constant(right) {
                             left_pol
                         } else if is_negative_constant(right) {
@@ -706,6 +780,7 @@ fn analyze_expr_polarity(
                             LinkPolarity::Unknown
                         }
                     } else if right_pol != LinkPolarity::Unknown {
+                        // Only right has polarity, check if left is a constant
                         if is_positive_constant(left) {
                             right_pol
                         } else if is_negative_constant(left) {
@@ -731,7 +806,8 @@ fn analyze_expr_polarity(
             }
         }
         Expr2::Op1(op, operand, _, _) => {
-            let operand_pol = analyze_expr_polarity(operand, from_var, current_polarity);
+            let operand_pol =
+                analyze_expr_polarity_with_context(operand, from_var, current_polarity, variables);
             match op {
                 crate::ast::UnaryOp::Not => flip_polarity(operand_pol),
                 crate::ast::UnaryOp::Negative => flip_polarity(operand_pol),
@@ -740,8 +816,18 @@ fn analyze_expr_polarity(
         }
         Expr2::If(_, true_branch, false_branch, _, _) => {
             // For IF-THEN-ELSE, check both branches
-            let true_pol = analyze_expr_polarity(true_branch, from_var, current_polarity);
-            let false_pol = analyze_expr_polarity(false_branch, from_var, current_polarity);
+            let true_pol = analyze_expr_polarity_with_context(
+                true_branch,
+                from_var,
+                current_polarity,
+                variables,
+            );
+            let false_pol = analyze_expr_polarity_with_context(
+                false_branch,
+                from_var,
+                current_polarity,
+                variables,
+            );
 
             if true_pol == false_pol {
                 true_pol
@@ -775,6 +861,52 @@ fn is_negative_constant(expr: &Expr2) -> bool {
     match expr {
         Expr2::Const(_, n, _) => *n < 0.0,
         _ => false,
+    }
+}
+
+/// Analyze the polarity of a graphical function/lookup table
+/// Returns Positive if monotonically increasing, Negative if monotonically decreasing, Unknown otherwise
+fn analyze_graphical_function_polarity(table: &crate::variable::Table) -> LinkPolarity {
+    // Need at least 2 points to determine monotonicity
+    if table.x.len() < 2 || table.y.len() < 2 {
+        return LinkPolarity::Unknown;
+    }
+
+    let mut all_increasing = true;
+    let mut all_decreasing = true;
+    let mut all_constant = true;
+
+    // Check consecutive pairs of points
+    for i in 1..table.y.len() {
+        let dy = table.y[i] - table.y[i - 1];
+
+        // Use a small epsilon for floating point comparison
+        const EPSILON: f64 = 1e-10;
+
+        if dy > EPSILON {
+            all_decreasing = false;
+            all_constant = false;
+        } else if dy < -EPSILON {
+            all_increasing = false;
+            all_constant = false;
+        } else {
+            // dy is approximately 0 (within epsilon)
+            // This doesn't break monotonicity but isn't strictly increasing/decreasing
+        }
+    }
+
+    // If all changes are zero (constant function), return Unknown
+    if all_constant {
+        return LinkPolarity::Unknown;
+    }
+
+    // Return polarity based on monotonicity
+    if all_increasing {
+        LinkPolarity::Positive
+    } else if all_decreasing {
+        LinkPolarity::Negative
+    } else {
+        LinkPolarity::Unknown
     }
 }
 
@@ -1045,7 +1177,8 @@ mod tests {
             crate::ast::Loc::default(),
         );
         let ast = Ast::Scalar(expr);
-        let polarity = analyze_link_polarity(&ast, &x_var);
+        let empty_vars = HashMap::new();
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
         assert_eq!(polarity, LinkPolarity::Positive);
 
         // Test negative link: y = -x
@@ -1061,7 +1194,7 @@ mod tests {
             crate::ast::Loc::default(),
         );
         let ast = Ast::Scalar(expr);
-        let polarity = analyze_link_polarity(&ast, &x_var);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
         assert_eq!(polarity, LinkPolarity::Negative);
 
         // Test negative link via multiplication: y = x * -3
@@ -1077,7 +1210,7 @@ mod tests {
             crate::ast::Loc::default(),
         );
         let ast = Ast::Scalar(expr);
-        let polarity = analyze_link_polarity(&ast, &x_var);
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
         assert_eq!(polarity, LinkPolarity::Negative);
     }
 
@@ -1363,7 +1496,8 @@ mod tests {
         );
 
         let ast = Ast::Arrayed(vec![], elements);
-        let polarity = analyze_link_polarity(&ast, &x_var);
+        let empty_vars = HashMap::new();
+        let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
         assert_eq!(
             polarity,
             LinkPolarity::Positive,
@@ -1387,7 +1521,7 @@ mod tests {
         );
 
         let mixed_ast = Ast::Arrayed(vec![], mixed_elements);
-        let mixed_polarity = analyze_link_polarity(&mixed_ast, &x_var);
+        let mixed_polarity = analyze_link_polarity(&mixed_ast, &x_var, &empty_vars);
         assert_eq!(
             mixed_polarity,
             LinkPolarity::Unknown,
@@ -1417,7 +1551,8 @@ mod tests {
             Loc::default(),
         );
 
-        let polarity = analyze_expr_polarity(&if_expr, &x_var, LinkPolarity::Positive);
+        let polarity =
+            analyze_expr_polarity_with_context(&if_expr, &x_var, LinkPolarity::Positive, None);
         assert_eq!(
             polarity,
             LinkPolarity::Positive,
@@ -1438,7 +1573,8 @@ mod tests {
             Loc::default(),
         );
 
-        let mixed_polarity = analyze_expr_polarity(&mixed_if, &x_var, LinkPolarity::Positive);
+        let mixed_polarity =
+            analyze_expr_polarity_with_context(&mixed_if, &x_var, LinkPolarity::Positive, None);
         assert_eq!(
             mixed_polarity,
             LinkPolarity::Unknown,
@@ -1460,7 +1596,8 @@ mod tests {
             Loc::default(),
         );
 
-        let polarity = analyze_expr_polarity(&not_expr, &x_var, LinkPolarity::Positive);
+        let polarity =
+            analyze_expr_polarity_with_context(&not_expr, &x_var, LinkPolarity::Positive, None);
         assert_eq!(
             polarity,
             LinkPolarity::Negative,
@@ -1563,7 +1700,8 @@ mod tests {
             Loc::default(),
         );
 
-        let pol_num = analyze_expr_polarity(&div_num, &x_var, LinkPolarity::Positive);
+        let pol_num =
+            analyze_expr_polarity_with_context(&div_num, &x_var, LinkPolarity::Positive, None);
         assert_eq!(
             pol_num,
             LinkPolarity::Positive,
@@ -1579,11 +1717,142 @@ mod tests {
             Loc::default(),
         );
 
-        let pol_other = analyze_expr_polarity(&div_other, &x_var, LinkPolarity::Positive);
+        let pol_other =
+            analyze_expr_polarity_with_context(&div_other, &x_var, LinkPolarity::Positive, None);
         assert_eq!(
             pol_other,
             LinkPolarity::Unknown,
             "Unrelated variable should give Unknown"
+        );
+    }
+
+    #[test]
+    fn test_graphical_function_polarity() {
+        use crate::variable::Table;
+
+        // Test 1: Monotonically increasing function (positive polarity)
+        let increasing_table =
+            Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0, 4.0], vec![0.0, 2.0, 4.0, 6.0, 8.0]);
+        assert_eq!(
+            analyze_graphical_function_polarity(&increasing_table),
+            LinkPolarity::Positive,
+            "Monotonically increasing function should have positive polarity"
+        );
+
+        // Test 2: Monotonically decreasing function (negative polarity)
+        let decreasing_table = Table::new_for_test(
+            vec![0.0, 1.0, 2.0, 3.0, 4.0],
+            vec![10.0, 8.0, 6.0, 4.0, 2.0],
+        );
+        assert_eq!(
+            analyze_graphical_function_polarity(&decreasing_table),
+            LinkPolarity::Negative,
+            "Monotonically decreasing function should have negative polarity"
+        );
+
+        // Test 3: Non-monotonic function (unknown polarity)
+        let non_monotonic_table =
+            Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0, 4.0], vec![0.0, 5.0, 3.0, 7.0, 2.0]);
+        assert_eq!(
+            analyze_graphical_function_polarity(&non_monotonic_table),
+            LinkPolarity::Unknown,
+            "Non-monotonic function should have unknown polarity"
+        );
+
+        // Test 4: Constant function (unknown polarity - no change)
+        let constant_table =
+            Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0], vec![5.0, 5.0, 5.0, 5.0]);
+        assert_eq!(
+            analyze_graphical_function_polarity(&constant_table),
+            LinkPolarity::Unknown,
+            "Constant function should have unknown polarity"
+        );
+
+        // Test 5: Single point (edge case)
+        let single_point_table = Table::new_for_test(vec![1.0], vec![2.0]);
+        assert_eq!(
+            analyze_graphical_function_polarity(&single_point_table),
+            LinkPolarity::Unknown,
+            "Single point should have unknown polarity"
+        );
+
+        // Test 6: Nearly constant with small variations (testing tolerance)
+        let nearly_constant_table =
+            Table::new_for_test(vec![0.0, 1.0, 2.0, 3.0], vec![5.0, 5.0001, 5.0002, 5.0003]);
+        assert_eq!(
+            analyze_graphical_function_polarity(&nearly_constant_table),
+            LinkPolarity::Positive,
+            "Nearly constant but increasing should have positive polarity"
+        );
+    }
+
+    #[test]
+    fn test_lookup_table_polarity_in_links() {
+        use crate::datamodel;
+        use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
+
+        // Create a model with a lookup table
+        let mut model_vars = vec![
+            x_stock("water", "100", &[], &["outflow"], None),
+            x_flow("outflow", "water * lookup(lookup, water)", None),
+        ];
+
+        // Create the lookup table auxiliary
+        let mut lookup_var = x_aux("lookup", "0", None);
+        if let datamodel::Variable::Aux(aux) = &mut lookup_var {
+            aux.gf = Some(datamodel::GraphicalFunction {
+                kind: datamodel::GraphicalFunctionKind::Continuous,
+                x_points: Some(vec![0.0, 50.0, 100.0, 150.0]),
+                y_points: vec![0.1, 0.2, 0.3, 0.4], // Monotonically increasing
+                x_scale: datamodel::GraphicalFunctionScale {
+                    min: 0.0,
+                    max: 150.0,
+                },
+                y_scale: datamodel::GraphicalFunctionScale { min: 0.1, max: 0.4 },
+            });
+        }
+        model_vars.push(lookup_var);
+
+        let model = x_model("main", model_vars);
+        let sim_specs = sim_specs_with_units("months");
+        let project = x_project(sim_specs, &[model]);
+        let project = Project::from(project);
+
+        // Build causal graph
+        let main_ident = crate::common::canonicalize("main");
+        let main_model = project
+            .models
+            .get(&main_ident)
+            .expect("Should have main model");
+        let graph =
+            CausalGraph::from_model(main_model, &project).expect("Should build causal graph");
+
+        // Get the link polarity for water -> outflow (through lookup table)
+        let water = crate::common::canonicalize("water");
+        let outflow = crate::common::canonicalize("outflow");
+        let polarity = graph.get_link_polarity(&water, &outflow);
+
+        // Since lookup table is monotonically increasing and water appears positively in the equation,
+        // the polarity should be positive
+        assert_eq!(
+            polarity,
+            LinkPolarity::Positive,
+            "Monotonically increasing lookup table should preserve positive polarity"
+        );
+
+        // Find loops and verify they have correct polarity
+        let loops = graph.find_loops();
+        assert_eq!(loops.len(), 1, "Should have one loop");
+
+        let loop_item = &loops[0];
+        // The loop is: water -> outflow -> water
+        // water -> outflow: Positive (through increasing lookup)
+        // outflow -> water: Negative (outflow decreases stock)
+        // One negative link = Balancing loop
+        assert_eq!(
+            loop_item.polarity,
+            LoopPolarity::Balancing,
+            "Loop with one negative link should be balancing"
         );
     }
 
