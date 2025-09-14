@@ -519,12 +519,27 @@ impl CausalGraph {
 
     /// Get the polarity of a single link
     fn get_link_polarity(&self, from: &Ident<Canonical>, to: &Ident<Canonical>) -> LinkPolarity {
-        // Get the equation of the 'to' variable
-        if let Some(to_var) = self.variables.get(to)
-            && let Some(ast) = to_var.ast()
-        {
-            // Analyze how 'from' appears in the equation
-            return analyze_link_polarity(ast, from);
+        // Get the 'to' variable
+        if let Some(to_var) = self.variables.get(to) {
+            // Special case: flow -> stock relationships
+            if let Variable::Stock {
+                inflows, outflows, ..
+            } = to_var
+            {
+                // Check if 'from' is an inflow (positive) or outflow (negative)
+                if inflows.contains(from) {
+                    return LinkPolarity::Positive;
+                } else if outflows.contains(from) {
+                    return LinkPolarity::Negative;
+                }
+                // If 'from' is not a flow for this stock, fall through to AST analysis
+            }
+
+            // General case: analyze the equation AST
+            if let Some(ast) = to_var.ast() {
+                // Analyze how 'from' appears in the equation
+                return analyze_link_polarity(ast, from);
+            }
         }
         LinkPolarity::Unknown
     }
@@ -1569,6 +1584,81 @@ mod tests {
             pol_other,
             LinkPolarity::Unknown,
             "Unrelated variable should give Unknown"
+        );
+    }
+
+    #[test]
+    fn test_fishbanks_loops() {
+        use crate::project::Project;
+        use crate::prost::Message;
+        use std::fs;
+
+        // Load the fishbanks.protobin file - path is relative to workspace root
+        let proto_bytes = fs::read("../../test/fishbanks.protobin")
+            .expect("Failed to read fishbanks.protobin file");
+
+        // Decode the protobuf into project_io::Project
+        let project_io = crate::project_io::Project::decode(&proto_bytes[..])
+            .expect("Failed to decode fishbanks.protobin");
+
+        // Convert to datamodel::Project then to project::Project
+        let datamodel_project = crate::serde::deserialize(project_io);
+        let project = Project::from(datamodel_project);
+
+        // Find the main model (fishbanks models typically have a single main model)
+        let main_model_name = project
+            .models
+            .keys()
+            .find(|name| project.models.get(*name).is_some_and(|m| !m.implicit))
+            .expect("Should have a non-implicit model");
+
+        let main_model = project
+            .models
+            .get(main_model_name)
+            .expect("Should be able to get main model");
+
+        // Build the causal graph and find loops
+        let graph = CausalGraph::from_model(main_model, &project)
+            .expect("Should be able to build causal graph");
+        let loops = graph.find_loops();
+
+        // Assert we have exactly 3 feedback loops
+        assert_eq!(
+            loops.len(),
+            3,
+            "Fishbanks model should have exactly 3 feedback loops, found: {}",
+            loops.len()
+        );
+
+        // Find the r1 loop (the one with catch and harvest_rate)
+        let r1_loop = loops
+            .iter()
+            .find(|l| {
+                l.links.iter().any(|link| {
+                    link.from.as_str() == "harvest_rate" && link.to.as_str() == "fish_stock"
+                })
+            })
+            .expect("Should find loop containing harvest_rate -> fish_stock");
+
+        // Find the specific link: harvest_rate -> fish_stock
+        let harvest_to_stock_link = r1_loop
+            .links
+            .iter()
+            .find(|link| link.from.as_str() == "harvest_rate" && link.to.as_str() == "fish_stock")
+            .expect("Should find harvest_rate -> fish_stock link");
+
+        // Assert that harvest_rate -> fish_stock has negative polarity (it's an outflow)
+        assert_eq!(
+            harvest_to_stock_link.polarity,
+            LinkPolarity::Negative,
+            "harvest_rate -> fish_stock should have negative polarity (outflow decreases stock)"
+        );
+
+        // The r1 loop should be balancing (odd number of negative links)
+        assert_eq!(
+            r1_loop.polarity,
+            LoopPolarity::Balancing,
+            "Loop r1 should be balancing"
         );
     }
 }
