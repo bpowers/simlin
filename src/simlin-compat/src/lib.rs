@@ -41,12 +41,12 @@ pub fn open_vensim(reader: &mut dyn BufRead) -> Result<Project> {
             Some("Invalid UTF-8 in MDL file".to_owned()),
         )
     })?;
-    let (xmile_src, _logs) = convert_vensim_mdl(&contents, false);
+    let (xmile_src, logs) = convert_vensim_mdl(&contents, false);
     if xmile_src.is_none() {
         return Err(Error::new(
             ErrorKind::Import,
             ErrorCode::VensimConversion,
-            Some("unknown xmutil error".to_owned()),
+            Some("xmutil error: ".to_owned() + logs.as_ref().unwrap_or(&"(no logs)".to_owned())),
         ));
     }
     let xmile_src = xmile_src.unwrap();
