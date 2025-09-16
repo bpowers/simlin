@@ -1616,6 +1616,89 @@ pub unsafe extern "C" fn simlin_project_serialize(
     engine::ErrorCode::NoError as c_int
 }
 
+/// Applies a patch to the project datamodel.
+///
+/// The patch is encoded as a `project_io.Patch` protobuf message. The caller can
+/// request a dry run (which performs validation without committing) and control
+/// whether errors are permitted. When `allow_errors` is false, any static or
+/// simulation error will cause the patch to be rejected.
+///
+/// On success returns `SimlinErrorCode::NoError`. On failure returns an error
+/// code describing why the patch could not be applied. When `out_errors` is not
+/// NULL it will receive a pointer to a `SimlinErrorDetails` structure
+/// describing all encountered errors; callers must free it with
+/// `simlin_free_error_details`.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_apply_patch(
+    project: *mut SimlinProject,
+    patch_data: *const u8,
+    patch_len: usize,
+    dry_run: bool,
+    allow_errors: bool,
+    out_errors: *mut *mut SimlinErrorDetails,
+) -> SimlinErrorCode {
+    if project.is_null() {
+        return SimlinErrorCode::Generic;
+    }
+
+    if !out_errors.is_null() {
+        *out_errors = ptr::null_mut();
+    }
+
+    if patch_len > 0 && patch_data.is_null() {
+        return SimlinErrorCode::Generic;
+    }
+
+    let patch_slice = if patch_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(patch_data, patch_len)
+    };
+
+    let patch = match engine::project_io::Patch::decode(patch_slice) {
+        Ok(patch) => patch,
+        Err(_) => return SimlinErrorCode::ProtobufDecode,
+    };
+
+    let mut staged_datamodel = (*project).project.datamodel.clone();
+    if let Err(err) = engine::apply_patch(&mut staged_datamodel, &patch) {
+        return SimlinErrorCode::from(err.code);
+    }
+
+    let staged_project = engine::Project::from(staged_datamodel);
+
+    let mut all_errors = collect_project_errors(&staged_project);
+    let sim_error = create_vm(&staged_project, "main").err();
+    if let Some(error) = sim_error.clone() {
+        all_errors.push(
+            ErrorDetailBuilder::new(error.code)
+                .message(error.get_details())
+                .model_name("main")
+                .build(),
+        );
+    }
+
+    let error_code = if !allow_errors {
+        first_error_code(&staged_project, sim_error.as_ref())
+    } else {
+        None
+    };
+
+    if !out_errors.is_null() {
+        *out_errors = allocate_error_details(all_errors);
+    }
+
+    if let Some(code) = error_code {
+        return code;
+    }
+
+    if !dry_run {
+        (*project).project = staged_project;
+    }
+
+    SimlinErrorCode::NoError
+}
+
 // Helper function to convert a Rust string to a C string pointer
 fn str_to_c_ptr(s: &str) -> *mut c_char {
     CString::new(s).unwrap().into_raw()
@@ -1733,6 +1816,115 @@ fn collect_unit_errors(
         .collect()
 }
 
+fn collect_project_errors(project: &engine::Project) -> Vec<SimlinErrorDetail> {
+    let mut all_errors = Vec::new();
+
+    for error in &project.errors {
+        all_errors.push(
+            ErrorDetailBuilder::new(error.code)
+                .message(error.get_details())
+                .build(),
+        );
+    }
+
+    for (model_name, model) in &project.models {
+        if let Some(ref errors) = model.errors {
+            for error in errors {
+                all_errors.push(
+                    ErrorDetailBuilder::new(error.code)
+                        .message(error.get_details())
+                        .model_name(model_name.as_str())
+                        .build(),
+                );
+            }
+        }
+
+        for (var_name, errors) in model.get_variable_errors() {
+            all_errors.extend(collect_equation_errors(
+                errors,
+                model_name.as_str(),
+                var_name.as_str(),
+            ));
+        }
+
+        for (var_name, errors) in model.get_unit_errors() {
+            all_errors.extend(collect_unit_errors(
+                errors,
+                model_name.as_str(),
+                var_name.as_str(),
+            ));
+        }
+    }
+
+    all_errors
+}
+
+fn gather_error_details(
+    project: &engine::Project,
+) -> (Vec<SimlinErrorDetail>, Option<engine::Error>) {
+    let mut all_errors = collect_project_errors(project);
+    let sim_error = create_vm(project, "main").err();
+
+    if let Some(error) = sim_error.clone() {
+        all_errors.push(
+            ErrorDetailBuilder::new(error.code)
+                .message(error.get_details())
+                .model_name("main")
+                .build(),
+        );
+    }
+
+    (all_errors, sim_error)
+}
+
+fn allocate_error_details(errors: Vec<SimlinErrorDetail>) -> *mut SimlinErrorDetails {
+    if errors.is_empty() {
+        return ptr::null_mut();
+    }
+
+    let (errors_ptr, count) = vec_to_c_array(errors);
+    let result = Box::new(SimlinErrorDetails {
+        errors: errors_ptr,
+        count,
+    });
+    Box::into_raw(result)
+}
+
+fn first_error_code(
+    project: &engine::Project,
+    sim_error: Option<&engine::Error>,
+) -> Option<SimlinErrorCode> {
+    if let Some(error) = project.errors.first() {
+        return Some(SimlinErrorCode::from(error.code));
+    }
+
+    for model in project.models.values() {
+        if let Some(errors) = &model.errors {
+            if let Some(error) = errors.first() {
+                return Some(SimlinErrorCode::from(error.code));
+            }
+        }
+
+        if model
+            .get_variable_errors()
+            .values()
+            .any(|errors| !errors.is_empty())
+        {
+            return Some(SimlinErrorCode::VariablesHaveErrors);
+        }
+
+        if model
+            .get_unit_errors()
+            .values()
+            .any(|errors| !errors.is_empty())
+        {
+            return Some(SimlinErrorCode::UnitDefinitionErrors);
+        }
+    }
+
+    sim_error.map(|error| SimlinErrorCode::from(error.code))
+}
+
 /// Get all errors in a project including static analysis and compilation errors
 ///
 /// Returns NULL if no errors exist in the project. This function collects all
@@ -1774,70 +1966,13 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     }
 
     let proj = &(*project).project;
-    let mut all_errors = Vec::new();
-
-    // Collect project-level errors
-    for error in &proj.errors {
-        all_errors.push(
-            ErrorDetailBuilder::new(error.code)
-                .message(error.get_details())
-                .build(),
-        );
-    }
-
-    // Collect model and variable errors
-    for (model_name, model) in &proj.models {
-        // Model-level errors
-        if let Some(ref errors) = model.errors {
-            for error in errors {
-                all_errors.push(
-                    ErrorDetailBuilder::new(error.code)
-                        .message(error.get_details())
-                        .model_name(model_name.as_str())
-                        .build(),
-                );
-            }
-        }
-
-        // Variable equation errors
-        for (var_name, errors) in model.get_variable_errors() {
-            all_errors.extend(collect_equation_errors(
-                errors,
-                model_name.as_str(),
-                var_name.as_str(),
-            ));
-        }
-
-        // Variable unit errors
-        for (var_name, errors) in model.get_unit_errors() {
-            all_errors.extend(collect_unit_errors(
-                errors,
-                model_name.as_str(),
-                var_name.as_str(),
-            ));
-        }
-    }
-
-    // Attempt to compile the "main" model to find compilation errors
-    if let Err(error) = create_vm(proj, "main") {
-        all_errors.push(
-            ErrorDetailBuilder::new(error.code)
-                .message(error.get_details())
-                .model_name("main")
-                .build(),
-        );
-    }
+    let (all_errors, _) = gather_error_details(proj);
 
     if all_errors.is_empty() {
         return ptr::null_mut();
     }
 
-    let (errors_ptr, count) = vec_to_c_array(all_errors);
-    let result = Box::new(SimlinErrorDetails {
-        errors: errors_ptr,
-        count,
-    });
-    Box::into_raw(result)
+    allocate_error_details(all_errors)
 }
 
 /// Free error details returned by the API
@@ -1934,6 +2069,173 @@ mod tests {
             assert!(!err_str.is_null());
             let s = CStr::from_ptr(err_str);
             assert_eq!(s.to_str().unwrap(), "no_error");
+        }
+    }
+
+    fn open_project_from_datamodel(project: &engine::datamodel::Project) -> *mut SimlinProject {
+        let pb = engine::serde::serialize(project);
+        let mut buf = Vec::new();
+        pb.encode(&mut buf).unwrap();
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err as *mut c_int);
+            assert!(!proj.is_null(), "project open failed: {err}");
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+            proj
+        }
+    }
+
+    fn aux_patch(model: &str, aux: engine::datamodel::Aux) -> Vec<u8> {
+        let variable = engine::datamodel::Variable::Aux(aux);
+        let aux_pb = match engine::project_io::Variable::from(variable).v.unwrap() {
+            engine::project_io::variable::V::Aux(aux) => aux,
+            _ => unreachable!(),
+        };
+        let patch = engine::project_io::Patch {
+            ops: vec![engine::project_io::PatchOperation {
+                op: Some(engine::project_io::patch_operation::Op::UpsertAux(
+                    engine::project_io::UpsertAuxOp {
+                        model_name: model.to_string(),
+                        aux: Some(aux_pb),
+                    },
+                )),
+            }],
+        };
+        let mut bytes = Vec::new();
+        patch.encode(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_project_apply_patch_commits() {
+        let datamodel = TestProject::new("test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let aux = engine::datamodel::Aux {
+            ident: "new_aux".to_string(),
+            equation: engine::datamodel::Equation::Scalar("5".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: engine::datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+        };
+        let patch_bytes = aux_patch("main", aux);
+
+        unsafe {
+            let mut errors: *mut SimlinErrorDetails = ptr::null_mut();
+            let code = simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                false,
+                true,
+                &mut errors as *mut *mut SimlinErrorDetails,
+            );
+            assert_eq!(code, SimlinErrorCode::NoError);
+            assert!(errors.is_null());
+
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(model.get_variable("new_aux").is_some());
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_apply_patch_errors_respected() {
+        let datamodel = TestProject::new("test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let aux = engine::datamodel::Aux {
+            ident: "bad_aux".to_string(),
+            equation: engine::datamodel::Equation::Scalar(String::new(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: engine::datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+        };
+        let patch_bytes = aux_patch("main", aux);
+
+        unsafe {
+            let mut errors: *mut SimlinErrorDetails = ptr::null_mut();
+            let code = simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                false,
+                false,
+                &mut errors as *mut *mut SimlinErrorDetails,
+            );
+            assert_eq!(code, SimlinErrorCode::VariablesHaveErrors);
+            assert!(!errors.is_null());
+            simlin_free_error_details(errors);
+
+            // Project should remain unchanged
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(model.get_variable("bad_aux").is_none());
+
+            let mut errors_allow: *mut SimlinErrorDetails = ptr::null_mut();
+            let code = simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                false,
+                true,
+                &mut errors_allow as *mut *mut SimlinErrorDetails,
+            );
+            assert_eq!(code, SimlinErrorCode::NoError);
+            assert!(!errors_allow.is_null());
+            simlin_free_error_details(errors_allow);
+
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(model.get_variable("bad_aux").is_some());
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_apply_patch_dry_run() {
+        let datamodel = TestProject::new("test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let aux = engine::datamodel::Aux {
+            ident: "dry_aux".to_string(),
+            equation: engine::datamodel::Equation::Scalar("3".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: engine::datamodel::Visibility::Private,
+            ai_state: None,
+            uid: None,
+        };
+        let patch_bytes = aux_patch("main", aux);
+
+        unsafe {
+            let mut errors: *mut SimlinErrorDetails = ptr::null_mut();
+            let code = simlin_project_apply_patch(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                true,
+                true,
+                &mut errors as *mut *mut SimlinErrorDetails,
+            );
+            assert_eq!(code, SimlinErrorCode::NoError);
+            assert!(errors.is_null());
+
+            // Dry run should not commit changes
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(model.get_variable("dry_aux").is_none());
+
+            simlin_project_unref(proj);
         }
     }
 
