@@ -365,7 +365,6 @@ message RenameVariableOp {
 message UpsertViewOp {
   uint32 index = 1;
   View view = 2;
-  bool allow_append = 3;
 };
 
 message DeleteViewOp {

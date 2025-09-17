@@ -2,8 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::cmp::Ordering;
-
 use crate::canonicalize;
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{self, Variable};
@@ -303,28 +301,19 @@ fn apply_upsert_view(model: &mut datamodel::Model, op: &project_io::UpsertViewOp
     let view = serde::deserialize_view(view_pb.clone());
     let index = op.index as usize;
 
-    match index.cmp(&model.views.len()) {
-        Ordering::Less => {
-            model.views[index] = view;
-            Ok(())
-        }
-        Ordering::Equal => {
-            if op.allow_append {
-                model.views.push(view);
-                Ok(())
-            } else {
-                Err(Error::new(
-                    ErrorKind::Model,
-                    ErrorCode::DoesNotExist,
-                    Some(format!("view index {index} out of range")),
-                ))
-            }
-        }
-        Ordering::Greater => Err(Error::new(
+    if index < model.views.len() {
+        model.views[index] = view;
+        Ok(())
+    } else if index == model.views.len() {
+        // Allow appending at the end
+        model.views.push(view);
+        Ok(())
+    } else {
+        Err(Error::new(
             ErrorKind::Model,
             ErrorCode::DoesNotExist,
             Some(format!("view index {index} out of range")),
-        )),
+        ))
     }
 }
 
@@ -584,7 +573,6 @@ mod tests {
                     op: Some(model_operation::Op::UpsertView(project_io::UpsertViewOp {
                         index: 0,
                         view: Some(view.clone()),
-                        allow_append: true,
                     })),
                 }],
             }],
