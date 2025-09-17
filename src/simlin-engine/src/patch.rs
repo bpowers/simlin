@@ -8,6 +8,19 @@ use crate::datamodel::{self, Variable};
 use crate::project_io::{self, model_operation, project_operation};
 use crate::serde;
 
+macro_rules! require_field {
+    ($field:expr, $msg:expr) => {{
+        let Some(value) = $field else {
+            return Err(Error::new(
+                ErrorKind::Model,
+                ErrorCode::ProtobufDecode,
+                Some($msg.to_string()),
+            ));
+        };
+        value
+    }};
+}
+
 pub fn apply_patch(
     project: &mut datamodel::Project,
     patch: &project_io::ProjectPatch,
@@ -115,13 +128,7 @@ fn apply_set_sim_specs(
     project: &mut datamodel::Project,
     op: &project_io::SetSimSpecsOp,
 ) -> Result<()> {
-    let Some(sim_specs) = &op.sim_specs else {
-        return Err(Error::new(
-            ErrorKind::Model,
-            ErrorCode::ProtobufDecode,
-            Some("missing sim_specs payload".to_string()),
-        ));
-    };
+    let sim_specs = require_field!(&op.sim_specs, "missing sim_specs payload");
 
     project.sim_specs.start = sim_specs.start;
     project.sim_specs.stop = sim_specs.stop;
@@ -153,13 +160,7 @@ fn apply_set_sim_specs(
 }
 
 fn apply_upsert_stock(model: &mut datamodel::Model, op: &project_io::UpsertStockOp) -> Result<()> {
-    let Some(stock_pb) = &op.stock else {
-        return Err(Error::new(
-            ErrorKind::Model,
-            ErrorCode::ProtobufDecode,
-            Some("missing stock payload".to_string()),
-        ));
-    };
+    let stock_pb = require_field!(&op.stock, "missing stock payload");
     let mut stock = datamodel::Stock::from(stock_pb.clone());
     canonicalize_stock(&mut stock);
     upsert_variable(model, Variable::Stock(stock));
@@ -167,13 +168,7 @@ fn apply_upsert_stock(model: &mut datamodel::Model, op: &project_io::UpsertStock
 }
 
 fn apply_upsert_flow(model: &mut datamodel::Model, op: &project_io::UpsertFlowOp) -> Result<()> {
-    let Some(flow_pb) = &op.flow else {
-        return Err(Error::new(
-            ErrorKind::Model,
-            ErrorCode::ProtobufDecode,
-            Some("missing flow payload".to_string()),
-        ));
-    };
+    let flow_pb = require_field!(&op.flow, "missing flow payload");
     let mut flow = datamodel::Flow::from(flow_pb.clone());
     canonicalize_flow(&mut flow);
     upsert_variable(model, Variable::Flow(flow));
@@ -181,13 +176,7 @@ fn apply_upsert_flow(model: &mut datamodel::Model, op: &project_io::UpsertFlowOp
 }
 
 fn apply_upsert_aux(model: &mut datamodel::Model, op: &project_io::UpsertAuxOp) -> Result<()> {
-    let Some(aux_pb) = &op.aux else {
-        return Err(Error::new(
-            ErrorKind::Model,
-            ErrorCode::ProtobufDecode,
-            Some("missing auxiliary payload".to_string()),
-        ));
-    };
+    let aux_pb = require_field!(&op.aux, "missing auxiliary payload");
     let mut aux = datamodel::Aux::from(aux_pb.clone());
     canonicalize_aux(&mut aux);
     upsert_variable(model, Variable::Aux(aux));
@@ -198,13 +187,7 @@ fn apply_upsert_module(
     model: &mut datamodel::Model,
     op: &project_io::UpsertModuleOp,
 ) -> Result<()> {
-    let Some(module_pb) = &op.module else {
-        return Err(Error::new(
-            ErrorKind::Model,
-            ErrorCode::ProtobufDecode,
-            Some("missing module payload".to_string()),
-        ));
-    };
+    let module_pb = require_field!(&op.module, "missing module payload");
     let mut module = datamodel::Module::from(module_pb.clone());
     canonicalize_module(&mut module);
     upsert_variable(model, Variable::Module(module));
@@ -291,13 +274,7 @@ fn apply_rename_variable(
 }
 
 fn apply_upsert_view(model: &mut datamodel::Model, op: &project_io::UpsertViewOp) -> Result<()> {
-    let Some(view_pb) = &op.view else {
-        return Err(Error::new(
-            ErrorKind::Model,
-            ErrorCode::ProtobufDecode,
-            Some("missing view payload".to_string()),
-        ));
-    };
+    let view_pb = require_field!(&op.view, "missing view payload");
     let view = serde::deserialize_view(view_pb.clone());
     let index = op.index as usize;
 
@@ -332,13 +309,7 @@ fn apply_delete_view(model: &mut datamodel::Model, op: &project_io::DeleteViewOp
 }
 
 fn apply_set_source(project: &mut datamodel::Project, op: &project_io::SetSourceOp) -> Result<()> {
-    let Some(source) = &op.source else {
-        return Err(Error::new(
-            ErrorKind::Model,
-            ErrorCode::ProtobufDecode,
-            Some("missing source payload".to_string()),
-        ));
-    };
+    let source = require_field!(&op.source, "missing source payload");
     project.source = Some(datamodel::Source::from(source.clone()));
     Ok(())
 }
