@@ -1660,7 +1660,7 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         std::slice::from_raw_parts(patch_data, patch_len)
     };
 
-    let patch = match engine::project_io::Patch::decode(patch_slice) {
+    let patch = match engine::project_io::ProjectPatch::decode(patch_slice) {
         Ok(patch) => patch,
         Err(_) => return SimlinErrorCode::ProtobufDecode,
     };
@@ -2096,14 +2096,15 @@ mod tests {
             engine::project_io::variable::V::Aux(aux) => aux,
             _ => unreachable!(),
         };
-        let patch = engine::project_io::Patch {
-            ops: vec![engine::project_io::PatchOperation {
-                op: Some(engine::project_io::patch_operation::Op::UpsertAux(
-                    engine::project_io::UpsertAuxOp {
-                        model_name: model.to_string(),
-                        aux: Some(aux_pb),
-                    },
-                )),
+        let patch = engine::project_io::ProjectPatch {
+            project_ops: vec![],
+            models: vec![engine::project_io::ModelPatch {
+                name: model.to_string(),
+                ops: vec![engine::project_io::ModelOperation {
+                    op: Some(engine::project_io::model_operation::Op::UpsertAux(
+                        engine::project_io::UpsertAuxOp { aux: Some(aux_pb) },
+                    )),
+                }],
             }],
         };
         let mut bytes = Vec::new();
@@ -2440,7 +2441,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
@@ -2704,7 +2705,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
@@ -2828,7 +2829,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
@@ -2941,7 +2942,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
@@ -3019,7 +3020,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
@@ -3097,7 +3098,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
@@ -3602,7 +3603,7 @@ mod tests {
                     }),
                     save_step: None,
                     sim_method: engine::project_io::SimMethod::Euler as i32,
-                    time_units: String::new(),
+                    time_units: None,
                 }),
                 models: vec![engine::project_io::Model {
                     name: "main".to_string(),
@@ -3646,7 +3647,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![
                 engine::project_io::Model {
@@ -4158,7 +4159,7 @@ mod tests {
                 }),
                 save_step: None,
                 sim_method: engine::project_io::SimMethod::Euler as i32,
-                time_units: String::new(),
+                time_units: None,
             }),
             models: vec![engine::project_io::Model {
                 name: "main".to_string(),
@@ -4249,7 +4250,7 @@ mod tests {
                     }),
                     save_step: None,
                     sim_method: engine::project_io::SimMethod::Euler as i32,
-                    time_units: String::new(),
+                    time_units: None,
                 }),
                 models: vec![],
                 dimensions: vec![],

@@ -7,32 +7,54 @@ use std::cmp::Ordering;
 use crate::canonicalize;
 use crate::common::{Error, ErrorCode, ErrorKind, Result};
 use crate::datamodel::{self, Variable};
-use crate::project_io::{self, patch_operation};
+use crate::project_io::{self, model_operation, project_operation};
 use crate::serde;
 
-pub fn apply_patch(project: &mut datamodel::Project, patch: &project_io::Patch) -> Result<()> {
+pub fn apply_patch(
+    project: &mut datamodel::Project,
+    patch: &project_io::ProjectPatch,
+) -> Result<()> {
     let mut staged = project.clone();
 
-    for op in &patch.ops {
-        let Some(kind) = &op.op else {
+    // Apply project-level operations first
+    for project_op in &patch.project_ops {
+        let Some(kind) = &project_op.op else {
             return Err(Error::new(
                 ErrorKind::Model,
                 ErrorCode::Generic,
-                Some("missing patch operation".to_string()),
+                Some("missing project operation".to_string()),
             ));
         };
 
         match kind {
-            patch_operation::Op::SetSimSpecs(specs) => apply_set_sim_specs(&mut staged, specs),
-            patch_operation::Op::UpsertStock(op) => apply_upsert_stock(&mut staged, op)?,
-            patch_operation::Op::UpsertFlow(op) => apply_upsert_flow(&mut staged, op)?,
-            patch_operation::Op::UpsertAux(op) => apply_upsert_aux(&mut staged, op)?,
-            patch_operation::Op::UpsertModule(op) => apply_upsert_module(&mut staged, op)?,
-            patch_operation::Op::DeleteVariable(op) => apply_delete_variable(&mut staged, op)?,
-            patch_operation::Op::RenameVariable(op) => apply_rename_variable(&mut staged, op)?,
-            patch_operation::Op::UpsertView(op) => apply_upsert_view(&mut staged, op)?,
-            patch_operation::Op::DeleteView(op) => apply_delete_view(&mut staged, op)?,
-            patch_operation::Op::SetSource(op) => apply_set_source(&mut staged, op)?,
+            project_operation::Op::SetSimSpecs(specs) => apply_set_sim_specs(&mut staged, specs)?,
+            project_operation::Op::SetSource(op) => apply_set_source(&mut staged, op)?,
+        }
+    }
+
+    // Then apply model-level operations
+    for model_patch in &patch.models {
+        let model = get_model_mut(&mut staged, &model_patch.name)?;
+
+        for op in &model_patch.ops {
+            let Some(kind) = &op.op else {
+                return Err(Error::new(
+                    ErrorKind::Model,
+                    ErrorCode::Generic,
+                    Some("missing model operation".to_string()),
+                ));
+            };
+
+            match kind {
+                model_operation::Op::UpsertStock(op) => apply_upsert_stock(model, op)?,
+                model_operation::Op::UpsertFlow(op) => apply_upsert_flow(model, op)?,
+                model_operation::Op::UpsertAux(op) => apply_upsert_aux(model, op)?,
+                model_operation::Op::UpsertModule(op) => apply_upsert_module(model, op)?,
+                model_operation::Op::DeleteVariable(op) => apply_delete_variable(model, op)?,
+                model_operation::Op::RenameVariable(op) => apply_rename_variable(model, op)?,
+                model_operation::Op::UpsertView(op) => apply_upsert_view(model, op)?,
+                model_operation::Op::DeleteView(op) => apply_delete_view(model, op)?,
+            }
         }
     }
 
@@ -91,41 +113,48 @@ fn get_model_mut<'a>(
     })
 }
 
-fn apply_set_sim_specs(project: &mut datamodel::Project, op: &project_io::SetSimSpecsOp) {
-    if let Some(start) = op.start {
-        project.sim_specs.start = start;
-    }
-    if let Some(stop) = op.stop {
-        project.sim_specs.stop = stop;
-    }
-    if let Some(dt) = &op.dt {
+fn apply_set_sim_specs(
+    project: &mut datamodel::Project,
+    op: &project_io::SetSimSpecsOp,
+) -> Result<()> {
+    let Some(sim_specs) = &op.sim_specs else {
+        return Err(Error::new(
+            ErrorKind::Model,
+            ErrorCode::ProtobufDecode,
+            Some("missing sim_specs payload".to_string()),
+        ));
+    };
+
+    project.sim_specs.start = sim_specs.start;
+    project.sim_specs.stop = sim_specs.stop;
+
+    if let Some(dt) = &sim_specs.dt {
         project.sim_specs.dt = datamodel::Dt::from(*dt);
     }
-    if op.clear_save_step {
+
+    if let Some(save_step) = &sim_specs.save_step {
+        project.sim_specs.save_step = Some(datamodel::Dt::from(*save_step));
+    } else {
         project.sim_specs.save_step = None;
-    } else if let Some(save) = &op.save_step {
-        project.sim_specs.save_step = Some(datamodel::Dt::from(*save));
     }
-    if let Some(method) = op.sim_method {
-        let sim_method = project_io::SimMethod::try_from(method).unwrap_or_default();
-        project.sim_specs.sim_method = datamodel::SimMethod::from(sim_method);
-    }
-    if op.clear_time_units {
-        project.sim_specs.time_units = None;
-    } else if let Some(units) = &op.time_units {
+
+    let sim_method = project_io::SimMethod::try_from(sim_specs.sim_method).unwrap_or_default();
+    project.sim_specs.sim_method = datamodel::SimMethod::from(sim_method);
+
+    if let Some(units) = &sim_specs.time_units {
         if units.is_empty() {
             project.sim_specs.time_units = None;
         } else {
             project.sim_specs.time_units = Some(units.clone());
         }
+    } else {
+        project.sim_specs.time_units = None;
     }
+
+    Ok(())
 }
 
-fn apply_upsert_stock(
-    project: &mut datamodel::Project,
-    op: &project_io::UpsertStockOp,
-) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
+fn apply_upsert_stock(model: &mut datamodel::Model, op: &project_io::UpsertStockOp) -> Result<()> {
     let Some(stock_pb) = &op.stock else {
         return Err(Error::new(
             ErrorKind::Model,
@@ -139,11 +168,7 @@ fn apply_upsert_stock(
     Ok(())
 }
 
-fn apply_upsert_flow(
-    project: &mut datamodel::Project,
-    op: &project_io::UpsertFlowOp,
-) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
+fn apply_upsert_flow(model: &mut datamodel::Model, op: &project_io::UpsertFlowOp) -> Result<()> {
     let Some(flow_pb) = &op.flow else {
         return Err(Error::new(
             ErrorKind::Model,
@@ -157,8 +182,7 @@ fn apply_upsert_flow(
     Ok(())
 }
 
-fn apply_upsert_aux(project: &mut datamodel::Project, op: &project_io::UpsertAuxOp) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
+fn apply_upsert_aux(model: &mut datamodel::Model, op: &project_io::UpsertAuxOp) -> Result<()> {
     let Some(aux_pb) = &op.aux else {
         return Err(Error::new(
             ErrorKind::Model,
@@ -173,10 +197,9 @@ fn apply_upsert_aux(project: &mut datamodel::Project, op: &project_io::UpsertAux
 }
 
 fn apply_upsert_module(
-    project: &mut datamodel::Project,
+    model: &mut datamodel::Model,
     op: &project_io::UpsertModuleOp,
 ) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
     let Some(module_pb) = &op.module else {
         return Err(Error::new(
             ErrorKind::Model,
@@ -191,10 +214,9 @@ fn apply_upsert_module(
 }
 
 fn apply_delete_variable(
-    project: &mut datamodel::Project,
+    model: &mut datamodel::Model,
     op: &project_io::DeleteVariableOp,
 ) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
     let ident = canonicalize(op.ident.as_str());
     let Some(pos) = model
         .variables
@@ -223,10 +245,9 @@ fn apply_delete_variable(
 }
 
 fn apply_rename_variable(
-    project: &mut datamodel::Project,
+    model: &mut datamodel::Model,
     op: &project_io::RenameVariableOp,
 ) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
     let old_ident = canonicalize(op.from.as_str());
     let new_ident = canonicalize(op.to.as_str());
 
@@ -271,11 +292,7 @@ fn apply_rename_variable(
     Ok(())
 }
 
-fn apply_upsert_view(
-    project: &mut datamodel::Project,
-    op: &project_io::UpsertViewOp,
-) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
+fn apply_upsert_view(model: &mut datamodel::Model, op: &project_io::UpsertViewOp) -> Result<()> {
     let Some(view_pb) = &op.view else {
         return Err(Error::new(
             ErrorKind::Model,
@@ -311,11 +328,7 @@ fn apply_upsert_view(
     }
 }
 
-fn apply_delete_view(
-    project: &mut datamodel::Project,
-    op: &project_io::DeleteViewOp,
-) -> Result<()> {
-    let model = get_model_mut(project, &op.model_name)?;
+fn apply_delete_view(model: &mut datamodel::Model, op: &project_io::DeleteViewOp) -> Result<()> {
     let index = op.index as usize;
     if index < model.views.len() {
         model.views.remove(index);
@@ -330,21 +343,15 @@ fn apply_delete_view(
 }
 
 fn apply_set_source(project: &mut datamodel::Project, op: &project_io::SetSourceOp) -> Result<()> {
-    if op.clear {
-        project.source = None;
-        return Ok(());
-    }
-
-    if let Some(source) = &op.source {
-        project.source = Some(datamodel::Source::from(source.clone()));
-        Ok(())
-    } else {
-        Err(Error::new(
+    let Some(source) = &op.source else {
+        return Err(Error::new(
             ErrorKind::Model,
-            ErrorCode::Generic,
+            ErrorCode::ProtobufDecode,
             Some("missing source payload".to_string()),
-        ))
-    }
+        ));
+    };
+    project.source = Some(datamodel::Source::from(source.clone()));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -352,7 +359,10 @@ mod tests {
     use super::*;
     use crate::datamodel::{self, Equation, Visibility};
     use crate::project_io::variable::V;
-    use crate::project_io::{self, Patch, patch_operation};
+    use crate::project_io::{
+        self, ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, model_operation,
+        project_operation,
+    };
     use crate::test_common::TestProject;
 
     fn stock_proto(stock: datamodel::Stock) -> project_io::variable::Stock {
@@ -385,12 +395,15 @@ mod tests {
             ai_state: None,
             uid: None,
         };
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::UpsertAux(project_io::UpsertAuxOp {
-                    model_name: "main".to_string(),
-                    aux: Some(aux_proto(aux.clone())),
-                })),
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::UpsertAux(project_io::UpsertAuxOp {
+                        aux: Some(aux_proto(aux.clone())),
+                    })),
+                }],
             }],
         };
 
@@ -422,14 +435,17 @@ mod tests {
             uid: Some(10),
         };
         stock.inflows.sort();
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::UpsertStock(
-                    project_io::UpsertStockOp {
-                        model_name: "main".to_string(),
-                        stock: Some(stock_proto(stock.clone())),
-                    },
-                )),
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::UpsertStock(
+                        project_io::UpsertStockOp {
+                            stock: Some(stock_proto(stock.clone())),
+                        },
+                    )),
+                }],
             }],
         };
 
@@ -453,14 +469,17 @@ mod tests {
             .flow("flow", "1", None)
             .stock("stock", "stock", &["flow"], &["flow"], None)
             .build_datamodel();
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::DeleteVariable(
-                    project_io::DeleteVariableOp {
-                        model_name: "main".to_string(),
-                        ident: "flow".to_string(),
-                    },
-                )),
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::DeleteVariable(
+                        project_io::DeleteVariableOp {
+                            ident: "flow".to_string(),
+                        },
+                    )),
+                }],
             }],
         };
 
@@ -482,15 +501,18 @@ mod tests {
             .flow("flow", "1", None)
             .stock("stock", "stock", &["flow"], &["flow"], None)
             .build_datamodel();
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::RenameVariable(
-                    project_io::RenameVariableOp {
-                        model_name: "main".to_string(),
-                        from: "flow".to_string(),
-                        to: "new_flow".to_string(),
-                    },
-                )),
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "flow".to_string(),
+                            to: "new_flow".to_string(),
+                        },
+                    )),
+                }],
             }],
         };
 
@@ -513,24 +535,25 @@ mod tests {
     #[test]
     fn set_sim_specs_partial_update() {
         let mut project = TestProject::new("test").build_datamodel();
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::SetSimSpecs(
+        let patch = ProjectPatch {
+            project_ops: vec![ProjectOperation {
+                op: Some(project_operation::Op::SetSimSpecs(
                     project_io::SetSimSpecsOp {
-                        start: Some(5.0),
-                        stop: None,
-                        dt: Some(project_io::Dt {
-                            value: 0.5,
-                            is_reciprocal: false,
+                        sim_specs: Some(project_io::SimSpecs {
+                            start: 5.0,
+                            stop: project.sim_specs.stop,
+                            dt: Some(project_io::Dt {
+                                value: 0.5,
+                                is_reciprocal: false,
+                            }),
+                            save_step: None,
+                            sim_method: project_io::SimMethod::RungeKutta4 as i32,
+                            time_units: Some("days".to_string()),
                         }),
-                        save_step: None,
-                        clear_save_step: true,
-                        sim_method: Some(project_io::SimMethod::RungeKutta4 as i32),
-                        time_units: Some("days".to_string()),
-                        clear_time_units: false,
                     },
                 )),
             }],
+            models: vec![],
         };
 
         apply_patch(&mut project, &patch).unwrap();
@@ -553,14 +576,17 @@ mod tests {
             view_box: None,
             zoom: 1.0,
         };
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::UpsertView(project_io::UpsertViewOp {
-                    model_name: "main".to_string(),
-                    index: 0,
-                    view: Some(view.clone()),
-                    allow_append: true,
-                })),
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::UpsertView(project_io::UpsertViewOp {
+                        index: 0,
+                        view: Some(view.clone()),
+                        allow_append: true,
+                    })),
+                }],
             }],
         };
 
@@ -568,12 +594,15 @@ mod tests {
         let model = project.get_model("main").unwrap();
         assert_eq!(model.views.len(), 1);
 
-        let delete_patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::DeleteView(project_io::DeleteViewOp {
-                    model_name: "main".to_string(),
-                    index: 0,
-                })),
+        let delete_patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::DeleteView(project_io::DeleteViewOp {
+                        index: 0,
+                    })),
+                }],
             }],
         };
 
@@ -583,34 +612,23 @@ mod tests {
     }
 
     #[test]
-    fn set_and_clear_source() {
+    fn set_source() {
         let mut project = TestProject::new("test").build_datamodel();
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::SetSource(project_io::SetSourceOp {
+        let patch = ProjectPatch {
+            project_ops: vec![ProjectOperation {
+                op: Some(project_operation::Op::SetSource(project_io::SetSourceOp {
                     source: Some(project_io::Source {
                         extension: project_io::source::Extension::Xmile as i32,
                         content: "hello".to_string(),
                     }),
-                    clear: false,
                 })),
             }],
+            models: vec![],
         };
 
         apply_patch(&mut project, &patch).unwrap();
         assert!(project.source.is_some());
-
-        let clear = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::SetSource(project_io::SetSourceOp {
-                    source: None,
-                    clear: true,
-                })),
-            }],
-        };
-
-        apply_patch(&mut project, &clear).unwrap();
-        assert!(project.source.is_none());
+        assert_eq!(project.source.as_ref().unwrap().content, "hello");
     }
 
     #[test]
@@ -619,15 +637,18 @@ mod tests {
             .flow("flow", "1", None)
             .flow("flow2", "2", None)
             .build_datamodel();
-        let patch = Patch {
-            ops: vec![project_io::PatchOperation {
-                op: Some(patch_operation::Op::RenameVariable(
-                    project_io::RenameVariableOp {
-                        model_name: "main".to_string(),
-                        from: "flow".to_string(),
-                        to: "flow2".to_string(),
-                    },
-                )),
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "flow".to_string(),
+                            to: "flow2".to_string(),
+                        },
+                    )),
+                }],
             }],
         };
 
