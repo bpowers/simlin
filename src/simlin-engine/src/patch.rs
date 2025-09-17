@@ -99,12 +99,12 @@ fn apply_set_sim_specs(project: &mut datamodel::Project, op: &project_io::SetSim
         project.sim_specs.stop = stop;
     }
     if let Some(dt) = &op.dt {
-        project.sim_specs.dt = datamodel::Dt::from(dt.clone());
+        project.sim_specs.dt = datamodel::Dt::from(*dt);
     }
     if op.clear_save_step {
         project.sim_specs.save_step = None;
     } else if let Some(save) = &op.save_step {
-        project.sim_specs.save_step = Some(datamodel::Dt::from(save.clone()));
+        project.sim_specs.save_step = Some(datamodel::Dt::from(*save));
     }
     if let Some(method) = op.sim_method {
         let sim_method = project_io::SimMethod::try_from(method).unwrap_or_default();
