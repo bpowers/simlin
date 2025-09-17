@@ -439,6 +439,30 @@ int simlin_export_xmile(SimlinProject *project, uint8_t **output, uintptr_t *out
 // - `output` and `output_len` must be valid pointers
 int simlin_project_serialize(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
 
+// Applies a patch to the project datamodel.
+//
+// The patch is encoded as a `project_io.Patch` protobuf message. The caller can
+// request a dry run (which performs validation without committing) and control
+// whether errors are permitted. When `allow_errors` is false, any static or
+// simulation error will cause the patch to be rejected.
+//
+// On success returns `SimlinErrorCode::NoError`. On failure returns an error
+// code describing why the patch could not be applied. When `out_errors` is not
+// NULL it will receive a pointer to a `SimlinErrorDetails` structure
+// describing all encountered errors; callers must free it with
+// `simlin_free_error_details`.
+//
+// # Safety
+// - `project` must be a valid pointer to a SimlinProject
+// - `patch_data` must be a valid pointer to at least `patch_len` bytes
+// - `out_errors` may be null
+SimlinErrorCode simlin_project_apply_patch(SimlinProject *project,
+                                           const uint8_t *patch_data,
+                                           uintptr_t patch_len,
+                                           bool dry_run,
+                                           bool allow_errors,
+                                           SimlinErrorDetails **out_errors);
+
 // Get all errors in a project including static analysis and compilation errors
 //
 // Returns NULL if no errors exist in the project. This function collects all
