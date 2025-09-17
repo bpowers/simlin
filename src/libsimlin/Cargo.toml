@@ -13,7 +13,7 @@ crate-type = ["staticlib"]
 [dependencies]
 simlin-engine = { version = "0.1", path = "../simlin-engine" }
 simlin-compat = { version = "0.1", path = "../simlin-compat", features = ["vensim"] }
-prost = "0.13"
+prost = "0.14"
 
 [dev-dependencies]
 

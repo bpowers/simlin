@@ -1195,8 +1195,8 @@ fn test_errors() {
 
 #[test]
 fn test_all_deps() {
+    use rand::rng;
     use rand::seq::SliceRandom;
-    use rand::thread_rng;
 
     fn verify_all_deps(
         expected_deps_list: &[(&Variable, &[&str])],
@@ -1245,7 +1245,7 @@ fn test_all_deps() {
         };
         assert_eq!(expected_deps, deps);
 
-        let mut rng = thread_rng();
+        let mut rng = rng();
         // no matter the order of variables in the list, we should get the same all_deps
         // (even though the order of recursion might change)
         for _ in 0..16 {

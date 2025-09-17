@@ -17,4 +17,4 @@ lazy_static = "1"
 cc = "1"
 
 [dev-dependencies]
-simlin-compat = { path = "../simlin-compat" }
+simlin-compat = { version = "0.1", path = "../simlin-compat" }

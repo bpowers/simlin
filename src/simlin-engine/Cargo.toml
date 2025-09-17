@@ -17,7 +17,7 @@ lazy_static = "1"
 regex = "1"
 unicode-xid = "0.2"
 lalrpop-util = "0.22"
-prost = "0.13"
+prost = "0.14"
 float-cmp = "0.10"
 ordered-float = "5"
 smallvec = { version = "1", features = [ "union" ] }
@@ -27,8 +27,8 @@ ed25519 = "2"
 base64 = "0.22"
 
 [dev-dependencies]
-rand = "0.8"
+rand = "0.9"
 
 [build-dependencies]
 lalrpop = "0.22"
-prost-build = "0.13"
+prost-build = "0.14"
