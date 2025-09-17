@@ -1628,6 +1628,11 @@ pub unsafe extern "C" fn simlin_project_serialize(
 /// NULL it will receive a pointer to a `SimlinErrorDetails` structure
 /// describing all encountered errors; callers must free it with
 /// `simlin_free_error_details`.
+///
+/// # Safety
+/// - `project` must be a valid pointer to a SimlinProject
+/// - `patch_data` must be a valid pointer to at least `patch_len` bytes
+/// - `out_errors` may be null
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_apply_patch(
     project: *mut SimlinProject,
