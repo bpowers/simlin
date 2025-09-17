@@ -23,6 +23,7 @@ mod builtins_visitor;
 mod compiler;
 mod dimensions;
 mod model;
+mod patch;
 mod token;
 mod variable;
 mod stdlib {
@@ -50,6 +51,7 @@ mod vm;
 pub use self::builder::build_sim_with_stderrors;
 pub use self::common::{Error, ErrorCode, Result, canonicalize};
 pub use self::interpreter::Simulation;
+pub use self::patch::apply_patch;
 pub use self::project::Project;
 pub use self::variable::{Variable, identifier_set};
 pub use self::vm::Method;

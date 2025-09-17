@@ -262,9 +262,9 @@ message SimSpecs {
   double start = 1;
   double stop = 2;
   Dt dt = 3;
-  Dt save_step = 4;
+  optional Dt save_step = 4;
   SimMethod sim_method = 5;
-  string time_units = 6;
+  optional string time_units = 6;
 };
 
 message Dimension {
@@ -301,6 +301,78 @@ message Source {
   };
   Extension extension = 1;
   string content = 2;
+};
+
+message ProjectPatch {
+  repeated ProjectOperation project_ops = 1;
+  repeated ModelPatch models = 2;
+};
+
+message ModelPatch {
+  string name = 1;
+  repeated ModelOperation ops = 2;
+};
+
+message ProjectOperation {
+  oneof op {
+    SetSimSpecsOp set_sim_specs = 1;
+    SetSourceOp set_source = 2;
+  }
+};
+
+message ModelOperation {
+  oneof op {
+    UpsertStockOp upsert_stock = 1;
+    UpsertFlowOp upsert_flow = 2;
+    UpsertAuxOp upsert_aux = 3;
+    UpsertModuleOp upsert_module = 4;
+    DeleteVariableOp delete_variable = 5;
+    RenameVariableOp rename_variable = 6;
+    UpsertViewOp upsert_view = 7;
+    DeleteViewOp delete_view = 8;
+  }
+};
+
+message SetSimSpecsOp {
+  SimSpecs sim_specs = 1;
+};
+
+message UpsertStockOp {
+  Variable.Stock stock = 1;
+};
+
+message UpsertFlowOp {
+  Variable.Flow flow = 1;
+};
+
+message UpsertAuxOp {
+  Variable.Aux aux = 1;
+};
+
+message UpsertModuleOp {
+  Variable.Module module = 1;
+};
+
+message DeleteVariableOp {
+  string ident = 1;
+};
+
+message RenameVariableOp {
+  string from = 1;
+  string to = 2;
+};
+
+message UpsertViewOp {
+  uint32 index = 1;
+  View view = 2;
+};
+
+message DeleteViewOp {
+  uint32 index = 1;
+};
+
+message SetSourceOp {
+  Source source = 1;
 };
 
 message Project {

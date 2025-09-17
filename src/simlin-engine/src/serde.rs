@@ -89,7 +89,7 @@ impl From<SimSpecs> for project_io::SimSpecs {
             dt: Some(project_io::Dt::from(sim_specs.dt)),
             save_step: sim_specs.save_step.map(project_io::Dt::from),
             sim_method: project_io::SimMethod::from(sim_specs.sim_method) as i32,
-            time_units: sim_specs.time_units.unwrap_or_default(),
+            time_units: sim_specs.time_units,
         }
     }
 }
@@ -107,11 +107,7 @@ impl From<project_io::SimSpecs> for SimSpecs {
             sim_method: SimMethod::from(
                 project_io::SimMethod::try_from(sim_specs.sim_method).unwrap_or_default(),
             ),
-            time_units: if sim_specs.time_units.is_empty() {
-                None
-            } else {
-                Some(sim_specs.time_units)
-            },
+            time_units: sim_specs.time_units.filter(|s| !s.is_empty()),
         }
     }
 }
