@@ -2,11 +2,17 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
+use crate::builtins::{BuiltinFn, UntypedBuiltinFn};
 use crate::canonicalize;
-use crate::common::{Error, ErrorCode, ErrorKind, Result};
+use crate::common::{
+    Canonical, CanonicalElementName, Error, ErrorCode, ErrorKind, Ident, RawIdent, Result,
+};
 use crate::datamodel::{self, Variable};
+use crate::project::Project as CompiledProject;
 use crate::project_io::{self, model_operation, project_operation};
 use crate::serde;
+use std::collections::HashMap;
 
 macro_rules! require_field {
     ($field:expr, $msg:expr) => {{
@@ -45,8 +51,6 @@ pub fn apply_patch(
 
     // Then apply model-level operations
     for model_patch in &patch.models {
-        let model = get_model_mut(&mut staged, &model_patch.name)?;
-
         for op in &model_patch.ops {
             let Some(kind) = &op.op else {
                 return Err(Error::new(
@@ -57,14 +61,24 @@ pub fn apply_patch(
             };
 
             match kind {
-                model_operation::Op::UpsertStock(op) => apply_upsert_stock(model, op)?,
-                model_operation::Op::UpsertFlow(op) => apply_upsert_flow(model, op)?,
-                model_operation::Op::UpsertAux(op) => apply_upsert_aux(model, op)?,
-                model_operation::Op::UpsertModule(op) => apply_upsert_module(model, op)?,
-                model_operation::Op::DeleteVariable(op) => apply_delete_variable(model, op)?,
-                model_operation::Op::RenameVariable(op) => apply_rename_variable(model, op)?,
-                model_operation::Op::UpsertView(op) => apply_upsert_view(model, op)?,
-                model_operation::Op::DeleteView(op) => apply_delete_view(model, op)?,
+                model_operation::Op::RenameVariable(op) => {
+                    apply_rename_variable(&mut staged, &model_patch.name, op)?
+                }
+                _ => {
+                    let model = get_model_mut(&mut staged, &model_patch.name)?;
+                    match kind {
+                        model_operation::Op::UpsertStock(op) => apply_upsert_stock(model, op)?,
+                        model_operation::Op::UpsertFlow(op) => apply_upsert_flow(model, op)?,
+                        model_operation::Op::UpsertAux(op) => apply_upsert_aux(model, op)?,
+                        model_operation::Op::UpsertModule(op) => apply_upsert_module(model, op)?,
+                        model_operation::Op::DeleteVariable(op) => {
+                            apply_delete_variable(model, op)?
+                        }
+                        model_operation::Op::UpsertView(op) => apply_upsert_view(model, op)?,
+                        model_operation::Op::DeleteView(op) => apply_delete_view(model, op)?,
+                        model_operation::Op::RenameVariable(_) => unreachable!(),
+                    }
+                }
             }
         }
     }
@@ -226,7 +240,8 @@ fn apply_delete_variable(
 }
 
 fn apply_rename_variable(
-    model: &mut datamodel::Model,
+    project: &mut datamodel::Project,
+    model_name: &str,
     op: &project_io::RenameVariableOp,
 ) -> Result<()> {
     let old_ident = canonicalize(op.from.as_str());
@@ -236,7 +251,17 @@ fn apply_rename_variable(
         return Ok(());
     }
 
-    if model.get_variable_mut(new_ident.as_str()).is_some() {
+    let compiled_project = CompiledProject::from(project.clone());
+    let canonical_model_name = canonicalize(model_name);
+    let compiled_model = compiled_project
+        .models
+        .get(&canonical_model_name)
+        .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::BadModelName, None))?
+        .clone();
+
+    let model = get_model_mut(project, model_name)?;
+
+    if model.get_variable(new_ident.as_str()).is_some() {
         return Err(Error::new(
             ErrorKind::Model,
             ErrorCode::DuplicateVariable,
@@ -244,33 +269,550 @@ fn apply_rename_variable(
         ));
     }
 
-    let is_flow = {
-        let var = model
-            .get_variable_mut(old_ident.as_str())
-            .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None))?;
-        let flow = matches!(var, Variable::Flow(_));
-        var.set_ident(new_ident.as_str().to_string());
-        flow
-    };
+    let (target_index, is_flow) = model
+        .variables
+        .iter()
+        .enumerate()
+        .find_map(|(idx, var)| {
+            if canonicalize(var.get_ident()) == old_ident {
+                Some((idx, matches!(var, Variable::Flow(_))))
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| Error::new(ErrorKind::Model, ErrorCode::DoesNotExist, None))?;
+
+    let compiled_vars = &compiled_model.variables;
+    rename_model_equations(model, compiled_vars, &old_ident, &new_ident);
 
     if is_flow {
-        for var in model.variables.iter_mut() {
-            if let Variable::Stock(stock) = var {
-                for inflow in stock.inflows.iter_mut() {
-                    if canonicalize(inflow.as_str()) == old_ident {
-                        *inflow = new_ident.as_str().to_string();
-                    }
+        update_stock_flow_references(model, &old_ident, &new_ident);
+    }
+
+    rename_module_references(model, &old_ident, &new_ident);
+
+    if let Some(var) = model.variables.get_mut(target_index) {
+        var.set_ident(new_ident.as_str().to_string());
+    }
+
+    Ok(())
+}
+
+fn rename_model_equations(
+    model: &mut datamodel::Model,
+    compiled_vars: &HashMap<Ident<Canonical>, crate::variable::Variable>,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    for datamodel_var in model.variables.iter_mut() {
+        let canonical_var_ident = canonicalize(datamodel_var.get_ident());
+        let Some(compiled_var) = compiled_vars.get(&canonical_var_ident) else {
+            continue;
+        };
+
+        match datamodel_var {
+            Variable::Stock(stock) => {
+                rewrite_equation(
+                    &mut stock.equation,
+                    compiled_var.ast(),
+                    compiled_var.init_ast(),
+                    old_ident,
+                    new_ident,
+                );
+            }
+            Variable::Flow(flow) => {
+                rewrite_equation(
+                    &mut flow.equation,
+                    compiled_var.ast(),
+                    compiled_var.init_ast(),
+                    old_ident,
+                    new_ident,
+                );
+            }
+            Variable::Aux(aux) => {
+                rewrite_equation(
+                    &mut aux.equation,
+                    compiled_var.ast(),
+                    compiled_var.init_ast(),
+                    old_ident,
+                    new_ident,
+                );
+            }
+            Variable::Module(_module) => {}
+        }
+    }
+}
+
+fn rewrite_equation(
+    equation: &mut datamodel::Equation,
+    ast: Option<&Ast<Expr2>>,
+    init_ast: Option<&Ast<Expr2>>,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    if let Some(ast) = ast {
+        let renamed = rename_ast(ast, old_ident, new_ident);
+        apply_ast_to_equation_main(equation, &renamed);
+    }
+
+    if let Some(init_ast) = init_ast {
+        let renamed = rename_ast(init_ast, old_ident, new_ident);
+        apply_ast_to_equation_initial(equation, &renamed);
+    }
+}
+
+fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr2>) {
+    match (equation, ast) {
+        (datamodel::Equation::Scalar(main, _), Ast::Scalar(expr)) => {
+            *main = expr2_to_string(expr);
+        }
+        (datamodel::Equation::ApplyToAll(_, main, _), Ast::ApplyToAll(_, expr)) => {
+            *main = expr2_to_string(expr);
+        }
+        (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
+            for (element_name, equation, _) in elements.iter_mut() {
+                let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
+                if let Some(expr) = exprs.get(&canonical_element) {
+                    *equation = expr2_to_string(expr);
                 }
-                for outflow in stock.outflows.iter_mut() {
-                    if canonicalize(outflow.as_str()) == old_ident {
-                        *outflow = new_ident.as_str().to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<Expr2>) {
+    match (equation, ast) {
+        (datamodel::Equation::Scalar(_, initial @ Some(_)), Ast::Scalar(expr)) => {
+            *initial = Some(expr2_to_string(expr));
+        }
+        (datamodel::Equation::ApplyToAll(_, _, initial @ Some(_)), Ast::ApplyToAll(_, expr)) => {
+            *initial = Some(expr2_to_string(expr));
+        }
+        (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
+            for (element_name, _, initial) in elements.iter_mut() {
+                if let Some(initial_value) = initial.as_mut() {
+                    let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
+                    if let Some(expr) = exprs.get(&canonical_element) {
+                        *initial_value = expr2_to_string(expr);
                     }
                 }
             }
         }
+        _ => {}
+    }
+}
+
+fn rename_ast(
+    ast: &Ast<Expr2>,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> Ast<Expr2> {
+    match ast {
+        Ast::Scalar(expr) => Ast::Scalar(rename_expr(expr, old_ident, new_ident)),
+        Ast::ApplyToAll(dims, expr) => {
+            Ast::ApplyToAll(dims.clone(), rename_expr(expr, old_ident, new_ident))
+        }
+        Ast::Arrayed(dims, elements) => {
+            let rewritten = elements
+                .iter()
+                .map(|(name, expr)| (name.clone(), rename_expr(expr, old_ident, new_ident)))
+                .collect();
+            Ast::Arrayed(dims.clone(), rewritten)
+        }
+    }
+}
+
+fn rename_expr(expr: &Expr2, old_ident: &Ident<Canonical>, new_ident: &Ident<Canonical>) -> Expr2 {
+    match expr {
+        Expr2::Const(text, value, loc) => Expr2::Const(text.clone(), *value, *loc),
+        Expr2::Var(ident, bounds, loc) => Expr2::Var(
+            rename_canonical_ident(ident, old_ident, new_ident),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::App(builtin, bounds, loc) => Expr2::App(
+            rename_builtin(builtin, old_ident, new_ident),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::Subscript(ident, indexes, bounds, loc) => Expr2::Subscript(
+            rename_canonical_ident(ident, old_ident, new_ident),
+            indexes
+                .iter()
+                .map(|idx| rename_index_expr(idx, old_ident, new_ident))
+                .collect(),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::Op1(op, rhs, bounds, loc) => Expr2::Op1(
+            *op,
+            Box::new(rename_expr(rhs, old_ident, new_ident)),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::Op2(op, lhs, rhs, bounds, loc) => Expr2::Op2(
+            *op,
+            Box::new(rename_expr(lhs, old_ident, new_ident)),
+            Box::new(rename_expr(rhs, old_ident, new_ident)),
+            bounds.clone(),
+            *loc,
+        ),
+        Expr2::If(cond, then_branch, else_branch, bounds, loc) => Expr2::If(
+            Box::new(rename_expr(cond, old_ident, new_ident)),
+            Box::new(rename_expr(then_branch, old_ident, new_ident)),
+            Box::new(rename_expr(else_branch, old_ident, new_ident)),
+            bounds.clone(),
+            *loc,
+        ),
+    }
+}
+
+fn rename_builtin(
+    builtin: &BuiltinFn<Expr2>,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> BuiltinFn<Expr2> {
+    match builtin {
+        BuiltinFn::Lookup(ident, expr, loc) => BuiltinFn::Lookup(
+            rename_identifier_string(ident, old_ident, new_ident),
+            Box::new(rename_expr(expr, old_ident, new_ident)),
+            *loc,
+        ),
+        BuiltinFn::IsModuleInput(ident, loc) => {
+            BuiltinFn::IsModuleInput(rename_identifier_string(ident, old_ident, new_ident), *loc)
+        }
+        BuiltinFn::Abs(expr) => BuiltinFn::Abs(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Arccos(expr) => {
+            BuiltinFn::Arccos(Box::new(rename_expr(expr, old_ident, new_ident)))
+        }
+        BuiltinFn::Arcsin(expr) => {
+            BuiltinFn::Arcsin(Box::new(rename_expr(expr, old_ident, new_ident)))
+        }
+        BuiltinFn::Arctan(expr) => {
+            BuiltinFn::Arctan(Box::new(rename_expr(expr, old_ident, new_ident)))
+        }
+        BuiltinFn::Cos(expr) => BuiltinFn::Cos(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Exp(expr) => BuiltinFn::Exp(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Inf => BuiltinFn::Inf,
+        BuiltinFn::Int(expr) => BuiltinFn::Int(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Ln(expr) => BuiltinFn::Ln(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Log10(expr) => {
+            BuiltinFn::Log10(Box::new(rename_expr(expr, old_ident, new_ident)))
+        }
+        BuiltinFn::Max(lhs, rhs) => BuiltinFn::Max(
+            Box::new(rename_expr(lhs, old_ident, new_ident)),
+            rhs.as_ref()
+                .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
+        ),
+        BuiltinFn::Mean(args) => BuiltinFn::Mean(
+            args.iter()
+                .map(|expr| rename_expr(expr, old_ident, new_ident))
+                .collect(),
+        ),
+        BuiltinFn::Min(lhs, rhs) => BuiltinFn::Min(
+            Box::new(rename_expr(lhs, old_ident, new_ident)),
+            rhs.as_ref()
+                .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
+        ),
+        BuiltinFn::Pi => BuiltinFn::Pi,
+        BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            c.as_ref()
+                .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
+        ),
+        BuiltinFn::Ramp(a, b, c) => BuiltinFn::Ramp(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            c.as_ref()
+                .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
+        ),
+        BuiltinFn::SafeDiv(a, b, c) => BuiltinFn::SafeDiv(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+            c.as_ref()
+                .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
+        ),
+        BuiltinFn::Sign(expr) => BuiltinFn::Sign(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Sin(expr) => BuiltinFn::Sin(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Sqrt(expr) => BuiltinFn::Sqrt(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Step(a, b) => BuiltinFn::Step(
+            Box::new(rename_expr(a, old_ident, new_ident)),
+            Box::new(rename_expr(b, old_ident, new_ident)),
+        ),
+        BuiltinFn::Tan(expr) => BuiltinFn::Tan(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Time => BuiltinFn::Time,
+        BuiltinFn::TimeStep => BuiltinFn::TimeStep,
+        BuiltinFn::StartTime => BuiltinFn::StartTime,
+        BuiltinFn::FinalTime => BuiltinFn::FinalTime,
+        BuiltinFn::Rank(expr, opts) => BuiltinFn::Rank(
+            Box::new(rename_expr(expr, old_ident, new_ident)),
+            opts.as_ref().map(|(a, b)| {
+                (
+                    Box::new(rename_expr(a, old_ident, new_ident)),
+                    b.as_ref()
+                        .map(|expr| Box::new(rename_expr(expr, old_ident, new_ident))),
+                )
+            }),
+        ),
+        BuiltinFn::Size(expr) => BuiltinFn::Size(Box::new(rename_expr(expr, old_ident, new_ident))),
+        BuiltinFn::Stddev(expr) => {
+            BuiltinFn::Stddev(Box::new(rename_expr(expr, old_ident, new_ident)))
+        }
+        BuiltinFn::Sum(expr) => BuiltinFn::Sum(Box::new(rename_expr(expr, old_ident, new_ident))),
+    }
+}
+
+fn rename_index_expr(
+    index: &IndexExpr2,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> IndexExpr2 {
+    match index {
+        IndexExpr2::Wildcard(loc) => IndexExpr2::Wildcard(*loc),
+        IndexExpr2::StarRange(dim, loc) => IndexExpr2::StarRange(dim.clone(), *loc),
+        IndexExpr2::Range(lhs, rhs, loc) => IndexExpr2::Range(
+            rename_expr(lhs, old_ident, new_ident),
+            rename_expr(rhs, old_ident, new_ident),
+            *loc,
+        ),
+        IndexExpr2::DimPosition(pos, loc) => IndexExpr2::DimPosition(*pos, *loc),
+        IndexExpr2::Expr(expr) => IndexExpr2::Expr(rename_expr(expr, old_ident, new_ident)),
+    }
+}
+
+fn expr2_to_string(expr: &Expr2) -> String {
+    let expr0 = expr2_to_expr0(expr);
+    crate::ast::print_eqn(&expr0)
+}
+
+fn expr2_to_expr0(expr: &Expr2) -> Expr0 {
+    match expr {
+        Expr2::Const(text, value, loc) => Expr0::Const(text.clone(), *value, *loc),
+        Expr2::Var(ident, _, loc) => Expr0::Var(RawIdent::new(ident.to_source_repr()), *loc),
+        Expr2::App(builtin, _, loc) => {
+            let untyped = builtin_to_untyped(builtin);
+            Expr0::App(untyped, *loc)
+        }
+        Expr2::Subscript(ident, indexes, _, loc) => Expr0::Subscript(
+            RawIdent::new(ident.to_source_repr()),
+            indexes.iter().map(index_expr2_to_index_expr0).collect(),
+            *loc,
+        ),
+        Expr2::Op1(op, rhs, _, loc) => Expr0::Op1(*op, Box::new(expr2_to_expr0(rhs)), *loc),
+        Expr2::Op2(op, lhs, rhs, _, loc) => Expr0::Op2(
+            *op,
+            Box::new(expr2_to_expr0(lhs)),
+            Box::new(expr2_to_expr0(rhs)),
+            *loc,
+        ),
+        Expr2::If(cond, then_branch, else_branch, _, loc) => Expr0::If(
+            Box::new(expr2_to_expr0(cond)),
+            Box::new(expr2_to_expr0(then_branch)),
+            Box::new(expr2_to_expr0(else_branch)),
+            *loc,
+        ),
+    }
+}
+
+fn index_expr2_to_index_expr0(index: &IndexExpr2) -> crate::ast::IndexExpr0 {
+    use crate::ast::IndexExpr0;
+    match index {
+        IndexExpr2::Wildcard(loc) => IndexExpr0::Wildcard(*loc),
+        IndexExpr2::StarRange(dim, loc) => {
+            IndexExpr0::StarRange(RawIdent::new(dim.as_str().to_string()), *loc)
+        }
+        IndexExpr2::Range(lhs, rhs, loc) => {
+            IndexExpr0::Range(expr2_to_expr0(lhs), expr2_to_expr0(rhs), *loc)
+        }
+        IndexExpr2::DimPosition(pos, loc) => IndexExpr0::DimPosition(*pos, *loc),
+        IndexExpr2::Expr(expr) => IndexExpr0::Expr(expr2_to_expr0(expr)),
+    }
+}
+
+fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
+    use crate::builtins::BuiltinFn;
+    match builtin {
+        BuiltinFn::Lookup(ident, expr, _) => UntypedBuiltinFn(
+            "lookup".to_string(),
+            vec![
+                Expr0::Var(RawIdent::new(ident.clone()), Default::default()),
+                expr2_to_expr0(expr),
+            ],
+        ),
+        BuiltinFn::IsModuleInput(ident, _) => UntypedBuiltinFn(
+            "ismoduleinput".to_string(),
+            vec![Expr0::Var(RawIdent::new(ident.clone()), Default::default())],
+        ),
+        BuiltinFn::Abs(expr) => UntypedBuiltinFn("abs".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Arccos(expr) => {
+            UntypedBuiltinFn("arccos".to_string(), vec![expr2_to_expr0(expr)])
+        }
+        BuiltinFn::Arcsin(expr) => {
+            UntypedBuiltinFn("arcsin".to_string(), vec![expr2_to_expr0(expr)])
+        }
+        BuiltinFn::Arctan(expr) => {
+            UntypedBuiltinFn("arctan".to_string(), vec![expr2_to_expr0(expr)])
+        }
+        BuiltinFn::Cos(expr) => UntypedBuiltinFn("cos".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Exp(expr) => UntypedBuiltinFn("exp".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Inf => UntypedBuiltinFn("inf".to_string(), vec![]),
+        BuiltinFn::Int(expr) => UntypedBuiltinFn("int".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Ln(expr) => UntypedBuiltinFn("ln".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Log10(expr) => UntypedBuiltinFn("log10".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Max(lhs, rhs) => {
+            let mut args = vec![expr2_to_expr0(lhs)];
+            if let Some(rhs) = rhs {
+                args.push(expr2_to_expr0(rhs));
+            }
+            UntypedBuiltinFn("max".to_string(), args)
+        }
+        BuiltinFn::Mean(args) => UntypedBuiltinFn(
+            "mean".to_string(),
+            args.iter().map(expr2_to_expr0).collect(),
+        ),
+        BuiltinFn::Min(lhs, rhs) => {
+            let mut args = vec![expr2_to_expr0(lhs)];
+            if let Some(rhs) = rhs {
+                args.push(expr2_to_expr0(rhs));
+            }
+            UntypedBuiltinFn("min".to_string(), args)
+        }
+        BuiltinFn::Pi => UntypedBuiltinFn("pi".to_string(), vec![]),
+        BuiltinFn::Pulse(a, b, c) => {
+            let mut args = vec![expr2_to_expr0(a), expr2_to_expr0(b)];
+            if let Some(c) = c {
+                args.push(expr2_to_expr0(c));
+            }
+            UntypedBuiltinFn("pulse".to_string(), args)
+        }
+        BuiltinFn::Ramp(a, b, c) => {
+            let mut args = vec![expr2_to_expr0(a), expr2_to_expr0(b)];
+            if let Some(c) = c {
+                args.push(expr2_to_expr0(c));
+            }
+            UntypedBuiltinFn("ramp".to_string(), args)
+        }
+        BuiltinFn::SafeDiv(a, b, c) => {
+            let mut args = vec![expr2_to_expr0(a), expr2_to_expr0(b)];
+            if let Some(c) = c {
+                args.push(expr2_to_expr0(c));
+            }
+            UntypedBuiltinFn("safediv".to_string(), args)
+        }
+        BuiltinFn::Sign(expr) => UntypedBuiltinFn("sign".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Sin(expr) => UntypedBuiltinFn("sin".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Sqrt(expr) => UntypedBuiltinFn("sqrt".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Step(a, b) => UntypedBuiltinFn(
+            "step".to_string(),
+            vec![expr2_to_expr0(a), expr2_to_expr0(b)],
+        ),
+        BuiltinFn::Tan(expr) => UntypedBuiltinFn("tan".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Time => UntypedBuiltinFn("time".to_string(), vec![]),
+        BuiltinFn::TimeStep => UntypedBuiltinFn("time_step".to_string(), vec![]),
+        BuiltinFn::StartTime => UntypedBuiltinFn("initial_time".to_string(), vec![]),
+        BuiltinFn::FinalTime => UntypedBuiltinFn("final_time".to_string(), vec![]),
+        BuiltinFn::Rank(expr, opts) => {
+            let mut args = vec![expr2_to_expr0(expr)];
+            if let Some((a, b)) = opts {
+                args.push(expr2_to_expr0(a));
+                if let Some(b) = b {
+                    args.push(expr2_to_expr0(b));
+                }
+            }
+            UntypedBuiltinFn("rank".to_string(), args)
+        }
+        BuiltinFn::Size(expr) => UntypedBuiltinFn("size".to_string(), vec![expr2_to_expr0(expr)]),
+        BuiltinFn::Stddev(expr) => {
+            UntypedBuiltinFn("stddev".to_string(), vec![expr2_to_expr0(expr)])
+        }
+        BuiltinFn::Sum(expr) => UntypedBuiltinFn("sum".to_string(), vec![expr2_to_expr0(expr)]),
+    }
+}
+
+fn rename_canonical_ident(
+    ident: &Ident<Canonical>,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> Ident<Canonical> {
+    if ident == old_ident {
+        return new_ident.clone();
     }
 
-    Ok(())
+    let ident_str = ident.as_str();
+    if let Some(pos) = ident_str.rfind('·') {
+        let prefix = &ident_str[..pos];
+        let suffix = &ident_str[pos + '·'.len_utf8()..];
+
+        // Only rename self-qualified references (self·variable)
+        // Don't rename other module-qualified references as they refer to different variables
+        if suffix == old_ident.as_str() && prefix == "self" {
+            return Ident::from_unchecked(format!("self·{}", new_ident.as_str()));
+        }
+    }
+
+    ident.clone()
+}
+
+fn rename_identifier_string(
+    ident: &str,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) -> String {
+    let canonical = canonicalize(ident);
+    let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
+    renamed.as_str().to_string()
+}
+
+fn rename_module_references(
+    model: &mut datamodel::Model,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    for var in model.variables.iter_mut() {
+        if let Variable::Module(module) = var {
+            for reference in module.references.iter_mut() {
+                rename_module_reference_string(&mut reference.src, old_ident, new_ident);
+                rename_module_reference_string(&mut reference.dst, old_ident, new_ident);
+            }
+        }
+    }
+}
+
+fn rename_module_reference_string(
+    value: &mut String,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    let canonical = canonicalize(value.as_str());
+    let renamed = rename_canonical_ident(&canonical, old_ident, new_ident);
+    if renamed != canonical {
+        *value = renamed.to_source_repr();
+    }
+}
+
+fn update_stock_flow_references(
+    model: &mut datamodel::Model,
+    old_ident: &Ident<Canonical>,
+    new_ident: &Ident<Canonical>,
+) {
+    for var in model.variables.iter_mut() {
+        if let Variable::Stock(stock) = var {
+            for inflow in stock.inflows.iter_mut() {
+                if canonicalize(inflow.as_str()) == *old_ident {
+                    *inflow = new_ident.to_source_repr();
+                }
+            }
+            for outflow in stock.outflows.iter_mut() {
+                if canonicalize(outflow.as_str()) == *old_ident {
+                    *outflow = new_ident.to_source_repr();
+                }
+            }
+            stock.inflows.sort_unstable();
+            stock.outflows.sort_unstable();
+        }
+    }
 }
 
 fn apply_upsert_view(model: &mut datamodel::Model, op: &project_io::UpsertViewOp) -> Result<()> {
@@ -614,5 +1156,466 @@ mod tests {
         let err = apply_patch(&mut project, &patch).unwrap_err();
         assert_eq!(err.code, ErrorCode::DuplicateVariable);
         assert_eq!(err.kind, ErrorKind::Model);
+    }
+
+    #[test]
+    fn rename_aux_updates_equations() {
+        let mut project = TestProject::new("test")
+            .aux("foo", "bar + 1", None)
+            .aux("bar", "foo + 2", None)
+            .build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "bar".to_string(),
+                            to: "baz".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("foo").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "baz + 1"),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected auxiliary variable"),
+        }
+
+        match model.get_variable("baz").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "foo + 2"),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected renamed auxiliary"),
+        }
+
+        assert!(model.get_variable("bar").is_none());
+    }
+
+    #[test]
+    fn rename_updates_module_references() {
+        let mut project = TestProject::new("test")
+            .aux("input", "1", None)
+            .aux("consumer", "input * 2", None)
+            .build_datamodel();
+
+        let model = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .expect("main model");
+
+        model
+            .variables
+            .push(datamodel::Variable::Module(datamodel::Module {
+                ident: "child".to_string(),
+                model_name: "child".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: "input".to_string(),
+                    dst: "self.target".to_string(),
+                }],
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+            }));
+
+        project.models.push(datamodel::Model {
+            name: "child".to_string(),
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "target".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string(), None),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+        });
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "input".to_string(),
+                            to: "new_input".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("consumer").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "new_input * 2"),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected auxiliary variable"),
+        }
+
+        let module = model
+            .variables
+            .iter()
+            .find_map(|var| match var {
+                Variable::Module(module) => Some(module),
+                _ => None,
+            })
+            .expect("module variable");
+
+        assert_eq!(module.references.len(), 1);
+        assert_eq!(module.references[0].src, "new_input");
+        assert_eq!(module.references[0].dst, "self.target");
+    }
+
+    #[test]
+    fn rename_does_not_affect_unrelated_module_variables() {
+        let mut project = TestProject::new("test")
+            .aux("foo", "1", None)
+            .aux("bar", "2", None)
+            .aux("consumer", "foo + child·foo + bar", None)
+            .build_datamodel();
+
+        let model = project
+            .models
+            .iter_mut()
+            .find(|m| m.name == "main")
+            .expect("main model");
+
+        model
+            .variables
+            .push(datamodel::Variable::Module(datamodel::Module {
+                ident: "child".to_string(),
+                model_name: "child_model".to_string(),
+                documentation: String::new(),
+                units: None,
+                references: vec![datamodel::ModuleReference {
+                    src: "bar".to_string(),
+                    dst: "child·foo".to_string(),
+                }],
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+            }));
+
+        project.models.push(datamodel::Model {
+            name: "child_model".to_string(),
+            variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+                ident: "foo".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string(), None),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                can_be_module_input: false,
+                visibility: datamodel::Visibility::Private,
+                ai_state: None,
+                uid: None,
+            })],
+            views: vec![],
+            loop_metadata: vec![],
+        });
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "foo".to_string(),
+                            to: "renamed_foo".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("consumer").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn, _) => {
+                    assert_eq!(eqn, "renamed_foo + child·foo + bar");
+                }
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected auxiliary variable"),
+        }
+
+        match model.get_variable("renamed_foo").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn, _) => assert_eq!(eqn, "1"),
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected renamed auxiliary"),
+        }
+
+        assert!(model.get_variable("foo").is_none());
+    }
+
+    #[test]
+    fn rename_self_qualified_references() {
+        let mut project = TestProject::new("test")
+            .aux("foo", "1", None)
+            .aux("consumer", "foo + self·foo", None)
+            .build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "foo".to_string(),
+                            to: "bar".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("consumer").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Scalar(eqn, _) => {
+                    assert_eq!(eqn, "bar + self·bar");
+                }
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected auxiliary variable"),
+        }
+    }
+
+    #[test]
+    fn rename_arrayed_equation() {
+        let mut project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![datamodel::Dimension::Named(
+                "Region".to_string(),
+                vec!["North".to_string(), "South".to_string()],
+            )],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "base_value".to_string(),
+                        equation: datamodel::Equation::Scalar("10".to_string(), None),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "regional_growth".to_string(),
+                        equation: datamodel::Equation::Arrayed(
+                            vec!["Region".to_string()],
+                            vec![
+                                ("North".to_string(), "base_value * 1.5".to_string(), None),
+                                ("South".to_string(), "base_value * 2".to_string(), None),
+                            ],
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "base_value".to_string(),
+                            to: "initial_value".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("regional_growth").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::Arrayed(dims, elements) => {
+                    assert_eq!(dims, &vec!["Region".to_string()]);
+                    assert_eq!(elements[0].0, "North");
+                    assert_eq!(elements[0].1, "initial_value * 1.5");
+                    assert_eq!(elements[1].0, "South");
+                    assert_eq!(elements[1].1, "initial_value * 2");
+                }
+                _ => panic!("expected arrayed equation"),
+            },
+            _ => panic!("expected auxiliary variable"),
+        }
+    }
+
+    #[test]
+    fn rename_apply_to_all_equation() {
+        let mut project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: datamodel::SimSpecs::default(),
+            dimensions: vec![datamodel::Dimension::Named(
+                "Product".to_string(),
+                vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            )],
+            units: vec![],
+            models: vec![datamodel::Model {
+                name: "main".to_string(),
+                variables: vec![
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "price".to_string(),
+                        equation: datamodel::Equation::Scalar("100".to_string(), None),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "revenue".to_string(),
+                        equation: datamodel::Equation::ApplyToAll(
+                            vec!["Product".to_string()],
+                            "price * quantity".to_string(),
+                            None,
+                        ),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    }),
+                    datamodel::Variable::Aux(datamodel::Aux {
+                        ident: "quantity".to_string(),
+                        equation: datamodel::Equation::Scalar("5".to_string(), None),
+                        documentation: String::new(),
+                        units: None,
+                        gf: None,
+                        can_be_module_input: false,
+                        visibility: datamodel::Visibility::Private,
+                        ai_state: None,
+                        uid: None,
+                    }),
+                ],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "price".to_string(),
+                            to: "unit_price".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("revenue").unwrap() {
+            Variable::Aux(aux) => match &aux.equation {
+                datamodel::Equation::ApplyToAll(dims, eqn, _) => {
+                    assert_eq!(dims, &vec!["Product".to_string()]);
+                    assert_eq!(eqn, "unit_price * quantity");
+                }
+                _ => panic!("expected apply-to-all equation"),
+            },
+            _ => panic!("expected auxiliary variable"),
+        }
+    }
+
+    #[test]
+    fn rename_stock_with_initial_value() {
+        let mut project = TestProject::new("test")
+            .aux("initial_stock", "100", None)
+            .stock("inventory", "initial_stock * 2", &[], &[], None)
+            .build_datamodel();
+
+        let patch = ProjectPatch {
+            project_ops: vec![],
+            models: vec![ModelPatch {
+                name: "main".to_string(),
+                ops: vec![ModelOperation {
+                    op: Some(model_operation::Op::RenameVariable(
+                        project_io::RenameVariableOp {
+                            from: "initial_stock".to_string(),
+                            to: "starting_inventory".to_string(),
+                        },
+                    )),
+                }],
+            }],
+        };
+
+        apply_patch(&mut project, &patch).unwrap();
+        let model = project.get_model("main").unwrap();
+
+        match model.get_variable("inventory").unwrap() {
+            Variable::Stock(stock) => match &stock.equation {
+                datamodel::Equation::Scalar(main, initial) => {
+                    assert_eq!(main, "starting_inventory * 2");
+                    assert_eq!(initial, &None);
+                }
+                _ => panic!("expected scalar equation"),
+            },
+            _ => panic!("expected stock variable"),
+        }
     }
 }
