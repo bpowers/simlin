@@ -9,11 +9,15 @@ use std::result::Result as StdResult;
 
 use pico_args::Arguments;
 
+use simlin::errors::{
+    FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
+    format_simulation_error,
+};
 use simlin_compat::engine::common::ErrorKind;
 use simlin_compat::engine::datamodel::Project as DatamodelProject;
 use simlin_compat::engine::{
-    Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, build_sim_with_stderrors,
-    datamodel, eprintln, project_io, serde,
+    Error, ErrorCode, Project, Result, Results, Simulation, Variable, Vm, datamodel, project_io,
+    serde,
 };
 use simlin_compat::prost::Message;
 use simlin_compat::{load_csv, load_dat, open_vensim, open_xmile, to_xmile};
@@ -149,8 +153,64 @@ fn open_binary(reader: &mut dyn BufRead) -> Result<datamodel::Project> {
     Ok(project)
 }
 
+fn print_formatted_error(error: &FormattedError) {
+    if matches!(
+        error.kind,
+        FormattedErrorKind::Variable | FormattedErrorKind::Units
+    ) {
+        eprintln!();
+    }
+    if let Some(message) = &error.message {
+        eprintln!("{message}");
+    }
+}
+
+fn report_formatted_errors(formatted: &FormattedErrors) {
+    for error in &formatted.errors {
+        print_formatted_error(error);
+    }
+}
+
+fn format_and_report_project_errors(project: &Project) -> FormattedErrors {
+    let formatted = collect_formatted_errors(project);
+    report_formatted_errors(&formatted);
+    formatted
+}
+
+fn run_engine_project(project: Project) -> StdResult<Results, Error> {
+    let project = Rc::new(project);
+    let sim = Simulation::new(&project, "main")?;
+    let compiled = sim.compile().unwrap();
+    let mut vm = Vm::new(compiled).unwrap();
+    vm.run_to_end().unwrap();
+    Ok(vm.into_results())
+}
+
+fn handle_simulation_error(err: &Error, formatted: &FormattedErrors) {
+    if err.code == ErrorCode::NotSimulatable && formatted.has_model_errors {
+        return;
+    }
+    let formatted_error = format_simulation_error("main", err);
+    print_formatted_error(&formatted_error);
+}
+
+fn finish_engine_project(project: Project, formatted: &FormattedErrors) -> Results {
+    match run_engine_project(project) {
+        Ok(results) => results,
+        Err(err) => {
+            handle_simulation_error(&err, formatted);
+            die!("failed to create simulation");
+        }
+    }
+}
+
+fn run_datamodel_with_errors(project: &DatamodelProject) -> Results {
+    let engine_project = Project::from(project.clone());
+    let formatted = format_and_report_project_errors(&engine_project);
+    finish_engine_project(engine_project, &formatted)
+}
+
 fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
-    // If LTM is requested, use the engine::Project with LTM and compile directly
     if enable_ltm {
         let engine_project = Project::from(project.clone());
 
@@ -168,36 +228,26 @@ fn simulate(project: &DatamodelProject, enable_ltm: bool) -> Results {
             }
         }
 
-        match engine_project.with_ltm() {
-            Ok(ltm_project) => {
-                // Use the LTM-instrumented Project directly with Simulation
-                let ltm_project = Rc::new(ltm_project);
-                match Simulation::new(&ltm_project, "main") {
-                    Ok(sim) => {
-                        let compiled = sim.compile().unwrap();
-                        let mut vm = Vm::new(compiled).unwrap();
-                        vm.run_to_end().unwrap();
-                        return vm.into_results();
-                    }
-                    Err(err) => {
-                        eprintln!("Error creating simulation with LTM: {}", err);
-                        // Fall back to regular simulation
-                    }
+        let formatted = format_and_report_project_errors(&engine_project);
+
+        match engine_project.clone().with_ltm() {
+            Ok(ltm_project) => match run_engine_project(ltm_project) {
+                Ok(results) => return results,
+                Err(err) => {
+                    handle_simulation_error(&err, &formatted);
+                    eprintln!("Error creating simulation with LTM: {err}");
+                    eprintln!("falling back to regular simulation without LTM");
                 }
-            }
+            },
             Err(err) => {
-                eprintln!("Warning: Failed to enable LTM: {}", err);
-                // Continue with the original project
+                eprintln!("Warning: Failed to enable LTM: {err}");
             }
         }
+
+        return finish_engine_project(engine_project, &formatted);
     }
 
-    // Regular simulation without LTM
-    let sim = build_sim_with_stderrors(project).unwrap();
-    let compiled = sim.compile().unwrap();
-    let mut vm = Vm::new(compiled).unwrap();
-    vm.run_to_end().unwrap();
-    vm.into_results()
+    run_datamodel_with_errors(project)
 }
 
 fn main() {

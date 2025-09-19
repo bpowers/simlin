@@ -32,7 +32,6 @@ mod stdlib {
 pub mod ai_info;
 #[cfg(test)]
 mod array_tests;
-mod builder;
 mod bytecode;
 pub mod interpreter;
 pub mod ltm;
@@ -48,7 +47,6 @@ mod units_check;
 mod units_infer;
 mod vm;
 
-pub use self::builder::build_sim_with_stderrors;
 pub use self::common::{Error, ErrorCode, Result, canonicalize};
 pub use self::interpreter::Simulation;
 pub use self::patch::apply_patch;

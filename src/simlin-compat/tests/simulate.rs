@@ -13,8 +13,7 @@ use simlin_compat::{load_csv, load_dat, xmile};
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::serde::{deserialize, serialize};
-use simlin_engine::{Project, Results, Vm};
-use simlin_engine::{build_sim_with_stderrors, project_io};
+use simlin_engine::{Project, Results, Vm, project_io};
 
 const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t')];
 
@@ -191,7 +190,8 @@ fn simulate_path(xmile_path: &str) {
             eprintln!("model '{xmile_path}' error: {err}");
         }
         let datamodel_project = datamodel_project.unwrap();
-        let sim = build_sim_with_stderrors(&datamodel_project).unwrap();
+        let project = Rc::new(Project::from(datamodel_project.clone()));
+        let sim = Simulation::new(&project, "main").unwrap();
 
         // sim.debug_print_runlists("main");
         let results = sim.run_to_end();

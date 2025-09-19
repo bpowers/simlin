@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 use prost::Message;
-use simlin_engine::common::{EquationError, ErrorCode, UnitError};
+use simlin_engine::common::ErrorCode;
 use simlin_engine::ltm::{detect_loops, LoopPolarity};
 use simlin_engine::{self as engine, canonicalize, serde, Vm};
 use std::alloc::{alloc, dealloc, Layout};
@@ -12,6 +12,7 @@ use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+pub mod errors;
 mod ffi;
 pub use ffi::{
     SimlinErrorDetail, SimlinErrorDetails, SimlinLink, SimlinLinkPolarity, SimlinLinks, SimlinLoop,
@@ -1675,12 +1676,8 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
     let mut all_errors = collect_project_errors(&staged_project);
     let sim_error = create_vm(&staged_project, "main").err();
     if let Some(error) = sim_error.clone() {
-        all_errors.push(
-            ErrorDetailBuilder::new(error.code)
-                .message(error.get_details())
-                .model_name("main")
-                .build(),
-        );
+        let formatted = errors::format_simulation_error("main", &error);
+        all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
     }
 
     let error_code = if !allow_errors {
@@ -1774,94 +1771,30 @@ impl ErrorDetailBuilder {
             end_offset: self.end_offset,
         }
     }
-}
 
-// Helper function to collect equation errors for a variable
-fn collect_equation_errors(
-    errors: Vec<EquationError>,
-    model_name: &str,
-    var_name: &str,
-) -> Vec<SimlinErrorDetail> {
-    errors
-        .into_iter()
-        .map(|error| {
-            ErrorDetailBuilder::new(error.code)
-                .model_name(model_name)
-                .variable_name(var_name)
-                .offsets(error.start, error.end)
-                .build()
-        })
-        .collect()
-}
-
-// Helper function to collect unit errors for a variable
-fn collect_unit_errors(
-    errors: Vec<UnitError>,
-    model_name: &str,
-    var_name: &str,
-) -> Vec<SimlinErrorDetail> {
-    errors
-        .into_iter()
-        .map(|error| {
-            let (code, start, end, message) = match error {
-                UnitError::DefinitionError(eq_err, details) => {
-                    (eq_err.code, eq_err.start, eq_err.end, details)
-                }
-                UnitError::ConsistencyError(err_code, loc, details) => {
-                    (err_code, loc.start, loc.end, details)
-                }
-            };
-            ErrorDetailBuilder::new(code)
-                .message(message)
-                .model_name(model_name)
-                .variable_name(var_name)
-                .offsets(start, end)
-                .build()
-        })
-        .collect()
+    fn from_formatted(error: errors::FormattedError) -> SimlinErrorDetail {
+        let mut builder = ErrorDetailBuilder::new(error.code);
+        if let Some(message) = error.message {
+            builder = builder.message(Some(message));
+        }
+        if let Some(model_name) = error.model_name {
+            builder = builder.model_name(&model_name);
+        }
+        if let Some(variable_name) = error.variable_name {
+            builder = builder.variable_name(&variable_name);
+        }
+        builder
+            .offsets(error.start_offset, error.end_offset)
+            .build()
+    }
 }
 
 fn collect_project_errors(project: &engine::Project) -> Vec<SimlinErrorDetail> {
-    let mut all_errors = Vec::new();
-
-    for error in &project.errors {
-        all_errors.push(
-            ErrorDetailBuilder::new(error.code)
-                .message(error.get_details())
-                .build(),
-        );
-    }
-
-    for (model_name, model) in &project.models {
-        if let Some(ref errors) = model.errors {
-            for error in errors {
-                all_errors.push(
-                    ErrorDetailBuilder::new(error.code)
-                        .message(error.get_details())
-                        .model_name(model_name.as_str())
-                        .build(),
-                );
-            }
-        }
-
-        for (var_name, errors) in model.get_variable_errors() {
-            all_errors.extend(collect_equation_errors(
-                errors,
-                model_name.as_str(),
-                var_name.as_str(),
-            ));
-        }
-
-        for (var_name, errors) in model.get_unit_errors() {
-            all_errors.extend(collect_unit_errors(
-                errors,
-                model_name.as_str(),
-                var_name.as_str(),
-            ));
-        }
-    }
-
-    all_errors
+    errors::collect_formatted_errors(project)
+        .errors
+        .into_iter()
+        .map(ErrorDetailBuilder::from_formatted)
+        .collect()
 }
 
 fn gather_error_details(
@@ -1871,12 +1804,8 @@ fn gather_error_details(
     let sim_error = create_vm(project, "main").err();
 
     if let Some(error) = sim_error.clone() {
-        all_errors.push(
-            ErrorDetailBuilder::new(error.code)
-                .message(error.get_details())
-                .model_name("main")
-                .build(),
-        );
+        let formatted = errors::format_simulation_error("main", &error);
+        all_errors.push(ErrorDetailBuilder::from_formatted(formatted));
     }
 
     (all_errors, sim_error)
