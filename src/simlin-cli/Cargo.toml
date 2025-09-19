@@ -13,3 +13,4 @@ path = "src/main.rs"
 pico-args = "0.5"
 stringreader = "0.1"
 simlin-compat = { version = "0.1", path = "../simlin-compat", features=["vensim"] }
+simlin = { version = "0.1", path = "../libsimlin" }
