@@ -32,6 +32,10 @@ python -m pip install -e src/pysimlin[dev]
 echo "Running pysimlin tests..."
 pytest -q --no-cov src/pysimlin/tests
 
+echo "Running pysimlin examples..."
+python src/pysimlin/examples/edit_existing_model.py
+python src/pysimlin/examples/population_model.py
+
 echo "Building wheel..."
 python -m pip install build
 python -m build -w src/pysimlin

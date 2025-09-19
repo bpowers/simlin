@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 import simlin
 from simlin import Project, SimlinImportError, ErrorCode
+from simlin import pb
 
 
 class TestProjectLoading:
@@ -83,7 +84,17 @@ class TestProjectModels:
         if names:
             model = project.get_model(names[0])
             assert model is not None
-    
+
+    def test_new_project_creates_blank_model(self) -> None:
+        """Project.new() should create a blank project with a single empty model."""
+        project = Project.new(name="example")
+        assert project.get_model_names() == ["main"]
+        assert project.get_errors() == []
+
+        model = project.get_model()
+        assert model.get_var_count() == 4
+        assert set(model.get_var_names()) == {"time", "dt", "initial_time", "final_time"}
+
     def test_get_nonexistent_model_raises(self, xmile_model_data: bytes) -> None:
         """Test that getting a nonexistent model raises an error."""
         project = Project.from_xmile(xmile_model_data)
@@ -205,6 +216,41 @@ class TestProjectContextManager:
         model = project.get_model()
         assert model is not None
         # Cleanup will still happen through finalizer
+
+
+class TestProjectEditing:
+    """Tests for editing project-level metadata."""
+
+    def test_set_sim_specs_updates_project(self, xmile_model_data: bytes) -> None:
+        """set_sim_specs should update the serialized simulation specs."""
+        project = Project.from_xmile(xmile_model_data)
+
+        project.set_sim_specs(
+            start=0.0,
+            stop=42.0,
+            dt={"value": 0.25, "is_reciprocal": False},
+            save_step=pb.Dt(value=0.5, is_reciprocal=False),
+            sim_method=pb.SimMethod.EULER,
+            time_units="Minutes",
+        )
+
+        project_proto = pb.Project()
+        project_proto.ParseFromString(project.serialize())
+
+        assert project_proto.sim_specs.start == pytest.approx(0.0)
+        assert project_proto.sim_specs.stop == pytest.approx(42.0)
+        assert project_proto.sim_specs.dt.value == pytest.approx(0.25)
+        assert project_proto.sim_specs.dt.is_reciprocal is False
+        assert project_proto.sim_specs.save_step.value == pytest.approx(0.5)
+        assert project_proto.sim_specs.sim_method == pb.SimMethod.EULER
+        assert project_proto.sim_specs.time_units == "Minutes"
+
+    def test_set_sim_specs_rejects_invalid_dt(self, xmile_model_data: bytes) -> None:
+        """Invalid dt types should raise a TypeError before reaching the engine."""
+        project = Project.from_xmile(xmile_model_data)
+
+        with pytest.raises(TypeError):
+            project.set_sim_specs(dt="not-a-dt")
 
 
 class TestProjectRepr:
