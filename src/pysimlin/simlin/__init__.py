@@ -25,6 +25,7 @@ from .analysis import (
 from .project import Project
 from .model import Model
 from .sim import Sim
+from . import pb
 
 __all__ = [
     # Main classes
@@ -44,4 +45,5 @@ __all__ = [
     "LoopPolarity",
     "Link",
     "Loop",
+    "pb",
 ]

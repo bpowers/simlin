@@ -19,6 +19,12 @@ def _register_finalizer(obj: Any, cleanup_func: Any, *args: Any) -> None:
 
 
 def string_to_c(s: Optional[str]) -> Any:
+    """Convert Python string to C string.
+
+    Note: The returned memory is managed by CFFI and will be garbage collected.
+    For long-lived usage or when passing to C functions that might store the pointer,
+    consider using a different approach.
+    """
     if s is None:
         return ffi.NULL
     return ffi.new("char[]", s.encode("utf-8"))
@@ -39,6 +45,7 @@ def get_error_string(error_code: int) -> str:
     c_str = lib.simlin_error_str(error_code)
     if c_str == ffi.NULL:
         return f"Unknown error code: {error_code}"
+    # Note: simlin_error_str returns a const static string that should NOT be freed
     return ffi.string(c_str).decode("utf-8")
 
 

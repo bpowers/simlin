@@ -144,6 +144,12 @@ SimlinProject *simlin_import_xmile(const uint8_t *data, uintptr_t len, int *err)
 SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, int *err);
 int simlin_export_xmile(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
 int simlin_project_serialize(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
+SimlinErrorCode simlin_project_apply_patch(SimlinProject *project,
+                                           const uint8_t *patch_data,
+                                           uintptr_t patch_len,
+                                           bool dry_run,
+                                           bool allow_errors,
+                                           SimlinErrorDetails **out_errors);
 SimlinErrorDetails *simlin_project_get_errors(SimlinProject *project);
 void simlin_free_error_details(SimlinErrorDetails *details);
 void simlin_free_error_detail(SimlinErrorDetail *detail);
