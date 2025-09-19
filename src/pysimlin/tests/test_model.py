@@ -3,7 +3,8 @@
 import pytest
 from pathlib import Path
 import simlin
-from simlin import Project, Model, SimlinRuntimeError
+from simlin import Project, Model, SimlinRuntimeError, AuxVariable, FlowVariable
+from simlin._generated import project_io_pb2 as project_io
 
 
 @pytest.fixture
@@ -176,6 +177,79 @@ class TestModelContextManager:
                 assert model.get_var_count() > 0
                 sim = model.new_sim()
                 assert sim is not None
+
+
+class TestModelEditing:
+    """Tests for the model editing context manager."""
+
+    def test_edit_context_applies_flow_changes(self, mdl_model_data: bytes) -> None:
+        """Patches created inside edit() should apply when the context exits."""
+        project = Project.from_mdl(mdl_model_data)
+        model = project.get_model()
+
+        with model.edit(allow_errors=True) as (current, patch):
+            heat_loss = current["Heat Loss to Room"]
+            assert isinstance(heat_loss, FlowVariable)
+            heat_loss.set_equation("0")
+            patch.upsert(heat_loss)
+
+        project_proto = project_io.Project()
+        project_proto.ParseFromString(project.serialize())
+        model_proto = project_proto.models[0]
+        flow_proto = next(
+            var.flow
+            for var in model_proto.variables
+            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+        )
+
+        assert flow_proto.equation.scalar.equation == "0"
+
+    def test_edit_context_dry_run_does_not_commit(self, mdl_model_data: bytes) -> None:
+        """dry_run=True should validate without mutating the project."""
+        project = Project.from_mdl(mdl_model_data)
+        model = project.get_model()
+
+        original = project_io.Project()
+        original.ParseFromString(project.serialize())
+        original_flow = next(
+            var.flow
+            for var in original.models[0].variables
+            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+        )
+
+        with model.edit(dry_run=True, allow_errors=True) as (current, patch):
+            flow = current["Heat Loss to Room"]
+            assert isinstance(flow, FlowVariable)
+            flow.set_equation("0")
+            patch.upsert(flow)
+
+        project_proto = project_io.Project()
+        project_proto.ParseFromString(project.serialize())
+        flow_proto = next(
+            var.flow
+            for var in project_proto.models[0].variables
+            if var.flow.ident in {"Heat Loss to Room", "heat_loss_to_room"}
+        )
+
+        assert flow_proto.equation.scalar.equation == original_flow.equation.scalar.equation
+
+    def test_edit_context_invalid_patch_raises(self, xmile_model_data: bytes) -> None:
+        """Invalid edits should raise and leave the project unchanged."""
+        project = Project.from_xmile(xmile_model_data)
+        model = project.get_model()
+
+        before = project_io.Project()
+        before.ParseFromString(project.serialize())
+
+        with pytest.raises(SimlinRuntimeError):
+            with model.edit() as (_, patch):
+                bad_aux = AuxVariable.new("bad_variable")
+                bad_aux.set_equation("?? invalid expression")
+                patch.upsert(bad_aux)
+
+        after = project_io.Project()
+        after.ParseFromString(project.serialize())
+        assert after == before
 
 
 class TestModelRepr:

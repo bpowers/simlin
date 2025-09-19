@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 import simlin
 from simlin import Project, SimlinImportError, ErrorCode
+from simlin._generated import project_io_pb2 as project_io
 
 
 class TestProjectLoading:
@@ -205,6 +206,41 @@ class TestProjectContextManager:
         model = project.get_model()
         assert model is not None
         # Cleanup will still happen through finalizer
+
+
+class TestProjectEditing:
+    """Tests for editing project-level metadata."""
+
+    def test_set_sim_specs_updates_project(self, xmile_model_data: bytes) -> None:
+        """set_sim_specs should update the serialized simulation specs."""
+        project = Project.from_xmile(xmile_model_data)
+
+        project.set_sim_specs(
+            start=0.0,
+            stop=42.0,
+            dt={"value": 0.25, "is_reciprocal": False},
+            save_step=project_io.Dt(value=0.5, is_reciprocal=False),
+            sim_method=project_io.SimMethod.EULER,
+            time_units="Minutes",
+        )
+
+        project_proto = project_io.Project()
+        project_proto.ParseFromString(project.serialize())
+
+        assert project_proto.sim_specs.start == pytest.approx(0.0)
+        assert project_proto.sim_specs.stop == pytest.approx(42.0)
+        assert project_proto.sim_specs.dt.value == pytest.approx(0.25)
+        assert project_proto.sim_specs.dt.is_reciprocal is False
+        assert project_proto.sim_specs.save_step.value == pytest.approx(0.5)
+        assert project_proto.sim_specs.sim_method == project_io.SimMethod.EULER
+        assert project_proto.sim_specs.time_units == "Minutes"
+
+    def test_set_sim_specs_rejects_invalid_dt(self, xmile_model_data: bytes) -> None:
+        """Invalid dt types should raise a TypeError before reaching the engine."""
+        project = Project.from_xmile(xmile_model_data)
+
+        with pytest.raises(TypeError):
+            project.set_sim_specs(dt="not-a-dt")
 
 
 class TestProjectRepr:

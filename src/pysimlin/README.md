@@ -153,6 +153,30 @@ sim.set_value("growth_rate", 0.05)
 sim.run_to_end()
 ```
 
+### Editing Models
+
+```python
+from pathlib import Path
+import simlin
+
+project = simlin.Project.from_file(Path("teacup.mdl"))
+model = project.get_model()
+
+with model.edit() as (current, patch):
+    heat_loss = current["Heat Loss to Room"].set_equation(
+        "(Teacup Temperature - Room Temperature) * Cooling Factor"
+    )
+    patch.upsert(heat_loss)
+
+    cooling_factor = simlin.AuxVariable.new("Cooling Factor").set_equation(
+        "0.1 / Characteristic Time"
+    )
+    patch.upsert(cooling_factor)
+
+sim = model.new_sim()
+sim.run_to_end()
+```
+
 ### Feedback Loop Analysis
 
 ```python

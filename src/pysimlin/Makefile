@@ -6,11 +6,16 @@ build-lib:
 
 # Build the Python package
 build: build-lib
-	python scripts/build_wheels.py
+        python scripts/build_wheels.py
+
+# Regenerate protobuf bindings
+protos:
+	mkdir -p simlin/_generated
+	protoc -I../simlin-engine/src --python_out=simlin/_generated ../simlin-engine/src/project_io.proto
 
 # Install for development
 dev: build-lib
-	pip install -e ".[dev]"
+        pip install -e ".[dev]"
 
 # Run tests
 test:

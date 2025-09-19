@@ -23,13 +23,25 @@ from .analysis import (
     Loop,
 )
 from .project import Project
-from .model import Model
+from .model import (
+    Model,
+    ModelVariable,
+    StockVariable,
+    FlowVariable,
+    AuxVariable,
+    ModuleVariable,
+)
 from .sim import Sim
 
 __all__ = [
     # Main classes
     "Project",
-    "Model", 
+    "Model",
+    "ModelVariable",
+    "StockVariable",
+    "FlowVariable",
+    "AuxVariable",
+    "ModuleVariable",
     "Sim",
     # Errors
     "SimlinError",

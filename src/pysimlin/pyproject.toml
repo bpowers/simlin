@@ -55,7 +55,7 @@ Repository = "https://github.com/bpowers/simlin"
 Issues = "https://github.com/bpowers/simlin/issues"
 
 [tool.setuptools]
-packages = ["simlin"]
+packages = ["simlin", "simlin._generated"]
 package-dir = {"" = "."}
 
 [tool.setuptools.package-data]
