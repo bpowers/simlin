@@ -167,8 +167,12 @@ export const Connector = styled(
     }
 
     static isStraightLine(props: ConnectorProps): boolean {
-      const from = props.from;
-      const to = props.to;
+      const { element, arcPoint, from, to } = props;
+
+      // If there's no arc defined and no arcPoint, draw a straight line
+      if (element.arc === undefined && !arcPoint) {
+        return true;
+      }
 
       const takeoffAngle = takeoffθ(props);
       const midθ = atan2(to.cy - from.cy, to.cx - from.cx);
