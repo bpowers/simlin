@@ -24,15 +24,18 @@ class TestObjectCreationDestruction:
     def test_rapid_project_creation_destruction(self, xmile_model_data: bytes) -> None:
         """Create and destroy many projects rapidly to test memory management."""
         projects = []
+        project_ids = []
         initial_ref_count = len(_finalizer_refs)
-        
+
         # Create many projects
         for _ in range(100):
             project = Project.from_xmile(xmile_model_data)
             projects.append(project)
-        
-        # Check that finalizer refs were registered
-        assert len(_finalizer_refs) >= initial_ref_count + 100
+            project_ids.append(id(project))
+
+        # Check that finalizer refs were registered for every project we created.
+        missing_finalizers = [pid for pid in project_ids if pid not in _finalizer_refs]
+        assert not missing_finalizers, f"Missing finalizers for project ids: {missing_finalizers}"
         
         # Clear references
         projects.clear()
