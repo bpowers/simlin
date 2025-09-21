@@ -746,7 +746,7 @@ const linkViewElementDefaults = {
   uid: -1,
   fromUid: -1,
   toUid: -1,
-  arc: 0.0 as number | undefined,
+  arc: undefined as number | undefined,
   isStraight: false,
   multiPoint: undefined as List<Point> | undefined,
 };
