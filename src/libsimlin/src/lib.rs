@@ -566,6 +566,9 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
+    // Resolve non-private dependencies to hide internal implementation details
+    let deps = engine::resolve_non_private_dependencies(eng_model, deps);
+
     // If max is 0, just return the count
     if max == 0 {
         return deps.len() as c_int;
@@ -4067,6 +4070,183 @@ mod tests {
 
             // Clean up
             simlin_sim_unref(sim);
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_get_incoming_links_with_private_variables() {
+        // Test that private variables (starting with $⁚) are not exposed in incoming links
+        // Create a model with a SMOOTH function which internally creates private variables
+        let test_project = TestProject::new("test")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("input", "10", None)
+            .aux("smooth_time", "3", None)
+            // SMTH1 creates internal private variables like $⁚smoothed⁚0⁚smth1⁚output
+            .aux("smoothed", "SMTH1(input, smooth_time)", None)
+            // A variable that depends on the smoothed output
+            .aux("result", "smoothed * 2", None);
+
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine::serde::serialize(&datamodel_project);
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+
+            // Test getting incoming links for 'smoothed' variable
+            // It should show 'input' and 'smooth_time' as dependencies,
+            // but NOT any private variables like $⁚smoothed⁚0⁚smooth⁚output
+            let smoothed_name = CString::new("smoothed").unwrap();
+            let count =
+                simlin_model_get_incoming_links(model, smoothed_name.as_ptr(), ptr::null_mut(), 0);
+
+            // Get the actual dependencies
+            let mut links = vec![ptr::null_mut::<c_char>(); count as usize];
+            let count2 = simlin_model_get_incoming_links(
+                model,
+                smoothed_name.as_ptr(),
+                links.as_mut_ptr(),
+                count as usize,
+            );
+            assert_eq!(count2, count);
+
+            // Collect dependency names
+            let mut dep_names = Vec::new();
+            for link in links.iter().take(count2 as usize) {
+                assert!(!link.is_null());
+                let dep_name = CStr::from_ptr(*link).to_string_lossy().into_owned();
+                dep_names.push(dep_name.clone());
+
+                simlin_free_string(*link);
+            }
+
+            // Assert that no private variable is exposed
+            for dep_name in &dep_names {
+                assert!(
+                    !dep_name.starts_with("$"),
+                    "Private variable '{}' should not be exposed in incoming links",
+                    dep_name
+                );
+            }
+
+            // Should have input and smooth_time as dependencies
+            assert!(
+                dep_names.contains(&"input".to_string()),
+                "Missing 'input' dependency"
+            );
+            assert!(
+                dep_names.contains(&"smooth_time".to_string()),
+                "Missing 'smooth_time' dependency"
+            );
+
+            // Clean up
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_get_incoming_links_nested_private_vars() {
+        // Test that nested private variables are resolved transitively
+        // Create a model with chained SMTH1 functions which create nested private variables
+        let test_project = TestProject::new("test")
+            .with_sim_time(0.0, 10.0, 1.0)
+            .aux("base_input", "TIME", None)
+            .aux("delay1", "2", None)
+            .aux("delay2", "3", None)
+            // First smoothing creates private variables
+            .aux("smooth1", "SMTH1(base_input, delay1)", None)
+            // Second smoothing uses first, creating more private variables
+            .aux("smooth2", "SMTH1(smooth1, delay2)", None)
+            // Final result uses the second smoothed value
+            .aux("final_output", "smooth2 * 1.5", None);
+
+        let datamodel_project = test_project.build_datamodel();
+        let project = engine::serde::serialize(&datamodel_project);
+        let mut buf = Vec::new();
+        project.encode(&mut buf).unwrap();
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_open(buf.as_ptr(), buf.len(), &mut err);
+            assert!(!proj.is_null());
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+
+            // Test smooth1 dependencies - should resolve to base_input and delay1
+            let smooth1_name = CString::new("smooth1").unwrap();
+            let count =
+                simlin_model_get_incoming_links(model, smooth1_name.as_ptr(), ptr::null_mut(), 0);
+
+            let mut links = vec![ptr::null_mut::<c_char>(); count as usize];
+            simlin_model_get_incoming_links(
+                model,
+                smooth1_name.as_ptr(),
+                links.as_mut_ptr(),
+                count as usize,
+            );
+
+            let mut smooth1_deps = Vec::new();
+            for link in links.iter().take(count as usize) {
+                let dep_name = CStr::from_ptr(*link).to_string_lossy().into_owned();
+                smooth1_deps.push(dep_name.clone());
+                assert!(
+                    !dep_name.starts_with("$"),
+                    "No private vars in smooth1 deps"
+                );
+                simlin_free_string(*link);
+            }
+
+            assert!(smooth1_deps.contains(&"base_input".to_string()));
+            assert!(smooth1_deps.contains(&"delay1".to_string()));
+
+            // Test smooth2 dependencies - should transitively resolve through smooth1's private vars
+            let smooth2_name = CString::new("smooth2").unwrap();
+            let count =
+                simlin_model_get_incoming_links(model, smooth2_name.as_ptr(), ptr::null_mut(), 0);
+
+            let mut links = vec![ptr::null_mut::<c_char>(); count as usize];
+            simlin_model_get_incoming_links(
+                model,
+                smooth2_name.as_ptr(),
+                links.as_mut_ptr(),
+                count as usize,
+            );
+
+            let mut smooth2_deps = Vec::new();
+            for link in links.iter().take(count as usize) {
+                let dep_name = CStr::from_ptr(*link).to_string_lossy().into_owned();
+                smooth2_deps.push(dep_name.clone());
+                assert!(
+                    !dep_name.starts_with("$"),
+                    "No private vars in smooth2 deps"
+                );
+                simlin_free_string(*link);
+            }
+
+            // smooth2 depends on smooth1's module output, which transitively depends on
+            // base_input, delay1, plus smooth2's own delay2
+            assert!(
+                smooth2_deps.contains(&"smooth1".to_string()),
+                "Should depend on smooth1"
+            );
+            assert!(
+                smooth2_deps.contains(&"delay2".to_string()),
+                "Should depend on delay2"
+            );
+
+            // Clean up
             simlin_model_unref(model);
             simlin_project_unref(proj);
         }

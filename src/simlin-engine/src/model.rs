@@ -1023,6 +1023,63 @@ impl ModelStage1 {
     }
 }
 
+/// Resolves dependencies to exclude private variables.
+/// Private variables (starting with "$⁚") are internal implementation details that
+/// should not be exposed through public APIs. This function transitively resolves
+/// them to their non-private dependencies.
+pub fn resolve_non_private_dependencies(
+    model: &ModelStage1,
+    deps: HashSet<Ident<Canonical>>,
+) -> HashSet<Ident<Canonical>> {
+    let mut resolved = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut to_process: Vec<_> = deps.into_iter().collect();
+
+    while let Some(dep) = to_process.pop() {
+        if !visited.insert(dep.clone()) {
+            continue;
+        }
+
+        if !dep.as_str().starts_with("$⁚") {
+            // Public variable - include in results
+            resolved.insert(dep);
+            continue;
+        }
+
+        // Private variable - resolve to its dependencies
+        let deps_to_add = if dep.as_str().contains('·') {
+            // Module output reference: "module·output"
+            // Dependencies are the module's input sources
+            let module_name = canonicalize(dep.as_str().split('·').next().unwrap());
+            match model.variables.get(&module_name) {
+                Some(Variable::Module { inputs, .. }) => {
+                    inputs.iter().map(|input| input.src.clone()).collect()
+                }
+                _ => vec![],
+            }
+        } else {
+            // Regular private variable - get its direct dependencies
+            match model.variables.get(&dep) {
+                Some(var) => {
+                    let ast = var.ast().or_else(|| var.init_ast());
+                    ast.map(|a| identifier_set(a, &[], None).into_iter().collect())
+                        .unwrap_or_default()
+                }
+                None => vec![],
+            }
+        };
+
+        // Queue dependencies for processing
+        for dep in deps_to_add {
+            if !visited.contains(&dep) {
+                to_process.push(dep);
+            }
+        }
+    }
+
+    resolved
+}
+
 #[test]
 fn test_module_dependency() {
     let lynxes_model = x_model(
