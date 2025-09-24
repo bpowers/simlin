@@ -186,7 +186,7 @@ export const Label = styled(
           <text
             x={textX}
             y={textY}
-            style={align ? { textAnchor: align } : undefined}
+            style={align ? { textAnchor: align, filter: 'url(#labelBackground)' } : { filter: 'url(#labelBackground)' }}
             onPointerDown={this.handlePointerDown}
             onPointerMove={this.handlePointerMove}
             onPointerUp={this.handlePointerUp}

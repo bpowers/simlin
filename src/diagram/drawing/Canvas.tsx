@@ -1608,7 +1608,20 @@ export const Canvas = styled(
             onPointerCancel={this.handlePointerCancel}
             onPointerUp={this.handlePointerCancel}
           >
-            <defs />
+            <defs>
+              <filter id="labelBackground" x="-50%" y="-50%" width="200%" height="200%">
+                <feMorphology operator="dilate" radius="4" />
+                <feGaussianBlur stdDeviation="2" />
+                <feColorMatrix
+                  type="matrix"
+                  values="0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0 1
+                          0 0 0 0.85 0"
+                />
+                <feComposite operator="over" in="SourceGraphic" />
+              </filter>
+            </defs>
             <g transform={transform}>
               {zLayers}
               {dragRect}
