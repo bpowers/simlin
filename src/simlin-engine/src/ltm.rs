@@ -771,19 +771,31 @@ fn analyze_expr_polarity_with_context(
                             _ => LinkPolarity::Unknown,
                         }
                     } else if left_pol != LinkPolarity::Unknown {
-                        // Only left has polarity, check if right is a constant
-                        if is_positive_constant(right) {
+                        // Only left has polarity, check if right is a constant or constant-valued variable
+                        if is_positive_constant(right)
+                            || (variables.is_some()
+                                && is_positive_variable(right, variables.unwrap()))
+                        {
                             left_pol
-                        } else if is_negative_constant(right) {
+                        } else if is_negative_constant(right)
+                            || (variables.is_some()
+                                && is_negative_variable(right, variables.unwrap()))
+                        {
                             flip_polarity(left_pol)
                         } else {
                             LinkPolarity::Unknown
                         }
                     } else if right_pol != LinkPolarity::Unknown {
-                        // Only right has polarity, check if left is a constant
-                        if is_positive_constant(left) {
+                        // Only right has polarity, check if left is a constant or constant-valued variable
+                        if is_positive_constant(left)
+                            || (variables.is_some()
+                                && is_positive_variable(left, variables.unwrap()))
+                        {
                             right_pol
-                        } else if is_negative_constant(left) {
+                        } else if is_negative_constant(left)
+                            || (variables.is_some()
+                                && is_negative_variable(left, variables.unwrap()))
+                        {
                             flip_polarity(right_pol)
                         } else {
                             LinkPolarity::Unknown
@@ -793,10 +805,12 @@ fn analyze_expr_polarity_with_context(
                     }
                 }
                 BinaryOp::Div => {
-                    // Division by variable in denominator flips polarity
+                    // Division: numerator preserves polarity, denominator flips polarity
                     if left_pol != LinkPolarity::Unknown {
+                        // Variable in numerator preserves polarity
                         left_pol
                     } else if right_pol != LinkPolarity::Unknown {
+                        // Variable in denominator flips polarity
                         flip_polarity(right_pol)
                     } else {
                         LinkPolarity::Unknown
@@ -862,6 +876,30 @@ fn is_negative_constant(expr: &Expr2) -> bool {
         Expr2::Const(_, n, _) => *n < 0.0,
         _ => false,
     }
+}
+
+/// Check if a variable has a positive constant value
+fn is_positive_variable(expr: &Expr2, variables: &HashMap<Ident<Canonical>, Variable>) -> bool {
+    if let Expr2::Var(ident, _, _) = expr
+        && let Some(var) = variables.get(ident)
+        && let Some(Ast::Scalar(var_expr)) = var.ast()
+    {
+        // Recursively check if the variable's equation is a positive constant
+        return is_positive_constant(var_expr);
+    }
+    false
+}
+
+/// Check if a variable has a negative constant value
+fn is_negative_variable(expr: &Expr2, variables: &HashMap<Ident<Canonical>, Variable>) -> bool {
+    if let Expr2::Var(ident, _, _) = expr
+        && let Some(var) = variables.get(ident)
+        && let Some(Ast::Scalar(var_expr)) = var.ast()
+    {
+        // Recursively check if the variable's equation is a negative constant
+        return is_negative_constant(var_expr);
+    }
+    false
 }
 
 /// Analyze the polarity of a graphical function/lookup table
@@ -1929,5 +1967,96 @@ mod tests {
             LoopPolarity::Balancing,
             "Loop r1 should be balancing"
         );
+    }
+
+    #[test]
+    fn test_logistic_growth_loops() {
+        use crate::project::Project;
+        use crate::prost::Message;
+        use std::fs;
+
+        // Load the logistic-growth.protobin file - path is relative to workspace root
+        let proto_bytes = fs::read("../../test/logistic-growth.protobin")
+            .expect("Failed to read logistic-growth.protobin file");
+
+        // Decode the protobuf into project_io::Project
+        let project_io = crate::project_io::Project::decode(&proto_bytes[..])
+            .expect("Failed to decode logistic-growth.protobin");
+
+        // Convert to datamodel::Project then to project::Project
+        let datamodel_project = crate::serde::deserialize(project_io);
+        let project = Project::from(datamodel_project);
+
+        // Find the main model
+        let main_model_name = project
+            .models
+            .keys()
+            .find(|name| project.models.get(*name).is_some_and(|m| !m.implicit))
+            .expect("Should have a non-implicit model");
+
+        let main_model = project
+            .models
+            .get(main_model_name)
+            .expect("Should be able to get main model");
+
+        // Build the causal graph and find loops
+        let graph = CausalGraph::from_model(main_model, &project)
+            .expect("Should be able to build causal graph");
+        let loops = graph.find_loops();
+
+        // Logistic growth should have exactly 2 loops:
+        // 1. One reinforcing loop (exponential growth)
+        // 2. One balancing loop (carrying capacity constraint)
+        assert_eq!(
+            loops.len(),
+            2,
+            "Logistic growth model should have exactly 2 feedback loops, found: {}",
+            loops.len()
+        );
+
+        // Count reinforcing and balancing loops
+        let reinforcing_count = loops
+            .iter()
+            .filter(|l| l.polarity == LoopPolarity::Reinforcing)
+            .count();
+        let balancing_count = loops
+            .iter()
+            .filter(|l| l.polarity == LoopPolarity::Balancing)
+            .count();
+
+        assert_eq!(
+            reinforcing_count, 1,
+            "Logistic growth model should have exactly 1 reinforcing loop, found: {}",
+            reinforcing_count
+        );
+
+        assert_eq!(
+            balancing_count, 1,
+            "Logistic growth model should have exactly 1 balancing loop, found: {}",
+            balancing_count
+        );
+
+        // Check if the carrying capacity loop is correctly identified as balancing
+        // This loop involves fractional_growth_rate which depends on fraction_of_carrying_capacity_used
+        let carrying_capacity_loop = loops.iter().find(|l| {
+            l.links.iter().any(|link| {
+                link.from.as_str() == "fraction_of_carrying_capacity_used"
+                    && link.to.as_str() == "fractional_growth_rate"
+            }) || l.links.iter().any(|link| {
+                link.from.as_str() == "fractional_growth_rate"
+                    && link.to.as_str() == "net_birth_rate"
+            })
+        });
+
+        if let Some(loop_item) = carrying_capacity_loop {
+            assert_eq!(
+                loop_item.polarity,
+                LoopPolarity::Balancing,
+                "The carrying capacity loop should be balancing, not reinforcing. Path: {}",
+                loop_item.format_path()
+            );
+        } else {
+            panic!("Could not find the carrying capacity loop in the model");
+        }
     }
 }
