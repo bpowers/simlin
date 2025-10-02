@@ -246,6 +246,61 @@ pub unsafe extern "C" fn simlin_project_open(
     }
     Box::into_raw(boxed)
 }
+
+/// simlin_project_json_open opens a project from JSON data.
+/// If an error occurs, the function returns NULL and if the err parameter
+/// is not NULL, details of the error are placed in it.
+///
+/// # Safety
+/// - `data` must be a valid pointer to at least `len` bytes of UTF-8 JSON
+/// - `err` may be null
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_json_open(
+    data: *const u8,
+    len: usize,
+    err: *mut c_int,
+) -> *mut SimlinProject {
+    if data.is_null() {
+        if !err.is_null() {
+            *err = engine::ErrorCode::Generic as c_int;
+        }
+        return ptr::null_mut();
+    }
+
+    let slice = std::slice::from_raw_parts(data, len);
+
+    let json_str = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => {
+            if !err.is_null() {
+                *err = engine::ErrorCode::Generic as c_int;
+            }
+            return ptr::null_mut();
+        }
+    };
+
+    let json_project: engine::json::Project = match serde_json::from_str(json_str) {
+        Ok(p) => p,
+        Err(_) => {
+            if !err.is_null() {
+                *err = engine::ErrorCode::Generic as c_int;
+            }
+            return ptr::null_mut();
+        }
+    };
+
+    let datamodel_project: engine::datamodel::Project = json_project.into();
+    let project: engine::Project = datamodel_project.into();
+
+    let boxed = Box::new(SimlinProject {
+        project,
+        ref_count: AtomicUsize::new(1),
+    });
+    if !err.is_null() {
+        *err = engine::ErrorCode::NoError as c_int;
+    }
+    Box::into_raw(boxed)
+}
 /// Increments the reference count of a project
 ///
 /// # Safety
@@ -4384,6 +4439,104 @@ mod tests {
 
             // Clean up
             simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_json_open() {
+        let json_str = r#"{
+            "name": "test_json_project",
+            "sim_specs": {
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "dt": "1",
+                "save_step": 1.0,
+                "method": "euler",
+                "time_units": "days"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [{
+                    "uid": 1,
+                    "name": "population",
+                    "initial_equation": "100",
+                    "inflows": [],
+                    "outflows": [],
+                    "units": "people",
+                    "documentation": "",
+                    "can_be_module_input": false,
+                    "is_public": false,
+                    "dimensions": []
+                }],
+                "flows": [],
+                "auxiliaries": [{
+                    "uid": 2,
+                    "name": "growth_rate",
+                    "equation": "0.1",
+                    "units": "",
+                    "documentation": "",
+                    "can_be_module_input": false,
+                    "is_public": false,
+                    "dimensions": []
+                }],
+                "modules": [],
+                "sim_specs": {
+                    "start_time": 0.0,
+                    "end_time": 10.0,
+                    "dt": "1",
+                    "save_step": 1.0,
+                    "method": "",
+                    "time_units": ""
+                },
+                "views": []
+            }],
+            "dimensions": [],
+            "units": []
+        }"#;
+
+        unsafe {
+            let mut err: c_int = 0;
+            let json_bytes = json_str.as_bytes();
+            let proj = simlin_project_json_open(json_bytes.as_ptr(), json_bytes.len(), &mut err);
+
+            assert!(!proj.is_null(), "project open failed: {err}");
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            // Verify we can get the model
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+
+            // Verify variable count
+            let var_count = simlin_model_get_var_count(model);
+            assert!(var_count > 0, "expected variables in model");
+
+            // Clean up
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_json_open_invalid_json() {
+        unsafe {
+            let mut err: c_int = 0;
+            let invalid_json = b"not valid json {";
+            let proj =
+                simlin_project_json_open(invalid_json.as_ptr(), invalid_json.len(), &mut err);
+
+            assert!(proj.is_null(), "expected null project for invalid JSON");
+            assert_ne!(err, engine::ErrorCode::NoError as c_int);
+        }
+    }
+
+    #[test]
+    fn test_project_json_open_null_input() {
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_json_open(ptr::null(), 0, &mut err);
+
+            assert!(proj.is_null());
+            assert_eq!(err, engine::ErrorCode::Generic as c_int);
         }
     }
 }

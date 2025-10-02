@@ -8,12 +8,12 @@
 //! arrays for stocks/flows/auxiliaries/modules rather than unified enums.
 //!
 //! # Example
-//! ```rust
+//! ```no_run
 //! use simlin_engine::json;
 //!
 //! let json_str = r#"{"name": "test", "sim_specs": {...}, ...}"#;
 //! let json_proj: json::Project = serde_json::from_str(json_str)?;
-//! let datamodel_proj: crate::datamodel::Project = json_proj.into();
+//! let datamodel_proj: simlin_engine::datamodel::Project = json_proj.into();
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -40,7 +40,7 @@ fn is_empty_string(val: &str) -> bool {
     val.is_empty()
 }
 
-fn is_empty_vec<T>(val: &Vec<T>) -> bool {
+fn is_empty_vec<T>(val: &[T]) -> bool {
     val.is_empty()
 }
 

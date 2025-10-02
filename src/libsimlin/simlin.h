@@ -140,6 +140,15 @@ const char *simlin_error_str(int err);
 // - `err` may be null
 SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, int *err);
 
+// simlin_project_json_open opens a project from JSON data.
+// If an error occurs, the function returns NULL and if the err parameter
+// is not NULL, details of the error are placed in it.
+//
+// # Safety
+// - `data` must be a valid pointer to at least `len` bytes of UTF-8 JSON
+// - `err` may be null
+SimlinProject *simlin_project_json_open(const uint8_t *data, uintptr_t len, int *err);
+
 // Increments the reference count of a project
 //
 // # Safety
