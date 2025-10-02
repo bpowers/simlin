@@ -28,6 +28,62 @@ class TestProjectLoading:
         assert project is not None
         assert len(project.get_model_names()) > 0
 
+    def test_load_from_json_sdai_format(self) -> None:
+        """Test loading a project from SDAI JSON format."""
+        sdai_json = b"""{
+            "variables": [
+                {
+                    "type": "stock",
+                    "name": "inventory",
+                    "equation": "50",
+                    "units": "widgets",
+                    "inflows": ["production"],
+                    "outflows": ["sales"]
+                },
+                {
+                    "type": "flow",
+                    "name": "production",
+                    "equation": "10",
+                    "units": "widgets/month"
+                },
+                {
+                    "type": "flow",
+                    "name": "sales",
+                    "equation": "8",
+                    "units": "widgets/month"
+                },
+                {
+                    "type": "variable",
+                    "name": "target_inventory",
+                    "equation": "100",
+                    "units": "widgets"
+                }
+            ],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 10.0,
+                "dt": 1.0,
+                "timeUnits": "months"
+            }
+        }"""
+        project = Project.from_json(sdai_json, format=simlin.JSON_FORMAT_SDAI)
+        assert project is not None
+        assert len(project.get_model_names()) > 0
+
+    def test_load_from_json_invalid_format(self, json_model_data: bytes) -> None:
+        """Test that invalid format string raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid format"):
+            Project.from_json(json_model_data, format="invalid")
+
+    def test_load_from_json_default_format(self, json_model_data: bytes) -> None:
+        """Test that default format is simlin format."""
+        # Should work with default format parameter
+        project = Project.from_json(json_model_data)
+        assert project is not None
+        # Should be equivalent to explicitly specifying simlin format
+        project2 = Project.from_json(json_model_data, format=simlin.JSON_FORMAT_SIMLIN)
+        assert project2 is not None
+
     def test_load_from_file_xmile(self, xmile_model_path: Path) -> None:
         """Test loading a project from an XMILE file."""
         project = Project.from_file(xmile_model_path)

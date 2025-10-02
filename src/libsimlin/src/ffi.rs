@@ -39,6 +39,14 @@ pub enum SimlinLinkPolarity {
     Unknown = 2,
 }
 
+/// JSON format specifier for C API
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimlinJsonFormat {
+    Native = 0,
+    Sdai = 1,
+}
+
 /// A single feedback loop
 #[repr(C)]
 pub struct SimlinLoop {

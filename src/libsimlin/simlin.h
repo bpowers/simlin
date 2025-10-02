@@ -52,6 +52,12 @@ typedef enum {
   SIMLIN_ERROR_CODE_GENERIC = 32,
 } SimlinErrorCode;
 
+// JSON format specifier for C API
+typedef enum {
+  SIMLIN_JSON_FORMAT_NATIVE = 0,
+  SIMLIN_JSON_FORMAT_SDAI = 1,
+} SimlinJsonFormat;
+
 // Link polarity for C API
 typedef enum {
   SIMLIN_LINK_POLARITY_POSITIVE = 0,
@@ -147,7 +153,10 @@ SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, int *err)
 // # Safety
 // - `data` must be a valid pointer to at least `len` bytes of UTF-8 JSON
 // - `err` may be null
-SimlinProject *simlin_project_json_open(const uint8_t *data, uintptr_t len, int *err);
+SimlinProject *simlin_project_json_open(const uint8_t *data,
+                                        uintptr_t len,
+                                        SimlinJsonFormat format,
+                                        int *err);
 
 // Increments the reference count of a project
 //

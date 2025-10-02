@@ -22,7 +22,7 @@ from .analysis import (
     Link,
     Loop,
 )
-from .project import Project
+from .project import Project, JSON_FORMAT_SIMLIN, JSON_FORMAT_SDAI
 from .model import Model
 from .sim import Sim
 from . import pb
@@ -30,7 +30,7 @@ from . import pb
 __all__ = [
     # Main classes
     "Project",
-    "Model", 
+    "Model",
     "Sim",
     # Errors
     "SimlinError",
@@ -45,5 +45,8 @@ __all__ = [
     "LoopPolarity",
     "Link",
     "Loop",
+    # JSON format constants
+    "JSON_FORMAT_SIMLIN",
+    "JSON_FORMAT_SDAI",
     "pb",
 ]

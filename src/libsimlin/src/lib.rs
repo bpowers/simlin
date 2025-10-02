@@ -258,6 +258,7 @@ pub unsafe extern "C" fn simlin_project_open(
 pub unsafe extern "C" fn simlin_project_json_open(
     data: *const u8,
     len: usize,
+    format: ffi::SimlinJsonFormat,
     err: *mut c_int,
 ) -> *mut SimlinProject {
     if data.is_null() {
@@ -279,17 +280,33 @@ pub unsafe extern "C" fn simlin_project_json_open(
         }
     };
 
-    let json_project: engine::json::Project = match serde_json::from_str(json_str) {
-        Ok(p) => p,
-        Err(_) => {
-            if !err.is_null() {
-                *err = engine::ErrorCode::Generic as c_int;
-            }
-            return ptr::null_mut();
+    let datamodel_project: engine::datamodel::Project = match format {
+        ffi::SimlinJsonFormat::Native => {
+            let json_project: engine::json::Project = match serde_json::from_str(json_str) {
+                Ok(p) => p,
+                Err(_) => {
+                    if !err.is_null() {
+                        *err = engine::ErrorCode::Generic as c_int;
+                    }
+                    return ptr::null_mut();
+                }
+            };
+            json_project.into()
+        }
+        ffi::SimlinJsonFormat::Sdai => {
+            let sdai_model: engine::json_sdai::SdaiModel = match serde_json::from_str(json_str) {
+                Ok(m) => m,
+                Err(_) => {
+                    if !err.is_null() {
+                        *err = engine::ErrorCode::Generic as c_int;
+                    }
+                    return ptr::null_mut();
+                }
+            };
+            sdai_model.into()
         }
     };
 
-    let datamodel_project: engine::datamodel::Project = json_project.into();
     let project: engine::Project = datamodel_project.into();
 
     let boxed = Box::new(SimlinProject {
@@ -4497,7 +4514,12 @@ mod tests {
         unsafe {
             let mut err: c_int = 0;
             let json_bytes = json_str.as_bytes();
-            let proj = simlin_project_json_open(json_bytes.as_ptr(), json_bytes.len(), &mut err);
+            let proj = simlin_project_json_open(
+                json_bytes.as_ptr(),
+                json_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                &mut err,
+            );
 
             assert!(!proj.is_null(), "project open failed: {err}");
             assert_eq!(err, engine::ErrorCode::NoError as c_int);
@@ -4521,8 +4543,12 @@ mod tests {
         unsafe {
             let mut err: c_int = 0;
             let invalid_json = b"not valid json {";
-            let proj =
-                simlin_project_json_open(invalid_json.as_ptr(), invalid_json.len(), &mut err);
+            let proj = simlin_project_json_open(
+                invalid_json.as_ptr(),
+                invalid_json.len(),
+                ffi::SimlinJsonFormat::Native,
+                &mut err,
+            );
 
             assert!(proj.is_null(), "expected null project for invalid JSON");
             assert_ne!(err, engine::ErrorCode::NoError as c_int);
@@ -4533,10 +4559,110 @@ mod tests {
     fn test_project_json_open_null_input() {
         unsafe {
             let mut err: c_int = 0;
-            let proj = simlin_project_json_open(ptr::null(), 0, &mut err);
+            let proj =
+                simlin_project_json_open(ptr::null(), 0, ffi::SimlinJsonFormat::Native, &mut err);
 
             assert!(proj.is_null());
             assert_eq!(err, engine::ErrorCode::Generic as c_int);
+        }
+    }
+
+    #[test]
+    fn test_project_json_open_sdai_format() {
+        let json_str = r#"{
+            "variables": [
+                {
+                    "type": "stock",
+                    "name": "inventory",
+                    "equation": "50",
+                    "units": "widgets",
+                    "inflows": ["production"],
+                    "outflows": ["sales"]
+                },
+                {
+                    "type": "flow",
+                    "name": "production",
+                    "equation": "10",
+                    "units": "widgets/month"
+                },
+                {
+                    "type": "flow",
+                    "name": "sales",
+                    "equation": "8",
+                    "units": "widgets/month"
+                },
+                {
+                    "type": "variable",
+                    "name": "target_inventory",
+                    "equation": "100",
+                    "units": "widgets"
+                }
+            ],
+            "specs": {
+                "startTime": 0.0,
+                "stopTime": 10.0,
+                "dt": 1.0,
+                "timeUnits": "months"
+            }
+        }"#;
+
+        unsafe {
+            let mut err: c_int = 0;
+            let json_bytes = json_str.as_bytes();
+            let proj = simlin_project_json_open(
+                json_bytes.as_ptr(),
+                json_bytes.len(),
+                ffi::SimlinJsonFormat::Sdai,
+                &mut err,
+            );
+
+            assert!(!proj.is_null(), "project open failed: {err}");
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            // Verify we can get the model
+            let model = simlin_project_get_model(proj, ptr::null());
+            assert!(!model.is_null());
+
+            // Verify variable count (at least 4 variables, may include built-ins)
+            let var_count = simlin_model_get_var_count(model);
+            assert!(
+                var_count >= 4,
+                "expected at least 4 variables, got {}",
+                var_count
+            );
+
+            // Clean up
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_json_open_sdai_invalid() {
+        let invalid_sdai = r#"{
+            "variables": [
+                {
+                    "type": "invalid_type",
+                    "name": "test"
+                }
+            ]
+        }"#;
+
+        unsafe {
+            let mut err: c_int = 0;
+            let json_bytes = invalid_sdai.as_bytes();
+            let proj = simlin_project_json_open(
+                json_bytes.as_ptr(),
+                json_bytes.len(),
+                ffi::SimlinJsonFormat::Sdai,
+                &mut err,
+            );
+
+            assert!(
+                proj.is_null(),
+                "expected null project for invalid SDAI JSON"
+            );
+            assert_ne!(err, engine::ErrorCode::NoError as c_int);
         }
     }
 }

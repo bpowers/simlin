@@ -20,6 +20,10 @@ from .errors import SimlinImportError, SimlinRuntimeError, ErrorCode, ErrorDetai
 from .analysis import Loop, LoopPolarity
 from . import pb
 
+# JSON format constants
+JSON_FORMAT_SIMLIN = "simlin"
+JSON_FORMAT_SDAI = "sd-ai"
+
 
 def _collect_error_details(c_details: Any) -> List[ErrorDetail]:
     """Convert a C SimlinErrorDetails pointer into Python ErrorDetail objects.
@@ -182,26 +186,40 @@ class Project:
         return cls(project_ptr)
 
     @classmethod
-    def from_json(cls, data: bytes) -> "Project":
+    def from_json(cls, data: bytes, format: str = JSON_FORMAT_SIMLIN) -> "Project":
         """
         Load a project from JSON format.
 
         Args:
             data: The JSON data
+            format: The JSON format to use. Must be one of:
+                - "simlin" (default): Native Simlin JSON format
+                - "sd-ai": SDAI JSON format for AI-generated models
 
         Returns:
             A new Project instance
 
         Raises:
             SimlinImportError: If the data cannot be parsed
+            ValueError: If format is not a valid JSON format string
         """
         if not data:
             raise SimlinImportError("Empty JSON data")
 
+        # Validate and convert format
+        if format == JSON_FORMAT_SIMLIN:
+            c_format = lib.SIMLIN_JSON_FORMAT_NATIVE
+        elif format == JSON_FORMAT_SDAI:
+            c_format = lib.SIMLIN_JSON_FORMAT_SDAI
+        else:
+            raise ValueError(
+                f"Invalid format: {format}. Must be '{JSON_FORMAT_SIMLIN}' or '{JSON_FORMAT_SDAI}'"
+            )
+
         err_ptr = ffi.new("int *")
         c_data = ffi.new("uint8_t[]", data)
 
-        project_ptr = lib.simlin_project_json_open(c_data, len(data), err_ptr)
+        project_ptr = lib.simlin_project_json_open(c_data, len(data), c_format, err_ptr)
 
         if project_ptr == ffi.NULL:
             error_code = err_ptr[0]

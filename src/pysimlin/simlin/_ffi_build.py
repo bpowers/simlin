@@ -63,6 +63,11 @@ typedef enum {
   SIMLIN_LOOP_POLARITY_BALANCING = 1,
 } SimlinLoopPolarity;
 
+typedef enum {
+  SIMLIN_JSON_FORMAT_NATIVE = 0,
+  SIMLIN_JSON_FORMAT_SDAI = 1,
+} SimlinJsonFormat;
+
 typedef struct SimlinModel SimlinModel;
 typedef struct SimlinProject SimlinProject;
 typedef struct SimlinSim SimlinSim;
@@ -108,7 +113,7 @@ typedef struct {
 
 const char *simlin_error_str(int err);
 SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, int *err);
-SimlinProject *simlin_project_json_open(const uint8_t *data, uintptr_t len, int *err);
+SimlinProject *simlin_project_json_open(const uint8_t *data, uintptr_t len, SimlinJsonFormat format, int *err);
 void simlin_project_ref(SimlinProject *project);
 void simlin_project_unref(SimlinProject *project);
 int simlin_project_get_model_count(SimlinProject *project);
