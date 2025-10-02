@@ -3188,8 +3188,8 @@ mod tests {
         // Test edge case of empty array
         let view = ArrayView::contiguous(vec![]);
 
-        assert_eq!(view.dims, vec![]);
-        assert_eq!(view.strides, vec![]);
+        assert_eq!(view.dims, Vec::<usize>::new());
+        assert_eq!(view.strides, Vec::<isize>::new());
         assert_eq!(view.offset, 0);
         assert_eq!(view.size(), 1); // Empty product is 1
         assert!(view.is_contiguous());

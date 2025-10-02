@@ -13,6 +13,7 @@ pub mod datamodel;
 pub mod project_io {
     include!(concat!(env!("OUT_DIR"), "/project_io.rs"));
 }
+pub mod json;
 pub mod serde;
 mod equation {
     #![allow(clippy::all)]
