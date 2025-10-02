@@ -33,3 +33,15 @@ def xmile_model_data(xmile_model_path: Path) -> bytes:
 def mdl_model_data(mdl_model_path: Path) -> bytes:
     """Load MDL model data."""
     return mdl_model_path.read_bytes()
+
+
+@pytest.fixture
+def json_model_path(fixtures_dir: Path) -> Path:
+    """Return path to a test JSON model."""
+    return fixtures_dir / "simple.json"
+
+
+@pytest.fixture
+def json_model_data(json_model_path: Path) -> bytes:
+    """Load JSON model data."""
+    return json_model_path.read_bytes()

@@ -21,10 +21,22 @@ class TestProjectLoading:
         project = Project.from_mdl(mdl_model_data)
         assert project is not None
         assert len(project.get_model_names()) > 0
-    
-    def test_load_from_file(self, xmile_model_path: Path) -> None:
-        """Test loading a project from a file."""
+
+    def test_load_from_json(self, json_model_data: bytes) -> None:
+        """Test loading a project from JSON format."""
+        project = Project.from_json(json_model_data)
+        assert project is not None
+        assert len(project.get_model_names()) > 0
+
+    def test_load_from_file_xmile(self, xmile_model_path: Path) -> None:
+        """Test loading a project from an XMILE file."""
         project = Project.from_file(xmile_model_path)
+        assert project is not None
+        assert len(project.get_model_names()) > 0
+
+    def test_load_from_file_json(self, json_model_path: Path) -> None:
+        """Test loading a project from a JSON file."""
+        project = Project.from_file(json_model_path)
         assert project is not None
         assert len(project.get_model_names()) > 0
     

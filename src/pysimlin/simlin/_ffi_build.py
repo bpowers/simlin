@@ -108,6 +108,7 @@ typedef struct {
 
 const char *simlin_error_str(int err);
 SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, int *err);
+SimlinProject *simlin_project_json_open(const uint8_t *data, uintptr_t len, int *err);
 void simlin_project_ref(SimlinProject *project);
 void simlin_project_unref(SimlinProject *project);
 int simlin_project_get_model_count(SimlinProject *project);

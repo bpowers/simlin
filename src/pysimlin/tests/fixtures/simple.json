@@ -1,0 +1,51 @@
+{
+    "name": "simple_test_model",
+    "sim_specs": {
+        "start_time": 0.0,
+        "end_time": 10.0,
+        "dt": "1",
+        "save_step": 1.0,
+        "method": "euler",
+        "time_units": "months"
+    },
+    "models": [{
+        "name": "main",
+        "stocks": [{
+            "uid": 1,
+            "name": "inventory",
+            "initial_equation": "50",
+            "inflows": ["production"],
+            "outflows": ["sales"],
+            "units": "widgets"
+        }],
+        "flows": [{
+            "uid": 2,
+            "name": "production",
+            "equation": "10",
+            "units": "widgets/month"
+        }, {
+            "uid": 3,
+            "name": "sales",
+            "equation": "8",
+            "units": "widgets/month"
+        }],
+        "auxiliaries": [{
+            "uid": 4,
+            "name": "target_inventory",
+            "equation": "100",
+            "units": "widgets"
+        }],
+        "modules": [],
+        "sim_specs": {
+            "start_time": 0.0,
+            "end_time": 10.0,
+            "dt": "1",
+            "save_step": 1.0,
+            "method": "",
+            "time_units": ""
+        },
+        "views": []
+    }],
+    "dimensions": [],
+    "units": []
+}

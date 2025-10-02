@@ -156,29 +156,58 @@ class Project:
     def from_mdl(cls, data: bytes) -> "Project":
         """
         Load a project from Vensim MDL format.
-        
+
         Args:
             data: The MDL text data
-            
+
         Returns:
             A new Project instance
-            
+
         Raises:
             SimlinImportError: If the data cannot be parsed
         """
         if not data:
             raise SimlinImportError("Empty MDL data")
-        
+
         err_ptr = ffi.new("int *")
         c_data = ffi.new("uint8_t[]", data)
-        
+
         project_ptr = lib.simlin_import_mdl(c_data, len(data), err_ptr)
-        
+
         if project_ptr == ffi.NULL:
             error_code = err_ptr[0]
             error_msg = get_error_string(error_code)
             raise SimlinImportError(f"Failed to import MDL: {error_msg}", ErrorCode(error_code))
-        
+
+        return cls(project_ptr)
+
+    @classmethod
+    def from_json(cls, data: bytes) -> "Project":
+        """
+        Load a project from JSON format.
+
+        Args:
+            data: The JSON data
+
+        Returns:
+            A new Project instance
+
+        Raises:
+            SimlinImportError: If the data cannot be parsed
+        """
+        if not data:
+            raise SimlinImportError("Empty JSON data")
+
+        err_ptr = ffi.new("int *")
+        c_data = ffi.new("uint8_t[]", data)
+
+        project_ptr = lib.simlin_project_json_open(c_data, len(data), err_ptr)
+
+        if project_ptr == ffi.NULL:
+            error_code = err_ptr[0]
+            error_msg = get_error_string(error_code)
+            raise SimlinImportError(f"Failed to import JSON: {error_msg}", ErrorCode(error_code))
+
         return cls(project_ptr)
     
     @classmethod
@@ -209,10 +238,14 @@ class Project:
             return cls.from_mdl(data)
         elif suffix in (".pb", ".bin", ".proto"):
             return cls.from_protobin(data)
+        elif suffix == ".json":
+            return cls.from_json(data)
         else:
             # Try to auto-detect based on content
             if data.startswith(b"<?xml") or data.startswith(b"<xmile"):
                 return cls.from_xmile(data)
+            elif data.startswith(b"{"):
+                return cls.from_json(data)
             else:
                 # Default to protobuf
                 return cls.from_protobin(data)
