@@ -1,0 +1,180 @@
+{
+    "name": "logistic-growth",
+    "sim_specs": {
+        "start_time": 0,
+        "end_time": 100,
+        "dt": "1",
+        "method": "euler"
+    },
+    "models": [
+        {
+            "name": "main",
+            "stocks": [
+                {
+                    "name": "population",
+                    "initial_equation": "5",
+                    "inflows": [
+                        "net_birth_rate"
+                    ],
+                    "outflows": []
+                }
+            ],
+            "flows": [
+                {
+                    "name": "net_birth_rate",
+                    "equation": "fractional_growth_rate * population"
+                }
+            ],
+            "auxiliaries": [
+                {
+                    "name": "carrying_capacity",
+                    "equation": "1000"
+                },
+                {
+                    "name": "fraction_of_carrying_capacity_used",
+                    "equation": "population/carrying_capacity"
+                },
+                {
+                    "name": "fractional_growth_rate",
+                    "equation": "maximum_growth_rate * (1 - fraction_of_carrying_capacity_used)"
+                },
+                {
+                    "name": "maximum_growth_rate",
+                    "equation": ".12"
+                }
+            ],
+            "modules": null,
+            "sim_specs": {
+                "start_time": 0,
+                "end_time": 100,
+                "dt": "1",
+                "method": "euler"
+            },
+            "views": [
+                {
+                    "elements": [
+                        {
+                            "label_side": "top",
+                            "name": "Population",
+                            "type": "stock",
+                            "uid": 1,
+                            "x": 602.4000244140625,
+                            "y": 259.8000183105469
+                        },
+                        {
+                            "label_side": "top",
+                            "name": "net birth rate",
+                            "points": [
+                                {
+                                    "attached_to_uid": 13,
+                                    "x": 456.79998779296875,
+                                    "y": 258.60003662109375
+                                },
+                                {
+                                    "attached_to_uid": 1,
+                                    "x": 579.9000244140625,
+                                    "y": 258.60003662109375
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 2,
+                            "x": 518.2726610523725,
+                            "y": 258.60003662109375
+                        },
+                        {
+                            "label_side": "left",
+                            "name": "maximum\ngrowth rate",
+                            "type": "aux",
+                            "uid": 3,
+                            "x": 463.2000244140625,
+                            "y": 400.44000244140625
+                        },
+                        {
+                            "label_side": "right",
+                            "name": "carrying capacity",
+                            "type": "aux",
+                            "uid": 4,
+                            "x": 651.8400146484374,
+                            "y": 399.23996582031253
+                        },
+                        {
+                            "label_side": "left",
+                            "name": "fractional \ngrowth rate",
+                            "type": "aux",
+                            "uid": 5,
+                            "x": 498,
+                            "y": 344.20001220703125
+                        },
+                        {
+                            "label_side": "right",
+                            "name": "fraction of carrying\ncapacity used",
+                            "type": "aux",
+                            "uid": 6,
+                            "x": 610.800048828125,
+                            "y": 344.6000061035156
+                        },
+                        {
+                            "arc": 230.32515249820716,
+                            "from_uid": 4,
+                            "to_uid": 6,
+                            "type": "link",
+                            "uid": 7
+                        },
+                        {
+                            "arc": 49.638563408603886,
+                            "from_uid": 1,
+                            "to_uid": 6,
+                            "type": "link",
+                            "uid": 8
+                        },
+                        {
+                            "arc": 131.65921988573643,
+                            "from_uid": 6,
+                            "to_uid": 5,
+                            "type": "link",
+                            "uid": 9
+                        },
+                        {
+                            "arc": 300.9615515537398,
+                            "from_uid": 3,
+                            "to_uid": 5,
+                            "type": "link",
+                            "uid": 10
+                        },
+                        {
+                            "arc": 241.17801396704323,
+                            "from_uid": 5,
+                            "to_uid": 2,
+                            "type": "link",
+                            "uid": 11
+                        },
+                        {
+                            "arc": 102.57380061282629,
+                            "from_uid": 1,
+                            "to_uid": 2,
+                            "type": "link",
+                            "uid": 12
+                        },
+                        {
+                            "flow_uid": 2,
+                            "type": "cloud",
+                            "uid": 13,
+                            "x": 456.79998779296875,
+                            "y": 258.60003662109375
+                        }
+                    ],
+                    "kind": "stock_flow",
+                    "view_box": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 0,
+                        "height": 0
+                    },
+                    "zoom": 1
+                }
+            ]
+        }
+    ],
+    "dimensions": [],
+    "units": []
+}

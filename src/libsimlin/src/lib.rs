@@ -4568,6 +4568,29 @@ mod tests {
     }
 
     #[test]
+    fn test_project_json_open_logistic_growth() {
+        let json_bytes = include_bytes!("../../../test/logistic-growth.sd.json");
+
+        unsafe {
+            let mut err: c_int = 0;
+            let proj = simlin_project_json_open(
+                json_bytes.as_ptr(),
+                json_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                &mut err,
+            );
+
+            assert!(
+                !proj.is_null(),
+                "project open failed with error code: {err}"
+            );
+            assert_eq!(err, engine::ErrorCode::NoError as c_int);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
     fn test_project_json_open_sdai_format() {
         let json_str = r#"{
             "variables": [

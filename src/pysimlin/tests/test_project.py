@@ -95,7 +95,19 @@ class TestProjectLoading:
         project = Project.from_file(json_model_path)
         assert project is not None
         assert len(project.get_model_names()) > 0
-    
+
+    def test_load_logistic_growth_json(self) -> None:
+        """Test loading the logistic growth model from JSON file."""
+        repo_root = Path(__file__).parent.parent.parent.parent
+        test_file = repo_root / "test" / "logistic-growth.sd.json"
+        assert test_file.exists(), f"Test file not found: {test_file}"
+
+        project = Project.from_file(test_file)
+        assert project is not None
+        assert len(project.get_model_names()) > 0
+        model = project.get_model()
+        assert model is not None
+
     def test_load_empty_data_raises(self) -> None:
         """Test that loading empty data raises an error."""
         with pytest.raises(SimlinImportError, match="Empty"):

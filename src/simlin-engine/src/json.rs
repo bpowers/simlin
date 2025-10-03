@@ -44,6 +44,15 @@ fn is_empty_vec<T>(val: &[T]) -> bool {
     val.is_empty()
 }
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 // Type alias matching Go's Ident
 pub type Ident = String;
 
@@ -309,6 +318,11 @@ pub struct Model {
     pub stocks: Vec<Stock>,
     pub flows: Vec<Flow>,
     pub auxiliaries: Vec<Auxiliary>,
+    #[serde(
+        skip_serializing_if = "is_empty_vec",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub modules: Vec<Module>,
     pub sim_specs: SimSpecs,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
@@ -1765,5 +1779,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_deserialize_with_null_modules() {
+        let json_str = r#"{
+            "name": "test",
+            "sim_specs": {
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "dt": "1",
+                "method": "euler"
+            },
+            "models": [{
+                "name": "main",
+                "stocks": [],
+                "flows": [],
+                "auxiliaries": [],
+                "modules": null,
+                "sim_specs": {
+                    "start_time": 0.0,
+                    "end_time": 10.0,
+                    "dt": "1",
+                    "method": "euler"
+                },
+                "views": []
+            }],
+            "dimensions": [],
+            "units": []
+        }"#;
+
+        let result: Result<Project, _> = serde_json::from_str(json_str);
+        assert!(result.is_ok(), "Failed to deserialize: {:?}", result.err());
     }
 }
