@@ -98,8 +98,7 @@ class TestProjectLoading:
 
     def test_load_logistic_growth_json(self) -> None:
         """Test loading the logistic growth model from JSON file."""
-        repo_root = Path(__file__).parent.parent.parent.parent
-        test_file = repo_root / "test" / "logistic-growth.sd.json"
+        test_file = Path(__file__).parent / "logistic-growth.sd.json"
         assert test_file.exists(), f"Test file not found: {test_file}"
 
         project = Project.from_file(test_file)
