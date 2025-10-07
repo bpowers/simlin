@@ -327,6 +327,8 @@ pub struct Model {
     pub sim_specs: SimSpecs,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub views: Vec<View>,
+    #[serde(skip_serializing_if = "is_empty_vec", default)]
+    pub loop_metadata: Vec<LoopMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,6 +349,16 @@ pub struct Unit {
     pub disabled: bool,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopMetadata {
+    pub uids: Vec<i32>,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub deleted: bool,
+    pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -784,7 +796,7 @@ impl From<Model> for datamodel::Model {
             name: model.name,
             variables,
             views: model.views.into_iter().map(|v| v.into()).collect(),
-            loop_metadata: vec![],
+            loop_metadata: model.loop_metadata.into_iter().map(|lm| lm.into()).collect(),
         }
     }
 }
@@ -812,6 +824,17 @@ impl From<Unit> for datamodel::Unit {
             },
             disabled: unit.disabled,
             aliases: unit.aliases,
+        }
+    }
+}
+
+impl From<LoopMetadata> for datamodel::LoopMetadata {
+    fn from(loop_metadata: LoopMetadata) -> Self {
+        datamodel::LoopMetadata {
+            uids: loop_metadata.uids,
+            deleted: loop_metadata.deleted,
+            name: loop_metadata.name,
+            description: loop_metadata.description,
         }
     }
 }
@@ -1175,6 +1198,7 @@ impl From<datamodel::Model> for Model {
                 time_units: String::new(),
             },
             views: model.views.into_iter().map(|v| v.into()).collect(),
+            loop_metadata: model.loop_metadata.into_iter().map(|lm| lm.into()).collect(),
         }
     }
 }
@@ -1203,6 +1227,17 @@ impl From<datamodel::Unit> for Unit {
             equation: unit.equation.unwrap_or_default(),
             disabled: unit.disabled,
             aliases: unit.aliases,
+        }
+    }
+}
+
+impl From<datamodel::LoopMetadata> for LoopMetadata {
+    fn from(loop_metadata: datamodel::LoopMetadata) -> Self {
+        LoopMetadata {
+            uids: loop_metadata.uids,
+            deleted: loop_metadata.deleted,
+            name: loop_metadata.name,
+            description: loop_metadata.description,
         }
     }
 }
