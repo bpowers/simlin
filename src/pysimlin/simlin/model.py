@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self, Union
 from types import TracebackType
 
 from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, get_error_string
 from .errors import SimlinRuntimeError, ErrorCode
-from .analysis import Link, LinkPolarity
+from .analysis import Link, LinkPolarity, Loop
+from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale
 from . import pb
 
 if TYPE_CHECKING:
     from .sim import Sim
     from .project import Project
+    from .run import Run
 
 
 def _variable_ident(variable: pb.Variable) -> str:
@@ -171,6 +173,13 @@ class Model:
         self._project = project
         self._name = name or ""
         _register_finalizer(self, lib.simlin_model_unref, ptr)
+
+        self._cached_project_proto: Optional[pb.Project] = None
+        self._cached_stocks: Optional[tuple[Stock, ...]] = None
+        self._cached_flows: Optional[tuple[Flow, ...]] = None
+        self._cached_auxs: Optional[tuple[Aux, ...]] = None
+        self._cached_time_spec: Optional[TimeSpec] = None
+        self._cached_base_case: Optional["Run"] = None
     
     def get_var_count(self) -> int:
         """Get the number of variables in the model."""
@@ -305,6 +314,319 @@ class Model:
             
         finally:
             lib.simlin_free_links(links_ptr)
+
+    def _get_project_proto(self) -> pb.Project:
+        """Get cached protobuf project representation."""
+        if self._cached_project_proto is None:
+            if self._project is None:
+                raise SimlinRuntimeError("Model is not attached to a Project")
+            project_proto = pb.Project()
+            project_proto.ParseFromString(self._project.serialize())
+            self._cached_project_proto = project_proto
+        return self._cached_project_proto
+
+    def _get_model_proto(self) -> pb.Model:
+        """Get this model's protobuf representation."""
+        project_proto = self._get_project_proto()
+        for model_proto in project_proto.models:
+            if model_proto.name == self._name or not self._name:
+                return model_proto
+        raise SimlinRuntimeError(f"Model '{self._name}' not found in project")
+
+    def _parse_graphical_function(self, gf_proto: pb.GraphicalFunction) -> GraphicalFunction:
+        """Parse a protobuf GraphicalFunction into a dataclass."""
+        x_points = tuple(gf_proto.x_points) if gf_proto.x_points else None
+        y_points = tuple(gf_proto.y_points)
+
+        x_scale = GraphicalFunctionScale(
+            min=gf_proto.x_scale.min,
+            max=gf_proto.x_scale.max,
+        )
+        y_scale = GraphicalFunctionScale(
+            min=gf_proto.y_scale.min,
+            max=gf_proto.y_scale.max,
+        )
+
+        kind_map = {
+            pb.GraphicalFunction.CONTINUOUS: "continuous",
+            pb.GraphicalFunction.DISCRETE: "discrete",
+            pb.GraphicalFunction.EXTRAPOLATE: "extrapolate",
+        }
+        kind = kind_map.get(gf_proto.kind, "continuous")
+
+        return GraphicalFunction(
+            x_points=x_points,
+            y_points=y_points,
+            x_scale=x_scale,
+            y_scale=y_scale,
+            kind=kind,
+        )
+
+    def _extract_equation_string(self, eqn_proto: pb.Variable.Equation) -> Tuple[str, Optional[str]]:
+        """
+        Extract equation and initial_equation from protobuf Equation.
+
+        Returns:
+            Tuple of (equation, initial_equation)
+        """
+        which = eqn_proto.WhichOneof("equation")
+        if which == "scalar":
+            scalar = eqn_proto.scalar
+            return scalar.equation, getattr(scalar, "initial_equation", None) or None
+        elif which == "apply_to_all":
+            ata = eqn_proto.apply_to_all
+            return ata.equation, getattr(ata, "initial_equation", None) or None
+        elif which == "arrayed":
+            return "[arrayed]", None
+        else:
+            return "", None
+
+    @property
+    def stocks(self) -> tuple[Stock, ...]:
+        """
+        Stock variables (immutable tuple).
+
+        Returns:
+            Tuple of Stock objects representing all stocks in the model
+        """
+        if self._cached_stocks is None:
+            model_proto = self._get_model_proto()
+            stocks_list = []
+
+            for var_proto in model_proto.variables:
+                which = var_proto.WhichOneof("v")
+                if which == "stock":
+                    stock_proto = var_proto.stock
+                    eqn, initial_eqn = self._extract_equation_string(stock_proto.equation)
+
+                    dimensions = tuple(stock_proto.equation.apply_to_all.dimension_names) if stock_proto.equation.HasField("apply_to_all") else ()
+
+                    stock = Stock(
+                        name=stock_proto.ident,
+                        initial_equation=initial_eqn or eqn,
+                        inflows=tuple(stock_proto.inflows),
+                        outflows=tuple(stock_proto.outflows),
+                        units=stock_proto.units or None,
+                        documentation=stock_proto.documentation or None,
+                        dimensions=dimensions,
+                        non_negative=stock_proto.non_negative,
+                    )
+                    stocks_list.append(stock)
+
+            self._cached_stocks = tuple(stocks_list)
+        return self._cached_stocks
+
+    @property
+    def flows(self) -> tuple[Flow, ...]:
+        """
+        Flow variables (immutable tuple).
+
+        Returns:
+            Tuple of Flow objects representing all flows in the model
+        """
+        if self._cached_flows is None:
+            model_proto = self._get_model_proto()
+            flows_list = []
+
+            for var_proto in model_proto.variables:
+                which = var_proto.WhichOneof("v")
+                if which == "flow":
+                    flow_proto = var_proto.flow
+                    eqn, _ = self._extract_equation_string(flow_proto.equation)
+
+                    dimensions = tuple(flow_proto.equation.apply_to_all.dimension_names) if flow_proto.equation.HasField("apply_to_all") else ()
+
+                    gf = None
+                    if flow_proto.HasField("gf"):
+                        gf = self._parse_graphical_function(flow_proto.gf)
+
+                    flow = Flow(
+                        name=flow_proto.ident,
+                        equation=eqn,
+                        units=flow_proto.units or None,
+                        documentation=flow_proto.documentation or None,
+                        dimensions=dimensions,
+                        non_negative=flow_proto.non_negative,
+                        graphical_function=gf,
+                    )
+                    flows_list.append(flow)
+
+            self._cached_flows = tuple(flows_list)
+        return self._cached_flows
+
+    @property
+    def auxs(self) -> tuple[Aux, ...]:
+        """
+        Auxiliary variables (immutable tuple).
+
+        Returns:
+            Tuple of Aux objects representing all auxiliary variables in the model
+        """
+        if self._cached_auxs is None:
+            model_proto = self._get_model_proto()
+            auxs_list = []
+
+            for var_proto in model_proto.variables:
+                which = var_proto.WhichOneof("v")
+                if which == "aux":
+                    aux_proto = var_proto.aux
+                    eqn, initial_eqn = self._extract_equation_string(aux_proto.equation)
+
+                    dimensions = tuple(aux_proto.equation.apply_to_all.dimension_names) if aux_proto.equation.HasField("apply_to_all") else ()
+
+                    gf = None
+                    if aux_proto.HasField("gf"):
+                        gf = self._parse_graphical_function(aux_proto.gf)
+
+                    aux = Aux(
+                        name=aux_proto.ident,
+                        equation=eqn,
+                        initial_equation=initial_eqn,
+                        units=aux_proto.units or None,
+                        documentation=aux_proto.documentation or None,
+                        dimensions=dimensions,
+                        graphical_function=gf,
+                    )
+                    auxs_list.append(aux)
+
+            self._cached_auxs = tuple(auxs_list)
+        return self._cached_auxs
+
+    @property
+    def variables(self) -> tuple[Union[Stock, Flow, Aux], ...]:
+        """
+        All variables in the model.
+
+        Returns stocks + flows + auxs combined as an immutable tuple.
+
+        Returns:
+            Tuple of all variable objects (Stock, Flow, or Aux)
+        """
+        return self.stocks + self.flows + self.auxs
+
+    @property
+    def time_spec(self) -> TimeSpec:
+        """
+        Time bounds and step size.
+
+        Returns:
+            TimeSpec with simulation time configuration
+        """
+        if self._cached_time_spec is None:
+            model_proto = self._get_model_proto()
+            project_proto = self._get_project_proto()
+
+            sim_specs = project_proto.sim_specs
+
+            start = sim_specs.start
+            stop = sim_specs.stop
+            dt_value = sim_specs.dt.value if sim_specs.HasField("dt") else 1.0
+            time_units = sim_specs.time_units if sim_specs.HasField("time_units") else None
+
+            self._cached_time_spec = TimeSpec(
+                start=start,
+                stop=stop,
+                dt=dt_value,
+                units=time_units,
+            )
+        return self._cached_time_spec
+
+    @property
+    def loops(self) -> tuple[Loop, ...]:
+        """
+        Structural feedback loops (no behavior data).
+
+        Returns an immutable tuple of Loop objects.
+        For loops with behavior time series, use model.base_case.loops
+        or run.loops from a specific simulation run.
+
+        Returns:
+            Tuple of Loop objects (structural only, no behavior data)
+        """
+        if self._project is None:
+            return ()
+        return tuple(self._project.get_loops())
+
+    def simulate(
+        self,
+        overrides: Optional[Dict[str, float]] = None,
+        enable_ltm: bool = False,
+    ) -> "Sim":
+        """
+        Create low-level simulation for step-by-step execution.
+
+        Use this for gaming applications where you need to inspect state
+        and modify variables during simulation. For batch analysis, use
+        model.run() instead.
+
+        Args:
+            overrides: Variable value overrides
+            enable_ltm: Enable Loops That Matter tracking
+
+        Returns:
+            Sim context manager for step-by-step execution
+
+        Example:
+            >>> with model.simulate() as sim:
+            ...     while sim.time < 100:
+            ...         sim.step()
+            ...         if sim.get_value('inventory') < 10:
+            ...             sim.set_value('production_rate', 1.5)
+        """
+        sim = self.new_sim(enable_ltm=enable_ltm)
+        if overrides:
+            for name, value in overrides.items():
+                sim.set_value(name, value)
+        return sim
+
+    def run(
+        self,
+        overrides: Optional[Dict[str, float]] = None,
+        time_range: Optional[Tuple[float, float]] = None,
+        dt: Optional[float] = None,
+        analyze_loops: bool = True,
+    ) -> "Run":
+        """
+        Run simulation with optional variable overrides.
+
+        Args:
+            overrides: Override values for any model variables (by name)
+            time_range: (start, stop) time bounds (uses model defaults if None)
+            dt: Time step (uses model default if None)
+            analyze_loops: Whether to compute loop dominance analysis (LTM)
+
+        Returns:
+            Run object with results and analysis
+
+        Example:
+            >>> run = model.run(overrides={'birth_rate': 0.03})
+            >>> run.results['population'].plot()
+        """
+        from .run import Run
+
+        sim = self.simulate(overrides=overrides or {}, enable_ltm=analyze_loops)
+        sim.run_to_end()
+
+        loops_structural = self.loops
+
+        return Run(sim, overrides or {}, loops_structural)
+
+    @property
+    def base_case(self) -> "Run":
+        """
+        Simulation results with default parameters.
+
+        Computed on first access and cached.
+
+        Returns:
+            Run object with baseline simulation results
+
+        Example:
+            >>> model.base_case.results['population'].plot()
+        """
+        if self._cached_base_case is None:
+            self._cached_base_case = self.run()
+        return self._cached_base_case
 
     def edit(self, *, dry_run: bool = False, allow_errors: bool = False) -> _ModelEditContext:
         """Return a context manager for batching model edits."""

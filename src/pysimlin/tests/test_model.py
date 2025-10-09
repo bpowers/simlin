@@ -253,9 +253,169 @@ class TestModelEditing:
 
 class TestModelRepr:
     """Test string representation of models."""
-    
+
     def test_repr(self, test_model: Model) -> None:
         """Test __repr__ method."""
         repr_str = repr(test_model)
         assert "Model" in repr_str
         assert "variable" in repr_str.lower()
+
+
+class TestModelStructuralProperties:
+    """Test the new structural properties of Model."""
+
+    def test_stocks_property(self, test_model: Model) -> None:
+        """Test that stocks property returns tuple of Stock objects."""
+        stocks = test_model.stocks
+        assert isinstance(stocks, tuple)
+
+        for stock in stocks:
+            from simlin.types import Stock
+            assert isinstance(stock, Stock)
+            assert isinstance(stock.name, str)
+            assert isinstance(stock.initial_equation, str)
+            assert isinstance(stock.inflows, tuple)
+            assert isinstance(stock.outflows, tuple)
+
+    def test_flows_property(self, test_model: Model) -> None:
+        """Test that flows property returns tuple of Flow objects."""
+        flows = test_model.flows
+        assert isinstance(flows, tuple)
+
+        for flow in flows:
+            from simlin.types import Flow
+            assert isinstance(flow, Flow)
+            assert isinstance(flow.name, str)
+            assert isinstance(flow.equation, str)
+
+    def test_auxs_property(self, test_model: Model) -> None:
+        """Test that auxs property returns tuple of Aux objects."""
+        auxs = test_model.auxs
+        assert isinstance(auxs, tuple)
+
+        for aux in auxs:
+            from simlin.types import Aux
+            assert isinstance(aux, Aux)
+            assert isinstance(aux.name, str)
+            assert isinstance(aux.equation, str)
+
+    def test_variables_property(self, test_model: Model) -> None:
+        """Test that variables property combines stocks, flows, and auxs."""
+        variables = test_model.variables
+        assert isinstance(variables, tuple)
+
+        stocks_count = len(test_model.stocks)
+        flows_count = len(test_model.flows)
+        auxs_count = len(test_model.auxs)
+
+        assert len(variables) == stocks_count + flows_count + auxs_count
+
+    def test_time_spec_property(self, test_model: Model) -> None:
+        """Test that time_spec property returns TimeSpec."""
+        from simlin.types import TimeSpec
+        time_spec = test_model.time_spec
+        assert isinstance(time_spec, TimeSpec)
+        assert time_spec.start >= 0
+        assert time_spec.stop > time_spec.start
+        assert time_spec.dt > 0
+
+    def test_loops_property(self, test_model: Model) -> None:
+        """Test that loops property returns tuple of Loop objects."""
+        loops = test_model.loops
+        assert isinstance(loops, tuple)
+
+        for loop in loops:
+            from simlin.analysis import Loop
+            assert isinstance(loop, Loop)
+            assert isinstance(loop.id, str)
+            assert isinstance(loop.variables, tuple)
+            assert loop.behavior_time_series is None
+
+    def test_structural_properties_cached(self, test_model: Model) -> None:
+        """Test that structural properties are cached."""
+        stocks1 = test_model.stocks
+        stocks2 = test_model.stocks
+        assert stocks1 is stocks2
+
+        flows1 = test_model.flows
+        flows2 = test_model.flows
+        assert flows1 is flows2
+
+        time_spec1 = test_model.time_spec
+        time_spec2 = test_model.time_spec
+        assert time_spec1 is time_spec2
+
+
+class TestModelSimulationMethods:
+    """Test the new simulation methods of Model."""
+
+    def test_simulate_method(self, test_model: Model) -> None:
+        """Test simulate() method returns Sim."""
+        from simlin import Sim
+        sim = test_model.simulate()
+        assert isinstance(sim, Sim)
+
+    def test_simulate_with_overrides(self, test_model: Model) -> None:
+        """Test simulate() with variable overrides."""
+        from simlin import Sim
+        var_names = test_model.get_var_names()
+        if not var_names:
+            pytest.skip("No variables in model")
+
+        overrides = {var_names[0]: 42.0}
+        sim = test_model.simulate(overrides=overrides)
+        assert isinstance(sim, Sim)
+
+    def test_simulate_with_ltm(self, test_model: Model) -> None:
+        """Test simulate() with LTM enabled."""
+        from simlin import Sim
+        sim = test_model.simulate(enable_ltm=True)
+        assert isinstance(sim, Sim)
+
+    def test_run_method(self, test_model: Model) -> None:
+        """Test run() method returns Run."""
+        from simlin.run import Run
+        run = test_model.run(analyze_loops=False)
+        assert isinstance(run, Run)
+
+    def test_run_with_overrides(self, test_model: Model) -> None:
+        """Test run() with variable overrides."""
+        from simlin.run import Run
+        var_names = test_model.get_var_names()
+        if not var_names:
+            pytest.skip("No variables in model")
+
+        overrides = {var_names[0]: 123.0}
+        run = test_model.run(overrides=overrides, analyze_loops=False)
+        assert isinstance(run, Run)
+        assert run.overrides == overrides
+
+    def test_run_with_analyze_loops(self, test_model: Model) -> None:
+        """Test run() with loop analysis."""
+        from simlin.run import Run
+        run = test_model.run(analyze_loops=True)
+        assert isinstance(run, Run)
+
+    def test_base_case_property(self, test_model: Model) -> None:
+        """Test base_case property returns Run."""
+        from simlin.run import Run
+        base_case = test_model.base_case
+        assert isinstance(base_case, Run)
+
+    def test_base_case_cached(self, test_model: Model) -> None:
+        """Test that base_case is cached."""
+        base1 = test_model.base_case
+        base2 = test_model.base_case
+        assert base1 is base2
+
+    def test_base_case_has_no_overrides(self, test_model: Model) -> None:
+        """Test that base_case has empty overrides."""
+        base_case = test_model.base_case
+        assert base_case.overrides == {}
+
+    def test_base_case_has_results(self, test_model: Model) -> None:
+        """Test that base_case has results."""
+        import pandas as pd
+        base_case = test_model.base_case
+        assert isinstance(base_case.results, pd.DataFrame)
+        assert len(base_case.results) > 0
