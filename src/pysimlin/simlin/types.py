@@ -163,3 +163,20 @@ class Aux:
 
     graphical_function: Optional[GraphicalFunction] = None
     """Graphical/table function if this uses WITH LOOKUP"""
+
+
+@dataclass(frozen=True)
+class ModelIssue:
+    """An issue found during model checking."""
+
+    severity: str
+    """Issue severity: 'error', 'warning', or 'info'"""
+
+    message: str
+    """Human-readable description of the issue"""
+
+    variable: Optional[str] = None
+    """Name of the variable with the issue (if applicable)"""
+
+    suggestion: Optional[str] = None
+    """Suggested fix for the issue (if available)"""

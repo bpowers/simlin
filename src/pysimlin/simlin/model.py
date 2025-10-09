@@ -8,7 +8,7 @@ from types import TracebackType
 from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, get_error_string
 from .errors import SimlinRuntimeError, ErrorCode
 from .analysis import Link, LinkPolarity, Loop
-from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale
+from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale, ModelIssue
 from . import pb
 
 if TYPE_CHECKING:
@@ -627,6 +627,75 @@ class Model:
         if self._cached_base_case is None:
             self._cached_base_case = self.run()
         return self._cached_base_case
+
+    def check(self) -> tuple[ModelIssue, ...]:
+        """
+        Check model for common issues.
+
+        Returns tuple of warnings/errors about model structure, equations, etc.
+
+        Returns:
+            Tuple of ModelIssue objects, or empty tuple if no issues
+
+        Example:
+            >>> issues = model.check()
+            >>> for issue in issues:
+            ...     print(f"{issue.severity}: {issue.message}")
+        """
+        if self._project is None:
+            return ()
+
+        error_details = self._project.get_errors()
+        issues = []
+
+        for detail in error_details:
+            severity = "error"
+
+            issue = ModelIssue(
+                severity=severity,
+                message=detail.message,
+                variable=detail.variable_name,
+                suggestion=None,
+            )
+            issues.append(issue)
+
+        return tuple(issues)
+
+    def explain(self, variable: str) -> str:
+        """
+        Get human-readable explanation of a variable.
+
+        Args:
+            variable: Variable name
+
+        Returns:
+            Textual description of what defines/drives this variable
+
+        Example:
+            >>> print(model.explain('population'))
+            "population is a stock increased by births and decreased by deaths"
+
+        Raises:
+            SimlinRuntimeError: If variable doesn't exist
+        """
+        for stock in self.stocks:
+            if stock.name == variable:
+                inflows_str = ", ".join(stock.inflows) if stock.inflows else "no inflows"
+                outflows_str = ", ".join(stock.outflows) if stock.outflows else "no outflows"
+                return f"{stock.name} is a stock with initial value {stock.initial_equation}, increased by {inflows_str}, decreased by {outflows_str}"
+
+        for flow in self.flows:
+            if flow.name == variable:
+                return f"{flow.name} is a flow computed as {flow.equation}"
+
+        for aux in self.auxs:
+            if aux.name == variable:
+                if aux.initial_equation:
+                    return f"{aux.name} is an auxiliary variable computed as {aux.equation} with initial value {aux.initial_equation}"
+                else:
+                    return f"{aux.name} is an auxiliary variable computed as {aux.equation}"
+
+        raise SimlinRuntimeError(f"Variable '{variable}' not found in model")
 
     def edit(self, *, dry_run: bool = False, allow_errors: bool = False) -> _ModelEditContext:
         """Return a context manager for batching model edits."""

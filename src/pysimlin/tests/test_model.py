@@ -419,3 +419,89 @@ class TestModelSimulationMethods:
         base_case = test_model.base_case
         assert isinstance(base_case.results, pd.DataFrame)
         assert len(base_case.results) > 0
+
+
+class TestModelUtilities:
+    """Test utility methods of Model."""
+
+    def test_check_method_returns_tuple(self, test_model: Model) -> None:
+        """Test that check() returns a tuple."""
+        issues = test_model.check()
+        assert isinstance(issues, tuple)
+
+    def test_check_method_on_valid_model(self, test_model: Model) -> None:
+        """Test check() on a valid model returns empty or valid issues."""
+        issues = test_model.check()
+        assert isinstance(issues, tuple)
+
+        for issue in issues:
+            from simlin import ModelIssue
+            assert isinstance(issue, ModelIssue)
+            assert hasattr(issue, 'severity')
+            assert hasattr(issue, 'message')
+            assert isinstance(issue.severity, str)
+            assert isinstance(issue.message, str)
+
+    def test_explain_stock(self, test_model: Model) -> None:
+        """Test explain() for a stock variable."""
+        stocks = test_model.stocks
+        if not stocks:
+            pytest.skip("No stocks in test model")
+
+        stock_name = stocks[0].name
+        explanation = test_model.explain(stock_name)
+        assert isinstance(explanation, str)
+        assert stock_name in explanation
+        assert "stock" in explanation
+
+    def test_explain_flow(self, test_model: Model) -> None:
+        """Test explain() for a flow variable."""
+        flows = test_model.flows
+        if not flows:
+            pytest.skip("No flows in test model")
+
+        flow_name = flows[0].name
+        explanation = test_model.explain(flow_name)
+        assert isinstance(explanation, str)
+        assert flow_name in explanation
+        assert "flow" in explanation
+
+    def test_explain_aux(self, test_model: Model) -> None:
+        """Test explain() for an auxiliary variable."""
+        auxs = test_model.auxs
+        if not auxs:
+            pytest.skip("No auxiliary variables in test model")
+
+        aux_name = auxs[0].name
+        explanation = test_model.explain(aux_name)
+        assert isinstance(explanation, str)
+        assert aux_name in explanation
+        assert "auxiliary" in explanation
+
+    def test_explain_nonexistent_raises(self, test_model: Model) -> None:
+        """Test explain() raises error for nonexistent variable."""
+        with pytest.raises(SimlinRuntimeError) as exc_info:
+            test_model.explain("nonexistent_variable_xyz")
+
+        assert "not found" in str(exc_info.value).lower()
+        assert "nonexistent_variable_xyz" in str(exc_info.value)
+
+    def test_explain_includes_initial_equation_for_stocks(self, test_model: Model) -> None:
+        """Test that stock explanation includes initial value."""
+        stocks = test_model.stocks
+        if not stocks:
+            pytest.skip("No stocks in test model")
+
+        stock_name = stocks[0].name
+        explanation = test_model.explain(stock_name)
+        assert "initial value" in explanation
+
+    def test_explain_includes_equation_for_flows(self, test_model: Model) -> None:
+        """Test that flow explanation includes equation."""
+        flows = test_model.flows
+        if not flows:
+            pytest.skip("No flows in test model")
+
+        flow_name = flows[0].name
+        explanation = test_model.explain(flow_name)
+        assert "computed as" in explanation

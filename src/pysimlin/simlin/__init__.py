@@ -32,6 +32,7 @@ from .types import (
     Stock,
     Flow,
     Aux,
+    ModelIssue,
 )
 from .run import (
     Run,
@@ -96,6 +97,7 @@ __all__ = [
     "Stock",
     "Flow",
     "Aux",
+    "ModelIssue",
     # JSON format constants
     "JSON_FORMAT_SIMLIN",
     "JSON_FORMAT_SDAI",
