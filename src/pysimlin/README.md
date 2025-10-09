@@ -31,24 +31,22 @@ pip install pysimlin
 
 ```python
 import simlin
-from pathlib import Path
 
-# Load a model from file (auto-detects format)
-project = simlin.Project.from_file("model.stmx")
+# Load a model (auto-detects format)
+model = simlin.load("model.stmx")
 
-# Get the default model
-model = project.get_model()
-
-# Create and run a simulation
-sim = model.new_sim()
-sim.run_to_end()
-
-# Get results as a pandas DataFrame
-results = sim.get_results()
-print(results.head())
+# Run simulation and get results
+run = model.run()
+print(run.results.head())
 
 # Access individual variables
-population = sim.get_series("population")
+population = run.results["population"]
+
+# Or use low-level simulation for gaming/interactive use
+with model.simulate() as sim:
+    sim.run_to_end()
+    run = sim.get_run()
+    print(run.results.head())
 ```
 
 ## Examples
