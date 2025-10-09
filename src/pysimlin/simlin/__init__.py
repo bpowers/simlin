@@ -22,6 +22,18 @@ from .analysis import (
     Link,
     Loop,
 )
+from .types import (
+    TimeSpec,
+    GraphicalFunctionScale,
+    GraphicalFunction,
+    Stock,
+    Flow,
+    Aux,
+)
+from .run import (
+    Run,
+    DominantPeriod,
+)
 from .project import Project, JSON_FORMAT_SIMLIN, JSON_FORMAT_SDAI
 from .model import Model
 from .sim import Sim
@@ -32,6 +44,7 @@ __all__ = [
     "Project",
     "Model",
     "Sim",
+    "Run",
     # Errors
     "SimlinError",
     "SimlinCompilationError",
@@ -45,6 +58,14 @@ __all__ = [
     "LoopPolarity",
     "Link",
     "Loop",
+    "DominantPeriod",
+    # Model structure types
+    "TimeSpec",
+    "GraphicalFunctionScale",
+    "GraphicalFunction",
+    "Stock",
+    "Flow",
+    "Aux",
     # JSON format constants
     "JSON_FORMAT_SIMLIN",
     "JSON_FORMAT_SDAI",

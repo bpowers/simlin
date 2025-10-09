@@ -400,10 +400,10 @@ class Project:
                     var_name = c_to_string(c_loop.variables[j])
                     if var_name:
                         variables.append(var_name)
-                
+
                 loop = Loop(
                     id=c_to_string(c_loop.id) or f"loop_{i}",
-                    variables=variables,
+                    variables=tuple(variables),
                     polarity=LoopPolarity(c_loop.polarity)
                 )
                 loops.append(loop)
