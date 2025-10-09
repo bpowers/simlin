@@ -93,7 +93,7 @@ class Sim:
 
     def get_var_names(self) -> list[str]:
         """Return the model's variable names (convenience method)."""
-        return self._model.get_var_names()
+        return [v.name for v in self._model.variables]
     
     def get_step_count(self) -> int:
         """

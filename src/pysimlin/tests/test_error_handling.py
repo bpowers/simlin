@@ -45,46 +45,36 @@ class TestErrorStringHandling:
 
             # Do NOT call lib.simlin_free_string(c_str) - it's a static string!
 
-    def test_import_error_handling(self) -> None:
+    def test_import_error_handling(self, tmp_path) -> None:
         """Test that import errors are handled correctly."""
         # Test invalid XMILE
+        invalid_xmile = tmp_path / "invalid.stmx"
+        invalid_xmile.write_bytes(b"not xml")
         with pytest.raises(SimlinImportError) as exc_info:
-            Project.from_xmile(b"not xml")
-        assert "Failed to import XMILE" in str(exc_info.value)
+            simlin.load(invalid_xmile)
+        assert "Failed to load model" in str(exc_info.value)
         assert exc_info.value.code is not None
 
         # Test invalid MDL
+        invalid_mdl = tmp_path / "invalid.mdl"
+        invalid_mdl.write_bytes(b"invalid mdl")
         with pytest.raises(SimlinImportError) as exc_info:
-            Project.from_mdl(b"invalid mdl")
-        assert "Failed to import" in str(exc_info.value)
+            simlin.load(invalid_mdl)
+        assert "Failed to load model" in str(exc_info.value)
         assert exc_info.value.code is not None
 
-        # Test invalid protobuf
-        with pytest.raises(SimlinImportError) as exc_info:
-            Project.from_protobin(b"not protobuf")
-        assert "Failed to open project" in str(exc_info.value)
-        assert exc_info.value.code is not None
-
-    def test_error_handling_stress(self) -> None:
+    def test_error_handling_stress(self, tmp_path) -> None:
         """Stress test error handling to check for crashes or leaks."""
         initial_refs = len(_finalizer_refs)
 
         # Generate many errors rapidly
         for i in range(100):
             # Try various invalid imports
-            for invalid_data in [b"", b"x", b"not xml", b"\x00" * 10, b"\xFF" * 10]:
+            for j, invalid_data in enumerate([b"", b"x", b"not xml", b"\x00" * 10, b"\xFF" * 10]):
+                invalid_file = tmp_path / f"invalid_{i}_{j}.stmx"
+                invalid_file.write_bytes(invalid_data)
                 try:
-                    Project.from_xmile(invalid_data)
-                except SimlinImportError:
-                    pass  # Expected
-
-                try:
-                    Project.from_mdl(invalid_data)
-                except SimlinImportError:
-                    pass  # Expected
-
-                try:
-                    Project.from_protobin(invalid_data)
+                    simlin.load(invalid_file)
                 except SimlinImportError:
                     pass  # Expected
 
@@ -96,17 +86,16 @@ class TestErrorStringHandling:
         # Allow some tolerance for objects that may still be in scope
         assert final_refs <= initial_refs + 10, f"Too many finalizer refs: {final_refs - initial_refs}"
 
-    def test_model_error_paths(self, xmile_model_data: bytes) -> None:
+    def test_model_error_paths(self, xmile_model_path) -> None:
         """Test error handling in model operations."""
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+        model = simlin.load(xmile_model_path)
 
         # Test error when accessing non-existent variable
         with pytest.raises(SimlinRuntimeError) as exc_info:
             model.get_incoming_links("nonexistent_variable_xyz_123")
         assert "Variable not found" in str(exc_info.value)
 
-    def test_error_detail_collection(self) -> None:
+    def test_error_detail_collection(self, tmp_path) -> None:
         """Test that error details are collected properly without memory issues."""
         # Create a model with intentional errors
         bad_xmile = b"""<?xml version='1.0' encoding='utf-8'?>
@@ -120,7 +109,10 @@ class TestErrorStringHandling:
             </model>
         </xmile>"""
 
-        project = Project.from_xmile(bad_xmile)
+        bad_file = tmp_path / "bad.stmx"
+        bad_file.write_bytes(bad_xmile)
+        model = simlin.load(bad_file)
+        project = model.project
         errors = project.get_errors()
 
         # Should have compilation errors

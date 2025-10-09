@@ -8,35 +8,33 @@ from simlin import pb
 
 
 @pytest.fixture
-def test_model(xmile_model_data: bytes) -> Model:
-    """Create a test model from XMILE data."""
-    project = Project.from_xmile(xmile_model_data)
-    return project.get_model()
+def test_model(xmile_model_path) -> Model:
+    """Create a test model from XMILE file."""
+    return simlin.load(xmile_model_path)
 
 
 class TestModelVariables:
     """Test working with model variables."""
     
-    def test_get_var_count_indirect(self, test_model: Model) -> None:
-        """Test getting the number of variables indirectly through get_var_names."""
-        names = test_model.get_var_names()
-        count = len(names)
+    def test_get_var_count_via_variables(self, test_model: Model) -> None:
+        """Test getting the number of variables via variables property."""
+        count = len(test_model.variables)
         assert isinstance(count, int)
         assert count > 0
-    
-    def test_get_var_names(self, test_model: Model) -> None:
-        """Test getting variable names."""
-        names = test_model.get_var_names()
+
+    def test_get_var_names_via_variables(self, test_model: Model) -> None:
+        """Test getting variable names via variables property."""
+        names = [v.name for v in test_model.variables]
         assert isinstance(names, list)
         assert len(names) > 0
         for name in names:
             assert isinstance(name, str)
             assert len(name) > 0
-    
+
     def test_get_incoming_links(self, test_model: Model) -> None:
         """Test getting incoming links for variables."""
-        var_names = test_model.get_var_names()
-        
+        var_names = [v.name for v in test_model.variables]
+
         # Test at least one variable if available
         if var_names:
             deps = test_model.get_incoming_links(var_names[0])
@@ -51,8 +49,8 @@ class TestModelVariables:
     
     def test_get_incoming_links_empty(self, test_model: Model) -> None:
         """Test that some variables might have no dependencies."""
-        var_names = test_model.get_var_names()
-        
+        var_names = [v.name for v in test_model.variables]
+
         # Find a constant or time variable that has no deps
         found_empty = False
         for name in var_names:
@@ -60,7 +58,7 @@ class TestModelVariables:
             if len(deps) == 0:
                 found_empty = True
                 break
-        
+
         # Most models have at least one variable with no dependencies
         # (like constants or time)
 
@@ -122,14 +120,14 @@ class TestModelSimulation:
 class TestModelContextManager:
     """Test context manager functionality for models."""
     
-    def test_context_manager_basic_usage(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_basic_usage(self, xmile_model_path) -> None:
         """Test basic context manager usage."""
-        project = Project.from_xmile(xmile_model_data)
-        with project.get_model() as model:
+        model = simlin.load(xmile_model_path)
+        with model:
             assert model is not None
-            assert model.get_var_count() > 0
+            assert len(model.variables) > 0
             # Model should be usable inside the context
-            var_names = model.get_var_names()
+            var_names = [v.name for v in model.variables]
             assert len(var_names) > 0
     
     def test_context_manager_returns_self(self, test_model: Model) -> None:
@@ -151,41 +149,38 @@ class TestModelContextManager:
         assert test_model._ptr == ffi.NULL
         assert original_ptr != ffi.NULL  # Original was valid
     
-    def test_context_manager_with_exception(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_with_exception(self, xmile_model_path) -> None:
         """Test context manager cleanup when exception occurs."""
         from simlin._ffi import ffi
-        
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
-        
+
+        model = simlin.load(xmile_model_path)
+
         try:
             with model:
                 # Simulate an exception
                 raise ValueError("Test exception")
         except ValueError:
             pass
-        
+
         # Even with exception, cleanup should occur
         assert model._ptr == ffi.NULL
-    
-    def test_nested_context_managers(self, xmile_model_data: bytes) -> None:
-        """Test nested context managers with project and model."""
-        with Project.from_xmile(xmile_model_data) as project:
-            with project.get_model() as model:
-                # Both should be usable inside their contexts
-                assert len(project.get_model_names()) > 0
-                assert model.get_var_count() > 0
-                sim = model.simulate()
-                assert sim is not None
+
+    def test_nested_context_managers(self, xmile_model_path) -> None:
+        """Test nested context managers with model and sim."""
+        model = simlin.load(xmile_model_path)
+        with model:
+            # Model should be usable inside context
+            assert len(model.variables) > 0
+            sim = model.simulate()
+            assert sim is not None
 
 
 class TestModelEditing:
     """Tests for the model editing context manager."""
 
-    def test_edit_context_applies_flow_changes(self, mdl_model_data: bytes) -> None:
+    def test_edit_context_applies_flow_changes(self, mdl_model_path) -> None:
         """Patches created inside edit() should apply when the context exits."""
-        project = Project.from_mdl(mdl_model_data)
-        model = project.get_model()
+        model = simlin.load(mdl_model_path)
 
         with model.edit(allow_errors=True) as (current, patch):
             heat_loss = current["Heat Loss to Room"]
@@ -193,7 +188,7 @@ class TestModelEditing:
             patch.upsert_flow(heat_loss.flow)
 
         project_proto = pb.Project()
-        project_proto.ParseFromString(project.serialize())
+        project_proto.ParseFromString(model.project.serialize())
         model_proto = project_proto.models[0]
         flow_proto = next(
             var.flow
@@ -203,13 +198,12 @@ class TestModelEditing:
 
         assert flow_proto.equation.scalar.equation == "0"
 
-    def test_edit_context_dry_run_does_not_commit(self, mdl_model_data: bytes) -> None:
+    def test_edit_context_dry_run_does_not_commit(self, mdl_model_path) -> None:
         """dry_run=True should validate without mutating the project."""
-        project = Project.from_mdl(mdl_model_data)
-        model = project.get_model()
+        model = simlin.load(mdl_model_path)
 
         original = pb.Project()
-        original.ParseFromString(project.serialize())
+        original.ParseFromString(model.project.serialize())
         original_flow = next(
             var.flow
             for var in original.models[0].variables
@@ -222,7 +216,7 @@ class TestModelEditing:
             patch.upsert_flow(flow.flow)
 
         project_proto = pb.Project()
-        project_proto.ParseFromString(project.serialize())
+        project_proto.ParseFromString(model.project.serialize())
         flow_proto = next(
             var.flow
             for var in project_proto.models[0].variables
@@ -231,13 +225,12 @@ class TestModelEditing:
 
         assert flow_proto.equation.scalar.equation == original_flow.equation.scalar.equation
 
-    def test_edit_context_invalid_patch_raises(self, xmile_model_data: bytes) -> None:
+    def test_edit_context_invalid_patch_raises(self, xmile_model_path) -> None:
         """Invalid edits should raise and leave the project unchanged."""
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+        model = simlin.load(xmile_model_path)
 
         before = pb.Project()
-        before.ParseFromString(project.serialize())
+        before.ParseFromString(model.project.serialize())
 
         with pytest.raises(SimlinRuntimeError):
             with model.edit() as (_, patch):
@@ -247,7 +240,7 @@ class TestModelEditing:
                 patch.upsert_aux(bad_aux)
 
         after = pb.Project()
-        after.ParseFromString(project.serialize())
+        after.ParseFromString(model.project.serialize())
         assert after == before
 
 
@@ -358,7 +351,7 @@ class TestModelSimulationMethods:
     def test_simulate_with_overrides(self, test_model: Model) -> None:
         """Test simulate() with variable overrides."""
         from simlin import Sim
-        var_names = test_model.get_var_names()
+        var_names = [v.name for v in test_model.variables]
         if not var_names:
             pytest.skip("No variables in model")
 
@@ -381,7 +374,7 @@ class TestModelSimulationMethods:
     def test_run_with_overrides(self, test_model: Model) -> None:
         """Test run() with variable overrides."""
         from simlin.run import Run
-        var_names = test_model.get_var_names()
+        var_names = [v.name for v in test_model.variables]
         if not var_names:
             pytest.skip("No variables in model")
 

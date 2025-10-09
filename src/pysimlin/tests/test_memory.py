@@ -21,7 +21,7 @@ from simlin._ffi import ffi, lib, _finalizer_refs
 class TestObjectCreationDestruction:
     """Test rapid creation and destruction of objects to detect memory leaks."""
     
-    def test_rapid_project_creation_destruction(self, xmile_model_data: bytes) -> None:
+    def test_rapid_project_creation_destruction(self, xmile_model_path) -> None:
         """Create and destroy many projects rapidly to test memory management."""
         projects = []
         project_ids = []
@@ -29,7 +29,8 @@ class TestObjectCreationDestruction:
 
         # Create many projects
         for _ in range(100):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             projects.append(project)
             project_ids.append(id(project))
 
@@ -45,13 +46,14 @@ class TestObjectCreationDestruction:
         remaining_refs = len(_finalizer_refs)
         assert remaining_refs <= initial_ref_count + 10, f"Too many finalizer refs remaining: {remaining_refs}"
     
-    def test_rapid_model_creation_destruction(self, xmile_model_data: bytes) -> None:
+    def test_rapid_model_creation_destruction(self, xmile_model_path) -> None:
         """Create and destroy many models rapidly."""
         models = []
         initial_ref_count = len(_finalizer_refs)
-        
+
         for _ in range(100):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             model = project.get_model()
             models.append(model)
         
@@ -63,13 +65,14 @@ class TestObjectCreationDestruction:
         remaining_refs = len(_finalizer_refs)
         assert remaining_refs <= initial_ref_count + 20, f"Too many finalizer refs remaining: {remaining_refs}"
     
-    def test_rapid_sim_creation_destruction(self, xmile_model_data: bytes) -> None:
+    def test_rapid_sim_creation_destruction(self, xmile_model_path) -> None:
         """Create and destroy many simulations rapidly."""
         sims = []
         initial_ref_count = len(_finalizer_refs)
-        
+
         for _ in range(100):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             model = project.get_model()
             sim = model.simulate()
             sims.append(sim)
@@ -82,18 +85,19 @@ class TestObjectCreationDestruction:
         remaining_refs = len(_finalizer_refs)
         assert remaining_refs <= initial_ref_count + 30, f"Too many finalizer refs remaining: {remaining_refs}"
     
-    def test_nested_object_creation(self, xmile_model_data: bytes) -> None:
+    def test_nested_object_creation(self, xmile_model_path) -> None:
         """Test creating objects in nested loops to stress memory management."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         for i in range(20):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             for j in range(5):
                 model = project.get_model()
                 for k in range(3):
                     sim = model.simulate()
                     # Use the sim to ensure it's not optimized away
-                    var_names = model.get_var_names()
+                    var_names = [v.name for v in model.variables]
                     if var_names:
                         try:
                             sim.run_to_end()
@@ -110,9 +114,10 @@ class TestObjectCreationDestruction:
 class TestReferenceCountingEdgeCases:
     """Test edge cases in reference counting that could lead to leaks."""
     
-    def test_circular_reference_prevention(self, xmile_model_data: bytes) -> None:
+    def test_circular_reference_prevention(self, xmile_model_path) -> None:
         """Test that circular references don't prevent cleanup."""
-        project = Project.from_xmile(xmile_model_data)
+        model = simlin.load(xmile_model_path)
+        project = model.project
         model = project.get_model()
         
         # Create weak references to detect cleanup
@@ -132,9 +137,10 @@ class TestReferenceCountingEdgeCases:
         assert project_ref() is None, "Project not garbage collected"
         assert model_ref() is None, "Model not garbage collected"
     
-    def test_multiple_references_to_same_object(self, xmile_model_data: bytes) -> None:
+    def test_multiple_references_to_same_object(self, xmile_model_path) -> None:
         """Test multiple Python references to the same underlying C object."""
-        project = Project.from_xmile(xmile_model_data)
+        model = simlin.load(xmile_model_path)
+        project = model.project
         
         # Get the same model multiple times
         model1 = project.get_model()
@@ -162,9 +168,10 @@ class TestReferenceCountingEdgeCases:
         
         assert model2_ref() is None
     
-    def test_reference_to_destroyed_parent(self, xmile_model_data: bytes) -> None:
+    def test_reference_to_destroyed_parent(self, xmile_model_path) -> None:
         """Test behavior when parent object is destroyed before child."""
-        project = Project.from_xmile(xmile_model_data)
+        model = simlin.load(xmile_model_path)
+        project = model.project
         model = project.get_model()
         sim = model.simulate()
         
@@ -190,19 +197,21 @@ class TestReferenceCountingEdgeCases:
         # All should be collected eventually
         assert sim_ref() is None
     
-    def test_exception_during_construction(self, xmile_model_data: bytes) -> None:
+    def test_exception_during_construction(self, tmp_path, xmile_model_path) -> None:
         """Test that exceptions during object construction don't leak memory."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         # Test invalid project creation
         for _ in range(50):
             try:
-                Project.from_xmile(b"invalid data")
+                invalid_file = tmp_path / "invalid.stmx"
+                invalid_file.write_bytes(b"invalid data")
+                simlin.load(invalid_file)
             except SimlinImportError:
                 pass
-        
+
         gc.collect()
-        
+
         # Should not have leaked finalizer refs
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count <= initial_ref_count + 5
@@ -211,11 +220,12 @@ class TestReferenceCountingEdgeCases:
 class TestFinalizerBehavior:
     """Test proper finalizer behavior and cleanup."""
     
-    def test_finalizer_registration(self, xmile_model_data: bytes) -> None:
+    def test_finalizer_registration(self, xmile_model_path) -> None:
         """Test that finalizers are properly registered for all objects."""
         initial_ref_count = len(_finalizer_refs)
-        
-        project = Project.from_xmile(xmile_model_data)
+
+        model = simlin.load(xmile_model_path)
+        project = model.project
         model = project.get_model()
         sim = model.simulate()
         
@@ -244,12 +254,13 @@ class TestFinalizerBehavior:
         assert model_id not in _finalizer_refs
         assert sim_id not in _finalizer_refs
     
-    def test_finalizer_execution_order(self, xmile_model_data: bytes) -> None:
+    def test_finalizer_execution_order(self, xmile_model_path) -> None:
         """Test that finalizers execute properly regardless of cleanup order."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         # Create objects
-        project = Project.from_xmile(xmile_model_data)
+        model = simlin.load(xmile_model_path)
+        project = model.project
         model = project.get_model()
         sim = model.simulate()
         
@@ -278,7 +289,7 @@ class TestFinalizerBehavior:
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count == initial_ref_count
     
-    def test_finalizer_with_gc_disabled(self, xmile_model_data: bytes) -> None:
+    def test_finalizer_with_gc_disabled(self, xmile_model_path) -> None:
         """Test finalizer behavior when garbage collection is disabled."""
         initial_ref_count = len(_finalizer_refs)
         
@@ -287,7 +298,8 @@ class TestFinalizerBehavior:
         try:
             objects = []
             for _ in range(20):
-                project = Project.from_xmile(xmile_model_data)
+                model = simlin.load(xmile_model_path)
+                project = model.project
                 model = project.get_model()
                 objects.extend([project, model])
             
@@ -307,35 +319,41 @@ class TestFinalizerBehavior:
 class TestContextManagerCleanup:
     """Test context manager cleanup functionality."""
     
-    def test_context_manager_explicit_cleanup(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_explicit_cleanup(self, xmile_model_path) -> None:
         """Test that context managers perform explicit cleanup."""
         project_ptr = None
         model_ptr = None
-        
-        with Project.from_xmile(xmile_model_data) as project:
+
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        with project:
             project_ptr = project._ptr
             assert project_ptr != ffi.NULL
-            
+
             with project.get_model() as model:
                 model_ptr = model._ptr
                 assert model_ptr != ffi.NULL
-                
+
                 # Objects should be valid inside context
-                assert model.get_var_count() > 0
-            
+                assert len(model.variables) > 0
+
             # Model should be cleaned up after context exit
             assert model._ptr == ffi.NULL
-        
+
         # Project should be cleaned up after context exit
         assert project._ptr == ffi.NULL
     
-    def test_nested_context_manager_exception_safety(self, xmile_model_data: bytes) -> None:
+    def test_nested_context_manager_exception_safety(self, xmile_model_path) -> None:
         """Test context manager cleanup when exceptions occur."""
         project_ptr = None
         model_ptr = None
-        
+
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
         try:
-            with Project.from_xmile(xmile_model_data) as project:
+            with project:
                 project_ptr = project._ptr
                 with project.get_model() as model:
                     model_ptr = model._ptr
@@ -343,21 +361,22 @@ class TestContextManagerCleanup:
                     raise ValueError("Test exception")
         except ValueError:
             pass
-        
+
         # Both objects should be cleaned up despite exception
         assert project._ptr == ffi.NULL
         assert model._ptr == ffi.NULL
     
-    def test_context_manager_multiple_entries(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_multiple_entries(self, xmile_model_path) -> None:
         """Test that context managers can be entered multiple times safely."""
-        project = Project.from_xmile(xmile_model_data)
-        
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
         # First context entry
         with project as p1:
             assert p1 is project
             assert project._ptr != ffi.NULL
-            var_count = project.get_model().get_var_count()
-        
+            var_count = len(project.get_model().variables)
+
         # Should be cleaned up
         assert project._ptr == ffi.NULL
         
@@ -370,13 +389,16 @@ class TestContextManagerCleanup:
             # Expected behavior for cleaned up object
             pass
     
-    def test_context_manager_with_simulation(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_with_simulation(self, xmile_model_path) -> None:
         """Test context manager cleanup with running simulations."""
-        with Project.from_xmile(xmile_model_data) as project:
+        model = simlin.load(xmile_model_path)
+        project = model.project
+
+        with project:
             with project.get_model() as model:
                 sim = model.simulate()
-                var_names = model.get_var_names()
-                
+                var_names = [v.name for v in model.variables]
+
                 if var_names:
                     try:
                         sim.run_to_end()
@@ -385,57 +407,57 @@ class TestContextManagerCleanup:
                         assert len(time_values) > 0
                     except SimlinRuntimeError:
                         pass  # Some models may have compilation errors
-        
+
         # All objects should be properly cleaned up
 
 
 class TestErrorPathMemoryLeaks:
     """Test memory leaks in error conditions and exception paths."""
     
-    def test_import_error_no_leak(self) -> None:
+    def test_import_error_no_leak(self, tmp_path) -> None:
         """Test that import errors don't leak memory."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         error_count = 0
-        for _ in range(100):
+        for i in range(100):
             try:
                 # Try various invalid inputs
-                Project.from_xmile(b"not xml")
+                invalid_xmile = tmp_path / f"invalid_{i}_xmile.stmx"
+                invalid_xmile.write_bytes(b"not xml")
+                simlin.load(invalid_xmile)
             except SimlinImportError:
                 error_count += 1
-            
+
             try:
-                Project.from_mdl(b"invalid mdl")
+                invalid_mdl = tmp_path / f"invalid_{i}_mdl.mdl"
+                invalid_mdl.write_bytes(b"invalid mdl")
+                simlin.load(invalid_mdl)
             except SimlinImportError:
                 error_count += 1
-            
-            try:
-                Project.from_protobin(b"not protobuf")
-            except SimlinImportError:
-                error_count += 1
-        
+
         assert error_count > 0  # Ensure we actually tested error paths
-        
+
         gc.collect()
-        
+
         # Should not have leaked memory
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count <= initial_ref_count + 5
     
-    def test_runtime_error_no_leak(self, xmile_model_data: bytes) -> None:
+    def test_runtime_error_no_leak(self, xmile_model_path) -> None:
         """Test that runtime errors don't leak memory."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         for _ in range(50):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             model = project.get_model()
-            
+
             # Try to access non-existent variables to trigger errors
             try:
                 model.get_incoming_links("nonexistent_variable_xyz")
             except SimlinRuntimeError:
                 pass
-            
+
             # Try invalid simulation operations
             sim = model.simulate()
             try:
@@ -443,9 +465,9 @@ class TestErrorPathMemoryLeaks:
                 sim.get_series("nonexistent_var")
             except SimlinRuntimeError:
                 pass
-        
+
         gc.collect()
-        
+
         # Should not have leaked memory
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count <= initial_ref_count + 10
@@ -453,23 +475,23 @@ class TestErrorPathMemoryLeaks:
     def test_file_not_found_no_leak(self) -> None:
         """Test that file not found errors don't leak memory."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         for _ in range(50):
             try:
-                Project.from_file("/nonexistent/path/file.stmx")
+                simlin.load("/nonexistent/path/file.stmx")
             except SimlinImportError:
                 pass
-        
+
         gc.collect()
-        
+
         # Should not have leaked memory
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count <= initial_ref_count + 5
     
-    def test_corrupted_data_no_leak(self) -> None:
+    def test_corrupted_data_no_leak(self, tmp_path) -> None:
         """Test that corrupted data doesn't leak memory."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         # Generate various corrupted data patterns
         corrupted_patterns = [
             b"",  # Empty
@@ -479,21 +501,25 @@ class TestErrorPathMemoryLeaks:
             b"<?xml version='1.0'?><xmile><model></xmile>",  # Invalid structure
             b"A" * 10000,  # Large invalid data
         ]
-        
-        for pattern in corrupted_patterns:
-            for _ in range(10):
+
+        for i, pattern in enumerate(corrupted_patterns):
+            for j in range(10):
                 try:
-                    Project.from_xmile(pattern)
+                    invalid_xmile = tmp_path / f"corrupted_{i}_{j}_xmile.stmx"
+                    invalid_xmile.write_bytes(pattern)
+                    simlin.load(invalid_xmile)
                 except SimlinImportError:
                     pass
-                
+
                 try:
-                    Project.from_mdl(pattern)
+                    invalid_mdl = tmp_path / f"corrupted_{i}_{j}_mdl.mdl"
+                    invalid_mdl.write_bytes(pattern)
+                    simlin.load(invalid_mdl)
                 except SimlinImportError:
                     pass
-        
+
         gc.collect()
-        
+
         # Should not have leaked memory
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count <= initial_ref_count + 10
@@ -502,61 +528,63 @@ class TestErrorPathMemoryLeaks:
 class TestMemoryStressTesting:
     """Comprehensive stress tests for memory management."""
     
-    def test_large_scale_object_churn(self, xmile_model_data: bytes) -> None:
+    def test_large_scale_object_churn(self, xmile_model_path) -> None:
         """Test large-scale creation and destruction of objects."""
         initial_ref_count = len(_finalizer_refs)
-        
+
         for batch in range(10):
             objects = []
-            
+
             # Create a batch of objects
             for i in range(100):
                 try:
-                    project = Project.from_xmile(xmile_model_data)
+                    model = simlin.load(xmile_model_path)
+                    project = model.project
                     model = project.get_model()
                     sim = model.simulate()
                     objects.extend([project, model, sim])
                 except (SimlinImportError, SimlinRuntimeError):
                     pass
-            
+
             # Use objects to prevent optimization
             for obj in objects[::10]:  # Sample every 10th object
-                if hasattr(obj, 'get_var_count'):
+                if hasattr(obj, 'variables'):
                     try:
-                        obj.get_var_count()
+                        len(obj.variables)
                     except:
                         pass
-            
+
             # Clear batch
             objects.clear()
             gc.collect()
-            
+
             # Check memory periodically
             if batch % 5 == 0:
                 current_ref_count = len(_finalizer_refs)
                 # Allow some growth but not unbounded
                 assert current_ref_count <= initial_ref_count + 50
-        
+
         # Final cleanup check
         gc.collect()
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count <= initial_ref_count + 20
     
-    def test_concurrent_object_access(self, xmile_model_data: bytes) -> None:
+    def test_concurrent_object_access(self, xmile_model_path) -> None:
         """Test concurrent access patterns that might reveal memory issues."""
         projects = []
         models = []
         sims = []
-        
+
         # Create objects
         for _ in range(50):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             model = project.get_model()
             sim = model.simulate()
             projects.append(project)
             models.append(model)
             sims.append(sim)
-        
+
         # Interleaved access patterns
         for i in range(10):
             # Access in different orders
@@ -566,52 +594,53 @@ class TestMemoryStressTesting:
                         len(projects[j].get_model_names())
                     except:
                         pass
-            
+
             for j in range(1, len(models), 3):
                 if j < len(models):
                     try:
-                        models[j].get_var_names()
+                        [v.name for v in models[j].variables]
                     except:
                         pass
-            
+
             for j in range(2, len(sims), 3):
                 if j < len(sims):
                     try:
                         sims[j].get_var_names()
                     except:
                         pass
-        
+
         # Clear all at once
         projects.clear()
         models.clear()
         sims.clear()
         gc.collect()
     
-    def test_memory_usage_bounds(self, xmile_model_data: bytes) -> None:
+    def test_memory_usage_bounds(self, xmile_model_path) -> None:
         """Test that memory usage stays within reasonable bounds."""
         if not hasattr(sys, 'getsizeof'):
             pytest.skip("sys.getsizeof not available")
-        
+
         initial_ref_count = len(_finalizer_refs)
-        
+
         # Create objects and measure
         objects = []
         for i in range(100):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             model = project.get_model()
             objects.extend([project, model])
-            
+
             # Check periodically that finalizer registry isn't growing unbounded
             if i % 20 == 0:
                 current_ref_count = len(_finalizer_refs)
                 # Should grow roughly linearly with objects created
                 expected_max = initial_ref_count + (i + 1) * 2 + 10
                 assert current_ref_count <= expected_max
-        
+
         # Clear and verify cleanup
         objects.clear()
         gc.collect()
-        
+
         final_ref_count = len(_finalizer_refs)
         assert final_ref_count <= initial_ref_count + 10
 
@@ -619,51 +648,53 @@ class TestMemoryStressTesting:
 class TestMemoryLeakDetection:
     """Tests specifically designed to catch memory leaks."""
     
-    def test_repeated_operations_memory_stable(self, xmile_model_data: bytes) -> None:
+    def test_repeated_operations_memory_stable(self, xmile_model_path) -> None:
         """Test that repeated operations don't cause unbounded memory growth."""
         # Baseline measurement
         gc.collect()
         baseline_refs = len(_finalizer_refs)
-        
+
         # Perform operations multiple times
         for iteration in range(50):
-            project = Project.from_xmile(xmile_model_data)
+            model = simlin.load(xmile_model_path)
+            project = model.project
             model = project.get_model()
-            
+
             # Perform various operations
-            model.get_var_names()
+            [v.name for v in model.variables]
             model.get_links()
             try:
                 sim = model.simulate()
                 sim.get_var_names()
-                var_names = model.get_var_names()
+                var_names = [v.name for v in model.variables]
                 if var_names:
                     sim.run_to_end()
             except SimlinRuntimeError:
                 pass
-            
+
             # Explicit cleanup every few iterations
             if iteration % 10 == 0:
                 gc.collect()
                 current_refs = len(_finalizer_refs)
                 # Memory usage should not grow unbounded
                 assert current_refs <= baseline_refs + 30
-        
+
         # Final cleanup
         gc.collect()
         final_refs = len(_finalizer_refs)
         assert final_refs <= baseline_refs + 10
     
-    def test_string_handling_no_leak(self, xmile_model_data: bytes) -> None:
+    def test_string_handling_no_leak(self, xmile_model_path) -> None:
         """Test that string conversions don't leak memory."""
         initial_refs = len(_finalizer_refs)
-        
-        project = Project.from_xmile(xmile_model_data)
+
+        model = simlin.load(xmile_model_path)
+        project = model.project
         model = project.get_model()
-        
+
         # Exercise string operations heavily
         for _ in range(1000):
-            var_names = model.get_var_names()
+            var_names = [v.name for v in model.variables]
             for name in var_names[:5]:  # Limit to first 5 to avoid timeout
                 try:
                     links = model.get_incoming_links(name)
@@ -671,11 +702,11 @@ class TestMemoryLeakDetection:
                     str(links)
                 except SimlinRuntimeError:
                     pass
-        
+
         # Clean up
         del model
         del project
         gc.collect()
-        
+
         final_refs = len(_finalizer_refs)
         assert final_refs <= initial_refs + 5

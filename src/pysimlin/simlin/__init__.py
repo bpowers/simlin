@@ -49,7 +49,7 @@ def load(path: Union[str, Path]) -> Model:
     """
     Load a system dynamics model from file.
 
-    Supports XMILE (.stmx, .xmile), SDAI JSON, and native JSON formats.
+    Supports XMILE (.stmx, .xmile), Vensim MDL (.mdl), SDAI JSON, and native JSON formats.
     Always returns the default/main model. For multi-model projects,
     access other models via model.project.get_model(name).
 
@@ -65,7 +65,48 @@ def load(path: Union[str, Path]) -> Model:
         >>> print(f"Model has {len(model.stocks)} stocks")
         >>> model.base_case.results['population'].plot()
     """
-    project = Project.from_file(path)
+    from pathlib import Path as PathlibPath
+    from ._ffi import ffi, lib, get_error_string
+
+    path = PathlibPath(path)
+
+    if not path.exists():
+        raise SimlinImportError(f"File not found: {path}")
+
+    data = path.read_bytes()
+    suffix = path.suffix.lower()
+
+    # Determine the import function based on file extension
+    err_ptr = ffi.new("int *")
+    c_data = ffi.new("uint8_t[]", data)
+
+    if suffix in (".xmile", ".stmx", ".xml"):
+        project_ptr = lib.simlin_import_xmile(c_data, len(data), err_ptr)
+    elif suffix in (".mdl", ".vpm"):
+        project_ptr = lib.simlin_import_mdl(c_data, len(data), err_ptr)
+    elif suffix in (".pb", ".bin", ".proto"):
+        project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
+    elif suffix == ".json":
+        # Default to simlin JSON format
+        c_format = lib.SIMLIN_JSON_FORMAT_NATIVE
+        project_ptr = lib.simlin_project_json_open(c_data, len(data), c_format, err_ptr)
+    else:
+        # Try to auto-detect based on content
+        if data.startswith(b"<?xml") or data.startswith(b"<xmile"):
+            project_ptr = lib.simlin_import_xmile(c_data, len(data), err_ptr)
+        elif data.startswith(b"{"):
+            c_format = lib.SIMLIN_JSON_FORMAT_NATIVE
+            project_ptr = lib.simlin_project_json_open(c_data, len(data), c_format, err_ptr)
+        else:
+            # Default to protobuf
+            project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
+
+    if project_ptr == ffi.NULL:
+        error_code = err_ptr[0]
+        error_msg = get_error_string(error_code)
+        raise SimlinImportError(f"Failed to load model from {path}: {error_msg}", ErrorCode(error_code))
+
+    project = Project(project_ptr)
     return project.get_model()
 
 

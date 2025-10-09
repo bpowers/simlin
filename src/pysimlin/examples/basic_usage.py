@@ -11,26 +11,23 @@ def load_and_run_model():
     print("=" * 60)
     print("Example 1: Load and Run a Model")
     print("=" * 60)
-    
+
     # Load a model from file
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    project = simlin.Project.from_file(model_path)
-    
-    # Get information about the project
-    print(f"Number of models: {len(project.get_model_names())}")
-    print(f"Model names: {project.get_model_names()}")
-    
-    # Get the default model
-    model = project.get_model()
-    print(f"Number of variables: {model.get_var_count()}")
-    
-    # Create and run a simulation
-    sim = model.simulate()
-    sim.run_to_end()
-    
-    print(f"Simulation completed with {sim.get_step_count()} time steps")
-    
-    return project, model, sim
+    model = simlin.load(model_path)
+
+    # Get information about the model
+    print(f"Number of variables: {len(model.variables)}")
+    print(f"Number of stocks: {len(model.stocks)}")
+    print(f"Number of flows: {len(model.flows)}")
+
+    # Run simulation using the high-level API
+    run = model.run(analyze_loops=False)
+
+    print(f"Simulation completed with {len(run.results)} time steps")
+    print(f"Variables in results: {list(run.results.columns[:5])}")
+
+    return model, run
 
 
 def analyze_model_structure():
@@ -38,30 +35,29 @@ def analyze_model_structure():
     print("\n" + "=" * 60)
     print("Example 2: Analyze Model Structure")
     print("=" * 60)
-    
+
     # Load a model
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    project = simlin.Project.from_file(model_path)
-    model = project.get_model()
-    
-    # Get all variable names
-    var_names = model.get_var_names()
+    model = simlin.load(model_path)
+
+    # Get all variable names using the new API
+    var_names = [v.name for v in model.variables]
     print(f"Variables in model: {', '.join(var_names[:5])}...")
-    
+
     # Analyze dependencies for a variable
     if var_names:
         var = var_names[0]
         deps = model.get_incoming_links(var)
         print(f"\nDependencies for '{var}': {deps}")
-    
+
     # Get all causal links
     links = model.get_links()
     print(f"\nTotal causal links: {len(links)}")
-    
+
     # Display a few links
     for link in links[:3]:
         print(f"  {link}")
-    
+
     return model, links
 
 
@@ -70,34 +66,31 @@ def work_with_dataframes():
     print("\n" + "=" * 60)
     print("Example 3: Working with DataFrames")
     print("=" * 60)
-    
+
     # Load and run a model
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    project = simlin.Project.from_file(model_path)
-    model = project.get_model()
-    
-    # Run simulation
-    sim = model.simulate()
-    sim.run_to_end()
+    model = simlin.load(model_path)
 
-    # Get results as DataFrame
-    var_names = model.get_var_names()
+    # Run simulation using high-level API
+    run = model.run(analyze_loops=False)
+
+    # Get results as DataFrame - it's already a DataFrame!
+    df = run.results
+
     # Select a subset of variables for display
+    var_names = [v.name for v in model.variables]
     selected_vars = var_names[:min(5, len(var_names))]
+    df_subset = df[[v for v in selected_vars if v in df.columns]]
 
-    df = sim.get_run().results
-    # Filter to selected variables
-    df = df[[v for v in selected_vars if v in df.columns]]
-    
     print("Simulation results DataFrame:")
-    print(df.head())
+    print(df_subset.head())
     print(f"\nShape: {df.shape}")
-    print(f"Columns: {list(df.columns)}")
-    
+    print(f"Columns: {list(df.columns[:10])}")
+
     # Basic analysis with pandas
     print("\nBasic statistics:")
-    print(df.describe())
-    
+    print(df_subset.describe())
+
     return df
 
 
@@ -106,23 +99,23 @@ def feedback_loop_analysis():
     print("\n" + "=" * 60)
     print("Example 4: Feedback Loop Analysis")
     print("=" * 60)
-    
+
     # Load a model
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    project = simlin.Project.from_file(model_path)
-    
-    # Get feedback loops
-    loops = project.get_loops()
-    
+    model = simlin.load(model_path)
+
+    # Get feedback loops from model
+    loops = model.loops
+
     if loops:
         print(f"Found {len(loops)} feedback loops:")
         for loop in loops[:3]:  # Show first 3 loops
             print(f"\n{loop}")
-            print(f"  Length: {len(loop)} variables")
+            print(f"  Length: {len(loop.variables)} variables")
             print(f"  Polarity: {loop.polarity}")
     else:
         print("No feedback loops found in this model")
-    
+
     return loops
 
 
@@ -131,37 +124,37 @@ def ltm_analysis():
     print("\n" + "=" * 60)
     print("Example 5: Loops That Matter (LTM) Analysis")
     print("=" * 60)
-    
+
     # Load a model
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    project = simlin.Project.from_file(model_path)
-    model = project.get_model()
-    
-    # Create simulation with LTM enabled
-    sim = model.simulate(enable_ltm=True)
-    sim.run_to_end()
-    
-    # Get links with scores
-    links = sim.get_links()
-    
-    # Find links with scores
-    scored_links = [link for link in links if link.has_score()]
-    
-    if scored_links:
-        print(f"Found {len(scored_links)} links with LTM scores")
-        
-        # Analyze top links by average score
-        scored_links.sort(key=lambda x: x.average_score() or 0, reverse=True)
-        
-        print("\nTop 3 links by average score:")
-        for link in scored_links[:3]:
-            print(f"  {link.from_var} -> {link.to_var}")
-            print(f"    Average score: {link.average_score():.4f}")
-            print(f"    Max score: {link.max_score():.4f}")
+    model = simlin.load(model_path)
+
+    # Run simulation with loop analysis enabled
+    run = model.run(analyze_loops=True)
+
+    # Analyze loops with behavior time series
+    loops_with_behavior = [loop for loop in run.loops if loop.behavior_time_series is not None]
+
+    if loops_with_behavior:
+        print(f"Found {len(loops_with_behavior)} loops with behavior analysis")
+
+        # Find most important loop by average importance
+        most_important = max(loops_with_behavior, key=lambda l: l.average_importance() or 0)
+
+        print(f"\nMost important loop: {most_important.id}")
+        print(f"  Polarity: {most_important.polarity}")
+        print(f"  Average importance: {most_important.average_importance():.4f}")
+        print(f"  Max importance: {most_important.max_importance():.4f}")
+
+        # Show dominant periods
+        if run.dominant_periods:
+            print(f"\nFound {len(run.dominant_periods)} dominant periods:")
+            for period in run.dominant_periods[:3]:
+                print(f"  t=[{period.start_time:.1f}, {period.end_time:.1f}]: {period.dominant_loops}")
     else:
-        print("No links with LTM scores (model may not have feedback loops)")
-    
-    return links
+        print("No loops with behavior data (model may not have feedback loops)")
+
+    return run
 
 
 def error_handling():
@@ -169,28 +162,28 @@ def error_handling():
     print("\n" + "=" * 60)
     print("Example 6: Error Handling")
     print("=" * 60)
-    
+
     # Try to load an invalid model
     try:
-        project = simlin.Project.from_xmile(b"invalid xml data")
+        model = simlin.load("/nonexistent/path.stmx")
     except simlin.SimlinImportError as e:
         print(f"Import error caught: {e}")
         if e.code:
             print(f"Error code: {e.code}")
-    
-    # Check for model errors
+
+    # Check for model issues
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    project = simlin.Project.from_file(model_path)
-    
-    errors = project.get_errors()
-    if errors:
-        print(f"\nFound {len(errors)} errors in the model:")
-        for error in errors:
-            print(f"  {error}")
+    model = simlin.load(model_path)
+
+    issues = model.check()
+    if issues:
+        print(f"\nFound {len(issues)} issues in the model:")
+        for issue in issues:
+            print(f"  {issue.severity}: {issue.message}")
     else:
-        print("\nNo errors found in the model")
-    
-    return errors
+        print("\nNo issues found in the model")
+
+    return issues
 
 
 def model_conversion():
@@ -198,23 +191,22 @@ def model_conversion():
     print("\n" + "=" * 60)
     print("Example 7: Model Format Conversion")
     print("=" * 60)
-    
+
     # Load a model
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    project = simlin.Project.from_file(model_path)
-    
-    # Export to XMILE
+    model = simlin.load(model_path)
+
+    # Export to XMILE via project
+    project = model.project
     xmile_data = project.to_xmile()
     print(f"Exported to XMILE: {len(xmile_data)} bytes")
-    
+
     # Serialize to protobuf
     pb_data = project.serialize()
     print(f"Serialized to protobuf: {len(pb_data)} bytes")
-    
-    # Round-trip test
-    project2 = simlin.Project.from_protobin(pb_data)
-    print(f"Round-trip successful: {len(project2.get_model_names())} models")
-    
+
+    print("Format conversion complete")
+
     return xmile_data, pb_data
 
 

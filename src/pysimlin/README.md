@@ -254,64 +254,59 @@ Both examples live under `src/pysimlin/examples/` and are executed by `scripts/p
 
 ## API Reference
 
-### Creating Projects
-
-```python
-# Create a new project with a blank model
-project = simlin.Project.new(name="my-project")
-model = project.get_model()  # defaults to the root model "main"
-```
-
-The engine currently expects the root model to be named `main`.
-
 ### Loading Models
 
 ```python
-# Load from different formats
-project = simlin.Project.from_xmile(xmile_bytes)  # XMILE/STMX format
-project = simlin.Project.from_mdl(mdl_bytes)      # Vensim MDL format
-project = simlin.Project.from_protobin(pb_bytes)  # Binary protobuf format
+import simlin
 
-# Auto-detect format from file extension
-project = simlin.Project.from_file("model.stmx")  # .stmx, .mdl, .pb, etc.
+# Load a model (auto-detects format from extension)
+model = simlin.load("model.stmx")  # .stmx, .mdl, .json, etc.
 
-# Context manager for automatic cleanup
-with simlin.Project.from_file("model.stmx") as project:
-    model = project.get_model()
-    # Project is automatically cleaned up when exiting the context
+# Access the underlying project if needed
+project = model.project
+
+# Create a new blank project/model programmatically
+from simlin import Project
+project = Project.new(name="my-project", sim_start=0, sim_stop=100, dt=0.25)
+model = project.get_model()
 ```
 
-### Working with Projects
+### Working with Models
 
 ```python
-# Get model information
-model_names = project.get_model_names()
+# Access model structure via properties
+stocks = model.stocks        # Tuple of Stock objects
+flows = model.flows          # Tuple of Flow objects
+auxs = model.auxs            # Tuple of Aux objects
+variables = model.variables  # All variables (stocks + flows + auxs)
 
-# Access models
-model = project.get_model()           # Get default/main model
-model = project.get_model("submodel") # Get specific model by name
+# Access individual variable properties
+for stock in model.stocks:
+    print(f"{stock.name}: initial = {stock.initial_equation}")
 
-# Check for compilation errors
-errors = project.get_errors()
-if errors:
-    for error in errors:
-        print(f"{error.code.name}: {error.message}")
-```
+for flow in model.flows:
+    print(f"{flow.name}: {flow.equation}")
 
-### Model Analysis
-
-```python
-# Get model structure
-var_names = model.get_var_names()
-var_count = model.get_var_count()
+# Get time configuration
+time_spec = model.time_spec
+print(f"Simulation: t={time_spec.start} to {time_spec.stop}, dt={time_spec.dt}")
 
 # Analyze variable dependencies
-incoming_deps = model.get_incoming_links("population")  # Variables that affect "population"
+incoming_deps = model.get_incoming_links("population")
 
 # Get causal links
 links = model.get_links()
 for link in links:
     print(f"{link.from_var} --{link.polarity}--> {link.to_var}")
+
+# Check for model issues
+issues = model.check()
+for issue in issues:
+    print(f"{issue.severity}: {issue.message}")
+
+# Get explanation for a variable
+explanation = model.explain("population")
+print(explanation)
 ```
 
 ### Model Editing
@@ -348,86 +343,90 @@ with model.edit() as (current, patch):
 ### Running Simulations
 
 ```python
-# Create simulation
-sim = model.new_sim()                # Standard simulation
-sim = model.new_sim(enable_ltm=True) # Enable Loops That Matter
+# High-level API: run and get results immediately
+run = model.run(analyze_loops=False)
+print(run.results.head())
 
-# Run simulation
-sim.run_to_end()        # Run to final time
-sim.run_to(50.0)        # Run to specific time
+# Run with variable overrides
+run = model.run(overrides={"initial_population": 1000}, analyze_loops=False)
 
-# Reset to run again
-sim.reset()
-sim.run_to_end()
+# Use the cached base case
+base_case = model.base_case  # Automatically cached
+print(base_case.results["population"].plot())
 
-# Context manager for automatic cleanup
-with model.new_sim() as sim:
+# Low-level API: create simulation for step-by-step control
+with model.simulate() as sim:
+    sim.run_to(50.0)        # Run to specific time
+    sim.set_value("growth_rate", 0.10)  # Intervention
+    sim.run_to_end()        # Continue to end
+    run = sim.get_run()     # Get results as Run object
+
+# Enable Loops That Matter analysis
+with model.simulate(enable_ltm=True) as sim:
     sim.run_to_end()
-    results = sim.get_results()
+    run = sim.get_run()
+    print(run.dominant_periods)
 ```
 
 ### Accessing Results
 
 ```python
-# Get results as pandas DataFrame
-df = sim.get_results()                    # All variables
-df = sim.get_results(variables=["x", "y"]) # Specific variables
+# Results are pandas DataFrames
+run = model.run(analyze_loops=False)
+df = run.results  # Time series for all variables
 
-# Get individual time series as numpy arrays
-values = sim.get_series("population")
+# Access specific variables
+population = df["population"]
+gdp = df["gdp"]
 
-# Get current value (at current simulation time)
-current_val = sim.get_value("population")
+# Standard pandas operations
+print(df.describe())
+print(df.tail())
+df["population"].plot()
 
 # Get metadata
-step_count = sim.get_step_count()
-```
-
-### Protobuf Types
-
-The protobuf message types are directly accessible via the `pb` module:
-
-```python
-import simlin.pb as pb
-
-# Create protobuf messages for model editing
-stock = pb.Variable.Stock()
-flow = pb.Variable.Flow()
-aux = pb.Variable.Aux()
-
-# Access protobuf enums
-sim_method = pb.SimMethod.EULER  # or RUNGE_KUTTA_4
-
-# Create complex structures
-project = pb.Project()
-model = pb.Model()
+time_spec = run.time_spec
+overrides = run.overrides  # Dict of variable overrides used
 ```
 
 ### Model Interventions
 
 ```python
-# Set initial values before running
-sim.set_value("initial_population", 1000)
-sim.run_to_end()
+# Run with different initial conditions
+scenarios = {}
+for initial_pop in [100, 500, 1000]:
+    run = model.run(
+        overrides={"initial_population": initial_pop},
+        analyze_loops=False
+    )
+    scenarios[f"pop_{initial_pop}"] = run.results["population"]
 
-# Mid-simulation interventions
-sim.run_to(10)
-sim.set_value("growth_rate", 0.05)
-sim.run_to_end()
+# Compare scenarios
+import pandas as pd
+comparison = pd.DataFrame(scenarios)
+comparison.plot()
 ```
 
 ### Feedback Loop Analysis
 
 ```python
-# Get all feedback loops
-loops = project.get_loops()
+# Get structural feedback loops
+loops = model.loops
 for loop in loops:
     print(f"Loop {loop.id} ({loop.polarity}): {' -> '.join(loop.variables)}")
-    
-# Check if variable is in a loop
-for loop in loops:
-    if loop.contains_variable("population"):
-        print(f"Population is in loop {loop.id}")
+
+# Run with loop behavior analysis
+run = model.run(analyze_loops=True)
+
+# Access loops with behavioral importance
+for loop in run.loops:
+    if loop.behavior_time_series is not None:
+        avg_importance = loop.average_importance()
+        print(f"Loop {loop.id}: avg importance = {avg_importance:.3f}")
+
+# Analyze dominant periods
+for period in run.dominant_periods:
+    print(f"t=[{period.start_time}, {period.end_time}]: {period.dominant_loops}")
 ```
 
 ### Loops That Matter (LTM)

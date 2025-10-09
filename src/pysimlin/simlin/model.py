@@ -180,44 +180,17 @@ class Model:
         self._cached_auxs: Optional[tuple[Aux, ...]] = None
         self._cached_time_spec: Optional[TimeSpec] = None
         self._cached_base_case: Optional["Run"] = None
-    
-    def get_var_count(self) -> int:
-        """Get the number of variables in the model."""
-        count = lib.simlin_model_get_var_count(self._ptr)
-        if count < 0:
-            raise SimlinRuntimeError("Failed to get variable count")
-        return count
-    
-    def get_var_names(self) -> List[str]:
+
+    @property
+    def project(self) -> Optional["Project"]:
         """
-        Get the names of all variables in the model.
-        
+        The Project this model belongs to.
+
         Returns:
-            List of variable names
-            
-        Raises:
-            SimlinRuntimeError: If the operation fails
+            The parent Project instance, or None if this model is not attached to a project
         """
-        count = self.get_var_count()
-        if count == 0:
-            return []
-        
-        # Allocate array for C string pointers
-        c_names = ffi.new("char *[]", count)
-        
-        result = lib.simlin_model_get_var_names(self._ptr, c_names, count)
-        if result != count:
-            raise SimlinRuntimeError(f"Failed to get variable names: got {result}, expected {count}")
-        
-        # Convert to Python strings and free C memory
-        names = []
-        for i in range(count):
-            if c_names[i] != ffi.NULL:
-                names.append(c_to_string(c_names[i]))
-                free_c_string(c_names[i])
-        
-        return names
-    
+        return self._project
+
     def get_incoming_links(self, var_name: str) -> List[str]:
         """
         Get the dependencies (incoming links) for a given variable.
@@ -235,7 +208,7 @@ class Model:
             SimlinRuntimeError: If the variable doesn't exist or operation fails
         """
         # Validate variable exists to provide a clear Pythonic error
-        names = self.get_var_names()
+        names = [v.name for v in self.variables]
         if var_name not in names:
             raise SimlinRuntimeError(f"Variable not found: {var_name}")
 
@@ -759,7 +732,7 @@ class Model:
     def __repr__(self) -> str:
         """Return a string representation of the Model."""
         try:
-            var_count = self.get_var_count()
+            var_count = len(self.variables)
             name = f" '{self._name}'" if self._name else ""
             return f"<Model{name} with {var_count} variable(s)>"
         except:

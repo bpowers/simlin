@@ -9,18 +9,16 @@ from simlin import Project, Model, Sim, SimlinRuntimeError
 
 
 @pytest.fixture
-def test_sim(xmile_model_data: bytes) -> Sim:
-    """Create a test simulation from XMILE data."""
-    project = Project.from_xmile(xmile_model_data)
-    model = project.get_model()
+def test_sim(xmile_model_path) -> Sim:
+    """Create a test simulation from XMILE file."""
+    model = simlin.load(xmile_model_path)
     return model.simulate()
 
 
 @pytest.fixture
-def test_sim_with_ltm(xmile_model_data: bytes) -> Sim:
+def test_sim_with_ltm(xmile_model_path) -> Sim:
     """Create a test simulation with LTM enabled."""
-    project = Project.from_xmile(xmile_model_data)
-    model = project.get_model()
+    model = simlin.load(xmile_model_path)
     return model.simulate(enable_ltm=True)
 
 
@@ -119,15 +117,14 @@ class TestSimValues:
 class TestSimDataFrame:
     """Test DataFrame functionality."""
     
-    def test_get_results_with_variables(self, xmile_model_data: bytes) -> None:
+    def test_get_results_with_variables(self, xmile_model_path) -> None:
         """Test getting results as DataFrame and selecting specific columns."""
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+        model = simlin.load(xmile_model_path)
         sim = model.simulate()
         sim.run_to_end()
 
         # Get variable names from model
-        var_names = model.get_var_names()
+        var_names = [v.name for v in model.variables]
 
         # Get all results then filter to subset of variables
         if len(var_names) > 2:
@@ -145,10 +142,9 @@ class TestSimDataFrame:
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 0
 
-    def test_get_results_without_variables_gets_all(self, xmile_model_data: bytes) -> None:
+    def test_get_results_without_variables_gets_all(self, xmile_model_path) -> None:
         """Test that results DataFrame includes all variables."""
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+        model = simlin.load(xmile_model_path)
         sim = model.simulate()
         sim.run_to_end()
 
@@ -158,14 +154,13 @@ class TestSimDataFrame:
 
         # Should have the same number of columns as variables in the model
         # (minus time which becomes the index)
-        var_names = model.get_var_names()
+        var_names = [v.name for v in model.variables]
         expected_cols = len([v for v in var_names if v.lower() != "time"])
         assert len(df.columns) <= expected_cols
 
-    def test_get_results_filters_invalid_variables(self, xmile_model_data: bytes) -> None:
+    def test_get_results_filters_invalid_variables(self, xmile_model_path) -> None:
         """Test that results include valid variables."""
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+        model = simlin.load(xmile_model_path)
         sim = model.simulate()
         sim.run_to_end()
 
@@ -174,7 +169,7 @@ class TestSimDataFrame:
         assert isinstance(df, pd.DataFrame)
 
         # Check that valid variables are present
-        var_names = model.get_var_names()
+        var_names = [v.name for v in model.variables]
         if var_names:
             # At least one variable should be in the results
             valid_vars_in_results = [v for v in var_names if v in df.columns or v.lower() == 'time']
@@ -243,10 +238,9 @@ class TestSimAnalysis:
 class TestSimContextManager:
     """Test context manager functionality for simulations."""
     
-    def test_context_manager_basic_usage(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_basic_usage(self, xmile_model_path) -> None:
         """Test basic context manager usage."""
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+        model = simlin.load(xmile_model_path)
         with model.simulate() as sim:
             assert sim is not None
             sim.run_to_end()
@@ -274,12 +268,11 @@ class TestSimContextManager:
         assert test_sim._ptr == ffi.NULL
         assert original_ptr != ffi.NULL  # Original was valid
     
-    def test_context_manager_with_exception(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_with_exception(self, xmile_model_path) -> None:
         """Test context manager cleanup when exception occurs."""
         from simlin._ffi import ffi
-        
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+
+        model = simlin.load(xmile_model_path)
         sim = model.simulate()
         
         try:
@@ -292,23 +285,21 @@ class TestSimContextManager:
         # Even with exception, cleanup should occur
         assert sim._ptr == ffi.NULL
     
-    def test_full_nested_context_managers(self, xmile_model_data: bytes) -> None:
-        """Test fully nested context managers with project, model, and sim."""
-        with Project.from_xmile(xmile_model_data) as project:
-            with project.get_model() as model:
-                with model.simulate() as sim:
+    def test_full_nested_context_managers(self, xmile_model_path) -> None:
+        """Test fully nested context managers with model and sim."""
+        model = simlin.load(xmile_model_path)
+        with model:
+            with model.simulate() as sim:
                     # All should be usable inside their contexts
-                    assert len(project.get_model_names()) > 0
-                    assert model.get_var_count() > 0
+                    assert len(model.variables) > 0
                     sim.run_to_end()
                     assert sim.get_step_count() > 0
                     results = sim.get_run().results
                     assert len(results) == sim.get_step_count()
     
-    def test_context_manager_with_ltm(self, xmile_model_data: bytes) -> None:
+    def test_context_manager_with_ltm(self, xmile_model_path) -> None:
         """Test context manager with LTM-enabled simulation."""
-        project = Project.from_xmile(xmile_model_data)
-        model = project.get_model()
+        model = simlin.load(xmile_model_path)
         with model.simulate(enable_ltm=True) as sim:
             sim.run_to_end()
             links = sim.get_links()

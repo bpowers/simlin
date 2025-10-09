@@ -140,7 +140,7 @@ class TestCompleteWorkflow:
         model = simlin.load(test_file)
 
         # Get a variable to override
-        var_names = model.get_var_names()
+        var_names = [v.name for v in model.variables]
         if not var_names:
             pytest.skip("No variables in model")
 
@@ -163,7 +163,7 @@ class TestCompleteWorkflow:
         base_run = model.base_case
 
         # Run with different overrides
-        var_names = model.get_var_names()
+        var_names = [v.name for v in model.variables]
         if not var_names:
             pytest.skip("No variables in model")
 

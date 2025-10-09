@@ -98,175 +98,6 @@ class Project:
         self._ptr = ptr
         _register_finalizer(self, lib.simlin_project_unref, ptr)
     
-    @classmethod
-    def from_protobin(cls, data: bytes) -> "Project":
-        """
-        Load a project from binary protobuf format.
-        
-        Args:
-            data: The protobuf binary data
-            
-        Returns:
-            A new Project instance
-            
-        Raises:
-            SimlinImportError: If the data cannot be parsed
-        """
-        if not data:
-            raise SimlinImportError("Empty project data")
-        
-        err_ptr = ffi.new("int *")
-        c_data = ffi.new("uint8_t[]", data)
-        
-        project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
-        
-        if project_ptr == ffi.NULL:
-            error_code = err_ptr[0]
-            error_msg = get_error_string(error_code)
-            raise SimlinImportError(f"Failed to open project: {error_msg}", ErrorCode(error_code))
-        
-        return cls(project_ptr)
-    
-    @classmethod
-    def from_xmile(cls, data: bytes) -> "Project":
-        """
-        Load a project from XMILE/STMX format.
-        
-        Args:
-            data: The XMILE XML data
-            
-        Returns:
-            A new Project instance
-            
-        Raises:
-            SimlinImportError: If the data cannot be parsed
-        """
-        if not data:
-            raise SimlinImportError("Empty XMILE data")
-        
-        err_ptr = ffi.new("int *")
-        c_data = ffi.new("uint8_t[]", data)
-        
-        project_ptr = lib.simlin_import_xmile(c_data, len(data), err_ptr)
-        
-        if project_ptr == ffi.NULL:
-            error_code = err_ptr[0]
-            error_msg = get_error_string(error_code)
-            raise SimlinImportError(f"Failed to import XMILE: {error_msg}", ErrorCode(error_code))
-        
-        return cls(project_ptr)
-    
-    @classmethod
-    def from_mdl(cls, data: bytes) -> "Project":
-        """
-        Load a project from Vensim MDL format.
-
-        Args:
-            data: The MDL text data
-
-        Returns:
-            A new Project instance
-
-        Raises:
-            SimlinImportError: If the data cannot be parsed
-        """
-        if not data:
-            raise SimlinImportError("Empty MDL data")
-
-        err_ptr = ffi.new("int *")
-        c_data = ffi.new("uint8_t[]", data)
-
-        project_ptr = lib.simlin_import_mdl(c_data, len(data), err_ptr)
-
-        if project_ptr == ffi.NULL:
-            error_code = err_ptr[0]
-            error_msg = get_error_string(error_code)
-            raise SimlinImportError(f"Failed to import MDL: {error_msg}", ErrorCode(error_code))
-
-        return cls(project_ptr)
-
-    @classmethod
-    def from_json(cls, data: bytes, format: str = JSON_FORMAT_SIMLIN) -> "Project":
-        """
-        Load a project from JSON format.
-
-        Args:
-            data: The JSON data
-            format: The JSON format to use. Must be one of:
-                - "simlin" (default): Native Simlin JSON format
-                - "sd-ai": SDAI JSON format for AI-generated models
-
-        Returns:
-            A new Project instance
-
-        Raises:
-            SimlinImportError: If the data cannot be parsed
-            ValueError: If format is not a valid JSON format string
-        """
-        if not data:
-            raise SimlinImportError("Empty JSON data")
-
-        # Validate and convert format
-        if format == JSON_FORMAT_SIMLIN:
-            c_format = lib.SIMLIN_JSON_FORMAT_NATIVE
-        elif format == JSON_FORMAT_SDAI:
-            c_format = lib.SIMLIN_JSON_FORMAT_SDAI
-        else:
-            raise ValueError(
-                f"Invalid format: {format}. Must be '{JSON_FORMAT_SIMLIN}' or '{JSON_FORMAT_SDAI}'"
-            )
-
-        err_ptr = ffi.new("int *")
-        c_data = ffi.new("uint8_t[]", data)
-
-        project_ptr = lib.simlin_project_json_open(c_data, len(data), c_format, err_ptr)
-
-        if project_ptr == ffi.NULL:
-            error_code = err_ptr[0]
-            error_msg = get_error_string(error_code)
-            raise SimlinImportError(f"Failed to import JSON: {error_msg}", ErrorCode(error_code))
-
-        return cls(project_ptr)
-    
-    @classmethod
-    def from_file(cls, path: Path | str) -> "Project":
-        """
-        Load a project from a file, auto-detecting the format.
-
-        Args:
-            path: Path to the model file
-            
-        Returns:
-            A new Project instance
-            
-        Raises:
-            SimlinImportError: If the file cannot be loaded or parsed
-        """
-        path = Path(path)
-        
-        if not path.exists():
-            raise SimlinImportError(f"File not found: {path}")
-        
-        data = path.read_bytes()
-        suffix = path.suffix.lower()
-        
-        if suffix in (".xmile", ".stmx", ".xml"):
-            return cls.from_xmile(data)
-        elif suffix in (".mdl", ".vpm"):
-            return cls.from_mdl(data)
-        elif suffix in (".pb", ".bin", ".proto"):
-            return cls.from_protobin(data)
-        elif suffix == ".json":
-            return cls.from_json(data)
-        else:
-            # Try to auto-detect based on content
-            if data.startswith(b"<?xml") or data.startswith(b"<xmile"):
-                return cls.from_xmile(data)
-            elif data.startswith(b"{"):
-                return cls.from_json(data)
-            else:
-                # Default to protobuf
-                return cls.from_protobin(data)
 
     @classmethod
     def new(
@@ -306,8 +137,22 @@ class Project:
         model_proto = project_proto.models.add()
         model_proto.name = "main"
 
-        project = cls.from_protobin(project_proto.SerializeToString())
-        return project
+        # Serialize protobuf and create project from binary data
+        data = project_proto.SerializeToString()
+        if not data:
+            raise SimlinImportError("Failed to serialize new project")
+
+        err_ptr = ffi.new("int *")
+        c_data = ffi.new("uint8_t[]", data)
+
+        project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
+
+        if project_ptr == ffi.NULL:
+            error_code = err_ptr[0]
+            error_msg = get_error_string(error_code)
+            raise SimlinImportError(f"Failed to create new project: {error_msg}", ErrorCode(error_code))
+
+        return cls(project_ptr)
 
     def __get_model_count(self) -> int:
         """Internal method to get the number of models in the project."""
