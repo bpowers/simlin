@@ -71,7 +71,7 @@ class TestObjectCreationDestruction:
         for _ in range(100):
             project = Project.from_xmile(xmile_model_data)
             model = project.get_model()
-            sim = model.new_sim()
+            sim = model.simulate()
             sims.append(sim)
         
         # Clear references and force garbage collection
@@ -91,7 +91,7 @@ class TestObjectCreationDestruction:
             for j in range(5):
                 model = project.get_model()
                 for k in range(3):
-                    sim = model.new_sim()
+                    sim = model.simulate()
                     # Use the sim to ensure it's not optimized away
                     var_names = model.get_var_names()
                     if var_names:
@@ -166,7 +166,7 @@ class TestReferenceCountingEdgeCases:
         """Test behavior when parent object is destroyed before child."""
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        sim = model.new_sim()
+        sim = model.simulate()
         
         # Create weak references
         project_ref = weakref.ref(project)
@@ -217,7 +217,7 @@ class TestFinalizerBehavior:
         
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        sim = model.new_sim()
+        sim = model.simulate()
         
         # Should have registered finalizers for all objects
         current_ref_count = len(_finalizer_refs)
@@ -251,7 +251,7 @@ class TestFinalizerBehavior:
         # Create objects
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        sim = model.new_sim()
+        sim = model.simulate()
         
         # Store the IDs for tracking
         project_id = id(project)
@@ -374,7 +374,7 @@ class TestContextManagerCleanup:
         """Test context manager cleanup with running simulations."""
         with Project.from_xmile(xmile_model_data) as project:
             with project.get_model() as model:
-                sim = model.new_sim()
+                sim = model.simulate()
                 var_names = model.get_var_names()
                 
                 if var_names:
@@ -437,7 +437,7 @@ class TestErrorPathMemoryLeaks:
                 pass
             
             # Try invalid simulation operations
-            sim = model.new_sim()
+            sim = model.simulate()
             try:
                 # Try to get results for non-existent variable
                 sim.get_series("nonexistent_var")
@@ -514,7 +514,7 @@ class TestMemoryStressTesting:
                 try:
                     project = Project.from_xmile(xmile_model_data)
                     model = project.get_model()
-                    sim = model.new_sim()
+                    sim = model.simulate()
                     objects.extend([project, model, sim])
                 except (SimlinImportError, SimlinRuntimeError):
                     pass
@@ -552,7 +552,7 @@ class TestMemoryStressTesting:
         for _ in range(50):
             project = Project.from_xmile(xmile_model_data)
             model = project.get_model()
-            sim = model.new_sim()
+            sim = model.simulate()
             projects.append(project)
             models.append(model)
             sims.append(sim)
@@ -634,7 +634,7 @@ class TestMemoryLeakDetection:
             model.get_var_names()
             model.get_links()
             try:
-                sim = model.new_sim()
+                sim = model.simulate()
                 sim.get_var_names()
                 var_names = model.get_var_names()
                 if var_names:

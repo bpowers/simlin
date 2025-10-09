@@ -13,7 +13,7 @@ def test_sim(xmile_model_data: bytes) -> Sim:
     """Create a test simulation from XMILE data."""
     project = Project.from_xmile(xmile_model_data)
     model = project.get_model()
-    return model.new_sim()
+    return model.simulate()
 
 
 @pytest.fixture
@@ -21,7 +21,7 @@ def test_sim_with_ltm(xmile_model_data: bytes) -> Sim:
     """Create a test simulation with LTM enabled."""
     project = Project.from_xmile(xmile_model_data)
     model = project.get_model()
-    return model.new_sim(enable_ltm=True)
+    return model.simulate(enable_ltm=True)
 
 
 class TestSimExecution:
@@ -120,62 +120,65 @@ class TestSimDataFrame:
     """Test DataFrame functionality."""
     
     def test_get_results_with_variables(self, xmile_model_data: bytes) -> None:
-        """Test getting results as DataFrame with specific variables."""
+        """Test getting results as DataFrame and selecting specific columns."""
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        sim = model.new_sim()
+        sim = model.simulate()
         sim.run_to_end()
-        
+
         # Get variable names from model
         var_names = model.get_var_names()
-        
-        # Get results for a subset of variables
+
+        # Get all results then filter to subset of variables
         if len(var_names) > 2:
-            df = sim.get_results(variables=var_names[:2])
-            assert isinstance(df, pd.DataFrame)
-            assert len(df) == sim.get_step_count()
-            assert len(df.columns) <= 2
-            assert df.index.name == "time"
+            df = sim.get_run().results
+            selected_vars = [v for v in var_names[:2] if v in df.columns]
+            df_subset = df[selected_vars]
+            assert isinstance(df_subset, pd.DataFrame)
+            assert len(df_subset) == sim.get_step_count()
+            assert len(df_subset.columns) <= 2
     
     def test_get_results_empty_sim(self, test_sim: Sim) -> None:
         """Test getting results from empty simulation."""
         # Before running, should return empty DataFrame
-        df = test_sim.get_results(variables=[])
+        df = test_sim.get_run().results
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 0
-    
+
     def test_get_results_without_variables_gets_all(self, xmile_model_data: bytes) -> None:
-        """Test that getting results without variable list gets all variables."""
+        """Test that results DataFrame includes all variables."""
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        sim = model.new_sim()
+        sim = model.simulate()
         sim.run_to_end()
-        
-        # Get results without specifying variables - should get all
-        df = sim.get_results()
+
+        # Get all results
+        df = sim.get_run().results
         assert isinstance(df, pd.DataFrame)
-        
+
         # Should have the same number of columns as variables in the model
         # (minus time which becomes the index)
         var_names = model.get_var_names()
         expected_cols = len([v for v in var_names if v.lower() != "time"])
-        assert len(df.columns) <= expected_cols  # Some variables might be filtered out if they don't exist
-    
+        assert len(df.columns) <= expected_cols
+
     def test_get_results_filters_invalid_variables(self, xmile_model_data: bytes) -> None:
-        """Test that invalid variables are filtered out."""
+        """Test that results include valid variables."""
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        sim = model.new_sim()
+        sim = model.simulate()
         sim.run_to_end()
-        
-        # Mix valid and invalid variable names
+
+        # Get all results
+        df = sim.get_run().results
+        assert isinstance(df, pd.DataFrame)
+
+        # Check that valid variables are present
         var_names = model.get_var_names()
         if var_names:
-            mixed_vars = [var_names[0], "invalid_var_xyz"]
-            df = sim.get_results(variables=mixed_vars)
-            assert isinstance(df, pd.DataFrame)
-            # Should only have the valid variable
-            assert len(df.columns) == 1
+            # At least one variable should be in the results
+            valid_vars_in_results = [v for v in var_names if v in df.columns or v.lower() == 'time']
+            assert len(valid_vars_in_results) > 0
 
 
 class TestSimAnalysis:
@@ -244,12 +247,12 @@ class TestSimContextManager:
         """Test basic context manager usage."""
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        with model.new_sim() as sim:
+        with model.simulate() as sim:
             assert sim is not None
             sim.run_to_end()
             assert sim.get_step_count() > 0
             # Simulation should be usable inside the context
-            results = sim.get_results()
+            results = sim.get_run().results
             assert isinstance(results, pd.DataFrame)
     
     def test_context_manager_returns_self(self, test_sim: Sim) -> None:
@@ -277,7 +280,7 @@ class TestSimContextManager:
         
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        sim = model.new_sim()
+        sim = model.simulate()
         
         try:
             with sim:
@@ -293,20 +296,20 @@ class TestSimContextManager:
         """Test fully nested context managers with project, model, and sim."""
         with Project.from_xmile(xmile_model_data) as project:
             with project.get_model() as model:
-                with model.new_sim() as sim:
+                with model.simulate() as sim:
                     # All should be usable inside their contexts
                     assert len(project.get_model_names()) > 0
                     assert model.get_var_count() > 0
                     sim.run_to_end()
                     assert sim.get_step_count() > 0
-                    results = sim.get_results()
+                    results = sim.get_run().results
                     assert len(results) == sim.get_step_count()
     
     def test_context_manager_with_ltm(self, xmile_model_data: bytes) -> None:
         """Test context manager with LTM-enabled simulation."""
         project = Project.from_xmile(xmile_model_data)
         model = project.get_model()
-        with model.new_sim(enable_ltm=True) as sim:
+        with model.simulate(enable_ltm=True) as sim:
             sim.run_to_end()
             links = sim.get_links()
             assert isinstance(links, list)

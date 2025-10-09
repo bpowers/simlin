@@ -91,7 +91,7 @@ def main() -> None:
         raise RuntimeError(f"Generated project contains validation errors: {errors}")
 
     model = project.get_model()
-    with model.new_sim() as sim:
+    with model.simulate() as sim:
         sim.run_to_end()
         population_series = [float(value) for value in sim.get_series("population")]
 

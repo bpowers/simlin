@@ -44,7 +44,7 @@ EXAMPLE_XMILE = b"""<?xml version='1.0' encoding='utf-8'?>
 def run_simulation(model: simlin.Model) -> float:
     """Run the model to the configured stop time and return the ending population."""
 
-    with model.new_sim() as sim:
+    with model.simulate() as sim:
         sim.run_to_end()
         return float(sim.get_value("population"))
 

@@ -568,12 +568,18 @@ class Model:
 
         Example:
             >>> with model.simulate() as sim:
-            ...     while sim.time < 100:
-            ...         sim.step()
-            ...         if sim.get_value('inventory') < 10:
-            ...             sim.set_value('production_rate', 1.5)
+            ...     sim.run_to_end()
+            ...     run = sim.get_run()
         """
-        sim = self.new_sim(enable_ltm=enable_ltm)
+        from .sim import Sim
+        from ._ffi import lib, ffi
+        from .errors import SimlinRuntimeError
+
+        sim_ptr = lib.simlin_sim_new(self._ptr, enable_ltm)
+        if sim_ptr == ffi.NULL:
+            raise SimlinRuntimeError("Failed to create simulation")
+
+        sim = Sim(sim_ptr, self, overrides or {})
         if overrides:
             for name, value in overrides.items():
                 sim.set_value(name, value)
@@ -661,6 +667,40 @@ class Model:
 
         return tuple(issues)
 
+    def check_units(self) -> tuple["UnitIssue", ...]:
+        """
+        Check dimensional consistency of equations.
+
+        Returns tuple of unit issues found.
+
+        Returns:
+            Tuple of UnitIssue objects, or empty tuple if no unit issues
+
+        Example:
+            >>> issues = model.check_units()
+            >>> errors = [i for i in issues if i.expected_units != i.actual_units]
+        """
+        from .types import UnitIssue
+        from .errors import ErrorCode
+
+        if self._project is None:
+            return ()
+
+        error_details = self._project.get_errors()
+        unit_issues = []
+
+        for detail in error_details:
+            if detail.code == ErrorCode.UNIT_DEFINITION_ERRORS:
+                issue = UnitIssue(
+                    variable=detail.variable_name or "",
+                    message=detail.message,
+                    expected_units=None,
+                    actual_units=None,
+                )
+                unit_issues.append(issue)
+
+        return tuple(unit_issues)
+
     def explain(self, variable: str) -> str:
         """
         Get human-readable explanation of a variable.
@@ -705,28 +745,6 @@ class Model:
 
         return _ModelEditContext(self, dry_run=dry_run, allow_errors=allow_errors)
 
-    def new_sim(self, enable_ltm: bool = False) -> "Sim":
-        """
-        Create a new simulation instance from this model.
-        
-        Args:
-            enable_ltm: Whether to enable Loops That Matter analysis.
-                       This allows getting link scores and loop analysis after simulation.
-                       
-        Returns:
-            A new Sim instance ready to run
-            
-        Raises:
-            SimlinRuntimeError: If simulation creation fails
-        """
-        from .sim import Sim
-        
-        sim_ptr = lib.simlin_sim_new(self._ptr, enable_ltm)
-        if sim_ptr == ffi.NULL:
-            raise SimlinRuntimeError("Failed to create simulation")
-        
-        return Sim(sim_ptr, self)
-    
     def __enter__(self) -> Self:
         """Context manager entry point."""
         return self

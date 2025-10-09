@@ -404,11 +404,13 @@ class Model:
 
         Example:
             >>> with model.simulate() as sim:
-            ...     while sim.time < 100:
-            ...         sim.step()
-            ...         if sim.get_value('inventory') < 10:
-            ...             sim.set_value('production_rate', 1.5)
-            ...     run = sim.to_run()
+            ...     sim.run_to_end()
+            ...     run = sim.get_run()
+            ...     # Or for interactive gaming:
+            ...     # sim.run_to(50)
+            ...     # if sim.get_value('inventory') < 10:
+            ...     #     sim.set_value('production_rate', 1.5)
+            ...     # sim.run_to_end()
         """
 
     # -------------------------------------------------------------------------
@@ -639,11 +641,14 @@ class Sim:
     def time(self) -> float:
         """Current simulation time"""
 
-    def step(self) -> None:
-        """Advance simulation by one time step"""
-
     def run_to_end(self) -> None:
         """Run simulation to completion"""
+
+    def run_to(self, time: float) -> None:
+        """Run simulation to specified time"""
+
+    def reset(self) -> None:
+        """Reset simulation to initial state"""
 
     def get_value(self, variable: str) -> float:
         """Get current value of a variable"""
@@ -663,12 +668,12 @@ class Sim:
             ...     plt.plot(time, population)
         """
 
-    def to_run(self, analyze_loops: bool = True) -> Run:
+    def get_run(self) -> Run:
         """
-        Convert completed simulation to Run object.
+        Get simulation results as a Run object.
 
-        Args:
-            analyze_loops: Whether to compute loop dominance analysis
+        Loop analysis is included if the simulation was created with enable_ltm=True.
+        Can be called before run_to_end() to get partial results.
 
         Returns:
             Run object with results and analysis
@@ -676,7 +681,7 @@ class Sim:
         Example:
             >>> with model.simulate(enable_ltm=True) as sim:
             ...     sim.run_to_end()
-            ...     run = sim.to_run()
+            ...     run = sim.get_run()
             ...     print(run.dominant_periods)
         """
 
@@ -925,37 +930,28 @@ plt.show()
 ```python
 model = simlin.load("inventory_management.stmx")
 
-# Step-by-step simulation with intervention
+# Interactive simulation with interventions
 with model.simulate() as sim:
-    history = []
+    # Run first half
+    sim.run_to(50)
 
-    while sim.time < 100:
-        # Check inventory level
-        inventory = sim.get_value('inventory')
+    # Check state and intervene
+    inventory = sim.get_value('inventory')
+    if inventory < 20:
+        print(f"t={sim.time:.1f}: Low inventory ({inventory:.1f}), increasing production")
+        sim.set_value('production_rate', 15)
+    elif inventory > 80:
+        print(f"t={sim.time:.1f}: High inventory ({inventory:.1f}), decreasing production")
+        sim.set_value('production_rate', 5)
 
-        # Intervene if inventory too low
-        if inventory < 20:
-            print(f"t={sim.time:.1f}: Low inventory ({inventory:.1f}), increasing production")
-            sim.set_value('production_rate', 15)
-        elif inventory > 80:
-            print(f"t={sim.time:.1f}: High inventory ({inventory:.1f}), decreasing production")
-            sim.set_value('production_rate', 5)
+    # Run to completion
+    sim.run_to_end()
 
-        history.append({
-            'time': sim.time,
-            'inventory': inventory,
-            'production_rate': sim.get_value('production_rate')
-        })
+    # Get results for analysis
+    run = sim.get_run()
 
-        sim.step()
-
-    # Convert to Run for analysis
-    run = sim.to_run()
-
-# Visualize intervention effects
-import pandas as pd
-history_df = pd.DataFrame(history)
-history_df.set_index('time')[['inventory', 'production_rate']].plot(secondary_y='production_rate')
+# Analyze intervention effects
+run.results[['inventory', 'production_rate']].plot(secondary_y='production_rate')
 ```
 
 ## Implementation Notes
@@ -1064,7 +1060,7 @@ Key mappings:
 # Old → New
 Project.from_file(path) → simlin.load(path).project
 model.new_sim() → model.simulate()
-sim.get_results() → sim.to_run().results
+sim.get_results() → sim.get_run().results
 ```
 
 ## Implementation Decisions
@@ -1094,8 +1090,8 @@ When getting time bounds and dt for a simulation:
 ### Project.get_model() Scope
 `project.get_model(name)` returns any model defined in the project file, whether it's used as a module or not. This allows inspection of the full model hierarchy.
 
-### Sim.to_run() Behavior
-Allow calling `to_run()` before `run_to_end()` - return results for the partial simulation. Useful for debugging and interrupted simulations.
+### Sim.get_run() Behavior
+Allow calling `get_run()` before `run_to_end()` - return results for the partial simulation. Useful for debugging and interrupted simulations. Loop analysis is included if the sim was created with `enable_ltm=True`.
 
 ## Rationale for Key Decisions
 

@@ -374,6 +374,37 @@ class Project:
             raise SimlinImportError(f"Model not found: {name or 'default'}")
 
         return Model(model_ptr, project=self, name=resolved_name)
+
+    @property
+    def models(self) -> tuple["Model", ...]:
+        """
+        All models in this project (immutable tuple).
+
+        Returns:
+            Tuple of all Model objects in the project
+
+        Example:
+            >>> for model in project.models:
+            ...     print(model._name)
+        """
+        model_names = self.get_model_names()
+        return tuple(self.get_model(name) for name in model_names)
+
+    @property
+    def main_model(self) -> "Model":
+        """
+        The main/default model.
+
+        Returns:
+            The first/main model in the project
+
+        Raises:
+            SimlinImportError: If the project has no models
+
+        Example:
+            >>> model = project.main_model
+        """
+        return self.get_model()
     
     def get_loops(self) -> List[Loop]:
         """

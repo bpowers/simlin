@@ -134,8 +134,40 @@ class Run:
             >>> final_pop = run.results['population'].iloc[-1]
         """
         if self._cached_results is None:
-            self._cached_results = self._sim.get_results()
+            self._cached_results = self._build_results_dataframe()
         return self._cached_results
+
+    def _build_results_dataframe(self) -> pd.DataFrame:
+        """Build the results DataFrame from simulation data."""
+        from .errors import SimlinRuntimeError
+        from typing import Dict
+        from numpy.typing import NDArray
+
+        variables = self._sim.get_var_names()
+        step_count = self._sim.get_step_count()
+
+        if step_count <= 0:
+            return pd.DataFrame()
+
+        try:
+            time_series = self._sim.get_series("time")
+        except SimlinRuntimeError:
+            time_series = np.arange(step_count, dtype=np.float64)
+
+        data: Dict[str, NDArray[np.float64]] = {}
+
+        for var_name in variables:
+            if var_name.lower() == "time":
+                continue
+            try:
+                data[var_name] = self._sim.get_series(var_name)
+            except SimlinRuntimeError:
+                pass
+
+        df = pd.DataFrame(data, index=time_series)
+        df.index.name = "time"
+
+        return df
 
     @property
     def loops(self) -> tuple[Loop, ...]:

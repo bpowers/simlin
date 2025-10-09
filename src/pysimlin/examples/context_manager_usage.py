@@ -29,12 +29,12 @@ def basic_context_manager_usage():
             print(f"Number of variables: {len(model.get_var_names())}")
             
             # Create and run a simulation with context manager
-            with model.new_sim() as sim:
+            with model.simulate() as sim:
                 sim.run_to_end()
                 print(f"Simulation completed with {sim.get_step_count()} time steps")
                 
                 # Get results as DataFrame
-                results = sim.get_results()
+                results = sim.get_run().results
                 print(f"Results shape: {results.shape}")
                 
     # All resources automatically cleaned up when exiting 'with' blocks
@@ -52,7 +52,7 @@ def exception_handling_example():
     try:
         with simlin.Project.from_file(model_path) as project:
             with project.get_model() as model:
-                with model.new_sim() as sim:
+                with model.simulate() as sim:
                     # Simulate an error condition
                     print("Starting simulation...")
                     sim.run_to_end()
@@ -81,7 +81,7 @@ def mixed_usage_patterns():
     print("Traditional usage (no context manager):")
     project1 = simlin.Project.from_file(model_path)
     model1 = project1.get_model()
-    sim1 = model1.new_sim()
+    sim1 = model1.simulate()
     sim1.run_to_end()
     print(f"Traditional sim completed with {sim1.get_step_count()} steps")
     # Cleanup happens automatically via finalizers
@@ -90,7 +90,7 @@ def mixed_usage_patterns():
     print("\nContext manager usage (explicit cleanup):")
     with simlin.Project.from_file(model_path) as project2:
         with project2.get_model() as model2:
-            with model2.new_sim() as sim2:
+            with model2.simulate() as sim2:
                 sim2.run_to_end()
                 print(f"Context manager sim completed with {sim2.get_step_count()} steps")
             # Explicit cleanup happens here
@@ -131,12 +131,12 @@ def advanced_analysis_with_context_managers():
             print(f"Causal links: {len(links)}")
             
             # Run simulation with LTM for detailed analysis
-            with model.new_sim(enable_ltm=True) as sim:
+            with model.simulate(enable_ltm=True) as sim:
                 print(f"\nRunning simulation with LTM analysis...")
                 sim.run_to_end()
                 
                 # Get comprehensive results
-                results = sim.get_results()
+                results = sim.get_run().results
                 print(f"Results DataFrame shape: {results.shape}")
                 
                 # Analyze links with scores
@@ -179,7 +179,7 @@ def context_manager_benefits():
     for i in range(3):
         with simlin.Project.from_file(model_path) as project:
             with project.get_model() as model:
-                with model.new_sim() as sim:
+                with model.simulate() as sim:
                     sim.run_to_end()
                     steps = sim.get_step_count()
                     print(f"  Simulation {i+1}: {steps} steps completed")

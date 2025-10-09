@@ -94,7 +94,7 @@ class SimulationExperiment:
         
         for value in param_values:
             # Create new simulation
-            sim = self.model.new_sim()
+            sim = self.model.simulate()
             
             # Set parameter value
             try:
@@ -133,7 +133,7 @@ class SimulationExperiment:
         mc_results = []
         
         for run in range(n_runs):
-            sim = self.model.new_sim()
+            sim = self.model.simulate()
             
             # Sample and set parameters
             param_values = {}
@@ -187,7 +187,7 @@ class LoopDominanceAnalyzer:
             return pd.DataFrame()
         
         # Run simulation with LTM
-        sim = model.new_sim(enable_ltm=True)
+        sim = model.simulate(enable_ltm=True)
         sim.run_to_end()
         
         # Collect loop scores
@@ -288,7 +288,7 @@ def demonstrate_advanced_features():
     results = []
     for model_name in project.get_model_names()[:3]:  # Process first 3 models
         model = project.get_model(model_name)
-        sim = model.new_sim()
+        sim = model.simulate()
         sim.run_to_end()
         
         results.append({

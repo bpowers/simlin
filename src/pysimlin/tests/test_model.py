@@ -97,22 +97,22 @@ class TestModelSimulation:
     
     def test_new_sim_default(self, test_model: Model) -> None:
         """Test creating a simulation with default settings."""
-        sim = test_model.new_sim()
+        sim = test_model.simulate()
         assert sim is not None
         from simlin import Sim
         assert isinstance(sim, Sim)
     
     def test_new_sim_with_ltm(self, test_model: Model) -> None:
         """Test creating a simulation with LTM enabled."""
-        sim = test_model.new_sim(enable_ltm=True)
+        sim = test_model.simulate(enable_ltm=True)
         assert sim is not None
         from simlin import Sim
         assert isinstance(sim, Sim)
     
     def test_multiple_sims(self, test_model: Model) -> None:
         """Test creating multiple simulations from the same model."""
-        sim1 = test_model.new_sim()
-        sim2 = test_model.new_sim()
+        sim1 = test_model.simulate()
+        sim2 = test_model.simulate()
         assert sim1 is not sim2
         # Both should be valid
         sim1.run_to_end()
@@ -175,7 +175,7 @@ class TestModelContextManager:
                 # Both should be usable inside their contexts
                 assert len(project.get_model_names()) > 0
                 assert model.get_var_count() > 0
-                sim = model.new_sim()
+                sim = model.simulate()
                 assert sim is not None
 
 

@@ -180,3 +180,20 @@ class ModelIssue:
 
     suggestion: Optional[str] = None
     """Suggested fix for the issue (if available)"""
+
+
+@dataclass(frozen=True)
+class UnitIssue:
+    """A dimensional analysis issue."""
+
+    variable: str
+    """Variable name with the unit issue"""
+
+    message: str
+    """Description of the unit issue"""
+
+    expected_units: Optional[str] = None
+    """Expected units for this variable"""
+
+    actual_units: Optional[str] = None
+    """Actual units computed for this variable"""

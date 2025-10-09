@@ -25,7 +25,7 @@ def load_and_run_model():
     print(f"Number of variables: {model.get_var_count()}")
     
     # Create and run a simulation
-    sim = model.new_sim()
+    sim = model.simulate()
     sim.run_to_end()
     
     print(f"Simulation completed with {sim.get_step_count()} time steps")
@@ -77,15 +77,17 @@ def work_with_dataframes():
     model = project.get_model()
     
     # Run simulation
-    sim = model.new_sim()
+    sim = model.simulate()
     sim.run_to_end()
-    
+
     # Get results as DataFrame
     var_names = model.get_var_names()
-    # Select a subset of variables for the DataFrame
+    # Select a subset of variables for display
     selected_vars = var_names[:min(5, len(var_names))]
-    
-    df = sim.get_results(variables=selected_vars)
+
+    df = sim.get_run().results
+    # Filter to selected variables
+    df = df[[v for v in selected_vars if v in df.columns]]
     
     print("Simulation results DataFrame:")
     print(df.head())
@@ -136,7 +138,7 @@ def ltm_analysis():
     model = project.get_model()
     
     # Create simulation with LTM enabled
-    sim = model.new_sim(enable_ltm=True)
+    sim = model.simulate(enable_ltm=True)
     sim.run_to_end()
     
     # Get links with scores
