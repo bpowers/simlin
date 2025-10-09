@@ -100,7 +100,7 @@ EXAMPLE_XMILE = b"""<?xml version='1.0' encoding='utf-8'?>
 def run_simulation(model: simlin.Model) -> float:
     """Run the model to the configured stop time and return the ending population."""
 
-    with model.new_sim() as sim:
+    with model.simulate() as sim:
         sim.run_to_end()
         return float(sim.get_value("population"))
 
@@ -108,30 +108,39 @@ def run_simulation(model: simlin.Model) -> float:
 def main() -> None:
     """Demonstrate editing a flow equation and verify the change takes effect."""
 
-    project = simlin.Project.from_xmile(EXAMPLE_XMILE)
-    model = project.get_model()
+    # Load model from XMILE bytes by writing to temp file first
+    import tempfile
+    import os
 
-    baseline_final = run_simulation(model)
+    with tempfile.NamedTemporaryFile(suffix=".stmx", delete=False) as f:
+        f.write(EXAMPLE_XMILE)
+        temp_path = f.name
 
-    with model.edit() as (current, patch):
-        flow_var = current["net_birth_rate"]
-        flow_var.flow.equation.scalar.equation = (
-            "fractional_growth_rate * population * 1.5"
+    try:
+        model = simlin.load(temp_path)
+        baseline_final = run_simulation(model)
+
+        with model.edit() as (current, patch):
+            flow_var = current["net_birth_rate"]
+            flow_var.flow.equation.scalar.equation = (
+                "fractional_growth_rate * population * 1.5"
+            )
+            patch.upsert_flow(flow_var.flow)
+
+        accelerated_final = run_simulation(model)
+
+        if not accelerated_final > baseline_final + 10:
+            raise RuntimeError(
+                "Edited model did not accelerate growth as expected: "
+                f"baseline={baseline_final:.2f} accelerated={accelerated_final:.2f}"
+            )
+
+        print(
+            "Updated growth equation increased the final population from "
+            f"{baseline_final:.1f} to {accelerated_final:.1f}."
         )
-        patch.upsert_flow(flow_var.flow)
-
-    accelerated_final = run_simulation(model)
-
-    if not accelerated_final > baseline_final + 10:
-        raise RuntimeError(
-            "Edited model did not accelerate growth as expected: "
-            f"baseline={baseline_final:.2f} accelerated={accelerated_final:.2f}"
-        )
-
-    print(
-        "Updated growth equation increased the final population from "
-        f"{baseline_final:.1f} to {accelerated_final:.1f}."
-    )
+    finally:
+        os.unlink(temp_path)
 
 
 if __name__ == "__main__":
@@ -234,7 +243,7 @@ def main() -> None:
         raise RuntimeError(f"Generated project contains validation errors: {errors}")
 
     model = project.get_model()
-    with model.new_sim() as sim:
+    with model.simulate() as sim:
         sim.run_to_end()
         population_series = [float(value) for value in sim.get_series("population")]
 
@@ -433,7 +442,7 @@ for period in run.dominant_periods:
 
 ```python
 # Run simulation with LTM enabled
-sim = model.new_sim(enable_ltm=True)
+sim = model.simulate(enable_ltm=True)
 sim.run_to_end()
 
 # Get links with importance scores over time
@@ -474,7 +483,8 @@ from simlin import (
 )
 
 try:
-    project = simlin.Project.from_file("model.stmx")
+    model = simlin.load("model.stmx")
+    project = model.project
 except SimlinImportError as e:
     print(f"Import failed: {e}")
     if e.code == ErrorCode.XML_DESERIALIZATION:
@@ -495,28 +505,27 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Load and run a population model
-with simlin.Project.from_file("population_model.stmx") as project:
-    model = project.get_model()
-    
-    # Run baseline simulation
-    with model.new_sim() as sim:
-        sim.run_to_end()
-        baseline = sim.get_results()
-    
-    # Run intervention scenario
-    with model.new_sim() as sim:
-        sim.set_value("birth_rate", 0.03)
-        sim.run_to_end()
-        intervention = sim.get_results()
-    
-    # Compare results
-    fig, ax = plt.subplots()
-    ax.plot(baseline.index, baseline["population"], label="Baseline")
-    ax.plot(intervention.index, intervention["population"], label="Intervention")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Population")
-    ax.legend()
-    plt.show()
+model = simlin.load("population_model.stmx")
+
+# Run baseline simulation
+with model.simulate() as sim:
+    sim.run_to_end()
+    baseline = sim.get_run().results
+
+# Run intervention scenario
+with model.simulate() as sim:
+    sim.set_value("birth_rate", 0.03)
+    sim.run_to_end()
+    intervention = sim.get_run().results
+
+# Compare results
+fig, ax = plt.subplots()
+ax.plot(baseline.index, baseline["population"], label="Baseline")
+ax.plot(intervention.index, intervention["population"], label="Intervention")
+ax.set_xlabel("Time")
+ax.set_ylabel("Population")
+ax.legend()
+plt.show()
 ```
 
 ## Supported Platforms

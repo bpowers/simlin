@@ -19,14 +19,16 @@ def basic_context_manager_usage():
     
     # Load a model using context manager - automatic cleanup when done
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    
-    with simlin.Project.from_file(model_path) as project:
+
+    # Load returns a Model; access Project via model.project if needed
+    model = simlin.load(model_path)
+    with model.project as project:
         print(f"Number of models: {len(project.get_model_names())}")
         print(f"Model names: {project.get_model_names()}")
-        
-        # Get the default model
-        with project.get_model() as model:
-            print(f"Number of variables: {len(model.get_var_names())}")
+
+        # Use the model (it's already loaded)
+        with model as m:
+            print(f"Number of variables: {len(m.variables)}")
             
             # Create and run a simulation with context manager
             with model.simulate() as sim:
@@ -48,11 +50,12 @@ def exception_handling_example():
     print("=" * 60)
     
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    
+
     try:
-        with simlin.Project.from_file(model_path) as project:
-            with project.get_model() as model:
-                with model.simulate() as sim:
+        model = simlin.load(model_path)
+        with model.project as project:
+            with model as m:
+                with m.simulate() as sim:
                     # Simulate an error condition
                     print("Starting simulation...")
                     sim.run_to_end()
@@ -79,18 +82,18 @@ def mixed_usage_patterns():
     
     # Traditional usage (still works exactly as before)
     print("Traditional usage (no context manager):")
-    project1 = simlin.Project.from_file(model_path)
-    model1 = project1.get_model()
+    model1 = simlin.load(model_path)
     sim1 = model1.simulate()
     sim1.run_to_end()
     print(f"Traditional sim completed with {sim1.get_step_count()} steps")
     # Cleanup happens automatically via finalizers
-    
+
     # Context manager usage for explicit control
     print("\nContext manager usage (explicit cleanup):")
-    with simlin.Project.from_file(model_path) as project2:
-        with project2.get_model() as model2:
-            with model2.simulate() as sim2:
+    model2 = simlin.load(model_path)
+    with model2.project as project2:
+        with model2 as m2:
+            with m2.simulate() as sim2:
                 sim2.run_to_end()
                 print(f"Context manager sim completed with {sim2.get_step_count()} steps")
             # Explicit cleanup happens here
@@ -106,24 +109,25 @@ def advanced_analysis_with_context_managers():
     print("=" * 60)
     
     model_path = Path("../tests/fixtures/eval_order.stmx")
-    
+
     # Comprehensive analysis with automatic cleanup
-    with simlin.Project.from_file(model_path) as project:
+    model = simlin.load(model_path)
+    with model.project as project:
         # Analyze project-level information
         print("Project Analysis:")
         loops = project.get_loops()
         print(f"Found {len(loops)} feedback loops")
-        
+
         errors = project.get_errors()
         if errors:
             print(f"Found {len(errors)} errors/warnings")
         else:
             print("No errors found in project")
-        
-        with project.get_model() as model:
+
+        with model as m:
             # Analyze model structure
             print(f"\nModel Analysis:")
-            var_names = model.get_var_names()
+            var_names = [v.name for v in m.variables]
             print(f"Variables: {len(var_names)}")
             
             # Analyze causal links
@@ -175,11 +179,11 @@ def context_manager_benefits():
     
     # Demonstrate resource management
     print("Running multiple simulations with automatic cleanup:")
-    
+
     for i in range(3):
-        with simlin.Project.from_file(model_path) as project:
-            with project.get_model() as model:
-                with model.simulate() as sim:
+        model = simlin.load(model_path)
+        with model as m:
+            with m.simulate() as sim:
                     sim.run_to_end()
                     steps = sim.get_step_count()
                     print(f"  Simulation {i+1}: {steps} steps completed")

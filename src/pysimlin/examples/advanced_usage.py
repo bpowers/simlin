@@ -14,7 +14,7 @@ class ModelAnalyzer:
     def __init__(self, project: simlin.Project):
         self.project = project
         self.model = project.get_model()
-        self.var_names = self.model.get_var_names()
+        self.var_names = [v.name for v in self.model.variables]
         self._dependency_graph: Optional[Dict[str, List[str]]] = None
     
     def build_dependency_graph(self) -> Dict[str, List[str]]:
@@ -222,9 +222,9 @@ def demonstrate_advanced_features():
     if not model_path.exists():
         print(f"Error: Model not found at {model_path}")
         return
-    
-    project = simlin.Project.from_file(model_path)
-    model = project.get_model()
+
+    model = simlin.load(model_path)
+    project = model.project
     
     # 1. Model Structure Analysis
     print("\n1. Model Structure Analysis")
@@ -293,7 +293,7 @@ def demonstrate_advanced_features():
         
         results.append({
             'model': model_name,
-            'variables': model.get_var_count(),
+            'variables': len(model.variables),
             'steps': sim.get_step_count()
         })
     
