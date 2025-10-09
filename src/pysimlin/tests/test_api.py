@@ -10,56 +10,50 @@ from simlin import Model, Run, Project
 class TestLoadFunction:
     """Test the top-level load() function."""
 
-    def test_load_returns_model(self) -> None:
+    def test_load_returns_model(self, teacup_stmx_path: Path) -> None:
         """Test that load() returns a Model instance."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
         assert isinstance(model, Model)
 
-    def test_load_with_str_path(self) -> None:
+    def test_load_with_str_path(self, teacup_stmx_path: Path) -> None:
         """Test that load() accepts string paths."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(str(test_file))
+        model = simlin.load(str(teacup_stmx_path))
         assert isinstance(model, Model)
 
-    def test_load_with_path_object(self) -> None:
+    def test_load_with_path_object(self, teacup_stmx_path: Path) -> None:
         """Test that load() accepts Path objects."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
         assert isinstance(model, Model)
 
-    def test_load_model_has_project(self) -> None:
+    def test_load_model_has_project(self, teacup_stmx_path: Path) -> None:
         """Test that loaded model has project reference."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
         assert model._project is not None
         assert isinstance(model._project, Project)
 
-    def test_load_model_base_case(self) -> None:
+    def test_load_model_base_case(self, teacup_stmx_path: Path) -> None:
         """Test that base_case is accessible on loaded model."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
         run = model.base_case
         assert isinstance(run, Run)
         assert len(run.results) > 0
         assert isinstance(run.results, pd.DataFrame)
 
-    def test_load_model_has_structure(self) -> None:
+    def test_load_model_has_structure(self, teacup_stmx_path: Path) -> None:
         """Test that loaded model has structural properties."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
 
         # Should have structural properties
         assert isinstance(model.stocks, tuple)
@@ -71,21 +65,19 @@ class TestLoadFunction:
         # Should have at least some variables
         assert len(model.variables) > 0
 
-    def test_load_xmile_format(self) -> None:
+    def test_load_xmile_format(self, teacup_xmile_path: Path) -> None:
         """Test loading XMILE format."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.xmile"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_xmile_path.exists(), f"Test file not found: {teacup_xmile_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_xmile_path)
         assert isinstance(model, Model)
         assert len(model.variables) > 0
 
-    def test_load_json_format(self) -> None:
+    def test_load_json_format(self, logistic_growth_json_path: Path) -> None:
         """Test loading JSON format."""
-        test_file = Path(__file__).parent / "logistic-growth.sd.json"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert logistic_growth_json_path.exists(), f"Test file not found: {logistic_growth_json_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(logistic_growth_json_path)
         assert isinstance(model, Model)
         assert len(model.variables) > 0
 
@@ -100,13 +92,12 @@ class TestLoadFunction:
 class TestCompleteWorkflow:
     """Test the complete pysimlin workflow from load to analysis."""
 
-    def test_complete_workflow(self) -> None:
+    def test_complete_workflow(self, teacup_stmx_path: Path) -> None:
         """Test the complete pysimlin workflow from load to analysis."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
         # Load model
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
 
         # Access structure
         assert len(model.stocks) > 0
@@ -132,12 +123,11 @@ class TestCompleteWorkflow:
         assert base_run.time_spec.stop > base_run.time_spec.start
         assert base_run.time_spec.dt > 0
 
-    def test_workflow_with_run_overrides(self) -> None:
+    def test_workflow_with_run_overrides(self, teacup_stmx_path: Path) -> None:
         """Test running model with overrides."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
 
         # Get a variable to override
         var_names = [v.name for v in model.variables]
@@ -152,12 +142,11 @@ class TestCompleteWorkflow:
         assert len(custom_run.results) > 0
         assert custom_run.overrides == {override_var: 42.0}
 
-    def test_workflow_base_case_vs_custom(self) -> None:
+    def test_workflow_base_case_vs_custom(self, teacup_stmx_path: Path) -> None:
         """Test comparing base case with custom run."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
 
         # Get base case
         base_run = model.base_case
@@ -187,12 +176,11 @@ class TestCompleteWorkflow:
         # Custom run should have overrides
         assert custom_run.overrides == {override_var: 99.0}
 
-    def test_workflow_multiple_runs(self) -> None:
+    def test_workflow_multiple_runs(self, teacup_stmx_path: Path) -> None:
         """Test creating multiple runs from the same model."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
 
         # Create multiple runs
         run1 = model.run(analyze_loops=False)
@@ -209,12 +197,11 @@ class TestCompleteWorkflow:
         assert len(run2.results) > 0
         assert len(run3.results) > 0
 
-    def test_workflow_access_loops(self) -> None:
+    def test_workflow_access_loops(self, teacup_stmx_path: Path) -> None:
         """Test accessing loop information."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
 
         # Structural loops (no behavior data)
         model_loops = model.loops
@@ -238,12 +225,11 @@ class TestCompleteWorkflow:
             assert isinstance(loop, Loop)
             assert loop.behavior_time_series is not None
 
-    def test_workflow_structural_properties_immutable(self) -> None:
+    def test_workflow_structural_properties_immutable(self, teacup_stmx_path: Path) -> None:
         """Test that structural properties are immutable."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
 
         # Stocks are frozen dataclasses
         if model.stocks:
@@ -263,12 +249,11 @@ class TestCompleteWorkflow:
             with pytest.raises(Exception):
                 aux.name = "modified"
 
-    def test_workflow_results_dataframe_properties(self) -> None:
+    def test_workflow_results_dataframe_properties(self, teacup_stmx_path: Path) -> None:
         """Test properties of the results DataFrame."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.stmx"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert teacup_stmx_path.exists(), f"Test file not found: {teacup_stmx_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(teacup_stmx_path)
         run = model.base_case
 
         # Results should be a DataFrame
@@ -295,12 +280,11 @@ class TestCompleteWorkflow:
 class TestLoadWithDifferentFormats:
     """Test loading models in different formats."""
 
-    def test_load_mdl_format(self) -> None:
+    def test_load_mdl_format(self, mdl_model_path: Path) -> None:
         """Test loading Vensim MDL format."""
-        test_file = Path(__file__).parent.parent.parent.parent / "test" / "test-models" / "samples" / "teacup" / "teacup.mdl"
-        assert test_file.exists(), f"Test file not found: {test_file}"
+        assert mdl_model_path.exists(), f"Test file not found: {mdl_model_path}"
 
-        model = simlin.load(test_file)
+        model = simlin.load(mdl_model_path)
         assert isinstance(model, Model)
         assert len(model.variables) > 0
 

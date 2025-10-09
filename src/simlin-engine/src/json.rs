@@ -796,7 +796,11 @@ impl From<Model> for datamodel::Model {
             name: model.name,
             variables,
             views: model.views.into_iter().map(|v| v.into()).collect(),
-            loop_metadata: model.loop_metadata.into_iter().map(|lm| lm.into()).collect(),
+            loop_metadata: model
+                .loop_metadata
+                .into_iter()
+                .map(|lm| lm.into())
+                .collect(),
         }
     }
 }
@@ -1198,7 +1202,11 @@ impl From<datamodel::Model> for Model {
                 time_units: String::new(),
             },
             views: model.views.into_iter().map(|v| v.into()).collect(),
-            loop_metadata: model.loop_metadata.into_iter().map(|lm| lm.into()).collect(),
+            loop_metadata: model
+                .loop_metadata
+                .into_iter()
+                .map(|lm| lm.into())
+                .collect(),
         }
     }
 }
@@ -1695,6 +1703,7 @@ mod tests {
                 time_units: String::new(),
             },
             views: vec![],
+            loop_metadata: vec![],
         };
 
         // Roundtrip
@@ -1742,6 +1751,7 @@ mod tests {
                     time_units: String::new(),
                 },
                 views: vec![],
+                loop_metadata: vec![],
             }],
             dimensions: vec![Dimension {
                 name: "cities".to_string(),

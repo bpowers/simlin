@@ -45,3 +45,21 @@ def json_model_path(fixtures_dir: Path) -> Path:
 def json_model_data(json_model_path: Path) -> bytes:
     """Load JSON model data."""
     return json_model_path.read_bytes()
+
+
+@pytest.fixture
+def teacup_stmx_path(fixtures_dir: Path) -> Path:
+    """Return path to teacup STMX model."""
+    return fixtures_dir / "teacup.stmx"
+
+
+@pytest.fixture
+def teacup_xmile_path(fixtures_dir: Path) -> Path:
+    """Return path to teacup XMILE model."""
+    return fixtures_dir / "teacup.xmile"
+
+
+@pytest.fixture
+def logistic_growth_json_path() -> Path:
+    """Return path to logistic growth JSON model."""
+    return Path(__file__).parent / "logistic-growth.sd.json"
