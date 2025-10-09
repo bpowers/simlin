@@ -56,7 +56,7 @@ def check_error(result: int, operation: str = "operation") -> None:
         code = None
         try:
             code = ErrorCode(result)
-        except Exception:
+        except ValueError:
             code = None
         raise SimlinRuntimeError(f"{operation} failed: {error_str}", code)
 

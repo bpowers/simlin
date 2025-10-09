@@ -1,7 +1,5 @@
 """Create a new Simlin project and build a simple population model using pysimlin's edit API."""
 
-from __future__ import annotations
-
 import simlin
 import simlin.pb as pb
 

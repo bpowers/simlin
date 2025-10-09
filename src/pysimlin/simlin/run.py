@@ -8,6 +8,7 @@ from numpy.typing import NDArray
 
 from .types import TimeSpec
 from .analysis import Loop, LoopPolarity
+from .errors import SimlinRuntimeError
 
 if TYPE_CHECKING:
     from .sim import Sim
@@ -260,7 +261,7 @@ class Run:
                     behavior_time_series=behavior_ts,
                 )
                 loops_with_behavior.append(loop_with_behavior)
-            except Exception:
+            except SimlinRuntimeError:
                 loops_with_behavior.append(structural_loop)
 
         return tuple(loops_with_behavior)

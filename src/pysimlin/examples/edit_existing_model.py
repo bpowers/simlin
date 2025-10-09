@@ -1,7 +1,5 @@
 """Example showing how to edit an existing model's flow equation with pysimlin."""
 
-from __future__ import annotations
-
 import simlin
 
 
