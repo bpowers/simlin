@@ -153,9 +153,7 @@ pub struct SimlinSim {
     ref_count: AtomicUsize,
 }
 
-type OutError = *mut *mut SimlinError;
-
-fn clear_out_error(out_error: OutError) {
+fn clear_out_error(out_error: *mut *mut SimlinError) {
     if out_error.is_null() {
         return;
     }
@@ -164,7 +162,7 @@ fn clear_out_error(out_error: OutError) {
     }
 }
 
-fn store_error(out_error: OutError, error: SimlinError) {
+fn store_error(out_error: *mut *mut SimlinError, error: SimlinError) {
     if out_error.is_null() {
         return;
     }
@@ -173,7 +171,7 @@ fn store_error(out_error: OutError, error: SimlinError) {
     }
 }
 
-fn store_ffi_error(out_error: OutError, error: FfiError) {
+fn store_ffi_error(out_error: *mut *mut SimlinError, error: FfiError) {
     store_error(out_error, error.into_simlin_error());
 }
 
@@ -190,7 +188,7 @@ fn error_from_anyhow(err: AnyError) -> SimlinError {
     error
 }
 
-fn store_anyhow_error(out_error: OutError, err: AnyError) {
+fn store_anyhow_error(out_error: *mut *mut SimlinError, err: AnyError) {
     store_error(out_error, error_from_anyhow(err));
 }
 
@@ -375,7 +373,7 @@ pub unsafe extern "C" fn simlin_error_get_detail(
 pub unsafe extern "C" fn simlin_project_open(
     data: *const u8,
     len: usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
     clear_out_error(out_error);
 
@@ -418,7 +416,7 @@ pub unsafe extern "C" fn simlin_project_json_open(
     data: *const u8,
     len: usize,
     format: ffi::SimlinJsonFormat,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
     clear_out_error(out_error);
 
@@ -504,7 +502,7 @@ pub unsafe extern "C" fn simlin_project_unref(project: *mut SimlinProject) {
 pub unsafe extern "C" fn simlin_project_get_model_count(
     project: *mut SimlinProject,
     out_count: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_count.is_null() {
@@ -532,7 +530,7 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
     result: *mut *mut c_char,
     max: usize,
     out_written: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_written.is_null() {
@@ -599,7 +597,7 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
 pub unsafe extern "C" fn simlin_project_add_model(
     project: *mut SimlinProject,
     model_name: *const c_char,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     let proj = ffi_try!(out_error, require_project(project));
@@ -673,7 +671,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
 pub unsafe extern "C" fn simlin_project_get_model(
     project: *mut SimlinProject,
     model_name: *const c_char,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinModel {
     clear_out_error(out_error);
     let proj = match require_project(project) {
@@ -766,7 +764,7 @@ pub unsafe extern "C" fn simlin_model_unref(model: *mut SimlinModel) {
 pub unsafe extern "C" fn simlin_model_get_var_count(
     model: *mut SimlinModel,
     out_count: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_count.is_null() {
@@ -796,7 +794,7 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
     result: *mut *mut c_char,
     max: usize,
     out_written: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_written.is_null() {
@@ -868,7 +866,7 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
     result: *mut *mut c_char,
     max: usize,
     out_written: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_written.is_null() {
@@ -1013,7 +1011,7 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
 #[no_mangle]
 pub unsafe extern "C" fn simlin_model_get_links(
     model: *mut SimlinModel,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLinks {
     clear_out_error(out_error);
     let model_ref = match require_model(model) {
@@ -1120,7 +1118,7 @@ fn create_vm(project: &engine::Project, model_name: &str) -> Result<Vm, engine::
 pub unsafe extern "C" fn simlin_sim_new(
     model: *mut SimlinModel,
     enable_ltm: bool,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinSim {
     clear_out_error(out_error);
     let model_ref = match require_model(model) {
@@ -1194,7 +1192,7 @@ pub unsafe extern "C" fn simlin_sim_unref(sim: *mut SimlinSim) {
 pub unsafe extern "C" fn simlin_sim_run_to(
     sim: *mut SimlinSim,
     time: c_double,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
@@ -1215,7 +1213,10 @@ pub unsafe extern "C" fn simlin_sim_run_to(
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
 #[no_mangle]
-pub unsafe extern "C" fn simlin_sim_run_to_end(sim: *mut SimlinSim, out_error: OutError) {
+pub unsafe extern "C" fn simlin_sim_run_to_end(
+    sim: *mut SimlinSim,
+    out_error: *mut *mut SimlinError,
+) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     if let Some(mut vm) = sim_ref.vm.take() {
@@ -1244,7 +1245,7 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(sim: *mut SimlinSim, out_error: O
 pub unsafe extern "C" fn simlin_sim_get_stepcount(
     sim: *mut SimlinSim,
     out_count: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_count.is_null() {
@@ -1272,7 +1273,7 @@ pub unsafe extern "C" fn simlin_sim_get_stepcount(
 /// # Safety
 /// - `sim` must be a valid pointer to a SimlinSim
 #[no_mangle]
-pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: OutError) {
+pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *mut SimlinError) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
     sim_ref.results = None;
@@ -1312,7 +1313,7 @@ pub unsafe extern "C" fn simlin_sim_get_value(
     sim: *mut SimlinSim,
     name: *const c_char,
     out_value: *mut c_double,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_value.is_null() {
@@ -1400,7 +1401,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
     sim: *mut SimlinSim,
     name: *const c_char,
     val: c_double,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if name.is_null() {
@@ -1460,7 +1461,7 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
     sim: *mut SimlinSim,
     offset: usize,
     val: c_double,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
@@ -1502,7 +1503,7 @@ pub unsafe extern "C" fn simlin_sim_get_offset(
     sim: *mut SimlinSim,
     name: *const c_char,
     out_offset: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_offset.is_null() {
@@ -1566,7 +1567,7 @@ pub unsafe extern "C" fn simlin_sim_get_series(
     results_ptr: *mut c_double,
     len: usize,
     out_written: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_written.is_null() {
@@ -1647,7 +1648,7 @@ pub unsafe extern "C" fn simlin_free_string(s: *mut c_char) {
 #[no_mangle]
 pub unsafe extern "C" fn simlin_analyze_get_loops(
     project: *mut SimlinProject,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLoops {
     clear_out_error(out_error);
     let project_ref = match require_project(project) {
@@ -1784,7 +1785,7 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
 #[no_mangle]
 pub unsafe extern "C" fn simlin_analyze_get_links(
     sim: *mut SimlinSim,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinLinks {
     clear_out_error(out_error);
     let sim_ref = match require_sim(sim) {
@@ -1975,7 +1976,7 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     results_ptr: *mut c_double,
     len: usize,
     out_written: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_written.is_null() {
@@ -2058,7 +2059,7 @@ pub unsafe extern "C" fn simlin_analyze_get_rel_loop_score(
     results_ptr: *mut c_double,
     len: usize,
     out_written: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     simlin_analyze_get_relative_loop_score(sim, loop_id, results_ptr, len, out_written, out_error);
 }
@@ -2107,7 +2108,7 @@ pub unsafe extern "C" fn simlin_free(ptr: *mut u8) {
 pub unsafe extern "C" fn simlin_import_xmile(
     data: *const u8,
     len: usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
     clear_out_error(out_error);
     if data.is_null() {
@@ -2150,7 +2151,7 @@ pub unsafe extern "C" fn simlin_import_xmile(
 pub unsafe extern "C" fn simlin_import_mdl(
     data: *const u8,
     len: usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinProject {
     clear_out_error(out_error);
     if data.is_null() {
@@ -2196,7 +2197,7 @@ pub unsafe extern "C" fn simlin_export_xmile(
     project: *mut SimlinProject,
     out_buffer: *mut *mut u8,
     out_len: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_buffer.is_null() || out_len.is_null() {
@@ -2263,7 +2264,7 @@ pub unsafe extern "C" fn simlin_project_serialize(
     project: *mut SimlinProject,
     out_buffer: *mut *mut u8,
     out_len: *mut usize,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if out_buffer.is_null() || out_len.is_null() {
@@ -2339,7 +2340,7 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
     dry_run: bool,
     allow_errors: bool,
     out_collected_errors: *mut *mut SimlinError,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) {
     clear_out_error(out_error);
     if !out_collected_errors.is_null() {
@@ -2583,7 +2584,7 @@ fn first_error_code(
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_get_errors(
     project: *mut SimlinProject,
-    out_error: OutError,
+    out_error: *mut *mut SimlinError,
 ) -> *mut SimlinError {
     clear_out_error(out_error);
     let proj = match require_project(project) {
