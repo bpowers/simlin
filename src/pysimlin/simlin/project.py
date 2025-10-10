@@ -12,9 +12,9 @@ from ._ffi import (
     string_to_c,
     c_to_string,
     free_c_string,
-    check_error,
+    check_out_error,
+    extract_error_details,
     _register_finalizer,
-    get_error_string,
 )
 from .errors import SimlinImportError, SimlinRuntimeError, ErrorCode, ErrorDetail
 from .analysis import Loop, LoopPolarity
@@ -25,32 +25,13 @@ JSON_FORMAT_SIMLIN = "simlin"
 JSON_FORMAT_SDAI = "sd-ai"
 
 
-def _collect_error_details(c_details: Any) -> List[ErrorDetail]:
-    """Convert a C SimlinErrorDetails pointer into Python ErrorDetail objects.
+def _collect_error_details(err_ptr: Any) -> List[ErrorDetail]:
+    """Convert a C SimlinError pointer into Python ErrorDetail objects.
 
     Note: This function does NOT free the C memory. The caller is responsible
-    for calling simlin_free_error_details() on the original pointer.
+    for calling simlin_error_free() on the original pointer.
     """
-    if c_details == ffi.NULL:
-        return []
-
-    errors: List[ErrorDetail] = []
-    for i in range(c_details.count):
-        c_detail = c_details.errors[i]
-        # Note: c_to_string creates Python strings from C strings without freeing the C memory.
-        # The C strings are owned by the SimlinErrorDetails structure and will be freed
-        # when simlin_free_error_details is called.
-        errors.append(
-            ErrorDetail(
-                code=ErrorCode(c_detail.code),
-                message=c_to_string(c_detail.message) or "",
-                model_name=c_to_string(c_detail.model_name),
-                variable_name=c_to_string(c_detail.variable_name),
-                start_offset=c_detail.start_offset,
-                end_offset=c_detail.end_offset,
-            )
-        )
-    return errors
+    return extract_error_details(err_ptr)
 
 
 def _coerce_dt(value: Any) -> pb.Dt:
@@ -142,50 +123,52 @@ class Project:
         if not data:
             raise SimlinImportError("Failed to serialize new project")
 
-        err_ptr = ffi.new("int *")
         c_data = ffi.new("uint8_t[]", data)
+        err_ptr = ffi.new("SimlinError **")
 
         project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
-
-        if project_ptr == ffi.NULL:
-            error_code = err_ptr[0]
-            error_msg = get_error_string(error_code)
-            raise SimlinImportError(f"Failed to create new project: {error_msg}", ErrorCode(error_code))
+        check_out_error(err_ptr, "Create new project")
 
         return cls(project_ptr)
 
     def __get_model_count(self) -> int:
         """Internal method to get the number of models in the project."""
-        count = lib.simlin_project_get_model_count(self._ptr)
-        if count < 0:
-            raise SimlinImportError("Failed to get model count")
-        return count
+        count_ptr = ffi.new("uintptr_t *")
+        err_ptr = ffi.new("SimlinError **")
+        lib.simlin_project_get_model_count(self._ptr, count_ptr, err_ptr)
+        check_out_error(err_ptr, "Get model count")
+        return int(count_ptr[0])
     
     def get_model_names(self) -> List[str]:
         """
         Get the names of all models in the project.
-        
+
         Returns:
             List of model names
         """
         count = self.__get_model_count()
         if count == 0:
             return []
-        
+
         # Allocate array for C string pointers
         c_names = ffi.new("char *[]", count)
-        
-        result = lib.simlin_project_get_model_names(self._ptr, c_names, count)
-        if result != count:
-            raise SimlinImportError(f"Failed to get model names: got {result}, expected {count}")
-        
+        out_written_ptr = ffi.new("uintptr_t *")
+        err_ptr = ffi.new("SimlinError **")
+
+        lib.simlin_project_get_model_names(self._ptr, c_names, count, out_written_ptr, err_ptr)
+        check_out_error(err_ptr, "Get model names")
+
+        written = int(out_written_ptr[0])
+        if written != count:
+            raise SimlinImportError(f"Failed to get model names: got {written}, expected {count}")
+
         # Convert to Python strings and free C memory
         names = []
         for i in range(count):
             if c_names[i] != ffi.NULL:
                 names.append(c_to_string(c_names[i]))
                 free_c_string(c_names[i])
-        
+
         return names
     
     def get_model(self, name: str = "") -> "Model":
@@ -214,9 +197,9 @@ class Project:
             resolved_name = names[0]
 
         c_name = string_to_c(resolved_name) if name else ffi.NULL
-        model_ptr = lib.simlin_project_get_model(self._ptr, c_name)
-        if model_ptr == ffi.NULL:
-            raise SimlinImportError(f"Model not found: {name or 'default'}")
+        err_ptr = ffi.new("SimlinError **")
+        model_ptr = lib.simlin_project_get_model(self._ptr, c_name, err_ptr)
+        check_out_error(err_ptr, f"Get model '{name or 'default'}'")
 
         return Model(model_ptr, project=self, name=resolved_name)
 
@@ -254,22 +237,25 @@ class Project:
     def get_loops(self) -> List[Loop]:
         """
         Get all feedback loops in the project.
-        
+
         Returns:
             List of Loop objects
         """
-        loops_ptr = lib.simlin_analyze_get_loops(self._ptr)
+        err_ptr = ffi.new("SimlinError **")
+        loops_ptr = lib.simlin_analyze_get_loops(self._ptr, err_ptr)
+        check_out_error(err_ptr, "Get loops")
+
         if loops_ptr == ffi.NULL:
             return []
-        
+
         try:
             if loops_ptr.count == 0:
                 return []
-            
+
             loops = []
             for i in range(loops_ptr.count):
                 c_loop = loops_ptr.loops[i]
-                
+
                 # Convert variables
                 variables = []
                 for j in range(c_loop.var_count):
@@ -283,48 +269,51 @@ class Project:
                     polarity=LoopPolarity(c_loop.polarity)
                 )
                 loops.append(loop)
-            
+
             return loops
-            
+
         finally:
             lib.simlin_free_loops(loops_ptr)
     
     def get_errors(self) -> List[ErrorDetail]:
         """
         Get all errors in the project (compilation and validation).
-        
+
         Returns:
             List of ErrorDetail objects, or empty list if no errors
         """
-        details_ptr = lib.simlin_project_get_errors(self._ptr)
-        if details_ptr == ffi.NULL:
+        err_ptr = ffi.new("SimlinError **")
+        error_ptr = lib.simlin_project_get_errors(self._ptr, err_ptr)
+        check_out_error(err_ptr, "Get errors")
+
+        if error_ptr == ffi.NULL:
             return []
 
         try:
-            return _collect_error_details(details_ptr)
+            return _collect_error_details(error_ptr)
         finally:
-            lib.simlin_free_error_details(details_ptr)
+            lib.simlin_error_free(error_ptr)
     
     def to_xmile(self) -> bytes:
         """
         Export the project to XMILE format.
-        
+
         Returns:
             The XMILE XML data as bytes
-            
+
         Raises:
             SimlinImportError: If export fails
         """
         output_ptr = ffi.new("uint8_t **")
-        # Use uintptr_t* to exactly match the C typedef used in cdef
         output_len_ptr = ffi.new("uintptr_t *")
-        
-        result = lib.simlin_export_xmile(self._ptr, output_ptr, output_len_ptr)
-        check_error(result, "Export to XMILE")
-        
+        err_ptr = ffi.new("SimlinError **")
+
+        lib.simlin_export_xmile(self._ptr, output_ptr, output_len_ptr, err_ptr)
+        check_out_error(err_ptr, "Export to XMILE")
+
         if output_ptr[0] == ffi.NULL:
             raise SimlinImportError("Export returned null output")
-        
+
         try:
             # Copy the data to Python bytes
             return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))
@@ -345,37 +334,27 @@ class Project:
 
         patch_bytes = patch.SerializeToString()
         c_patch = ffi.new("uint8_t[]", patch_bytes)
-        errors_ptr = ffi.new("SimlinErrorDetails **")
+        out_collected_errors_ptr = ffi.new("SimlinError **")
+        err_ptr = ffi.new("SimlinError **")
 
-        result = lib.simlin_project_apply_patch(
+        lib.simlin_project_apply_patch(
             self._ptr,
             c_patch,
             len(patch_bytes),
             dry_run,
             allow_errors,
-            errors_ptr,
+            out_collected_errors_ptr,
+            err_ptr,
         )
+        check_out_error(err_ptr, "Apply patch")
 
         errors: List[ErrorDetail] = []
-        if errors_ptr[0] != ffi.NULL:
-            errors = _collect_error_details(errors_ptr[0])
-            lib.simlin_free_error_details(errors_ptr[0])
+        if out_collected_errors_ptr[0] != ffi.NULL:
+            errors = _collect_error_details(out_collected_errors_ptr[0])
+            lib.simlin_error_free(out_collected_errors_ptr[0])
 
-        if result == ErrorCode.NO_ERROR.value and not errors:
+        if not errors:
             return []
-
-        try:
-            code = ErrorCode(result)
-        except ValueError:
-            code = None
-
-        if result != ErrorCode.NO_ERROR.value:
-            message = f"Patch failed: {get_error_string(result)}"
-            exc = SimlinRuntimeError(message, code)
-            setattr(exc, "errors", errors)
-            setattr(exc, "dry_run", dry_run)
-            setattr(exc, "allow_errors", allow_errors)
-            raise exc
 
         if errors and not allow_errors:
             first_code = errors[0].code if errors else None
@@ -433,23 +412,23 @@ class Project:
     def serialize(self) -> bytes:
         """
         Serialize the project to binary protobuf format.
-        
+
         Returns:
             The protobuf binary data
-            
+
         Raises:
             SimlinImportError: If serialization fails
         """
         output_ptr = ffi.new("uint8_t **")
-        # Use uintptr_t* to exactly match the C typedef used in cdef
         output_len_ptr = ffi.new("uintptr_t *")
-        
-        result = lib.simlin_project_serialize(self._ptr, output_ptr, output_len_ptr)
-        check_error(result, "Project serialization")
-        
+        err_ptr = ffi.new("SimlinError **")
+
+        lib.simlin_project_serialize(self._ptr, output_ptr, output_len_ptr, err_ptr)
+        check_out_error(err_ptr, "Project serialization")
+
         if output_ptr[0] == ffi.NULL:
             raise SimlinImportError("Serialize returned null output")
-        
+
         try:
             # Copy the data to Python bytes
             return bytes(ffi.buffer(output_ptr[0], output_len_ptr[0]))

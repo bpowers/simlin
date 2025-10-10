@@ -1,4 +1,4 @@
-# cbindgen configuration for engine2
+# cbindgen configuration for simlin FFI
 
 language = "C"
 cpp_compat = true
@@ -18,7 +18,7 @@ include = []
 
 [export]
 # Explicitly include the types we want
-include = ["SimlinErrorCode", "SimlinLoopPolarity", "SimlinLoop", "SimlinLoops", "SimlinProject", "SimlinModel", "SimlinSim", "SimlinErrorDetail", "SimlinErrorDetails", "SimlinJsonFormat"]
+include = ["SimlinErrorCode", "SimlinLoopPolarity", "SimlinLoop", "SimlinLoops", "SimlinProject", "SimlinModel", "SimlinSim", "SimlinError", "SimlinErrorDetail", "SimlinJsonFormat"]
 exclude = []
 item_types = ["enums", "structs", "unions", "typedefs", "opaque", "functions"]
 
@@ -31,8 +31,8 @@ item_types = ["enums", "structs", "unions", "typedefs", "opaque", "functions"]
 "SimlinProject" = "SimlinProject"
 "SimlinModel" = "SimlinModel"
 "SimlinSim" = "SimlinSim"
+"SimlinError" = "SimlinError"
 "SimlinErrorDetail" = "SimlinErrorDetail"
-"SimlinErrorDetails" = "SimlinErrorDetails"
 
 [enum]
 # Use the enum name as prefix

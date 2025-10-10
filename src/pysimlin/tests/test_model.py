@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 import simlin
-from simlin import Project, Model, SimlinRuntimeError
+from simlin import Project, Model, SimlinRuntimeError, SimlinCompilationError
 from simlin import pb
 
 
@@ -232,7 +232,7 @@ class TestModelEditing:
         before = pb.Project()
         before.ParseFromString(model.project.serialize())
 
-        with pytest.raises(SimlinRuntimeError):
+        with pytest.raises((SimlinRuntimeError, SimlinCompilationError)):
             with model.edit() as (_, patch):
                 bad_aux = pb.Variable.Aux()
                 bad_aux.ident = "bad_variable"

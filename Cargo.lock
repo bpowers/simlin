@@ -1189,6 +1189,7 @@ dependencies = [
 name = "simlin"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "prost",
  "serde_json",
  "simlin-compat",

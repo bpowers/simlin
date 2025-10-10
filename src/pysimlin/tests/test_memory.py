@@ -207,7 +207,7 @@ class TestReferenceCountingEdgeCases:
                 invalid_file = tmp_path / "invalid.stmx"
                 invalid_file.write_bytes(b"invalid data")
                 simlin.load(invalid_file)
-            except SimlinImportError:
+            except SimlinRuntimeError:
                 pass
 
         gc.collect()
@@ -425,14 +425,14 @@ class TestErrorPathMemoryLeaks:
                 invalid_xmile = tmp_path / f"invalid_{i}_xmile.stmx"
                 invalid_xmile.write_bytes(b"not xml")
                 simlin.load(invalid_xmile)
-            except SimlinImportError:
+            except SimlinRuntimeError:
                 error_count += 1
 
             try:
                 invalid_mdl = tmp_path / f"invalid_{i}_mdl.mdl"
                 invalid_mdl.write_bytes(b"invalid mdl")
                 simlin.load(invalid_mdl)
-            except SimlinImportError:
+            except SimlinRuntimeError:
                 error_count += 1
 
         assert error_count > 0  # Ensure we actually tested error paths
@@ -479,7 +479,7 @@ class TestErrorPathMemoryLeaks:
         for _ in range(50):
             try:
                 simlin.load("/nonexistent/path/file.stmx")
-            except SimlinImportError:
+            except (SimlinRuntimeError, SimlinImportError):
                 pass
 
         gc.collect()
@@ -508,14 +508,14 @@ class TestErrorPathMemoryLeaks:
                     invalid_xmile = tmp_path / f"corrupted_{i}_{j}_xmile.stmx"
                     invalid_xmile.write_bytes(pattern)
                     simlin.load(invalid_xmile)
-                except SimlinImportError:
+                except SimlinRuntimeError:
                     pass
 
                 try:
                     invalid_mdl = tmp_path / f"corrupted_{i}_{j}_mdl.mdl"
                     invalid_mdl.write_bytes(pattern)
                     simlin.load(invalid_mdl)
-                except SimlinImportError:
+                except SimlinRuntimeError:
                     pass
 
         gc.collect()

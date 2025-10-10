@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any, Self, Union
 from types import TracebackType
 
-from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, get_error_string
+from ._ffi import ffi, lib, string_to_c, c_to_string, free_c_string, _register_finalizer, check_out_error
 from .errors import SimlinRuntimeError, ErrorCode
 from .analysis import Link, LinkPolarity, Loop
 from .types import Stock, Flow, Aux, TimeSpec, GraphicalFunction, GraphicalFunctionScale, ModelIssue
@@ -194,16 +194,16 @@ class Model:
     def get_incoming_links(self, var_name: str) -> List[str]:
         """
         Get the dependencies (incoming links) for a given variable.
-        
+
         For flows and auxiliary variables, returns dependencies from their equations.
         For stocks, returns dependencies from their initial value equation.
-        
+
         Args:
             var_name: The name of the variable to query
-            
+
         Returns:
             List of variable names that this variable depends on
-            
+
         Raises:
             SimlinRuntimeError: If the variable doesn't exist or operation fails
         """
@@ -213,68 +213,67 @@ class Model:
             raise SimlinRuntimeError(f"Variable not found: {var_name}")
 
         c_var_name = string_to_c(var_name)
-        
+
         # First query the number of dependencies
-        count = lib.simlin_model_get_incoming_links(self._ptr, c_var_name, ffi.NULL, 0)
-        if count < 0:
-            error_msg = get_error_string(-count)
-            raise SimlinRuntimeError(
-                f"Failed to get incoming links for '{var_name}': {error_msg}",
-                ErrorCode(-count) if -count <= 32 else None
-            )
-        
+        out_written_ptr = ffi.new("uintptr_t *")
+        err_ptr = ffi.new("SimlinError **")
+        lib.simlin_model_get_incoming_links(self._ptr, c_var_name, ffi.NULL, 0, out_written_ptr, err_ptr)
+        check_out_error(err_ptr, f"Get incoming links count for '{var_name}'")
+
+        count = int(out_written_ptr[0])
         if count == 0:
             return []
-        
+
         # Allocate array for dependency names
         c_deps = ffi.new("char *[]", count)
-        
+        out_written_ptr = ffi.new("uintptr_t *")
+        err_ptr = ffi.new("SimlinError **")
+
         # Get the actual dependencies
-        actual_count = lib.simlin_model_get_incoming_links(self._ptr, c_var_name, c_deps, count)
-        if actual_count < 0:
-            error_msg = get_error_string(-actual_count)
-            raise SimlinRuntimeError(
-                f"Failed to get incoming links for '{var_name}': {error_msg}",
-                ErrorCode(-actual_count) if -actual_count <= 32 else None
-            )
-        
+        lib.simlin_model_get_incoming_links(self._ptr, c_var_name, c_deps, count, out_written_ptr, err_ptr)
+        check_out_error(err_ptr, f"Get incoming links for '{var_name}'")
+
+        actual_count = int(out_written_ptr[0])
         if actual_count != count:
             raise SimlinRuntimeError(
                 f"Failed to get incoming links for '{var_name}': count mismatch (expected {count}, got {actual_count})"
             )
-        
+
         # Convert to Python strings and free C memory
         deps = []
         for i in range(count):
             if c_deps[i] != ffi.NULL:
                 deps.append(c_to_string(c_deps[i]))
                 free_c_string(c_deps[i])
-        
+
         return deps
     
     def get_links(self) -> List[Link]:
         """
         Get all causal links in the model (static analysis).
-        
+
         This returns the structural links in the model without simulation data.
         To get links with LTM scores, run a simulation with enable_ltm=True
         and call get_links() on the Sim instance.
-        
+
         Returns:
             List of Link objects representing causal relationships
         """
-        links_ptr = lib.simlin_model_get_links(self._ptr)
+        err_ptr = ffi.new("SimlinError **")
+        links_ptr = lib.simlin_model_get_links(self._ptr, err_ptr)
+        check_out_error(err_ptr, "Get links")
+
         if links_ptr == ffi.NULL:
             return []
-        
+
         try:
             if links_ptr.count == 0:
                 return []
-            
+
             links = []
             for i in range(links_ptr.count):
                 c_link = links_ptr.links[i]
-                
+
                 link = Link(
                     from_var=c_to_string(getattr(c_link, 'from')) or "",
                     to_var=c_to_string(c_link.to) or "",
@@ -282,9 +281,9 @@ class Model:
                     score=None  # No scores in static analysis
                 )
                 links.append(link)
-            
+
             return links
-            
+
         finally:
             lib.simlin_free_links(links_ptr)
 
@@ -545,12 +544,11 @@ class Model:
             ...     run = sim.get_run()
         """
         from .sim import Sim
-        from ._ffi import lib, ffi
-        from .errors import SimlinRuntimeError
+        from ._ffi import lib, ffi, check_out_error
 
-        sim_ptr = lib.simlin_sim_new(self._ptr, enable_ltm)
-        if sim_ptr == ffi.NULL:
-            raise SimlinRuntimeError("Failed to create simulation")
+        err_ptr = ffi.new("SimlinError **")
+        sim_ptr = lib.simlin_sim_new(self._ptr, enable_ltm, err_ptr)
+        check_out_error(err_ptr, "Create simulation")
 
         sim = Sim(sim_ptr, self, overrides or {})
         if overrides:

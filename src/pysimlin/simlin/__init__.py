@@ -66,7 +66,7 @@ def load(path: Union[str, Path]) -> Model:
         >>> model.base_case.results['population'].plot()
     """
     from pathlib import Path as PathlibPath
-    from ._ffi import ffi, lib, get_error_string
+    from ._ffi import ffi, lib, check_out_error
 
     path = PathlibPath(path)
 
@@ -77,8 +77,8 @@ def load(path: Union[str, Path]) -> Model:
     suffix = path.suffix.lower()
 
     # Determine the import function based on file extension
-    err_ptr = ffi.new("int *")
     c_data = ffi.new("uint8_t[]", data)
+    err_ptr = ffi.new("SimlinError **")
 
     if suffix in (".xmile", ".stmx", ".xml"):
         project_ptr = lib.simlin_import_xmile(c_data, len(data), err_ptr)
@@ -101,10 +101,7 @@ def load(path: Union[str, Path]) -> Model:
             # Default to protobuf
             project_ptr = lib.simlin_project_open(c_data, len(data), err_ptr)
 
-    if project_ptr == ffi.NULL:
-        error_code = err_ptr[0]
-        error_msg = get_error_string(error_code)
-        raise SimlinImportError(f"Failed to load model from {path}: {error_msg}", ErrorCode(error_code))
+    check_out_error(err_ptr, f"Load model from {path}")
 
     project = Project(project_ptr)
     return project.get_model()
