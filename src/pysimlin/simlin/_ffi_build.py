@@ -106,59 +106,57 @@ typedef struct {
   uint16_t end_offset;
 } SimlinErrorDetail;
 
-typedef struct {
-  SimlinErrorDetail *errors;
-  uintptr_t count;
-} SimlinErrorDetails;
+typedef struct SimlinError SimlinError;
+typedef SimlinError **OutError;
 
-const char *simlin_error_str(int err);
-SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, int *err);
-SimlinProject *simlin_project_json_open(const uint8_t *data, uintptr_t len, SimlinJsonFormat format, int *err);
+const char *simlin_error_str(SimlinErrorCode err);
+void simlin_error_free(SimlinError *err);
+SimlinErrorCode simlin_error_get_code(const SimlinError *err);
+const char *simlin_error_get_message(const SimlinError *err);
+uintptr_t simlin_error_get_detail_count(const SimlinError *err);
+const SimlinErrorDetail *simlin_error_get_details(const SimlinError *err);
+const SimlinErrorDetail *simlin_error_get_detail(const SimlinError *err, uintptr_t index);
+SimlinProject *simlin_project_open(const uint8_t *data, uintptr_t len, OutError out_error);
+SimlinProject *simlin_project_json_open(const uint8_t *data, uintptr_t len, SimlinJsonFormat format, OutError out_error);
 void simlin_project_ref(SimlinProject *project);
 void simlin_project_unref(SimlinProject *project);
-int simlin_project_get_model_count(SimlinProject *project);
-int simlin_project_get_model_names(SimlinProject *project, char **result, uintptr_t max);
-SimlinModel *simlin_project_get_model(SimlinProject *project, const char *model_name);
+void simlin_project_get_model_count(SimlinProject *project, uintptr_t *out_count, OutError out_error);
+void simlin_project_get_model_names(SimlinProject *project, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
+void simlin_project_add_model(SimlinProject *project, const char *model_name, OutError out_error);
+SimlinModel *simlin_project_get_model(SimlinProject *project, const char *model_name, OutError out_error);
 void simlin_model_ref(SimlinModel *model);
 void simlin_model_unref(SimlinModel *model);
-int simlin_model_get_var_count(SimlinModel *model);
-int simlin_model_get_var_names(SimlinModel *model, char **result, uintptr_t max);
-int simlin_model_get_incoming_links(SimlinModel *model, const char *var_name, char **result, uintptr_t max);
-SimlinLinks *simlin_model_get_links(SimlinModel *model);
-SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm);
+void simlin_model_get_var_count(SimlinModel *model, uintptr_t *out_count, OutError out_error);
+void simlin_model_get_var_names(SimlinModel *model, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
+void simlin_model_get_incoming_links(SimlinModel *model, const char *var_name, char **result, uintptr_t max, uintptr_t *out_written, OutError out_error);
+SimlinLinks *simlin_model_get_links(SimlinModel *model, OutError out_error);
+SimlinSim *simlin_sim_new(SimlinModel *model, bool enable_ltm, OutError out_error);
 void simlin_sim_ref(SimlinSim *sim);
 void simlin_sim_unref(SimlinSim *sim);
-int simlin_sim_run_to(SimlinSim *sim, double time);
-int simlin_sim_run_to_end(SimlinSim *sim);
-int simlin_sim_get_stepcount(SimlinSim *sim);
-int simlin_sim_reset(SimlinSim *sim);
-int simlin_sim_get_value(SimlinSim *sim, const char *name, double *result);
-int simlin_sim_set_value(SimlinSim *sim, const char *name, double val);
-int simlin_sim_set_value_by_offset(SimlinSim *sim, uintptr_t offset, double val);
-int simlin_sim_get_offset(SimlinSim *sim, const char *name);
-int simlin_sim_get_series(SimlinSim *sim, const char *name, double *results_ptr, uintptr_t len);
+void simlin_sim_run_to(SimlinSim *sim, double time, OutError out_error);
+void simlin_sim_run_to_end(SimlinSim *sim, OutError out_error);
+void simlin_sim_get_stepcount(SimlinSim *sim, uintptr_t *out_count, OutError out_error);
+void simlin_sim_reset(SimlinSim *sim, OutError out_error);
+void simlin_sim_get_value(SimlinSim *sim, const char *name, double *out_value, OutError out_error);
+void simlin_sim_set_value(SimlinSim *sim, const char *name, double val, OutError out_error);
+void simlin_sim_set_value_by_offset(SimlinSim *sim, uintptr_t offset, double val, OutError out_error);
+void simlin_sim_get_offset(SimlinSim *sim, const char *name, uintptr_t *out_offset, OutError out_error);
+void simlin_sim_get_series(SimlinSim *sim, const char *name, double *results_ptr, uintptr_t len, uintptr_t *out_written, OutError out_error);
 void simlin_free_string(char *s);
-SimlinLoops *simlin_analyze_get_loops(SimlinProject *project);
+SimlinLoops *simlin_analyze_get_loops(SimlinProject *project, OutError out_error);
 void simlin_free_loops(SimlinLoops *loops);
-SimlinLinks *simlin_analyze_get_links(SimlinSim *sim);
+SimlinLinks *simlin_analyze_get_links(SimlinSim *sim, OutError out_error);
 void simlin_free_links(SimlinLinks *links);
-int simlin_analyze_get_relative_loop_score(SimlinSim *sim, const char *loop_id, double *results_ptr, uintptr_t len);
-int simlin_analyze_get_rel_loop_score(SimlinSim *sim, const char *loop_id, double *results_ptr, uintptr_t len);
+void simlin_analyze_get_relative_loop_score(SimlinSim *sim, const char *loop_id, double *results_ptr, uintptr_t len, uintptr_t *out_written, OutError out_error);
+void simlin_analyze_get_rel_loop_score(SimlinSim *sim, const char *loop_id, double *results_ptr, uintptr_t len, uintptr_t *out_written, OutError out_error);
 uint8_t *simlin_malloc(uintptr_t size);
 void simlin_free(uint8_t *ptr);
-SimlinProject *simlin_import_xmile(const uint8_t *data, uintptr_t len, int *err);
-SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, int *err);
-int simlin_export_xmile(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
-int simlin_project_serialize(SimlinProject *project, uint8_t **output, uintptr_t *output_len);
-SimlinErrorCode simlin_project_apply_patch(SimlinProject *project,
-                                           const uint8_t *patch_data,
-                                           uintptr_t patch_len,
-                                           bool dry_run,
-                                           bool allow_errors,
-                                           SimlinErrorDetails **out_errors);
-SimlinErrorDetails *simlin_project_get_errors(SimlinProject *project);
-void simlin_free_error_details(SimlinErrorDetails *details);
-void simlin_free_error_detail(SimlinErrorDetail *detail);
+SimlinProject *simlin_import_xmile(const uint8_t *data, uintptr_t len, OutError out_error);
+SimlinProject *simlin_import_mdl(const uint8_t *data, uintptr_t len, OutError out_error);
+void simlin_export_xmile(SimlinProject *project, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
+void simlin_project_serialize(SimlinProject *project, uint8_t **out_buffer, uintptr_t *out_len, OutError out_error);
+void simlin_project_apply_patch(SimlinProject *project, const uint8_t *patch_data, uintptr_t patch_len, bool dry_run, bool allow_errors, SimlinError **out_collected_errors, OutError out_error);
+SimlinError *simlin_project_get_errors(SimlinProject *project, OutError out_error);
 """
 
 ffibuilder.cdef(cdef_content)

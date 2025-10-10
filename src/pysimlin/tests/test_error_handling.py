@@ -13,20 +13,11 @@ class TestErrorStringHandling:
 
     def test_get_error_string_various_codes(self) -> None:
         """Test get_error_string with various error codes."""
-        # Test valid error codes
-        for code in [0, 1, 2, 3, 4, 5]:
+        # Test valid error codes (from ErrorCode enum: 0-32)
+        for code in [0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 32]:
             msg = get_error_string(code)
             assert isinstance(msg, str)
             assert len(msg) > 0
-
-        # Test invalid/unknown error codes
-        for code in [-1, -2, 100, 999]:
-            msg = get_error_string(code)
-            assert isinstance(msg, str)
-            # Should return something like "Unknown error code: X"
-            if "Unknown" not in msg:
-                # It's a valid error code, just verify it's a string
-                assert len(msg) > 0
 
     def test_error_string_const_static(self) -> None:
         """Verify that simlin_error_str returns static strings that shouldn't be freed."""
@@ -50,17 +41,17 @@ class TestErrorStringHandling:
         # Test invalid XMILE
         invalid_xmile = tmp_path / "invalid.stmx"
         invalid_xmile.write_bytes(b"not xml")
-        with pytest.raises(SimlinImportError) as exc_info:
+        with pytest.raises(SimlinRuntimeError) as exc_info:
             simlin.load(invalid_xmile)
-        assert "Failed to load model" in str(exc_info.value)
+        assert "failed" in str(exc_info.value).lower()
         assert exc_info.value.code is not None
 
         # Test invalid MDL
         invalid_mdl = tmp_path / "invalid.mdl"
         invalid_mdl.write_bytes(b"invalid mdl")
-        with pytest.raises(SimlinImportError) as exc_info:
+        with pytest.raises(SimlinRuntimeError) as exc_info:
             simlin.load(invalid_mdl)
-        assert "Failed to load model" in str(exc_info.value)
+        assert "failed" in str(exc_info.value).lower()
         assert exc_info.value.code is not None
 
     def test_error_handling_stress(self, tmp_path) -> None:
@@ -75,7 +66,7 @@ class TestErrorStringHandling:
                 invalid_file.write_bytes(invalid_data)
                 try:
                     simlin.load(invalid_file)
-                except SimlinImportError:
+                except SimlinRuntimeError:
                     pass  # Expected
 
         # Force garbage collection

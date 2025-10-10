@@ -5,7 +5,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 export RUST_BACKTRACE=1
 cd "$REPO_ROOT"
 
-PY=${PYTHON_BIN:-/opt/homebrew/bin/python3}
+PY=${PYTHON_BIN:-/opt/homebrew/bin/python3.13}
 if ! command -v "$PY" >/dev/null 2>&1; then
   echo "Python 3.13 not found at $PY; falling back to python3" >&2
   PY=python3
