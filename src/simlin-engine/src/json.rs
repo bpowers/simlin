@@ -65,6 +65,17 @@ pub struct ElementEquation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArrayedEquation {
+    pub dimensions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub equation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub initial_equation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub elements: Option<Vec<ElementEquation>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphicalFunctionScale {
     pub min: f64,
     pub max: f64,
@@ -89,6 +100,7 @@ pub struct Stock {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
     pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
     pub initial_equation: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub units: String,
@@ -102,10 +114,8 @@ pub struct Stock {
     pub can_be_module_input: bool,
     #[serde(skip_serializing_if = "is_false", default)]
     pub is_public: bool,
-    #[serde(skip_serializing_if = "is_empty_vec", default)]
-    pub dimensions: Vec<String>,
-    #[serde(skip_serializing_if = "is_empty_vec", default)]
-    pub element_equations: Vec<ElementEquation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrayed_equation: Option<ArrayedEquation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,6 +123,7 @@ pub struct Flow {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
     pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
     pub equation: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub units: String,
@@ -126,10 +137,8 @@ pub struct Flow {
     pub can_be_module_input: bool,
     #[serde(skip_serializing_if = "is_false", default)]
     pub is_public: bool,
-    #[serde(skip_serializing_if = "is_empty_vec", default)]
-    pub dimensions: Vec<String>,
-    #[serde(skip_serializing_if = "is_empty_vec", default)]
-    pub element_equations: Vec<ElementEquation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrayed_equation: Option<ArrayedEquation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +146,7 @@ pub struct Auxiliary {
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub uid: i32,
     pub name: String,
+    #[serde(skip_serializing_if = "is_empty_string", default)]
     pub equation: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub initial_equation: String,
@@ -150,10 +160,8 @@ pub struct Auxiliary {
     pub can_be_module_input: bool,
     #[serde(skip_serializing_if = "is_false", default)]
     pub is_public: bool,
-    #[serde(skip_serializing_if = "is_empty_vec", default)]
-    pub dimensions: Vec<String>,
-    #[serde(skip_serializing_if = "is_empty_vec", default)]
-    pub element_equations: Vec<ElementEquation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub arrayed_equation: Option<ArrayedEquation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,29 +432,35 @@ impl From<GraphicalFunction> for datamodel::GraphicalFunction {
 
 impl From<Stock> for datamodel::Stock {
     fn from(stock: Stock) -> Self {
-        let equation = if stock.dimensions.is_empty() {
-            datamodel::Equation::Scalar(stock.initial_equation, None)
-        } else if stock.element_equations.is_empty() {
-            datamodel::Equation::ApplyToAll(stock.dimensions, stock.initial_equation, None)
-        } else {
-            datamodel::Equation::Arrayed(
-                stock.dimensions,
-                stock
-                    .element_equations
-                    .into_iter()
-                    .map(|ee| {
-                        (
-                            ee.subscript,
-                            ee.equation,
-                            if ee.initial_equation.is_empty() {
-                                None
-                            } else {
-                                Some(ee.initial_equation)
-                            },
-                        )
-                    })
-                    .collect(),
-            )
+        let equation = match stock.arrayed_equation {
+            Some(arrayed) => {
+                if let Some(elements) = arrayed.elements {
+                    datamodel::Equation::Arrayed(
+                        arrayed.dimensions,
+                        elements
+                            .into_iter()
+                            .map(|ee| {
+                                (
+                                    ee.subscript,
+                                    ee.equation,
+                                    if ee.initial_equation.is_empty() {
+                                        None
+                                    } else {
+                                        Some(ee.initial_equation)
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                } else {
+                    datamodel::Equation::ApplyToAll(
+                        arrayed.dimensions,
+                        arrayed.equation.unwrap_or_default(),
+                        arrayed.initial_equation,
+                    )
+                }
+            }
+            None => datamodel::Equation::Scalar(stock.initial_equation, None),
         };
 
         datamodel::Stock {
@@ -479,18 +493,35 @@ impl From<Stock> for datamodel::Stock {
 
 impl From<Flow> for datamodel::Flow {
     fn from(flow: Flow) -> Self {
-        let equation = if flow.dimensions.is_empty() {
-            datamodel::Equation::Scalar(flow.equation, None)
-        } else if flow.element_equations.is_empty() {
-            datamodel::Equation::ApplyToAll(flow.dimensions, flow.equation, None)
-        } else {
-            datamodel::Equation::Arrayed(
-                flow.dimensions,
-                flow.element_equations
-                    .into_iter()
-                    .map(|ee| (ee.subscript, ee.equation, None))
-                    .collect(),
-            )
+        let equation = match flow.arrayed_equation {
+            Some(arrayed) => {
+                if let Some(elements) = arrayed.elements {
+                    datamodel::Equation::Arrayed(
+                        arrayed.dimensions,
+                        elements
+                            .into_iter()
+                            .map(|ee| {
+                                (
+                                    ee.subscript,
+                                    ee.equation,
+                                    if ee.initial_equation.is_empty() {
+                                        None
+                                    } else {
+                                        Some(ee.initial_equation)
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                } else {
+                    datamodel::Equation::ApplyToAll(
+                        arrayed.dimensions,
+                        arrayed.equation.unwrap_or_default(),
+                        arrayed.initial_equation,
+                    )
+                }
+            }
+            None => datamodel::Equation::Scalar(flow.equation, None),
         };
 
         datamodel::Flow {
@@ -518,43 +549,42 @@ impl From<Flow> for datamodel::Flow {
 
 impl From<Auxiliary> for datamodel::Aux {
     fn from(aux: Auxiliary) -> Self {
-        let equation = if aux.dimensions.is_empty() {
-            datamodel::Equation::Scalar(
+        let equation = match aux.arrayed_equation {
+            Some(arrayed) => {
+                if let Some(elements) = arrayed.elements {
+                    datamodel::Equation::Arrayed(
+                        arrayed.dimensions,
+                        elements
+                            .into_iter()
+                            .map(|ee| {
+                                (
+                                    ee.subscript,
+                                    ee.equation,
+                                    if ee.initial_equation.is_empty() {
+                                        None
+                                    } else {
+                                        Some(ee.initial_equation)
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                } else {
+                    datamodel::Equation::ApplyToAll(
+                        arrayed.dimensions,
+                        arrayed.equation.unwrap_or_default(),
+                        arrayed.initial_equation,
+                    )
+                }
+            }
+            None => datamodel::Equation::Scalar(
                 aux.equation,
                 if aux.initial_equation.is_empty() {
                     None
                 } else {
                     Some(aux.initial_equation)
                 },
-            )
-        } else if aux.element_equations.is_empty() {
-            datamodel::Equation::ApplyToAll(
-                aux.dimensions,
-                aux.equation,
-                if aux.initial_equation.is_empty() {
-                    None
-                } else {
-                    Some(aux.initial_equation)
-                },
-            )
-        } else {
-            datamodel::Equation::Arrayed(
-                aux.dimensions,
-                aux.element_equations
-                    .into_iter()
-                    .map(|ee| {
-                        (
-                            ee.subscript,
-                            ee.equation,
-                            if ee.initial_equation.is_empty() {
-                                None
-                            } else {
-                                Some(ee.initial_equation)
-                            },
-                        )
-                    })
-                    .collect(),
-            )
+            ),
         };
 
         datamodel::Aux {
@@ -900,11 +930,17 @@ impl From<datamodel::GraphicalFunction> for GraphicalFunction {
 
 impl From<datamodel::Stock> for Stock {
     fn from(stock: datamodel::Stock) -> Self {
-        let (initial_equation, dimensions, element_equations) = match stock.equation {
-            datamodel::Equation::Scalar(eq, init_eq) => (init_eq.unwrap_or(eq), vec![], vec![]),
-            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => {
-                (init_eq.unwrap_or(eq), dims, vec![])
-            }
+        let (initial_equation, arrayed_equation) = match stock.equation {
+            datamodel::Equation::Scalar(eq, init_eq) => (init_eq.unwrap_or(eq), None),
+            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => (
+                String::new(),
+                Some(ArrayedEquation {
+                    dimensions: dims,
+                    equation: Some(eq),
+                    initial_equation: init_eq,
+                    elements: None,
+                }),
+            ),
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
@@ -914,7 +950,15 @@ impl From<datamodel::Stock> for Stock {
                         initial_equation: initial_equation.unwrap_or_default(),
                     })
                     .collect();
-                (String::new(), dims, ees)
+                (
+                    String::new(),
+                    Some(ArrayedEquation {
+                        dimensions: dims,
+                        equation: None,
+                        initial_equation: None,
+                        elements: Some(ees),
+                    }),
+                )
             }
         };
 
@@ -929,27 +973,42 @@ impl From<datamodel::Stock> for Stock {
             documentation: stock.documentation,
             can_be_module_input: stock.can_be_module_input,
             is_public: matches!(stock.visibility, datamodel::Visibility::Public),
-            dimensions,
-            element_equations,
+            arrayed_equation,
         }
     }
 }
 
 impl From<datamodel::Flow> for Flow {
     fn from(flow: datamodel::Flow) -> Self {
-        let (equation, dimensions, element_equations) = match flow.equation {
-            datamodel::Equation::Scalar(eq, _) => (eq, vec![], vec![]),
-            datamodel::Equation::ApplyToAll(dims, eq, _) => (eq, dims, vec![]),
+        let (equation, arrayed_equation) = match flow.equation {
+            datamodel::Equation::Scalar(eq, _) => (eq, None),
+            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => (
+                String::new(),
+                Some(ArrayedEquation {
+                    dimensions: dims,
+                    equation: Some(eq),
+                    initial_equation: init_eq,
+                    elements: None,
+                }),
+            ),
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
-                    .map(|(subscript, equation, _)| ElementEquation {
+                    .map(|(subscript, equation, initial_equation)| ElementEquation {
                         subscript,
                         equation,
-                        initial_equation: String::new(),
+                        initial_equation: initial_equation.unwrap_or_default(),
                     })
                     .collect();
-                (String::new(), dims, ees)
+                (
+                    String::new(),
+                    Some(ArrayedEquation {
+                        dimensions: dims,
+                        equation: None,
+                        initial_equation: None,
+                        elements: Some(ees),
+                    }),
+                )
             }
         };
 
@@ -963,21 +1022,25 @@ impl From<datamodel::Flow> for Flow {
             documentation: flow.documentation,
             can_be_module_input: flow.can_be_module_input,
             is_public: matches!(flow.visibility, datamodel::Visibility::Public),
-            dimensions,
-            element_equations,
+            arrayed_equation,
         }
     }
 }
 
 impl From<datamodel::Aux> for Auxiliary {
     fn from(aux: datamodel::Aux) -> Self {
-        let (equation, initial_equation, dimensions, element_equations) = match aux.equation {
-            datamodel::Equation::Scalar(eq, init_eq) => {
-                (eq, init_eq.unwrap_or_default(), vec![], vec![])
-            }
-            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => {
-                (eq, init_eq.unwrap_or_default(), dims, vec![])
-            }
+        let (equation, initial_equation, arrayed_equation) = match aux.equation {
+            datamodel::Equation::Scalar(eq, init_eq) => (eq, init_eq.unwrap_or_default(), None),
+            datamodel::Equation::ApplyToAll(dims, eq, init_eq) => (
+                String::new(),
+                String::new(),
+                Some(ArrayedEquation {
+                    dimensions: dims,
+                    equation: Some(eq),
+                    initial_equation: init_eq,
+                    elements: None,
+                }),
+            ),
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
@@ -987,7 +1050,16 @@ impl From<datamodel::Aux> for Auxiliary {
                         initial_equation: initial_equation.unwrap_or_default(),
                     })
                     .collect();
-                (String::new(), String::new(), dims, ees)
+                (
+                    String::new(),
+                    String::new(),
+                    Some(ArrayedEquation {
+                        dimensions: dims,
+                        equation: None,
+                        initial_equation: None,
+                        elements: Some(ees),
+                    }),
+                )
             }
         };
 
@@ -1001,8 +1073,7 @@ impl From<datamodel::Aux> for Auxiliary {
             documentation: aux.documentation,
             can_be_module_input: aux.can_be_module_input,
             is_public: matches!(aux.visibility, datamodel::Visibility::Public),
-            dimensions,
-            element_equations,
+            arrayed_equation,
         }
     }
 }
@@ -1406,8 +1477,28 @@ mod tests {
                     documentation: "Total population".to_string(),
                     can_be_module_input: false,
                     is_public: true,
-                    dimensions: vec![],
-                    element_equations: vec![],
+                    arrayed_equation: None,
+                },
+            ),
+            (
+                "apply to all stock",
+                Stock {
+                    uid: 7,
+                    name: "inventory".to_string(),
+                    initial_equation: String::new(),
+                    units: String::new(),
+                    inflows: vec!["production".to_string()],
+                    outflows: vec!["sales".to_string()],
+                    non_negative: false,
+                    documentation: String::new(),
+                    can_be_module_input: true,
+                    is_public: false,
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["warehouses".to_string()],
+                        equation: Some("50".to_string()),
+                        initial_equation: None,
+                        elements: None,
+                    }),
                 },
             ),
             (
@@ -1423,19 +1514,23 @@ mod tests {
                     documentation: String::new(),
                     can_be_module_input: true,
                     is_public: false,
-                    dimensions: vec!["cities".to_string()],
-                    element_equations: vec![
-                        ElementEquation {
-                            subscript: "Boston".to_string(),
-                            equation: "50".to_string(),
-                            initial_equation: "10".to_string(),
-                        },
-                        ElementEquation {
-                            subscript: "NYC".to_string(),
-                            equation: "100".to_string(),
-                            initial_equation: String::new(),
-                        },
-                    ],
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["cities".to_string()],
+                        equation: None,
+                        initial_equation: None,
+                        elements: Some(vec![
+                            ElementEquation {
+                                subscript: "Boston".to_string(),
+                                equation: "50".to_string(),
+                                initial_equation: "10".to_string(),
+                            },
+                            ElementEquation {
+                                subscript: "NYC".to_string(),
+                                equation: "100".to_string(),
+                                initial_equation: String::new(),
+                            },
+                        ]),
+                    }),
                 },
             ),
         ];
@@ -1463,8 +1558,24 @@ mod tests {
                 "Failed for: {}",
                 name
             );
+            assert_eq!(json_stock.units, json_stock3.units, "Failed for: {}", name);
+            assert_eq!(
+                json_stock.initial_equation, json_stock3.initial_equation,
+                "Failed for: {}",
+                name
+            );
             assert_eq!(
                 json_stock.is_public, json_stock3.is_public,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_stock.can_be_module_input, json_stock3.can_be_module_input,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_stock.arrayed_equation, json_stock3.arrayed_equation,
                 "Failed for: {}",
                 name
             );
@@ -1473,62 +1584,232 @@ mod tests {
 
     #[test]
     fn test_flow_roundtrip() {
-        let json_flow = Flow {
-            uid: 100,
-            name: "births".to_string(),
-            equation: "population * birth_rate".to_string(),
-            units: "people/year".to_string(),
-            non_negative: true,
-            graphical_function: Some(GraphicalFunction {
-                points: vec![[0.0, 0.0], [1.0, 1.0]],
-                y_points: vec![],
-                kind: "continuous".to_string(),
-                x_scale: None,
-                y_scale: None,
-            }),
-            documentation: "Birth flow".to_string(),
-            can_be_module_input: false,
-            is_public: true,
-            dimensions: vec![],
-            element_equations: vec![],
-        };
+        let cases = vec![
+            (
+                "scalar flow",
+                Flow {
+                    uid: 100,
+                    name: "births".to_string(),
+                    equation: "population * birth_rate".to_string(),
+                    units: "people/year".to_string(),
+                    non_negative: true,
+                    graphical_function: Some(GraphicalFunction {
+                        points: vec![[0.0, 0.0], [1.0, 1.0]],
+                        y_points: vec![],
+                        kind: "continuous".to_string(),
+                        x_scale: Some(GraphicalFunctionScale { min: 0.0, max: 1.0 }),
+                        y_scale: Some(GraphicalFunctionScale { min: 0.0, max: 1.0 }),
+                    }),
+                    documentation: "Birth flow".to_string(),
+                    can_be_module_input: false,
+                    is_public: true,
+                    arrayed_equation: None,
+                },
+            ),
+            (
+                "apply to all flow",
+                Flow {
+                    uid: 0,
+                    name: "production".to_string(),
+                    equation: String::new(),
+                    units: String::new(),
+                    non_negative: false,
+                    graphical_function: None,
+                    documentation: String::new(),
+                    can_be_module_input: true,
+                    is_public: false,
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["factories".to_string()],
+                        equation: Some("orders / lead_time".to_string()),
+                        initial_equation: Some("initial_orders".to_string()),
+                        elements: None,
+                    }),
+                },
+            ),
+            (
+                "arrayed flow",
+                Flow {
+                    uid: 0,
+                    name: "shipments".to_string(),
+                    equation: String::new(),
+                    units: String::new(),
+                    non_negative: false,
+                    graphical_function: None,
+                    documentation: String::new(),
+                    can_be_module_input: true,
+                    is_public: false,
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["routes".to_string()],
+                        equation: None,
+                        initial_equation: None,
+                        elements: Some(vec![
+                            ElementEquation {
+                                subscript: "east".to_string(),
+                                equation: "supply_east".to_string(),
+                                initial_equation: "init_supply_east".to_string(),
+                            },
+                            ElementEquation {
+                                subscript: "west".to_string(),
+                                equation: "supply_west".to_string(),
+                                initial_equation: String::new(),
+                            },
+                        ]),
+                    }),
+                },
+            ),
+        ];
 
-        // Roundtrip
-        let dm_flow: datamodel::Flow = json_flow.clone().into();
-        let json_flow2: Flow = dm_flow.into();
-        let json_str = serde_json::to_string(&json_flow2).unwrap();
-        let json_flow3: Flow = serde_json::from_str(&json_str).unwrap();
+        for (name, json_flow) in cases {
+            let dm_flow: datamodel::Flow = json_flow.clone().into();
+            let json_flow2: Flow = dm_flow.into();
+            let json_str = serde_json::to_string(&json_flow2).unwrap();
+            let json_flow3: Flow = serde_json::from_str(&json_str).unwrap();
 
-        assert_eq!(json_flow.name, json_flow3.name);
-        assert_eq!(json_flow.equation, json_flow3.equation);
-        assert!(json_flow3.graphical_function.is_some());
+            assert_eq!(json_flow.name, json_flow3.name, "Failed for: {}", name);
+            assert_eq!(
+                json_flow.equation, json_flow3.equation,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(json_flow.units, json_flow3.units, "Failed for: {}", name);
+            assert_eq!(
+                json_flow.graphical_function, json_flow3.graphical_function,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_flow.non_negative, json_flow3.non_negative,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_flow.can_be_module_input, json_flow3.can_be_module_input,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_flow.is_public, json_flow3.is_public,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_flow.arrayed_equation, json_flow3.arrayed_equation,
+                "Failed for: {}",
+                name
+            );
+        }
     }
 
     #[test]
     fn test_auxiliary_roundtrip() {
-        let json_aux = Auxiliary {
-            uid: 200,
-            name: "birth_rate".to_string(),
-            equation: "0.02".to_string(),
-            initial_equation: "0.015".to_string(),
-            units: "1/year".to_string(),
-            graphical_function: None,
-            documentation: "Annual birth rate".to_string(),
-            can_be_module_input: true,
-            is_public: false,
-            dimensions: vec![],
-            element_equations: vec![],
-        };
+        let cases = vec![
+            (
+                "scalar aux",
+                Auxiliary {
+                    uid: 200,
+                    name: "birth_rate".to_string(),
+                    equation: "0.02".to_string(),
+                    initial_equation: "0.015".to_string(),
+                    units: "1/year".to_string(),
+                    graphical_function: None,
+                    documentation: "Annual birth rate".to_string(),
+                    can_be_module_input: true,
+                    is_public: false,
+                    arrayed_equation: None,
+                },
+            ),
+            (
+                "apply to all aux",
+                Auxiliary {
+                    uid: 0,
+                    name: "capacity".to_string(),
+                    equation: String::new(),
+                    initial_equation: String::new(),
+                    units: String::new(),
+                    graphical_function: None,
+                    documentation: String::new(),
+                    can_be_module_input: false,
+                    is_public: true,
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["plants".to_string()],
+                        equation: Some("base_capacity".to_string()),
+                        initial_equation: Some("initial_capacity".to_string()),
+                        elements: None,
+                    }),
+                },
+            ),
+            (
+                "arrayed aux",
+                Auxiliary {
+                    uid: 0,
+                    name: "demand".to_string(),
+                    equation: String::new(),
+                    initial_equation: String::new(),
+                    units: String::new(),
+                    graphical_function: None,
+                    documentation: String::new(),
+                    can_be_module_input: false,
+                    is_public: true,
+                    arrayed_equation: Some(ArrayedEquation {
+                        dimensions: vec!["regions".to_string()],
+                        equation: None,
+                        initial_equation: None,
+                        elements: Some(vec![
+                            ElementEquation {
+                                subscript: "north".to_string(),
+                                equation: "north_demand".to_string(),
+                                initial_equation: "north_demand_init".to_string(),
+                            },
+                            ElementEquation {
+                                subscript: "south".to_string(),
+                                equation: "south_demand".to_string(),
+                                initial_equation: String::new(),
+                            },
+                        ]),
+                    }),
+                },
+            ),
+        ];
 
-        // Roundtrip
-        let dm_aux: datamodel::Aux = json_aux.clone().into();
-        let json_aux2: Auxiliary = dm_aux.into();
-        let json_str = serde_json::to_string(&json_aux2).unwrap();
-        let json_aux3: Auxiliary = serde_json::from_str(&json_str).unwrap();
+        for (name, json_aux) in cases {
+            let dm_aux: datamodel::Aux = json_aux.clone().into();
+            let json_aux2: Auxiliary = dm_aux.into();
+            let json_str = serde_json::to_string(&json_aux2).unwrap();
+            let json_aux3: Auxiliary = serde_json::from_str(&json_str).unwrap();
 
-        assert_eq!(json_aux.name, json_aux3.name);
-        assert_eq!(json_aux.equation, json_aux3.equation);
-        assert_eq!(json_aux.initial_equation, json_aux3.initial_equation);
+            assert_eq!(json_aux.name, json_aux3.name, "Failed for: {}", name);
+            assert_eq!(
+                json_aux.equation, json_aux3.equation,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_aux.initial_equation, json_aux3.initial_equation,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(json_aux.units, json_aux3.units, "Failed for: {}", name);
+            assert_eq!(
+                json_aux.graphical_function, json_aux3.graphical_function,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_aux.can_be_module_input, json_aux3.can_be_module_input,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_aux.is_public, json_aux3.is_public,
+                "Failed for: {}",
+                name
+            );
+            assert_eq!(
+                json_aux.arrayed_equation, json_aux3.arrayed_equation,
+                "Failed for: {}",
+                name
+            );
+        }
     }
 
     #[test]
@@ -1664,8 +1945,7 @@ mod tests {
                 documentation: String::new(),
                 can_be_module_input: false,
                 is_public: false,
-                dimensions: vec![],
-                element_equations: vec![],
+                arrayed_equation: None,
             }],
             flows: vec![Flow {
                 uid: 2,
@@ -1677,8 +1957,7 @@ mod tests {
                 documentation: String::new(),
                 can_be_module_input: false,
                 is_public: false,
-                dimensions: vec![],
-                element_equations: vec![],
+                arrayed_equation: None,
             }],
             auxiliaries: vec![Auxiliary {
                 uid: 3,
@@ -1690,8 +1969,7 @@ mod tests {
                 documentation: String::new(),
                 can_be_module_input: false,
                 is_public: false,
-                dimensions: vec![],
-                element_equations: vec![],
+                arrayed_equation: None,
             }],
             modules: vec![],
             sim_specs: SimSpecs {
