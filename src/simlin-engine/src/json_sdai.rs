@@ -274,6 +274,7 @@ impl From<SdaiModel> for datamodel::Project {
 
         let model = datamodel::Model {
             name: "main".to_string(),
+            sim_specs: None,
             variables,
             views,
             loop_metadata: vec![],
@@ -435,6 +436,7 @@ impl From<datamodel::Project> for SdaiModel {
             .next()
             .unwrap_or_else(|| datamodel::Model {
                 name: "main".to_string(),
+                sim_specs: None,
                 variables: vec![],
                 views: vec![],
                 loop_metadata: vec![],

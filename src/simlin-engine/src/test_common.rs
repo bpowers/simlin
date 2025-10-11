@@ -272,6 +272,7 @@ impl TestProject {
             units: self.units.clone(),
             models: vec![datamodel::Model {
                 name: "main".to_string(),
+                sim_specs: None,
                 variables: self.variables.clone(),
                 views: vec![],
                 loop_metadata: vec![],

@@ -332,7 +332,8 @@ pub struct Model {
         deserialize_with = "deserialize_null_default"
     )]
     pub modules: Vec<Module>,
-    pub sim_specs: SimSpecs,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sim_specs: Option<SimSpecs>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
     pub views: Vec<View>,
     #[serde(skip_serializing_if = "is_empty_vec", default)]
@@ -824,6 +825,7 @@ impl From<Model> for datamodel::Model {
 
         datamodel::Model {
             name: model.name,
+            sim_specs: model.sim_specs.map(|ss| ss.into()),
             variables,
             views: model.views.into_iter().map(|v| v.into()).collect(),
             loop_metadata: model
@@ -1264,14 +1266,7 @@ impl From<datamodel::Model> for Model {
             flows,
             auxiliaries,
             modules,
-            sim_specs: SimSpecs {
-                start_time: 0.0,
-                end_time: 100.0,
-                dt: "1".to_string(),
-                save_step: 1.0,
-                method: String::new(),
-                time_units: String::new(),
-            },
+            sim_specs: model.sim_specs.map(|ss| ss.into()),
             views: model.views.into_iter().map(|v| v.into()).collect(),
             loop_metadata: model
                 .loop_metadata
@@ -1972,20 +1967,21 @@ mod tests {
                 arrayed_equation: None,
             }],
             modules: vec![],
-            sim_specs: SimSpecs {
-                start_time: 0.0,
-                end_time: 100.0,
-                dt: "1".to_string(),
-                save_step: 1.0,
-                method: String::new(),
-                time_units: String::new(),
-            },
+            sim_specs: Some(SimSpecs {
+                start_time: 5.0,
+                end_time: 50.0,
+                dt: "0.5".to_string(),
+                save_step: 0.5,
+                method: "rk4".to_string(),
+                time_units: "Months".to_string(),
+            }),
             views: vec![],
             loop_metadata: vec![],
         };
 
         // Roundtrip
         let dm_model: datamodel::Model = json_model.clone().into();
+        let dm_model_specs = dm_model.sim_specs.clone();
         let json_model2: Model = dm_model.into();
         let json_str = serde_json::to_string(&json_model2).unwrap();
         let json_model3: Model = serde_json::from_str(&json_str).unwrap();
@@ -1995,11 +1991,50 @@ mod tests {
         assert_eq!(json_model.stocks.len(), json_model3.stocks.len());
         assert_eq!(json_model.flows.len(), json_model3.flows.len());
         assert_eq!(json_model.auxiliaries.len(), json_model3.auxiliaries.len());
+        assert_eq!(dm_model_specs.as_ref().map(|ss| ss.start), Some(5.0));
+        assert_eq!(
+            json_model3.sim_specs.as_ref().map(|ss| (
+                ss.start_time,
+                ss.end_time,
+                ss.dt.clone(),
+                ss.method.clone(),
+                ss.time_units.clone()
+            )),
+            Some((
+                5.0,
+                50.0,
+                "0.5".to_string(),
+                "rk4".to_string(),
+                "Months".to_string()
+            ))
+        );
 
         // Verify arrays are sorted by canonical name
         assert_eq!(json_model3.stocks[0].name, "stock1");
         assert_eq!(json_model3.flows[0].name, "flow1");
         assert_eq!(json_model3.auxiliaries[0].name, "aux1");
+    }
+
+    #[test]
+    fn test_model_without_sim_specs_defaults_to_none() {
+        let json = r#"{
+            "name": "test_model",
+            "stocks": [],
+            "flows": [],
+            "auxiliaries": [],
+            "modules": [],
+            "views": [],
+            "loop_metadata": []
+        }"#;
+
+        let json_model: Model = serde_json::from_str(json).unwrap();
+        assert!(json_model.sim_specs.is_none());
+
+        let dm_model: datamodel::Model = json_model.into();
+        assert!(dm_model.sim_specs.is_none());
+
+        let json_model2: Model = dm_model.into();
+        assert!(json_model2.sim_specs.is_none());
     }
 
     #[test]
@@ -2020,14 +2055,14 @@ mod tests {
                 flows: vec![],
                 auxiliaries: vec![],
                 modules: vec![],
-                sim_specs: SimSpecs {
+                sim_specs: Some(SimSpecs {
                     start_time: 0.0,
                     end_time: 100.0,
                     dt: "1".to_string(),
                     save_step: 1.0,
                     method: String::new(),
                     time_units: String::new(),
-                },
+                }),
                 views: vec![],
                 loop_metadata: vec![],
             }],
@@ -2062,6 +2097,7 @@ mod tests {
             json_project.sim_specs.method,
             json_project3.sim_specs.method
         );
+        assert!(json_project3.models[0].sim_specs.is_some());
     }
 
     #[test]

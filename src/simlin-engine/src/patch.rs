@@ -1234,6 +1234,7 @@ mod tests {
 
         project.models.push(datamodel::Model {
             name: "child".to_string(),
+            sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "target".to_string(),
                 equation: datamodel::Equation::Scalar("0".to_string(), None),
@@ -1322,6 +1323,7 @@ mod tests {
 
         project.models.push(datamodel::Model {
             name: "child_model".to_string(),
+            sim_specs: None,
             variables: vec![datamodel::Variable::Aux(datamodel::Aux {
                 ident: "foo".to_string(),
                 equation: datamodel::Equation::Scalar("0".to_string(), None),
@@ -1424,6 +1426,7 @@ mod tests {
             units: vec![],
             models: vec![datamodel::Model {
                 name: "main".to_string(),
+                sim_specs: None,
                 variables: vec![
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "base_value".to_string(),
@@ -1506,6 +1509,7 @@ mod tests {
             units: vec![],
             models: vec![datamodel::Model {
                 name: "main".to_string(),
+                sim_specs: None,
                 variables: vec![
                     datamodel::Variable::Aux(datamodel::Aux {
                         ident: "price".to_string(),

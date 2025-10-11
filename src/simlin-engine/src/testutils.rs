@@ -91,6 +91,7 @@ pub(crate) fn stock(ident: &str, eqn: &str, inflows: &[&str], outflows: &[&str])
 pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datamodel::Model {
     datamodel::Model {
         name: ident.to_string(),
+        sim_specs: None,
         variables,
         views: vec![],
         loop_metadata: vec![],
