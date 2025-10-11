@@ -1437,6 +1437,8 @@ impl From<Model> for project_io::Model {
     fn from(mut model: Model) -> Self {
         use crate::canonicalize;
 
+        let _ = model.sim_specs;
+
         // Sort ALL variables by their canonical identifier for deterministic ordering
         // This ensures consistent proto serialization regardless of file order or variable type
         model.variables.sort_by_key(|a| canonicalize(a.get_ident()));
@@ -1495,6 +1497,7 @@ impl From<project_io::Model> for Model {
 
         Model {
             name: model.name,
+            sim_specs: None,
             variables,
             views: model.views.into_iter().map(View::from).collect(),
             loop_metadata: model
@@ -1510,6 +1513,7 @@ impl From<project_io::Model> for Model {
 fn test_model_with_loop_metadata_roundtrip() {
     let cases: &[Model] = &[Model {
         name: "test_model".to_string(),
+        sim_specs: None,
         variables: vec![Variable::Stock(Stock {
             ident: "stock1".to_string(),
             equation: Equation::Scalar("1".to_string(), None),

@@ -578,6 +578,7 @@ pub struct LoopMetadata {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Model {
     pub name: String,
+    pub sim_specs: Option<SimSpecs>,
     pub variables: Vec<Variable>,
     pub views: Vec<View>,
     pub loop_metadata: Vec<LoopMetadata>,

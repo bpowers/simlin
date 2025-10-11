@@ -663,6 +663,7 @@ mod ast_tests {
 
         let model_datamodel = datamodel::Model {
             name: "test_model".to_string(),
+            sim_specs: None,
             variables: vec![array_var],
             views: vec![],
             loop_metadata: vec![],
@@ -754,6 +755,7 @@ mod ast_tests {
 
         let model_datamodel = datamodel::Model {
             name: "test_model".to_string(),
+            sim_specs: None,
             variables: vec![array_var1, array_var2],
             views: vec![],
             loop_metadata: vec![],

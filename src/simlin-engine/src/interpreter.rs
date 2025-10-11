@@ -657,7 +657,13 @@ impl Simulation {
             }
         }
 
-        let specs = Specs::from(&project.datamodel.sim_specs);
+        let sim_specs_dm = project
+            .datamodel
+            .get_model(main_model_name)
+            .and_then(|model| model.sim_specs.clone())
+            .unwrap_or_else(|| project.datamodel.sim_specs.clone());
+
+        let specs = Specs::from(&sim_specs_dm);
 
         let offsets = calc_flattened_offsets(project, main_model_name);
         let offsets: HashMap<Ident<Canonical>, usize> =
@@ -1097,6 +1103,7 @@ fn test_arrays() {
             units: vec![],
             models: vec![Model {
                 name: "main".to_owned(),
+                sim_specs: None,
                 variables: vec![
                     Variable::Aux(Aux {
                         ident: "constants".to_owned(),
@@ -1377,4 +1384,113 @@ fn test_arrays() {
 #[test]
 fn nan_is_approx_eq() {
     assert!(approx_eq!(f64, f64::NAN, f64::NAN));
+}
+
+#[test]
+fn simulation_uses_model_sim_specs_when_present() {
+    use crate::datamodel::{self, Aux, Equation, SimSpecs as DmSimSpecs, Variable, Visibility};
+
+    let project_specs = DmSimSpecs {
+        start: 0.0,
+        stop: 10.0,
+        dt: datamodel::Dt::Dt(1.0),
+        save_step: Some(datamodel::Dt::Dt(1.0)),
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: Some("Days".to_string()),
+    };
+
+    let model_specs = DmSimSpecs {
+        start: 2.0,
+        stop: 20.0,
+        dt: datamodel::Dt::Dt(0.5),
+        save_step: Some(datamodel::Dt::Dt(2.5)),
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: Some("Hours".to_string()),
+    };
+
+    let model = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: Some(model_specs.clone()),
+        variables: vec![Variable::Aux(Aux {
+            ident: "const".to_string(),
+            equation: Equation::Scalar("1".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: Visibility::Private,
+            ai_state: None,
+            uid: None,
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+    };
+
+    let datamodel_project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: project_specs,
+        dimensions: vec![],
+        units: vec![],
+        models: vec![model],
+        source: None,
+        ai_information: None,
+    };
+
+    let compiled = crate::project::Project::from(datamodel_project);
+    let sim = Simulation::new(&compiled, "main").expect("simulation should build");
+
+    assert_eq!(sim.specs.start, 2.0);
+    assert_eq!(sim.specs.stop, 20.0);
+    assert!(approx_eq!(f64, sim.specs.dt, 0.5));
+    assert!(approx_eq!(f64, sim.specs.save_step, 2.5));
+}
+
+#[test]
+fn simulation_defaults_to_project_sim_specs_without_model_override() {
+    use crate::datamodel::{self, Aux, Equation, SimSpecs as DmSimSpecs, Variable, Visibility};
+
+    let project_specs = DmSimSpecs {
+        start: 1.0,
+        stop: 11.0,
+        dt: datamodel::Dt::Dt(0.25),
+        save_step: Some(datamodel::Dt::Dt(0.5)),
+        sim_method: datamodel::SimMethod::Euler,
+        time_units: Some("Weeks".to_string()),
+    };
+
+    let model = datamodel::Model {
+        name: "main".to_string(),
+        sim_specs: None,
+        variables: vec![Variable::Aux(Aux {
+            ident: "const".to_string(),
+            equation: Equation::Scalar("1".to_string(), None),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            can_be_module_input: false,
+            visibility: Visibility::Private,
+            ai_state: None,
+            uid: None,
+        })],
+        views: vec![],
+        loop_metadata: vec![],
+    };
+
+    let datamodel_project = datamodel::Project {
+        name: "test".to_string(),
+        sim_specs: project_specs,
+        dimensions: vec![],
+        units: vec![],
+        models: vec![model],
+        source: None,
+        ai_information: None,
+    };
+
+    let compiled = crate::project::Project::from(datamodel_project);
+    let sim = Simulation::new(&compiled, "main").expect("simulation should build");
+
+    assert_eq!(sim.specs.start, 1.0);
+    assert_eq!(sim.specs.stop, 11.0);
+    assert!(approx_eq!(f64, sim.specs.dt, 0.25));
+    assert!(approx_eq!(f64, sim.specs.save_step, 0.5));
 }
