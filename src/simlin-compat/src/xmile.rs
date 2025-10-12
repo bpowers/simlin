@@ -1080,6 +1080,7 @@ impl From<Model> for datamodel::Model {
             .collect();
         datamodel::Model {
             name: model.name.as_deref().unwrap_or("main").to_string(),
+            sim_specs: model.sim_specs.map(datamodel::SimSpecs::from),
             variables: match model.variables {
                 Some(Variables {
                     variables: vars, ..
@@ -1106,22 +1107,29 @@ impl From<Model> for datamodel::Model {
 
 impl From<datamodel::Model> for Model {
     fn from(model: datamodel::Model) -> Self {
+        let datamodel::Model {
+            name,
+            sim_specs,
+            variables,
+            views,
+            ..
+        } = model;
         Model {
-            name: Some(model.name),
+            name: Some(name),
             namespaces: None,
             resource: None,
-            sim_specs: None,
-            variables: if model.variables.is_empty() {
+            sim_specs: sim_specs.map(SimSpecs::from),
+            variables: if variables.is_empty() {
                 None
             } else {
-                let variables = model.variables.into_iter().map(Var::from).collect();
+                let variables = variables.into_iter().map(Var::from).collect();
                 Some(Variables { variables })
             },
-            views: if model.views.is_empty() {
+            views: if views.is_empty() {
                 None
             } else {
                 Some(Views {
-                    view: Some(model.views.into_iter().map(View::from).collect()),
+                    view: Some(views.into_iter().map(View::from).collect()),
                 })
             },
         }
