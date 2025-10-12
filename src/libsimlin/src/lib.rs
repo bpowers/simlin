@@ -3,9 +3,10 @@
 // Version 2.0, that can be found in the LICENSE file.
 use anyhow::{Error as AnyError, Result};
 use prost::Message;
+use serde::Deserialize;
 use simlin_engine::common::ErrorCode;
 use simlin_engine::ltm::{detect_loops, LoopPolarity};
-use simlin_engine::{self as engine, canonicalize, serde, Vm};
+use simlin_engine::{self as engine, canonicalize, serde as engine_serde, Vm};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{CStr, CString};
 use std::io::BufReader;
@@ -390,7 +391,7 @@ pub unsafe extern "C" fn simlin_project_open(
                 .with_message(format!("failed to decode project protobuf: {decode_err}"))
         })?;
 
-        let project: engine::Project = serde::deserialize(pb_project).into();
+        let project: engine::Project = engine_serde::deserialize(pb_project).into();
         Ok(Box::into_raw(Box::new(SimlinProject {
             project,
             ref_count: AtomicUsize::new(1),
@@ -2285,7 +2286,7 @@ pub unsafe extern "C" fn simlin_project_serialize(
         }
     };
 
-    let pb_project = engine::serde::serialize(&proj.project.datamodel);
+    let pb_project = engine_serde::serialize(&proj.project.datamodel);
 
     let mut bytes = Vec::new();
     if pb_project.encode(&mut bytes).is_err() {
@@ -2420,6 +2421,336 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
     if !dry_run {
         project_ref.project = staged_project;
     }
+}
+
+/// Serializes a project to JSON format.
+///
+/// # Safety
+/// - `project` must point to a valid `SimlinProject`.
+/// - `out_buffer` and `out_len` must be valid pointers where the serialized
+///   bytes and length will be written.
+/// - `out_error` must be a valid pointer for receiving error details and may
+///   be set to null on success.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_serialize_json(
+    project: *mut SimlinProject,
+    format: ffi::SimlinJsonFormat,
+    out_buffer: *mut *mut u8,
+    out_len: *mut usize,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if out_buffer.is_null() || out_len.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("output pointers must not be NULL"),
+        );
+        return;
+    }
+
+    *out_buffer = ptr::null_mut();
+    *out_len = 0;
+
+    let project_ref = match require_project(project) {
+        Ok(proj) => proj,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
+    };
+
+    if format != ffi::SimlinJsonFormat::Native {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("only native JSON format is supported"),
+        );
+        return;
+    }
+
+    let json_project: engine::json::Project = project_ref.project.datamodel.clone().into();
+    let bytes = match serde_json::to_vec(&json_project) {
+        Ok(data) => data,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to encode JSON project: {err}")),
+            );
+            return;
+        }
+    };
+
+    let len = bytes.len();
+    let buf = simlin_malloc(len);
+    if buf.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("allocation failed while serializing project"),
+        );
+        return;
+    }
+
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+
+    *out_buffer = buf;
+    *out_len = len;
+}
+
+/// Applies a JSON patch to the project datamodel.
+///
+/// # Safety
+/// - `project` must point to a valid `SimlinProject`.
+/// - `patch_data` must either be null with `patch_len == 0` or reference at
+///   least `patch_len` bytes containing UTF-8 JSON.
+/// - `out_collected_errors` and `out_error` must be valid pointers for writing
+///   error details and may be set to null on success.
+#[no_mangle]
+pub unsafe extern "C" fn simlin_project_apply_patch_json(
+    project: *mut SimlinProject,
+    patch_data: *const u8,
+    patch_len: usize,
+    format: ffi::SimlinJsonFormat,
+    dry_run: bool,
+    allow_errors: bool,
+    out_collected_errors: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) {
+    clear_out_error(out_error);
+    if !out_collected_errors.is_null() {
+        *out_collected_errors = ptr::null_mut();
+    }
+
+    if format != ffi::SimlinJsonFormat::Native {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("only native JSON format is supported"),
+        );
+        return;
+    }
+
+    if patch_len > 0 && patch_data.is_null() {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message("patch_data pointer must not be NULL when patch_len > 0"),
+        );
+        return;
+    }
+
+    let patch_slice = if patch_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(patch_data, patch_len)
+    };
+
+    let json_str = match std::str::from_utf8(patch_slice) {
+        Ok(s) => s,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("input JSON is not valid UTF-8: {err}")),
+            );
+            return;
+        }
+    };
+
+    let json_patch: JsonProjectPatch = match serde_json::from_str(json_str) {
+        Ok(patch) => patch,
+        Err(err) => {
+            store_error(
+                out_error,
+                SimlinError::new(SimlinErrorCode::Generic)
+                    .with_message(format!("failed to parse JSON patch: {err}")),
+            );
+            return;
+        }
+    };
+
+    let patch_proto = match convert_json_project_patch(json_patch) {
+        Ok(patch) => patch,
+        Err(err) => {
+            store_ffi_error(out_error, err);
+            return;
+        }
+    };
+
+    let mut patch_bytes = Vec::new();
+    if let Err(err) = patch_proto.encode(&mut patch_bytes) {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::Generic)
+                .with_message(format!("failed to encode patch protobuf: {err}")),
+        );
+        return;
+    }
+
+    let (data_ptr, data_len) = if patch_bytes.is_empty() {
+        (ptr::null(), 0)
+    } else {
+        (patch_bytes.as_ptr(), patch_bytes.len())
+    };
+
+    simlin_project_apply_patch(
+        project,
+        data_ptr,
+        data_len,
+        dry_run,
+        allow_errors,
+        out_collected_errors,
+        out_error,
+    );
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonProjectPatch {
+    #[serde(default)]
+    project_ops: Vec<serde_json::Value>,
+    #[serde(default)]
+    models: Vec<JsonModelPatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonModelPatch {
+    name: String,
+    #[serde(default)]
+    ops: Vec<JsonModelOperation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+enum JsonModelOperation {
+    UpsertAux {
+        aux: engine::json::Auxiliary,
+    },
+    UpsertStock {
+        stock: engine::json::Stock,
+    },
+    UpsertFlow {
+        flow: engine::json::Flow,
+    },
+    UpsertModule {
+        module: engine::json::Module,
+    },
+    DeleteVariable {
+        ident: String,
+    },
+    RenameVariable {
+        from: String,
+        to: String,
+    },
+    UpsertView {
+        index: u32,
+        view: engine::json::View,
+    },
+    DeleteView {
+        index: u32,
+    },
+}
+
+fn convert_json_project_patch(
+    patch: JsonProjectPatch,
+) -> Result<engine::project_io::ProjectPatch, FfiError> {
+    if !patch.project_ops.is_empty() {
+        return Err(FfiError::new(SimlinErrorCode::Generic)
+            .with_message("project_ops are not supported in JSON patches"));
+    }
+
+    let mut model_patches = Vec::with_capacity(patch.models.len());
+    for model in patch.models {
+        let mut ops = Vec::with_capacity(model.ops.len());
+        for op in model.ops {
+            let converted = convert_json_model_operation(op)?;
+            ops.push(engine::project_io::ModelOperation {
+                op: Some(converted),
+            });
+        }
+        model_patches.push(engine::project_io::ModelPatch {
+            name: model.name,
+            ops,
+        });
+    }
+
+    Ok(engine::project_io::ProjectPatch {
+        project_ops: Vec::new(),
+        models: model_patches,
+    })
+}
+
+fn convert_json_model_operation(
+    op: JsonModelOperation,
+) -> Result<engine::project_io::model_operation::Op, FfiError> {
+    use engine::datamodel;
+    use engine::project_io;
+    use engine::project_io::model_operation;
+
+    let result = match op {
+        JsonModelOperation::UpsertAux { aux } => {
+            let dm_aux: datamodel::Aux = aux.into();
+            let variable_pb = project_io::Variable::from(datamodel::Variable::Aux(dm_aux));
+            let aux_pb = match variable_pb.v {
+                Some(project_io::variable::V::Aux(aux)) => aux,
+                _ => unreachable!(),
+            };
+            model_operation::Op::UpsertAux(project_io::UpsertAuxOp { aux: Some(aux_pb) })
+        }
+        JsonModelOperation::UpsertStock { stock } => {
+            let dm_stock: datamodel::Stock = stock.into();
+            let variable_pb = project_io::Variable::from(datamodel::Variable::Stock(dm_stock));
+            let stock_pb = match variable_pb.v {
+                Some(project_io::variable::V::Stock(stock)) => stock,
+                _ => unreachable!(),
+            };
+            model_operation::Op::UpsertStock(project_io::UpsertStockOp {
+                stock: Some(stock_pb),
+            })
+        }
+        JsonModelOperation::UpsertFlow { flow } => {
+            let dm_flow: datamodel::Flow = flow.into();
+            let variable_pb = project_io::Variable::from(datamodel::Variable::Flow(dm_flow));
+            let flow_pb = match variable_pb.v {
+                Some(project_io::variable::V::Flow(flow)) => flow,
+                _ => unreachable!(),
+            };
+            model_operation::Op::UpsertFlow(project_io::UpsertFlowOp {
+                flow: Some(flow_pb),
+            })
+        }
+        JsonModelOperation::UpsertModule { module } => {
+            let dm_module: datamodel::Module = module.into();
+            let variable_pb = project_io::Variable::from(datamodel::Variable::Module(dm_module));
+            let module_pb = match variable_pb.v {
+                Some(project_io::variable::V::Module(module)) => module,
+                _ => unreachable!(),
+            };
+            model_operation::Op::UpsertModule(project_io::UpsertModuleOp {
+                module: Some(module_pb),
+            })
+        }
+        JsonModelOperation::DeleteVariable { ident } => {
+            model_operation::Op::DeleteVariable(project_io::DeleteVariableOp { ident })
+        }
+        JsonModelOperation::RenameVariable { from, to } => {
+            model_operation::Op::RenameVariable(project_io::RenameVariableOp { from, to })
+        }
+        JsonModelOperation::UpsertView { index, view } => {
+            let dm_view: datamodel::View = view.into();
+            let view_pb = project_io::View::from(dm_view);
+            model_operation::Op::UpsertView(project_io::UpsertViewOp {
+                index,
+                view: Some(view_pb),
+            })
+        }
+        JsonModelOperation::DeleteView { index } => {
+            model_operation::Op::DeleteView(project_io::DeleteViewOp { index })
+        }
+    };
+
+    Ok(result)
 }
 
 // Builder for error details used to populate SimlinError instances
@@ -2613,6 +2944,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
 mod tests {
     use super::*;
     use engine::test_common::TestProject;
+    use serde_json::Value;
     #[test]
     fn test_error_str() {
         unsafe {
@@ -2624,7 +2956,7 @@ mod tests {
     }
 
     fn open_project_from_datamodel(project: &engine::datamodel::Project) -> *mut SimlinProject {
-        let pb = engine::serde::serialize(project);
+        let pb = engine_serde::serialize(project);
         let mut buf = Vec::new();
         pb.encode(&mut buf).unwrap();
         unsafe {
@@ -2811,6 +3143,148 @@ mod tests {
             // Dry run should not commit changes
             let model = (*proj).project.datamodel.get_model("main").unwrap();
             assert!(model.get_variable("dry_aux").is_none());
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_serialize_json_native() {
+        let datamodel = TestProject::new("json_native").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_serialize_json(
+                proj,
+                ffi::SimlinJsonFormat::Native,
+                &mut out_buffer,
+                &mut out_len,
+                &mut out_error,
+            );
+
+            assert!(out_error.is_null(), "expected no error serializing json");
+            assert!(!out_buffer.is_null(), "expected JSON buffer");
+
+            let slice = std::slice::from_raw_parts(out_buffer, out_len);
+            let json_str = std::str::from_utf8(slice).expect("valid utf-8 JSON");
+
+            let actual: Value = serde_json::from_str(json_str).expect("parsed json");
+            let expected_project: engine::json::Project = datamodel.clone().into();
+            let expected = serde_json::to_value(expected_project).unwrap();
+
+            assert_eq!(actual, expected);
+
+            simlin_free(out_buffer);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_serialize_json_unsupported_format() {
+        let datamodel = TestProject::new("json_native").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_serialize_json(
+                proj,
+                ffi::SimlinJsonFormat::Sdai,
+                &mut out_buffer,
+                &mut out_len,
+                &mut out_error,
+            );
+
+            assert!(out_buffer.is_null(), "expected null buffer on error");
+            assert!(
+                !out_error.is_null(),
+                "expected error for unsupported format"
+            );
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_apply_patch_json_commits() {
+        let datamodel = TestProject::new("json_patch").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsert_aux",
+                            "payload": {
+                                "aux": {
+                                    "name": "json_aux",
+                                    "equation": "7"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                false,
+                true,
+                &mut collected_errors as *mut *mut SimlinError,
+                &mut out_error as *mut *mut SimlinError,
+            );
+
+            assert!(out_error.is_null(), "expected no error applying json patch");
+            assert!(collected_errors.is_null());
+
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(model.get_variable("json_aux").is_some());
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_project_apply_patch_json_invalid() {
+        let datamodel = TestProject::new("json_patch").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let patch_bytes = b"{invalid";
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                false,
+                true,
+                &mut collected_errors as *mut *mut SimlinError,
+                &mut out_error as *mut *mut SimlinError,
+            );
+
+            assert!(collected_errors.is_null());
+            assert!(!out_error.is_null(), "expected error for invalid json");
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
 
             simlin_project_unref(proj);
         }
@@ -4277,7 +4751,7 @@ mod tests {
 
         // Build the datamodel and serialize to protobuf
         let datamodel_project = test_project.build_datamodel();
-        let project = engine::serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project);
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -4444,7 +4918,7 @@ mod tests {
 
         // Build the datamodel and serialize to protobuf
         let datamodel_project = test_project.build_datamodel();
-        let project = engine::serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project);
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -4522,7 +4996,7 @@ mod tests {
             .flow("births", "population * 0.02", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let project = engine::serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project);
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -4618,7 +5092,7 @@ mod tests {
             .aux("death_rate", "0.01", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let original_pb = engine::serde::serialize(&datamodel_project);
+        let original_pb = engine_serde::serialize(&datamodel_project);
 
         let mut buf = Vec::new();
         original_pb.encode(&mut buf).unwrap();
@@ -4749,7 +5223,7 @@ mod tests {
             .flow("inflow", "stock * 0.1", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let original_pb = engine::serde::serialize(&datamodel_project);
+        let original_pb = engine_serde::serialize(&datamodel_project);
 
         let mut buf = Vec::new();
         original_pb.encode(&mut buf).unwrap();
@@ -5342,7 +5816,7 @@ mod tests {
             .flow("births", "population * 0.02", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let project = engine::serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project);
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -5415,7 +5889,7 @@ mod tests {
 
         // Build the datamodel and serialize to protobuf
         let datamodel_project = test_project.build_datamodel();
-        let project = engine::serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project);
 
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
@@ -5660,7 +6134,7 @@ mod tests {
             .aux("result", "smoothed * 2", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let project = engine::serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project);
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
 
@@ -5776,7 +6250,7 @@ mod tests {
             .aux("final_output", "smooth2 * 1.5", None);
 
         let datamodel_project = test_project.build_datamodel();
-        let project = engine::serde::serialize(&datamodel_project);
+        let project = engine_serde::serialize(&datamodel_project);
         let mut buf = Vec::new();
         project.encode(&mut buf).unwrap();
 
