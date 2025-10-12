@@ -649,6 +649,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // Create new empty model
     let new_model = engine::datamodel::Model {
         name: model_name_str.to_string(),
+        sim_specs: None,
         variables: vec![],
         views: vec![],
         loop_metadata: vec![],
