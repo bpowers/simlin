@@ -2431,6 +2431,23 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
 ///   bytes and length will be written.
 /// - `out_error` must be a valid pointer for receiving error details and may
 ///   be set to null on success.
+///
+/// # Thread Safety
+/// - This function is NOT thread-safe for concurrent calls with the same `project` pointer.
+/// - The underlying `engine::Project` uses `Rc<ModelStage1>` which is not `Send` or `Sync`.
+/// - Concurrent access to the same project from multiple threads will cause undefined behavior.
+/// - Different projects may be serialized concurrently from different threads safely.
+///
+/// # Ownership
+/// - Serialization creates a deep copy of the project datamodel via `clone()`.
+/// - The original `project` remains fully usable after serialization.
+/// - The returned buffer is exclusively owned by the caller and MUST be freed with `simlin_free`.
+/// - The caller is responsible for freeing the buffer even if subsequent operations fail.
+///
+/// # Buffer Lifetime
+/// - The serialized JSON buffer remains valid until `simlin_free` is called on it.
+/// - Multiple serializations can be performed concurrently (separate buffers are independent).
+/// - It is safe to serialize the same project multiple times.
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_serialize_json(
     project: *mut SimlinProject,
@@ -2517,6 +2534,23 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
 ///   least `patch_len` bytes containing UTF-8 JSON.
 /// - `out_collected_errors` and `out_error` must be valid pointers for writing
 ///   error details and may be set to null on success.
+///
+/// # Thread Safety
+/// - This function is NOT thread-safe for concurrent calls with the same `project` pointer.
+/// - The underlying `engine::Project` uses `Rc<ModelStage1>` which is not `Send` or `Sync`.
+/// - Concurrent modifications to the same project from multiple threads will cause undefined behavior.
+/// - Different projects may be patched concurrently from different threads safely.
+///
+/// # Ownership and Mutation
+/// - When `dry_run` is false, this function modifies the project in-place.
+/// - When `dry_run` is true, the project remains unchanged and no modifications are committed.
+/// - The `project` pointer remains valid and usable after this function returns.
+/// - The project is not consumed or moved by this operation.
+///
+/// # Format Support
+/// - Only `SimlinJsonFormat::Native` is supported for patches.
+/// - SDAI format is only supported for full project import via `simlin_project_json_open`.
+/// - Attempting to use SDAI format will return an error.
 #[no_mangle]
 pub unsafe extern "C" fn simlin_project_apply_patch_json(
     project: *mut SimlinProject,
