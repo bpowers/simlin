@@ -3351,6 +3351,117 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_json_null_out_buffer() {
+        let datamodel = TestProject::new("error_test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_serialize_json(
+                proj,
+                ffi::SimlinJsonFormat::Native,
+                ptr::null_mut(),
+                &mut out_len,
+                &mut out_error,
+            );
+
+            assert!(!out_error.is_null(), "expected error for NULL out_buffer");
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_serialize_json_null_out_len() {
+        let datamodel = TestProject::new("error_test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_serialize_json(
+                proj,
+                ffi::SimlinJsonFormat::Native,
+                &mut out_buffer,
+                ptr::null_mut(),
+                &mut out_error,
+            );
+
+            assert!(!out_error.is_null(), "expected error for NULL out_len");
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_serialize_json_null_project() {
+        unsafe {
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_serialize_json(
+                ptr::null_mut(),
+                ffi::SimlinJsonFormat::Native,
+                &mut out_buffer,
+                &mut out_len,
+                &mut out_error,
+            );
+
+            assert!(!out_error.is_null(), "expected error for NULL project");
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+        }
+    }
+
+    #[test]
+    fn test_serialize_json_both_formats_work() {
+        let datamodel = TestProject::new("format_test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            // Test Native format
+            let mut out_buffer: *mut u8 = ptr::null_mut();
+            let mut out_len: usize = 0;
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_serialize_json(
+                proj,
+                ffi::SimlinJsonFormat::Native,
+                &mut out_buffer,
+                &mut out_len,
+                &mut out_error,
+            );
+
+            assert!(out_error.is_null(), "Native format should succeed");
+            assert!(!out_buffer.is_null());
+            assert!(out_len > 0);
+            simlin_free(out_buffer);
+
+            // Test SDAI format
+            out_buffer = ptr::null_mut();
+            out_len = 0;
+            simlin_project_serialize_json(
+                proj,
+                ffi::SimlinJsonFormat::Sdai,
+                &mut out_buffer,
+                &mut out_len,
+                &mut out_error,
+            );
+
+            assert!(out_error.is_null(), "SDAI format should succeed");
+            assert!(!out_buffer.is_null());
+            assert!(out_len > 0);
+            simlin_free(out_buffer);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
     fn test_project_apply_patch_json_commits() {
         let datamodel = TestProject::new("json_patch").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
@@ -4050,6 +4161,299 @@ mod tests {
             );
             assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
             simlin_error_free(out_error);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_json_invalid_utf8() {
+        let datamodel = TestProject::new("utf8_test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let invalid_utf8: Vec<u8> = vec![0xFF, 0xFE, 0xFD];
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                invalid_utf8.as_ptr(),
+                invalid_utf8.len(),
+                ffi::SimlinJsonFormat::Native,
+                false,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(!out_error.is_null(), "expected error for invalid UTF-8");
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_json_empty_patch() {
+        let datamodel = TestProject::new("empty_patch").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let empty_patch = r#"{"models": []}"#;
+        let patch_bytes = empty_patch.as_bytes();
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                false,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(out_error.is_null(), "empty patch should succeed as no-op");
+            assert!(collected_errors.is_null());
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_json_dry_run_no_changes() {
+        let datamodel = TestProject::new("dry_run_test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(
+                model.get_variable("dry_run_var").is_none(),
+                "variable should not exist before patch"
+            );
+        }
+
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsert_aux",
+                            "payload": {
+                                "aux": {
+                                    "name": "dry_run_var",
+                                    "equation": "99"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                true,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(out_error.is_null(), "dry run should succeed");
+            assert!(collected_errors.is_null());
+
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(
+                model.get_variable("dry_run_var").is_none(),
+                "variable should not exist after dry run"
+            );
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_json_null_data_with_length() {
+        let datamodel = TestProject::new("null_test").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                ptr::null(),
+                10,
+                ffi::SimlinJsonFormat::Native,
+                false,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(
+                !out_error.is_null(),
+                "expected error for NULL patch_data with length > 0"
+            );
+            assert_eq!(simlin_error_get_code(out_error), SimlinErrorCode::Generic);
+            simlin_error_free(out_error);
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_json_multiple_models() {
+        // Create a project with multiple models
+        let mut datamodel = TestProject::new("multi_model").build_datamodel();
+        let second_model = engine::datamodel::Model {
+            name: "SecondModel".to_string(),
+            sim_specs: None,
+            variables: vec![],
+            views: vec![],
+            loop_metadata: vec![],
+        };
+        datamodel.models.push(second_model);
+
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsert_aux",
+                            "payload": {
+                                "aux": {
+                                    "name": "main_var",
+                                    "equation": "1"
+                                }
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "SecondModel",
+                    "ops": [
+                        {
+                            "type": "upsert_aux",
+                            "payload": {
+                                "aux": {
+                                    "name": "second_var",
+                                    "equation": "2"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                false,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(out_error.is_null(), "multi-model patch should succeed");
+            assert!(collected_errors.is_null());
+
+            let main_model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(main_model.get_variable("main_var").is_some());
+
+            let second_model = (*proj).project.datamodel.get_model("SecondModel").unwrap();
+            assert!(second_model.get_variable("second_var").is_some());
+
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_json_multiple_ops_per_model() {
+        let datamodel = TestProject::new("multi_ops").build_datamodel();
+        let proj = open_project_from_datamodel(&datamodel);
+
+        let patch_json = r#"{
+            "models": [
+                {
+                    "name": "main",
+                    "ops": [
+                        {
+                            "type": "upsert_aux",
+                            "payload": {
+                                "aux": {
+                                    "name": "var1",
+                                    "equation": "10"
+                                }
+                            }
+                        },
+                        {
+                            "type": "upsert_aux",
+                            "payload": {
+                                "aux": {
+                                    "name": "var2",
+                                    "equation": "20"
+                                }
+                            }
+                        },
+                        {
+                            "type": "upsert_aux",
+                            "payload": {
+                                "aux": {
+                                    "name": "var3",
+                                    "equation": "30"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let patch_bytes = patch_json.as_bytes();
+
+        unsafe {
+            let mut collected_errors: *mut SimlinError = ptr::null_mut();
+            let mut out_error: *mut SimlinError = ptr::null_mut();
+            simlin_project_apply_patch_json(
+                proj,
+                patch_bytes.as_ptr(),
+                patch_bytes.len(),
+                ffi::SimlinJsonFormat::Native,
+                false,
+                true,
+                &mut collected_errors,
+                &mut out_error,
+            );
+
+            assert!(out_error.is_null(), "multiple ops should succeed");
+            assert!(collected_errors.is_null());
+
+            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            assert!(model.get_variable("var1").is_some());
+            assert!(model.get_variable("var2").is_some());
+            assert!(model.get_variable("var3").is_some());
 
             simlin_project_unref(proj);
         }
