@@ -2324,6 +2324,58 @@ pub unsafe extern "C" fn simlin_project_serialize(
 ///
 /// On success returns `SimlinErrorCode::NoError`. On failure returns an error
 /// code describing why the patch could not be applied. When `out_errors` is not
+/// Internal helper that applies a ProjectPatch to a project.
+///
+/// This is the core patch application logic shared by both protobuf and JSON entry points.
+/// It handles datamodel cloning, patch application, error gathering, validation, and
+/// committing changes (unless dry_run is true).
+unsafe fn apply_project_patch_internal(
+    project_ref: &mut SimlinProject,
+    patch: engine::project_io::ProjectPatch,
+    dry_run: bool,
+    allow_errors: bool,
+    out_collected_errors: *mut *mut SimlinError,
+    out_error: *mut *mut SimlinError,
+) {
+    let mut staged_datamodel = project_ref.project.datamodel.clone();
+    if let Err(err) = engine::apply_patch(&mut staged_datamodel, &patch) {
+        store_error(
+            out_error,
+            SimlinError::new(SimlinErrorCode::from(err.code))
+                .with_message(format!("failed to apply patch: {err}")),
+        );
+        return;
+    }
+
+    let staged_project = engine::Project::from(staged_datamodel);
+
+    let (all_errors, sim_error) = gather_error_details(&staged_project);
+
+    let maybe_first_code = if !allow_errors {
+        first_error_code(&staged_project, sim_error.as_ref())
+    } else {
+        None
+    };
+
+    if !out_collected_errors.is_null() && !all_errors.is_empty() {
+        let code = maybe_first_code
+            .or_else(|| all_errors.first().map(|detail| detail.code))
+            .unwrap_or(SimlinErrorCode::NoError);
+        let aggregate = build_simlin_error(code, &all_errors);
+        *out_collected_errors = aggregate.into_raw();
+    }
+
+    if let Some(code) = maybe_first_code {
+        let error = build_simlin_error(code, &all_errors);
+        store_error(out_error, error);
+        return;
+    }
+
+    if !dry_run {
+        project_ref.project = staged_project;
+    }
+}
+
 /// Applies a patch to the project datamodel.
 ///
 /// On success returns without populating `out_error`. When `out_collected_errors` is
@@ -2384,43 +2436,14 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
         }
     };
 
-    let mut staged_datamodel = project_ref.project.datamodel.clone();
-    if let Err(err) = engine::apply_patch(&mut staged_datamodel, &patch) {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::from(err.code))
-                .with_message(format!("failed to apply patch: {err}")),
-        );
-        return;
-    }
-
-    let staged_project = engine::Project::from(staged_datamodel);
-
-    let (all_errors, sim_error) = gather_error_details(&staged_project);
-
-    let maybe_first_code = if !allow_errors {
-        first_error_code(&staged_project, sim_error.as_ref())
-    } else {
-        None
-    };
-
-    if !out_collected_errors.is_null() && !all_errors.is_empty() {
-        let code = maybe_first_code
-            .or_else(|| all_errors.first().map(|detail| detail.code))
-            .unwrap_or(SimlinErrorCode::NoError);
-        let aggregate = build_simlin_error(code, &all_errors);
-        *out_collected_errors = aggregate.into_raw();
-    }
-
-    if let Some(code) = maybe_first_code {
-        let error = build_simlin_error(code, &all_errors);
-        store_error(out_error, error);
-        return;
-    }
-
-    if !dry_run {
-        project_ref.project = staged_project;
-    }
+    apply_project_patch_internal(
+        project_ref,
+        patch,
+        dry_run,
+        allow_errors,
+        out_collected_errors,
+        out_error,
+    );
 }
 
 /// Serializes a project to JSON format.
@@ -2623,26 +2646,17 @@ pub unsafe extern "C" fn simlin_project_apply_patch_json(
         }
     };
 
-    let mut patch_bytes = Vec::new();
-    if let Err(err) = patch_proto.encode(&mut patch_bytes) {
-        store_error(
-            out_error,
-            SimlinError::new(SimlinErrorCode::Generic)
-                .with_message(format!("failed to encode patch protobuf: {err}")),
-        );
-        return;
-    }
-
-    let (data_ptr, data_len) = if patch_bytes.is_empty() {
-        (ptr::null(), 0)
-    } else {
-        (patch_bytes.as_ptr(), patch_bytes.len())
+    let project_ref = match require_project(project) {
+        Ok(p) => p,
+        Err(err) => {
+            store_anyhow_error(out_error, err);
+            return;
+        }
     };
 
-    simlin_project_apply_patch(
-        project,
-        data_ptr,
-        data_len,
+    apply_project_patch_internal(
+        project_ref,
+        patch_proto,
         dry_run,
         allow_errors,
         out_collected_errors,
