@@ -731,8 +731,8 @@ pub unsafe extern "C" fn simlin_project_get_model(
         requested_name = Some(project_locked.datamodel.models[0].name.clone());
     }
 
-    drop(project_locked);
     simlin_project_ref(project);
+    drop(project_locked);
 
     let model = SimlinModel {
         project,
