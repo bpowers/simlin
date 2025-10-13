@@ -1191,6 +1191,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "prost",
+ "serde",
  "serde_json",
  "simlin-compat",
  "simlin-engine",

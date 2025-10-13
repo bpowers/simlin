@@ -492,6 +492,19 @@ void simlin_project_serialize(SimlinProject *project,
                               uintptr_t *out_len,
                               SimlinError ** out_error);
 
+// Serializes a project to JSON format.
+//
+// The resulting buffer contains UTF-8 JSON matching the native Simlin JSON
+// schema. Only the native format is supported.
+//
+// The caller takes ownership of `out_buffer` and must free it with
+// `simlin_free`.
+void simlin_project_serialize_json(SimlinProject *project,
+                                   SimlinJsonFormat format,
+                                   uint8_t **out_buffer,
+                                   uintptr_t *out_len,
+                                   SimlinError **out_error);
+
 // Applies a patch to the project datamodel.
 //
 // The patch is encoded as a `project_io.Patch` protobuf message. The caller can
@@ -518,6 +531,19 @@ void simlin_project_apply_patch(SimlinProject *project,
                                 bool allow_errors,
                                 SimlinError **out_collected_errors,
                                 SimlinError ** out_error);
+
+// Applies a patch described by the native JSON format to the project.
+//
+// Only the native JSON format is accepted. The payload must be UTF-8 encoded.
+// Semantics match `simlin_project_apply_patch`.
+void simlin_project_apply_patch_json(SimlinProject *project,
+                                     const uint8_t *patch_data,
+                                     uintptr_t patch_len,
+                                     SimlinJsonFormat format,
+                                     bool dry_run,
+                                     bool allow_errors,
+                                     SimlinError **out_collected_errors,
+                                     SimlinError **out_error);
 
 // Get all errors in a project including static analysis and compilation errors
 //
