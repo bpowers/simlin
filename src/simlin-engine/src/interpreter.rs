@@ -19,7 +19,7 @@ use float_cmp::approx_eq;
 use std::borrow::BorrowMut;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Maps a flat index from transposed array space to original array space
 ///
@@ -609,8 +609,8 @@ pub struct Simulation {
     specs: Specs,
     root: Ident<Canonical>,
     offsets: HashMap<Ident<Canonical>, usize>,
-    temps: Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
-    temp_offsets: Vec<usize>,     // Offset of each temporary in the temps vector
+    temps: std::rc::Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
+    temp_offsets: Vec<usize>,              // Offset of each temporary in the temps vector
 }
 
 impl Simulation {
@@ -650,7 +650,7 @@ impl Simulation {
         for name in module_names {
             let distinct_inputs = &modules[name];
             for inputs in distinct_inputs.iter() {
-                let model = Rc::clone(&project.models[name]);
+                let model = Arc::clone(&project.models[name]);
                 let is_root = name.as_str() == main_model_ident.as_str();
                 let module = Module::new(project, model, inputs, is_root)?;
                 compiled_modules.insert(name.clone(), module);
@@ -688,7 +688,7 @@ impl Simulation {
         }
         temp_offsets.push(total_temp_size); // Final offset for easy range calculation
 
-        let temps = Rc::new(RefCell::new(vec![0.0; total_temp_size]));
+        let temps = std::rc::Rc::new(RefCell::new(vec![0.0; total_temp_size]));
 
         Ok(Simulation {
             modules: compiled_modules,
@@ -881,7 +881,7 @@ pub fn calc_flattened_offsets(
         i += IMPLICIT_VAR_COUNT;
     }
 
-    let model = Rc::clone(&project.models[&canonicalize(model_name)]);
+    let model = Arc::clone(&project.models[&canonicalize(model_name)]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
         var_names.sort_unstable();
@@ -1168,7 +1168,7 @@ fn test_arrays() {
         }
     };
 
-    let parsed_project = Rc::new(Project::from(project));
+    let parsed_project = Arc::new(Project::from(project));
 
     {
         let actual = calc_flattened_offsets(&parsed_project, "main");

@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::common::{Canonical, Ident};
 use ordered_float::OrderedFloat;
@@ -160,8 +160,8 @@ fn test_opcode_size() {
 pub struct CompiledModule {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,
-    pub(crate) context: Rc<ByteCodeContext>,
-    pub(crate) compiled_initials: Rc<ByteCode>,
-    pub(crate) compiled_flows: Rc<ByteCode>,
-    pub(crate) compiled_stocks: Rc<ByteCode>,
+    pub(crate) context: Arc<ByteCodeContext>,
+    pub(crate) compiled_initials: Arc<ByteCode>,
+    pub(crate) compiled_flows: Arc<ByteCode>,
+    pub(crate) compiled_stocks: Arc<ByteCode>,
 }

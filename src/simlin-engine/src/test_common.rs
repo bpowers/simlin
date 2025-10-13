@@ -13,7 +13,7 @@ use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 use crate::interpreter::Simulation;
 use crate::project::Project as CompiledProject;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Builder for creating test projects with support for arrays, units, and all variable types
 pub struct TestProject {
@@ -285,7 +285,7 @@ impl TestProject {
     /// Build and compile the project
     pub fn compile(&self) -> Result<CompiledProject, Vec<(String, ErrorCode)>> {
         let datamodel = self.build_datamodel();
-        let compiled = Rc::new(CompiledProject::from(datamodel));
+        let compiled = Arc::new(CompiledProject::from(datamodel));
 
         let mut errors = Vec::new();
 
@@ -313,7 +313,7 @@ impl TestProject {
         }
 
         if errors.is_empty() {
-            Ok(Rc::try_unwrap(compiled).unwrap_or_else(|rc| (*rc).clone()))
+            Ok(Arc::try_unwrap(compiled).unwrap_or_else(|arc| (*arc).clone()))
         } else {
             Err(errors)
         }
@@ -322,7 +322,7 @@ impl TestProject {
     /// Build a Simulation (requires successful compilation)
     pub fn build_sim(&self) -> Result<Simulation, String> {
         let datamodel = self.build_datamodel();
-        let compiled = Rc::new(CompiledProject::from(datamodel));
+        let compiled = Arc::new(CompiledProject::from(datamodel));
 
         // Check for compilation errors first
         let mut has_errors = false;

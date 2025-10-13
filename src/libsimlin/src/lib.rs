@@ -13,6 +13,7 @@ use std::io::BufReader;
 use std::os::raw::{c_char, c_double};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub mod errors;
 mod ffi;
@@ -136,21 +137,28 @@ impl From<engine::ErrorCode> for SimlinErrorCode {
 }
 /// Opaque project structure
 pub struct SimlinProject {
-    project: engine::Project,
+    project: Mutex<engine::Project>,
     ref_count: AtomicUsize,
 }
+
 /// Opaque model structure
 pub struct SimlinModel {
     project: *const SimlinProject,
-    model_name: String,
+    model_name: Arc<String>,
     ref_count: AtomicUsize,
 }
+
+/// Internal state for SimlinSim
+struct SimState {
+    vm: Option<Vm>,
+    results: Option<engine::Results>,
+}
+
 /// Opaque simulation structure
 pub struct SimlinSim {
     model: *const SimlinModel,
     enable_ltm: bool,
-    vm: Option<Vm>,
-    results: Option<engine::Results>,
+    state: Mutex<SimState>,
     ref_count: AtomicUsize,
 }
 
@@ -393,7 +401,7 @@ pub unsafe extern "C" fn simlin_project_open(
 
         let project: engine::Project = engine_serde::deserialize(pb_project).into();
         Ok(Box::into_raw(Box::new(SimlinProject {
-            project,
+            project: Mutex::new(project),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -456,7 +464,7 @@ pub unsafe extern "C" fn simlin_project_json_open(
 
         let project: engine::Project = datamodel_project.into();
         Ok(Box::into_raw(Box::new(SimlinProject {
-            project,
+            project: Mutex::new(project),
             ref_count: AtomicUsize::new(1),
         })))
     })();
@@ -516,7 +524,8 @@ pub unsafe extern "C" fn simlin_project_get_model_count(
     }
 
     let project_ref = ffi_try!(out_error, require_project(project));
-    *out_count = project_ref.project.datamodel.models.len();
+    let project_locked = project_ref.project.lock().unwrap();
+    *out_count = project_locked.datamodel.models.len();
 }
 
 /// Gets the list of model names in the project
@@ -544,7 +553,8 @@ pub unsafe extern "C" fn simlin_project_get_model_names(
     }
 
     let proj = ffi_try!(out_error, require_project(project));
-    let models = &proj.project.datamodel.models;
+    let project_locked = proj.project.lock().unwrap();
+    let models = &project_locked.datamodel.models;
 
     if max == 0 {
         *out_written = models.len();
@@ -632,8 +642,9 @@ pub unsafe extern "C" fn simlin_project_add_model(
         }
     };
 
-    if proj
-        .project
+    let mut project_locked = proj.project.lock().unwrap();
+
+    if project_locked
         .datamodel
         .models
         .iter()
@@ -657,10 +668,10 @@ pub unsafe extern "C" fn simlin_project_add_model(
     };
 
     // Add to datamodel
-    proj.project.datamodel.models.push(new_model);
+    project_locked.datamodel.models.push(new_model);
 
     // Rebuild the project's internal structures
-    proj.project = engine::Project::from(proj.project.datamodel.clone());
+    *project_locked = engine::Project::from(project_locked.datamodel.clone());
 }
 
 /// Gets a model from a project by name
@@ -684,7 +695,9 @@ pub unsafe extern "C" fn simlin_project_get_model(
         }
     };
 
-    if proj.project.datamodel.models.is_empty() {
+    let project_locked = proj.project.lock().unwrap();
+
+    if project_locked.datamodel.models.is_empty() {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist)
@@ -712,17 +725,18 @@ pub unsafe extern "C" fn simlin_project_get_model(
 
     if requested_name
         .as_deref()
-        .and_then(|name| proj.project.datamodel.get_model(name))
+        .and_then(|name| project_locked.datamodel.get_model(name))
         .is_none()
     {
-        requested_name = Some(proj.project.datamodel.models[0].name.clone());
+        requested_name = Some(project_locked.datamodel.models[0].name.clone());
     }
 
+    drop(project_locked);
     simlin_project_ref(project);
 
     let model = SimlinModel {
         project,
-        model_name: requested_name.unwrap(),
+        model_name: Arc::new(requested_name.unwrap()),
         ref_count: AtomicUsize::new(1),
     };
 
@@ -779,8 +793,9 @@ pub unsafe extern "C" fn simlin_model_get_var_count(
     }
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project = &(*model_ref.project).project;
-    let offsets = engine::interpreter::calc_flattened_offsets(project, &model_ref.model_name);
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+    let offsets =
+        engine::interpreter::calc_flattened_offsets(&project_locked, &model_ref.model_name);
     *out_count = offsets.len();
 }
 
@@ -809,8 +824,9 @@ pub unsafe extern "C" fn simlin_model_get_var_names(
     }
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project = &(*model_ref.project).project;
-    let offsets = engine::interpreter::calc_flattened_offsets(project, &model_ref.model_name);
+    let project_locked = (*model_ref.project).project.lock().unwrap();
+    let offsets =
+        engine::interpreter::calc_flattened_offsets(&project_locked, &model_ref.model_name);
 
     if max == 0 {
         *out_written = offsets.len();
@@ -890,7 +906,7 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
     }
 
     let model_ref = ffi_try!(out_error, require_model(model));
-    let project = &(*model_ref.project).project;
+    let project_locked = (*model_ref.project).project.lock().unwrap();
 
     let var_name = match CStr::from_ptr(var_name).to_str() {
         Ok(s) => canonicalize(s),
@@ -904,7 +920,10 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
         }
     };
 
-    let eng_model = match project.models.get(&canonicalize(&model_ref.model_name)) {
+    let eng_model = match project_locked
+        .models
+        .get(&canonicalize(&model_ref.model_name))
+    {
         Some(m) => m,
         None => {
             store_error(
@@ -1023,9 +1042,12 @@ pub unsafe extern "C" fn simlin_model_get_links(
             return ptr::null_mut();
         }
     };
-    let project = &(*model_ref.project).project;
+    let project_locked = (*model_ref.project).project.lock().unwrap();
 
-    let eng_model = match project.models.get(&canonicalize(&model_ref.model_name)) {
+    let eng_model = match project_locked
+        .models
+        .get(&canonicalize(&model_ref.model_name))
+    {
         Some(m) => m,
         None => {
             store_error(
@@ -1133,8 +1155,13 @@ pub unsafe extern "C" fn simlin_sim_new(
     let project_ptr = model_ref.project;
     let project_ref = &*project_ptr;
 
+    let cloned_project = {
+        let project_locked = project_ref.project.lock().unwrap();
+        project_locked.clone()
+    };
+
     let project_variant = if enable_ltm {
-        match project_ref.project.clone().with_ltm() {
+        match cloned_project.with_ltm() {
             Ok(proj) => proj,
             Err(err) => {
                 store_ffi_error(out_error, ffi_error_from_engine(&err));
@@ -1142,20 +1169,18 @@ pub unsafe extern "C" fn simlin_sim_new(
             }
         }
     } else {
-        project_ref.project.clone()
+        cloned_project
     };
 
     simlin_model_ref(model);
 
-    let mut sim = Box::new(SimlinSim {
+    let vm = create_vm(&project_variant, &model_ref.model_name).ok();
+    let sim = Box::new(SimlinSim {
         model: model_ref as *const _,
         enable_ltm,
-        vm: None,
-        results: None,
+        state: Mutex::new(SimState { vm, results: None }),
         ref_count: AtomicUsize::new(1),
     });
-
-    sim.vm = create_vm(&project_variant, &model_ref.model_name).ok();
 
     Box::into_raw(sim)
 }
@@ -1198,7 +1223,8 @@ pub unsafe extern "C" fn simlin_sim_run_to(
 ) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
-    if let Some(ref mut vm) = sim_ref.vm {
+    let mut state = sim_ref.state.lock().unwrap();
+    if let Some(ref mut vm) = state.vm {
         if let Err(err) = vm.run_to(time) {
             store_ffi_error(out_error, ffi_error_from_engine(&err));
         }
@@ -1221,17 +1247,18 @@ pub unsafe extern "C" fn simlin_sim_run_to_end(
 ) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
-    if let Some(mut vm) = sim_ref.vm.take() {
+    let mut state = sim_ref.state.lock().unwrap();
+    if let Some(mut vm) = state.vm.take() {
         match vm.run_to_end() {
             Ok(_) => {
-                sim_ref.results = Some(vm.into_results());
+                state.results = Some(vm.into_results());
             }
             Err(err) => {
-                sim_ref.vm = Some(vm);
+                state.vm = Some(vm);
                 store_ffi_error(out_error, ffi_error_from_engine(&err));
             }
         }
-    } else if sim_ref.results.is_none() {
+    } else if state.results.is_none() {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::Generic)
@@ -1260,7 +1287,8 @@ pub unsafe extern "C" fn simlin_sim_get_stepcount(
     }
 
     let sim_ref = ffi_try!(out_error, require_sim(sim));
-    if let Some(ref results) = sim_ref.results {
+    let state = sim_ref.state.lock().unwrap();
+    if let Some(ref results) = state.results {
         *out_count = results.step_count;
     } else {
         store_error(
@@ -1278,31 +1306,36 @@ pub unsafe extern "C" fn simlin_sim_get_stepcount(
 pub unsafe extern "C" fn simlin_sim_reset(sim: *mut SimlinSim, out_error: *mut *mut SimlinError) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
-    sim_ref.results = None;
 
     let model = &*sim_ref.model;
     let project = &*model.project;
 
-    let project_variant = if sim_ref.enable_ltm {
-        match project.project.clone().with_ltm() {
-            Ok(proj) => proj,
-            Err(err) => {
-                store_ffi_error(out_error, ffi_error_from_engine(&err));
-                return;
+    let project_variant = {
+        let project_locked = project.project.lock().unwrap();
+        if sim_ref.enable_ltm {
+            match project_locked.clone().with_ltm() {
+                Ok(proj) => proj,
+                Err(err) => {
+                    store_ffi_error(out_error, ffi_error_from_engine(&err));
+                    return;
+                }
             }
+        } else {
+            project_locked.clone()
         }
-    } else {
-        project.project.clone()
     };
 
-    match create_vm(&project_variant, &model.model_name) {
-        Ok(vm) => {
-            sim_ref.vm = Some(vm);
-        }
+    let new_vm = match create_vm(&project_variant, &model.model_name) {
+        Ok(vm) => vm,
         Err(err) => {
             store_ffi_error(out_error, ffi_error_from_engine(&err));
+            return;
         }
-    }
+    };
+
+    let mut state = sim_ref.state.lock().unwrap();
+    state.results = None;
+    state.vm = Some(new_vm);
 }
 /// Gets a single value from the simulation
 ///
@@ -1348,7 +1381,8 @@ pub unsafe extern "C" fn simlin_sim_get_value(
         }
     };
 
-    if let Some(ref vm) = sim_ref.vm {
+    let state = sim_ref.state.lock().unwrap();
+    if let Some(ref vm) = state.vm {
         if let Some(off) = vm.get_offset(&canon_name) {
             *out_value = vm.get_value_now(off);
         } else {
@@ -1360,7 +1394,7 @@ pub unsafe extern "C" fn simlin_sim_get_value(
                 )),
             );
         }
-    } else if let Some(ref results) = sim_ref.results {
+    } else if let Some(ref results) = state.results {
         if let Some(&offset) = results.offsets.get(&canon_name) {
             if let Some(last_row) = results.iter().next_back() {
                 *out_value = last_row[offset];
@@ -1428,7 +1462,8 @@ pub unsafe extern "C" fn simlin_sim_set_value(
         }
     };
 
-    if let Some(ref mut vm) = sim_ref.vm {
+    let mut state = sim_ref.state.lock().unwrap();
+    if let Some(ref mut vm) = state.vm {
         if let Some(off) = vm.get_offset(&canon_name) {
             vm.set_value_now(off, val);
         } else {
@@ -1440,7 +1475,7 @@ pub unsafe extern "C" fn simlin_sim_set_value(
                 )),
             );
         }
-    } else if sim_ref.results.is_some() {
+    } else if state.results.is_some() {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::NotSimulatable)
@@ -1467,7 +1502,8 @@ pub unsafe extern "C" fn simlin_sim_set_value_by_offset(
 ) {
     clear_out_error(out_error);
     let sim_ref = ffi_try!(out_error, require_sim(sim));
-    if let Some(ref mut results) = sim_ref.results {
+    let mut state = sim_ref.state.lock().unwrap();
+    if let Some(ref mut results) = state.results {
         if results.step_count == 0 || offset >= results.step_size {
             store_error(
                 out_error,
@@ -1538,12 +1574,13 @@ pub unsafe extern "C" fn simlin_sim_get_offset(
         }
     };
 
-    if let Some(ref vm) = sim_ref.vm {
+    let state = sim_ref.state.lock().unwrap();
+    if let Some(ref vm) = state.vm {
         if let Some(off) = vm.get_offset(&canon_name) {
             *out_offset = off;
             return;
         }
-    } else if let Some(ref results) = sim_ref.results {
+    } else if let Some(ref results) = state.results {
         if let Some(&off) = results.offsets.get(&canon_name) {
             *out_offset = off;
             return;
@@ -1610,7 +1647,8 @@ pub unsafe extern "C" fn simlin_sim_get_series(
         }
     };
 
-    if let Some(ref results) = sim_ref.results {
+    let state = sim_ref.state.lock().unwrap();
+    if let Some(ref results) = state.results {
         if let Some(&offset) = results.offsets.get(&name) {
             let count = std::cmp::min(results.step_count, len);
             for (i, row) in results.iter().take(count).enumerate() {
@@ -1662,7 +1700,8 @@ pub unsafe extern "C" fn simlin_analyze_get_loops(
     };
     let project = &project_ref.project;
 
-    let loops_by_model = match detect_loops(project) {
+    let project_locked = project.lock().unwrap();
+    let loops_by_model = match detect_loops(&project_locked) {
         Ok(loops) => loops,
         Err(err) => {
             store_error(
@@ -1798,9 +1837,12 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
         }
     };
     let model_ref = &*sim_ref.model;
-    let project = &(*model_ref.project).project;
+    let project_locked = (*model_ref.project).project.lock().unwrap();
 
-    let model = match project.models.get(&canonicalize(&model_ref.model_name)) {
+    let model = match project_locked
+        .models
+        .get(&canonicalize(&model_ref.model_name))
+    {
         Some(m) => m,
         None => {
             store_error(
@@ -1812,7 +1854,7 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
         }
     };
 
-    let graph = match engine::ltm::CausalGraph::from_model(model, project) {
+    let graph = match engine::ltm::CausalGraph::from_model(model, &project_locked) {
         Ok(g) => g,
         Err(err) => {
             store_error(
@@ -1867,13 +1909,19 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
     }
 
     if unique_links.is_empty() {
+        drop(project_locked);
         return Box::into_raw(Box::new(SimlinLinks {
             links: ptr::null_mut(),
             count: 0,
         }));
     }
 
-    let has_ltm_scores = sim_ref.enable_ltm && sim_ref.results.is_some();
+    drop(project_locked);
+
+    let has_ltm_scores = {
+        let state = sim_ref.state.lock().unwrap();
+        sim_ref.enable_ltm && state.results.is_some()
+    };
 
     let mut c_links = Vec::with_capacity(unique_links.len());
     for (_, link) in unique_links {
@@ -1893,7 +1941,8 @@ pub unsafe extern "C" fn simlin_analyze_get_links(
             );
             let var_ident = canonicalize(&link_score_var);
 
-            if let Some(ref results) = sim_ref.results {
+            let state = sim_ref.state.lock().unwrap();
+            if let Some(ref results) = state.results {
                 if let Some(&offset) = results.offsets.get(&var_ident) {
                     let mut scores = Vec::with_capacity(results.step_count);
                     for row in results.iter() {
@@ -2022,7 +2071,8 @@ pub unsafe extern "C" fn simlin_analyze_get_relative_loop_score(
     let var_name = format!("$⁚ltm⁚rel_loop_score⁚{loop_id}");
     let var_ident = canonicalize(&var_name);
 
-    if let Some(ref results) = sim_ref.results {
+    let state = sim_ref.state.lock().unwrap();
+    if let Some(ref results) = state.results {
         if let Some(&offset) = results.offsets.get(&var_ident) {
             let count = std::cmp::min(results.step_count, len);
             for (i, row) in results.iter().take(count).enumerate() {
@@ -2127,9 +2177,9 @@ pub unsafe extern "C" fn simlin_import_xmile(
 
     match simlin_compat::open_xmile(&mut reader) {
         Ok(datamodel_project) => {
-            let project = datamodel_project.into();
+            let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
-                project,
+                project: Mutex::new(project),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -2170,9 +2220,9 @@ pub unsafe extern "C" fn simlin_import_mdl(
 
     match simlin_compat::open_vensim(&mut reader) {
         Ok(datamodel_project) => {
-            let project = datamodel_project.into();
+            let project: engine::Project = datamodel_project.into();
             let boxed = Box::new(SimlinProject {
-                project,
+                project: Mutex::new(project),
                 ref_count: AtomicUsize::new(1),
             });
             Box::into_raw(boxed)
@@ -2219,7 +2269,8 @@ pub unsafe extern "C" fn simlin_export_xmile(
         }
     };
 
-    match simlin_compat::to_xmile(&proj.project.datamodel) {
+    let project_locked = proj.project.lock().unwrap();
+    match simlin_compat::to_xmile(&project_locked.datamodel) {
         Ok(xmile_str) => {
             let bytes = xmile_str.into_bytes();
             let len = bytes.len();
@@ -2286,7 +2337,8 @@ pub unsafe extern "C" fn simlin_project_serialize(
         }
     };
 
-    let pb_project = engine_serde::serialize(&proj.project.datamodel);
+    let project_locked = proj.project.lock().unwrap();
+    let pb_project = engine_serde::serialize(&project_locked.datamodel);
 
     let mut bytes = Vec::new();
     if pb_project.encode(&mut bytes).is_err() {
@@ -2337,7 +2389,11 @@ unsafe fn apply_project_patch_internal(
     out_collected_errors: *mut *mut SimlinError,
     out_error: *mut *mut SimlinError,
 ) {
-    let mut staged_datamodel = project_ref.project.datamodel.clone();
+    let mut staged_datamodel = {
+        let project_locked = project_ref.project.lock().unwrap();
+        project_locked.datamodel.clone()
+    };
+
     if let Err(err) = engine::apply_patch(&mut staged_datamodel, &patch) {
         store_error(
             out_error,
@@ -2372,7 +2428,8 @@ unsafe fn apply_project_patch_internal(
     }
 
     if !dry_run {
-        project_ref.project = staged_project;
+        let mut project_locked = project_ref.project.lock().unwrap();
+        *project_locked = staged_project;
     }
 }
 
@@ -2456,10 +2513,10 @@ pub unsafe extern "C" fn simlin_project_apply_patch(
 ///   be set to null on success.
 ///
 /// # Thread Safety
-/// - This function is NOT thread-safe for concurrent calls with the same `project` pointer.
-/// - The underlying `engine::Project` uses `Rc<ModelStage1>` which is not `Send` or `Sync`.
-/// - Concurrent access to the same project from multiple threads will cause undefined behavior.
-/// - Different projects may be serialized concurrently from different threads safely.
+/// - This function is thread-safe for concurrent calls with the same `project` pointer.
+/// - The underlying `engine::Project` uses `Arc<ModelStage1>` and is protected by a `Mutex`.
+/// - Multiple threads may safely access the same project concurrently.
+/// - Different projects may also be serialized concurrently from different threads safely.
 ///
 /// # Ownership
 /// - Serialization creates a deep copy of the project datamodel via `clone()`.
@@ -2500,9 +2557,10 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
         }
     };
 
+    let project_locked = project_ref.project.lock().unwrap();
     let bytes = match format {
         ffi::SimlinJsonFormat::Native => {
-            let json_project: engine::json::Project = project_ref.project.datamodel.clone().into();
+            let json_project: engine::json::Project = project_locked.datamodel.clone().into();
             match serde_json::to_vec(&json_project) {
                 Ok(data) => data,
                 Err(err) => {
@@ -2516,8 +2574,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
             }
         }
         ffi::SimlinJsonFormat::Sdai => {
-            let sdai_model: engine::json_sdai::SdaiModel =
-                project_ref.project.datamodel.clone().into();
+            let sdai_model: engine::json_sdai::SdaiModel = project_locked.datamodel.clone().into();
             match serde_json::to_vec(&sdai_model) {
                 Ok(data) => data,
                 Err(err) => {
@@ -2559,10 +2616,10 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
 ///   error details and may be set to null on success.
 ///
 /// # Thread Safety
-/// - This function is NOT thread-safe for concurrent calls with the same `project` pointer.
-/// - The underlying `engine::Project` uses `Rc<ModelStage1>` which is not `Send` or `Sync`.
-/// - Concurrent modifications to the same project from multiple threads will cause undefined behavior.
-/// - Different projects may be patched concurrently from different threads safely.
+/// - This function is thread-safe for concurrent calls with the same `project` pointer.
+/// - The underlying `engine::Project` uses `Arc<ModelStage1>` and is protected by a `Mutex`.
+/// - Multiple threads may safely modify the same project concurrently.
+/// - Different projects may also be patched concurrently from different threads safely.
 ///
 /// # Ownership and Mutation
 /// - When `dry_run` is false, this function modifies the project in-place.
@@ -3014,7 +3071,8 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         }
     };
 
-    let (all_errors, _) = gather_error_details(&proj.project);
+    let project_locked = proj.project.lock().unwrap();
+    let (all_errors, _) = gather_error_details(&project_locked);
 
     if all_errors.is_empty() {
         return ptr::null_mut();
@@ -3121,8 +3179,10 @@ mod tests {
             assert!(out_error.is_null(), "expected no error");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(model.get_variable("new_aux").is_some());
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3166,8 +3226,11 @@ mod tests {
             simlin_error_free(collected_errors);
 
             // Project should remain unchanged
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
-            assert!(model.get_variable("bad_aux").is_none());
+            {
+                let project_locked = (*proj).project.lock().unwrap();
+                let model = project_locked.datamodel.get_model("main").unwrap();
+                assert!(model.get_variable("bad_aux").is_none());
+            }
 
             let mut collected_errors_allow: *mut SimlinError = ptr::null_mut();
             let mut out_error_allow: *mut SimlinError = ptr::null_mut();
@@ -3187,8 +3250,10 @@ mod tests {
             assert!(!collected_errors_allow.is_null());
             simlin_error_free(collected_errors_allow);
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(model.get_variable("bad_aux").is_some());
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3228,8 +3293,10 @@ mod tests {
             assert!(collected_errors.is_null());
 
             // Dry run should not commit changes
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(model.get_variable("dry_aux").is_none());
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3350,12 +3417,14 @@ mod tests {
             assert!(!model.is_null());
 
             // Verify variables exist
-            let roundtrip_datamodel = &(*proj2).project.datamodel;
+            let project2_locked = (*proj2).project.lock().unwrap();
+            let roundtrip_datamodel = &project2_locked.datamodel;
             let roundtrip_model = roundtrip_datamodel.get_model("main").unwrap();
 
             assert!(roundtrip_model.get_variable("population").is_some());
             assert!(roundtrip_model.get_variable("births").is_some());
             assert!(roundtrip_model.get_variable("deaths").is_some());
+            drop(project2_locked);
 
             simlin_free(out_buffer);
             simlin_model_unref(model);
@@ -3517,8 +3586,10 @@ mod tests {
             assert!(out_error.is_null(), "expected no error applying json patch");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(model.get_variable("json_aux").is_some());
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3598,9 +3669,11 @@ mod tests {
             assert!(out_error.is_null(), "expected no error upserting stock");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             let stock = model.get_variable("inventory");
             assert!(stock.is_some(), "stock should exist after upsert");
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3649,9 +3722,11 @@ mod tests {
             assert!(out_error.is_null(), "expected no error upserting flow");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             let flow = model.get_variable("production");
             assert!(flow.is_some(), "flow should exist after upsert");
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3712,9 +3787,11 @@ mod tests {
             // Modules referencing other models may have compilation errors, which is ok
             // when allow_errors=true
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             let module = model.get_variable("submodel");
             assert!(module.is_some(), "module should exist after upsert");
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3728,7 +3805,8 @@ mod tests {
         let proj = open_project_from_datamodel(&datamodel);
 
         unsafe {
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(
                 model.get_variable("to_delete").is_some(),
                 "variable should exist before delete"
@@ -3769,11 +3847,13 @@ mod tests {
             assert!(out_error.is_null(), "expected no error deleting variable");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(
                 model.get_variable("to_delete").is_none(),
                 "variable should not exist after delete"
             );
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3787,7 +3867,8 @@ mod tests {
         let proj = open_project_from_datamodel(&datamodel);
 
         unsafe {
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(
                 model.get_variable("old_name").is_some(),
                 "old variable should exist before rename"
@@ -3829,7 +3910,8 @@ mod tests {
             assert!(out_error.is_null(), "expected no error renaming variable");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(
                 model.get_variable("old_name").is_none(),
                 "old variable should not exist after rename"
@@ -3838,6 +3920,7 @@ mod tests {
                 model.get_variable("new_name").is_some(),
                 "new variable should exist after rename"
             );
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3893,8 +3976,10 @@ mod tests {
             assert!(out_error.is_null(), "expected no error upserting view");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(!model.views.is_empty(), "view should exist after upsert");
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3944,7 +4029,8 @@ mod tests {
             );
             assert!(out_error.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(!model.views.is_empty(), "view should exist after upsert");
         }
 
@@ -3983,8 +4069,10 @@ mod tests {
             assert!(out_error.is_null(), "expected no error deleting view");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(model.views.is_empty(), "view should not exist after delete");
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -3995,8 +4083,8 @@ mod tests {
         let datamodel = TestProject::new("json_patch_sim_specs").build_datamodel();
         let proj = open_project_from_datamodel(&datamodel);
 
-        let original_start = unsafe { (*proj).project.datamodel.sim_specs.start };
-        let original_stop = unsafe { (*proj).project.datamodel.sim_specs.stop };
+        let original_start = unsafe { (*proj).project.lock().unwrap().datamodel.sim_specs.start };
+        let original_stop = unsafe { (*proj).project.lock().unwrap().datamodel.sim_specs.stop };
 
         let patch_json = r#"{
             "project_ops": [
@@ -4047,8 +4135,8 @@ mod tests {
             }
             assert!(collected_errors.is_null());
 
-            let new_start = (*proj).project.datamodel.sim_specs.start;
-            let new_stop = (*proj).project.datamodel.sim_specs.stop;
+            let new_start = (*proj).project.lock().unwrap().datamodel.sim_specs.start;
+            let new_stop = (*proj).project.lock().unwrap().datamodel.sim_specs.stop;
 
             assert_ne!(
                 original_start, new_start,
@@ -4134,14 +4222,16 @@ mod tests {
             }
             assert!(collected_errors.is_null());
 
-            let new_stop = (*proj).project.datamodel.sim_specs.stop;
+            let new_stop = (*proj).project.lock().unwrap().datamodel.sim_specs.stop;
             assert_eq!(new_stop, 100.0, "sim specs should be updated");
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(
                 model.get_variable("combined_test").is_some(),
                 "variable should exist"
             );
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -4244,7 +4334,8 @@ mod tests {
         let proj = open_project_from_datamodel(&datamodel);
 
         unsafe {
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(
                 model.get_variable("dry_run_var").is_none(),
                 "variable should not exist before patch"
@@ -4288,11 +4379,13 @@ mod tests {
             assert!(out_error.is_null(), "dry run should succeed");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(
                 model.get_variable("dry_run_var").is_none(),
                 "variable should not exist after dry run"
             );
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -4394,11 +4487,13 @@ mod tests {
             assert!(out_error.is_null(), "multi-model patch should succeed");
             assert!(collected_errors.is_null());
 
-            let main_model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let main_model = project_locked.datamodel.get_model("main").unwrap();
             assert!(main_model.get_variable("main_var").is_some());
 
-            let second_model = (*proj).project.datamodel.get_model("SecondModel").unwrap();
+            let second_model = project_locked.datamodel.get_model("SecondModel").unwrap();
             assert!(second_model.get_variable("second_var").is_some());
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -4464,10 +4559,12 @@ mod tests {
             assert!(out_error.is_null(), "multiple ops should succeed");
             assert!(collected_errors.is_null());
 
-            let model = (*proj).project.datamodel.get_model("main").unwrap();
+            let project_locked = (*proj).project.lock().unwrap();
+            let model = project_locked.datamodel.get_model("main").unwrap();
             assert!(model.get_variable("var1").is_some());
             assert!(model.get_variable("var2").is_some());
             assert!(model.get_variable("var3").is_some());
+            drop(project_locked);
 
             simlin_project_unref(proj);
         }
@@ -6791,7 +6888,7 @@ mod tests {
             );
             assert!(!model1.is_null());
             assert!(err.is_null());
-            assert_eq!((*model1).model_name, "model1");
+            assert_eq!((*model1).model_name.as_str(), "model1");
 
             // Test simlin_project_get_model with null (should get first model)
             let mut err_get_model_default: *mut SimlinError = ptr::null_mut();
@@ -6805,7 +6902,7 @@ mod tests {
                 panic!("get_model failed");
             }
             assert!(!model_default.is_null());
-            assert_eq!((*model_default).model_name, "model1");
+            assert_eq!((*model_default).model_name.as_str(), "model1");
 
             // Test simlin_project_get_model with non-existent name (should get first model)
             let bad_name = CString::new("nonexistent").unwrap();
@@ -6817,7 +6914,7 @@ mod tests {
             );
             assert!(!model_fallback.is_null());
             assert!(err.is_null());
-            assert_eq!((*model_fallback).model_name, "model1");
+            assert_eq!((*model_fallback).model_name.as_str(), "model1");
 
             // Test simlin_model_get_var_count
             let model2_name = CString::new("model2").unwrap();
@@ -7647,7 +7744,7 @@ mod tests {
             );
             assert!(!new_model.is_null());
             assert!(err.is_null());
-            assert_eq!((*new_model).model_name, "new_model");
+            assert_eq!((*new_model).model_name.as_str(), "new_model");
 
             // Verify the new model can be used to create a simulation
             err = ptr::null_mut();

@@ -12,14 +12,14 @@ use crate::ltm_augment::generate_ltm_variables;
 use crate::model::{ModelStage0, ModelStage1, ScopeStage0};
 use crate::units::Context;
 use crate::variable::Variable;
-use prost::alloc::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub datamodel: datamodel::Project,
-    // these are Rcs so that multiple Modules created by the compiler can
+    // these are Arcs so that multiple Modules created by the compiler can
     // reference the same Model instance
-    pub models: HashMap<Ident<Canonical>, Rc<ModelStage1>>,
+    pub models: HashMap<Ident<Canonical>, Arc<ModelStage1>>,
     model_order: Vec<Ident<Canonical>>,
     pub errors: Vec<Error>,
 }
@@ -196,7 +196,7 @@ impl Project {
 
         let models = models_list
             .into_iter()
-            .map(|m| (m.name.clone(), Rc::new(m)))
+            .map(|m| (m.name.clone(), Arc::new(m)))
             .collect();
 
         Project {
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn test_project_with_ltm_simulation() {
         use crate::test_common::TestProject;
-        use std::rc::Rc;
+        use std::sync::Arc;
 
         // Create a project with a simple reinforcing loop
         let project = TestProject::new("test_ltm_simulation")
@@ -335,7 +335,7 @@ mod tests {
         }
 
         // Build and run the simulation
-        let project_rc = Rc::new(ltm_project);
+        let project_rc = Arc::new(ltm_project);
 
         // Check all variables for errors before building simulation
         for (model_name, model) in &project_rc.models {

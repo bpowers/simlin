@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use float_cmp::approx_eq;
 use smallvec::SmallVec;
@@ -250,8 +250,8 @@ impl Stack {
 struct CompiledModuleSlice {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
-    context: Rc<ByteCodeContext>,
-    bytecode: Rc<ByteCode>,
+    context: Arc<ByteCodeContext>,
+    bytecode: Arc<ByteCode>,
     part: StepPart,
 }
 

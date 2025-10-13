@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::ast::{self, Ast, BinaryOp, IndexExpr2, Loc};
 use crate::bytecode::{
@@ -2060,7 +2060,7 @@ pub(crate) fn calc_module_model_map(
     let mut all_models: HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>> =
         HashMap::new();
 
-    let model = Rc::clone(&project.models[model_name]);
+    let model = Arc::clone(&project.models[model_name]);
     let var_names: Vec<&str> = {
         let mut var_names: Vec<_> = model.variables.keys().map(|s| s.as_str()).collect();
         var_names.sort_unstable();
@@ -2182,7 +2182,7 @@ pub(crate) fn build_metadata(
         i += IMPLICIT_VAR_COUNT;
     }
 
-    let model = Rc::clone(&project.models[model_name]);
+    let model = Arc::clone(&project.models[model_name]);
     let var_names: Vec<&Ident<Canonical>> = {
         let mut var_names: Vec<_> = model.variables.keys().collect();
         var_names.sort_unstable();
@@ -2231,7 +2231,7 @@ fn calc_n_slots(
 impl Module {
     pub(crate) fn new(
         project: &Project,
-        model: Rc<ModelStage1>,
+        model: Arc<ModelStage1>,
         inputs: &BTreeSet<Ident<Canonical>>,
         is_root: bool,
     ) -> Result<Self> {
@@ -2721,14 +2721,14 @@ impl<'module> Compiler<'module> {
     }
 
     fn compile(mut self) -> Result<CompiledModule> {
-        let compiled_initials = Rc::new(self.walk(&self.module.runlist_initials)?);
-        let compiled_flows = Rc::new(self.walk(&self.module.runlist_flows)?);
-        let compiled_stocks = Rc::new(self.walk(&self.module.runlist_stocks)?);
+        let compiled_initials = Arc::new(self.walk(&self.module.runlist_initials)?);
+        let compiled_flows = Arc::new(self.walk(&self.module.runlist_flows)?);
+        let compiled_stocks = Arc::new(self.walk(&self.module.runlist_stocks)?);
 
         Ok(CompiledModule {
             ident: self.module.ident.clone(),
             n_slots: self.module.n_slots,
-            context: Rc::new(ByteCodeContext {
+            context: Arc::new(ByteCodeContext {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
                 arrays: vec![],
