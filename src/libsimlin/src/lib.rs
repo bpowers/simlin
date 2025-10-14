@@ -8139,4 +8139,328 @@ mod tests {
             // assert_ne!(err, engine::ErrorCode::NoError as c_int);  // Obsolete assertion from old API
         }
     }
+
+    #[test]
+    fn test_concurrent_project_ref_unref() {
+        use std::thread;
+
+        unsafe {
+            // Create a test project
+            let datamodel = TestProject::new("concurrent_test").build_datamodel();
+            let pb_project = engine_serde::serialize(&datamodel);
+            let encoded = pb_project.encode_to_vec();
+
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open(
+                encoded.as_ptr(),
+                encoded.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+
+            if !err.is_null() {
+                simlin_error_free(err);
+                panic!("failed to create project");
+            }
+            assert!(!proj.is_null());
+
+            // Add many references from multiple threads
+            const NUM_THREADS: usize = 10;
+            const REFS_PER_THREAD: usize = 100;
+
+            let mut handles = vec![];
+
+            // Spawn threads that will add and remove references
+            for _ in 0..NUM_THREADS {
+                // Cast to usize to make it Send
+                let proj_addr = proj as usize;
+                let handle = thread::spawn(move || {
+                    let proj_ptr = proj_addr as *mut SimlinProject;
+                    for _ in 0..REFS_PER_THREAD {
+                        simlin_project_ref(proj_ptr);
+                        simlin_project_unref(proj_ptr);
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // Reference count should be back to 1
+            assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 1);
+
+            // Clean up
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_concurrent_model_creation() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+        use std::thread;
+
+        unsafe {
+            // Create a test project
+            let datamodel = TestProject::new("concurrent_model").build_datamodel();
+            let pb_project = engine_serde::serialize(&datamodel);
+            let encoded = pb_project.encode_to_vec();
+
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open(
+                encoded.as_ptr(),
+                encoded.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+
+            if !err.is_null() {
+                simlin_error_free(err);
+                panic!("failed to create project");
+            }
+            assert!(!proj.is_null());
+
+            const NUM_THREADS: usize = 8;
+            let success_count = Arc::new(AtomicUsize::new(0));
+            let mut handles = vec![];
+
+            // Spawn threads that create and destroy models
+            for _ in 0..NUM_THREADS {
+                let proj_addr = proj as usize;
+                let success = Arc::clone(&success_count);
+                let handle = thread::spawn(move || {
+                    let proj_ptr = proj_addr as *mut SimlinProject;
+                    for _ in 0..10 {
+                        let mut err: *mut SimlinError = ptr::null_mut();
+                        let model = simlin_project_get_model(
+                            proj_ptr,
+                            ptr::null(),
+                            &mut err as *mut *mut SimlinError,
+                        );
+
+                        if !err.is_null() {
+                            simlin_error_free(err);
+                            continue;
+                        }
+
+                        if model.is_null() {
+                            continue;
+                        }
+
+                        success.fetch_add(1, AtomicOrdering::SeqCst);
+
+                        // Use the model briefly
+                        let mut var_count: usize = 0;
+                        let mut err_count: *mut SimlinError = ptr::null_mut();
+                        simlin_model_get_var_count(
+                            model,
+                            &mut var_count as *mut usize,
+                            &mut err_count as *mut *mut SimlinError,
+                        );
+                        if !err_count.is_null() {
+                            simlin_error_free(err_count);
+                        }
+
+                        simlin_model_unref(model);
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // Should have had successful model creations
+            assert!(success_count.load(AtomicOrdering::SeqCst) > 0);
+
+            // Clean up
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_concurrent_sim_operations() {
+        use std::thread;
+
+        unsafe {
+            // Create a test project with a simple model
+            let datamodel = TestProject::new("concurrent_sim")
+                .stock("inventory", "0", &[], &[], None)
+                .flow("production", "5", None)
+                .build_datamodel();
+            let pb_project = engine_serde::serialize(&datamodel);
+            let encoded = pb_project.encode_to_vec();
+
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open(
+                encoded.as_ptr(),
+                encoded.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+
+            if !err.is_null() {
+                simlin_error_free(err);
+                panic!("failed to create project");
+            }
+            assert!(!proj.is_null());
+
+            // Get model
+            let mut err_model: *mut SimlinError = ptr::null_mut();
+            let model = simlin_project_get_model(
+                proj,
+                ptr::null(),
+                &mut err_model as *mut *mut SimlinError,
+            );
+            if !err_model.is_null() {
+                simlin_error_free(err_model);
+                panic!("failed to get model");
+            }
+
+            const NUM_THREADS: usize = 5;
+            let mut handles = vec![];
+
+            // Spawn threads that create and run simulations
+            for _ in 0..NUM_THREADS {
+                let model_addr = model as usize;
+                let handle = thread::spawn(move || {
+                    let model_ptr = model_addr as *mut SimlinModel;
+                    for _ in 0..5 {
+                        let mut err_sim: *mut SimlinError = ptr::null_mut();
+                        let sim =
+                            simlin_sim_new(model_ptr, false, &mut err_sim as *mut *mut SimlinError);
+
+                        if !err_sim.is_null() {
+                            simlin_error_free(err_sim);
+                            continue;
+                        }
+
+                        if sim.is_null() {
+                            continue;
+                        }
+
+                        // Run simulation
+                        let mut err_run: *mut SimlinError = ptr::null_mut();
+                        simlin_sim_run_to_end(sim, &mut err_run as *mut *mut SimlinError);
+                        if !err_run.is_null() {
+                            simlin_error_free(err_run);
+                        }
+
+                        simlin_sim_unref(sim);
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // Clean up
+            simlin_model_unref(model);
+            simlin_project_unref(proj);
+        }
+    }
+
+    #[test]
+    fn test_stress_ref_counting() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+        use std::thread;
+
+        unsafe {
+            // Create a test project
+            let datamodel = TestProject::new("stress_test")
+                .stock("s", "10", &[], &[], None)
+                .build_datamodel();
+            let pb_project = engine_serde::serialize(&datamodel);
+            let encoded = pb_project.encode_to_vec();
+
+            let mut err: *mut SimlinError = ptr::null_mut();
+            let proj = simlin_project_open(
+                encoded.as_ptr(),
+                encoded.len(),
+                &mut err as *mut *mut SimlinError,
+            );
+
+            if !err.is_null() {
+                simlin_error_free(err);
+                panic!("failed to create project");
+            }
+            assert!(!proj.is_null());
+
+            const NUM_THREADS: usize = 20;
+            const ITERATIONS: usize = 50;
+            let barrier = Arc::new(Barrier::new(NUM_THREADS));
+            let mut handles = vec![];
+
+            // Spawn threads that stress test the ref counting
+            for thread_id in 0..NUM_THREADS {
+                let proj_addr = proj as usize;
+                let barrier = Arc::clone(&barrier);
+                let handle = thread::spawn(move || {
+                    // Wait for all threads to be ready
+                    barrier.wait();
+
+                    let proj_ptr = proj_addr as *mut SimlinProject;
+                    for _ in 0..ITERATIONS {
+                        // Create model
+                        let mut err_model: *mut SimlinError = ptr::null_mut();
+                        let model = simlin_project_get_model(
+                            proj_ptr,
+                            ptr::null(),
+                            &mut err_model as *mut *mut SimlinError,
+                        );
+
+                        if !err_model.is_null() {
+                            simlin_error_free(err_model);
+                            continue;
+                        }
+
+                        if model.is_null() {
+                            continue;
+                        }
+
+                        // Ref and unref the model multiple times
+                        for _ in 0..5 {
+                            simlin_model_ref(model);
+                        }
+                        for _ in 0..5 {
+                            simlin_model_unref(model);
+                        }
+
+                        // Create sim on every other iteration
+                        if thread_id % 2 == 0 {
+                            let mut err_sim: *mut SimlinError = ptr::null_mut();
+                            let sim =
+                                simlin_sim_new(model, false, &mut err_sim as *mut *mut SimlinError);
+
+                            if !err_sim.is_null() {
+                                simlin_error_free(err_sim);
+                            } else if !sim.is_null() {
+                                simlin_sim_unref(sim);
+                            }
+                        }
+
+                        simlin_model_unref(model);
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // Final ref count should be 1
+            assert_eq!((*proj).ref_count.load(Ordering::SeqCst), 1);
+
+            // Clean up
+            simlin_project_unref(proj);
+        }
+    }
 }
