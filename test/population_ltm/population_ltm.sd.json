@@ -1,0 +1,194 @@
+{
+    "name": "population",
+    "sim_specs": {
+        "start_time": 1,
+        "end_time": 25,
+        "dt": "1/2",
+        "method": "euler",
+        "time_units": "year"
+    },
+    "models": [
+        {
+            "name": "main",
+            "stocks": [
+                {
+                    "name": "population",
+                    "initial_equation": "100",
+                    "units": "individuals",
+                    "inflows": [
+                        "births"
+                    ],
+                    "outflows": [
+                        "deaths"
+                    ],
+                    "non_negative": true
+                }
+            ],
+            "flows": [
+                {
+                    "name": "births",
+                    "equation": "population*birth_rate",
+                    "units": "individuals/year",
+                    "non_negative": true
+                },
+                {
+                    "name": "deaths",
+                    "equation": "population/average_lifespan",
+                    "units": "individuals/year",
+                    "non_negative": true
+                }
+            ],
+            "auxiliaries": [
+                {
+                    "name": "average lifespan",
+                    "equation": "80",
+                    "units": "years"
+                },
+                {
+                    "name": "birth rate",
+                    "equation": "0.1",
+                    "units": "1/year"
+                }
+            ],
+            "modules": null,
+            "sim_specs": {
+                "start_time": 1,
+                "end_time": 25,
+                "dt": "1/2",
+                "method": "euler",
+                "time_units": "year"
+            },
+            "views": [
+                {
+                    "elements": [
+                        {
+                            "label_side": "bottom",
+                            "name": "population",
+                            "type": "stock",
+                            "uid": 1,
+                            "x": 514,
+                            "y": 102
+                        },
+                        {
+                            "label_side": "bottom",
+                            "name": "births",
+                            "points": [
+                                {
+                                    "attached_to_uid": 10,
+                                    "x": 387,
+                                    "y": 102
+                                },
+                                {
+                                    "attached_to_uid": 1,
+                                    "x": 491.5,
+                                    "y": 102
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 2,
+                            "x": 439.25,
+                            "y": 102
+                        },
+                        {
+                            "label_side": "bottom",
+                            "name": "deaths",
+                            "points": [
+                                {
+                                    "attached_to_uid": 1,
+                                    "x": 536.5,
+                                    "y": 102
+                                },
+                                {
+                                    "attached_to_uid": 11,
+                                    "x": 643,
+                                    "y": 102
+                                }
+                            ],
+                            "type": "flow",
+                            "uid": 3,
+                            "x": 577.75,
+                            "y": 102
+                        },
+                        {
+                            "arc": 324.6888,
+                            "from_uid": 1,
+                            "to_uid": 3,
+                            "type": "link",
+                            "uid": 4
+                        },
+                        {
+                            "arc": 219.806,
+                            "from_uid": 1,
+                            "to_uid": 2,
+                            "type": "link",
+                            "uid": 5
+                        },
+                        {
+                            "label_side": "bottom",
+                            "name": "birth rate",
+                            "type": "aux",
+                            "uid": 6,
+                            "x": 378,
+                            "y": 146
+                        },
+                        {
+                            "label_side": "bottom",
+                            "name": "average lifespan",
+                            "type": "aux",
+                            "uid": 7,
+                            "x": 641,
+                            "y": 146
+                        },
+                        {
+                            "arc": 324.3078,
+                            "from_uid": 6,
+                            "to_uid": 2,
+                            "type": "link",
+                            "uid": 8
+                        },
+                        {
+                            "arc": 214.824,
+                            "from_uid": 7,
+                            "to_uid": 3,
+                            "type": "link",
+                            "uid": 9
+                        },
+                        {
+                            "flow_uid": 2,
+                            "type": "cloud",
+                            "uid": 10,
+                            "x": 387,
+                            "y": 102
+                        },
+                        {
+                            "flow_uid": 3,
+                            "type": "cloud",
+                            "uid": 11,
+                            "x": 643,
+                            "y": 102
+                        }
+                    ],
+                    "kind": "stock_flow",
+                    "view_box": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 0,
+                        "height": 0
+                    },
+                    "zoom": 1
+                }
+            ],
+            "loop_metadata": []
+        }
+    ],
+    "dimensions": [],
+    "units": [
+        {
+            "name": "Years",
+            "aliases": [
+                "yr",
+                "year"
+            ]
+        }
+    ]
+}
