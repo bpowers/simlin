@@ -271,7 +271,6 @@ fn simulate_ltm_path(model_path: &str) {
 }
 
 #[test]
-#[ignore]
 fn simulates_population_ltm() {
     simulate_ltm_path("../../test/logistic_growth_ltm/logistic_growth.stmx");
 }
