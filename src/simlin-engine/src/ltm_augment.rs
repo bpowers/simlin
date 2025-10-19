@@ -325,7 +325,11 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     let sign = if is_inflow { "" } else { "-" };
 
     // Using SAFEDIV to handle division by zero
-    let numerator = format!("{sign}({flow} - PREVIOUS({flow}))");
+    let numerator = format!(
+        "{sign}(PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow})))",
+        sign = sign,
+        flow = flow
+    );
     let denominator = format!(
         "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
     );
