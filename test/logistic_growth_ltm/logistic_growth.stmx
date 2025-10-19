@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" xmlns:simlin="https://simlin.com/XMILE/v1.0">
+    <header>
+        <name>logistic-growth</name>
+        <vendor>Simlin</vendor>
+        <product version="0.1.0" lang="en">Simlin</product>
+    </header>
+    <sim_specs method="euler">
+        <start>0</start>
+        <stop>100</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model>
+        <variables>
+            <stock name="population">
+                <eqn>5</eqn>
+                <inflow>net_birth_rate</inflow>
+            </stock>
+            <flow name="net_birth_rate">
+                <eqn>fractional_growth_rate * population</eqn>
+            </flow>
+            <aux name="maximum_growth_rate">
+                <eqn>.12</eqn>
+            </aux>
+            <aux name="carrying_capacity">
+                <eqn>1000</eqn>
+            </aux>
+            <aux name="fractional_growth_rate">
+                <eqn>maximum_growth_rate * (1 - fraction_of_carrying_capacity_used)</eqn>
+            </aux>
+            <aux name="fraction_of_carrying_capacity_used">
+                <eqn>population/carrying_capacity</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view isee:show_pages="false" page_width="800" page_height="600" view_type="stock_flow">
+                <stock name="Population" x="602.4000244140625" y="259.8000183105469" label_side="top"></stock>
+                <flow name="net birth rate" x="518.2726610523725" y="258.60003662109375" label_side="top">
+                    <pts>
+                        <pt x="456.79998779296875" y="258.60003662109375"></pt>
+                        <pt x="579.9000244140625" y="258.60003662109375"></pt>
+                    </pts>
+                </flow>
+                <aux name="maximum
+growth rate" x="463.2000244140625" y="400.44000244140625" label_side="left"></aux>
+                <aux name="carrying capacity" x="651.8400146484374" y="399.23996582031253" label_side="right"></aux>
+                <aux name="fractional 
+growth rate" x="498" y="344.20001220703125" label_side="left"></aux>
+                <aux name="fraction of carrying
+capacity used" x="610.800048828125" y="344.6000061035156" label_side="right"></aux>
+                <connector angle="129.67484750179284">
+                    <from>carrying capacity</from>
+                    <to>fraction of carrying
+capacity used</to>
+                </connector>
+                <connector angle="-49.638563408603886">
+                    <from>Population</from>
+                    <to>fraction of carrying
+capacity used</to>
+                </connector>
+                <connector angle="-131.65921988573643">
+                    <from>fraction of carrying
+capacity used</from>
+                    <to>fractional 
+growth rate</to>
+                </connector>
+                <connector angle="59.03844844626019">
+                    <from>maximum
+growth rate</from>
+                    <to>fractional 
+growth rate</to>
+                </connector>
+                <connector angle="118.82198603295677">
+                    <from>fractional 
+growth rate</from>
+                    <to>net birth rate</to>
+                </connector>
+                <connector angle="-102.57380061282629">
+                    <from>Population</from>
+                    <to>net birth rate</to>
+                </connector>
+            </view>
+        </views>
+    </model>
+</xmile>

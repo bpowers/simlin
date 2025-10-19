@@ -209,6 +209,51 @@ fn simulate_ltm_path(model_path: &str) {
     let sim = Simulation::new(&ltm_project, "main").unwrap();
     let results1 = sim.run_to_end().unwrap();
 
+    // Debug: print link scores and absolute loop scores for first few timesteps
+    eprintln!("\n=== Debug: Link Scores and Loop Scores ===");
+    for model_loops in loops.values() {
+        for loop_item in model_loops {
+            eprintln!("\nLoop {}: {}", loop_item.id, loop_item.format_path());
+
+            // Print link scores
+            for link in &loop_item.links {
+                let link_var_name = format!(
+                    "$⁚ltm⁚link_score⁚{}⁚{}",
+                    link.from.as_str(),
+                    link.to.as_str()
+                );
+                let link_var_ident = Ident::<Canonical>::from_str_unchecked(
+                    &canonicalize(&link_var_name).to_source_repr(),
+                );
+
+                if let Some(&offset) = results1.offsets.get(&link_var_ident) {
+                    eprintln!("  Link {} -> {}:", link.from.as_str(), link.to.as_str());
+                    for (step, result_row) in results1.iter().take(10).enumerate() {
+                        let time = results1.specs.start + results1.specs.save_step * (step as f64);
+                        let link_value = result_row[offset];
+                        eprintln!("    t={:6.2}: {:12.6}", time, link_value);
+                    }
+                }
+            }
+
+            // Print absolute loop score
+            let abs_var_name = format!("$⁚ltm⁚abs_loop_score⁚{}", loop_item.id);
+            let abs_var_ident = Ident::<Canonical>::from_str_unchecked(
+                &canonicalize(&abs_var_name).to_source_repr(),
+            );
+
+            if let Some(&offset) = results1.offsets.get(&abs_var_ident) {
+                eprintln!("  Absolute loop score:");
+                for (step, result_row) in results1.iter().take(10).enumerate() {
+                    let time = results1.specs.start + results1.specs.save_step * (step as f64);
+                    let abs_value = result_row[offset];
+                    eprintln!("    t={:6.2}: {:12.6}", time, abs_value);
+                }
+            }
+        }
+    }
+    eprintln!("=================================\n");
+
     let compiled = sim.compile().unwrap();
     let mut vm = Vm::new(compiled).unwrap();
     vm.run_to_end().unwrap();
@@ -228,5 +273,5 @@ fn simulate_ltm_path(model_path: &str) {
 #[test]
 #[ignore]
 fn simulates_population_ltm() {
-    simulate_ltm_path("../../test/population_ltm/population_ltm.stmx");
+    simulate_ltm_path("../../test/logistic_growth_ltm/logistic_growth.stmx");
 }
