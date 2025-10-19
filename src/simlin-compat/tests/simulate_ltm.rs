@@ -5,9 +5,11 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
+use std::io::BufReader;
 use std::rc::Rc;
 use std::result::Result as StdResult;
 
+use simlin_compat::xmile;
 use simlin_engine::common::{Canonical, Ident, canonicalize};
 use simlin_engine::interpreter::Simulation;
 use simlin_engine::{Project, Results, Vm, ltm};
@@ -190,9 +192,13 @@ fn simulate_ltm_path(model_path: &str) {
     eprintln!("LTM model: {}", model_path);
 
     let f = File::open(model_path).unwrap();
-    let json_project: simlin_engine::json::Project =
-        simlin_engine::json::Project::from_reader(f).unwrap();
-    let datamodel_project: simlin_engine::datamodel::Project = json_project.into();
+    let mut f = BufReader::new(f);
+    let datamodel_project = xmile::project_from_reader(&mut f);
+
+    if let Err(ref err) = datamodel_project {
+        eprintln!("model '{model_path}' error: {err}");
+    }
+    let datamodel_project = datamodel_project.unwrap();
 
     let project = Project::from(datamodel_project);
     let ltm_project = project.with_ltm().unwrap();
@@ -208,8 +214,12 @@ fn simulate_ltm_path(model_path: &str) {
     vm.run_to_end().unwrap();
     let results2 = vm.into_results();
 
-    let ltm_results_path = model_path.replace("population_ltm.sd.json", "ltm_results.tsv");
-    let expected = load_ltm_results(&ltm_results_path).unwrap();
+    let xmile_name = std::path::Path::new(model_path).file_name().unwrap();
+    let dir_path = &model_path[0..(model_path.len() - xmile_name.len())];
+    let dir_path = std::path::Path::new(dir_path);
+
+    let ltm_results_path = dir_path.join("ltm_results.tsv");
+    let expected = load_ltm_results(&ltm_results_path.to_string_lossy()).unwrap();
 
     ensure_ltm_results(&expected, &results1, &loops);
     ensure_ltm_results(&expected, &results2, &loops);
@@ -218,5 +228,5 @@ fn simulate_ltm_path(model_path: &str) {
 #[test]
 #[ignore]
 fn simulates_population_ltm() {
-    simulate_ltm_path("../../test/population_ltm/population_ltm.sd.json");
+    simulate_ltm_path("../../test/population_ltm/population_ltm.stmx");
 }
