@@ -12,6 +12,7 @@ use std::ffi::{CStr, CString};
 use std::io::BufReader;
 use std::os::raw::{c_char, c_double};
 use std::ptr;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -444,19 +445,16 @@ pub unsafe extern "C" fn simlin_project_json_open(
 
         let datamodel_project: engine::datamodel::Project = match format {
             ffi::SimlinJsonFormat::Native => {
-                let json_project: engine::json::Project =
-                    serde_json::from_str(json_str).map_err(|parse_err| {
-                        FfiError::new(SimlinErrorCode::Generic).with_message(format!(
-                            "failed to parse native JSON project: {parse_err}"
-                        ))
+                let json_project: engine::json::Project = engine::json::Project::from_str(json_str)
+                    .map_err(|engine_err| {
+                        FfiError::new(SimlinErrorCode::Generic).with_message(engine_err.to_string())
                     })?;
                 json_project.into()
             }
             ffi::SimlinJsonFormat::Sdai => {
-                let sdai_model: engine::json_sdai::SdaiModel = serde_json::from_str(json_str)
-                    .map_err(|parse_err| {
-                        FfiError::new(SimlinErrorCode::Generic)
-                            .with_message(format!("failed to parse SDAI JSON model: {parse_err}"))
+                let sdai_model: engine::json_sdai::SdaiModel =
+                    engine::json_sdai::SdaiModel::from_str(json_str).map_err(|engine_err| {
+                        FfiError::new(SimlinErrorCode::Generic).with_message(engine_err.to_string())
                     })?;
                 sdai_model.into()
             }

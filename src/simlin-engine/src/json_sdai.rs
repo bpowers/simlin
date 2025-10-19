@@ -292,6 +292,33 @@ impl From<SdaiModel> for datamodel::Project {
     }
 }
 
+impl std::str::FromStr for SdaiModel {
+    type Err = crate::common::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(|err| {
+            crate::common::Error::new(
+                crate::common::ErrorKind::Import,
+                crate::common::ErrorCode::Generic,
+                Some(format!("Failed to parse SDAI JSON model: {}", err)),
+            )
+        })
+    }
+}
+
+impl SdaiModel {
+    /// Parse an SdaiModel from a reader
+    pub fn from_reader(reader: impl std::io::Read) -> crate::common::Result<Self> {
+        serde_json::from_reader(reader).map_err(|err| {
+            crate::common::Error::new(
+                crate::common::ErrorKind::Import,
+                crate::common::ErrorCode::Generic,
+                Some(format!("Failed to parse SDAI JSON model: {}", err)),
+            )
+        })
+    }
+}
+
 // Conversions FROM datamodel types TO SDAI types
 
 impl From<datamodel::GraphicalFunction> for GraphicalFunction {
