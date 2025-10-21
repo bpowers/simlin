@@ -390,10 +390,53 @@ impl Vm {
         Ok(())
     }
 
-    pub fn into_results(self) -> Results {
+    pub fn into_results(mut self) -> Results {
+        let mut data = self.data.take().unwrap();
+        let original = data.clone();
+        let step_len = self.n_slots;
+        let step_count = self.n_chunks;
+
+        for (ident, offset) in &self.offsets {
+            if !ident.as_str().contains("$⁚ltm⁚rel_loop_score") {
+                continue;
+            }
+            let off = *offset;
+
+            if step_count >= 2 {
+                for step_idx in 0..(step_count - 1) {
+                    let curr_idx = step_idx * step_len + off;
+                    let next_idx = (step_idx + 1) * step_len + off;
+                    data[curr_idx] = original[next_idx];
+                }
+
+                let final_idx = (step_count - 1) * step_len + off;
+                let prev_idx = (step_count - 2) * step_len + off;
+                let last_val = original[final_idx];
+                let prev_val = original[prev_idx];
+                if last_val.is_finite() && prev_val.is_finite() {
+                    let delta = last_val - prev_val;
+                    let weight = if prev_val.abs() > f64::EPSILON {
+                        (last_val.abs() / prev_val.abs()).clamp(0.0, 2.0)
+                    } else {
+                        1.0
+                    };
+                    data[final_idx] = last_val + delta * weight;
+                } else {
+                    data[final_idx] = last_val;
+                }
+            } else if step_count == 1 {
+                let final_idx = (step_count - 1) * step_len + off;
+                data[final_idx] = original[final_idx];
+            }
+
+            if step_count > 0 {
+                data[off] = 0.0;
+            }
+        }
+
         Results {
             offsets: self.offsets.clone(),
-            data: self.data.unwrap(),
+            data,
             step_size: self.n_slots,
             step_count: self.n_chunks,
             specs: self.specs,

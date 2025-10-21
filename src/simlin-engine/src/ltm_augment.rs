@@ -12,7 +12,7 @@
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{self, Equation};
-use crate::ltm::{Link, Loop, detect_loops};
+use crate::ltm::{Link, Loop, LoopPolarity, detect_loops};
 use crate::project::Project;
 use crate::variable::{Variable, identifier_set};
 use std::collections::{HashMap, HashSet};
@@ -205,7 +205,7 @@ fn generate_loop_score_variables(loops: &[Loop]) -> HashMap<Ident<Canonical>, da
             // Single loop always has relative score of 1
             "1".to_string()
         } else {
-            generate_relative_loop_score_equation(&loop_item.id, loops)
+            generate_relative_loop_score_equation(loop_item, loops)
         };
 
         // Create the synthetic variable
@@ -314,7 +314,7 @@ fn generate_auxiliary_to_auxiliary_equation(
 }
 
 /// Generate flow-to-stock link score equation
-fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable) -> String {
+fn generate_flow_to_stock_equation(flow: &str, _stock: &str, stock_var: &Variable) -> String {
     // Check if this flow is an inflow or outflow
     let is_inflow = if let Variable::Stock { inflows, .. } = stock_var {
         inflows.iter().any(|f| f.as_str() == flow)
@@ -326,11 +326,43 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
 
     // Using SAFEDIV to handle division by zero
     let numerator = format!("{sign}({flow} - PREVIOUS({flow}))");
-    let denominator = format!(
-        "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
-    );
+    let net_flow_expr = build_net_flow_expression(stock_var);
+    let denominator = format!("({net_flow_expr} - PREVIOUS({net_flow_expr}))");
 
     format!("SAFEDIV({numerator}, {denominator}, 0)")
+}
+
+fn build_net_flow_expression(stock_var: &Variable) -> String {
+    if let Variable::Stock {
+        inflows, outflows, ..
+    } = stock_var
+    {
+        let mut parts = Vec::new();
+        if !inflows.is_empty() {
+            let sum_in = inflows
+                .iter()
+                .map(|f| f.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(" + ");
+            parts.push(format!("({sum_in})"));
+        }
+        if !outflows.is_empty() {
+            let sum_out = outflows
+                .iter()
+                .map(|f| f.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(" + ");
+            parts.push(format!("-({sum_out})"));
+        }
+
+        if parts.is_empty() {
+            "0".to_string()
+        } else {
+            format!("({})", parts.join(" "))
+        }
+    } else {
+        "0".to_string()
+    }
 }
 
 /// Generate stock-to-flow link score equation
@@ -374,24 +406,15 @@ fn generate_stock_to_flow_equation(
         }
     }
 
-    // Check if this flow affects the stock (is it an inflow or outflow?)
     let stock_var = all_vars.get(stock);
-    let _is_affecting_stock = if let Some(Variable::Stock {
-        inflows, outflows, ..
-    }) = stock_var
-    {
-        inflows.contains(flow) || outflows.contains(flow)
-    } else {
-        false
-    };
+    let net_flow_expr = stock_var
+        .map(build_net_flow_expression)
+        .unwrap_or_else(|| "0".to_string());
 
     // Using SAFEDIV for both divisions
     // Per 2023 paper Eqn (3): use second-order difference for stock change (change in net flow)
     let flow_diff = format!("({flow} - PREVIOUS({flow}))", flow = flow.as_str());
-    let stock_second_diff = format!(
-        "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))",
-        stock = stock.as_str()
-    );
+    let net_flow_diff = format!("({net_flow_expr} - PREVIOUS({net_flow_expr}))");
     let partial_change = format!(
         "(({partial_eq}) - PREVIOUS({flow}))",
         partial_eq = partial_eq,
@@ -399,15 +422,19 @@ fn generate_stock_to_flow_equation(
     );
 
     let abs_part = format!("ABS(SAFEDIV({partial_change}, {flow_diff}, 0))");
-    let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_second_diff}, 0))");
+    let sign_part = format!("SIGN(SAFEDIV({partial_change}, {net_flow_diff}, 0))");
 
     // We still need the outer check because we're multiplying ABS and SIGN parts
     // and want the result to be 0 when either denominator is 0
     format!(
         "if \
-            ({flow_diff} = 0) OR ({stock_second_diff} = 0) \
+            ({flow_diff} = 0) OR ({net_flow_diff} = 0) \
             then 0 \
-            else {abs_part} * {sign_part}"
+            else {abs_part} * {sign_part}",
+        flow_diff = flow_diff,
+        net_flow_diff = net_flow_diff,
+        abs_part = abs_part,
+        sign_part = sign_part
     )
 }
 
@@ -436,10 +463,10 @@ fn generate_loop_score_equation(loop_item: &Loop) -> String {
 }
 
 /// Generate the equation for a relative loop score variable
-fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> String {
+fn generate_relative_loop_score_equation(loop_item: &Loop, all_loops: &[Loop]) -> String {
     // Relative loop score = abs(loop_score) / sum(abs(all_loop_scores))
     // Use double quotes around variable names with $
-    let loop_score_var = format!("\"$⁚ltm⁚abs_loop_score⁚{loop_id}\"");
+    let loop_score_var = format!("\"$⁚ltm⁚abs_loop_score⁚{}\"", loop_item.id);
 
     // Build sum of absolute values of all loop scores
     let all_loop_scores: Vec<String> = all_loops
@@ -453,8 +480,18 @@ fn generate_relative_loop_score_equation(loop_id: &str, all_loops: &[Loop]) -> S
         all_loop_scores.join(" + ")
     };
 
+    let sign_factor = match loop_item.polarity {
+        LoopPolarity::Reinforcing => "1",
+        LoopPolarity::Balancing => "-1",
+    };
+
     // Relative score formula using SAFEDIV for division by zero protection
-    format!("SAFEDIV({loop_score_var}, ({sum_expr}), 0)")
+    format!(
+        "({sign_factor}) * SAFEDIV(ABS({loop_score_var}), ({sum_expr}), 0)",
+        sign_factor = sign_factor,
+        loop_score_var = loop_score_var,
+        sum_expr = sum_expr
+    )
 }
 
 /// Create an auxiliary variable with the given equation
@@ -528,7 +565,7 @@ mod tests {
             },
         ];
 
-        let equation = generate_relative_loop_score_equation("R1", &loops);
+        let equation = generate_relative_loop_score_equation(&loops[0], &loops);
 
         // Should use SAFEDIV for division by zero protection
         assert!(equation.contains("SAFEDIV"));
@@ -539,6 +576,11 @@ mod tests {
             equation
                 .contains("ABS(\"$⁚ltm⁚abs_loop_score⁚R1\") + ABS(\"$⁚ltm⁚abs_loop_score⁚B1\")")
         );
+
+        assert!(equation.starts_with("(1) *"));
+
+        let equation_balancing = generate_relative_loop_score_equation(&loops[1], &loops);
+        assert!(equation_balancing.starts_with("(-1) *"));
     }
 
     #[test]
