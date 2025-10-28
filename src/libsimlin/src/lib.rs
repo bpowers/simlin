@@ -6168,9 +6168,27 @@ mod tests {
                     );
 
                     // Check that scores contain reasonable values
+                    // Note: First timestep(s) will be NaN due to insufficient history for PREVIOUS()
+                    // For flow-to-stock links, first 2 timesteps are NaN (need PREVIOUS(PREVIOUS))
+                    // For other links, first timestep is NaN (need PREVIOUS)
                     let scores = std::slice::from_raw_parts(link.score, link.score_len);
-                    for &score in scores {
-                        assert!(score.is_finite(), "Score should be finite");
+                    let is_flow_to_stock = from == "births" && to == "population";
+                    let skip_count = if is_flow_to_stock { 2 } else { 1 };
+
+                    // Check first timestep(s) are NaN
+                    for &score in scores.iter().take(skip_count.min(scores.len())) {
+                        assert!(
+                            score.is_nan(),
+                            "Early timesteps should be NaN due to insufficient history"
+                        );
+                    }
+
+                    // Check remaining scores are finite
+                    for &score in &scores[skip_count..] {
+                        assert!(
+                            score.is_finite(),
+                            "Score should be finite after initial timesteps"
+                        );
                     }
                 }
             }

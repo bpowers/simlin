@@ -121,13 +121,16 @@ fn generate_module_link_score_equation(
         // Since the module instance itself is the output value
         return format!(
             "if \
-                (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
-                then 0 \
-                else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                if \
-                    ({from} - PREVIOUS({from})) = 0 \
+                (TIME = PREVIOUS(TIME)) \
+                then 0/0 \
+                else if \
+                    (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
                     then 0 \
-                    else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
+                    else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
+                    if \
+                        ({from} - PREVIOUS({from})) = 0 \
+                        then 0 \
+                        else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
             to = to.as_str(),
             from = from.as_str()
         );
@@ -142,13 +145,16 @@ fn generate_module_link_score_equation(
                 // Black box: assume unit transfer initially (module will process internally)
                 return format!(
                     "if \
-                        (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
-                        then 0 \
-                        else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                        if \
-                            ({from} - PREVIOUS({from})) = 0 \
+                        (TIME = PREVIOUS(TIME)) \
+                        then 0/0 \
+                        else if \
+                            (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
                             then 0 \
-                            else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
+                            else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
+                            if \
+                                ({from} - PREVIOUS({from})) = 0 \
+                                then 0 \
+                                else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
                     to = to.as_str(),
                     from = from.as_str()
                 );
@@ -164,13 +170,16 @@ fn generate_module_link_score_equation(
         // Chain transfer score: product of individual transfer scores
         return format!(
             "if \
-                (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
-                then 0 \
-                else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
-                if \
-                    ({from} - PREVIOUS({from})) = 0 \
+                (TIME = PREVIOUS(TIME)) \
+                then 0/0 \
+                else if \
+                    (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
                     then 0 \
-                    else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
+                    else ABS((({to} - PREVIOUS({to}))) / ({to} - PREVIOUS({to}))) * \
+                    if \
+                        ({from} - PREVIOUS({from})) = 0 \
+                        then 0 \
+                        else SIGN((({to} - PREVIOUS({to}))) / ({from} - PREVIOUS({from})))",
             to = to.as_str(),
             from = from.as_str()
         );
@@ -301,11 +310,15 @@ fn generate_auxiliary_to_auxiliary_equation(
         from = from.as_str()
     );
 
+    // Return NaN at the initial timestep when PREVIOUS values don't exist yet
     format!(
         "if \
-            (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
-            then 0 \
-            else {abs_part} * {sign_part}",
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                (({to} - PREVIOUS({to})) = 0) OR (({from} - PREVIOUS({from})) = 0) \
+                then 0 \
+                else {abs_part} * {sign_part}",
         to = to.as_str(),
         from = from.as_str(),
         abs_part = abs_part,
@@ -333,7 +346,13 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
         "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
     );
 
-    format!("SAFEDIV({numerator}, {denominator}, 0)")
+    // Return NaN for the first two timesteps when we don't have enough history for second-order differences
+    format!(
+        "if \
+            (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
+            then 0/0 \
+            else SAFEDIV({numerator}, {denominator}, 0)"
+    )
 }
 
 /// Generate stock-to-flow link score equation
@@ -401,11 +420,15 @@ fn generate_stock_to_flow_equation(
     let abs_part = format!("ABS(SAFEDIV({partial_change}, {flow_diff}, 0))");
     let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_diff}, 0))");
 
+    // Return NaN at the initial timestep when PREVIOUS values don't exist yet
     format!(
         "if \
-            ({flow_diff} = 0) OR ({stock_diff} = 0) \
-            then 0 \
-            else {abs_part} * {sign_part}"
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ({flow_diff} = 0) OR ({stock_diff} = 0) \
+                then 0 \
+                else {abs_part} * {sign_part}"
     )
 }
 
@@ -621,11 +644,15 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, y_var, all_vars);
 
         // Verify the EXACT equation structure
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((y - PREVIOUS(y)) = 0) OR ((x - PREVIOUS(x)) = 0) \
-            then 0 \
-            else ABS(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (y - PREVIOUS(y)), 0)) * \
-            SIGN(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (x - PREVIOUS(x)), 0))";
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((y - PREVIOUS(y)) = 0) OR ((x - PREVIOUS(x)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (y - PREVIOUS(y)), 0)) * \
+                SIGN(SAFEDIV(((x * 2 + PREVIOUS(z)) - PREVIOUS(y)), (x - PREVIOUS(x)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -656,11 +683,15 @@ mod tests {
 
         // Verify the EXACT equation structure for flow-to-stock
         // Uses PREVIOUS in numerator to align timing with denominator
-        let expected = "SAFEDIV(\
-            (PREVIOUS(inflow_rate) - PREVIOUS(PREVIOUS(inflow_rate))), \
-            ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
-            0\
-        )";
+        // Returns NaN for first two timesteps when insufficient history
+        let expected = "if \
+            (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
+            then 0/0 \
+            else SAFEDIV(\
+                (PREVIOUS(inflow_rate) - PREVIOUS(PREVIOUS(inflow_rate))), \
+                ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
+                0\
+            )";
 
         assert_eq!(
             equation, expected,
@@ -691,11 +722,15 @@ mod tests {
 
         // Verify the EXACT equation structure for outflow-to-stock (negative sign)
         // Uses PREVIOUS in numerator to align timing with denominator
-        let expected = "SAFEDIV(\
-            -(PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
-            ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
-            0\
-        )";
+        // Returns NaN for first two timesteps when insufficient history
+        let expected = "if \
+            (TIME = PREVIOUS(TIME)) OR (PREVIOUS(TIME) = PREVIOUS(PREVIOUS(TIME))) \
+            then 0/0 \
+            else SAFEDIV(\
+                -(PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
+                ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
+                0\
+            )";
 
         assert_eq!(
             equation, expected,
@@ -854,14 +889,18 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for module-to-variable link
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((processed - PREVIOUS(processed)) = 0) OR ((smoother - PREVIOUS(smoother)) = 0) \
-            then 0 \
-            else ABS(((processed - PREVIOUS(processed))) / (processed - PREVIOUS(processed))) * \
-            if \
-                (smoother - PREVIOUS(smoother)) = 0 \
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((processed - PREVIOUS(processed)) = 0) OR ((smoother - PREVIOUS(smoother)) = 0) \
                 then 0 \
-                else SIGN(((processed - PREVIOUS(processed))) / (smoother - PREVIOUS(smoother)))";
+                else ABS(((processed - PREVIOUS(processed))) / (processed - PREVIOUS(processed))) * \
+                if \
+                    (smoother - PREVIOUS(smoother)) = 0 \
+                    then 0 \
+                    else SIGN(((processed - PREVIOUS(processed))) / (smoother - PREVIOUS(smoother)))";
 
         assert_eq!(
             equation, expected,
@@ -915,14 +954,18 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for variable-to-module link
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((processor - PREVIOUS(processor)) = 0) OR ((raw_data - PREVIOUS(raw_data)) = 0) \
-            then 0 \
-            else ABS(((processor - PREVIOUS(processor))) / (processor - PREVIOUS(processor))) * \
-            if \
-                (raw_data - PREVIOUS(raw_data)) = 0 \
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((processor - PREVIOUS(processor)) = 0) OR ((raw_data - PREVIOUS(raw_data)) = 0) \
                 then 0 \
-                else SIGN(((processor - PREVIOUS(processor))) / (raw_data - PREVIOUS(raw_data)))";
+                else ABS(((processor - PREVIOUS(processor))) / (processor - PREVIOUS(processor))) * \
+                if \
+                    (raw_data - PREVIOUS(raw_data)) = 0 \
+                    then 0 \
+                    else SIGN(((processor - PREVIOUS(processor))) / (raw_data - PREVIOUS(raw_data)))";
 
         assert_eq!(
             equation, expected,
@@ -970,14 +1013,18 @@ mod tests {
         let equation = generate_module_link_score_equation(&from, &to, &variables);
 
         // Verify the EXACT equation structure for module-to-module link
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((filter_b - PREVIOUS(filter_b)) = 0) OR ((filter_a - PREVIOUS(filter_a)) = 0) \
-            then 0 \
-            else ABS(((filter_b - PREVIOUS(filter_b))) / (filter_b - PREVIOUS(filter_b))) * \
-            if \
-                (filter_a - PREVIOUS(filter_a)) = 0 \
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((filter_b - PREVIOUS(filter_b)) = 0) OR ((filter_a - PREVIOUS(filter_a)) = 0) \
                 then 0 \
-                else SIGN(((filter_b - PREVIOUS(filter_b))) / (filter_a - PREVIOUS(filter_a)))";
+                else ABS(((filter_b - PREVIOUS(filter_b))) / (filter_b - PREVIOUS(filter_b))) * \
+                if \
+                    (filter_a - PREVIOUS(filter_a)) = 0 \
+                    then 0 \
+                    else SIGN(((filter_b - PREVIOUS(filter_b))) / (filter_a - PREVIOUS(filter_a)))";
 
         assert_eq!(
             equation, expected,
@@ -1129,13 +1176,17 @@ mod tests {
 
         // Verify the EXACT equation structure for stock-to-flow
         // Sign term uses first-order stock change per LTM paper formula
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((deaths - PREVIOUS(deaths)) = 0) OR \
-            ((population - PREVIOUS(population)) = 0) \
-            then 0 \
-            else ABS(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), (deaths - PREVIOUS(deaths)), 0)) * \
-            SIGN(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), \
-                (population - PREVIOUS(population)), 0))";
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((deaths - PREVIOUS(deaths)) = 0) OR \
+                ((population - PREVIOUS(population)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), (deaths - PREVIOUS(deaths)), 0)) * \
+                SIGN(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), \
+                    (population - PREVIOUS(population)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1167,13 +1218,17 @@ mod tests {
 
         // Verify the EXACT equation structure using SAFEDIV
         // Sign term uses first-order stock change per LTM paper formula
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((production - PREVIOUS(production)) = 0) OR \
-            ((inventory - PREVIOUS(inventory)) = 0) \
-            then 0 \
-            else ABS(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
-            SIGN(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), \
-                (inventory - PREVIOUS(inventory)), 0))";
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((production - PREVIOUS(production)) = 0) OR \
+                ((inventory - PREVIOUS(inventory)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
+                SIGN(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), \
+                    (inventory - PREVIOUS(inventory)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1204,13 +1259,17 @@ mod tests {
 
         // Verify the EXACT equation structure using SAFEDIV
         // Sign term uses first-order stock change per LTM paper formula
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((drainage - PREVIOUS(drainage)) = 0) OR \
-            ((water_tank - PREVIOUS(water_tank)) = 0) \
-            then 0 \
-            else ABS(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
-            SIGN(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), \
-                (water_tank - PREVIOUS(water_tank)), 0))";
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((drainage - PREVIOUS(drainage)) = 0) OR \
+                ((water_tank - PREVIOUS(water_tank)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
+                SIGN(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), \
+                    (water_tank - PREVIOUS(water_tank)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1243,14 +1302,18 @@ mod tests {
 
         // Verify the EXACT equation using SAFEDIV - note that non-stock dependencies get PREVIOUS()
         // Sign term uses first-order stock change per LTM paper formula
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((births - PREVIOUS(births)) = 0) OR \
-            ((population - PREVIOUS(population)) = 0) \
-            then 0 \
-            else ABS(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
-                (births - PREVIOUS(births)), 0)) * \
-            SIGN(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
-                (population - PREVIOUS(population)), 0))";
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((births - PREVIOUS(births)) = 0) OR \
+                ((population - PREVIOUS(population)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
+                    (births - PREVIOUS(births)), 0)) * \
+                SIGN(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
+                    (population - PREVIOUS(population)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1281,13 +1344,17 @@ mod tests {
 
         // When flow doesn't depend on stock, partial equation is just the constant
         // Sign term uses first-order stock change per LTM paper formula
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((constant_flow - PREVIOUS(constant_flow)) = 0) OR \
-            ((unrelated_stock - PREVIOUS(unrelated_stock)) = 0) \
-            then 0 \
-            else ABS(SAFEDIV(((10) - PREVIOUS(constant_flow)), (constant_flow - PREVIOUS(constant_flow)), 0)) * \
-            SIGN(SAFEDIV(((10) - PREVIOUS(constant_flow)), \
-                (unrelated_stock - PREVIOUS(unrelated_stock)), 0))";
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((constant_flow - PREVIOUS(constant_flow)) = 0) OR \
+                ((unrelated_stock - PREVIOUS(unrelated_stock)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((10) - PREVIOUS(constant_flow)), (constant_flow - PREVIOUS(constant_flow)), 0)) * \
+                SIGN(SAFEDIV(((10) - PREVIOUS(constant_flow)), \
+                    (unrelated_stock - PREVIOUS(unrelated_stock)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1372,13 +1439,17 @@ mod tests {
         // This test validates the correct LTM paper formula implementation
         // Note: 'S' becomes lowercase 's' in stock references but stays uppercase in partial equation
         // Sign term uses first-order stock change per LTM paper formula
+        // Returns NaN at initial timestep when PREVIOUS values don't exist
         let expected = "if \
-            ((inflow - PREVIOUS(inflow)) = 0) OR \
-            ((s - PREVIOUS(s)) = 0) \
-            then 0 \
-            else ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
-            SIGN(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
-                (s - PREVIOUS(s)), 0))";
+            (TIME = PREVIOUS(TIME)) \
+            then 0/0 \
+            else if \
+                ((inflow - PREVIOUS(inflow)) = 0) OR \
+                ((s - PREVIOUS(s)) = 0) \
+                then 0 \
+                else ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
+                SIGN(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
+                    (s - PREVIOUS(s)), 0))";
 
         assert_eq!(
             equation, expected,
