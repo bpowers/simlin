@@ -58,13 +58,13 @@ class Link:
         """Calculate the average score across all time steps."""
         if self.score is None or len(self.score) == 0:
             return None
-        return float(np.mean(self.score))
+        return float(np.nanmean(self.score))
     
     def max_score(self) -> Optional[float]:
         """Get the maximum score across all time steps."""
         if self.score is None or len(self.score) == 0:
             return None
-        return float(np.max(self.score))
+        return float(np.nanmax(self.score))
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ class Loop:
         """
         if self.behavior_time_series is None or len(self.behavior_time_series) == 0:
             return None
-        return float(np.mean(np.abs(self.behavior_time_series)))
+        return float(np.nanmean(np.abs(self.behavior_time_series)))
 
     def max_importance(self) -> Optional[float]:
         """
@@ -141,4 +141,4 @@ class Loop:
         """
         if self.behavior_time_series is None or len(self.behavior_time_series) == 0:
             return None
-        return float(np.max(np.abs(self.behavior_time_series)))
+        return float(np.nanmax(np.abs(self.behavior_time_series)))

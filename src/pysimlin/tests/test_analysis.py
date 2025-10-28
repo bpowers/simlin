@@ -84,11 +84,53 @@ class TestLink:
             to_var="output",
             polarity=LinkPolarity.POSITIVE
         )
-        
+
         str_repr = str(link)
         assert "input" in str_repr
         assert "output" in str_repr
         assert "+" in str_repr or "--+--" in str_repr
+
+    def test_link_average_score_with_nan(self) -> None:
+        """Test Link average_score handles NaN values correctly."""
+        scores = np.array([np.nan, np.nan, 0.2, 0.3, 0.4])
+        link = Link(
+            from_var="A",
+            to_var="B",
+            polarity=LinkPolarity.POSITIVE,
+            score=scores
+        )
+
+        avg = link.average_score()
+        assert avg is not None
+        assert avg == pytest.approx(0.3)
+
+    def test_link_max_score_with_nan(self) -> None:
+        """Test Link max_score handles NaN values correctly."""
+        scores = np.array([np.nan, 0.1, 0.5, 0.2, 0.3])
+        link = Link(
+            from_var="A",
+            to_var="B",
+            polarity=LinkPolarity.NEGATIVE,
+            score=scores
+        )
+
+        max_score = link.max_score()
+        assert max_score is not None
+        assert max_score == pytest.approx(0.5)
+
+    def test_link_average_score_all_nan(self) -> None:
+        """Test Link average_score returns NaN when all values are NaN."""
+        scores = np.array([np.nan, np.nan, np.nan])
+        link = Link(
+            from_var="A",
+            to_var="B",
+            polarity=LinkPolarity.POSITIVE,
+            score=scores
+        )
+
+        avg = link.average_score()
+        assert avg is not None
+        assert np.isnan(avg)
 
 
 class TestLoop:
@@ -278,3 +320,59 @@ class TestLoop:
         )
 
         assert loop.max_importance() is None
+
+    def test_loop_average_importance_with_nan(self) -> None:
+        """Test average_importance handles NaN values correctly."""
+        behavior = np.array([np.nan, np.nan, 0.2, 0.3, 0.4])
+        loop = Loop(
+            id="R1",
+            variables=("population", "births"),
+            polarity=LoopPolarity.REINFORCING,
+            behavior_time_series=behavior,
+        )
+
+        avg = loop.average_importance()
+        assert avg is not None
+        assert avg == pytest.approx(0.3)
+
+    def test_loop_max_importance_with_nan(self) -> None:
+        """Test max_importance handles NaN values correctly."""
+        behavior = np.array([np.nan, 0.1, 0.5, 0.2, 0.3])
+        loop = Loop(
+            id="B1",
+            variables=("stock", "flow"),
+            polarity=LoopPolarity.BALANCING,
+            behavior_time_series=behavior,
+        )
+
+        max_imp = loop.max_importance()
+        assert max_imp is not None
+        assert max_imp == pytest.approx(0.5)
+
+    def test_loop_average_importance_with_nan_and_negative(self) -> None:
+        """Test average_importance with NaN and negative values."""
+        behavior = np.array([np.nan, np.nan, -0.5, 0.3, 0.4])
+        loop = Loop(
+            id="R1",
+            variables=("x", "y"),
+            polarity=LoopPolarity.REINFORCING,
+            behavior_time_series=behavior,
+        )
+
+        avg = loop.average_importance()
+        assert avg is not None
+        assert avg == pytest.approx(0.4)
+
+    def test_loop_average_importance_all_nan(self) -> None:
+        """Test average_importance returns NaN when all values are NaN."""
+        behavior = np.array([np.nan, np.nan, np.nan])
+        loop = Loop(
+            id="R1",
+            variables=("a", "b"),
+            polarity=LoopPolarity.REINFORCING,
+            behavior_time_series=behavior,
+        )
+
+        avg = loop.average_importance()
+        assert avg is not None
+        assert np.isnan(avg)
