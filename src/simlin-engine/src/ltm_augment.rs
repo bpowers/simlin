@@ -325,7 +325,10 @@ fn generate_flow_to_stock_equation(flow: &str, stock: &str, stock_var: &Variable
     let sign = if is_inflow { "" } else { "-" };
 
     // Using SAFEDIV to handle division by zero
-    let numerator = format!("{sign}({flow} - PREVIOUS({flow}))");
+    // The numerator uses PREVIOUS values to align timing with the denominator.
+    // At time t, the flow at t-1 (PREVIOUS(flow)) is what drove the stock change from t-1 to t.
+    // We measure the change in that causal flow: flow(t-1) - flow(t-2).
+    let numerator = format!("{sign}(PREVIOUS({flow}) - PREVIOUS(PREVIOUS({flow})))");
     let denominator = format!(
         "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))"
     );
@@ -385,13 +388,10 @@ fn generate_stock_to_flow_equation(
         false
     };
 
-    // Using SAFEDIV for both divisions
-    // Per 2023 paper Eqn (3): use second-order difference for stock change (change in net flow)
+    // Link score formula from LTM paper: |Δxz/Δz| × sign(Δxz/Δx)
+    // For stock-to-flow: x=stock, z=flow
     let flow_diff = format!("({flow} - PREVIOUS({flow}))", flow = flow.as_str());
-    let stock_second_diff = format!(
-        "(({stock} - PREVIOUS({stock})) - (PREVIOUS({stock}) - PREVIOUS(PREVIOUS({stock}))))",
-        stock = stock.as_str()
-    );
+    let stock_diff = format!("({stock} - PREVIOUS({stock}))", stock = stock.as_str());
     let partial_change = format!(
         "(({partial_eq}) - PREVIOUS({flow}))",
         partial_eq = partial_eq,
@@ -399,13 +399,11 @@ fn generate_stock_to_flow_equation(
     );
 
     let abs_part = format!("ABS(SAFEDIV({partial_change}, {flow_diff}, 0))");
-    let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_second_diff}, 0))");
+    let sign_part = format!("SIGN(SAFEDIV({partial_change}, {stock_diff}, 0))");
 
-    // We still need the outer check because we're multiplying ABS and SIGN parts
-    // and want the result to be 0 when either denominator is 0
     format!(
         "if \
-            ({flow_diff} = 0) OR ({stock_second_diff} = 0) \
+            ({flow_diff} = 0) OR ({stock_diff} = 0) \
             then 0 \
             else {abs_part} * {sign_part}"
     )
@@ -657,8 +655,9 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
         // Verify the EXACT equation structure for flow-to-stock
+        // Uses PREVIOUS in numerator to align timing with denominator
         let expected = "SAFEDIV(\
-            (inflow_rate - PREVIOUS(inflow_rate)), \
+            (PREVIOUS(inflow_rate) - PREVIOUS(PREVIOUS(inflow_rate))), \
             ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
             0\
         )";
@@ -691,8 +690,9 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, stock_var, all_vars);
 
         // Verify the EXACT equation structure for outflow-to-stock (negative sign)
+        // Uses PREVIOUS in numerator to align timing with denominator
         let expected = "SAFEDIV(\
-            -(outflow_rate - PREVIOUS(outflow_rate)), \
+            -(PREVIOUS(outflow_rate) - PREVIOUS(PREVIOUS(outflow_rate))), \
             ((water_in_tank - PREVIOUS(water_in_tank)) - (PREVIOUS(water_in_tank) - PREVIOUS(PREVIOUS(water_in_tank)))), \
             0\
         )";
@@ -1128,17 +1128,18 @@ mod tests {
         let equation = generate_link_score_equation(&from, &to, flow_var, all_vars);
 
         // Verify the EXACT equation structure for stock-to-flow
+        // Sign term uses first-order stock change per LTM paper formula
         let expected = "if \
             ((deaths - PREVIOUS(deaths)) = 0) OR \
-            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0) \
+            ((population - PREVIOUS(population)) = 0) \
             then 0 \
             else ABS(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), (deaths - PREVIOUS(deaths)), 0)) * \
             SIGN(SAFEDIV(((population * PREVIOUS(death_rate)) - PREVIOUS(deaths)), \
-                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))";
+                (population - PREVIOUS(population)), 0))";
 
         assert_eq!(
             equation, expected,
-            "Stock-to-flow equation must match exact format with second-order difference"
+            "Stock-to-flow equation must match exact format with first-order stock diff for sign"
         );
     }
 
@@ -1165,17 +1166,18 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // Verify the EXACT equation structure using SAFEDIV
+        // Sign term uses first-order stock change per LTM paper formula
         let expected = "if \
             ((production - PREVIOUS(production)) = 0) OR \
-            (((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))) = 0) \
+            ((inventory - PREVIOUS(inventory)) = 0) \
             then 0 \
             else ABS(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), (production - PREVIOUS(production)), 0)) * \
             SIGN(SAFEDIV(((inventory * 0.1) - PREVIOUS(production)), \
-                ((inventory - PREVIOUS(inventory)) - (PREVIOUS(inventory) - PREVIOUS(PREVIOUS(inventory)))), 0))";
+                (inventory - PREVIOUS(inventory)), 0))";
 
         assert_eq!(
             equation, expected,
-            "Stock-to-flow equation must match exact format with second-order difference"
+            "Stock-to-flow equation must match exact format with first-order stock diff for sign"
         );
     }
 
@@ -1201,17 +1203,18 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // Verify the EXACT equation structure using SAFEDIV
+        // Sign term uses first-order stock change per LTM paper formula
         let expected = "if \
             ((drainage - PREVIOUS(drainage)) = 0) OR \
-            (((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))) = 0) \
+            ((water_tank - PREVIOUS(water_tank)) = 0) \
             then 0 \
             else ABS(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), (drainage - PREVIOUS(drainage)), 0)) * \
             SIGN(SAFEDIV(((water_tank / 10) - PREVIOUS(drainage)), \
-                ((water_tank - PREVIOUS(water_tank)) - (PREVIOUS(water_tank) - PREVIOUS(PREVIOUS(water_tank)))), 0))";
+                (water_tank - PREVIOUS(water_tank)), 0))";
 
         assert_eq!(
             equation, expected,
-            "Outflow equation must match exact format with second-order difference"
+            "Outflow equation must match exact format with first-order stock diff for sign"
         );
     }
 
@@ -1239,14 +1242,15 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // Verify the EXACT equation using SAFEDIV - note that non-stock dependencies get PREVIOUS()
+        // Sign term uses first-order stock change per LTM paper formula
         let expected = "if \
             ((births - PREVIOUS(births)) = 0) OR \
-            (((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))) = 0) \
+            ((population - PREVIOUS(population)) = 0) \
             then 0 \
             else ABS(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
                 (births - PREVIOUS(births)), 0)) * \
             SIGN(SAFEDIV(((population * PREVIOUS(birth_rate) * PREVIOUS(seasonal_factor)) - PREVIOUS(births)), \
-                ((population - PREVIOUS(population)) - (PREVIOUS(population) - PREVIOUS(PREVIOUS(population)))), 0))";
+                (population - PREVIOUS(population)), 0))";
 
         assert_eq!(
             equation, expected,
@@ -1276,17 +1280,18 @@ mod tests {
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
         // When flow doesn't depend on stock, partial equation is just the constant
+        // Sign term uses first-order stock change per LTM paper formula
         let expected = "if \
             ((constant_flow - PREVIOUS(constant_flow)) = 0) OR \
-            (((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))) = 0) \
+            ((unrelated_stock - PREVIOUS(unrelated_stock)) = 0) \
             then 0 \
             else ABS(SAFEDIV(((10) - PREVIOUS(constant_flow)), (constant_flow - PREVIOUS(constant_flow)), 0)) * \
             SIGN(SAFEDIV(((10) - PREVIOUS(constant_flow)), \
-                ((unrelated_stock - PREVIOUS(unrelated_stock)) - (PREVIOUS(unrelated_stock) - PREVIOUS(PREVIOUS(unrelated_stock)))), 0))";
+                (unrelated_stock - PREVIOUS(unrelated_stock)), 0))";
 
         assert_eq!(
             equation, expected,
-            "No dependency equation should still use second-order difference structure"
+            "No dependency equation should use first-order stock diff for sign"
         );
     }
 
@@ -1364,19 +1369,20 @@ mod tests {
 
         let equation = generate_stock_to_flow_equation(&stock, &flow, flow_var, all_vars);
 
-        // This test validates the exact implementation of Equation (3) from the 2023 paper
+        // This test validates the correct LTM paper formula implementation
         // Note: 'S' becomes lowercase 's' in stock references but stays uppercase in partial equation
+        // Sign term uses first-order stock change per LTM paper formula
         let expected = "if \
             ((inflow - PREVIOUS(inflow)) = 0) OR \
-            (((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))) = 0) \
+            ((s - PREVIOUS(s)) = 0) \
             then 0 \
             else ABS(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), (inflow - PREVIOUS(inflow)), 0)) * \
             SIGN(SAFEDIV(((S * PREVIOUS(growth_rate)) - PREVIOUS(inflow)), \
-                ((s - PREVIOUS(s)) - (PREVIOUS(s) - PREVIOUS(PREVIOUS(s)))), 0))";
+                (s - PREVIOUS(s)), 0))";
 
         assert_eq!(
             equation, expected,
-            "Equation must exactly match 2023 paper Equation (3) with second-order difference for stock change"
+            "Equation must match LTM paper formula with first-order stock diff for sign"
         );
     }
 }
