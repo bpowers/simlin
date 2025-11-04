@@ -1803,13 +1803,13 @@ pub unsafe extern "C" fn simlin_free_loops(loops: *mut SimlinLoops) {
                         let _ = CString::from_raw(*var);
                     }
                 }
-                let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                     loop_item.variables,
                     loop_item.var_count,
                 ));
             }
         }
-        let _ = Box::from_raw(std::slice::from_raw_parts_mut(loops.loops, loops.count));
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(loops.loops, loops.count));
     }
 }
 /// Gets all causal links in a model
@@ -2003,10 +2003,13 @@ pub unsafe extern "C" fn simlin_free_links(links: *mut SimlinLinks) {
             }
             // Free the score array if present
             if !link.score.is_null() && link.score_len > 0 {
-                let _ = Box::from_raw(std::slice::from_raw_parts_mut(link.score, link.score_len));
+                let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                    link.score,
+                    link.score_len,
+                ));
             }
         }
-        let _ = Box::from_raw(std::slice::from_raw_parts_mut(links.links, links.count));
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(links.links, links.count));
     }
 }
 

@@ -1434,7 +1434,7 @@ fn test_all_deps() {
     // recurse
     let aux_a = aux("aux_a", "aux_b");
     let aux_b = aux("aux_b", "aux_a");
-    let all_vars = vec![aux_a, aux_b];
+    let all_vars = [aux_a, aux_b];
     let ctx = DepContext {
         is_initial: false,
         model_name: "test",
@@ -1448,7 +1448,7 @@ fn test_all_deps() {
 
     // also self-references should return an error and not blow stock
     let aux_a = aux("aux_a", "aux_a");
-    let all_vars = vec![aux_a];
+    let all_vars = [aux_a];
     let deps_result = all_deps(&ctx, all_vars.iter());
     assert!(deps_result.is_err());
 
