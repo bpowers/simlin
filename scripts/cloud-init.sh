@@ -148,6 +148,75 @@ else
     echo -e "Yarn dependencies: ${GREEN}already installed${NC}"
 fi
 
+# 6. Install and configure AI tools for pre-commit hook
+echo ""
+echo "Setting up AI tools for pre-commit hook..."
+
+# Install codex if not present
+echo -n "  Installing @openai/codex... "
+if command -v codex >/dev/null 2>&1; then
+    CODEX_VERSION=$(codex --version 2>/dev/null | head -1)
+    echo -e "${GREEN}already installed ($CODEX_VERSION)${NC}"
+else
+    if npm install -g @openai/codex >/dev/null 2>&1; then
+        echo -e "${GREEN}done${NC}"
+    else
+        echo -e "${YELLOW}failed (non-critical)${NC}"
+    fi
+fi
+
+# Login to codex with API key if available
+if command -v codex >/dev/null 2>&1 && [ -n "$OPENAI_API_KEY" ]; then
+    echo -n "  Configuring codex with API key... "
+    if printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null 2>&1; then
+        echo -e "${GREEN}done${NC}"
+    else
+        echo -e "${YELLOW}failed${NC}"
+    fi
+fi
+
+# Test which AI tool works for pre-commit hook
+# We'll save the result to a config file that the pre-commit hook can read
+AI_CONFIG_FILE="$REPO_ROOT/.ai-tool-config"
+echo -n "  Testing AI tools for pre-commit... "
+
+# First, test Claude CLI (10 second timeout)
+CLAUDE_WORKS=false
+if command -v claude >/dev/null 2>&1; then
+    CLAUDE_OUTPUT=$(mktemp)
+    if timeout -k 2 10 claude -p "respond with the single word: yes" > "$CLAUDE_OUTPUT" 2>&1; then
+        if grep -qi "yes" "$CLAUDE_OUTPUT"; then
+            CLAUDE_WORKS=true
+        fi
+    fi
+    rm -f "$CLAUDE_OUTPUT"
+fi
+
+# Test codex if Claude didn't work
+CODEX_WORKS=false
+if [ "$CLAUDE_WORKS" = "false" ] && command -v codex >/dev/null 2>&1; then
+    CODEX_OUTPUT=$(mktemp)
+    if timeout -k 2 30 codex exec -m gpt-4o-mini "respond with the single word: yes" > "$CODEX_OUTPUT" 2>&1; then
+        if grep -qi "yes" "$CODEX_OUTPUT"; then
+            CODEX_WORKS=true
+        fi
+    fi
+    rm -f "$CODEX_OUTPUT"
+fi
+
+# Save the preferred tool to config file
+if [ "$CLAUDE_WORKS" = "true" ]; then
+    echo "claude" > "$AI_CONFIG_FILE"
+    echo -e "${GREEN}claude${NC}"
+elif [ "$CODEX_WORKS" = "true" ]; then
+    echo "codex" > "$AI_CONFIG_FILE"
+    echo -e "${GREEN}codex${NC}"
+else
+    echo "none" > "$AI_CONFIG_FILE"
+    echo -e "${YELLOW}none available${NC}"
+    echo -e "    ${YELLOW}Pre-commit AI checks will be skipped${NC}"
+fi
+
 echo ""
 echo -e "${GREEN}Environment setup complete!${NC}"
 echo ""

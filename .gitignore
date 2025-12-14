@@ -85,3 +85,4 @@ src/pysimlin/simlin/_clib*.so
 __pycache__/
 **/__pycache__/
 *.pyc
+.ai-tool-config

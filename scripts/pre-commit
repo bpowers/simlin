@@ -107,46 +107,111 @@ else
 fi
 
 # 6. Make sure no cheating happened with tests
-# Set CLAUDE to the full path of claude if found on PATH, otherwise use local installation
-if command -v claude > /dev/null 2>&1; then
-    CLAUDE=$(command -v claude)
-else
-    CLAUDE="$HOME/.claude/local/claude"
-fi
+# This check uses either Claude CLI or Codex CLI depending on what's available
 
-CLAUDE_SANITY_OUTPUT="$(mktemp)"
-echo -n "Running claude to check that we don't have incomplete tests..."
+# The prompt for test quality checking
+TEST_CHECK_PROMPT="a user is looking to commit code - look at what parts of the diff being committed are in tests (files named like *_test.rs, *.test.ts, *.test.tsx, files in tests/, but also in functions annotated #[test] in regular rust files), and if any of the tests take shortcuts or are stubbed out (e.g. using todo!(), unimplemented!(), or comments to the effect of 'real logic to test this would go here'), start your response with 'FAIL: ' followed by a description of what is wrong, and what needs to happen. Based on the test name and surrounding code, be clear on what test functionality is missing and needs to be implemented before it can be committed. Strictly follow CLAUDE.md, provide guidance referencing CLAUDE.md, and tell the user to closely follow CLAUDE.md as they address the problem. Also tell them they MUST NOT delete the tests, the only way to succeed on the task is to fully implement the test. If the tests look reasonable you MUST respond succinctly with the 1-word message: SUCCESS"
 
-# Use timeout to prevent hanging (5 minutes max for the Claude check)
-# This can happen when running in nested Claude Code environments
-# Use -k 5 to send SIGKILL 5 seconds after SIGTERM if process doesn't die
-CLAUDE_TIMEOUT=${CLAUDE_TIMEOUT:-300}
-if timeout -k 5 "$CLAUDE_TIMEOUT" "$CLAUDE" -p --allowedTools 'Bash(git:*)' LS Read --model sonnet "a user is looking to commit code - look at what parts of the diff being committed are in tests (files named like *_test.rs, *.test.ts, *.test.tsx, files in tests/, but also in functions annotated #[test] in regular rust files), and if any of the tests take shortcuts or are stubbed out (e.g. using todo!(), unimplemented!(), or comments to the effect of 'real logic to test this would go here'), start your response with 'FAIL: ' followed by a description of what is wrong, and what needs to happen. Based on the test name and surrounding code, be clear on what test functionality is missing and needs to be implemented before it can be committed. Strictly follow CLAUDE.md, provide guidance referencing CLAUDE.md, and tell the user to closely follow CLAUDE.md as they address the problem. Also tell them they MUST NOT delete the tests, the only way to succeed on the task is to fully implement the test. If the tests look reasonable you MUST respond succinctly with the 1-word message: SUCCESS" > "$CLAUDE_SANITY_OUTPUT" 2>&1; then
-    if grep -q "^SUCCESS$" "$CLAUDE_SANITY_OUTPUT"; then
-        echo -e " ${GREEN}✓${NC}"
-        rm -f "$CLAUDE_SANITY_OUTPUT"
-    else
-        echo -e " ${RED}✗${NC}"
-        echo -e "${RED}Test quality check failed:${NC}"
-        cat "$CLAUDE_SANITY_OUTPUT"
-        rm -f "$CLAUDE_SANITY_OUTPUT"
-        exit 1
-    fi
+# Determine which AI tool to use
+# Priority: 1) AI_TOOL env var, 2) .ai-tool-config file, 3) auto-detect
+AI_CONFIG_FILE="$REPO_ROOT/.ai-tool-config"
+if [ -n "$AI_TOOL" ]; then
+    SELECTED_AI_TOOL="$AI_TOOL"
+elif [ -f "$AI_CONFIG_FILE" ]; then
+    SELECTED_AI_TOOL=$(cat "$AI_CONFIG_FILE")
 else
-    EXIT_CODE=$?
-    # Exit code 124 = SIGTERM timeout, 137 = SIGKILL (128 + 9)
-    if [ $EXIT_CODE -eq 124 ] || [ $EXIT_CODE -eq 137 ]; then
-        # Timeout occurred
-        echo -e " ${YELLOW}skipped (timeout)${NC}"
-        echo -e "${YELLOW}Warning: Claude check timed out after ${CLAUDE_TIMEOUT}s. Skipping check.${NC}"
-        rm -f "$CLAUDE_SANITY_OUTPUT"
+    # Auto-detect: prefer claude, fall back to codex
+    if command -v claude > /dev/null 2>&1; then
+        SELECTED_AI_TOOL="claude"
+    elif command -v codex > /dev/null 2>&1; then
+        SELECTED_AI_TOOL="codex"
     else
-        echo -e " ${RED}✗${NC}"
-        echo -e "${RED}Claude check failed with exit code $EXIT_CODE${NC}"
-        cat "$CLAUDE_SANITY_OUTPUT"
-        rm -f "$CLAUDE_SANITY_OUTPUT"
-        exit 1
+        SELECTED_AI_TOOL="none"
     fi
 fi
+
+AI_OUTPUT="$(mktemp)"
+AI_TIMEOUT=${AI_TIMEOUT:-300}
+
+# Function to run the test check with Claude
+run_claude_check() {
+    local CLAUDE_BIN
+    if command -v claude > /dev/null 2>&1; then
+        CLAUDE_BIN=$(command -v claude)
+    else
+        CLAUDE_BIN="$HOME/.claude/local/claude"
+    fi
+    timeout -k 5 "$AI_TIMEOUT" "$CLAUDE_BIN" -p --allowedTools 'Bash(git:*)' LS Read --model sonnet "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
+}
+
+# Function to run the test check with Codex
+run_codex_check() {
+    timeout -k 5 "$AI_TIMEOUT" codex exec -m gpt-4o-mini --full-auto "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
+}
+
+echo -n "Running AI test quality check ($SELECTED_AI_TOOL)..."
+
+case "$SELECTED_AI_TOOL" in
+    claude)
+        if run_claude_check; then
+            if grep -q "^SUCCESS$" "$AI_OUTPUT"; then
+                echo -e " ${GREEN}✓${NC}"
+                rm -f "$AI_OUTPUT"
+            else
+                echo -e " ${RED}✗${NC}"
+                echo -e "${RED}Test quality check failed:${NC}"
+                cat "$AI_OUTPUT"
+                rm -f "$AI_OUTPUT"
+                exit 1
+            fi
+        else
+            EXIT_CODE=$?
+            # Exit code 124 = SIGTERM timeout, 137 = SIGKILL (128 + 9)
+            if [ $EXIT_CODE -eq 124 ] || [ $EXIT_CODE -eq 137 ]; then
+                echo -e " ${YELLOW}skipped (timeout)${NC}"
+                echo -e "${YELLOW}Warning: Claude check timed out after ${AI_TIMEOUT}s. Skipping check.${NC}"
+                rm -f "$AI_OUTPUT"
+            else
+                echo -e " ${RED}✗${NC}"
+                echo -e "${RED}Claude check failed with exit code $EXIT_CODE${NC}"
+                cat "$AI_OUTPUT"
+                rm -f "$AI_OUTPUT"
+                exit 1
+            fi
+        fi
+        ;;
+    codex)
+        if run_codex_check; then
+            if grep -q "SUCCESS" "$AI_OUTPUT"; then
+                echo -e " ${GREEN}✓${NC}"
+                rm -f "$AI_OUTPUT"
+            else
+                echo -e " ${RED}✗${NC}"
+                echo -e "${RED}Test quality check failed:${NC}"
+                cat "$AI_OUTPUT"
+                rm -f "$AI_OUTPUT"
+                exit 1
+            fi
+        else
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ] || [ $EXIT_CODE -eq 137 ]; then
+                echo -e " ${YELLOW}skipped (timeout)${NC}"
+                echo -e "${YELLOW}Warning: Codex check timed out after ${AI_TIMEOUT}s. Skipping check.${NC}"
+                rm -f "$AI_OUTPUT"
+            else
+                echo -e " ${RED}✗${NC}"
+                echo -e "${RED}Codex check failed with exit code $EXIT_CODE${NC}"
+                cat "$AI_OUTPUT"
+                rm -f "$AI_OUTPUT"
+                exit 1
+            fi
+        fi
+        ;;
+    none|*)
+        echo -e " ${YELLOW}skipped (no AI tool available)${NC}"
+        echo -e "${YELLOW}Warning: No AI tool configured. Run ./scripts/cloud-init.sh to set up.${NC}"
+        rm -f "$AI_OUTPUT"
+        ;;
+esac
 
 echo -e "${GREEN}All pre-commit checks passed!${NC}"
