@@ -95,6 +95,47 @@ This is a yarn workspace with these packages:
 - Node.js and Yarn
 - Rust toolchain (specified in `rust-toolchain.toml`)
 
+### Initial Environment Setup
+
+For Claude Code on the web, Codex Web, or any fresh checkout, run the initialization script:
+
+```bash
+./scripts/cloud-init.sh
+```
+
+This script:
+- Initializes git submodules (required for test models)
+- Installs git pre-commit hooks
+- Verifies required tools are available
+- Installs yarn dependencies if needed
+
+Alternatively, you can set up manually:
+
+```bash
+# Initialize git submodules (required for tests)
+git submodule update --init --recursive
+
+# Install pre-commit hooks
+yarn install-git-hooks
+```
+
+### Pre-commit Hooks
+
+The pre-commit hook (`scripts/pre-commit`) runs automatically before each commit and performs:
+1. Rust formatting check (`cargo fmt --check`)
+2. Rust linting (`cargo clippy`)
+3. Rust tests (`cargo test`)
+4. TypeScript/JavaScript linting (`yarn lint`)
+5. TypeScript type checking (`yarn tsc`)
+6. Python bindings tests (requires Python 3.11+)
+7. Test quality verification via Claude (checks for incomplete/stubbed tests, 5 minute timeout)
+
+If any check fails, the commit is rejected. Fix the issues and try again.
+
+**Important**: Never use `--no-verify` to skip hooks. The hooks exist to maintain code quality.
+
+**Note**: When running `git commit`, use a 5+ minute timeout since the pre-commit hook runs comprehensive checks including tests. The Claude-based test quality check has a 5 minute timeout and will skip gracefully if it times out (which can happen in nested Claude environments like Claude Code on the web).
+
 ## Development Commands
 
 ### Build Commands
