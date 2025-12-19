@@ -44,6 +44,16 @@ impl Table {
 
 pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
 
+/// Information about a sparse (non-contiguous) dimension in an array view.
+/// Used when a subdimension's elements are not contiguous in the parent dimension.
+#[derive(PartialEq, Clone, Debug)]
+pub struct SparseInfo {
+    /// Which dimension (0-indexed) in the view is sparse
+    pub dim_index: usize,
+    /// Parent offsets to iterate (e.g., [0, 2] for elements at indices 0 and 2)
+    pub parent_offsets: Vec<usize>,
+}
+
 /// Represents a view into array data with support for striding and slicing
 #[derive(PartialEq, Clone, Debug)]
 pub struct ArrayView {
@@ -53,6 +63,8 @@ pub struct ArrayView {
     pub strides: Vec<isize>,
     /// Starting offset in the underlying data
     pub offset: usize,
+    /// Sparse dimension info (empty means fully contiguous)
+    pub sparse: Vec<SparseInfo>,
 }
 
 impl ArrayView {
@@ -68,6 +80,7 @@ impl ArrayView {
             dims,
             strides,
             offset: 0,
+            sparse: Vec::new(),
         }
     }
 
@@ -80,7 +93,7 @@ impl ArrayView {
     /// Check if this view represents contiguous data in row-major order
     #[allow(dead_code)]
     pub fn is_contiguous(&self) -> bool {
-        if self.offset != 0 {
+        if self.offset != 0 || !self.sparse.is_empty() {
             return false;
         }
 
@@ -119,6 +132,7 @@ impl ArrayView {
             dims: new_dims,
             strides: new_strides,
             offset: new_offset,
+            sparse: self.sparse.clone(),
         })
     }
 }
@@ -596,6 +610,7 @@ impl Context<'_> {
                                                 dims: reordered_dims,
                                                 strides: reordered_strides,
                                                 offset: 0,
+                                                sparse: Vec::new(),
                                             };
 
                                             return Ok(Expr::StaticSubscript(off, view, *loc));
@@ -718,10 +733,11 @@ impl Context<'_> {
 
                 // Build a list of operations to apply to the view
                 enum IndexOp {
-                    Range(usize, usize), // start, end (0-based, end exclusive)
-                    Single(usize),       // single index (0-based)
-                    Wildcard,            // keep dimension
-                    DimPosition(usize),  // dimension position (0-based)
+                    Range(usize, usize),     // start, end (0-based, end exclusive)
+                    Single(usize),           // single index (0-based)
+                    Wildcard,                // keep dimension
+                    DimPosition(usize),      // dimension position (0-based)
+                    SparseRange(Vec<usize>), // non-contiguous parent offsets for subdimension iteration
                 }
 
                 let mut operations = Vec::new();
@@ -807,9 +823,37 @@ impl Context<'_> {
                                 }
                             }
                         }
-                        _ => {
-                            is_static = false;
-                            break;
+                        IndexExpr2::StarRange(subdim_name, _) => {
+                            // *:SubDim - iterate over subdimension elements
+                            if i >= dims.len() {
+                                is_static = false;
+                                break;
+                            }
+                            let parent_dim = &dims[i];
+                            let parent_name =
+                                crate::common::CanonicalDimensionName::from_raw(parent_dim.name());
+
+                            // Look up subdimension relationship
+                            if let Some(relation) = self
+                                .dimensions_ctx
+                                .get_subdimension_relation(subdim_name, &parent_name)
+                            {
+                                if relation.is_contiguous() {
+                                    // Contiguous subdimension - use Range
+                                    let start = relation.start_offset();
+                                    let end = start + relation.parent_offsets.len();
+                                    operations.push(IndexOp::Range(start, end));
+                                } else {
+                                    // Non-contiguous - use SparseRange
+                                    operations.push(IndexOp::SparseRange(
+                                        relation.parent_offsets.clone(),
+                                    ));
+                                }
+                            } else {
+                                // Not a valid subdimension - fall back to dynamic handling
+                                is_static = false;
+                                break;
+                            }
                         }
                     }
                 }
@@ -870,12 +914,30 @@ impl Context<'_> {
                                 dim_mapping.push(Some(*pos));
                                 single_indices.push(0); // Will be resolved at runtime in A2A context
                             }
+                            IndexOp::SparseRange(parent_offsets) => {
+                                // Validate all parent offsets are in bounds
+                                for &off in parent_offsets {
+                                    if off >= orig_dims[i] {
+                                        return sim_err!(
+                                            Generic,
+                                            format!(
+                                                "Sparse range offset out of bounds for dimension {}",
+                                                i
+                                            )
+                                        );
+                                    }
+                                }
+                                dim_mapping.push(Some(i));
+                                single_indices.push(0); // No static offset for sparse dimensions
+                            }
                         }
                     }
 
                     // Build the resulting view
                     let mut new_dims = Vec::new();
                     let mut new_strides = Vec::new();
+                    let mut sparse_info = Vec::new();
+                    let mut output_dim_idx = 0usize;
 
                     for (i, op) in operations.iter().enumerate() {
                         match op {
@@ -885,15 +947,28 @@ impl Context<'_> {
                             IndexOp::Range(start, end) => {
                                 new_dims.push(end - start);
                                 new_strides.push(orig_strides[i]);
+                                output_dim_idx += 1;
                             }
                             IndexOp::Wildcard => {
                                 new_dims.push(orig_dims[i]);
                                 new_strides.push(orig_strides[i]);
+                                output_dim_idx += 1;
                             }
                             IndexOp::DimPosition(pos) => {
                                 // Use the dimension size and stride from the referenced position
                                 new_dims.push(orig_dims[*pos]);
                                 new_strides.push(orig_strides[*pos]);
+                                output_dim_idx += 1;
+                            }
+                            IndexOp::SparseRange(parent_offsets) => {
+                                // Dimension size is the number of sparse elements
+                                new_dims.push(parent_offsets.len());
+                                new_strides.push(orig_strides[i]);
+                                sparse_info.push(SparseInfo {
+                                    dim_index: output_dim_idx,
+                                    parent_offsets: parent_offsets.clone(),
+                                });
+                                output_dim_idx += 1;
                             }
                         }
                     }
@@ -902,6 +977,7 @@ impl Context<'_> {
                         dims: new_dims,
                         strides: new_strides,
                         offset: offset_adjustment,
+                        sparse: sparse_info,
                     };
 
                     // Check if we're in an array iteration context
@@ -1151,6 +1227,7 @@ impl Context<'_> {
                                         dims: orig_dims.clone(),
                                         strides: orig_strides,
                                         offset: 0,
+                                        sparse: Vec::new(),
                                     };
 
                                     // Now transpose it
@@ -1162,6 +1239,7 @@ impl Context<'_> {
                                         dims: transposed_dims,
                                         strides: transposed_strides,
                                         offset: view.offset,
+                                        sparse: view.sparse.clone(),
                                     };
 
                                     return Ok(Expr::StaticSubscript(
@@ -1200,6 +1278,7 @@ impl Context<'_> {
                                         dims: transposed_dims,
                                         strides: transposed_strides,
                                         offset: view.offset,
+                                        sparse: view.sparse.clone(),
                                     };
 
                                     Expr::StaticSubscript(off, transposed_view, loc)
@@ -1378,6 +1457,7 @@ impl Context<'_> {
                         dims: reordered_dims,
                         strides: reordered_strides,
                         offset: 0,
+                        sparse: Vec::new(),
                     };
 
                     return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
@@ -1394,6 +1474,7 @@ impl Context<'_> {
                     dims: reordered_dims,
                     strides: reordered_strides,
                     offset: view.offset,
+                    sparse: view.sparse.clone(),
                 };
 
                 return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
@@ -2052,6 +2133,7 @@ fn get_array_view(expr: &Expr) -> Option<ArrayView> {
                     dims: transposed_dims,
                     strides: transposed_strides,
                     offset: view.offset,
+                    sparse: view.sparse.clone(),
                 }
             })
         }
@@ -3217,6 +3299,7 @@ mod tests {
             dims: vec![3, 4],
             strides: vec![4, 1],
             offset: 5,
+            sparse: Vec::new(),
         };
         assert!(!view2.is_contiguous());
 
@@ -3225,6 +3308,7 @@ mod tests {
             dims: vec![3, 4],
             strides: vec![1, 3], // Column-major strides
             offset: 0,
+            sparse: Vec::new(),
         };
         assert!(!view3.is_contiguous());
 
@@ -3233,6 +3317,7 @@ mod tests {
             dims: vec![2, 3, 4],
             strides: vec![12, 4, 1],
             offset: 0,
+            sparse: Vec::new(),
         };
         assert!(view4.is_contiguous());
     }
