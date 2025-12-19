@@ -14,14 +14,17 @@ use crate::units::Context;
 use crate::variable::Variable;
 use std::sync::Arc;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub struct Project {
     pub datamodel: datamodel::Project,
     // these are Arcs so that multiple Modules created by the compiler can
     // reference the same Model instance
     pub models: HashMap<Ident<Canonical>, Arc<ModelStage1>>,
+    #[allow(dead_code)]
     model_order: Vec<Ident<Canonical>>,
     pub errors: Vec<Error>,
+    /// Cached dimension context for subdimension lookups
+    pub dimensions_ctx: DimensionsContext,
 }
 
 impl Project {
@@ -204,6 +207,7 @@ impl Project {
             models,
             model_order: ordered_models,
             errors: project_errors,
+            dimensions_ctx: dims_ctx,
         }
     }
 }

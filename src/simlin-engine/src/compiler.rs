@@ -13,7 +13,7 @@ use crate::bytecode::{
 use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
 };
-use crate::dimensions::Dimension;
+use crate::dimensions::{Dimension, DimensionsContext};
 use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
@@ -288,6 +288,8 @@ pub(crate) struct VariableMetadata {
 #[derive(Clone, Debug)]
 pub(crate) struct Context<'a> {
     pub(crate) dimensions: Vec<Dimension>,
+    #[allow(dead_code)]
+    pub(crate) dimensions_ctx: &'a DimensionsContext,
     pub(crate) model_name: &'a Ident<Canonical>,
     #[allow(dead_code)]
     pub(crate) ident: &'a Ident<Canonical>,
@@ -1543,8 +1545,10 @@ fn test_lower() {
     let main_ident = canonicalize("main");
     let test_ident = canonicalize("test");
     metadata2.insert(main_ident.clone(), metadata);
+    let dims_ctx = DimensionsContext::default();
     let context = Context {
         dimensions: vec![],
+        dimensions_ctx: &dims_ctx,
         model_name: &main_ident,
         ident: &test_ident,
         active_dimension: None,
@@ -1636,8 +1640,10 @@ fn test_lower() {
     let main_ident = canonicalize("main");
     let test_ident = canonicalize("test");
     metadata2.insert(main_ident.clone(), metadata);
+    let dims_ctx = DimensionsContext::default();
     let context = Context {
         dimensions: vec![],
+        dimensions_ctx: &dims_ctx,
         model_name: &main_ident,
         ident: &test_ident,
         active_dimension: None,
@@ -1760,8 +1766,10 @@ fn test_fold_flows() {
     let main_ident = canonicalize("main");
     let test_ident = canonicalize("test");
     metadata2.insert(main_ident.clone(), metadata);
+    let dims_ctx = DimensionsContext::default();
     let ctx = Context {
         dimensions: vec![],
+        dimensions_ctx: &dims_ctx,
         model_name: &main_ident,
         ident: &test_ident,
         active_dimension: None,
@@ -2272,6 +2280,7 @@ impl Module {
             Var::new(
                 &Context {
                     dimensions: converted_dims.clone(),
+                    dimensions_ctx: &project.dimensions_ctx,
                     model_name,
                     ident,
                     active_dimension: None,

@@ -1215,6 +1215,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: arrayed_constants_var.canonical_ident(),
             active_dimension: None,
@@ -1252,6 +1253,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: arrayed_aux_var.canonical_ident(),
             active_dimension: None,
@@ -1288,6 +1290,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: var.canonical_ident(),
             active_dimension: None,
@@ -1332,6 +1335,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: var.canonical_ident(),
             active_dimension: None,

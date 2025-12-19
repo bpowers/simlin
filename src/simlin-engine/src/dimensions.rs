@@ -2,8 +2,8 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
 use crate::datamodel;
@@ -47,13 +47,13 @@ impl SubdimensionRelation {
     }
 }
 
-/// Cache for subdimension relationships. Uses RefCell for O(1) lookup after first computation.
+/// Cache for subdimension relationships. Uses Mutex for thread-safe O(1) lookup after first computation.
 /// The cache key is (child_name, parent_name), and the value is the relation if child is
 /// a subdimension of parent, or None if we've determined it's not a subdimension.
 #[allow(dead_code)]
 #[derive(Debug, Default)]
 struct RelationshipCache {
-    cache: RefCell<
+    cache: Mutex<
         HashMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
     >,
 }
@@ -61,7 +61,7 @@ struct RelationshipCache {
 impl Clone for RelationshipCache {
     fn clone(&self) -> Self {
         RelationshipCache {
-            cache: RefCell::new(self.cache.borrow().clone()),
+            cache: Mutex::new(self.cache.lock().unwrap().clone()),
         }
     }
 }
@@ -217,7 +217,13 @@ impl DimensionsContext {
     ) -> Option<SubdimensionRelation> {
         // Check cache first
         let cache_key = (child.clone(), parent.clone());
-        if let Some(cached) = self.relationship_cache.cache.borrow().get(&cache_key) {
+        if let Some(cached) = self
+            .relationship_cache
+            .cache
+            .lock()
+            .unwrap()
+            .get(&cache_key)
+        {
             return cached.clone();
         }
 
@@ -227,7 +233,8 @@ impl DimensionsContext {
         // Cache the result (including None for "not a subdimension")
         self.relationship_cache
             .cache
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(cache_key, result.clone());
 
         result
@@ -671,7 +678,7 @@ mod tests {
         let child = CanonicalDimensionName::from_raw("SubA");
 
         // Initially cache is empty
-        assert!(cache.cache.borrow().is_empty());
+        assert!(cache.cache.lock().unwrap().is_empty());
 
         // Insert a subdimension relation
         let relation = super::SubdimensionRelation {
@@ -679,13 +686,15 @@ mod tests {
         };
         cache
             .cache
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert((child.clone(), parent.clone()), Some(relation.clone()));
 
         // Verify we can retrieve it
         let retrieved = cache
             .cache
-            .borrow()
+            .lock()
+            .unwrap()
             .get(&(child.clone(), parent.clone()))
             .cloned();
         assert_eq!(retrieved, Some(Some(relation)));
@@ -694,13 +703,15 @@ mod tests {
         let other_child = CanonicalDimensionName::from_raw("NotSubA");
         cache
             .cache
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert((other_child.clone(), parent.clone()), None);
 
         // Verify negative result is cached
         let retrieved = cache
             .cache
-            .borrow()
+            .lock()
+            .unwrap()
             .get(&(other_child.clone(), parent.clone()))
             .cloned();
         assert_eq!(retrieved, Some(None));
@@ -719,14 +730,21 @@ mod tests {
         };
         cache
             .cache
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert((child.clone(), parent.clone()), Some(relation));
 
         // Clone the cache
         let cloned_cache = cache.clone();
 
         // Verify cloned cache has the same content
-        assert!(cloned_cache.cache.borrow().contains_key(&(child, parent)));
+        assert!(
+            cloned_cache
+                .cache
+                .lock()
+                .unwrap()
+                .contains_key(&(child, parent))
+        );
     }
 
     #[test]
@@ -861,7 +879,7 @@ mod tests {
         assert_eq!(relation1, relation2);
 
         // Verify cache was populated
-        let cache = ctx.relationship_cache.cache.borrow();
+        let cache = ctx.relationship_cache.cache.lock().unwrap();
         assert!(cache.contains_key(&(sub_a.clone(), dim_a.clone())));
     }
 
