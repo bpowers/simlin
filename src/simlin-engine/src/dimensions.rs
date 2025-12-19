@@ -145,9 +145,10 @@ impl From<datamodel::Dimension> for Dimension {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DimensionsContext {
     dimensions: HashMap<CanonicalDimensionName, Dimension>,
+    relationship_cache: RelationshipCache,
 }
 
 impl DimensionsContext {
@@ -162,7 +163,14 @@ impl DimensionsContext {
                     )
                 })
                 .collect(),
+            relationship_cache: RelationshipCache::default(),
         }
+    }
+
+    /// Get a dimension by its canonical name
+    #[allow(dead_code)]
+    pub fn get(&self, name: &CanonicalDimensionName) -> Option<&Dimension> {
+        self.dimensions.get(name)
     }
 
     pub(crate) fn is_dimension_name(&self, name: &str) -> bool {
@@ -181,6 +189,77 @@ impl DimensionsContext {
             }
         }
         None
+    }
+
+    /// Check if child is a subdimension of parent (all child elements exist in parent).
+    /// Only Named dimensions can have subdimension relationships.
+    #[allow(dead_code)]
+    pub fn is_subdimension_of(
+        &self,
+        child: &CanonicalDimensionName,
+        parent: &CanonicalDimensionName,
+    ) -> bool {
+        self.get_subdimension_relation(child, parent).is_some()
+    }
+
+    /// Get the subdimension relationship between child and parent dimensions.
+    /// Returns Some(SubdimensionRelation) if child is a subdimension of parent,
+    /// or None if it's not. Results are cached for O(1) lookup on subsequent calls.
+    ///
+    /// Note: Indexed dimension subdimensions are not currently supported.
+    /// The datamodel lacks metadata to express which range of parent indices
+    /// the child maps to. This returns None for indexed dimensions.
+    #[allow(dead_code)]
+    pub fn get_subdimension_relation(
+        &self,
+        child: &CanonicalDimensionName,
+        parent: &CanonicalDimensionName,
+    ) -> Option<SubdimensionRelation> {
+        // Check cache first
+        let cache_key = (child.clone(), parent.clone());
+        if let Some(cached) = self.relationship_cache.cache.borrow().get(&cache_key) {
+            return cached.clone();
+        }
+
+        // Compute the relationship
+        let result = self.compute_subdimension_relation(child, parent);
+
+        // Cache the result (including None for "not a subdimension")
+        self.relationship_cache
+            .cache
+            .borrow_mut()
+            .insert(cache_key, result.clone());
+
+        result
+    }
+
+    fn compute_subdimension_relation(
+        &self,
+        child: &CanonicalDimensionName,
+        parent: &CanonicalDimensionName,
+    ) -> Option<SubdimensionRelation> {
+        let child_dim = self.dimensions.get(child)?;
+        let parent_dim = self.dimensions.get(parent)?;
+
+        match (child_dim, parent_dim) {
+            (Dimension::Named(_, child_named), Dimension::Named(_, parent_named)) => {
+                // Check all child elements exist in parent and build offset mapping
+                let mut parent_offsets = Vec::with_capacity(child_named.elements.len());
+                for child_elem in &child_named.elements {
+                    match parent_named.indexed_elements.get(child_elem) {
+                        Some(&idx) => parent_offsets.push(idx - 1), // 1-based to 0-based
+                        None => return None,                        // Element not in parent
+                    }
+                }
+                Some(SubdimensionRelation { parent_offsets })
+            }
+            (Dimension::Indexed(_, _), Dimension::Indexed(_, _)) => {
+                // TODO: Indexed subdimensions deferred - datamodel lacks parent mapping metadata.
+                // Would need to express which range of parent indices the child maps to.
+                None
+            }
+            _ => None, // Mixed types cannot be subdimensions of each other
+        }
     }
 }
 
@@ -648,5 +727,200 @@ mod tests {
 
         // Verify cloned cache has the same content
         assert!(cloned_cache.cache.borrow().contains_key(&(child, parent)));
+    }
+
+    #[test]
+    fn test_subdimension_contiguous() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA = [A1, A2, A3], SubA = [A2, A3] (contiguous subdimension)
+        let dims = vec![
+            datamodel::Dimension::Named(
+                "DimA".to_string(),
+                vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+            ),
+            datamodel::Dimension::Named(
+                "SubA".to_string(),
+                vec!["A2".to_string(), "A3".to_string()],
+            ),
+        ];
+
+        let ctx = DimensionsContext::from(&dims);
+        let dim_a = CanonicalDimensionName::from_raw("DimA");
+        let sub_a = CanonicalDimensionName::from_raw("SubA");
+
+        // SubA should be a subdimension of DimA
+        assert!(ctx.is_subdimension_of(&sub_a, &dim_a));
+
+        let relation = ctx.get_subdimension_relation(&sub_a, &dim_a).unwrap();
+        assert_eq!(relation.parent_offsets, vec![1, 2]); // A2 is at index 1, A3 is at index 2
+        assert!(relation.is_contiguous());
+        assert_eq!(relation.start_offset(), 1);
+    }
+
+    #[test]
+    fn test_subdimension_non_contiguous() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA = [A1, A2, A3], SubA = [A1, A3] (non-contiguous subdimension)
+        let dims = vec![
+            datamodel::Dimension::Named(
+                "DimA".to_string(),
+                vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+            ),
+            datamodel::Dimension::Named(
+                "SubA".to_string(),
+                vec!["A1".to_string(), "A3".to_string()],
+            ),
+        ];
+
+        let ctx = DimensionsContext::from(&dims);
+        let dim_a = CanonicalDimensionName::from_raw("DimA");
+        let sub_a = CanonicalDimensionName::from_raw("SubA");
+
+        assert!(ctx.is_subdimension_of(&sub_a, &dim_a));
+
+        let relation = ctx.get_subdimension_relation(&sub_a, &dim_a).unwrap();
+        assert_eq!(relation.parent_offsets, vec![0, 2]); // A1 is at index 0, A3 is at index 2
+        assert!(!relation.is_contiguous());
+    }
+
+    #[test]
+    fn test_subdimension_single_element() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA = [A1, A2, A3], SubA = [A2] (single element subdimension)
+        let dims = vec![
+            datamodel::Dimension::Named(
+                "DimA".to_string(),
+                vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+            ),
+            datamodel::Dimension::Named("SubA".to_string(), vec!["A2".to_string()]),
+        ];
+
+        let ctx = DimensionsContext::from(&dims);
+        let dim_a = CanonicalDimensionName::from_raw("DimA");
+        let sub_a = CanonicalDimensionName::from_raw("SubA");
+
+        assert!(ctx.is_subdimension_of(&sub_a, &dim_a));
+
+        let relation = ctx.get_subdimension_relation(&sub_a, &dim_a).unwrap();
+        assert_eq!(relation.parent_offsets, vec![1]);
+        assert!(relation.is_contiguous());
+    }
+
+    #[test]
+    fn test_not_subdimension() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA = [A1, A2], DimB = [B1, B2] (no overlap)
+        let dims = vec![
+            datamodel::Dimension::Named(
+                "DimA".to_string(),
+                vec!["A1".to_string(), "A2".to_string()],
+            ),
+            datamodel::Dimension::Named(
+                "DimB".to_string(),
+                vec!["B1".to_string(), "B2".to_string()],
+            ),
+        ];
+
+        let ctx = DimensionsContext::from(&dims);
+        let dim_a = CanonicalDimensionName::from_raw("DimA");
+        let dim_b = CanonicalDimensionName::from_raw("DimB");
+
+        assert!(!ctx.is_subdimension_of(&dim_b, &dim_a));
+        assert!(ctx.get_subdimension_relation(&dim_b, &dim_a).is_none());
+    }
+
+    #[test]
+    fn test_subdimension_cache() {
+        use crate::common::CanonicalDimensionName;
+
+        let dims = vec![
+            datamodel::Dimension::Named(
+                "DimA".to_string(),
+                vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+            ),
+            datamodel::Dimension::Named(
+                "SubA".to_string(),
+                vec!["A2".to_string(), "A3".to_string()],
+            ),
+        ];
+
+        let ctx = DimensionsContext::from(&dims);
+        let dim_a = CanonicalDimensionName::from_raw("DimA");
+        let sub_a = CanonicalDimensionName::from_raw("SubA");
+
+        // First call computes and caches
+        let relation1 = ctx.get_subdimension_relation(&sub_a, &dim_a);
+        assert!(relation1.is_some());
+
+        // Second call should return cached result
+        let relation2 = ctx.get_subdimension_relation(&sub_a, &dim_a);
+        assert_eq!(relation1, relation2);
+
+        // Verify cache was populated
+        let cache = ctx.relationship_cache.cache.borrow();
+        assert!(cache.contains_key(&(sub_a.clone(), dim_a.clone())));
+    }
+
+    #[test]
+    fn test_indexed_subdimension_not_supported() {
+        use crate::common::CanonicalDimensionName;
+
+        // Indexed dimensions don't support subdimension relationships yet
+        let dims = vec![
+            datamodel::Dimension::Indexed("DimA".to_string(), 5),
+            datamodel::Dimension::Indexed("SubA".to_string(), 3),
+        ];
+
+        let ctx = DimensionsContext::from(&dims);
+        let dim_a = CanonicalDimensionName::from_raw("DimA");
+        let sub_a = CanonicalDimensionName::from_raw("SubA");
+
+        // Should return None because indexed subdimensions aren't supported
+        assert!(!ctx.is_subdimension_of(&sub_a, &dim_a));
+        assert!(ctx.get_subdimension_relation(&sub_a, &dim_a).is_none());
+    }
+
+    #[test]
+    fn test_mixed_dimension_types() {
+        use crate::common::CanonicalDimensionName;
+
+        // Named and Indexed dimensions can't be subdimensions of each other
+        let dims = vec![
+            datamodel::Dimension::Named(
+                "DimA".to_string(),
+                vec!["A1".to_string(), "A2".to_string()],
+            ),
+            datamodel::Dimension::Indexed("DimB".to_string(), 2),
+        ];
+
+        let ctx = DimensionsContext::from(&dims);
+        let dim_a = CanonicalDimensionName::from_raw("DimA");
+        let dim_b = CanonicalDimensionName::from_raw("DimB");
+
+        assert!(!ctx.is_subdimension_of(&dim_b, &dim_a));
+        assert!(!ctx.is_subdimension_of(&dim_a, &dim_b));
+    }
+
+    #[test]
+    fn test_dimension_get() {
+        use crate::common::CanonicalDimensionName;
+
+        let dims = vec![datamodel::Dimension::Named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string()],
+        )];
+
+        let ctx = DimensionsContext::from(&dims);
+
+        let region = CanonicalDimensionName::from_raw("Region");
+        assert!(ctx.get(&region).is_some());
+        assert_eq!(ctx.get(&region).unwrap().len(), 2);
+
+        let unknown = CanonicalDimensionName::from_raw("Unknown");
+        assert!(ctx.get(&unknown).is_none());
     }
 }
