@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
@@ -43,6 +44,25 @@ impl SubdimensionRelation {
     /// For contiguous relations, get the start offset
     pub fn start_offset(&self) -> usize {
         self.parent_offsets.first().copied().unwrap_or(0)
+    }
+}
+
+/// Cache for subdimension relationships. Uses RefCell for O(1) lookup after first computation.
+/// The cache key is (child_name, parent_name), and the value is the relation if child is
+/// a subdimension of parent, or None if we've determined it's not a subdimension.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+struct RelationshipCache {
+    cache: RefCell<
+        HashMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
+    >,
+}
+
+impl Clone for RelationshipCache {
+    fn clone(&self) -> Self {
+        RelationshipCache {
+            cache: RefCell::new(self.cache.borrow().clone()),
+        }
     }
 }
 
@@ -560,5 +580,73 @@ mod tests {
             parent_offsets: vec![0, 1, 4],
         };
         assert!(!relation.is_contiguous());
+    }
+
+    #[test]
+    fn test_relationship_cache_basic() {
+        use crate::common::CanonicalDimensionName;
+
+        let cache = super::RelationshipCache::default();
+
+        let parent = CanonicalDimensionName::from_raw("DimA");
+        let child = CanonicalDimensionName::from_raw("SubA");
+
+        // Initially cache is empty
+        assert!(cache.cache.borrow().is_empty());
+
+        // Insert a subdimension relation
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![1, 2],
+        };
+        cache
+            .cache
+            .borrow_mut()
+            .insert((child.clone(), parent.clone()), Some(relation.clone()));
+
+        // Verify we can retrieve it
+        let retrieved = cache
+            .cache
+            .borrow()
+            .get(&(child.clone(), parent.clone()))
+            .cloned();
+        assert_eq!(retrieved, Some(Some(relation)));
+
+        // Insert a negative result (not a subdimension)
+        let other_child = CanonicalDimensionName::from_raw("NotSubA");
+        cache
+            .cache
+            .borrow_mut()
+            .insert((other_child.clone(), parent.clone()), None);
+
+        // Verify negative result is cached
+        let retrieved = cache
+            .cache
+            .borrow()
+            .get(&(other_child.clone(), parent.clone()))
+            .cloned();
+        assert_eq!(retrieved, Some(None));
+    }
+
+    #[test]
+    fn test_relationship_cache_clone() {
+        use crate::common::CanonicalDimensionName;
+
+        let cache = super::RelationshipCache::default();
+        let parent = CanonicalDimensionName::from_raw("DimA");
+        let child = CanonicalDimensionName::from_raw("SubA");
+
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![0, 2],
+        };
+        cache
+            .cache
+            .borrow_mut()
+            .insert((child.clone(), parent.clone()), Some(relation));
+
+        // Clone the cache
+        let cloned_cache = cache.clone();
+
+        // Verify cloned cache has the same content
+        assert!(cloned_cache.cache.borrow().contains_key(&(child, parent)));
     }
 }
