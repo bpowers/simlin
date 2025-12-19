@@ -1573,7 +1573,6 @@ mod star_range_subdimension_tests {
     use crate::test_common::TestProject;
 
     #[test]
-    #[ignore]
     fn star_to_subdimension_simple() {
         // Simpler test: just check if *:SubA resolves correctly as a subscript
         let project = TestProject::new("star_simple")
@@ -1590,7 +1589,6 @@ mod star_range_subdimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn star_to_subdimension() {
         // Test that *:SubDim creates a range from the first element to the last element of SubDim
         let project = TestProject::new("star_to_subdim")
@@ -1608,7 +1606,6 @@ mod star_range_subdimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn star_to_subdimension_with_sum() {
         // Test star range with SUM builtin
         let project = TestProject::new("star_to_subdim_sum")
@@ -1627,6 +1624,9 @@ mod star_range_subdimension_tests {
         project.assert_scalar_result("total", 50.0);
     }
 
+    // TODO: Indexed subdimensions deferred - datamodel lacks parent mapping metadata.
+    // When the parent dimension for an indexed subdimension can be expressed in the
+    // datamodel, this test should be enabled.
     #[test]
     #[ignore]
     fn star_to_indexed_subdimension() {
@@ -1645,7 +1645,6 @@ mod star_range_subdimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn star_range_with_multidim() {
         // Test star range in multi-dimensional context
         let project = TestProject::new("star_multidim")
@@ -1679,6 +1678,45 @@ mod star_range_subdimension_tests {
     }
 
     #[test]
+    fn star_to_subdimension_non_contiguous() {
+        // Test star range with non-contiguous subdimension (exercises sparse iteration)
+        let project = TestProject::new("star_to_subdim_non_contiguous")
+            .named_dimension("DimA", &["A1", "A2", "A3", "A4"])
+            .named_dimension("SubA", &["A1", "A3"]) // Non-contiguous: offsets [0, 2]
+            .array_with_ranges(
+                "values[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30"), ("A4", "40")],
+            )
+            .array_aux("result[SubA]", "values[*:SubA]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get A1 (10) and A3 (30)
+        project.assert_interpreter_result("result", &[10.0, 30.0]);
+    }
+
+    #[test]
+    fn star_to_subdimension_non_contiguous_with_sum() {
+        // Test SUM with non-contiguous subdimension
+        let project = TestProject::new("star_to_subdim_non_contiguous_sum")
+            .named_dimension("DimA", &["A1", "A2", "A3", "A4"])
+            .named_dimension("SubA", &["A1", "A3"]) // Non-contiguous
+            .array_with_ranges(
+                "values[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30"), ("A4", "40")],
+            )
+            .scalar_aux("total", "SUM(values[*:SubA])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should sum A1 (10) and A3 (30) = 40
+        project.assert_scalar_result("total", 40.0);
+    }
+
+    // TODO: Dimension-name placeholders in Apply-to-All equations (e.g., m[DimD, *])
+    // are a different mechanism from StarRange. This test uses the dimension name
+    // directly as a subscript, which is parsed as Expr(Var("DimD")), not StarRange.
+    #[test]
     #[ignore]
     fn sum_with_active_dimension_in_subscript() {
         // This test reproduces the issue from simulates_sum test
@@ -1706,6 +1744,8 @@ mod star_range_subdimension_tests {
         project.assert_interpreter_result("msum", &[23.0, 43.0]);
     }
 
+    // TODO: Dimension name as subscript (a[SubA]) is a different mechanism from
+    // StarRange. It's parsed as Expr(Var("SubA")), not StarRange syntax.
     #[test]
     #[ignore]
     fn sum_with_dimension_name_as_subscript() {

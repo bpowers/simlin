@@ -136,6 +136,10 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     fn is_array_context(&self) -> bool {
         self.is_array
     }
+
+    fn get_dimension_len(&self, name: &crate::common::CanonicalDimensionName) -> Option<usize> {
+        self.scope.dimensions.get(name).map(|dim| dim.len())
+    }
 }
 
 pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {

@@ -84,13 +84,33 @@ impl ModuleEvaluator<'_> {
                 let base_off = self.off + *off;
                 let total_elements = view.dims.iter().product::<usize>();
 
+                // Build sparse lookup for O(1) access
+                let sparse_map: std::collections::HashMap<usize, &[usize]> = view
+                    .sparse
+                    .iter()
+                    .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
+                    .collect();
+
                 for i in 0..total_elements {
                     let mut remainder = i;
                     let mut idx = view.offset;
                     for (dim_idx, &dim_size) in view.dims.iter().enumerate().rev() {
                         let coord = remainder % dim_size;
                         remainder /= dim_size;
-                        idx += coord * view.strides[dim_idx] as usize;
+                        // If this dimension is sparse, translate coord through parent_offsets
+                        let parent_coord = if let Some(offsets) = sparse_map.get(&dim_idx) {
+                            debug_assert!(
+                                coord < offsets.len(),
+                                "SparseInfo invariant violated: coord={} offsets.len()={} dim_size={}",
+                                coord,
+                                offsets.len(),
+                                dim_size
+                            );
+                            offsets[coord]
+                        } else {
+                            coord
+                        };
+                        idx += parent_coord * view.strides[dim_idx] as usize;
                     }
                     f(self.curr[base_off + idx]);
                 }
@@ -518,12 +538,25 @@ impl ModuleEvaluator<'_> {
                         Expr::Const(n, _) => *n,
                         Expr::StaticSubscript(off, view, _) => {
                             // Calculate position in the source array
+                            // Build sparse lookup for this view
+                            let sparse_map: std::collections::HashMap<usize, &[usize]> = view
+                                .sparse
+                                .iter()
+                                .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
+                                .collect();
+
                             let mut remainder = flat_idx;
                             let mut src_idx = view.offset;
                             for (dim_idx, &dim_size) in dims.iter().enumerate().rev() {
                                 let coord = remainder % dim_size;
                                 remainder /= dim_size;
-                                src_idx += coord * view.strides[dim_idx] as usize;
+                                // Translate through sparse offsets if this dimension is sparse
+                                let parent_coord = if let Some(offsets) = sparse_map.get(&dim_idx) {
+                                    offsets[coord]
+                                } else {
+                                    coord
+                                };
+                                src_idx += parent_coord * view.strides[dim_idx] as usize;
                             }
                             evaluator.curr[evaluator.off + *off + src_idx]
                         }
@@ -532,13 +565,26 @@ impl ModuleEvaluator<'_> {
                             let id = *id as usize;
                             let start = evaluator.sim.temp_offsets[id];
 
+                            // Build sparse lookup for this view
+                            let sparse_map: std::collections::HashMap<usize, &[usize]> = view
+                                .sparse
+                                .iter()
+                                .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
+                                .collect();
+
                             // Calculate position in the temp array
                             let mut remainder = flat_idx;
                             let mut src_idx = view.offset;
                             for (dim_idx, &dim_size) in dims.iter().enumerate().rev() {
                                 let coord = remainder % dim_size;
                                 remainder /= dim_size;
-                                src_idx += coord * view.strides[dim_idx] as usize;
+                                // Translate through sparse offsets if this dimension is sparse
+                                let parent_coord = if let Some(offsets) = sparse_map.get(&dim_idx) {
+                                    offsets[coord]
+                                } else {
+                                    coord
+                                };
+                                src_idx += parent_coord * view.strides[dim_idx] as usize;
                             }
 
                             let temp_data = (*evaluator.sim.temps).borrow();
@@ -1215,6 +1261,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: arrayed_constants_var.canonical_ident(),
             active_dimension: None,
@@ -1252,6 +1299,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: arrayed_aux_var.canonical_ident(),
             active_dimension: None,
@@ -1288,6 +1336,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: var.canonical_ident(),
             active_dimension: None,
@@ -1311,6 +1360,7 @@ fn test_arrays() {
                     dims: vec![],
                     strides: vec![],
                     offset: 1,
+                    sparse: Vec::new(),
                 },
                 Loc::default(),
             )),
@@ -1332,6 +1382,7 @@ fn test_arrays() {
                 .iter()
                 .map(|d| crate::dimensions::Dimension::from(d.clone()))
                 .collect(),
+            dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
             ident: var.canonical_ident(),
             active_dimension: None,
