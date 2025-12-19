@@ -145,6 +145,10 @@ pub trait Expr2Context {
 
     /// Check if we're in an array context (processing an arrayed or apply-to-all equation)
     fn is_array_context(&self) -> bool;
+
+    /// Get the length of a dimension by its canonical name.
+    /// Used for StarRange subscripts to determine result dimensions.
+    fn get_dimension_len(&self, name: &CanonicalDimensionName) -> Option<usize>;
 }
 
 impl Expr2 {
@@ -425,9 +429,15 @@ impl Expr2 {
                                     // For now, use the full dimension size as max bound
                                     result_dims.push(dims[i].len());
                                 }
-                                IndexExpr2::StarRange(_, _) => {
-                                    // Star ranges keep the dimension
-                                    result_dims.push(dims[i].len());
+                                IndexExpr2::StarRange(subdim_name, _) => {
+                                    // Star ranges use the subdimension's length, not the parent's
+                                    // This is critical for correct temp array sizing
+                                    if let Some(subdim_len) = ctx.get_dimension_len(subdim_name) {
+                                        result_dims.push(subdim_len);
+                                    } else {
+                                        // Fall back to parent dimension if subdim not found
+                                        result_dims.push(dims[i].len());
+                                    }
                                 }
                                 IndexExpr2::Expr(_) | IndexExpr2::DimPosition(_, _) => {
                                     // These reduce the dimension
@@ -689,6 +699,11 @@ mod tests {
         fn is_array_context(&self) -> bool {
             // For tests, assume we're not in array context unless specifically testing that
             false
+        }
+
+        fn get_dimension_len(&self, _name: &CanonicalDimensionName) -> Option<usize> {
+            // For tests, we don't have dimension context
+            None
         }
     }
 
