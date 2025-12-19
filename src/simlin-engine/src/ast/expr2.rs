@@ -435,8 +435,10 @@ impl Expr2 {
                                     if let Some(subdim_len) = ctx.get_dimension_len(subdim_name) {
                                         result_dims.push(subdim_len);
                                     } else {
-                                        // Fall back to parent dimension if subdim not found
-                                        result_dims.push(dims[i].len());
+                                        unreachable!(
+                                            "StarRange subdimension '{}' should exist - validated during compilation",
+                                            subdim_name.as_str()
+                                        );
                                     }
                                 }
                                 IndexExpr2::Expr(_) | IndexExpr2::DimPosition(_, _) => {

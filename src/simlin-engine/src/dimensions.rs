@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
@@ -12,8 +12,6 @@ use crate::datamodel;
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
     pub indexed_elements: HashMap<CanonicalElementName, usize>,
-    /// O(1) containment check for subdimension detection
-    pub element_set: HashSet<CanonicalElementName>,
 }
 
 /// Relationship between a subdimension and parent dimension.
@@ -130,14 +128,11 @@ impl From<datamodel::Dimension> for Dimension {
                     // system dynamic indexes are 1-indexed
                     .map(|(i, elem)| (elem.clone(), i + 1))
                     .collect();
-                let element_set: HashSet<CanonicalElementName> =
-                    canonical_elements.iter().cloned().collect();
                 Dimension::Named(
                     CanonicalDimensionName::from_raw(&name),
                     NamedDimension {
                         indexed_elements,
                         elements: canonical_elements,
-                        element_set,
                     },
                 )
             }
@@ -215,22 +210,20 @@ impl DimensionsContext {
         child: &CanonicalDimensionName,
         parent: &CanonicalDimensionName,
     ) -> Option<SubdimensionRelation> {
-        // Check cache first
         let cache_key = (child.clone(), parent.clone());
-        if let Some(cached) = self
-            .relationship_cache
-            .cache
-            .lock()
-            .unwrap()
-            .get(&cache_key)
+
+        // Check cache first (short lock scope)
         {
-            return cached.clone();
+            let guard = self.relationship_cache.cache.lock().unwrap();
+            if let Some(cached) = guard.get(&cache_key) {
+                return cached.clone();
+            }
         }
 
-        // Compute the relationship
+        // Compute outside the lock to avoid potential deadlock on nested calls
         let result = self.compute_subdimension_relation(child, parent);
 
-        // Cache the result (including None for "not a subdimension")
+        // Cache the result (short lock scope)
         self.relationship_cache
             .cache
             .lock()
@@ -573,41 +566,6 @@ mod tests {
         assert_eq!(ctx.lookup("region·west"), None);
         assert_eq!(ctx.lookup("invalid·north"), None);
         assert_eq!(ctx.lookup("no_dot"), None);
-    }
-
-    #[test]
-    fn test_element_set_populated() {
-        let datamodel_dim = datamodel::Dimension::Named(
-            "Region".to_string(),
-            vec!["North".to_string(), "South".to_string(), "East".to_string()],
-        );
-        let dim = Dimension::from(datamodel_dim);
-
-        if let Dimension::Named(_, named) = &dim {
-            assert_eq!(named.element_set.len(), 3);
-            assert!(
-                named
-                    .element_set
-                    .contains(&CanonicalElementName::from_raw("north"))
-            );
-            assert!(
-                named
-                    .element_set
-                    .contains(&CanonicalElementName::from_raw("south"))
-            );
-            assert!(
-                named
-                    .element_set
-                    .contains(&CanonicalElementName::from_raw("east"))
-            );
-            assert!(
-                !named
-                    .element_set
-                    .contains(&CanonicalElementName::from_raw("west"))
-            );
-        } else {
-            panic!("Expected Named dimension");
-        }
     }
 
     #[test]

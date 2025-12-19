@@ -1677,6 +1677,42 @@ mod star_range_subdimension_tests {
         project.assert_interpreter_result("slice", &[12.0, 13.0, 22.0, 23.0, 32.0, 33.0]);
     }
 
+    #[test]
+    fn star_to_subdimension_non_contiguous() {
+        // Test star range with non-contiguous subdimension (exercises sparse iteration)
+        let project = TestProject::new("star_to_subdim_non_contiguous")
+            .named_dimension("DimA", &["A1", "A2", "A3", "A4"])
+            .named_dimension("SubA", &["A1", "A3"]) // Non-contiguous: offsets [0, 2]
+            .array_with_ranges(
+                "values[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30"), ("A4", "40")],
+            )
+            .array_aux("result[SubA]", "values[*:SubA]");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should get A1 (10) and A3 (30)
+        project.assert_interpreter_result("result", &[10.0, 30.0]);
+    }
+
+    #[test]
+    fn star_to_subdimension_non_contiguous_with_sum() {
+        // Test SUM with non-contiguous subdimension
+        let project = TestProject::new("star_to_subdim_non_contiguous_sum")
+            .named_dimension("DimA", &["A1", "A2", "A3", "A4"])
+            .named_dimension("SubA", &["A1", "A3"]) // Non-contiguous
+            .array_with_ranges(
+                "values[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30"), ("A4", "40")],
+            )
+            .scalar_aux("total", "SUM(values[*:SubA])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Should sum A1 (10) and A3 (30) = 40
+        project.assert_scalar_result("total", 40.0);
+    }
+
     // TODO: Dimension-name placeholders in Apply-to-All equations (e.g., m[DimD, *])
     // are a different mechanism from StarRange. This test uses the dimension name
     // directly as a subscript, which is parsed as Expr(Var("DimD")), not StarRange.

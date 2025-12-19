@@ -99,6 +99,13 @@ impl ModuleEvaluator<'_> {
                         remainder /= dim_size;
                         // If this dimension is sparse, translate coord through parent_offsets
                         let parent_coord = if let Some(offsets) = sparse_map.get(&dim_idx) {
+                            debug_assert!(
+                                coord < offsets.len(),
+                                "SparseInfo invariant violated: coord={} offsets.len()={} dim_size={}",
+                                coord,
+                                offsets.len(),
+                                dim_size
+                            );
                             offsets[coord]
                         } else {
                             coord

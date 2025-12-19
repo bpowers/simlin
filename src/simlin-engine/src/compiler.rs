@@ -985,22 +985,26 @@ impl Context<'_> {
                     if let Some(active_subscripts) = &self.active_subscript
                         && let Some(_active_dims) = &self.active_dimension
                     {
-                        // Check if we have any dimension positions or sparse ranges
+                        // Check if we have any dimension positions
                         let has_dim_positions = operations
                             .iter()
                             .any(|op| matches!(op, IndexOp::DimPosition(_)));
-                        let has_sparse = operations
-                            .iter()
-                            .any(|op| matches!(op, IndexOp::SparseRange(_)));
 
-                        if has_dim_positions || has_sparse {
-                            // For dimension positions or sparse ranges in A2A context,
+                        if has_dim_positions {
+                            // For dimension positions in A2A context,
                             // fall back to dynamic evaluation
                             is_static = false;
                         } else {
                             // Calculate the linear index in the result array based on the view
                             let mut result_index = 0;
                             let active_dims = self.active_dimension.as_ref().unwrap();
+
+                            // Build map of dim_index -> sparse parent_offsets for quick lookup
+                            let sparse_map: std::collections::HashMap<usize, &[usize]> = view
+                                .sparse
+                                .iter()
+                                .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
+                                .collect();
 
                             // For each dimension in the view, find its value from active subscripts
                             // The active subscripts correspond to the OUTPUT dimensions, not the input
@@ -1012,6 +1016,10 @@ impl Context<'_> {
                                         let source_dim = &dims[dim_idx];
                                         let target_dim = &active_dims[view_idx];
                                         let subscript = &active_subscripts[view_idx];
+
+                                        // For sparse dimensions, we need to find which sparse index
+                                        // corresponds to the subscript's absolute offset in the parent
+                                        let is_sparse = sparse_map.contains_key(&view_idx);
 
                                         // For named dimensions, try to look up the subscript in the
                                         // source dimension. This handles cases like StarRange where
@@ -1026,9 +1034,18 @@ impl Context<'_> {
                                                 if let Some(abs_offset) =
                                                     source_dim.get_offset(subscript)
                                                 {
-                                                    // Subscript found in source - adjust for range start
-                                                    let start_offset = single_indices[dim_idx];
-                                                    abs_offset.saturating_sub(start_offset)
+                                                    if is_sparse {
+                                                        // For sparse dimensions in A2A, use the absolute
+                                                        // offset to access the source element directly.
+                                                        // The sparse parent_offsets are for iteration;
+                                                        // in A2A we want the actual source position.
+                                                        abs_offset
+                                                    } else {
+                                                        // Subscript found in source - adjust for range start
+                                                        let start_offset = single_indices[dim_idx];
+                                                        abs_offset.checked_sub(start_offset)
+                                                            .expect("abs_offset should be >= start_offset in subdimension range")
+                                                    }
                                                 } else {
                                                     // Subscript not in source - use position
                                                     if let Ok(idx) =
@@ -1048,8 +1065,16 @@ impl Context<'_> {
                                                     if let Some(abs_offset) =
                                                         source_dim.get_offset(subscript)
                                                     {
-                                                        let start_offset = single_indices[dim_idx];
-                                                        abs_offset.saturating_sub(start_offset)
+                                                        if is_sparse {
+                                                            // For sparse dimensions in A2A, use the absolute
+                                                            // offset to access the source element directly
+                                                            abs_offset
+                                                        } else {
+                                                            let start_offset =
+                                                                single_indices[dim_idx];
+                                                            abs_offset.checked_sub(start_offset)
+                                                                .expect("abs_offset should be >= start_offset in subdimension range")
+                                                        }
                                                     } else {
                                                         0
                                                     }
