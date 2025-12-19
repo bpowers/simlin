@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
 use crate::datamodel;
@@ -11,6 +11,39 @@ use crate::datamodel;
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
     pub indexed_elements: HashMap<CanonicalElementName, usize>,
+    /// O(1) containment check for subdimension detection
+    pub element_set: HashSet<CanonicalElementName>,
+}
+
+/// Relationship between a subdimension and parent dimension.
+/// Maps each subdim element index to its offset in the parent.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubdimensionRelation {
+    /// Maps subdim element index -> parent offset (0-based).
+    /// For SubA=[A2,A3] from DimA=[A1,A2,A3]: parent_offsets=[1,2]
+    pub parent_offsets: Vec<usize>,
+}
+
+#[allow(dead_code)]
+impl SubdimensionRelation {
+    /// Check if parent offsets are contiguous (can use range instead of sparse iteration)
+    pub fn is_contiguous(&self) -> bool {
+        if self.parent_offsets.len() <= 1 {
+            return true;
+        }
+        for i in 1..self.parent_offsets.len() {
+            if self.parent_offsets[i] != self.parent_offsets[i - 1] + 1 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// For contiguous relations, get the start offset
+    pub fn start_offset(&self) -> usize {
+        self.parent_offsets.first().copied().unwrap_or(0)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -77,11 +110,14 @@ impl From<datamodel::Dimension> for Dimension {
                     // system dynamic indexes are 1-indexed
                     .map(|(i, elem)| (elem.clone(), i + 1))
                     .collect();
+                let element_set: HashSet<CanonicalElementName> =
+                    canonical_elements.iter().cloned().collect();
                 Dimension::Named(
                     CanonicalDimensionName::from_raw(&name),
                     NamedDimension {
                         indexed_elements,
                         elements: canonical_elements,
+                        element_set,
                     },
                 )
             }
@@ -431,5 +467,98 @@ mod tests {
         assert_eq!(ctx.lookup("region·west"), None);
         assert_eq!(ctx.lookup("invalid·north"), None);
         assert_eq!(ctx.lookup("no_dot"), None);
+    }
+
+    #[test]
+    fn test_element_set_populated() {
+        let datamodel_dim = datamodel::Dimension::Named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string(), "East".to_string()],
+        );
+        let dim = Dimension::from(datamodel_dim);
+
+        if let Dimension::Named(_, named) = &dim {
+            assert_eq!(named.element_set.len(), 3);
+            assert!(
+                named
+                    .element_set
+                    .contains(&CanonicalElementName::from_raw("north"))
+            );
+            assert!(
+                named
+                    .element_set
+                    .contains(&CanonicalElementName::from_raw("south"))
+            );
+            assert!(
+                named
+                    .element_set
+                    .contains(&CanonicalElementName::from_raw("east"))
+            );
+            assert!(
+                !named
+                    .element_set
+                    .contains(&CanonicalElementName::from_raw("west"))
+            );
+        } else {
+            panic!("Expected Named dimension");
+        }
+    }
+
+    #[test]
+    fn test_subdimension_relation_contiguous() {
+        // Contiguous offsets: A2, A3 (indices 1, 2) from A1, A2, A3
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![1, 2],
+        };
+        assert!(relation.is_contiguous());
+        assert_eq!(relation.start_offset(), 1);
+    }
+
+    #[test]
+    fn test_subdimension_relation_non_contiguous() {
+        // Non-contiguous offsets: A1, A3 (indices 0, 2) from A1, A2, A3
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![0, 2],
+        };
+        assert!(!relation.is_contiguous());
+        assert_eq!(relation.start_offset(), 0);
+    }
+
+    #[test]
+    fn test_subdimension_relation_single_element() {
+        // Single element is always contiguous
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![1],
+        };
+        assert!(relation.is_contiguous());
+        assert_eq!(relation.start_offset(), 1);
+    }
+
+    #[test]
+    fn test_subdimension_relation_empty() {
+        // Empty is contiguous by definition
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![],
+        };
+        assert!(relation.is_contiguous());
+        assert_eq!(relation.start_offset(), 0);
+    }
+
+    #[test]
+    fn test_subdimension_relation_three_elements_contiguous() {
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![2, 3, 4],
+        };
+        assert!(relation.is_contiguous());
+        assert_eq!(relation.start_offset(), 2);
+    }
+
+    #[test]
+    fn test_subdimension_relation_three_elements_non_contiguous() {
+        // Gap in the middle
+        let relation = super::SubdimensionRelation {
+            parent_offsets: vec![0, 1, 4],
+        };
+        assert!(!relation.is_contiguous());
     }
 }
