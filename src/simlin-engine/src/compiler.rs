@@ -985,18 +985,22 @@ impl Context<'_> {
                     if let Some(active_subscripts) = &self.active_subscript
                         && let Some(_active_dims) = &self.active_dimension
                     {
-                        // Check if we have any dimension positions
+                        // Check if we have any dimension positions or sparse ranges
                         let has_dim_positions = operations
                             .iter()
                             .any(|op| matches!(op, IndexOp::DimPosition(_)));
+                        let has_sparse = operations
+                            .iter()
+                            .any(|op| matches!(op, IndexOp::SparseRange(_)));
 
-                        if has_dim_positions {
-                            // For dimension positions in A2A context, we need to fall back to dynamic evaluation
-                            // because @n refers to the nth dimension of the target variable's current iteration
+                        if has_dim_positions || has_sparse {
+                            // For dimension positions or sparse ranges in A2A context,
+                            // fall back to dynamic evaluation
                             is_static = false;
                         } else {
                             // Calculate the linear index in the result array based on the view
                             let mut result_index = 0;
+                            let active_dims = self.active_dimension.as_ref().unwrap();
 
                             // For each dimension in the view, find its value from active subscripts
                             // The active subscripts correspond to the OUTPUT dimensions, not the input
@@ -1005,18 +1009,64 @@ impl Context<'_> {
                                     // Get the dimension for this view index
                                     let dim_idx = dim_mapping[view_idx].unwrap_or(view_idx);
                                     if dim_idx < dims.len() {
-                                        let dim = &dims[dim_idx];
+                                        let source_dim = &dims[dim_idx];
+                                        let target_dim = &active_dims[view_idx];
                                         let subscript = &active_subscripts[view_idx];
 
-                                        // Get the offset for this subscript in the dimension
-                                        if let Some(offset) = dim.get_offset(subscript) {
-                                            result_index += offset * (*stride as usize);
-                                        } else if let Ok(idx) = subscript.as_str().parse::<usize>()
-                                        {
-                                            // For indexed dimensions with numeric subscripts
-                                            let idx_0based = idx - 1;
-                                            result_index += idx_0based * (*stride as usize);
-                                        }
+                                        // For named dimensions, try to look up the subscript in the
+                                        // source dimension. This handles cases like StarRange where
+                                        // source and target dimensions share element names (SubA
+                                        // elements exist in DimA).
+                                        //
+                                        // For indexed dimensions with different source/target dims,
+                                        // use the subscript's 0-based position directly.
+                                        let rel_offset = match source_dim {
+                                            Dimension::Named(_, _) => {
+                                                // Try lookup in source dimension first
+                                                if let Some(abs_offset) =
+                                                    source_dim.get_offset(subscript)
+                                                {
+                                                    // Subscript found in source - adjust for range start
+                                                    let start_offset = single_indices[dim_idx];
+                                                    abs_offset.saturating_sub(start_offset)
+                                                } else {
+                                                    // Subscript not in source - use position
+                                                    if let Ok(idx) =
+                                                        subscript.as_str().parse::<usize>()
+                                                    {
+                                                        idx - 1
+                                                    } else {
+                                                        0
+                                                    }
+                                                }
+                                            }
+                                            Dimension::Indexed(_, _) => {
+                                                // For indexed dimensions, check if source and target
+                                                // are the same dimension. If not, use position.
+                                                if source_dim.name() == target_dim.name() {
+                                                    // Same indexed dim - look up subscript
+                                                    if let Some(abs_offset) =
+                                                        source_dim.get_offset(subscript)
+                                                    {
+                                                        let start_offset = single_indices[dim_idx];
+                                                        abs_offset.saturating_sub(start_offset)
+                                                    } else {
+                                                        0
+                                                    }
+                                                } else {
+                                                    // Different indexed dims - use position
+                                                    if let Ok(idx) =
+                                                        subscript.as_str().parse::<usize>()
+                                                    {
+                                                        idx - 1
+                                                    } else {
+                                                        0
+                                                    }
+                                                }
+                                            }
+                                        };
+
+                                        result_index += rel_offset * (*stride as usize);
                                     }
                                 }
                             }
