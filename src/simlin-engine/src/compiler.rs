@@ -1543,51 +1543,41 @@ impl Context<'_> {
                 let mut l_expr = self.lower(l)?;
                 let mut r_expr = self.lower(r)?;
 
-                // Only apply dimension reordering if we're NOT in an A2A context
-                // In A2A context, the implicit subscripts already handle dimension reordering
+                // Only apply dimension reordering if we're NOT in an A2A context.
+                // In A2A context, the implicit subscripts already handle dimension reordering.
                 if self.active_dimension.is_none() {
-                    // If we have array bounds, check if dimension reordering is needed
-                    if let Some(bounds) = array_bounds {
-                        // Get dimension names from the array bounds
-                        if let Some(_target_dim_names) = bounds.dim_names() {
-                            // Try to get dimension names from left and right expressions
-                            // Prefer ArrayBounds (already computed during type checking)
-                            // Prefer ArrayBounds dim_names, fall back to metadata lookup for temps
-                            let l_dim_names: Option<Vec<String>> = match l
-                                .get_array_bounds()
-                                .and_then(|b| b.dim_names())
-                            {
+                    // If the result is an array, check if operand dimension reordering is needed.
+                    // Prefer ArrayBounds dim_names (computed during type checking), with fallback
+                    // to metadata lookup for temp arrays where dim_names can be None.
+                    if let Some(bounds) = array_bounds
+                        && bounds.dim_names().is_some()
+                    {
+                        let l_dim_names: Option<Vec<String>> =
+                            match l.get_array_bounds().and_then(|b| b.dim_names()) {
                                 Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
                                 None => self.get_expr_dimension_names(l),
                             };
-                            let r_dim_names: Option<Vec<String>> = match r
-                                .get_array_bounds()
-                                .and_then(|b| b.dim_names())
-                            {
+                        let r_dim_names: Option<Vec<String>> =
+                            match r.get_array_bounds().and_then(|b| b.dim_names()) {
                                 Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
                                 None => self.get_expr_dimension_names(r),
                             };
 
-                            // Check if right needs reordering to match left's dimension order
-                            if let (Some(l_names), Some(r_names)) = (&l_dim_names, &r_dim_names)
-                                && l_names != r_names
+                        // Check if right needs reordering to match left's dimension order
+                        if let (Some(l_names), Some(r_names)) = (&l_dim_names, &r_dim_names)
+                            && l_names != r_names
+                        {
+                            // Check if r can be reordered to match l
+                            if let Some(reordering) = find_dimension_reordering(r_names, l_names) {
+                                r_expr =
+                                    self.apply_dimension_reordering(r_expr, reordering, *loc)?;
+                            }
+                            // Otherwise check if l can be reordered to match r
+                            else if let Some(reordering) =
+                                find_dimension_reordering(l_names, r_names)
                             {
-                                // Check if r can be reordered to match l
-                                if let Some(reordering) =
-                                    find_dimension_reordering(r_names, l_names)
-                                {
-                                    // Apply reordering to r_expr
-                                    r_expr =
-                                        self.apply_dimension_reordering(r_expr, reordering, *loc)?;
-                                }
-                                // Otherwise check if l can be reordered to match r
-                                else if let Some(reordering) =
-                                    find_dimension_reordering(l_names, r_names)
-                                {
-                                    // Apply reordering to l_expr
-                                    l_expr =
-                                        self.apply_dimension_reordering(l_expr, reordering, *loc)?;
-                                }
+                                l_expr =
+                                    self.apply_dimension_reordering(l_expr, reordering, *loc)?;
                             }
                         }
                     }
