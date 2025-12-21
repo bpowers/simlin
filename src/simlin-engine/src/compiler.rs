@@ -2693,6 +2693,65 @@ impl Module {
     }
 }
 
+#[cfg(test)]
+impl Module {
+    /// Get flow expressions for a variable (may be multiple for A2A arrays).
+    /// Returns all AssignCurr expressions that target offsets within this variable's range.
+    pub fn get_flow_exprs(&self, var_name: &str) -> Vec<&Expr> {
+        use crate::common::canonicalize;
+        let canonical_name = canonicalize(var_name);
+
+        // Look up the variable's offset range
+        let Some(model_offsets) = self.offsets.get(&self.ident) else {
+            return vec![];
+        };
+        let Some(&(base_offset, size)) = model_offsets.get(&canonical_name) else {
+            return vec![];
+        };
+        let offset_range = base_offset..base_offset + size;
+
+        // Find all AssignCurr expressions that target offsets in this range
+        self.runlist_flows
+            .iter()
+            .filter(|expr| {
+                if let Expr::AssignCurr(off, _) = expr {
+                    offset_range.contains(off)
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+
+    /// Get initial expressions for a variable (may be multiple for A2A arrays).
+    /// Returns all AssignCurr expressions in the initials runlist for this variable.
+    pub fn get_initial_exprs(&self, var_name: &str) -> Vec<&Expr> {
+        use crate::common::canonicalize;
+        let canonical_name = canonicalize(var_name);
+
+        // Look up the variable's offset range
+        let Some(model_offsets) = self.offsets.get(&self.ident) else {
+            return vec![];
+        };
+        let Some(&(base_offset, size)) = model_offsets.get(&canonical_name) else {
+            return vec![];
+        };
+        let offset_range = base_offset..base_offset + size;
+
+        // Find all AssignCurr expressions that target offsets in this range
+        self.runlist_initials
+            .iter()
+            .filter(|expr| {
+                if let Expr::AssignCurr(off, _) = expr {
+                    offset_range.contains(off)
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+}
+
 struct Compiler<'module> {
     module: &'module Module,
     module_decls: Vec<ModuleDeclaration>,

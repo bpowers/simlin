@@ -9,10 +9,11 @@
 
 use crate::common::ErrorCode;
 use crate::common::{Canonical, Ident};
+use crate::compiler::Module;
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 use crate::interpreter::Simulation;
 use crate::project::Project as CompiledProject;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Builder for creating test projects with support for arrays, units, and all variable types
@@ -512,6 +513,37 @@ impl TestProject {
     pub fn assert_sim_builds(&self) {
         self.build_sim()
             .expect("Simulation should build successfully");
+    }
+
+    /// Build a Module for testing lowered expressions.
+    /// Returns the compiled Module for the main model, allowing inspection of
+    /// the lowered expressions via get_flow_exprs() and get_initial_exprs().
+    pub fn build_module(&self) -> Result<Module, String> {
+        let datamodel = self.build_datamodel();
+        let compiled = Arc::new(CompiledProject::from(datamodel));
+
+        // Check for compilation errors first
+        if !compiled.errors.is_empty() {
+            return Err(format!(
+                "Project has compilation errors: {:?}",
+                compiled.errors
+            ));
+        }
+
+        let main_ident = Ident::<Canonical>::from_str_unchecked("main");
+        let model = compiled
+            .models
+            .get(&main_ident)
+            .ok_or_else(|| "Model 'main' not found in compiled project".to_string())?;
+
+        if model.errors.is_some() {
+            return Err(format!("Model has errors: {:?}", model.errors));
+        }
+
+        // Create module with no inputs (root model)
+        let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
+        Module::new(&compiled, model.clone(), &inputs, true)
+            .map_err(|e| format!("Failed to create module: {e:?}"))
     }
 }
 
