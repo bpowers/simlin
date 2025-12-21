@@ -484,7 +484,15 @@ impl Context<'_> {
         }
     }
 
+    /// Pass-through to lower_late. This stub exists to make room for future
+    /// normalization passes that will be inserted before lower_late.
     fn lower(&self, expr: &ast::Expr2) -> Result<Expr> {
+        self.lower_late(expr)
+    }
+
+    /// Lowers an Expr2 AST node to the compiler's Expr representation.
+    /// This handles all expression types including subscripts, builtins, and operations.
+    fn lower_late(&self, expr: &ast::Expr2) -> Result<Expr> {
         let expr = match expr {
             ast::Expr2::Const(_, n, loc) => Expr::Const(*n, *loc),
             ast::Expr2::Var(id, _, loc) => {
