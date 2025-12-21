@@ -137,6 +137,31 @@ impl ArrayView {
     }
 }
 
+/// Represents a subscript operation after parsing but before view construction.
+/// Used to normalize different subscript syntaxes into a uniform representation
+/// that can be processed by build_view_from_ops.
+#[derive(Clone, Debug, PartialEq)]
+enum IndexOp {
+    /// Range subscript with start and end (0-based, end exclusive).
+    /// Example: `arr[2:5]` becomes `Range(1, 5)` (converted from 1-based)
+    Range(usize, usize),
+    /// Single element access (0-based index).
+    /// Example: `arr[3]` becomes `Single(2)` (converted from 1-based)
+    Single(usize),
+    /// Wildcard that preserves the dimension.
+    /// Example: `arr[*]` keeps the full dimension
+    Wildcard,
+    /// Dimension position reference (0-based).
+    /// Example: `arr[@2]` references dimension at position 1
+    DimPosition(usize),
+    /// Sparse (non-contiguous) range for subdimension iteration.
+    /// Contains parent offsets to iterate (e.g., [0, 2] for elements at indices 0 and 2)
+    SparseRange(Vec<usize>),
+    /// Reference to an active A2A dimension by index.
+    /// Used when a dimension name appears as a subscript in A2A context
+    ActiveDimRef(usize),
+}
+
 #[derive(PartialEq, Clone, Debug)]
 #[allow(dead_code)]
 pub enum Expr {
@@ -760,15 +785,6 @@ impl Context<'_> {
                 let mut is_static = true;
 
                 // Build a list of operations to apply to the view
-                enum IndexOp {
-                    Range(usize, usize),     // start, end (0-based, end exclusive)
-                    Single(usize),           // single index (0-based)
-                    Wildcard,                // keep dimension
-                    DimPosition(usize),      // dimension position (0-based)
-                    SparseRange(Vec<usize>), // non-contiguous parent offsets for subdimension iteration
-                    ActiveDimRef(usize),     // reference to active A2A dimension by index
-                }
-
                 let mut operations = Vec::new();
 
                 for (i, arg) in args.iter().enumerate() {
