@@ -1770,3 +1770,160 @@ mod star_range_subdimension_tests {
         project.assert_interpreter_result("msum", &[23.0, 43.0]);
     }
 }
+
+#[cfg(test)]
+mod structural_lowering_tests {
+    //! Tests that verify the structure of lowered expressions, not just execution results.
+    //! These tests use Module::get_flow_exprs() to inspect the AST after lowering.
+
+    use crate::compiler::{BuiltinFn, Expr, pretty};
+    use crate::test_common::TestProject;
+
+    #[test]
+    fn a2a_collapses_wildcard_to_var() {
+        // In A2A context, source[*] collapses to a scalar Var
+        // because the wildcard resolves to the current element being computed
+        let project = TestProject::new("test")
+            .indexed_dimension("D", 3)
+            .array_const("source[D]", 10.0)
+            .array_aux("result[D]", "source[*]");
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("result");
+
+        // Should have 3 expressions (one per A2A element)
+        assert_eq!(
+            exprs.len(),
+            3,
+            "expected 3 A2A elements, got {}",
+            exprs.len()
+        );
+
+        // Each should be AssignCurr containing Var (collapsed), not StaticSubscript
+        for expr in &exprs {
+            if let Expr::AssignCurr(_, inner) = expr {
+                assert!(
+                    matches!(inner.as_ref(), Expr::Var(..)),
+                    "expected Var inside AssignCurr, got: {}",
+                    pretty(expr)
+                );
+            } else {
+                panic!("expected AssignCurr, got: {}", pretty(expr));
+            }
+        }
+    }
+
+    #[test]
+    fn sum_preserves_array_for_iteration() {
+        // Inside SUM, the array reference is preserved as StaticSubscript for iteration
+        let project = TestProject::new("test")
+            .indexed_dimension("A", 5)
+            .array_const("source[A]", 10.0)
+            .scalar_aux("total", "SUM(source[2:4])");
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("total");
+
+        assert_eq!(exprs.len(), 1, "scalar should have 1 expression");
+
+        // Verify SUM contains StaticSubscript with range view
+        let expr = exprs[0];
+        if let Expr::AssignCurr(_, inner) = expr {
+            if let Expr::App(BuiltinFn::Sum(sum_inner), _) = inner.as_ref() {
+                if let Expr::StaticSubscript(_, view, _) = sum_inner.as_ref() {
+                    // Range 2:4 = 3 elements (inclusive)
+                    assert_eq!(
+                        view.dims,
+                        vec![3],
+                        "expected range view with 3 elements, got: {:?}",
+                        view.dims
+                    );
+                } else {
+                    panic!(
+                        "expected StaticSubscript inside SUM, got: {}",
+                        pretty(sum_inner)
+                    );
+                }
+            } else {
+                panic!(
+                    "expected App(Sum) inside AssignCurr, got: {}",
+                    pretty(inner)
+                );
+            }
+        } else {
+            panic!("expected AssignCurr, got: {}", pretty(expr));
+        }
+    }
+
+    #[test]
+    fn sum_with_dim_name_subscript_preserves_other_dimension() {
+        // SUM(m[DimD, *]) should preserve the array for the * dimension
+        // while collapsing DimD to the current A2A element
+        let project = TestProject::new("test")
+            .named_dimension("DimD", &["D1", "D2"])
+            .named_dimension("DimE", &["E1", "E2"])
+            .array_const("m[DimD, DimE]", 10.0)
+            .array_aux("msum[DimD]", "SUM(m[DimD, *])");
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("msum");
+
+        // 2 A2A elements (D1, D2)
+        assert_eq!(
+            exprs.len(),
+            2,
+            "expected 2 A2A elements, got {}",
+            exprs.len()
+        );
+
+        // Each should have SUM with StaticSubscript preserving the E dimension
+        for expr in &exprs {
+            if let Expr::AssignCurr(_, inner) = expr {
+                if let Expr::App(BuiltinFn::Sum(sum_inner), _) = inner.as_ref() {
+                    if let Expr::StaticSubscript(_, view, _) = sum_inner.as_ref() {
+                        // The wildcard dimension (DimE with 2 elements) should be preserved
+                        assert_eq!(
+                            view.dims,
+                            vec![2],
+                            "expected StaticSubscript to preserve DimE (size 2), got {:?}",
+                            view.dims
+                        );
+                    } else {
+                        panic!(
+                            "expected StaticSubscript inside SUM, got: {}",
+                            pretty(sum_inner)
+                        );
+                    }
+                } else {
+                    panic!(
+                        "expected App(Sum) inside AssignCurr, got: {}",
+                        pretty(inner)
+                    );
+                }
+            } else {
+                panic!("expected AssignCurr, got: {}", pretty(expr));
+            }
+        }
+    }
+
+    #[test]
+    fn pretty_formats_expressions_for_debugging() {
+        // Quick sanity check that pretty() works for debugging test failures
+        let project = TestProject::new("test")
+            .indexed_dimension("D", 2)
+            .array_const("x[D]", 5.0)
+            .scalar_aux("y", "SUM(x[*])");
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("y");
+
+        assert_eq!(exprs.len(), 1);
+        let pretty_str = pretty(exprs[0]);
+        // Should contain recognizable structure (lowercase from pretty() format)
+        assert!(
+            pretty_str.contains("curr") && pretty_str.contains("sum"),
+            "pretty() output should show expression structure: {}",
+            pretty_str
+        );
+    }
+}
