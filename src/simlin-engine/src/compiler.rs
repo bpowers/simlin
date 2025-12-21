@@ -175,6 +175,27 @@ struct SubscriptConfig<'a> {
     active_dimension: Option<&'a [Dimension]>,
 }
 
+/// Result of building an ArrayView from IndexOp operations.
+struct ViewBuildResult {
+    /// The constructed array view
+    view: ArrayView,
+    /// Mapping from output dimension index to input dimension index.
+    /// dim_mapping[i] = Some(j) means output dim i comes from input dim j.
+    /// dim_mapping[i] = None means output dim i was removed (single index).
+    dim_mapping: Vec<Option<usize>>,
+    /// Start offset for each input dimension (for A2A element index calculation)
+    single_indices: Vec<usize>,
+}
+
+/// Configuration for view building.
+/// Contains context needed for ActiveDimRef resolution.
+struct ViewBuildConfig<'a> {
+    /// Active A2A subscript values (if in A2A context)
+    active_subscript: Option<&'a [CanonicalElementName]>,
+    /// Dimensions of the variable being subscripted (for element name → offset lookups)
+    dims: &'a [Dimension],
+}
+
 /// Normalize subscript expressions to IndexOp operations.
 ///
 /// Returns Some(ops) if all subscripts can be converted statically,
@@ -302,6 +323,151 @@ fn normalize_subscripts(args: &[IndexExpr2], config: &SubscriptConfig) -> Option
     }
 
     Some(operations)
+}
+
+/// Build an ArrayView from normalized IndexOp operations.
+///
+/// Returns the view, dimension mapping, and single_indices needed for
+/// A2A element index computation and range/sparse semantics.
+fn build_view_from_ops(
+    operations: &[IndexOp],
+    orig_dims: &[usize],
+    orig_strides: &[isize],
+    config: &ViewBuildConfig,
+) -> Result<ViewBuildResult> {
+    let mut dim_mapping: Vec<Option<usize>> = Vec::new();
+    let mut single_indices: Vec<usize> = Vec::new();
+    let mut offset_adjustment = 0usize;
+
+    // First pass: determine dimension mapping and validate
+    for (i, op) in operations.iter().enumerate() {
+        match op {
+            IndexOp::Single(idx) => {
+                // Validate bounds
+                if *idx >= orig_dims[i] {
+                    return sim_err!(Generic, format!("Index out of bounds for dimension {}", i));
+                }
+                single_indices.push(*idx);
+                offset_adjustment += idx * orig_strides[i] as usize;
+            }
+            IndexOp::Range(start, end) => {
+                // Validate bounds
+                if *end > orig_dims[i] || *start >= *end {
+                    return sim_err!(Generic, format!("Invalid range bounds for dimension {}", i));
+                }
+                dim_mapping.push(Some(i));
+                single_indices.push(*start); // Track start offset
+                offset_adjustment += start * orig_strides[i] as usize;
+            }
+            IndexOp::Wildcard => {
+                dim_mapping.push(Some(i));
+                single_indices.push(0); // No offset for wildcard
+            }
+            IndexOp::DimPosition(pos) => {
+                if *pos >= orig_dims.len() {
+                    return sim_err!(
+                        Generic,
+                        format!("Dimension position @{} out of bounds", pos + 1)
+                    );
+                }
+                dim_mapping.push(Some(*pos));
+                single_indices.push(0); // Will be resolved at runtime in A2A context
+            }
+            IndexOp::SparseRange(parent_offsets) => {
+                // Validate all parent offsets are in bounds
+                for &off in parent_offsets {
+                    if off >= orig_dims[i] {
+                        return sim_err!(
+                            Generic,
+                            format!("Sparse range offset out of bounds for dimension {}", i)
+                        );
+                    }
+                }
+                dim_mapping.push(Some(i));
+                single_indices.push(0); // No static offset for sparse dimensions
+            }
+            IndexOp::ActiveDimRef(active_idx) => {
+                // Reference to active A2A dimension - resolve to concrete offset
+                let active_subscripts = config.active_subscript.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::Generic,
+                        Some("ActiveDimRef without active subscript context".to_string()),
+                    )
+                })?;
+                let subscript = &active_subscripts[*active_idx];
+                let dim = &config.dims[i];
+
+                if let Some(offset) = dim.get_offset(subscript) {
+                    single_indices.push(offset);
+                    offset_adjustment += offset * orig_strides[i] as usize;
+                } else {
+                    return sim_err!(
+                        Generic,
+                        format!(
+                            "Invalid active subscript '{}' for dimension {}",
+                            subscript.as_str(),
+                            i
+                        )
+                    );
+                }
+            }
+        }
+    }
+
+    // Second pass: build the resulting view
+    let mut new_dims = Vec::new();
+    let mut new_strides = Vec::new();
+    let mut sparse_info = Vec::new();
+    let mut output_dim_idx = 0usize;
+
+    for (i, op) in operations.iter().enumerate() {
+        match op {
+            IndexOp::Single(_) => {
+                // Dimension is removed, don't add to output
+            }
+            IndexOp::Range(start, end) => {
+                new_dims.push(end - start);
+                new_strides.push(orig_strides[i]);
+                output_dim_idx += 1;
+            }
+            IndexOp::Wildcard => {
+                new_dims.push(orig_dims[i]);
+                new_strides.push(orig_strides[i]);
+                output_dim_idx += 1;
+            }
+            IndexOp::DimPosition(pos) => {
+                // Use the dimension size and stride from the referenced position
+                new_dims.push(orig_dims[*pos]);
+                new_strides.push(orig_strides[*pos]);
+                output_dim_idx += 1;
+            }
+            IndexOp::SparseRange(parent_offsets) => {
+                // Dimension size is the number of sparse elements
+                new_dims.push(parent_offsets.len());
+                new_strides.push(orig_strides[i]);
+                sparse_info.push(SparseInfo {
+                    dim_index: output_dim_idx,
+                    parent_offsets: parent_offsets.clone(),
+                });
+                output_dim_idx += 1;
+            }
+            IndexOp::ActiveDimRef(_) => {
+                // Dimension is consumed (resolved to active subscript), don't add to output
+            }
+        }
+    }
+
+    Ok(ViewBuildResult {
+        view: ArrayView {
+            dims: new_dims,
+            strides: new_strides,
+            offset: offset_adjustment,
+            sparse: sparse_info,
+        },
+        dim_mapping,
+        single_indices,
+    })
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -941,140 +1107,16 @@ impl Context<'_> {
                         orig_strides[i] = orig_strides[i + 1] * orig_dims[i + 1] as isize;
                     }
 
-                    // First pass: determine dimension mapping and validate
-                    // dim_mapping[i] = Some(j) means output dim i comes from input dim j
-                    // dim_mapping[i] = None means output dim i is removed (single index)
-                    let mut dim_mapping: Vec<Option<usize>> = Vec::new();
-                    let mut single_indices: Vec<usize> = Vec::new();
-                    let mut offset_adjustment = 0usize;
-
-                    for (i, op) in operations.iter().enumerate() {
-                        match op {
-                            IndexOp::Single(idx) => {
-                                // Validate bounds
-                                if *idx >= orig_dims[i] {
-                                    return sim_err!(
-                                        Generic,
-                                        format!("Index out of bounds for dimension {}", i)
-                                    );
-                                }
-                                single_indices.push(*idx);
-                                offset_adjustment += idx * orig_strides[i] as usize;
-                            }
-                            IndexOp::Range(start, end) => {
-                                // Validate bounds
-                                if *end > orig_dims[i] || *start >= *end {
-                                    return sim_err!(
-                                        Generic,
-                                        format!("Invalid range bounds for dimension {}", i)
-                                    );
-                                }
-                                dim_mapping.push(Some(i));
-                                single_indices.push(*start); // Track start offset
-                                offset_adjustment += start * orig_strides[i] as usize;
-                            }
-                            IndexOp::Wildcard => {
-                                dim_mapping.push(Some(i));
-                                single_indices.push(0); // No offset for wildcard
-                            }
-                            IndexOp::DimPosition(pos) => {
-                                if *pos >= orig_dims.len() {
-                                    return sim_err!(
-                                        Generic,
-                                        format!("Dimension position @{} out of bounds", pos + 1)
-                                    );
-                                }
-                                dim_mapping.push(Some(*pos));
-                                single_indices.push(0); // Will be resolved at runtime in A2A context
-                            }
-                            IndexOp::SparseRange(parent_offsets) => {
-                                // Validate all parent offsets are in bounds
-                                for &off in parent_offsets {
-                                    if off >= orig_dims[i] {
-                                        return sim_err!(
-                                            Generic,
-                                            format!(
-                                                "Sparse range offset out of bounds for dimension {}",
-                                                i
-                                            )
-                                        );
-                                    }
-                                }
-                                dim_mapping.push(Some(i));
-                                single_indices.push(0); // No static offset for sparse dimensions
-                            }
-                            IndexOp::ActiveDimRef(active_idx) => {
-                                // Reference to active A2A dimension - resolve to concrete offset
-                                let active_subscripts = self.active_subscript.as_ref().unwrap();
-                                let subscript = &active_subscripts[*active_idx];
-                                let dim = &dims[i];
-
-                                if let Some(offset) = dim.get_offset(subscript) {
-                                    single_indices.push(offset);
-                                    offset_adjustment += offset * orig_strides[i] as usize;
-                                } else {
-                                    return sim_err!(
-                                        Generic,
-                                        format!(
-                                            "Invalid active subscript '{}' for dimension {}",
-                                            subscript.as_str(),
-                                            i
-                                        )
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    // Build the resulting view
-                    let mut new_dims = Vec::new();
-                    let mut new_strides = Vec::new();
-                    let mut sparse_info = Vec::new();
-                    let mut output_dim_idx = 0usize;
-
-                    for (i, op) in operations.iter().enumerate() {
-                        match op {
-                            IndexOp::Single(_) => {
-                                // Dimension is removed, don't add to output
-                            }
-                            IndexOp::Range(start, end) => {
-                                new_dims.push(end - start);
-                                new_strides.push(orig_strides[i]);
-                                output_dim_idx += 1;
-                            }
-                            IndexOp::Wildcard => {
-                                new_dims.push(orig_dims[i]);
-                                new_strides.push(orig_strides[i]);
-                                output_dim_idx += 1;
-                            }
-                            IndexOp::DimPosition(pos) => {
-                                // Use the dimension size and stride from the referenced position
-                                new_dims.push(orig_dims[*pos]);
-                                new_strides.push(orig_strides[*pos]);
-                                output_dim_idx += 1;
-                            }
-                            IndexOp::SparseRange(parent_offsets) => {
-                                // Dimension size is the number of sparse elements
-                                new_dims.push(parent_offsets.len());
-                                new_strides.push(orig_strides[i]);
-                                sparse_info.push(SparseInfo {
-                                    dim_index: output_dim_idx,
-                                    parent_offsets: parent_offsets.clone(),
-                                });
-                                output_dim_idx += 1;
-                            }
-                            IndexOp::ActiveDimRef(_) => {
-                                // Dimension is consumed (resolved to active subscript), don't add to output
-                            }
-                        }
-                    }
-
-                    let view = ArrayView {
-                        dims: new_dims,
-                        strides: new_strides,
-                        offset: offset_adjustment,
-                        sparse: sparse_info,
+                    // Build the view using the helper
+                    let view_config = ViewBuildConfig {
+                        active_subscript: self.active_subscript.as_deref(),
+                        dims,
                     };
+                    let ViewBuildResult {
+                        view,
+                        dim_mapping,
+                        single_indices,
+                    } = build_view_from_ops(&operations, &orig_dims, &orig_strides, &view_config)?;
 
                     // Check if we're in an array iteration context
                     // If we have dimension positions, we need special handling in A2A context
