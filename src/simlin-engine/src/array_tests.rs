@@ -1713,11 +1713,7 @@ mod star_range_subdimension_tests {
         project.assert_scalar_result("total", 40.0);
     }
 
-    // TODO: Dimension-name placeholders in Apply-to-All equations (e.g., m[DimD, *])
-    // are a different mechanism from StarRange. This test uses the dimension name
-    // directly as a subscript, which is parsed as Expr(Var("DimD")), not StarRange.
     #[test]
-    #[ignore]
     fn sum_with_active_dimension_in_subscript() {
         // This test reproduces the issue from simulates_sum test
         // We have a 2D array m[DimD, DimE] and want to compute msum[DimD] = SUM(m[DimD, *])
@@ -1744,10 +1740,7 @@ mod star_range_subdimension_tests {
         project.assert_interpreter_result("msum", &[23.0, 43.0]);
     }
 
-    // TODO: Dimension name as subscript (a[SubA]) is a different mechanism from
-    // StarRange. It's parsed as Expr(Var("SubA")), not StarRange syntax.
     #[test]
-    #[ignore]
     fn sum_with_dimension_name_as_subscript() {
         // Even more minimal test - use dimension name directly as subscript
         // This is exactly what fails in simulates_sum

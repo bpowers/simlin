@@ -74,6 +74,221 @@ pub struct ModuleEvaluator<'a> {
 }
 
 impl ModuleEvaluator<'_> {
+    /// Helper to find array dimensions from an expression (returns first StaticSubscript's dims)
+    fn find_array_dims(expr: &Expr) -> Option<&[usize]> {
+        match expr {
+            Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(&view.dims),
+            Expr::Op1(_, inner, _) => Self::find_array_dims(inner),
+            Expr::Op2(_, left, right, _) => {
+                Self::find_array_dims(left).or_else(|| Self::find_array_dims(right))
+            }
+            Expr::If(_, t, f, _) => Self::find_array_dims(t).or_else(|| Self::find_array_dims(f)),
+            Expr::App(builtin, _) => match builtin {
+                BuiltinFn::Abs(e)
+                | BuiltinFn::Arccos(e)
+                | BuiltinFn::Arcsin(e)
+                | BuiltinFn::Arctan(e)
+                | BuiltinFn::Cos(e)
+                | BuiltinFn::Exp(e)
+                | BuiltinFn::Int(e)
+                | BuiltinFn::Ln(e)
+                | BuiltinFn::Log10(e)
+                | BuiltinFn::Sin(e)
+                | BuiltinFn::Sqrt(e)
+                | BuiltinFn::Tan(e) => Self::find_array_dims(e),
+                BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => Self::find_array_dims(a)
+                    .or_else(|| b.as_ref().and_then(|e| Self::find_array_dims(e))),
+                BuiltinFn::SafeDiv(a, b, _) => {
+                    Self::find_array_dims(a).or_else(|| Self::find_array_dims(b))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Helper to evaluate an expression at a specific array index
+    fn eval_at_index(&mut self, expr: &Expr, index: usize) -> f64 {
+        match expr {
+            Expr::StaticSubscript(off, view, _) => {
+                let base_off = self.off + *off;
+                let total_elements: usize = view.dims.iter().product();
+                if index >= total_elements {
+                    return f64::NAN;
+                }
+
+                // Build sparse lookup for O(1) access
+                let sparse_map: std::collections::HashMap<usize, &[usize]> = view
+                    .sparse
+                    .iter()
+                    .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
+                    .collect();
+
+                let mut remainder = index;
+                let mut idx = view.offset;
+                for (dim_idx, &dim_size) in view.dims.iter().enumerate().rev() {
+                    let coord = remainder % dim_size;
+                    remainder /= dim_size;
+                    let parent_coord = if let Some(offsets) = sparse_map.get(&dim_idx) {
+                        if coord < offsets.len() {
+                            offsets[coord]
+                        } else {
+                            coord
+                        }
+                    } else {
+                        coord
+                    };
+                    idx += parent_coord * view.strides[dim_idx] as usize;
+                }
+                self.curr[base_off + idx]
+            }
+            Expr::TempArray(id, view, _) => {
+                let id = *id as usize;
+                if id >= self.sim.temp_offsets.len() - 1 {
+                    return f64::NAN;
+                }
+                let start = self.sim.temp_offsets[id];
+                let temps = (*self.sim.temps).borrow();
+                let size: usize = view.dims.iter().product();
+                if index < size {
+                    temps[start + index]
+                } else {
+                    f64::NAN
+                }
+            }
+            Expr::Op1(op, inner, _) => {
+                let val = self.eval_at_index(inner, index);
+                match op {
+                    UnaryOp::Not => {
+                        if is_truthy(val) {
+                            0.0
+                        } else {
+                            1.0
+                        }
+                    }
+                    UnaryOp::Transpose => {
+                        // Transpose doesn't make sense for scalar evaluation
+                        val
+                    }
+                }
+            }
+            Expr::Op2(op, left, right, _) => {
+                let lval = if Self::find_array_dims(left).is_some() {
+                    self.eval_at_index(left, index)
+                } else {
+                    self.eval(left)
+                };
+                let rval = if Self::find_array_dims(right).is_some() {
+                    self.eval_at_index(right, index)
+                } else {
+                    self.eval(right)
+                };
+                match op {
+                    BinaryOp::Add => lval + rval,
+                    BinaryOp::Sub => lval - rval,
+                    BinaryOp::Mul => lval * rval,
+                    BinaryOp::Div => lval / rval,
+                    BinaryOp::Mod => lval % rval,
+                    BinaryOp::Exp => lval.powf(rval),
+                    BinaryOp::Lt => {
+                        if lval < rval {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinaryOp::Lte => {
+                        if lval <= rval {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinaryOp::Gt => {
+                        if lval > rval {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinaryOp::Gte => {
+                        if lval >= rval {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinaryOp::Eq => {
+                        if (lval - rval).abs() < f64::EPSILON {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinaryOp::Neq => {
+                        if (lval - rval).abs() >= f64::EPSILON {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinaryOp::And => {
+                        if is_truthy(lval) && is_truthy(rval) {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    BinaryOp::Or => {
+                        if is_truthy(lval) || is_truthy(rval) {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                }
+            }
+            Expr::If(cond, t, f, _) => {
+                let cond_val = if Self::find_array_dims(cond).is_some() {
+                    self.eval_at_index(cond, index)
+                } else {
+                    self.eval(cond)
+                };
+                if is_truthy(cond_val) {
+                    if Self::find_array_dims(t).is_some() {
+                        self.eval_at_index(t, index)
+                    } else {
+                        self.eval(t)
+                    }
+                } else if Self::find_array_dims(f).is_some() {
+                    self.eval_at_index(f, index)
+                } else {
+                    self.eval(f)
+                }
+            }
+            Expr::App(builtin, _) => {
+                // For simple functions, evaluate the argument at index
+                match builtin {
+                    BuiltinFn::Abs(e) => self.eval_at_index(e, index).abs(),
+                    BuiltinFn::Cos(e) => self.eval_at_index(e, index).cos(),
+                    BuiltinFn::Sin(e) => self.eval_at_index(e, index).sin(),
+                    BuiltinFn::Tan(e) => self.eval_at_index(e, index).tan(),
+                    BuiltinFn::Exp(e) => self.eval_at_index(e, index).exp(),
+                    BuiltinFn::Ln(e) => self.eval_at_index(e, index).ln(),
+                    BuiltinFn::Log10(e) => self.eval_at_index(e, index).log10(),
+                    BuiltinFn::Sqrt(e) => self.eval_at_index(e, index).sqrt(),
+                    BuiltinFn::Int(e) => self.eval_at_index(e, index).trunc(),
+                    BuiltinFn::Arccos(e) => self.eval_at_index(e, index).acos(),
+                    BuiltinFn::Arcsin(e) => self.eval_at_index(e, index).asin(),
+                    BuiltinFn::Arctan(e) => self.eval_at_index(e, index).atan(),
+                    _ => self.eval(expr), // Fall back to scalar eval for other builtins
+                }
+            }
+            // For non-array expressions, just evaluate normally
+            _ => self.eval(expr),
+        }
+    }
+
     /// Helper to iterate over all elements in an array expression
     fn iter_array_elements<F>(&mut self, expr: &Expr, mut f: F)
     where
@@ -129,7 +344,17 @@ impl ModuleEvaluator<'_> {
                     f(temps[start + i]);
                 }
             }
-            _ => panic!("iter_array_elements called with non-array expression: {expr:?}"),
+            // Handle composite expressions with arrays (e.g., a[*]*b[*]/DT)
+            _ => {
+                if let Some(dims) = Self::find_array_dims(expr) {
+                    let total_elements: usize = dims.iter().product();
+                    for i in 0..total_elements {
+                        f(self.eval_at_index(expr, i));
+                    }
+                } else {
+                    panic!("iter_array_elements called with non-array expression: {expr:?}");
+                }
+            }
         }
     }
 
@@ -140,7 +365,14 @@ impl ModuleEvaluator<'_> {
                 view.dims.iter().product()
             }
             Expr::TempArrayElement(_, _, _, _) => 1, // Single element
-            _ => panic!("get_array_size called with non-array expression: {expr:?}"),
+            _ => {
+                // Handle composite expressions by finding array dims
+                if let Some(dims) = Self::find_array_dims(expr) {
+                    dims.iter().product()
+                } else {
+                    panic!("get_array_size called with non-array expression: {expr:?}")
+                }
+            }
         }
     }
 
@@ -1270,6 +1502,7 @@ fn test_arrays() {
             module_models: &module_models,
             is_initial: false,
             inputs: &BTreeSet::new(),
+            preserve_wildcards_for_iteration: false,
         },
         arrayed_constants_var,
     );
@@ -1308,6 +1541,7 @@ fn test_arrays() {
             module_models: &module_models,
             is_initial: false,
             inputs: &BTreeSet::new(),
+            preserve_wildcards_for_iteration: false,
         },
         arrayed_aux_var,
     );
@@ -1345,6 +1579,7 @@ fn test_arrays() {
             module_models: &module_models,
             is_initial: false,
             inputs: &BTreeSet::new(),
+            preserve_wildcards_for_iteration: false,
         },
         var,
     );
@@ -1391,6 +1626,7 @@ fn test_arrays() {
             module_models: &module_models,
             is_initial: false,
             inputs: &BTreeSet::new(),
+            preserve_wildcards_for_iteration: false,
         },
         var,
     );

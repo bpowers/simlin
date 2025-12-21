@@ -314,6 +314,9 @@ pub(crate) struct Context<'a> {
         &'a HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, Ident<Canonical>>>,
     pub(crate) is_initial: bool,
     pub(crate) inputs: &'a BTreeSet<Ident<Canonical>>,
+    /// When true, wildcards should always be preserved for iteration (inside SUM, etc.)
+    /// rather than being collapsed based on active_dimension matching.
+    pub(crate) preserve_wildcards_for_iteration: bool,
 }
 
 impl Context<'_> {
@@ -647,27 +650,40 @@ impl Context<'_> {
                     BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower(a)?)),
                     BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower(a)?)),
                     BFn::Max(a, b) => {
-                        let b = if let Some(b) = b {
-                            Some(Box::new(self.lower(b)?))
+                        if b.is_none() {
+                            // Single-arg array Max: preserve wildcards for iteration
+                            let mut ctx = self.clone();
+                            ctx.preserve_wildcards_for_iteration = true;
+                            BuiltinFn::Max(Box::new(ctx.lower(a)?), None)
                         } else {
-                            None
-                        };
-                        BuiltinFn::Max(Box::new(self.lower(a)?), b)
+                            // Two-arg scalar Max
+                            let a = Box::new(self.lower(a)?);
+                            let b = Some(Box::new(self.lower(b.as_ref().unwrap())?));
+                            BuiltinFn::Max(a, b)
+                        }
                     }
                     BFn::Mean(args) => {
+                        // Mean can be used with arrays - preserve wildcards
+                        let mut ctx = self.clone();
+                        ctx.preserve_wildcards_for_iteration = true;
                         let args = args
                             .iter()
-                            .map(|arg| self.lower(arg))
+                            .map(|arg| ctx.lower(arg))
                             .collect::<Result<Vec<Expr>>>();
                         BuiltinFn::Mean(args?)
                     }
                     BFn::Min(a, b) => {
-                        let b = if let Some(b) = b {
-                            Some(Box::new(self.lower(b)?))
+                        if b.is_none() {
+                            // Single-arg array Min: preserve wildcards for iteration
+                            let mut ctx = self.clone();
+                            ctx.preserve_wildcards_for_iteration = true;
+                            BuiltinFn::Min(Box::new(ctx.lower(a)?), None)
                         } else {
-                            None
-                        };
-                        BuiltinFn::Min(Box::new(self.lower(a)?), b)
+                            // Two-arg scalar Min
+                            let a = Box::new(self.lower(a)?);
+                            let b = Some(Box::new(self.lower(b.as_ref().unwrap())?));
+                            BuiltinFn::Min(a, b)
+                        }
                     }
                     BFn::Pi => BuiltinFn::Pi,
                     BFn::Pulse(a, b, c) => {
@@ -706,16 +722,20 @@ impl Context<'_> {
                         return sim_err!(TodoArrayBuiltin, self.ident.to_string());
                     }
                     BFn::Size(a) => {
-                        let arg = self.lower(a)?;
-                        BuiltinFn::Size(Box::new(arg))
+                        // Set flag to preserve wildcards for array iteration
+                        let mut ctx = self.clone();
+                        ctx.preserve_wildcards_for_iteration = true;
+                        BuiltinFn::Size(Box::new(ctx.lower(a)?))
                     }
                     BFn::Stddev(a) => {
-                        let arg = self.lower(a)?;
-                        BuiltinFn::Stddev(Box::new(arg))
+                        let mut ctx = self.clone();
+                        ctx.preserve_wildcards_for_iteration = true;
+                        BuiltinFn::Stddev(Box::new(ctx.lower(a)?))
                     }
                     BFn::Sum(a) => {
-                        let arg = self.lower(a)?;
-                        BuiltinFn::Sum(Box::new(arg))
+                        let mut ctx = self.clone();
+                        ctx.preserve_wildcards_for_iteration = true;
+                        BuiltinFn::Sum(Box::new(ctx.lower(a)?))
                     }
                 };
                 Expr::App(builtin, *loc)
@@ -738,6 +758,7 @@ impl Context<'_> {
                     Wildcard,                // keep dimension
                     DimPosition(usize),      // dimension position (0-based)
                     SparseRange(Vec<usize>), // non-contiguous parent offsets for subdimension iteration
+                    ActiveDimRef(usize),     // reference to active A2A dimension by index
                 }
 
                 let mut operations = Vec::new();
@@ -797,20 +818,51 @@ impl Context<'_> {
                                 ast::Expr2::Var(ident, _, _) => {
                                     // Check if it's a named dimension element
                                     if i < dims.len() {
-                                        if let Dimension::Named(_, named_dim) = &dims[i] {
-                                            if let Some(idx) = named_dim
-                                                .elements
-                                                .iter()
-                                                .position(|elem| elem.as_str() == ident.as_str())
-                                            {
-                                                operations.push(IndexOp::Single(idx));
+                                        let dim = &dims[i];
+                                        // First try to match as a dimension element
+                                        let element_idx =
+                                            if let Dimension::Named(_, named_dim) = dim {
+                                                named_dim.elements.iter().position(|elem| {
+                                                    elem.as_str() == ident.as_str()
+                                                })
+                                            } else {
+                                                None
+                                            };
+
+                                        if let Some(idx) = element_idx {
+                                            operations.push(IndexOp::Single(idx));
+                                        } else {
+                                            // Not an element - check if it's a dimension name
+                                            // matching an active A2A dimension
+                                            let is_dim_name = self.dimensions.iter().any(|d| {
+                                                canonicalize(d.name()).as_str() == ident.as_str()
+                                            });
+
+                                            if is_dim_name {
+                                                if let Some(active_dims) = &self.active_dimension {
+                                                    // Find matching active dimension
+                                                    let active_idx =
+                                                        active_dims.iter().position(|ad| {
+                                                            canonicalize(ad.name()).as_str()
+                                                                == ident.as_str()
+                                                        });
+
+                                                    if let Some(idx) = active_idx {
+                                                        operations.push(IndexOp::ActiveDimRef(idx));
+                                                    } else {
+                                                        // Dimension name but not in active context
+                                                        is_static = false;
+                                                        break;
+                                                    }
+                                                } else {
+                                                    // Dimension name outside A2A context
+                                                    is_static = false;
+                                                    break;
+                                                }
                                             } else {
                                                 is_static = false;
                                                 break;
                                             }
-                                        } else {
-                                            is_static = false;
-                                            break;
                                         }
                                     } else {
                                         is_static = false;
@@ -930,6 +982,26 @@ impl Context<'_> {
                                 dim_mapping.push(Some(i));
                                 single_indices.push(0); // No static offset for sparse dimensions
                             }
+                            IndexOp::ActiveDimRef(active_idx) => {
+                                // Reference to active A2A dimension - resolve to concrete offset
+                                let active_subscripts = self.active_subscript.as_ref().unwrap();
+                                let subscript = &active_subscripts[*active_idx];
+                                let dim = &dims[i];
+
+                                if let Some(offset) = dim.get_offset(subscript) {
+                                    single_indices.push(offset);
+                                    offset_adjustment += offset * orig_strides[i] as usize;
+                                } else {
+                                    return sim_err!(
+                                        Generic,
+                                        format!(
+                                            "Invalid active subscript '{}' for dimension {}",
+                                            subscript.as_str(),
+                                            i
+                                        )
+                                    );
+                                }
+                            }
                         }
                     }
 
@@ -970,6 +1042,9 @@ impl Context<'_> {
                                 });
                                 output_dim_idx += 1;
                             }
+                            IndexOp::ActiveDimRef(_) => {
+                                // Dimension is consumed (resolved to active subscript), don't add to output
+                            }
                         }
                     }
 
@@ -983,17 +1058,59 @@ impl Context<'_> {
                     // Check if we're in an array iteration context
                     // If we have dimension positions, we need special handling in A2A context
                     if let Some(active_subscripts) = &self.active_subscript
-                        && let Some(_active_dims) = &self.active_dimension
+                        && let Some(active_dims) = &self.active_dimension
                     {
                         // Check if we have any dimension positions
                         let has_dim_positions = operations
                             .iter()
                             .any(|op| matches!(op, IndexOp::DimPosition(_)));
 
+                        // Check for operations that preserve dimensions for iteration.
+                        // These include Wildcard (*), Range (1:3), and SparseRange (*:SubDim).
+                        let has_iteration_preserving_ops = operations.iter().any(|op| {
+                            matches!(
+                                op,
+                                IndexOp::Wildcard | IndexOp::SparseRange(_) | IndexOp::Range(_, _)
+                            )
+                        });
+
+                        // When preserve_wildcards_for_iteration is set (inside SUM, etc.),
+                        // any iteration-preserving op should keep the array for iteration.
+                        // This handles cases like SUM(b[*]) or SUM(b[*:SubA]) or SUM(b[1:3])
+                        // where we want to iterate all elements, not collapse to current element.
+                        let should_skip_collapse = if self.preserve_wildcards_for_iteration {
+                            // Inside array-reducing builtins: preserve for iteration
+                            has_iteration_preserving_ops
+                        } else {
+                            // At top level of A2A: only skip if preserving op is on non-active dim
+                            let active_dim_names_set: std::collections::HashSet<_> =
+                                active_dims.iter().map(|d| canonicalize(d.name())).collect();
+
+                            operations.iter().enumerate().any(|(i, op)| {
+                                match op {
+                                    IndexOp::Wildcard => {
+                                        // For wildcards, check if dim is non-active
+                                        if i < dims.len() {
+                                            let dim_name = canonicalize(dims[i].name());
+                                            !active_dim_names_set.contains(&dim_name)
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    // SparseRange (*:SubDim) and Range at top-level A2A should
+                                    // collapse because they're designed to match active dims
+                                    _ => false,
+                                }
+                            })
+                        };
+
                         if has_dim_positions {
                             // For dimension positions in A2A context,
                             // fall back to dynamic evaluation
                             is_static = false;
+                        } else if should_skip_collapse {
+                            // View has extra dims beyond active dims - return StaticSubscript for iteration
+                            return Ok(Expr::StaticSubscript(off, view, *loc));
                         } else {
                             // Calculate the linear index in the result array based on the view
                             let mut result_index = 0;
@@ -1713,6 +1830,7 @@ fn test_lower() {
         module_models: &module_models,
         is_initial: false,
         inputs,
+        preserve_wildcards_for_iteration: false,
     };
     let expected = Expr::If(
         Box::new(Expr::Op2(
@@ -1808,6 +1926,7 @@ fn test_lower() {
         module_models: &module_models,
         is_initial: false,
         inputs,
+        preserve_wildcards_for_iteration: false,
     };
     let expected = Expr::If(
         Box::new(Expr::Op2(
@@ -1934,6 +2053,7 @@ fn test_fold_flows() {
         module_models: &module_models,
         is_initial: false,
         inputs,
+        preserve_wildcards_for_iteration: false,
     };
 
     assert_eq!(None, ctx.fold_flows(&[]));
@@ -2446,6 +2566,7 @@ impl Module {
                     module_models: &module_models,
                     is_initial,
                     inputs,
+                    preserve_wildcards_for_iteration: false,
                 },
                 &model.variables[ident],
             )

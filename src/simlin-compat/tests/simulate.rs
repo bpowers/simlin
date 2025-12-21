@@ -268,6 +268,32 @@ fn simulate_path(xmile_path: &str) {
     assert_eq!(&serialized_xmile, &serialized_xmile2);
 }
 
+/// Interpreter-only simulation test - runs the interpreter and compares
+/// results against expected output, but skips the VM (for models that use
+/// array builtins like SUM which aren't yet supported in bytecode).
+fn simulate_path_interpreter_only(xmile_path: &str) {
+    eprintln!("model (interpreter-only): {xmile_path}");
+
+    let f = File::open(xmile_path).unwrap();
+    let mut f = BufReader::new(f);
+
+    let datamodel_project = xmile::project_from_reader(&mut f);
+    if let Err(ref err) = datamodel_project {
+        eprintln!("model '{xmile_path}' error: {err}");
+    }
+    let datamodel_project = datamodel_project.unwrap();
+    let project = Rc::new(Project::from(datamodel_project));
+    let sim = Simulation::new(&project, "main").unwrap();
+
+    let results = sim.run_to_end();
+    assert!(results.is_ok(), "interpreter run failed: {:?}", results);
+    let results = results.unwrap();
+
+    // compare against expected results
+    let expected = load_expected_results(xmile_path).unwrap();
+    ensure_results(&expected, &results);
+}
+
 #[test]
 fn simulates_models_correctly() {
     for &path in TEST_MODELS {
@@ -341,6 +367,27 @@ fn simulates_except() {
 #[ignore]
 fn simulates_sum() {
     simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
+}
+
+// Ignored: The sum model contains cross-dimension broadcasting expressions like
+// "SUM(a[*]+h[*])" where a[DimA] and h[DimC] have different dimensions. The expected
+// behavior is a 3x3 cross-product (9 elements summed = 198), but the interpreter
+// currently treats this as element-wise (3 elements summed = 66).
+// This is a separate interpreter limitation, not related to dimension-name subscripts.
+#[test]
+#[ignore]
+fn simulates_sum_interpreter_only() {
+    simulate_path_interpreter_only("../../test/sdeverywhere/models/sum/sum.xmile");
+}
+
+// Ignored: The except model uses Vensim subscript mappings (e.g., "DimD: D1, D2 -> (DimA: SubA, A1)")
+// that are not preserved in the XMILE conversion. Without these mappings, equations like
+// "k[DimA] = a[DimA] + j[DimD]" cannot be resolved since there's no way to map DimD elements
+// to DimA elements.
+#[test]
+#[ignore]
+fn simulates_except_interpreter_only() {
+    simulate_path_interpreter_only("../../test/sdeverywhere/models/except/except.xmile");
 }
 
 #[test]
