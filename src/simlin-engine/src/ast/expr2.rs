@@ -153,7 +153,7 @@ pub trait Expr2Context {
 
 impl Expr2 {
     /// Extract the array bounds from an expression, if it has one
-    fn get_array_bounds(&self) -> Option<&ArrayBounds> {
+    pub(crate) fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {
             Expr2::Const(_, _, _) => None,
             Expr2::Var(_, array_bounds, _) => array_bounds.as_ref(),

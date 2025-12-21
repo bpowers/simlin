@@ -1551,8 +1551,22 @@ impl Context<'_> {
                         // Get dimension names from the array bounds
                         if let Some(_target_dim_names) = bounds.dim_names() {
                             // Try to get dimension names from left and right expressions
-                            let l_dim_names = self.get_expr_dimension_names(l);
-                            let r_dim_names = self.get_expr_dimension_names(r);
+                            // Prefer ArrayBounds (already computed during type checking)
+                            // Prefer ArrayBounds dim_names, fall back to metadata lookup for temps
+                            let l_dim_names: Option<Vec<String>> = match l
+                                .get_array_bounds()
+                                .and_then(|b| b.dim_names())
+                            {
+                                Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
+                                None => self.get_expr_dimension_names(l),
+                            };
+                            let r_dim_names: Option<Vec<String>> = match r
+                                .get_array_bounds()
+                                .and_then(|b| b.dim_names())
+                            {
+                                Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
+                                None => self.get_expr_dimension_names(r),
+                            };
 
                             // Check if right needs reordering to match left's dimension order
                             if let (Some(l_names), Some(r_names)) = (&l_dim_names, &r_dim_names)
