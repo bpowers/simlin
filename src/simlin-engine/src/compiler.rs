@@ -162,6 +162,148 @@ enum IndexOp {
     ActiveDimRef(usize),
 }
 
+/// Configuration for subscript normalization.
+/// Contains all context needed to convert IndexExpr2 to IndexOp.
+struct SubscriptConfig<'a> {
+    /// Dimensions of the variable being subscripted
+    dims: &'a [Dimension],
+    /// All dimensions in the model (for checking if a name is a dimension)
+    all_dimensions: &'a [Dimension],
+    /// For subdimension relationship lookups
+    dimensions_ctx: &'a DimensionsContext,
+    /// Active A2A dimensions (if in A2A context)
+    active_dimension: Option<&'a [Dimension]>,
+}
+
+/// Normalize subscript expressions to IndexOp operations.
+///
+/// Returns Some(ops) if all subscripts can be converted statically,
+/// None if any subscript requires dynamic evaluation.
+///
+/// NOTE: This does NOT determine final is_static status - that depends on
+/// later A2A context checks (has_dim_positions, preserve_wildcards_for_iteration, etc.)
+fn normalize_subscripts(args: &[IndexExpr2], config: &SubscriptConfig) -> Option<Vec<IndexOp>> {
+    let mut operations = Vec::with_capacity(args.len());
+
+    for (i, arg) in args.iter().enumerate() {
+        let op = match arg {
+            IndexExpr2::Range(start_expr, end_expr, _) => {
+                // Helper to resolve a dimension element to an index
+                let resolve_to_index = |expr: &ast::Expr2| -> Option<usize> {
+                    match expr {
+                        ast::Expr2::Const(_, val, _) => {
+                            // Numeric constant - convert from 1-based to 0-based
+                            Some((*val as isize - 1).max(0) as usize)
+                        }
+                        ast::Expr2::Var(ident, _, _) => {
+                            // Could be a named dimension element
+                            if i < config.dims.len() {
+                                if let Dimension::Named(_, named_dim) = &config.dims[i] {
+                                    named_dim
+                                        .elements
+                                        .iter()
+                                        .position(|elem| elem.as_str() == ident.as_str())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+
+                let start_idx = resolve_to_index(start_expr)?;
+                let end_idx = resolve_to_index(end_expr)?;
+                // end_idx is inclusive in the source, but we need exclusive for the range
+                IndexOp::Range(start_idx, end_idx + 1)
+            }
+            IndexExpr2::Wildcard(_) => IndexOp::Wildcard,
+            IndexExpr2::DimPosition(pos, _) => {
+                // @1 is position 0, @2 is position 1, etc.
+                let dim_idx = (*pos as usize).saturating_sub(1);
+                IndexOp::DimPosition(dim_idx)
+            }
+            IndexExpr2::Expr(expr) => {
+                match expr {
+                    ast::Expr2::Const(_, val, _) => {
+                        let idx = (*val as isize - 1).max(0) as usize;
+                        IndexOp::Single(idx)
+                    }
+                    ast::Expr2::Var(ident, _, _) => {
+                        // Check if it's a named dimension element
+                        if i >= config.dims.len() {
+                            return None;
+                        }
+
+                        let dim = &config.dims[i];
+                        // First try to match as a dimension element
+                        let element_idx = if let Dimension::Named(_, named_dim) = dim {
+                            named_dim
+                                .elements
+                                .iter()
+                                .position(|elem| elem.as_str() == ident.as_str())
+                        } else {
+                            None
+                        };
+
+                        if let Some(idx) = element_idx {
+                            IndexOp::Single(idx)
+                        } else {
+                            // Not an element - check if it's a dimension name
+                            // matching an active A2A dimension
+                            let is_dim_name = config
+                                .all_dimensions
+                                .iter()
+                                .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
+
+                            if is_dim_name {
+                                let active_dims = config.active_dimension?;
+                                // Find matching active dimension
+                                let active_idx = active_dims.iter().position(|ad| {
+                                    canonicalize(ad.name()).as_str() == ident.as_str()
+                                })?;
+                                IndexOp::ActiveDimRef(active_idx)
+                            } else {
+                                return None;
+                            }
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            IndexExpr2::StarRange(subdim_name, _) => {
+                // *:SubDim - iterate over subdimension elements
+                if i >= config.dims.len() {
+                    return None;
+                }
+                let parent_dim = &config.dims[i];
+                let parent_name =
+                    crate::common::CanonicalDimensionName::from_raw(parent_dim.name());
+
+                // Look up subdimension relationship
+                let relation = config
+                    .dimensions_ctx
+                    .get_subdimension_relation(subdim_name, &parent_name)?;
+
+                if relation.is_contiguous() {
+                    // Contiguous subdimension - use Range
+                    let start = relation.start_offset();
+                    let end = start + relation.parent_offsets.len();
+                    IndexOp::Range(start, end)
+                } else {
+                    // Non-contiguous - use SparseRange
+                    IndexOp::SparseRange(relation.parent_offsets.clone())
+                }
+            }
+        };
+        operations.push(op);
+    }
+
+    Some(operations)
+}
+
 #[derive(PartialEq, Clone, Debug)]
 #[allow(dead_code)]
 pub enum Expr {
@@ -781,160 +923,15 @@ impl Context<'_> {
                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
                 }
 
-                // First, check if this is a static subscript that we can optimize
-                let mut is_static = true;
+                // Try to normalize subscripts to static operations
+                let config = SubscriptConfig {
+                    dims,
+                    all_dimensions: &self.dimensions,
+                    dimensions_ctx: self.dimensions_ctx,
+                    active_dimension: self.active_dimension.as_deref(),
+                };
 
-                // Build a list of operations to apply to the view
-                let mut operations = Vec::new();
-
-                for (i, arg) in args.iter().enumerate() {
-                    match arg {
-                        IndexExpr2::Range(start_expr, end_expr, _) => {
-                            // Helper to resolve a dimension element to an index
-                            let resolve_to_index = |expr: &ast::Expr2| -> Option<usize> {
-                                match expr {
-                                    ast::Expr2::Const(_, val, _) => {
-                                        // Numeric constant - convert from 1-based to 0-based
-                                        Some((*val as isize - 1).max(0) as usize)
-                                    }
-                                    ast::Expr2::Var(ident, _, _) => {
-                                        // Could be a named dimension element
-                                        if i < dims.len() {
-                                            if let Dimension::Named(_, named_dim) = &dims[i] {
-                                                named_dim.elements.iter().position(|elem| {
-                                                    elem.as_str() == ident.as_str()
-                                                })
-                                            } else {
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    _ => None,
-                                }
-                            };
-
-                            if let (Some(start_idx), Some(end_idx)) =
-                                (resolve_to_index(start_expr), resolve_to_index(end_expr))
-                            {
-                                // end_idx is inclusive in the source, but we need exclusive for the range
-                                operations.push(IndexOp::Range(start_idx, end_idx + 1));
-                            } else {
-                                is_static = false;
-                                break;
-                            }
-                        }
-                        IndexExpr2::Wildcard(_) => {
-                            operations.push(IndexOp::Wildcard);
-                        }
-                        IndexExpr2::DimPosition(pos, _) => {
-                            // @1 is position 0, @2 is position 1, etc.
-                            let dim_idx = (*pos as usize).saturating_sub(1);
-                            operations.push(IndexOp::DimPosition(dim_idx));
-                        }
-                        IndexExpr2::Expr(expr) => {
-                            match expr {
-                                ast::Expr2::Const(_, val, _) => {
-                                    let idx = (*val as isize - 1).max(0) as usize;
-                                    operations.push(IndexOp::Single(idx));
-                                }
-                                ast::Expr2::Var(ident, _, _) => {
-                                    // Check if it's a named dimension element
-                                    if i < dims.len() {
-                                        let dim = &dims[i];
-                                        // First try to match as a dimension element
-                                        let element_idx =
-                                            if let Dimension::Named(_, named_dim) = dim {
-                                                named_dim.elements.iter().position(|elem| {
-                                                    elem.as_str() == ident.as_str()
-                                                })
-                                            } else {
-                                                None
-                                            };
-
-                                        if let Some(idx) = element_idx {
-                                            operations.push(IndexOp::Single(idx));
-                                        } else {
-                                            // Not an element - check if it's a dimension name
-                                            // matching an active A2A dimension
-                                            let is_dim_name = self.dimensions.iter().any(|d| {
-                                                canonicalize(d.name()).as_str() == ident.as_str()
-                                            });
-
-                                            if is_dim_name {
-                                                if let Some(active_dims) = &self.active_dimension {
-                                                    // Find matching active dimension
-                                                    let active_idx =
-                                                        active_dims.iter().position(|ad| {
-                                                            canonicalize(ad.name()).as_str()
-                                                                == ident.as_str()
-                                                        });
-
-                                                    if let Some(idx) = active_idx {
-                                                        operations.push(IndexOp::ActiveDimRef(idx));
-                                                    } else {
-                                                        // Dimension name but not in active context
-                                                        is_static = false;
-                                                        break;
-                                                    }
-                                                } else {
-                                                    // Dimension name outside A2A context
-                                                    is_static = false;
-                                                    break;
-                                                }
-                                            } else {
-                                                is_static = false;
-                                                break;
-                                            }
-                                        }
-                                    } else {
-                                        is_static = false;
-                                        break;
-                                    }
-                                }
-                                _ => {
-                                    is_static = false;
-                                    break;
-                                }
-                            }
-                        }
-                        IndexExpr2::StarRange(subdim_name, _) => {
-                            // *:SubDim - iterate over subdimension elements
-                            if i >= dims.len() {
-                                is_static = false;
-                                break;
-                            }
-                            let parent_dim = &dims[i];
-                            let parent_name =
-                                crate::common::CanonicalDimensionName::from_raw(parent_dim.name());
-
-                            // Look up subdimension relationship
-                            if let Some(relation) = self
-                                .dimensions_ctx
-                                .get_subdimension_relation(subdim_name, &parent_name)
-                            {
-                                if relation.is_contiguous() {
-                                    // Contiguous subdimension - use Range
-                                    let start = relation.start_offset();
-                                    let end = start + relation.parent_offsets.len();
-                                    operations.push(IndexOp::Range(start, end));
-                                } else {
-                                    // Non-contiguous - use SparseRange
-                                    operations.push(IndexOp::SparseRange(
-                                        relation.parent_offsets.clone(),
-                                    ));
-                                }
-                            } else {
-                                // Not a valid subdimension - fall back to dynamic handling
-                                is_static = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if is_static {
+                if let Some(operations) = normalize_subscripts(args, &config) {
                     // Build a unified view for any combination of static operations
                     let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
 
@@ -1107,8 +1104,7 @@ impl Context<'_> {
 
                         if has_dim_positions {
                             // For dimension positions in A2A context,
-                            // fall back to dynamic evaluation
-                            is_static = false;
+                            // we'll fall through to dynamic handling at the end
                         } else if preserve_for_iteration {
                             // View has extra dims beyond active dims - return StaticSubscript for iteration
                             return Ok(Expr::StaticSubscript(off, view, *loc));
@@ -1213,12 +1209,14 @@ impl Context<'_> {
 
                             return Ok(Expr::Var(off + view.offset + result_index, *loc));
                         }
-                    }
 
-                    if !is_static {
-                        // Fall through to dynamic handling
+                        if !has_dim_positions {
+                            // No dimension positions - use StaticSubscript for the full view
+                            return Ok(Expr::StaticSubscript(off, view, *loc));
+                        }
+                        // has_dim_positions is true - fall through to dynamic handling
                     } else {
-                        // Not in iteration context or no dimension positions - use StaticSubscript for the full view
+                        // Not in A2A context - return StaticSubscript for the full view
                         return Ok(Expr::StaticSubscript(off, view, *loc));
                     }
                 }
