@@ -1078,43 +1078,31 @@ impl Context<'_> {
                         // any iteration-preserving op should keep the array for iteration.
                         // This handles cases like SUM(b[*]) or SUM(b[*:SubA]) or SUM(b[1:3])
                         // where we want to iterate all elements, not collapse to current element.
-                        let should_skip_collapse = if self.preserve_wildcards_for_iteration {
-                            // Inside array-reducing builtins: preserve for iteration
-                            has_iteration_preserving_ops
-                        } else {
-                            // At top level of A2A: only skip if preserving op is on non-active dim
-                            let active_dim_names_set: std::collections::HashSet<_> =
-                                active_dims.iter().map(|d| canonicalize(d.name())).collect();
-
-                            operations.iter().enumerate().any(|(i, op)| {
-                                match op {
-                                    IndexOp::Wildcard => {
-                                        // For wildcards, check if dim is non-active
-                                        if i < dims.len() {
-                                            let dim_name = canonicalize(dims[i].name());
-                                            !active_dim_names_set.contains(&dim_name)
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    // SparseRange (*:SubDim) and Range at top-level A2A should
-                                    // collapse because they're designed to match active dims
-                                    _ => false,
-                                }
-                            })
-                        };
+                        let preserve_for_iteration =
+                            self.preserve_wildcards_for_iteration && has_iteration_preserving_ops;
 
                         if has_dim_positions {
                             // For dimension positions in A2A context,
                             // fall back to dynamic evaluation
                             is_static = false;
-                        } else if should_skip_collapse {
+                        } else if preserve_for_iteration {
                             // View has extra dims beyond active dims - return StaticSubscript for iteration
                             return Ok(Expr::StaticSubscript(off, view, *loc));
                         } else {
+                            if view.dims.is_empty() {
+                                return Ok(Expr::Var(off + view.offset, *loc));
+                            }
+                            if view.dims.len() != active_dims.len() {
+                                return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                            }
+                            for (view_dim, active_dim) in view.dims.iter().zip(active_dims.iter()) {
+                                if *view_dim != active_dim.len() {
+                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                                }
+                            }
+
                             // Calculate the linear index in the result array based on the view
                             let mut result_index = 0;
-                            let active_dims = self.active_dimension.as_ref().unwrap();
 
                             // Build map of dim_index -> sparse parent_offsets for quick lookup
                             let sparse_map: std::collections::HashMap<usize, &[usize]> = view
@@ -1126,91 +1114,77 @@ impl Context<'_> {
                             // For each dimension in the view, find its value from active subscripts
                             // The active subscripts correspond to the OUTPUT dimensions, not the input
                             for (view_idx, stride) in view.strides.iter().enumerate() {
-                                if view_idx < active_subscripts.len() {
-                                    // Get the dimension for this view index
-                                    let dim_idx = dim_mapping[view_idx].unwrap_or(view_idx);
-                                    if dim_idx < dims.len() {
-                                        let source_dim = &dims[dim_idx];
-                                        let target_dim = &active_dims[view_idx];
-                                        let subscript = &active_subscripts[view_idx];
-
-                                        // For sparse dimensions, we need to find which sparse index
-                                        // corresponds to the subscript's absolute offset in the parent
-                                        let is_sparse = sparse_map.contains_key(&view_idx);
-
-                                        // For named dimensions, try to look up the subscript in the
-                                        // source dimension. This handles cases like StarRange where
-                                        // source and target dimensions share element names (SubA
-                                        // elements exist in DimA).
-                                        //
-                                        // For indexed dimensions with different source/target dims,
-                                        // use the subscript's 0-based position directly.
-                                        let rel_offset = match source_dim {
-                                            Dimension::Named(_, _) => {
-                                                // Try lookup in source dimension first
-                                                if let Some(abs_offset) =
-                                                    source_dim.get_offset(subscript)
-                                                {
-                                                    if is_sparse {
-                                                        // For sparse dimensions in A2A, use the absolute
-                                                        // offset to access the source element directly.
-                                                        // The sparse parent_offsets are for iteration;
-                                                        // in A2A we want the actual source position.
-                                                        abs_offset
-                                                    } else {
-                                                        // Subscript found in source - adjust for range start
-                                                        let start_offset = single_indices[dim_idx];
-                                                        abs_offset.checked_sub(start_offset)
-                                                            .expect("abs_offset should be >= start_offset in subdimension range")
-                                                    }
-                                                } else {
-                                                    // Subscript not in source - use position
-                                                    if let Ok(idx) =
-                                                        subscript.as_str().parse::<usize>()
-                                                    {
-                                                        idx - 1
-                                                    } else {
-                                                        0
-                                                    }
-                                                }
-                                            }
-                                            Dimension::Indexed(_, _) => {
-                                                // For indexed dimensions, check if source and target
-                                                // are the same dimension. If not, use position.
-                                                if source_dim.name() == target_dim.name() {
-                                                    // Same indexed dim - look up subscript
-                                                    if let Some(abs_offset) =
-                                                        source_dim.get_offset(subscript)
-                                                    {
-                                                        if is_sparse {
-                                                            // For sparse dimensions in A2A, use the absolute
-                                                            // offset to access the source element directly
-                                                            abs_offset
-                                                        } else {
-                                                            let start_offset =
-                                                                single_indices[dim_idx];
-                                                            abs_offset.checked_sub(start_offset)
-                                                                .expect("abs_offset should be >= start_offset in subdimension range")
-                                                        }
-                                                    } else {
-                                                        0
-                                                    }
-                                                } else {
-                                                    // Different indexed dims - use position
-                                                    if let Ok(idx) =
-                                                        subscript.as_str().parse::<usize>()
-                                                    {
-                                                        idx - 1
-                                                    } else {
-                                                        0
-                                                    }
-                                                }
-                                            }
-                                        };
-
-                                        result_index += rel_offset * (*stride as usize);
-                                    }
+                                // Get the dimension for this view index
+                                let dim_idx = if let Some(dim_idx) =
+                                    dim_mapping.get(view_idx).and_then(|idx| *idx)
+                                {
+                                    dim_idx
+                                } else {
+                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                                };
+                                if dim_idx >= dims.len() {
+                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
                                 }
+
+                                let source_dim = &dims[dim_idx];
+                                let target_dim = &active_dims[view_idx];
+                                let subscript = &active_subscripts[view_idx];
+
+                                // For sparse dimensions, we need to find which sparse index
+                                // corresponds to the subscript's absolute offset in the parent
+                                let is_sparse = sparse_map.contains_key(&view_idx);
+
+                                let prefer_source = source_dim.name() == target_dim.name()
+                                    || matches!(source_dim, Dimension::Named(_, _));
+
+                                let source_offset = if prefer_source {
+                                    source_dim.get_offset(subscript)
+                                } else {
+                                    None
+                                };
+                                let target_offset = if source_offset.is_none() {
+                                    target_dim.get_offset(subscript)
+                                } else {
+                                    None
+                                };
+
+                                let (abs_offset, offset_from_source) = if let Some(abs_offset) =
+                                    source_offset
+                                {
+                                    (abs_offset, true)
+                                } else if let Some(abs_offset) = target_offset {
+                                    (abs_offset, false)
+                                } else {
+                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+                                };
+
+                                let rel_offset = if is_sparse {
+                                    if !offset_from_source {
+                                        return sim_err!(
+                                            MismatchedDimensions,
+                                            id.as_str().to_string()
+                                        );
+                                    }
+                                    // For sparse dimensions in A2A, use the absolute
+                                    // offset to access the source element directly.
+                                    abs_offset
+                                } else if offset_from_source {
+                                    // Subscript found in source - adjust for range start
+                                    let start_offset = single_indices[dim_idx];
+                                    if let Some(rel_offset) = abs_offset.checked_sub(start_offset) {
+                                        rel_offset
+                                    } else {
+                                        return sim_err!(
+                                            MismatchedDimensions,
+                                            id.as_str().to_string()
+                                        );
+                                    }
+                                } else {
+                                    // Different dimension name: map by target position.
+                                    abs_offset
+                                };
+
+                                result_index += rel_offset * (*stride as usize);
                             }
 
                             return Ok(Expr::Var(off + view.offset + result_index, *loc));
@@ -2291,6 +2265,8 @@ fn create_temp_for_array_expr(
         return (expr, vec![]);
     }
     let view = view.unwrap();
+    // Temporary arrays store a contiguous copy of the view.
+    let temp_view = ArrayView::contiguous(view.dims.clone());
 
     let temp_id = *next_temp_id;
     *next_temp_id += 1;
@@ -2300,10 +2276,10 @@ fn create_temp_for_array_expr(
     temp_sizes.push(size);
 
     // Create the assignment to populate the temporary
-    let assign = Expr::AssignTemp(temp_id, Box::new(expr), view.clone());
+    let assign = Expr::AssignTemp(temp_id, Box::new(expr), temp_view.clone());
 
     // Return a reference to the temporary
-    let temp_ref = Expr::TempArray(temp_id, view, Loc::default());
+    let temp_ref = Expr::TempArray(temp_id, temp_view, Loc::default());
 
     (temp_ref, vec![assign])
 }

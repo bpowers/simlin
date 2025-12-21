@@ -74,10 +74,17 @@ pub struct ModuleEvaluator<'a> {
 }
 
 impl ModuleEvaluator<'_> {
-    /// Helper to find array dimensions from an expression (returns first StaticSubscript's dims)
-    fn find_array_dims(expr: &Expr) -> Option<&[usize]> {
+    /// Helper to find array dimensions from an expression (returns a cloned dims vector)
+    fn find_array_dims(expr: &Expr) -> Option<Vec<usize>> {
         match expr {
-            Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => Some(&view.dims),
+            Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => {
+                Some(view.dims.clone())
+            }
+            Expr::Op1(UnaryOp::Transpose, inner, _) => Self::find_array_dims(inner).map(|dims| {
+                let mut dims = dims;
+                dims.reverse();
+                dims
+            }),
             Expr::Op1(_, inner, _) => Self::find_array_dims(inner),
             Expr::Op2(_, left, right, _) => {
                 Self::find_array_dims(left).or_else(|| Self::find_array_dims(right))
@@ -96,8 +103,8 @@ impl ModuleEvaluator<'_> {
                 | BuiltinFn::Sin(e)
                 | BuiltinFn::Sqrt(e)
                 | BuiltinFn::Tan(e) => Self::find_array_dims(e),
-                BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => Self::find_array_dims(a)
-                    .or_else(|| b.as_ref().and_then(|e| Self::find_array_dims(e))),
+                BuiltinFn::Max(_, None) | BuiltinFn::Min(_, None) => None,
+                BuiltinFn::Max(_, Some(_)) | BuiltinFn::Min(_, Some(_)) => None,
                 BuiltinFn::SafeDiv(a, b, _) => {
                     Self::find_array_dims(a).or_else(|| Self::find_array_dims(b))
                 }
@@ -150,6 +157,10 @@ impl ModuleEvaluator<'_> {
                 let start = self.sim.temp_offsets[id];
                 let temps = (*self.sim.temps).borrow();
                 let size: usize = view.dims.iter().product();
+                debug_assert!(
+                    view.offset == 0 && view.sparse.is_empty() && view.is_contiguous(),
+                    "TempArray view should be contiguous and rebased"
+                );
                 if index < size {
                     temps[start + index]
                 } else {
@@ -167,8 +178,12 @@ impl ModuleEvaluator<'_> {
                         }
                     }
                     UnaryOp::Transpose => {
-                        // Transpose doesn't make sense for scalar evaluation
-                        val
+                        if let Some(dims) = Self::find_array_dims(expr) {
+                            let orig_idx = transpose_flat_index(index, &dims);
+                            self.eval_at_index(inner, orig_idx)
+                        } else {
+                            val
+                        }
                     }
                 }
             }
@@ -352,7 +367,7 @@ impl ModuleEvaluator<'_> {
                         f(self.eval_at_index(expr, i));
                     }
                 } else {
-                    panic!("iter_array_elements called with non-array expression: {expr:?}");
+                    f(self.eval(expr));
                 }
             }
         }
@@ -365,14 +380,9 @@ impl ModuleEvaluator<'_> {
                 view.dims.iter().product()
             }
             Expr::TempArrayElement(_, _, _, _) => 1, // Single element
-            _ => {
-                // Handle composite expressions by finding array dims
-                if let Some(dims) = Self::find_array_dims(expr) {
-                    dims.iter().product()
-                } else {
-                    panic!("get_array_size called with non-array expression: {expr:?}")
-                }
-            }
+            _ => Self::find_array_dims(expr)
+                .map(|dims| dims.iter().product())
+                .unwrap_or(1),
         }
     }
 
@@ -726,10 +736,14 @@ impl ModuleEvaluator<'_> {
                 let temp_data = (*self.sim.temps).borrow();
 
                 let size = view.dims.iter().product::<usize>();
+                debug_assert!(
+                    view.offset == 0 && view.sparse.is_empty() && view.is_contiguous(),
+                    "TempArray view should be contiguous and rebased"
+                );
 
                 // If it's a single-element array, return that element
                 if size == 1 {
-                    return temp_data[start + view.offset];
+                    return temp_data[start];
                 }
 
                 // For multi-element arrays, TempArray cannot be evaluated as scalar
