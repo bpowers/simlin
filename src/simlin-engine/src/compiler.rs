@@ -1301,6 +1301,16 @@ impl Context<'_> {
                 if args.len() != dims.len() {
                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
                 }
+                for arg in args {
+                    if let IndexExpr2::Expr(expr) = arg
+                        && expr.get_array_bounds().is_some()
+                    {
+                        return sim_err!(
+                            Generic,
+                            format!("array-valued subscript expression for '{}'", id.as_str())
+                        );
+                    }
+                }
 
                 // Try to normalize subscripts to static operations
                 let config = SubscriptConfig {
