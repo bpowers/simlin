@@ -828,7 +828,7 @@ impl Context<'_> {
         match expr {
             ast::Expr2::Var(id, Some(bounds), loc) => {
                 // Expand bare array variable to Subscript with dimension name subscripts
-                let subscripts = self.make_dimension_subscripts(bounds, *loc);
+                let subscripts = self.make_dimension_subscripts(id, bounds, *loc);
                 ast::Expr2::Subscript(id.clone(), subscripts, Some(bounds.clone()), *loc)
             }
             ast::Expr2::Var(_, None, _) => expr.clone(), // Scalar - unchanged
@@ -879,6 +879,7 @@ impl Context<'_> {
     /// - Full reduction: total = SUM(source) where source is [A,B] -> SUM(source[*,*])
     fn make_dimension_subscripts(
         &self,
+        ident: &Ident<Canonical>,
         bounds: &ast::ArrayBounds,
         loc: Loc,
     ) -> Vec<ast::IndexExpr2> {
@@ -889,54 +890,42 @@ impl Context<'_> {
             .map(|dims| dims.iter().map(|d| canonicalize(d.name())).collect())
             .unwrap_or_default();
 
-        if let Some(dim_names) = bounds.dim_names() {
-            // We have explicit dimension names from the source array
-            dim_names
+        let dim_names: Option<Vec<Ident<Canonical>>> = match bounds.dim_names() {
+            Some(names) => Some(
+                names
+                    .iter()
+                    .map(|name| canonicalize(name))
+                    .collect::<Vec<Ident<Canonical>>>(),
+            ),
+            None => self
+                .get_metadata(ident)
+                .ok()
+                .and_then(|metadata| metadata.var.get_dimensions())
+                .map(|dims| {
+                    dims.iter()
+                        .map(|d| canonicalize(d.name()))
+                        .collect::<Vec<Ident<Canonical>>>()
+                }),
+        };
+
+        let Some(dim_names) = dim_names else {
+            return bounds
+                .dims()
                 .iter()
-                .map(|name| {
-                    let canonical = canonicalize(name);
-                    if active_dim_names.contains(&canonical) {
-                        // This dimension is active - use dimension name for A2A binding
-                        ast::IndexExpr2::Expr(ast::Expr2::Var(canonical, None, loc))
-                    } else {
-                        // This dimension is not active - use wildcard for iteration/reduction
-                        ast::IndexExpr2::Wildcard(loc)
-                    }
-                })
-                .collect()
-        } else {
-            // No dim_names available (e.g., indexed dimensions without explicit names)
-            // Try to match by size, but only use dimension names for active dimensions
-            let dims = bounds.dims();
-            let mut result = Vec::with_capacity(dims.len());
-            let mut used_dims = std::collections::HashSet::new();
+                .map(|_| ast::IndexExpr2::Wildcard(loc))
+                .collect();
+        };
 
-            for &size in dims {
-                let mut found = false;
-                for dim in &self.dimensions {
-                    let dim_name = canonicalize(dim.name());
-                    if dim.len() == size && !used_dims.contains(&dim_name) {
-                        used_dims.insert(dim_name.clone());
-                        if active_dim_names.contains(&dim_name) {
-                            // Active dimension - use dimension name
-                            result
-                                .push(ast::IndexExpr2::Expr(ast::Expr2::Var(dim_name, None, loc)));
-                        } else {
-                            // Not active - use wildcard
-                            result.push(ast::IndexExpr2::Wildcard(loc));
-                        }
-                        found = true;
-                        break;
-                    }
+        dim_names
+            .iter()
+            .map(|name| {
+                if active_dim_names.contains(name) {
+                    ast::IndexExpr2::Expr(ast::Expr2::Var(name.clone(), None, loc))
+                } else {
+                    ast::IndexExpr2::Wildcard(loc)
                 }
-                if !found {
-                    // Couldn't find matching dimension - use wildcard
-                    result.push(ast::IndexExpr2::Wildcard(loc));
-                }
-            }
-
-            result
-        }
+            })
+            .collect()
     }
 
     /// Recursively process index expressions
