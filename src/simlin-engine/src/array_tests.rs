@@ -2035,6 +2035,19 @@ mod pass0_structural_lowering_tests {
     }
 
     #[test]
+    fn a2a_transpose_of_composite_expression() {
+        // (matrix + 1)' should transpose the composite expression
+        TestProject::new("test")
+            .indexed_dimension("Row", 2)
+            .indexed_dimension("Col", 3)
+            .array_aux("matrix[Row, Col]", "Row + (Col - 1) * 2")
+            .array_aux("transposed_plus_one[Col, Row]", "(matrix + 1)'")
+            // matrix + 1: [2,4,6; 3,5,7]
+            // transposed: [2,3; 4,5; 6,7]
+            .assert_interpreter_result("transposed_plus_one", &[2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
     fn builtin_args_expanded() {
         // SUM(arr) where arr is bare array reference
         // (2 time steps: t=0 and t=1)
@@ -2043,6 +2056,19 @@ mod pass0_structural_lowering_tests {
             .array_const("arr[D]", 2.0)
             .scalar_aux("total", "SUM(arr)") // bare array in SUM
             .assert_interpreter_result("total", &[10.0, 10.0]);
+    }
+
+    #[test]
+    fn sum_bare_array_in_a2a_context() {
+        // SUM(m) in A2A context should bind active dims and reduce others.
+        let project = TestProject::new("test")
+            .named_dimension("DimD", &["D1", "D2"])
+            .named_dimension("DimE", &["E1", "E2"])
+            // m[D1,E1]=1, m[D1,E2]=2, m[D2,E1]=11, m[D2,E2]=12
+            .array_aux("m[DimD, DimE]", "(DimD - 1) * 10 + DimE")
+            .array_aux("msum[DimD]", "SUM(m)");
+
+        project.assert_interpreter_result("msum", &[3.0, 23.0]);
     }
 
     #[test]
