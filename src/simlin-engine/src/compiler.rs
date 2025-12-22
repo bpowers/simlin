@@ -817,10 +817,259 @@ impl Context<'_> {
         }
     }
 
-    /// Pass-through to lower_late. This stub exists to make room for future
-    /// normalization passes that will be inserted before lower_late.
+    /// Pass 0: Structural lowering - expands bare array variable references.
+    ///
+    /// Transforms `Expr2::Var` with ArrayBounds into `Expr2::Subscript` with
+    /// dimension name subscripts. This ensures:
+    /// 1. Subsequent phases can treat all Var nodes as scalars
+    /// 2. Dimension bindings are explicit for A2A processing
+    /// 3. Dimension reordering works correctly
+    fn lower_pass0(&self, expr: &ast::Expr2) -> ast::Expr2 {
+        match expr {
+            ast::Expr2::Var(id, Some(bounds), loc) => {
+                // Expand bare array variable to Subscript with dimension name subscripts
+                let subscripts = self.make_dimension_subscripts(bounds, *loc);
+                ast::Expr2::Subscript(id.clone(), subscripts, Some(bounds.clone()), *loc)
+            }
+            ast::Expr2::Var(_, None, _) => expr.clone(), // Scalar - unchanged
+            ast::Expr2::Const(_, _, _) => expr.clone(),
+            ast::Expr2::Subscript(id, args, bounds, loc) => {
+                // Recursively process expressions inside subscripts
+                let new_args: Vec<ast::IndexExpr2> = args
+                    .iter()
+                    .map(|arg| self.lower_pass0_index_expr(arg))
+                    .collect();
+                ast::Expr2::Subscript(id.clone(), new_args, bounds.clone(), *loc)
+            }
+            ast::Expr2::Op1(op, inner, bounds, loc) => {
+                match op {
+                    ast::UnaryOp::Transpose => {
+                        // For transpose of a bare array, preserve the Var node.
+                        // lower_late has special handling for Transpose(Var(...)) that
+                        // reverses dimensions and handles A2A context correctly.
+                        // Expanding here would create Transpose(Subscript(...)) which
+                        // wouldn't match that pattern and would fail.
+                        if matches!(&**inner, ast::Expr2::Var(_, Some(_), _)) {
+                            expr.clone()
+                        } else {
+                            // For non-bare expressions like (a + b)', recurse normally
+                            ast::Expr2::Op1(
+                                *op,
+                                Box::new(self.lower_pass0(inner)),
+                                bounds.clone(),
+                                *loc,
+                            )
+                        }
+                    }
+                    _ => ast::Expr2::Op1(
+                        *op,
+                        Box::new(self.lower_pass0(inner)),
+                        bounds.clone(),
+                        *loc,
+                    ),
+                }
+            }
+            ast::Expr2::Op2(op, left, right, bounds, loc) => ast::Expr2::Op2(
+                *op,
+                Box::new(self.lower_pass0(left)),
+                Box::new(self.lower_pass0(right)),
+                bounds.clone(),
+                *loc,
+            ),
+            ast::Expr2::If(cond, then_branch, else_branch, bounds, loc) => ast::Expr2::If(
+                Box::new(self.lower_pass0(cond)),
+                Box::new(self.lower_pass0(then_branch)),
+                Box::new(self.lower_pass0(else_branch)),
+                bounds.clone(),
+                *loc,
+            ),
+            ast::Expr2::App(builtin, bounds, loc) => {
+                let new_builtin = self.lower_pass0_builtin(builtin);
+                ast::Expr2::App(new_builtin, bounds.clone(), *loc)
+            }
+        }
+    }
+
+    /// Create dimension name subscripts from ArrayBounds.
+    ///
+    /// For each dimension in bounds:
+    /// - If the dimension is in the active set, use a dimension name subscript
+    ///   (creates proper A2A binding via ActiveDimRef)
+    /// - If the dimension is NOT in the active set, use a wildcard
+    ///   (needed for reductions like SUM where we iterate over non-active dims)
+    ///
+    /// This handles:
+    /// - Full A2A: result[A,B] = source where source is [A,B] -> source[A,B]
+    /// - Partial reduction: result[A] = SUM(source) where source is [A,B] -> SUM(source[A,*])
+    /// - Full reduction: total = SUM(source) where source is [A,B] -> SUM(source[*,*])
+    fn make_dimension_subscripts(
+        &self,
+        bounds: &ast::ArrayBounds,
+        loc: Loc,
+    ) -> Vec<ast::IndexExpr2> {
+        // Build set of active dimension names (canonicalized)
+        let active_dim_names: std::collections::HashSet<Ident<Canonical>> = self
+            .active_dimension
+            .as_ref()
+            .map(|dims| dims.iter().map(|d| canonicalize(d.name())).collect())
+            .unwrap_or_default();
+
+        if let Some(dim_names) = bounds.dim_names() {
+            // We have explicit dimension names from the source array
+            dim_names
+                .iter()
+                .map(|name| {
+                    let canonical = canonicalize(name);
+                    if active_dim_names.contains(&canonical) {
+                        // This dimension is active - use dimension name for A2A binding
+                        ast::IndexExpr2::Expr(ast::Expr2::Var(canonical, None, loc))
+                    } else {
+                        // This dimension is not active - use wildcard for iteration/reduction
+                        ast::IndexExpr2::Wildcard(loc)
+                    }
+                })
+                .collect()
+        } else {
+            // No dim_names available (e.g., indexed dimensions without explicit names)
+            // Try to match by size, but only use dimension names for active dimensions
+            let dims = bounds.dims();
+            let mut result = Vec::with_capacity(dims.len());
+            let mut used_dims = std::collections::HashSet::new();
+
+            for &size in dims {
+                let mut found = false;
+                for dim in &self.dimensions {
+                    let dim_name = canonicalize(dim.name());
+                    if dim.len() == size && !used_dims.contains(&dim_name) {
+                        used_dims.insert(dim_name.clone());
+                        if active_dim_names.contains(&dim_name) {
+                            // Active dimension - use dimension name
+                            result
+                                .push(ast::IndexExpr2::Expr(ast::Expr2::Var(dim_name, None, loc)));
+                        } else {
+                            // Not active - use wildcard
+                            result.push(ast::IndexExpr2::Wildcard(loc));
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    // Couldn't find matching dimension - use wildcard
+                    result.push(ast::IndexExpr2::Wildcard(loc));
+                }
+            }
+
+            result
+        }
+    }
+
+    /// Recursively process index expressions
+    fn lower_pass0_index_expr(&self, expr: &ast::IndexExpr2) -> ast::IndexExpr2 {
+        match expr {
+            ast::IndexExpr2::Expr(inner) => ast::IndexExpr2::Expr(self.lower_pass0(inner)),
+            ast::IndexExpr2::Range(start, end, loc) => {
+                ast::IndexExpr2::Range(self.lower_pass0(start), self.lower_pass0(end), *loc)
+            }
+            // Wildcard, StarRange, DimPosition remain unchanged
+            ast::IndexExpr2::Wildcard(_)
+            | ast::IndexExpr2::StarRange(_, _)
+            | ast::IndexExpr2::DimPosition(_, _) => expr.clone(),
+        }
+    }
+
+    /// Recursively process builtin function arguments
+    fn lower_pass0_builtin(
+        &self,
+        builtin: &crate::builtins::BuiltinFn<ast::Expr2>,
+    ) -> crate::builtins::BuiltinFn<ast::Expr2> {
+        use crate::builtins::BuiltinFn::*;
+        match builtin {
+            // Single expression argument
+            Abs(e) => Abs(Box::new(self.lower_pass0(e))),
+            Arccos(e) => Arccos(Box::new(self.lower_pass0(e))),
+            Arcsin(e) => Arcsin(Box::new(self.lower_pass0(e))),
+            Arctan(e) => Arctan(Box::new(self.lower_pass0(e))),
+            Cos(e) => Cos(Box::new(self.lower_pass0(e))),
+            Exp(e) => Exp(Box::new(self.lower_pass0(e))),
+            Int(e) => Int(Box::new(self.lower_pass0(e))),
+            Ln(e) => Ln(Box::new(self.lower_pass0(e))),
+            Log10(e) => Log10(Box::new(self.lower_pass0(e))),
+            Sign(e) => Sign(Box::new(self.lower_pass0(e))),
+            Sin(e) => Sin(Box::new(self.lower_pass0(e))),
+            Sqrt(e) => Sqrt(Box::new(self.lower_pass0(e))),
+            Tan(e) => Tan(Box::new(self.lower_pass0(e))),
+
+            // Array builtins with single expression
+            Size(e) => Size(Box::new(self.lower_pass0(e))),
+            Stddev(e) => Stddev(Box::new(self.lower_pass0(e))),
+            Sum(e) => Sum(Box::new(self.lower_pass0(e))),
+
+            // Two expression arguments with optional second
+            Max(a, b) => Max(
+                Box::new(self.lower_pass0(a)),
+                b.as_ref().map(|e| Box::new(self.lower_pass0(e))),
+            ),
+            Min(a, b) => Min(
+                Box::new(self.lower_pass0(a)),
+                b.as_ref().map(|e| Box::new(self.lower_pass0(e))),
+            ),
+
+            // Two required expression arguments
+            Step(a, b) => Step(Box::new(self.lower_pass0(a)), Box::new(self.lower_pass0(b))),
+
+            // Three expression arguments (last optional)
+            Pulse(a, b, c) => Pulse(
+                Box::new(self.lower_pass0(a)),
+                Box::new(self.lower_pass0(b)),
+                c.as_ref().map(|e| Box::new(self.lower_pass0(e))),
+            ),
+            Ramp(a, b, c) => Ramp(
+                Box::new(self.lower_pass0(a)),
+                Box::new(self.lower_pass0(b)),
+                c.as_ref().map(|e| Box::new(self.lower_pass0(e))),
+            ),
+            SafeDiv(a, b, c) => SafeDiv(
+                Box::new(self.lower_pass0(a)),
+                Box::new(self.lower_pass0(b)),
+                c.as_ref().map(|e| Box::new(self.lower_pass0(e))),
+            ),
+
+            // Vec of expressions
+            Mean(exprs) => Mean(exprs.iter().map(|e| self.lower_pass0(e)).collect()),
+
+            // Lookup with string table name + expression
+            Lookup(name, e, loc) => Lookup(name.clone(), Box::new(self.lower_pass0(e)), *loc),
+
+            // Rank with complex signature
+            Rank(e, maybe_tuple) => Rank(
+                Box::new(self.lower_pass0(e)),
+                maybe_tuple.as_ref().map(|(a, b)| {
+                    (
+                        Box::new(self.lower_pass0(a)),
+                        b.as_ref().map(|e| Box::new(self.lower_pass0(e))),
+                    )
+                }),
+            ),
+
+            // 0-arity builtins (no expressions to transform)
+            Inf => Inf,
+            Pi => Pi,
+            Time => Time,
+            TimeStep => TimeStep,
+            StartTime => StartTime,
+            FinalTime => FinalTime,
+
+            // IsModuleInput has string + loc, no Expr
+            IsModuleInput(name, loc) => IsModuleInput(name.clone(), *loc),
+        }
+    }
+
+    /// Entry point for lowering Expr2 to compiler's Expr representation.
+    /// Applies pass 0 (structural lowering) then lower_late (full lowering).
     fn lower(&self, expr: &ast::Expr2) -> Result<Expr> {
-        self.lower_late(expr)
+        let normalized = self.lower_pass0(expr);
+        self.lower_late(&normalized)
     }
 
     /// Lowers an Expr2 AST node to the compiler's Expr representation.
