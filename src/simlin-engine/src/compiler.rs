@@ -829,7 +829,8 @@ impl Context<'_> {
             ast::Expr2::Var(id, Some(bounds), loc) => {
                 // Expand bare array variable to Subscript with dimension name subscripts
                 let subscripts = self.make_dimension_subscripts(id, bounds, *loc);
-                ast::Expr2::Subscript(id.clone(), subscripts, Some(bounds.clone()), *loc)
+                let subscript_bounds = self.make_subscript_bounds(id, bounds, &subscripts);
+                ast::Expr2::Subscript(id.clone(), subscripts, subscript_bounds, *loc)
             }
             ast::Expr2::Var(_, None, _) => expr.clone(), // Scalar - unchanged
             ast::Expr2::Const(_, _, _) => expr.clone(),
@@ -926,6 +927,58 @@ impl Context<'_> {
                 }
             })
             .collect()
+    }
+
+    fn make_subscript_bounds(
+        &self,
+        ident: &Ident<Canonical>,
+        bounds: &ast::ArrayBounds,
+        subscripts: &[ast::IndexExpr2],
+    ) -> Option<ast::ArrayBounds> {
+        let dims = self
+            .get_metadata(ident)
+            .ok()
+            .and_then(|metadata| metadata.var.get_dimensions())?;
+
+        let mut result_dims = Vec::new();
+        let mut result_dim_names = Vec::new();
+
+        for (i, subscript) in subscripts.iter().enumerate() {
+            match subscript {
+                ast::IndexExpr2::Wildcard(_) | ast::IndexExpr2::Range(_, _, _) => {
+                    result_dims.push(dims[i].len());
+                    result_dim_names.push(dims[i].name().to_string());
+                }
+                ast::IndexExpr2::StarRange(subdim_name, _) => {
+                    let len = self
+                        .dimensions_ctx
+                        .get(subdim_name)
+                        .map(|dim| dim.len())
+                        .unwrap_or_else(|| dims[i].len());
+                    result_dims.push(len);
+                    result_dim_names.push(subdim_name.as_str().to_string());
+                }
+                ast::IndexExpr2::Expr(_) | ast::IndexExpr2::DimPosition(_, _) => {}
+            }
+        }
+
+        if result_dims.is_empty() {
+            return None;
+        }
+
+        let dim_names = Some(result_dim_names);
+        match bounds {
+            ast::ArrayBounds::Named { name, .. } => Some(ast::ArrayBounds::Named {
+                name: name.clone(),
+                dims: result_dims,
+                dim_names,
+            }),
+            ast::ArrayBounds::Temp { id, .. } => Some(ast::ArrayBounds::Temp {
+                id: *id,
+                dims: result_dims,
+                dim_names,
+            }),
+        }
     }
 
     /// Recursively process index expressions
