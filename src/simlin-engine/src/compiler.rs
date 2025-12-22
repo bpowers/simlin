@@ -842,32 +842,7 @@ impl Context<'_> {
                 ast::Expr2::Subscript(id.clone(), new_args, bounds.clone(), *loc)
             }
             ast::Expr2::Op1(op, inner, bounds, loc) => {
-                match op {
-                    ast::UnaryOp::Transpose => {
-                        // For transpose of a bare array, preserve the Var node.
-                        // lower_late has special handling for Transpose(Var(...)) that
-                        // reverses dimensions and handles A2A context correctly.
-                        // Expanding here would create Transpose(Subscript(...)) which
-                        // wouldn't match that pattern and would fail.
-                        if matches!(&**inner, ast::Expr2::Var(_, Some(_), _)) {
-                            expr.clone()
-                        } else {
-                            // For non-bare expressions like (a + b)', recurse normally
-                            ast::Expr2::Op1(
-                                *op,
-                                Box::new(self.lower_pass0(inner)),
-                                bounds.clone(),
-                                *loc,
-                            )
-                        }
-                    }
-                    _ => ast::Expr2::Op1(
-                        *op,
-                        Box::new(self.lower_pass0(inner)),
-                        bounds.clone(),
-                        *loc,
-                    ),
-                }
+                ast::Expr2::Op1(*op, Box::new(self.lower_pass0(inner)), bounds.clone(), *loc)
             }
             ast::Expr2::Op2(op, left, right, bounds, loc) => ast::Expr2::Op2(
                 *op,
