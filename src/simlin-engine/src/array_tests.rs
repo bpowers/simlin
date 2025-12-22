@@ -1927,3 +1927,158 @@ mod structural_lowering_tests {
         );
     }
 }
+
+mod pass0_structural_lowering_tests {
+    //! Tests that verify pass 0 structural lowering:
+    //! - Bare array vars become Subscript with dimension name subscripts
+    //! - Scalar vars remain unchanged
+    //! - Nested expressions are recursively transformed
+    //! - Transpose still works correctly
+    //! - Dimension reordering works correctly
+
+    use crate::compiler::{Expr, pretty};
+    use crate::test_common::TestProject;
+
+    #[test]
+    fn bare_array_var_becomes_subscript_with_dim_names() {
+        // result[DimB] = source  (where source is [DimB])
+        // After lowering, source should be referenced with explicit subscript
+        // In A2A context, dimension name subscripts collapse to scalar Var
+        let project = TestProject::new("test")
+            .named_dimension("DimB", &["B1", "B2"])
+            .array_const("source[DimB]", 10.0)
+            .array_aux("result[DimB]", "source"); // bare var reference
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("result");
+
+        // Should have 2 A2A elements
+        assert_eq!(exprs.len(), 2, "expected 2 A2A elements");
+        // Each should collapse to scalar Var (dimension name -> ActiveDimRef -> scalar)
+        for expr in &exprs {
+            if let Expr::AssignCurr(_, inner) = expr {
+                assert!(
+                    matches!(inner.as_ref(), Expr::Var(..)),
+                    "expected Var inside AssignCurr, got: {}",
+                    pretty(expr)
+                );
+            } else {
+                panic!("expected AssignCurr, got: {}", pretty(expr));
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_var_unchanged() {
+        // Scalar variables should remain Var nodes (no ArrayBounds)
+        let project = TestProject::new("test")
+            .scalar_const("x", 5.0)
+            .scalar_aux("y", "x");
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("y");
+        assert_eq!(exprs.len(), 1);
+        // Verify it compiled - scalar vars should work
+        // (2 time steps: t=0 and t=1)
+        project.assert_interpreter_result("y", &[5.0, 5.0]);
+    }
+
+    #[test]
+    fn dimension_reordering_with_bare_arrays() {
+        // p[DimB, DimA] = f  (where f is [DimA, DimB])
+        // Dimension names create correct reordering
+        let project = TestProject::new("test")
+            .named_dimension("DimA", &["A1", "A2"])
+            .named_dimension("DimB", &["B1", "B2", "B3"])
+            // f[A1,B1]=1, f[A1,B2]=2, f[A1,B3]=3, f[A2,B1]=4, f[A2,B2]=5, f[A2,B3]=6
+            .array_aux("f[DimA, DimB]", "(DimA - 1) * 3 + DimB")
+            .array_aux("p[DimB, DimA]", "f"); // reordered dimensions
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("p");
+        // 3 * 2 = 6 A2A elements
+        assert_eq!(exprs.len(), 6, "expected 6 A2A elements");
+
+        // Verify reordering works correctly:
+        // p[B1,A1] = f[A1,B1] = 1
+        // p[B1,A2] = f[A2,B1] = 4
+        // p[B2,A1] = f[A1,B2] = 2
+        // p[B2,A2] = f[A2,B2] = 5
+        // p[B3,A1] = f[A1,B3] = 3
+        // p[B3,A2] = f[A2,B3] = 6
+        project.assert_interpreter_result("p", &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn a2a_transpose_still_works() {
+        // Test that transpose with bare arrays still compiles and runs
+        // This verifies the transpose handling isn't broken by pass 0
+        TestProject::new("test")
+            .indexed_dimension("Row", 2)
+            .indexed_dimension("Col", 3)
+            .array_aux("matrix[Row, Col]", "Row + (Col - 1) * 2")
+            .array_aux("transposed[Col, Row]", "matrix'")
+            // matrix: [1,3,5; 2,4,6] (row-major)
+            // transposed: [1,2; 3,4; 5,6] (row-major)
+            .assert_interpreter_result("transposed", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn a2a_transpose_with_operations() {
+        // matrix' * 2 should still work after pass 0
+        TestProject::new("test")
+            .indexed_dimension("Row", 2)
+            .indexed_dimension("Col", 3)
+            .array_aux("matrix[Row, Col]", "Row + (Col - 1) * 2")
+            .array_aux("transposed_doubled[Col, Row]", "matrix' * 2")
+            .assert_interpreter_result("transposed_doubled", &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
+    }
+
+    #[test]
+    fn builtin_args_expanded() {
+        // SUM(arr) where arr is bare array reference
+        // (2 time steps: t=0 and t=1)
+        TestProject::new("test")
+            .indexed_dimension("D", 5)
+            .array_const("arr[D]", 2.0)
+            .scalar_aux("total", "SUM(arr)") // bare array in SUM
+            .assert_interpreter_result("total", &[10.0, 10.0]);
+    }
+
+    #[test]
+    fn multidimensional_bare_array() {
+        // 2D bare array reference
+        let project = TestProject::new("test")
+            .named_dimension("DimA", &["A1", "A2"])
+            .named_dimension("DimB", &["B1", "B2", "B3"])
+            .array_const("source[DimA, DimB]", 1.0)
+            .array_aux("target[DimA, DimB]", "source");
+
+        let module = project.build_module().expect("should compile");
+        let exprs = module.get_flow_exprs("target");
+        assert_eq!(exprs.len(), 6, "expected 6 A2A elements (2 * 3)");
+    }
+
+    #[test]
+    fn binary_op_with_bare_arrays() {
+        // a + b where both a and b are bare array references
+        TestProject::new("test")
+            .indexed_dimension("D", 3)
+            .array_const("a[D]", 1.0)
+            .array_const("b[D]", 2.0)
+            .array_aux("result[D]", "a + b") // both are bare
+            .assert_interpreter_result("result", &[3.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn nested_bare_arrays_in_if() {
+        // IF cond THEN a ELSE b where a and b are bare arrays
+        TestProject::new("test")
+            .indexed_dimension("D", 3)
+            .array_const("a[D]", 1.0)
+            .array_const("b[D]", 2.0)
+            .array_aux("result[D]", "IF D > 1 THEN a ELSE b")
+            // D=1: b[1]=2, D=2: a[2]=1, D=3: a[3]=1
+            .assert_interpreter_result("result", &[2.0, 1.0, 1.0]);
+    }
+}
