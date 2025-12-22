@@ -1731,17 +1731,22 @@ impl Context<'_> {
                         }
 
                         // Default transpose handling
-                        // If we're in an A2A context and the inner expression might contain bare arrays,
-                        // we need to handle it specially by creating a temporary
                         if self.active_dimension.is_some() {
-                            // In A2A context - the inner expression needs to be processed without A2A
-                            // to get the full array, then we transpose and apply the A2A subscript
-                            // For now, just wrap in transpose and let expression rewriting handle it
+                            // In A2A context, transpose swaps the active indices. We lower the
+                            // inner expression with reversed active dims/subscripts so the
+                            // element-level expression already reflects the transposed access.
                             let mut ctx = self.clone();
-                            ctx.active_dimension = None;
-                            ctx.active_subscript = None;
-                            let l = ctx.lower(l)?;
-                            Expr::Op1(UnaryOp::Transpose, Box::new(l), *loc)
+                            if let Some(ref active_dims) = ctx.active_dimension {
+                                let mut reversed_dims = active_dims.clone();
+                                reversed_dims.reverse();
+                                ctx.active_dimension = Some(reversed_dims);
+                            }
+                            if let Some(ref active_subs) = ctx.active_subscript {
+                                let mut reversed_subs = active_subs.clone();
+                                reversed_subs.reverse();
+                                ctx.active_subscript = Some(reversed_subs);
+                            }
+                            ctx.lower(l)?
                         } else {
                             let l = self.lower(l)?;
                             // Transpose reverses the dimensions of an array
