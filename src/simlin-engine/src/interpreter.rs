@@ -2,11 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+#[cfg(test)]
+use crate::ast::ArrayView;
 use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, Ident, canonicalize};
-#[cfg(test)]
-use crate::compiler::ArrayView;
 use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
 use crate::model::enumerate_modules;
 use crate::sim_err;

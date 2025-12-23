@@ -11,14 +11,19 @@ use crate::dimensions::Dimension;
 use crate::model::{ModelStage0, ScopeStage0};
 use crate::variable::Variable;
 
+mod array_view;
 mod expr0;
 mod expr1;
 mod expr2;
+mod expr3;
 
+pub use array_view::{ArrayView, SparseInfo};
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::Expr1;
 #[allow(unused_imports)]
 pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
+#[allow(unused_imports)]
+pub use expr3::{Expr3, IndexExpr3};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {
