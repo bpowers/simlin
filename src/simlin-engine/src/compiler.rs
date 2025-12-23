@@ -2601,67 +2601,6 @@ pub struct Module {
     pub(crate) tables: HashMap<Ident<Canonical>, Table>,
 }
 
-/// Create a temporary for an array expression
-#[allow(dead_code)]
-fn create_temp_for_array_expr(
-    expr: Expr,
-    next_temp_id: &mut u32,
-    temp_sizes: &mut Vec<usize>,
-) -> (Expr, Vec<Expr>) {
-    // Get the array dimensions from the expression
-    let view = get_array_view(&expr);
-    if view.is_none() {
-        return (expr, vec![]);
-    }
-    let view = view.unwrap();
-    // Temporary arrays store a contiguous copy of the view.
-    let temp_view = ArrayView::contiguous(view.dims.clone());
-
-    let temp_id = *next_temp_id;
-    *next_temp_id += 1;
-
-    // Add the size of this temporary
-    let size = view.dims.iter().product();
-    temp_sizes.push(size);
-
-    // Create the assignment to populate the temporary
-    let assign = Expr::AssignTemp(temp_id, Box::new(expr), temp_view.clone());
-
-    // Return a reference to the temporary
-    let temp_ref = Expr::TempArray(temp_id, temp_view, Loc::default());
-
-    (temp_ref, vec![assign])
-}
-
-/// Extract the array view from an expression
-#[allow(dead_code)]
-fn get_array_view(expr: &Expr) -> Option<ArrayView> {
-    match expr {
-        Expr::StaticSubscript(_, view, _) => Some(view.clone()),
-        Expr::Op2(_, l, r, _) => {
-            // For binary operations, get the view from the array operand
-            get_array_view(l).or_else(|| get_array_view(r))
-        }
-        Expr::Op1(UnaryOp::Transpose, e, _) => {
-            // For transpose, get the view and reverse its dimensions
-            get_array_view(e).map(|view| {
-                let mut transposed_dims = view.dims.clone();
-                transposed_dims.reverse();
-                let mut transposed_strides = view.strides.clone();
-                transposed_strides.reverse();
-                ArrayView {
-                    dims: transposed_dims,
-                    strides: transposed_strides,
-                    offset: view.offset,
-                    sparse: view.sparse.clone(),
-                }
-            })
-        }
-        Expr::Op1(_, e, _) => get_array_view(e),
-        _ => None,
-    }
-}
-
 // calculate a mapping of module variable name -> module model name
 pub(crate) fn calc_module_model_map(
     project: &Project,
