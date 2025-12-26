@@ -112,16 +112,6 @@ This script:
 - Installs yarn dependencies if needed
 - Configures AI tools (Claude CLI or Codex) for pre-commit checks
 
-Alternatively, you can set up manually:
-
-```bash
-# Initialize git submodules (required for tests)
-git submodule update --init --recursive
-
-# Install pre-commit hooks
-yarn install-git-hooks
-```
-
 ### Pre-commit Hooks
 
 The pre-commit hook (`scripts/pre-commit`) runs automatically before each commit and performs:
