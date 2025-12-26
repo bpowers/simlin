@@ -127,15 +127,6 @@ If any check fails, the commit is rejected. Fix the issues and try again.
 
 **Important**: Never use `--no-verify` to skip hooks. The hooks exist to maintain code quality.
 
-**AI Tool Selection**: The test quality check uses Claude CLI or OpenAI Codex CLI:
-- Set via `AI_TOOL` environment variable (`claude` or `codex`)
-- Or auto-configured by `./scripts/cloud-init.sh` (stored in `.ai-tool-config`)
-- Claude is preferred when available; Codex is the fallback
-- Has a 5-minute timeout (configurable via `AI_TIMEOUT`)
-- Skips gracefully if no AI tool is available or if it times out
-
-**Note**: When running `git commit`, use a 5+ minute timeout since the pre-commit hook runs comprehensive checks including tests.
-
 ## Development Commands
 
 ### Build Commands

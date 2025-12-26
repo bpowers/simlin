@@ -133,6 +133,21 @@ fi
 AI_OUTPUT="$(mktemp)"
 AI_TIMEOUT=${AI_TIMEOUT:-300}
 
+# Portable timeout wrapper (works on Linux and macOS)
+# On macOS, 'timeout' is not available by default; use 'gtimeout' from coreutils or skip timeout
+run_with_timeout() {
+    local timeout_secs="$1"
+    shift
+    if command -v timeout > /dev/null 2>&1; then
+        timeout -k 5 "$timeout_secs" "$@"
+    elif command -v gtimeout > /dev/null 2>&1; then
+        gtimeout -k 5 "$timeout_secs" "$@"
+    else
+        # No timeout command available, run without timeout
+        "$@"
+    fi
+}
+
 # Function to run the test check with Claude
 run_claude_check() {
     local CLAUDE_BIN
@@ -141,12 +156,12 @@ run_claude_check() {
     else
         CLAUDE_BIN="$HOME/.claude/local/claude"
     fi
-    timeout -k 5 "$AI_TIMEOUT" "$CLAUDE_BIN" -p --allowedTools 'Bash(git:*)' LS Read --model sonnet "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
+    run_with_timeout "$AI_TIMEOUT" "$CLAUDE_BIN" -p --allowedTools 'Bash(git:*)' LS Read --model sonnet "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
 }
 
 # Function to run the test check with Codex
 run_codex_check() {
-    timeout -k 5 "$AI_TIMEOUT" codex exec -m gpt-5.2 --full-auto "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
+    run_with_timeout "$AI_TIMEOUT" codex exec -m gpt-5.2 --full-auto "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
 }
 
 echo -n "Running AI test quality check ($SELECTED_AI_TOOL)..."
