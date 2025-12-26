@@ -103,11 +103,14 @@ For Claude Code on the web, Codex Web, or any fresh checkout, run the initializa
 ./scripts/cloud-init.sh
 ```
 
+**Important**: This script should be run any time the development environment is initialized or re-initialized (e.g., when a new container session starts, after a fresh clone, or when resuming work in a cloud environment). Running this script ensures the environment is properly configured so that you and other agents can be successful and productive.
+
 This script:
 - Initializes git submodules (required for test models)
 - Installs git pre-commit hooks
 - Verifies required tools are available
 - Installs yarn dependencies if needed
+- Configures AI tools (Claude CLI or Codex) for pre-commit checks
 
 Alternatively, you can set up manually:
 
