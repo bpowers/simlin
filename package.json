@@ -37,7 +37,7 @@
     "rust-format": "cargo fmt",
     "format": "npm-run-all -p js-format rust-format",
     "precommit": "npm-run-all -p js-needs-format rust-needs-format lint",
-    "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../scripts/pre-commit.hook ./pre-commit",
+    "install-git-hooks": "cd .git/hooks && rm -f pre-commit && ln -s ../../scripts/pre-commit ./pre-commit",
     "lint": "yarn rust-lint && yarn workspaces run lint",
     "patch": "true",
     "rust-lint": "cargo clippy",
