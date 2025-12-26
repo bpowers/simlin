@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::ast::{self, Ast, BinaryOp, IndexExpr2, Loc};
+use crate::ast::{self, ArrayView, Ast, BinaryOp, IndexExpr2, Loc, SparseInfo};
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
     ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
@@ -43,99 +43,6 @@ impl Table {
 }
 
 pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
-
-/// Information about a sparse (non-contiguous) dimension in an array view.
-/// Used when a subdimension's elements are not contiguous in the parent dimension.
-#[derive(PartialEq, Clone, Debug)]
-pub struct SparseInfo {
-    /// Which dimension (0-indexed) in the view is sparse
-    pub dim_index: usize,
-    /// Parent offsets to iterate (e.g., [0, 2] for elements at indices 0 and 2)
-    pub parent_offsets: Vec<usize>,
-}
-
-/// Represents a view into array data with support for striding and slicing
-#[derive(PartialEq, Clone, Debug)]
-pub struct ArrayView {
-    /// Dimension sizes after slicing/viewing
-    pub dims: Vec<usize>,
-    /// Stride for each dimension (elements to skip to move by 1 in that dimension)
-    pub strides: Vec<isize>,
-    /// Starting offset in the underlying data
-    pub offset: usize,
-    /// Sparse dimension info (empty means fully contiguous)
-    pub sparse: Vec<SparseInfo>,
-}
-
-impl ArrayView {
-    /// Create a contiguous array view (row-major order)
-    #[allow(dead_code)]
-    pub fn contiguous(dims: Vec<usize>) -> Self {
-        let mut strides = vec![1isize; dims.len()];
-        // Build strides from right to left for row-major order
-        for i in (0..dims.len().saturating_sub(1)).rev() {
-            strides[i] = strides[i + 1] * dims[i + 1] as isize;
-        }
-        ArrayView {
-            dims,
-            strides,
-            offset: 0,
-            sparse: Vec::new(),
-        }
-    }
-
-    /// Total number of elements in the view
-    #[allow(dead_code)]
-    pub fn size(&self) -> usize {
-        self.dims.iter().product()
-    }
-
-    /// Check if this view represents contiguous data in row-major order
-    #[allow(dead_code)]
-    pub fn is_contiguous(&self) -> bool {
-        if self.offset != 0 || !self.sparse.is_empty() {
-            return false;
-        }
-
-        let mut expected_stride = 1isize;
-        for i in (0..self.dims.len()).rev() {
-            if self.strides[i] != expected_stride {
-                return false;
-            }
-            expected_stride *= self.dims[i] as isize;
-        }
-        true
-    }
-
-    /// Apply a range subscript to create a new view
-    #[allow(dead_code)]
-    pub fn apply_range_subscript(
-        &self,
-        dim_index: usize,
-        start: usize,
-        end: usize,
-    ) -> Result<ArrayView> {
-        if dim_index >= self.dims.len() {
-            return sim_err!(Generic, "dimension index out of bounds".to_string());
-        }
-        if start >= end || end > self.dims[dim_index] {
-            return sim_err!(Generic, "invalid range bounds".to_string());
-        }
-
-        let mut new_dims = self.dims.clone();
-        new_dims[dim_index] = end - start;
-
-        let new_strides = self.strides.clone();
-        let new_offset = self.offset + (start * self.strides[dim_index] as usize);
-
-        Ok(ArrayView {
-            dims: new_dims,
-            strides: new_strides,
-            offset: new_offset,
-            sparse: self.sparse.clone(),
-        })
-    }
-}
 
 /// Represents a subscript operation after parsing but before view construction.
 /// Used to normalize different subscript syntaxes into a uniform representation
@@ -2599,67 +2506,6 @@ pub struct Module {
     pub(crate) offsets: VariableOffsetMap,
     pub(crate) runlist_order: Vec<Ident<Canonical>>,
     pub(crate) tables: HashMap<Ident<Canonical>, Table>,
-}
-
-/// Create a temporary for an array expression
-#[allow(dead_code)]
-fn create_temp_for_array_expr(
-    expr: Expr,
-    next_temp_id: &mut u32,
-    temp_sizes: &mut Vec<usize>,
-) -> (Expr, Vec<Expr>) {
-    // Get the array dimensions from the expression
-    let view = get_array_view(&expr);
-    if view.is_none() {
-        return (expr, vec![]);
-    }
-    let view = view.unwrap();
-    // Temporary arrays store a contiguous copy of the view.
-    let temp_view = ArrayView::contiguous(view.dims.clone());
-
-    let temp_id = *next_temp_id;
-    *next_temp_id += 1;
-
-    // Add the size of this temporary
-    let size = view.dims.iter().product();
-    temp_sizes.push(size);
-
-    // Create the assignment to populate the temporary
-    let assign = Expr::AssignTemp(temp_id, Box::new(expr), temp_view.clone());
-
-    // Return a reference to the temporary
-    let temp_ref = Expr::TempArray(temp_id, temp_view, Loc::default());
-
-    (temp_ref, vec![assign])
-}
-
-/// Extract the array view from an expression
-#[allow(dead_code)]
-fn get_array_view(expr: &Expr) -> Option<ArrayView> {
-    match expr {
-        Expr::StaticSubscript(_, view, _) => Some(view.clone()),
-        Expr::Op2(_, l, r, _) => {
-            // For binary operations, get the view from the array operand
-            get_array_view(l).or_else(|| get_array_view(r))
-        }
-        Expr::Op1(UnaryOp::Transpose, e, _) => {
-            // For transpose, get the view and reverse its dimensions
-            get_array_view(e).map(|view| {
-                let mut transposed_dims = view.dims.clone();
-                transposed_dims.reverse();
-                let mut transposed_strides = view.strides.clone();
-                transposed_strides.reverse();
-                ArrayView {
-                    dims: transposed_dims,
-                    strides: transposed_strides,
-                    offset: view.offset,
-                    sparse: view.sparse.clone(),
-                }
-            })
-        }
-        Expr::Op1(_, e, _) => get_array_view(e),
-        _ => None,
-    }
 }
 
 // calculate a mapping of module variable name -> module model name

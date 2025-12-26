@@ -129,6 +129,90 @@ impl<Expr> BuiltinFn<Expr> {
             Sum(_) => "sum",
         }
     }
+
+    /// Transform all expression arguments in this builtin using the provided function.
+    /// Returns an error if any transformation fails.
+    pub fn try_map<F, E2, Err>(self, mut f: F) -> std::result::Result<BuiltinFn<E2>, Err>
+    where
+        F: FnMut(Expr) -> std::result::Result<E2, Err>,
+    {
+        use BuiltinFn::*;
+        Ok(match self {
+            Lookup(id, expr, loc) => Lookup(id, Box::new(f(*expr)?), loc),
+            Abs(a) => Abs(Box::new(f(*a)?)),
+            Arccos(a) => Arccos(Box::new(f(*a)?)),
+            Arcsin(a) => Arcsin(Box::new(f(*a)?)),
+            Arctan(a) => Arctan(Box::new(f(*a)?)),
+            Cos(a) => Cos(Box::new(f(*a)?)),
+            Exp(a) => Exp(Box::new(f(*a)?)),
+            Inf => Inf,
+            Int(a) => Int(Box::new(f(*a)?)),
+            IsModuleInput(id, loc) => IsModuleInput(id, loc),
+            Ln(a) => Ln(Box::new(f(*a)?)),
+            Log10(a) => Log10(Box::new(f(*a)?)),
+            Max(a, b) => Max(
+                Box::new(f(*a)?),
+                b.map(|b| f(*b)).transpose()?.map(Box::new),
+            ),
+            Mean(args) => Mean(
+                args.into_iter()
+                    .map(&mut f)
+                    .collect::<std::result::Result<_, _>>()?,
+            ),
+            Min(a, b) => Min(
+                Box::new(f(*a)?),
+                b.map(|b| f(*b)).transpose()?.map(Box::new),
+            ),
+            Pi => Pi,
+            Pulse(a, b, c) => Pulse(
+                Box::new(f(*a)?),
+                Box::new(f(*b)?),
+                c.map(|c| f(*c)).transpose()?.map(Box::new),
+            ),
+            Ramp(a, b, c) => Ramp(
+                Box::new(f(*a)?),
+                Box::new(f(*b)?),
+                c.map(|c| f(*c)).transpose()?.map(Box::new),
+            ),
+            SafeDiv(a, b, c) => SafeDiv(
+                Box::new(f(*a)?),
+                Box::new(f(*b)?),
+                c.map(|c| f(*c)).transpose()?.map(Box::new),
+            ),
+            Sign(a) => Sign(Box::new(f(*a)?)),
+            Sin(a) => Sin(Box::new(f(*a)?)),
+            Sqrt(a) => Sqrt(Box::new(f(*a)?)),
+            Step(a, b) => Step(Box::new(f(*a)?), Box::new(f(*b)?)),
+            Tan(a) => Tan(Box::new(f(*a)?)),
+            Time => Time,
+            TimeStep => TimeStep,
+            StartTime => StartTime,
+            FinalTime => FinalTime,
+            Rank(a, rest) => Rank(
+                Box::new(f(*a)?),
+                rest.map(|(b, c)| {
+                    Ok::<_, Err>((
+                        Box::new(f(*b)?),
+                        c.map(|c| f(*c)).transpose()?.map(Box::new),
+                    ))
+                })
+                .transpose()?,
+            ),
+            Size(a) => Size(Box::new(f(*a)?)),
+            Stddev(a) => Stddev(Box::new(f(*a)?)),
+            Sum(a) => Sum(Box::new(f(*a)?)),
+        })
+    }
+
+    /// Transform all expression arguments in this builtin using the provided function.
+    /// Infallible version of try_map.
+    pub fn map<F, E2>(self, mut f: F) -> BuiltinFn<E2>
+    where
+        F: FnMut(Expr) -> E2,
+    {
+        self.try_map(|e| Ok::<_, std::convert::Infallible>(f(e)))
+            .unwrap()
+    }
 }
 
 pub fn is_0_arity_builtin_fn(name: &str) -> bool {
@@ -266,4 +350,58 @@ fn test_name() {
 
     assert_eq!("inf", Builtin::Inf.name());
     assert_eq!("time", Builtin::Time.name());
+}
+
+#[test]
+fn test_map() {
+    // Test that map correctly transforms expression types
+    let builtin: BuiltinFn<i32> = BuiltinFn::Abs(Box::new(42));
+    let mapped: BuiltinFn<String> = builtin.map(|x| x.to_string());
+    assert_eq!(mapped.name(), "abs");
+    if let BuiltinFn::Abs(x) = mapped {
+        assert_eq!(*x, "42");
+    } else {
+        panic!("expected Abs variant");
+    }
+}
+
+#[test]
+fn test_map_0_arity() {
+    // Test that 0-arity builtins work with map
+    let builtin: BuiltinFn<i32> = BuiltinFn::Time;
+    let mapped: BuiltinFn<String> = builtin.map(|x| x.to_string());
+    assert!(matches!(mapped, BuiltinFn::Time));
+}
+
+#[test]
+fn test_try_map_success() {
+    let builtin: BuiltinFn<i32> = BuiltinFn::Max(Box::new(10), Some(Box::new(20)));
+    let result: Result<BuiltinFn<i64>, &str> = builtin.try_map(|x| Ok(x as i64 * 2));
+    assert!(result.is_ok());
+    if let Ok(BuiltinFn::Max(a, Some(b))) = result {
+        assert_eq!(*a, 20);
+        assert_eq!(*b, 40);
+    } else {
+        panic!("expected Max variant with two args");
+    }
+}
+
+#[test]
+fn test_try_map_failure() {
+    let builtin: BuiltinFn<i32> = BuiltinFn::Abs(Box::new(42));
+    let result: Result<BuiltinFn<i64>, &str> = builtin.try_map(|_| Err("error"));
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), "error");
+}
+
+#[test]
+fn test_map_mean_vec() {
+    // Test that Mean with Vec<Expr> is correctly transformed
+    let builtin: BuiltinFn<i32> = BuiltinFn::Mean(vec![1, 2, 3]);
+    let mapped: BuiltinFn<i32> = builtin.map(|x| x * 10);
+    if let BuiltinFn::Mean(args) = mapped {
+        assert_eq!(args, vec![10, 20, 30]);
+    } else {
+        panic!("expected Mean variant");
+    }
 }
