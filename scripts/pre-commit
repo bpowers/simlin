@@ -146,7 +146,7 @@ run_claude_check() {
 
 # Function to run the test check with Codex
 run_codex_check() {
-    timeout -k 5 "$AI_TIMEOUT" codex exec -m gpt-4o-mini --full-auto "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
+    timeout -k 5 "$AI_TIMEOUT" codex exec -m gpt-5.2 --full-auto "$TEST_CHECK_PROMPT" > "$AI_OUTPUT" 2>&1
 }
 
 echo -n "Running AI test quality check ($SELECTED_AI_TOOL)..."
