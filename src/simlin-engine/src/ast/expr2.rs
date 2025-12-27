@@ -95,6 +95,17 @@ impl IndexExpr2 {
         Ok(expr)
     }
 
+    /// Get the source location of this index expression.
+    pub fn get_loc(&self) -> Loc {
+        match self {
+            IndexExpr2::Wildcard(loc) => *loc,
+            IndexExpr2::StarRange(_, loc) => *loc,
+            IndexExpr2::Range(_, _, loc) => *loc,
+            IndexExpr2::DimPosition(_, loc) => *loc,
+            IndexExpr2::Expr(e) => e.get_loc(),
+        }
+    }
+
     pub(crate) fn get_var_loc(&self, ident: &str) -> Option<Loc> {
         match self {
             IndexExpr2::Wildcard(_) => None,

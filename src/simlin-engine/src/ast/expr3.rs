@@ -169,12 +169,20 @@ impl IndexExpr3 {
     ) -> EquationResult<Self> {
         match expr {
             IndexExpr2::Wildcard(loc) => {
-                // Wildcard must be resolved to the dimension at this position
+                // Wildcard must be resolved to the dimension at this position.
+                // Note: dim is None when either:
+                // 1. The variable is a scalar (CantSubscriptScalar)
+                // 2. The subscript position exceeds the dimension count (caught by caller)
                 let dim = dim.ok_or(crate::common::EquationError {
                     start: loc.start,
                     end: loc.end,
                     code: crate::common::ErrorCode::CantSubscriptScalar,
                 })?;
+                // Convert wildcard to star range with the parent dimension name.
+                // For indexed dimensions like Dim(5), this becomes StarRange("dim").
+                // For named dimensions like Cities{Boston,NYC,LA}, this becomes StarRange("cities").
+                // The downstream compiler/evaluator must recognize that StarRange(parent_dim)
+                // means "iterate over all elements" (equivalent to IndexOp::Wildcard).
                 let dim_name = CanonicalDimensionName::from_raw(dim.name());
                 Ok(IndexExpr3::StarRange(dim_name, *loc))
             }
@@ -254,6 +262,18 @@ impl Expr3 {
                             return eqn_err!(CantSubscriptScalar, wloc.start, wloc.end);
                         }
                     }
+                }
+
+                // Validate subscript count matches dimension count.
+                // This catches cases like arr[*, *, *] on a 2D array before
+                // we hit misleading errors in individual subscript lowering.
+                if let Some(ref d) = dims
+                    && args.len() > d.len()
+                {
+                    // Find the first out-of-bounds subscript for error location
+                    let first_extra = &args[d.len()];
+                    let extra_loc = first_extra.get_loc();
+                    return eqn_err!(MismatchedDimensions, extra_loc.start, extra_loc.end);
                 }
 
                 let dims_ref = dims.as_deref();
@@ -794,5 +814,75 @@ mod tests {
             },
             _ => panic!("Expected Subscript"),
         }
+    }
+
+    #[test]
+    fn test_lower_multidimensional_wildcards() {
+        // Test cube[*, *, 5] - 3D array with first two wildcards and third constant
+        let ctx = TestLowerContext::new().with_var("cube", indexed_dims(&[3, 4, 5]));
+
+        let expr2 = Expr2::Subscript(
+            canonicalize("cube"),
+            vec![
+                IndexExpr2::Wildcard(Loc::new(5, 6)),
+                IndexExpr2::Wildcard(Loc::new(8, 9)),
+                IndexExpr2::Expr(Expr2::Const("5".to_string(), 5.0, Loc::new(11, 12))),
+            ],
+            None,
+            Loc::new(0, 13),
+        );
+
+        let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
+
+        match expr3 {
+            Expr3::Subscript(id, args, _, _) => {
+                assert_eq!(id.as_str(), "cube");
+                assert_eq!(args.len(), 3);
+
+                // First two subscripts: wildcards → StarRange
+                match &args[0] {
+                    IndexExpr3::StarRange(name, _) => assert_eq!(name.as_str(), "dim0"),
+                    _ => panic!("Expected StarRange for first subscript"),
+                }
+                match &args[1] {
+                    IndexExpr3::StarRange(name, _) => assert_eq!(name.as_str(), "dim1"),
+                    _ => panic!("Expected StarRange for second subscript"),
+                }
+
+                // Third subscript: constant expression
+                match &args[2] {
+                    IndexExpr3::Expr(Expr3::Const(_, val, _)) => assert_eq!(*val, 5.0),
+                    _ => panic!("Expected Expr(Const) for third subscript"),
+                }
+            }
+            _ => panic!("Expected Subscript"),
+        }
+    }
+
+    #[test]
+    fn test_lower_too_many_subscripts_errors() {
+        // Test arr[*, *, *] on a 2D array - should error with MismatchedDimensions
+        let ctx = TestLowerContext::new().with_var("matrix", indexed_dims(&[3, 4]));
+
+        let expr2 = Expr2::Subscript(
+            canonicalize("matrix"),
+            vec![
+                IndexExpr2::Wildcard(Loc::new(7, 8)),
+                IndexExpr2::Wildcard(Loc::new(10, 11)),
+                IndexExpr2::Wildcard(Loc::new(13, 14)), // This is out of bounds
+            ],
+            None,
+            Loc::new(0, 15),
+        );
+
+        let result = Expr3::from_expr2(&expr2, &ctx);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        // Should be MismatchedDimensions, not CantSubscriptScalar
+        assert_eq!(err.code, crate::common::ErrorCode::MismatchedDimensions);
+        // Error location should point to the first out-of-bounds subscript
+        assert_eq!(err.start, 13);
+        assert_eq!(err.end, 14);
     }
 }
