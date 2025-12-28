@@ -240,6 +240,8 @@ fn normalize_subscripts(args: &[IndexExpr2], config: &SubscriptConfig) -> Option
 struct Subscript3Config<'a> {
     /// Dimensions of the variable being subscripted
     dims: &'a [Dimension],
+    /// All dimensions in the model (for checking if a name is a dimension)
+    all_dimensions: &'a [Dimension],
     /// For subdimension relationship lookups
     dimensions_ctx: &'a DimensionsContext,
     /// Active A2A dimensions (if in A2A context)
@@ -332,7 +334,7 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
                         IndexOp::Single(idx)
                     }
                     Expr3::Var(ident, _, _) => {
-                        // Check if it's a named dimension element
+                        // First check if it's a named dimension element (takes priority)
                         let element_idx = if let Dimension::Named(_, named_dim) = parent_dim {
                             named_dim
                                 .elements
@@ -344,9 +346,58 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
 
                         if let Some(idx) = element_idx {
                             IndexOp::Single(idx)
+                        } else if let Dimension::Indexed(dim_name, size) = parent_dim {
+                            // For indexed dimensions, check if ident is "DimName.Index" format
+                            let expected_prefix = format!("{}.", dim_name.as_str());
+                            if ident.as_str().starts_with(&expected_prefix) {
+                                if let Ok(idx) =
+                                    ident.as_str()[expected_prefix.len()..].parse::<usize>()
+                                {
+                                    // Validate the index is within bounds (1-based)
+                                    let size_usize = *size as usize;
+                                    if idx >= 1 && idx <= size_usize {
+                                        IndexOp::Single(idx - 1) // Convert to 0-based
+                                    } else {
+                                        return None;
+                                    }
+                                } else {
+                                    return None;
+                                }
+                            } else {
+                                // Check for dimension name (A2A reference)
+                                let is_dim_name = config
+                                    .all_dimensions
+                                    .iter()
+                                    .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
+
+                                if is_dim_name {
+                                    let active_dims = config.active_dimension?;
+                                    let active_idx = active_dims.iter().position(|ad| {
+                                        canonicalize(ad.name()).as_str() == ident.as_str()
+                                    })?;
+                                    IndexOp::ActiveDimRef(active_idx)
+                                } else {
+                                    return None;
+                                }
+                            }
                         } else {
-                            // Not a known element - need dynamic handling
-                            return None;
+                            // Not an element - check if it's a dimension name (A2A reference)
+                            let is_dim_name = config
+                                .all_dimensions
+                                .iter()
+                                .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
+
+                            if is_dim_name {
+                                // It's a dimension name - find matching active dimension
+                                let active_dims = config.active_dimension?;
+                                let active_idx = active_dims.iter().position(|ad| {
+                                    canonicalize(ad.name()).as_str() == ident.as_str()
+                                })?;
+                                IndexOp::ActiveDimRef(active_idx)
+                            } else {
+                                // Not a known element or dimension - need dynamic handling
+                                return None;
+                            }
                         }
                     }
                     _ => return None,
@@ -354,6 +405,19 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
             }
 
             IndexExpr3::Dimension(name, _) => {
+                // First check if the name matches an element of the parent dimension.
+                // An element name that happens to match a dimension name should be
+                // resolved as an element, not as an A2A dimension reference.
+                if let Dimension::Named(_, named_dim) = parent_dim
+                    && let Some(idx) = named_dim
+                        .elements
+                        .iter()
+                        .position(|elem| elem.as_str() == name.as_str())
+                {
+                    operations.push(IndexOp::Single(idx));
+                    continue;
+                }
+
                 // A2A dimension reference - need to find matching active dimension
                 let active_dims = config.active_dimension?;
                 let active_idx = active_dims
@@ -2179,7 +2243,16 @@ impl Context<'_> {
                 // Handle subscript directly without converting to Expr2
                 let off = self.get_base_offset(id)?;
                 let metadata = self.get_metadata(id)?;
-                let dims = metadata.var.get_dimensions().unwrap();
+                let dims = metadata.var.get_dimensions().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Model,
+                        ErrorCode::Generic,
+                        Some(format!(
+                            "expected array variable '{}' to have dimensions",
+                            id.as_str()
+                        )),
+                    )
+                })?;
 
                 if indices.len() != dims.len() {
                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
@@ -2200,6 +2273,7 @@ impl Context<'_> {
                 // Try to normalize subscripts to static operations
                 let config = Subscript3Config {
                     dims,
+                    all_dimensions: &self.dimensions,
                     dimensions_ctx: self.dimensions_ctx,
                     active_dimension: self.active_dimension.as_deref(),
                 };
@@ -2416,7 +2490,7 @@ impl Context<'_> {
         i: usize,
         dims: &[Dimension],
         _orig_dims: &[usize],
-        loc: Loc,
+        _loc: Loc,
     ) -> Result<Expr> {
         match idx {
             IndexExpr3::StarRange(subdim_name, star_loc) => {
@@ -2488,11 +2562,80 @@ impl Context<'_> {
             }
 
             IndexExpr3::Expr(e) => {
-                // Lower the inner expression directly
+                // Handle Var expressions that might be dimension elements or DimName.Index syntax
+                if let Expr3::Var(ident, _, var_loc) = e {
+                    let dim = &dims[i];
+
+                    // First check if it's a named dimension element
+                    if let Some(offset) = dim.get_offset(
+                        &crate::common::CanonicalElementName::from_raw(ident.as_str()),
+                    ) {
+                        return Ok(Expr::Const((offset + 1) as f64, *var_loc));
+                    }
+
+                    // Check for DimName.Index syntax (e.g., "Dim.3" for indexed dimensions)
+                    if let Dimension::Indexed(dim_name, size) = dim {
+                        let expected_prefix = format!("{}.", dim_name.as_str());
+                        if ident.as_str().starts_with(&expected_prefix)
+                            && let Ok(idx) =
+                                ident.as_str()[expected_prefix.len()..].parse::<usize>()
+                        {
+                            // Validate the index is within bounds (1-based)
+                            let size_usize = *size as usize;
+                            if idx >= 1 && idx <= size_usize {
+                                return Ok(Expr::Const(idx as f64, *var_loc));
+                            }
+                        }
+                    }
+
+                    // Check if it's a dimension name (A2A reference)
+                    let is_dim_name = self
+                        .dimensions
+                        .iter()
+                        .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
+
+                    if is_dim_name {
+                        if self.active_dimension.is_none() {
+                            return sim_err!(
+                                ArrayReferenceNeedsExplicitSubscripts,
+                                id.as_str().to_string()
+                            );
+                        }
+                        let active_dims = self.active_dimension.as_ref().unwrap();
+                        let active_subscripts = self.active_subscript.as_ref().unwrap();
+
+                        for (active_dim, active_subscript) in
+                            active_dims.iter().zip(active_subscripts)
+                        {
+                            if canonicalize(active_dim.name()).as_str() == ident.as_str() {
+                                if let Some(offset) = dim.get_offset(active_subscript) {
+                                    return Ok(Expr::Const((offset + 1) as f64, *var_loc));
+                                } else if let Ok(idx_val) =
+                                    active_subscript.as_str().parse::<usize>()
+                                {
+                                    return Ok(Expr::Const(idx_val as f64, *var_loc));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fall back to lowering the expression directly
                 self.lower_from_expr3(e)
             }
 
             IndexExpr3::Dimension(name, dim_loc) => {
+                let dim = &dims[i];
+
+                // First check if the name matches an element of the parent dimension.
+                // An element name that happens to match a dimension name should be
+                // resolved as an element, not as an A2A dimension reference.
+                if let Some(offset) = dim.get_offset(
+                    &crate::common::CanonicalElementName::from_raw(name.as_str()),
+                ) {
+                    return Ok(Expr::Const((offset + 1) as f64, *dim_loc));
+                }
+
                 // A2A dimension reference in dynamic context
                 if self.active_dimension.is_none() {
                     return sim_err!(
@@ -2502,7 +2645,6 @@ impl Context<'_> {
                 }
                 let active_dims = self.active_dimension.as_ref().unwrap();
                 let active_subscripts = self.active_subscript.as_ref().unwrap();
-                let dim = &dims[i];
 
                 // Find the matching active dimension
                 for (active_dim, active_subscript) in active_dims.iter().zip(active_subscripts) {
@@ -2514,13 +2656,6 @@ impl Context<'_> {
                             return Ok(Expr::Const(idx_val as f64, *dim_loc));
                         }
                     }
-                }
-
-                // Check if it's just an element name
-                if let Some(offset) = dim.get_offset(
-                    &crate::common::CanonicalElementName::from_raw(name.as_str()),
-                ) {
-                    return Ok(Expr::Const((offset + 1) as f64, loc));
                 }
 
                 sim_err!(MismatchedDimensions, id.as_str().to_string())
