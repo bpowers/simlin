@@ -23,7 +23,7 @@ pub use expr1::Expr1;
 #[allow(unused_imports)]
 pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2};
 #[allow(unused_imports)]
-pub use expr3::{Expr3, IndexExpr3};
+pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, Pass1Context};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ast<Expr> {

@@ -527,7 +527,6 @@ mod transpose_tests {
     }
 
     #[test]
-    #[ignore]
     fn transpose_with_operations() {
         // Test transpose in expressions
         let project = TestProject::new("transpose_with_ops")
@@ -635,7 +634,6 @@ mod transpose_tests {
     }
 
     #[test]
-    #[ignore]
     fn transpose_chain() {
         // Test that (A')' = A
         let project = TestProject::new("transpose_chain")
@@ -716,7 +714,6 @@ mod range_tests {
     use crate::test_common::TestProject;
 
     #[test]
-    #[ignore]
     fn range_sum_1d_w_ops() {
         let project = TestProject::new("range_sum_1d_w_ops")
             .indexed_dimension("A", 5)
@@ -1011,7 +1008,6 @@ mod range_tests {
     }
 
     #[test]
-    #[ignore]
     fn range_mean_1d_w_ops() {
         let project = TestProject::new("range_mean_1d_w_ops")
             .indexed_dimension("A", 5)
@@ -1042,7 +1038,6 @@ mod range_tests {
     }
 
     #[test]
-    #[ignore]
     fn range_stddev_1d_w_ops() {
         let project = TestProject::new("range_stddev_1d_w_ops")
             .indexed_dimension("A", 5)
@@ -1081,7 +1076,6 @@ mod range_tests {
     }
 
     #[test]
-    #[ignore]
     fn range_min_1d_w_ops() {
         let project = TestProject::new("range_min_1d_w_ops")
             .indexed_dimension("A", 5)
@@ -1118,7 +1112,6 @@ mod range_tests {
     }
 
     #[test]
-    #[ignore]
     fn range_max_1d_w_ops() {
         let project = TestProject::new("range_max_1d_w_ops")
             .indexed_dimension("A", 5)
@@ -1320,7 +1313,6 @@ mod combined_operations_tests {
     }
 
     #[test]
-    #[ignore] // Enable when all operations are implemented
     fn dimension_position_and_wildcard() {
         // Combine dimension position with wildcard
         TestProject::new("combined_dimpos_wildcard")
@@ -1350,7 +1342,6 @@ mod combined_operations_tests {
 #[cfg(test)]
 mod error_handling_tests {
     #[test]
-    #[ignore] // Enable when dimension checking is fully implemented
     fn dimension_mismatch() {
         // Test that dimension mismatches are caught
         // TestProject::new("dim_mismatch")
@@ -1363,7 +1354,6 @@ mod error_handling_tests {
     }
 
     #[test]
-    #[ignore] // Enable when bounds checking is implemented
     fn out_of_bounds_index() {
         // Test out of bounds access
         // TestProject::new("out_of_bounds")
@@ -1516,7 +1506,6 @@ mod implicit_transpose_tests {
     }
 
     #[test]
-    #[ignore] // Enable when compiler support is implemented
     fn dimension_mismatch_error() {
         // Test that incompatible dimensions cause an error
         // This test should verify that the simulation fails to build

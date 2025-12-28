@@ -28,6 +28,11 @@ pub enum IndexExpr3 {
     DimPosition(u32, Loc),
     /// General expression subscript
     Expr(Expr3),
+    /// Active A2A dimension reference.
+    /// When a dimension name appears as a subscript in an A2A context,
+    /// the value depends on which A2A element is being evaluated.
+    /// This variant makes it explicit that pass 2 (not pass 1) must handle it.
+    Dimension(CanonicalDimensionName, Loc),
 }
 
 impl IndexExpr3 {
@@ -38,6 +43,23 @@ impl IndexExpr3 {
             IndexExpr3::Range(_, _, loc) => *loc,
             IndexExpr3::DimPosition(_, loc) => *loc,
             IndexExpr3::Expr(e) => e.get_loc(),
+            IndexExpr3::Dimension(_, loc) => *loc,
+        }
+    }
+
+    /// Returns true if this index expression references an A2A dimension.
+    /// Such expressions cannot be fully resolved until pass 2 when we know
+    /// which specific A2A element is being evaluated.
+    #[allow(dead_code)]
+    pub fn references_a2a_dimension(&self) -> bool {
+        match self {
+            IndexExpr3::Dimension(_, _) => true,
+            IndexExpr3::DimPosition(_, _) => true,
+            IndexExpr3::Range(start, end, _) => {
+                start.references_a2a_dimension() || end.references_a2a_dimension()
+            }
+            IndexExpr3::Expr(e) => e.references_a2a_dimension(),
+            IndexExpr3::StarRange(_, _) => false,
         }
     }
 }
@@ -127,6 +149,78 @@ impl Expr3 {
             _ => None,
         }
     }
+
+    /// Returns true if this expression contains any A2A dimension references.
+    /// Such expressions cannot be fully resolved until pass 2 when we know
+    /// which specific A2A element is being evaluated.
+    #[allow(dead_code)]
+    pub fn references_a2a_dimension(&self) -> bool {
+        match self {
+            Expr3::Const(_, _, _) => false,
+            Expr3::Var(_, _, _) => false,
+            Expr3::App(builtin, _, _) => {
+                use crate::builtins::BuiltinFn::*;
+                match builtin {
+                    Lookup(_, e, _)
+                    | Abs(e)
+                    | Arccos(e)
+                    | Arcsin(e)
+                    | Arctan(e)
+                    | Cos(e)
+                    | Exp(e)
+                    | Int(e)
+                    | Ln(e)
+                    | Log10(e)
+                    | Sign(e)
+                    | Sin(e)
+                    | Sqrt(e)
+                    | Tan(e)
+                    | Size(e)
+                    | Stddev(e)
+                    | Sum(e) => e.references_a2a_dimension(),
+                    Max(a, b) | Min(a, b) => {
+                        a.references_a2a_dimension()
+                            || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
+                    }
+                    Mean(exprs) => exprs.iter().any(|e| e.references_a2a_dimension()),
+                    Pulse(a, b, c) | Ramp(a, b, c) | SafeDiv(a, b, c) => {
+                        a.references_a2a_dimension()
+                            || b.references_a2a_dimension()
+                            || c.as_ref().is_some_and(|e| e.references_a2a_dimension())
+                    }
+                    Step(a, b) => a.references_a2a_dimension() || b.references_a2a_dimension(),
+                    Rank(e, opt) => {
+                        e.references_a2a_dimension()
+                            || opt.as_ref().is_some_and(|(a, b)| {
+                                a.references_a2a_dimension()
+                                    || b.as_ref().is_some_and(|e| e.references_a2a_dimension())
+                            })
+                    }
+                    Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
+                        false
+                    }
+                }
+            }
+            Expr3::Subscript(_, indices, _, _) => {
+                indices.iter().any(|idx| idx.references_a2a_dimension())
+            }
+            Expr3::Op1(_, inner, _, _) => inner.references_a2a_dimension(),
+            Expr3::Op2(_, left, right, _, _) => {
+                left.references_a2a_dimension() || right.references_a2a_dimension()
+            }
+            Expr3::If(cond, then_expr, else_expr, _, _) => {
+                cond.references_a2a_dimension()
+                    || then_expr.references_a2a_dimension()
+                    || else_expr.references_a2a_dimension()
+            }
+            // Array-specific variants don't contain A2A dimension references
+            // (they've already been processed)
+            Expr3::StaticSubscript(_, _, _, _)
+            | Expr3::TempArray(_, _, _)
+            | Expr3::TempArrayElement(_, _, _, _) => false,
+            Expr3::AssignTemp(_, expr, _) => expr.references_a2a_dimension(),
+        }
+    }
 }
 
 // ============================================================================
@@ -145,9 +239,14 @@ impl Expr3 {
 /// Provides access to variable dimension information needed for:
 /// - Resolving wildcards to explicit star ranges
 /// - Adding implicit subscripts to bare array references
+/// - Detecting dimension name references in subscripts
 pub trait Expr3LowerContext {
     /// Get the dimensions of a variable, or None if it's a scalar.
     fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>>;
+
+    /// Check if an identifier is a dimension name (not a variable).
+    /// Used to detect A2A dimension references in subscripts.
+    fn is_dimension_name(&self, ident: &str) -> bool;
 }
 
 impl IndexExpr3 {
@@ -197,6 +296,17 @@ impl IndexExpr3 {
             }
             IndexExpr2::DimPosition(pos, loc) => Ok(IndexExpr3::DimPosition(*pos, *loc)),
             IndexExpr2::Expr(e) => {
+                // Check if this is a bare variable that matches a dimension name.
+                // This indicates an A2A (apply-to-all) dimension reference.
+                // Note: This may misclassify an element name that matches a dimension
+                // name, but normalize_subscripts3 handles this by checking element
+                // names first when it has the parent dimension context.
+                if let Expr2::Var(ident, None, loc) = e
+                    && ctx.is_dimension_name(ident.as_str())
+                {
+                    let canonical = CanonicalDimensionName::from_raw(ident.as_str());
+                    return Ok(IndexExpr3::Dimension(canonical, *loc));
+                }
                 let expr3 = Expr3::from_expr2(e, ctx)?;
                 Ok(IndexExpr3::Expr(expr3))
             }
@@ -327,6 +437,448 @@ impl Expr3 {
     }
 }
 
+// ============================================================================
+// Pass 1: Temp Array Decomposition (Expr3 → Expr3)
+// ============================================================================
+//
+// Pass 1 processes Expr3 trees and decomposes complex expressions inside
+// array builtins (SUM, MEAN, MIN, MAX, STDDEV, SIZE) into temporary arrays.
+//
+// Example transformation:
+//   SUM(source[3:5] + 1)
+//   → AssignTemp(0, source[3:5] + 1, view)
+//     SUM(TempArray(0, view))
+//
+// Pass 1 only handles expressions that do NOT contain A2A dimension references.
+// Expressions with dimension references (like arr[*, DimName]) are deferred
+// to pass 2, which runs per-A2A-element.
+//
+// The transformation is applied recursively bottom-up to handle nested cases:
+//   SUM(SUM(inner) + outer)
+//   → (inner SUM evaluated first, then outer decomposed)
+
+/// Context for pass 1 temp decomposition.
+/// Tracks temp ID allocation across the transformation.
+#[allow(dead_code)]
+pub struct Pass1Context {
+    /// Counter for allocating temp array IDs
+    next_temp_id: u32,
+    /// Accumulated AssignTemp expressions (prepended to result)
+    temp_assignments: Vec<Expr3>,
+}
+
+#[allow(dead_code)]
+impl Pass1Context {
+    /// Create a new pass 1 context
+    pub fn new() -> Self {
+        Self {
+            next_temp_id: 0,
+            temp_assignments: Vec::new(),
+        }
+    }
+
+    /// Allocate a new temp array ID
+    fn allocate_temp_id(&mut self) -> u32 {
+        let id = self.next_temp_id;
+        self.next_temp_id += 1;
+        id
+    }
+
+    /// Take the accumulated temp assignments
+    pub fn take_assignments(&mut self) -> Vec<Expr3> {
+        std::mem::take(&mut self.temp_assignments)
+    }
+
+    /// Apply pass 1 transformation to an expression.
+    /// Returns the transformed expression and accumulates any AssignTemp nodes.
+    pub fn transform(&mut self, expr: Expr3) -> Expr3 {
+        self.transform_inner(expr).0
+    }
+
+    /// Internal transform that returns (transformed_expr, has_a2a_dimension_ref).
+    /// The bool tracks whether the expression contains A2A dimension references,
+    /// computed during the single recursive pass to avoid O(n²) tree walks.
+    fn transform_inner(&mut self, expr: Expr3) -> (Expr3, bool) {
+        match expr {
+            // Constants and simple vars don't need transformation and have no A2A refs
+            Expr3::Const(_, _, _) | Expr3::Var(_, _, _) => (expr, false),
+
+            // Subscripts - check indices for A2A refs (Dimension, DimPosition)
+            Expr3::Subscript(id, indices, bounds, loc) => {
+                let mut has_a2a = false;
+                let new_indices: Vec<_> = indices
+                    .into_iter()
+                    .map(|idx| {
+                        let (new_idx, idx_has_a2a) = self.transform_index_expr_inner(idx);
+                        has_a2a = has_a2a || idx_has_a2a;
+                        new_idx
+                    })
+                    .collect();
+                (Expr3::Subscript(id, new_indices, bounds, loc), has_a2a)
+            }
+
+            // Builtins - check if decomposition is needed for array builtins
+            Expr3::App(builtin, bounds, loc) => {
+                let (transformed_builtin, has_a2a) = self.transform_builtin_inner(builtin);
+                (Expr3::App(transformed_builtin, bounds, loc), has_a2a)
+            }
+
+            // Binary ops - recurse into operands
+            Expr3::Op2(op, left, right, bounds, loc) => {
+                let (new_left, left_a2a) = self.transform_inner(*left);
+                let (new_right, right_a2a) = self.transform_inner(*right);
+                (
+                    Expr3::Op2(op, Box::new(new_left), Box::new(new_right), bounds, loc),
+                    left_a2a || right_a2a,
+                )
+            }
+
+            // Unary ops - recurse into operand
+            Expr3::Op1(op, inner, bounds, loc) => {
+                let (new_inner, has_a2a) = self.transform_inner(*inner);
+                (Expr3::Op1(op, Box::new(new_inner), bounds, loc), has_a2a)
+            }
+
+            // If expressions - recurse into all branches
+            Expr3::If(cond, then_expr, else_expr, bounds, loc) => {
+                let (new_cond, cond_a2a) = self.transform_inner(*cond);
+                let (new_then, then_a2a) = self.transform_inner(*then_expr);
+                let (new_else, else_a2a) = self.transform_inner(*else_expr);
+                (
+                    Expr3::If(
+                        Box::new(new_cond),
+                        Box::new(new_then),
+                        Box::new(new_else),
+                        bounds,
+                        loc,
+                    ),
+                    cond_a2a || then_a2a || else_a2a,
+                )
+            }
+
+            // Already-processed array variants - pass through, no A2A refs
+            Expr3::StaticSubscript(_, _, _, _)
+            | Expr3::TempArray(_, _, _)
+            | Expr3::TempArrayElement(_, _, _, _) => (expr, false),
+
+            // AssignTemp - recurse into the expression being assigned
+            Expr3::AssignTemp(id, inner, view) => {
+                let (new_inner, has_a2a) = self.transform_inner(*inner);
+                (Expr3::AssignTemp(id, Box::new(new_inner), view), has_a2a)
+            }
+        }
+    }
+
+    /// Transform an index expression, returning (result, has_a2a_ref).
+    fn transform_index_expr_inner(&mut self, idx: IndexExpr3) -> (IndexExpr3, bool) {
+        match idx {
+            IndexExpr3::Range(start, end, loc) => {
+                let (new_start, start_a2a) = self.transform_inner(start);
+                let (new_end, end_a2a) = self.transform_inner(end);
+                (
+                    IndexExpr3::Range(new_start, new_end, loc),
+                    start_a2a || end_a2a,
+                )
+            }
+            IndexExpr3::Expr(e) => {
+                let (new_e, has_a2a) = self.transform_inner(e);
+                (IndexExpr3::Expr(new_e), has_a2a)
+            }
+            // Dimension and DimPosition are A2A references
+            // DimPosition (@1, @2, etc.) is inherently an A2A operation because it
+            // references the "current" dimension index during array iteration.
+            // Outside A2A context, there is no current dimension to reference.
+            IndexExpr3::Dimension(_, _) | IndexExpr3::DimPosition(_, _) => (idx, true),
+            // StarRange doesn't indicate A2A ref by itself
+            IndexExpr3::StarRange(_, _) => (idx, false),
+        }
+    }
+
+    /// Transform a builtin function, returning (result, has_a2a_ref).
+    fn transform_builtin_inner(&mut self, builtin: BuiltinFn<Expr3>) -> (BuiltinFn<Expr3>, bool) {
+        use crate::builtins::BuiltinFn::*;
+
+        match builtin {
+            // Array reduction builtins - may need decomposition
+            Sum(arg) => {
+                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
+                (Sum(Box::new(new_arg)), has_a2a)
+            }
+            Mean(args) => {
+                let mut has_a2a = false;
+                let new_args: Vec<_> = args
+                    .into_iter()
+                    .map(|e| {
+                        let (new_e, e_has_a2a) = self.maybe_decompose_array_arg_inner(e);
+                        has_a2a = has_a2a || e_has_a2a;
+                        new_e
+                    })
+                    .collect();
+                (Mean(new_args), has_a2a)
+            }
+            Stddev(arg) => {
+                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
+                (Stddev(Box::new(new_arg)), has_a2a)
+            }
+            Size(arg) => {
+                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
+                (Size(Box::new(new_arg)), has_a2a)
+            }
+            // Min/Max with single arg are array reductions
+            Min(arg, None) => {
+                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
+                (Min(Box::new(new_arg), None), has_a2a)
+            }
+            Max(arg, None) => {
+                let (new_arg, has_a2a) = self.maybe_decompose_array_arg_inner(*arg);
+                (Max(Box::new(new_arg), None), has_a2a)
+            }
+
+            // Two-arg Min/Max are scalar operations - just recurse
+            Min(a, Some(b)) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                (
+                    Min(Box::new(new_a), Some(Box::new(new_b))),
+                    a_has_a2a || b_has_a2a,
+                )
+            }
+            Max(a, Some(b)) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                (
+                    Max(Box::new(new_a), Some(Box::new(new_b))),
+                    a_has_a2a || b_has_a2a,
+                )
+            }
+
+            // Other builtins - recurse into arguments
+            Lookup(id, e, loc) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Lookup(id, Box::new(new_e), loc), has_a2a)
+            }
+            Abs(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Abs(Box::new(new_e)), has_a2a)
+            }
+            Arccos(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Arccos(Box::new(new_e)), has_a2a)
+            }
+            Arcsin(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Arcsin(Box::new(new_e)), has_a2a)
+            }
+            Arctan(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Arctan(Box::new(new_e)), has_a2a)
+            }
+            Cos(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Cos(Box::new(new_e)), has_a2a)
+            }
+            Exp(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Exp(Box::new(new_e)), has_a2a)
+            }
+            Int(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Int(Box::new(new_e)), has_a2a)
+            }
+            Ln(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Ln(Box::new(new_e)), has_a2a)
+            }
+            Log10(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Log10(Box::new(new_e)), has_a2a)
+            }
+            Sign(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Sign(Box::new(new_e)), has_a2a)
+            }
+            Sin(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Sin(Box::new(new_e)), has_a2a)
+            }
+            Sqrt(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Sqrt(Box::new(new_e)), has_a2a)
+            }
+            Tan(e) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (Tan(Box::new(new_e)), has_a2a)
+            }
+            Step(a, b) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                (
+                    Step(Box::new(new_a), Box::new(new_b)),
+                    a_has_a2a || b_has_a2a,
+                )
+            }
+            Pulse(a, b, c) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                let (new_c, c_has_a2a) = match c {
+                    Some(e) => {
+                        let (new_e, has_a2a) = self.transform_inner(*e);
+                        (Some(Box::new(new_e)), has_a2a)
+                    }
+                    None => (None, false),
+                };
+                (
+                    Pulse(Box::new(new_a), Box::new(new_b), new_c),
+                    a_has_a2a || b_has_a2a || c_has_a2a,
+                )
+            }
+            Ramp(a, b, c) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                let (new_c, c_has_a2a) = match c {
+                    Some(e) => {
+                        let (new_e, has_a2a) = self.transform_inner(*e);
+                        (Some(Box::new(new_e)), has_a2a)
+                    }
+                    None => (None, false),
+                };
+                (
+                    Ramp(Box::new(new_a), Box::new(new_b), new_c),
+                    a_has_a2a || b_has_a2a || c_has_a2a,
+                )
+            }
+            SafeDiv(a, b, c) => {
+                let (new_a, a_has_a2a) = self.transform_inner(*a);
+                let (new_b, b_has_a2a) = self.transform_inner(*b);
+                let (new_c, c_has_a2a) = match c {
+                    Some(e) => {
+                        let (new_e, has_a2a) = self.transform_inner(*e);
+                        (Some(Box::new(new_e)), has_a2a)
+                    }
+                    None => (None, false),
+                };
+                (
+                    SafeDiv(Box::new(new_a), Box::new(new_b), new_c),
+                    a_has_a2a || b_has_a2a || c_has_a2a,
+                )
+            }
+            Rank(e, opt) => {
+                let (new_e, e_has_a2a) = self.transform_inner(*e);
+                let (new_opt, opt_has_a2a) = match opt {
+                    Some((a, b)) => {
+                        let (new_a, a_has_a2a) = self.transform_inner(*a);
+                        let (new_b, b_has_a2a) = match b {
+                            Some(e) => {
+                                let (new_e, has_a2a) = self.transform_inner(*e);
+                                (Some(Box::new(new_e)), has_a2a)
+                            }
+                            None => (None, false),
+                        };
+                        (Some((Box::new(new_a), new_b)), a_has_a2a || b_has_a2a)
+                    }
+                    None => (None, false),
+                };
+                (Rank(Box::new(new_e), new_opt), e_has_a2a || opt_has_a2a)
+            }
+
+            // 0-arity builtins - no A2A refs
+            Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {
+                (builtin, false)
+            }
+        }
+    }
+
+    /// Check if an array argument needs decomposition and decompose if so.
+    /// Returns (transformed_expr, has_a2a_ref).
+    ///
+    /// Decomposition is needed when:
+    /// 1. The expression is complex (Op1, Op2, If) - not a simple Subscript/Var/TempArray
+    /// 2. The expression does NOT contain A2A dimension references (defer those to pass 2)
+    /// 3. The expression has array bounds (produces an array result)
+    fn maybe_decompose_array_arg_inner(&mut self, arg: Expr3) -> (Expr3, bool) {
+        // First, recursively transform the argument (handles nested cases)
+        // This also computes has_a2a in O(n) during the single pass
+        let (transformed, has_a2a) = self.transform_inner(arg);
+
+        // Check if this needs decomposition
+        if !Self::needs_decomposition(&transformed) {
+            return (transformed, has_a2a);
+        }
+
+        // If this contains A2A dimension references, defer to pass 2
+        if has_a2a {
+            return (transformed, has_a2a);
+        }
+
+        // Get the array dimensions from the expression bounds
+        let dims = match transformed.get_array_bounds() {
+            Some(bounds) => bounds.dims().to_vec(),
+            None => {
+                // No array bounds - might be a scalar or already decomposed
+                // Check for array view
+                if let Some(view) = transformed.get_array_view() {
+                    view.dims.clone()
+                } else {
+                    // Scalar expression - no decomposition needed
+                    return (transformed, has_a2a);
+                }
+            }
+        };
+
+        // Edge case: empty dimensions means 0-dimensional array (scalar-like)
+        // No decomposition needed for this case
+        if dims.is_empty() {
+            return (transformed, has_a2a);
+        }
+
+        // Create the view for the temp array
+        let view = ArrayView::contiguous(dims);
+
+        // Allocate a temp ID and create the decomposition
+        let temp_id = self.allocate_temp_id();
+        let loc = transformed.get_loc();
+
+        // Add the AssignTemp to our accumulated assignments
+        let assign = Expr3::AssignTemp(temp_id, Box::new(transformed), view.clone());
+        self.temp_assignments.push(assign);
+
+        // Return a TempArray reference (no A2A refs since we only decompose non-A2A exprs)
+        (Expr3::TempArray(temp_id, view, loc), false)
+    }
+
+    /// Check if an expression needs to be decomposed into a temp array.
+    /// Returns true for complex expressions (Op1, Op2, If) that produce arrays.
+    fn needs_decomposition(expr: &Expr3) -> bool {
+        match expr {
+            // Complex expressions that might need decomposition
+            Expr3::Op1(_, _, bounds, _)
+            | Expr3::Op2(_, _, _, bounds, _)
+            | Expr3::If(_, _, _, bounds, _) => {
+                // Only decompose if it produces an array
+                bounds.is_some()
+            }
+            // Simple expressions don't need decomposition
+            Expr3::Const(_, _, _)
+            | Expr3::Var(_, _, _)
+            | Expr3::Subscript(_, _, _, _)
+            | Expr3::StaticSubscript(_, _, _, _)
+            | Expr3::TempArray(_, _, _)
+            | Expr3::TempArrayElement(_, _, _, _) => false,
+            // App might need decomposition if it contains complex args
+            // but the result of the app itself doesn't need further decomposition
+            Expr3::App(_, _, _) => false,
+            // Already an assignment - don't re-decompose
+            Expr3::AssignTemp(_, _, _) => false,
+        }
+    }
+}
+
+impl Default for Pass1Context {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 impl Expr3 {
     pub fn strip_loc(self) -> Self {
@@ -380,6 +932,7 @@ impl IndexExpr3 {
             IndexExpr3::Range(l, r, _) => IndexExpr3::Range(l.strip_loc(), r.strip_loc(), loc),
             IndexExpr3::DimPosition(n, _) => IndexExpr3::DimPosition(n, loc),
             IndexExpr3::Expr(e) => IndexExpr3::Expr(e.strip_loc()),
+            IndexExpr3::Dimension(name, _) => IndexExpr3::Dimension(name, loc),
         }
     }
 }
@@ -532,17 +1085,28 @@ mod tests {
     /// Test context for Expr3 lowering
     struct TestLowerContext {
         dimensions: HashMap<String, Vec<Dimension>>,
+        dimension_names: std::collections::HashSet<String>,
     }
 
     impl TestLowerContext {
         fn new() -> Self {
             Self {
                 dimensions: HashMap::new(),
+                dimension_names: std::collections::HashSet::new(),
             }
         }
 
         fn with_var(mut self, name: &str, dims: Vec<Dimension>) -> Self {
+            // Register dimension names from the dimensions
+            for dim in &dims {
+                self.dimension_names.insert(dim.name().to_lowercase());
+            }
             self.dimensions.insert(name.to_string(), dims);
+            self
+        }
+
+        fn with_dimension_name(mut self, name: &str) -> Self {
+            self.dimension_names.insert(name.to_lowercase());
             self
         }
     }
@@ -550,6 +1114,10 @@ mod tests {
     impl Expr3LowerContext for TestLowerContext {
         fn get_dimensions(&self, ident: &str) -> Option<Vec<Dimension>> {
             self.dimensions.get(ident).cloned()
+        }
+
+        fn is_dimension_name(&self, ident: &str) -> bool {
+            self.dimension_names.contains(&ident.to_lowercase())
         }
     }
 
@@ -884,5 +1452,667 @@ mod tests {
         // Error location should point to the first out-of-bounds subscript
         assert_eq!(err.start, 13);
         assert_eq!(err.end, 14);
+    }
+
+    #[test]
+    fn test_lower_dimension_name_subscript() {
+        // Test that arr[DimName] where DimName is a dimension name
+        // gets converted to IndexExpr3::Dimension
+        let ctx = TestLowerContext::new()
+            .with_var("arr", indexed_dims(&[5]))
+            .with_dimension_name("MyDim");
+
+        // arr[MyDim] - MyDim is a dimension name, not a variable
+        let expr2 = Expr2::Subscript(
+            canonicalize("arr"),
+            vec![IndexExpr2::Expr(Expr2::Var(
+                canonicalize("MyDim"),
+                None,
+                Loc::new(4, 9),
+            ))],
+            None,
+            Loc::new(0, 10),
+        );
+
+        let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
+
+        match expr3 {
+            Expr3::Subscript(id, args, _, _) => {
+                assert_eq!(id.as_str(), "arr");
+                assert_eq!(args.len(), 1);
+
+                // The subscript should be converted to IndexExpr3::Dimension
+                match &args[0] {
+                    IndexExpr3::Dimension(name, loc) => {
+                        assert_eq!(name.as_str(), "mydim");
+                        assert_eq!(*loc, Loc::new(4, 9));
+                    }
+                    _ => panic!("Expected Dimension, got {:?}", args[0]),
+                }
+            }
+            _ => panic!("Expected Subscript"),
+        }
+    }
+
+    #[test]
+    fn test_lower_non_dimension_var_subscript() {
+        // Test that arr[x] where x is NOT a dimension name stays as Expr
+        let ctx = TestLowerContext::new()
+            .with_var("arr", indexed_dims(&[5]))
+            .with_dimension_name("OtherDim"); // Not the one we're using
+
+        // arr[x] - x is not a dimension name
+        let expr2 = Expr2::Subscript(
+            canonicalize("arr"),
+            vec![IndexExpr2::Expr(Expr2::Var(
+                canonicalize("x"),
+                None,
+                Loc::new(4, 5),
+            ))],
+            None,
+            Loc::new(0, 6),
+        );
+
+        let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
+
+        match expr3 {
+            Expr3::Subscript(_, args, _, _) => {
+                // Should remain as Expr, not Dimension
+                match &args[0] {
+                    IndexExpr3::Expr(Expr3::Var(name, _, _)) => {
+                        assert_eq!(name.as_str(), "x");
+                    }
+                    _ => panic!("Expected Expr(Var), got {:?}", args[0]),
+                }
+            }
+            _ => panic!("Expected Subscript"),
+        }
+    }
+
+    #[test]
+    fn test_references_a2a_dimension() {
+        let ctx = TestLowerContext::new()
+            .with_var("arr", indexed_dims(&[3, 4]))
+            .with_dimension_name("Row");
+
+        // arr[*, Row] - has a dimension reference in second position
+        let expr2 = Expr2::Subscript(
+            canonicalize("arr"),
+            vec![
+                IndexExpr2::Wildcard(Loc::new(4, 5)),
+                IndexExpr2::Expr(Expr2::Var(canonicalize("Row"), None, Loc::new(7, 10))),
+            ],
+            None,
+            Loc::new(0, 11),
+        );
+
+        let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
+
+        // The expression should reference an A2A dimension
+        assert!(expr3.references_a2a_dimension());
+
+        // arr[*, *] - no dimension reference
+        let expr2_no_dim = Expr2::Subscript(
+            canonicalize("arr"),
+            vec![
+                IndexExpr2::Wildcard(Loc::new(4, 5)),
+                IndexExpr2::Wildcard(Loc::new(7, 8)),
+            ],
+            None,
+            Loc::new(0, 9),
+        );
+
+        let expr3_no_dim = Expr3::from_expr2(&expr2_no_dim, &ctx).unwrap();
+        // Should not reference A2A dimension (wildcards are resolved to StarRange)
+        assert!(!expr3_no_dim.references_a2a_dimension());
+    }
+
+    // =========================================================================
+    // Pass 1 Tests
+    // =========================================================================
+
+    #[test]
+    fn test_pass1_no_decomposition_simple_subscript() {
+        // SUM(arr[*]) - simple subscript, no decomposition needed
+        let arr_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![5],
+            dim_names: None,
+        };
+
+        let subscript = Expr3::Subscript(
+            canonicalize("arr"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("dim"),
+                Loc::new(4, 5),
+            )],
+            Some(arr_bounds),
+            Loc::new(0, 6),
+        );
+
+        let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(subscript)), None, Loc::new(0, 10));
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(sum_expr.clone());
+        let assignments = ctx.take_assignments();
+
+        // No decomposition needed - no assignments generated
+        assert!(assignments.is_empty());
+
+        // Result should be structurally the same as input
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => {
+                assert!(matches!(*inner, Expr3::Subscript(_, _, _, _)));
+            }
+            _ => panic!("Expected App(Sum(...))"),
+        }
+    }
+
+    #[test]
+    fn test_pass1_decompose_sum_with_op2() {
+        // SUM(arr[*] + 1) - should decompose
+        let arr_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![5],
+            dim_names: None,
+        };
+
+        let subscript = Expr3::Subscript(
+            canonicalize("arr"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("dim"),
+                Loc::new(4, 5),
+            )],
+            Some(arr_bounds.clone()),
+            Loc::new(0, 6),
+        );
+
+        let one = Expr3::Const("1".to_string(), 1.0, Loc::new(10, 11));
+
+        // arr[*] + 1 - has array bounds because arr[*] is an array
+        let add_expr = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(subscript),
+            Box::new(one),
+            Some(arr_bounds),
+            Loc::new(0, 11),
+        );
+
+        let sum_expr = Expr3::App(
+            BuiltinFn::Sum(Box::new(add_expr)),
+            None, // SUM produces scalar
+            Loc::new(0, 15),
+        );
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(sum_expr);
+        let assignments = ctx.take_assignments();
+
+        // Should have one assignment
+        assert_eq!(assignments.len(), 1);
+
+        // Check the assignment
+        match &assignments[0] {
+            Expr3::AssignTemp(id, expr, view) => {
+                assert_eq!(*id, 0);
+                assert_eq!(view.dims, vec![5]);
+                // The expression should be the Op2
+                assert!(matches!(**expr, Expr3::Op2(BinaryOp::Add, _, _, _, _)));
+            }
+            _ => panic!("Expected AssignTemp"),
+        }
+
+        // Check the result uses TempArray
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => match *inner {
+                Expr3::TempArray(id, view, _) => {
+                    assert_eq!(id, 0);
+                    assert_eq!(view.dims, vec![5]);
+                }
+                _ => panic!("Expected TempArray, got {:?}", inner),
+            },
+            _ => panic!("Expected App(Sum(...))"),
+        }
+    }
+
+    #[test]
+    fn test_pass1_skip_a2a_dimension_reference() {
+        // SUM(arr[*, DimName]) - has A2A dimension reference, should NOT decompose
+        let arr_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![3, 4],
+            dim_names: None,
+        };
+
+        let subscript = Expr3::Subscript(
+            canonicalize("arr"),
+            vec![
+                IndexExpr3::StarRange(CanonicalDimensionName::from_raw("row"), Loc::new(4, 5)),
+                IndexExpr3::Dimension(CanonicalDimensionName::from_raw("col"), Loc::new(7, 10)),
+            ],
+            Some(arr_bounds.clone()),
+            Loc::new(0, 11),
+        );
+
+        let one = Expr3::Const("1".to_string(), 1.0, Loc::new(14, 15));
+
+        // arr[*, Col] + 1 - has dimension reference
+        let add_expr = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(subscript),
+            Box::new(one),
+            Some(arr_bounds),
+            Loc::new(0, 15),
+        );
+
+        let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 20));
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(sum_expr);
+        let assignments = ctx.take_assignments();
+
+        // Should NOT decompose because of A2A dimension reference
+        assert!(assignments.is_empty());
+
+        // The Op2 should still be there (not replaced with TempArray)
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => {
+                assert!(matches!(*inner, Expr3::Op2(BinaryOp::Add, _, _, _, _)));
+            }
+            _ => panic!("Expected App(Sum(...))"),
+        }
+    }
+
+    #[test]
+    fn test_pass1_nested_sums() {
+        // SUM(SUM(inner) + outer)
+        // The inner SUM reduces to scalar, so no decomposition is triggered
+        // for the outer addition (since one operand is scalar).
+        let inner_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![3],
+            dim_names: None,
+        };
+
+        let inner_sub = Expr3::Subscript(
+            canonicalize("inner"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("a"),
+                Loc::new(0, 1),
+            )],
+            Some(inner_bounds),
+            Loc::new(0, 5),
+        );
+
+        // SUM(inner[*]) - produces scalar
+        let inner_sum = Expr3::App(BuiltinFn::Sum(Box::new(inner_sub)), None, Loc::new(0, 10));
+
+        let outer_bounds = ArrayBounds::Temp {
+            id: 1,
+            dims: vec![5],
+            dim_names: None,
+        };
+
+        let outer_sub = Expr3::Subscript(
+            canonicalize("outer"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("b"),
+                Loc::new(0, 1),
+            )],
+            Some(outer_bounds.clone()),
+            Loc::new(0, 5),
+        );
+
+        // SUM(inner) + outer[*] - outer is array, but inner_sum is scalar
+        // This still has array bounds from outer
+        let add_expr = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(inner_sum),
+            Box::new(outer_sub),
+            Some(outer_bounds),
+            Loc::new(0, 15),
+        );
+
+        // SUM(SUM(inner[*]) + outer[*])
+        let outer_sum = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 20));
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(outer_sum);
+        let assignments = ctx.take_assignments();
+
+        // Should decompose the addition into a temp
+        assert_eq!(assignments.len(), 1);
+
+        match &assignments[0] {
+            Expr3::AssignTemp(_, _, view) => {
+                assert_eq!(view.dims, vec![5]); // outer's dimensions
+            }
+            _ => panic!("Expected AssignTemp"),
+        }
+
+        // Result should reference the temp
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => {
+                assert!(matches!(*inner, Expr3::TempArray(_, _, _)));
+            }
+            _ => panic!("Expected App(Sum(TempArray))"),
+        }
+    }
+
+    #[test]
+    fn test_pass1_multiple_decompositions() {
+        // SUM(a[*] + 1) + SUM(b[*] * 2) - two separate decompositions
+        let a_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![3],
+            dim_names: None,
+        };
+        let b_bounds = ArrayBounds::Temp {
+            id: 1,
+            dims: vec![4],
+            dim_names: None,
+        };
+
+        // a[*] + 1
+        let a_sub = Expr3::Subscript(
+            canonicalize("a"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("x"),
+                Loc::new(0, 1),
+            )],
+            Some(a_bounds.clone()),
+            Loc::new(0, 3),
+        );
+        let a_add = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(a_sub),
+            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(6, 7))),
+            Some(a_bounds),
+            Loc::new(0, 7),
+        );
+
+        // b[*] * 2
+        let b_sub = Expr3::Subscript(
+            canonicalize("b"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("y"),
+                Loc::new(0, 1),
+            )],
+            Some(b_bounds.clone()),
+            Loc::new(0, 3),
+        );
+        let b_mul = Expr3::Op2(
+            BinaryOp::Mul,
+            Box::new(b_sub),
+            Box::new(Expr3::Const("2".to_string(), 2.0, Loc::new(6, 7))),
+            Some(b_bounds),
+            Loc::new(0, 7),
+        );
+
+        // SUM(a[*] + 1) - produces scalar
+        let sum_a = Expr3::App(BuiltinFn::Sum(Box::new(a_add)), None, Loc::new(0, 12));
+
+        // SUM(b[*] * 2) - produces scalar
+        let sum_b = Expr3::App(BuiltinFn::Sum(Box::new(b_mul)), None, Loc::new(0, 12));
+
+        // SUM(a) + SUM(b) - scalar + scalar
+        let total = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(sum_a),
+            Box::new(sum_b),
+            None, // scalar result
+            Loc::new(0, 25),
+        );
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(total);
+        let assignments = ctx.take_assignments();
+
+        // Should have two decompositions
+        assert_eq!(assignments.len(), 2);
+
+        // First decomposition for a[*] + 1
+        match &assignments[0] {
+            Expr3::AssignTemp(id, _, view) => {
+                assert_eq!(*id, 0);
+                assert_eq!(view.dims, vec![3]);
+            }
+            _ => panic!("Expected AssignTemp"),
+        }
+
+        // Second decomposition for b[*] * 2
+        match &assignments[1] {
+            Expr3::AssignTemp(id, _, view) => {
+                assert_eq!(*id, 1);
+                assert_eq!(view.dims, vec![4]);
+            }
+            _ => panic!("Expected AssignTemp"),
+        }
+
+        // Result should be Op2(Add, App(Sum(TempArray)), App(Sum(TempArray)))
+        match result {
+            Expr3::Op2(BinaryOp::Add, left, right, None, _) => {
+                assert!(matches!(
+                    *left,
+                    Expr3::App(BuiltinFn::Sum(ref inner), _, _) if matches!(**inner, Expr3::TempArray(0, _, _))
+                ));
+                assert!(matches!(
+                    *right,
+                    Expr3::App(BuiltinFn::Sum(ref inner), _, _) if matches!(**inner, Expr3::TempArray(1, _, _))
+                ));
+            }
+            _ => panic!("Expected Op2(Add, App, App)"),
+        }
+    }
+
+    #[test]
+    fn test_pass1_if_with_a2a_branch() {
+        // IF(cond, arr[*, DimName], arr[*] + 1)
+        // First branch has A2A, second does NOT - should still NOT decompose
+        // because we can't partially decompose an IF expression
+        let arr_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![3, 4],
+            dim_names: None,
+        };
+
+        let cond = Expr3::Var(canonicalize("cond"), None, Loc::new(0, 4));
+
+        // true branch: arr[*, DimName] - has A2A reference
+        let true_branch = Expr3::Subscript(
+            canonicalize("arr"),
+            vec![
+                IndexExpr3::StarRange(CanonicalDimensionName::from_raw("row"), Loc::new(0, 1)),
+                IndexExpr3::Dimension(CanonicalDimensionName::from_raw("col"), Loc::new(3, 6)),
+            ],
+            Some(arr_bounds.clone()),
+            Loc::new(0, 7),
+        );
+
+        // false branch: arr2[*] + 1 - no A2A, could decompose
+        let arr2_bounds = ArrayBounds::Temp {
+            id: 1,
+            dims: vec![5],
+            dim_names: None,
+        };
+        let arr2_sub = Expr3::Subscript(
+            canonicalize("arr2"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("x"),
+                Loc::new(0, 1),
+            )],
+            Some(arr2_bounds.clone()),
+            Loc::new(0, 4),
+        );
+        let false_branch = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(arr2_sub),
+            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(7, 8))),
+            Some(arr2_bounds),
+            Loc::new(0, 8),
+        );
+
+        // The IF expression has array bounds
+        let if_expr = Expr3::If(
+            Box::new(cond),
+            Box::new(true_branch),
+            Box::new(false_branch),
+            Some(arr_bounds),
+            Loc::new(0, 30),
+        );
+
+        let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(if_expr)), None, Loc::new(0, 35));
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(sum_expr);
+        let assignments = ctx.take_assignments();
+
+        // Should NOT decompose because the true branch has A2A reference
+        assert!(assignments.is_empty());
+
+        // Result should still have the IF expression
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => {
+                assert!(matches!(*inner, Expr3::If(_, _, _, _, _)));
+            }
+            _ => panic!("Expected App(Sum(If(...)))"),
+        }
+    }
+
+    #[test]
+    fn test_pass1_dim_position_blocks_decomposition() {
+        // SUM(arr[@1]) - DimPosition is also an A2A reference, should NOT decompose
+        let arr_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![5],
+            dim_names: None,
+        };
+
+        let subscript = Expr3::Subscript(
+            canonicalize("arr"),
+            vec![IndexExpr3::DimPosition(1, Loc::new(4, 6))],
+            Some(arr_bounds.clone()),
+            Loc::new(0, 7),
+        );
+
+        // arr[@1] + 1
+        let add_expr = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(subscript),
+            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(10, 11))),
+            Some(arr_bounds),
+            Loc::new(0, 11),
+        );
+
+        let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 15));
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(sum_expr);
+        let assignments = ctx.take_assignments();
+
+        // Should NOT decompose because DimPosition is an A2A reference
+        assert!(
+            assignments.is_empty(),
+            "DimPosition should block decomposition"
+        );
+
+        // Result should still have the Op2 expression
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => {
+                assert!(matches!(*inner, Expr3::Op2(BinaryOp::Add, _, _, _, _)));
+            }
+            _ => panic!("Expected App(Sum(Op2(...)))"),
+        }
+    }
+
+    #[test]
+    fn test_pass1_deeply_nested_decomposition() {
+        // SUM((arr[*] + 1) * (arr2[*] - 1))
+        // The expression inside SUM is a complex non-trivial Op2 tree that should be decomposed
+        let arr_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![3],
+            dim_names: None,
+        };
+        let arr2_bounds = ArrayBounds::Temp {
+            id: 1,
+            dims: vec![3],
+            dim_names: None,
+        };
+
+        let arr_sub = Expr3::Subscript(
+            canonicalize("arr"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("x"),
+                Loc::new(0, 1),
+            )],
+            Some(arr_bounds.clone()),
+            Loc::new(0, 4),
+        );
+
+        let arr2_sub = Expr3::Subscript(
+            canonicalize("arr2"),
+            vec![IndexExpr3::StarRange(
+                CanonicalDimensionName::from_raw("x"),
+                Loc::new(0, 1),
+            )],
+            Some(arr2_bounds.clone()),
+            Loc::new(0, 5),
+        );
+
+        // arr[*] + 1
+        let left_op = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(arr_sub),
+            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(7, 8))),
+            Some(arr_bounds.clone()),
+            Loc::new(0, 8),
+        );
+
+        // arr2[*] - 1
+        let right_op = Expr3::Op2(
+            BinaryOp::Sub,
+            Box::new(arr2_sub),
+            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(15, 16))),
+            Some(arr2_bounds),
+            Loc::new(0, 16),
+        );
+
+        // (arr[*] + 1) * (arr2[*] - 1) - the multiply has array bounds
+        let mul_expr = Expr3::Op2(
+            BinaryOp::Mul,
+            Box::new(left_op),
+            Box::new(right_op),
+            Some(arr_bounds),
+            Loc::new(0, 25),
+        );
+
+        // SUM((arr[*] + 1) * (arr2[*] - 1))
+        let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(mul_expr)), None, Loc::new(0, 30));
+
+        let mut ctx = Pass1Context::new();
+        let result = ctx.transform(sum_expr);
+        let assignments = ctx.take_assignments();
+
+        // Should have one decomposition for the multiply expression
+        assert_eq!(assignments.len(), 1);
+
+        match &assignments[0] {
+            Expr3::AssignTemp(id, expr, view) => {
+                assert_eq!(*id, 0);
+                assert_eq!(view.dims, vec![3]);
+                // The expression should be the multiply
+                assert!(matches!(**expr, Expr3::Op2(BinaryOp::Mul, _, _, _, _)));
+            }
+            _ => panic!("Expected AssignTemp"),
+        }
+
+        // Result should reference the temp
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => {
+                assert!(matches!(*inner, Expr3::TempArray(0, _, _)));
+            }
+            _ => panic!("Expected App(Sum(TempArray))"),
+        }
     }
 }
