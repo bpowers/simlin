@@ -1061,6 +1061,10 @@ impl Context<'_> {
     /// Applies pass 0 → Expr3 → pass 1 → lower_from_expr3.
     /// Returns a Vec<Expr> where the first elements are temp assignments
     /// and the last element is the main expression.
+    ///
+    /// When A2A context is available (active_dimension and active_subscript set),
+    /// pass 1 can resolve Dimension and DimPosition references to concrete indices,
+    /// enabling decomposition of expressions that would otherwise be deferred.
     fn lower(&self, expr: &ast::Expr2) -> Result<Vec<Expr>> {
         // Pass 0: normalize bare arrays, subscripts
         let normalized = self.lower_pass0(expr);
@@ -1073,7 +1077,11 @@ impl Context<'_> {
         })?;
 
         // Pass 1: temp decomposition for complex array expressions
-        let mut pass1_ctx = Pass1Context::new();
+        // Use A2A context when available to resolve dimension references
+        let mut pass1_ctx = match (&self.active_dimension, &self.active_subscript) {
+            (Some(dims), Some(subs)) => Pass1Context::with_a2a_context(dims, subs),
+            _ => Pass1Context::new(),
+        };
         let transformed = pass1_ctx.transform(expr3);
         let assignments = pass1_ctx.take_assignments();
 
