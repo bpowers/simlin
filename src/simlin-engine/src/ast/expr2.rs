@@ -315,6 +315,54 @@ impl Expr2 {
         eqn_err!(MismatchedDimensions, loc.start, loc.end)
     }
 
+    /// Compute the size of a range subscript from constant bounds.
+    ///
+    /// Returns `Some(size)` if both bounds are constant and the range is valid.
+    /// Returns `None` in these cases:
+    /// - Either bound is not a constant expression (we can't compute at compile time)
+    /// - The range is invalid (end < start), which will be caught later during
+    ///   compilation when `build_view_from_ops` validates the IndexOp::Range
+    ///
+    /// When `None` is returned, callers should fall back to the full dimension size
+    /// as a conservative upper bound for ArrayBounds.
+    fn compute_range_size(start: &Expr2, end: &Expr2, dim: &Dimension) -> Option<usize> {
+        let start_idx = Self::expr_to_index(start, dim)?;
+        let end_idx = Self::expr_to_index(end, dim)?;
+        // Range is inclusive on both ends, so size is end - start + 1
+        if end_idx >= start_idx {
+            Some(end_idx - start_idx + 1)
+        } else {
+            None // Invalid range will be caught during build_view_from_ops
+        }
+    }
+
+    /// Convert an expression to a 0-based index if it's a constant or named element.
+    fn expr_to_index(expr: &Expr2, dim: &Dimension) -> Option<usize> {
+        match expr {
+            Expr2::Const(_, val, _) => {
+                // Numeric constant - interpret as 1-based index.
+                // Guard against overflow: val must be in range [1, isize::MAX].
+                if *val >= 1.0 && *val <= isize::MAX as f64 {
+                    Some((*val as usize).saturating_sub(1))
+                } else {
+                    None
+                }
+            }
+            Expr2::Var(ident, _, _) => {
+                // Could be a named dimension element
+                if let Dimension::Named(_, named_dim) = dim {
+                    named_dim
+                        .elements
+                        .iter()
+                        .position(|elem| elem.as_str() == ident.as_str())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn from<C: Expr2Context>(expr: Expr1, ctx: &mut C) -> EquationResult<Self> {
         let expr = match expr {
             Expr1::Const(s, n, loc) => Expr2::Const(s, n, loc),
@@ -435,10 +483,10 @@ impl Expr2 {
                                 IndexExpr2::Wildcard(_) => {
                                     result_dims.push(dims[i].len());
                                 }
-                                IndexExpr2::Range(_start, _end, _) => {
-                                    // For ranges, we'd need to evaluate start/end
-                                    // For now, use the full dimension size as max bound
-                                    result_dims.push(dims[i].len());
+                                IndexExpr2::Range(start, end, _) => {
+                                    // Try to compute actual range size from constant bounds
+                                    let range_size = Self::compute_range_size(start, end, &dims[i]);
+                                    result_dims.push(range_size.unwrap_or(dims[i].len()));
                                 }
                                 IndexExpr2::StarRange(subdim_name, _) => {
                                     // Star ranges use the subdimension's length, not the parent's
