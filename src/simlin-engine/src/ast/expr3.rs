@@ -296,14 +296,23 @@ impl IndexExpr3 {
             IndexExpr2::Expr(e) => {
                 // Check if this is a bare variable that matches a dimension name.
                 // This indicates an A2A (apply-to-all) dimension reference.
-                // Note: This may misclassify an element name that matches a dimension
-                // name, but normalize_subscripts3 handles this by checking element
-                // names first when it has the parent dimension context.
+                //
+                // IMPORTANT: If the parent dimension contains this name as an element,
+                // it should be treated as an element reference, not a dimension reference.
+                // Element names take precedence over dimension names in subscript context.
                 if let Expr2::Var(ident, None, loc) = e
                     && ctx.is_dimension_name(ident.as_str())
                 {
-                    let canonical = CanonicalDimensionName::from_raw(ident.as_str());
-                    return Ok(IndexExpr3::Dimension(canonical, *loc));
+                    // Check if this is an element of the parent dimension first
+                    let element_name = CanonicalElementName::from_raw(ident.as_str());
+                    let is_element_of_parent = dim
+                        .map(|d| d.get_offset(&element_name).is_some())
+                        .unwrap_or(false);
+
+                    if !is_element_of_parent {
+                        let canonical = CanonicalDimensionName::from_raw(ident.as_str());
+                        return Ok(IndexExpr3::Dimension(canonical, *loc));
+                    }
                 }
                 let expr3 = Expr3::from_expr2(e, ctx)?;
                 Ok(IndexExpr3::Expr(expr3))
@@ -617,9 +626,14 @@ impl<'a> Pass1Context<'a> {
                         let active_dim_name = CanonicalDimensionName::from_raw(dim.name());
                         if active_dim_name.as_str() == dim_name.as_str() {
                             // Found a match - resolve to the concrete index
-                            let index = Self::subscript_to_index(dim, sub);
-                            let const_expr = Expr3::Const(index.to_string(), index, loc);
-                            return (IndexExpr3::Expr(const_expr), false);
+                            if let Some(index) = Self::subscript_to_index(dim, sub) {
+                                let const_expr = Expr3::Const(index.to_string(), index, loc);
+                                return (IndexExpr3::Expr(const_expr), false);
+                            }
+                            // subscript_to_index returned None - subscript not valid for dimension.
+                            // This is a bug in the caller since active_subscripts should always
+                            // be valid elements. Leave the dimension unresolved so we fail later
+                            // with a more informative error instead of silently using index 1.
                         }
                     }
                 }
@@ -640,24 +654,10 @@ impl<'a> Pass1Context<'a> {
     }
 
     /// Convert a dimension + subscript to its 1-based index value.
-    /// For indexed dimensions, the subscript is already a numeric string.
-    /// For named dimensions, we look up the element's position.
-    fn subscript_to_index(dim: &Dimension, subscript: &CanonicalElementName) -> f64 {
-        match dim {
-            Dimension::Indexed(_, _) => {
-                // For indexed dimensions, the subscript is already a 1-based index
-                subscript.as_str().parse::<f64>().unwrap_or(1.0)
-            }
-            Dimension::Named(_, named_dim) => {
-                // For named dimensions, find the element's position (0-based) and add 1
-                named_dim
-                    .elements
-                    .iter()
-                    .position(|elem| elem.as_str() == subscript.as_str())
-                    .map(|off| (off + 1) as f64)
-                    .unwrap_or(1.0)
-            }
-        }
+    /// Uses Dimension::get_offset to find the 0-based offset, then adds 1.
+    /// Returns None if the subscript is not a valid element of the dimension.
+    fn subscript_to_index(dim: &Dimension, subscript: &CanonicalElementName) -> Option<f64> {
+        dim.get_offset(subscript).map(|offset| (offset + 1) as f64)
     }
 
     /// Transform a builtin function, returning (result, has_a2a_ref).
@@ -2391,6 +2391,162 @@ mod tests {
                     _ => panic!("Expected Op2, got {:?}", inner),
                 }
             }
+            _ => panic!("Expected App(Sum(...))"),
+        }
+    }
+
+    #[test]
+    fn test_pass0_element_name_takes_precedence_over_dimension() {
+        // When an element name matches a dimension name, it should be treated
+        // as an element reference (Expr), not a dimension reference (Dimension).
+        //
+        // Example: A dimension named "Region" has elements ["North", "South", "Row"]
+        // where "Row" is also a dimension name. arr[Row] should use the element "Row",
+        // not create a Dimension reference to the Row dimension.
+
+        // Create a named dimension where one element matches another dimension name
+        let region_dim = named_dim("Region", &["North", "South", "Row"]);
+
+        let ctx = TestLowerContext::new()
+            .with_var("arr", vec![region_dim])
+            .with_dimension_name("Region")
+            .with_dimension_name("Row"); // "Row" is also a dimension name
+
+        // arr[Row] - Row is both an element of Region and a dimension name
+        let expr2 = Expr2::Subscript(
+            canonicalize("arr"),
+            vec![IndexExpr2::Expr(Expr2::Var(
+                canonicalize("Row"),
+                None,
+                Loc::new(4, 7),
+            ))],
+            None,
+            Loc::new(0, 8),
+        );
+
+        let expr3 = Expr3::from_expr2(&expr2, &ctx).unwrap();
+
+        // Should NOT create a Dimension reference - should remain as Expr
+        // because "Row" is an element of the parent dimension "Region"
+        match &expr3 {
+            Expr3::Subscript(_, indices, _, _) => {
+                match &indices[0] {
+                    IndexExpr3::Expr(inner) => {
+                        // Good - it stayed as an expression, not converted to Dimension
+                        match inner {
+                            Expr3::Var(name, _, _) => {
+                                assert_eq!(name.as_str(), "row");
+                            }
+                            _ => panic!("Expected Var, got {:?}", inner),
+                        }
+                    }
+                    IndexExpr3::Dimension(name, _) => {
+                        panic!(
+                            "Element name 'Row' should take precedence over dimension name, \
+                            but got Dimension({:?})",
+                            name
+                        );
+                    }
+                    other => panic!("Expected Expr or Dimension, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Subscript, got {:?}", expr3),
+        }
+
+        // The expression should NOT reference an A2A dimension
+        // (since it's an element reference, not a dimension reference)
+        assert!(
+            !expr3.references_a2a_dimension(),
+            "Element reference should not count as A2A dimension reference"
+        );
+    }
+
+    #[test]
+    fn test_pass1_unmatched_dimension_stays_unresolved() {
+        // When a Dimension ref doesn't match any active dimension, it should
+        // remain unresolved (not be converted to a constant).
+        //
+        // This is important for cases where:
+        // 1. The equation has multiple dimension references
+        // 2. Some are resolved by A2A context, some aren't
+
+        let arr_bounds = ArrayBounds::Temp {
+            id: 0,
+            dims: vec![3, 4],
+            dim_names: Some(vec!["row".to_string(), "col".to_string()]),
+        };
+
+        // Create arr[Row, UnknownDim] - UnknownDim won't be in A2A context
+        let subscript = Expr3::Subscript(
+            canonicalize("arr"),
+            vec![
+                IndexExpr3::Dimension(CanonicalDimensionName::from_raw("row"), Loc::new(4, 7)),
+                IndexExpr3::Dimension(
+                    CanonicalDimensionName::from_raw("unknowndim"),
+                    Loc::new(9, 19),
+                ),
+            ],
+            Some(arr_bounds.clone()),
+            Loc::new(0, 20),
+        );
+
+        let add_expr = Expr3::Op2(
+            BinaryOp::Add,
+            Box::new(subscript),
+            Box::new(Expr3::Const("1".to_string(), 1.0, Loc::new(23, 24))),
+            Some(arr_bounds),
+            Loc::new(0, 24),
+        );
+
+        let sum_expr = Expr3::App(BuiltinFn::Sum(Box::new(add_expr)), None, Loc::new(0, 28));
+
+        // A2A context only has Row, not UnknownDim
+        let row_dim = Dimension::Indexed(CanonicalDimensionName::from_raw("row"), 3);
+        let active_dimensions = vec![row_dim];
+        let active_subscripts = vec![CanonicalElementName::from_raw("2")]; // Row = 2
+
+        let mut ctx = Pass1Context::with_a2a_context(&active_dimensions, &active_subscripts);
+        let result = ctx.transform(sum_expr);
+        let assignments = ctx.take_assignments();
+
+        // Should NOT decompose because UnknownDim is still unresolved
+        assert!(
+            assignments.is_empty(),
+            "Should not decompose when dimension ref is unmatched"
+        );
+
+        // Check that Row was resolved but UnknownDim was not
+        match result {
+            Expr3::App(BuiltinFn::Sum(inner), _, _) => match *inner {
+                Expr3::Op2(BinaryOp::Add, ref left, _, _, _) => match left.as_ref() {
+                    Expr3::Subscript(_, indices, _, _) => {
+                        // First index (Row) should be resolved to a constant
+                        match &indices[0] {
+                            IndexExpr3::Expr(Expr3::Const(_, val, _)) => {
+                                assert_eq!(*val, 2.0, "Row should be resolved to 2");
+                            }
+                            _ => panic!("Expected Row to be resolved, got {:?}", indices[0]),
+                        }
+
+                        // Second index (UnknownDim) should remain as Dimension
+                        match &indices[1] {
+                            IndexExpr3::Dimension(name, _) => {
+                                assert_eq!(
+                                    name.as_str(),
+                                    "unknowndim",
+                                    "UnknownDim should stay unresolved"
+                                );
+                            }
+                            _ => panic!(
+                                "Expected UnknownDim to remain as Dimension, got {:?}",
+                                indices[1]
+                            ),
+                        }
+                    }
+                    _ => panic!("Expected Subscript, got {:?}", left),
+                },
+                _ => panic!("Expected Op2, got {:?}", inner),
+            },
             _ => panic!("Expected App(Sum(...))"),
         }
     }
