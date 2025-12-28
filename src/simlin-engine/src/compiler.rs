@@ -6,8 +6,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::ast::{
-    self, ArrayView, Ast, BinaryOp, Expr3, Expr3LowerContext, IndexExpr2, IndexExpr3, Loc,
-    Pass1Context, SparseInfo,
+    self, ArrayView, Ast, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, Pass1Context,
+    SparseInfo,
 };
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
@@ -72,19 +72,6 @@ enum IndexOp {
     ActiveDimRef(usize),
 }
 
-/// Configuration for subscript normalization.
-/// Contains all context needed to convert IndexExpr2 to IndexOp.
-struct SubscriptConfig<'a> {
-    /// Dimensions of the variable being subscripted
-    dims: &'a [Dimension],
-    /// All dimensions in the model (for checking if a name is a dimension)
-    all_dimensions: &'a [Dimension],
-    /// For subdimension relationship lookups
-    dimensions_ctx: &'a DimensionsContext,
-    /// Active A2A dimensions (if in A2A context)
-    active_dimension: Option<&'a [Dimension]>,
-}
-
 /// Result of building an ArrayView from IndexOp operations.
 struct ViewBuildResult {
     /// The constructed array view
@@ -106,137 +93,7 @@ struct ViewBuildConfig<'a> {
     dims: &'a [Dimension],
 }
 
-/// Normalize subscript expressions to IndexOp operations.
-///
-/// Returns Some(ops) if all subscripts can be converted statically,
-/// None if any subscript requires dynamic evaluation.
-///
-/// NOTE: This does NOT determine final is_static status - that depends on
-/// later A2A context checks (has_dim_positions, preserve_wildcards_for_iteration, etc.)
-fn normalize_subscripts(args: &[IndexExpr2], config: &SubscriptConfig) -> Option<Vec<IndexOp>> {
-    let mut operations = Vec::with_capacity(args.len());
-
-    for (i, arg) in args.iter().enumerate() {
-        let op = match arg {
-            IndexExpr2::Range(start_expr, end_expr, _) => {
-                // Helper to resolve a dimension element to an index
-                let resolve_to_index = |expr: &ast::Expr2| -> Option<usize> {
-                    match expr {
-                        ast::Expr2::Const(_, val, _) => {
-                            // Numeric constant - convert from 1-based to 0-based
-                            Some((*val as isize - 1).max(0) as usize)
-                        }
-                        ast::Expr2::Var(ident, _, _) => {
-                            // Could be a named dimension element
-                            if i < config.dims.len() {
-                                if let Dimension::Named(_, named_dim) = &config.dims[i] {
-                                    named_dim
-                                        .elements
-                                        .iter()
-                                        .position(|elem| elem.as_str() == ident.as_str())
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                };
-
-                let start_idx = resolve_to_index(start_expr)?;
-                let end_idx = resolve_to_index(end_expr)?;
-                // end_idx is inclusive in the source, but we need exclusive for the range
-                IndexOp::Range(start_idx, end_idx + 1)
-            }
-            IndexExpr2::Wildcard(_) => IndexOp::Wildcard,
-            IndexExpr2::DimPosition(pos, _) => {
-                // @1 is position 0, @2 is position 1, etc.
-                let dim_idx = (*pos as usize).saturating_sub(1);
-                IndexOp::DimPosition(dim_idx)
-            }
-            IndexExpr2::Expr(expr) => {
-                match expr {
-                    ast::Expr2::Const(_, val, _) => {
-                        let idx = (*val as isize - 1).max(0) as usize;
-                        IndexOp::Single(idx)
-                    }
-                    ast::Expr2::Var(ident, _, _) => {
-                        // Check if it's a named dimension element
-                        if i >= config.dims.len() {
-                            return None;
-                        }
-
-                        let dim = &config.dims[i];
-                        // First try to match as a dimension element
-                        let element_idx = if let Dimension::Named(_, named_dim) = dim {
-                            named_dim
-                                .elements
-                                .iter()
-                                .position(|elem| elem.as_str() == ident.as_str())
-                        } else {
-                            None
-                        };
-
-                        if let Some(idx) = element_idx {
-                            IndexOp::Single(idx)
-                        } else {
-                            // Not an element - check if it's a dimension name
-                            // matching an active A2A dimension
-                            let is_dim_name = config
-                                .all_dimensions
-                                .iter()
-                                .any(|d| canonicalize(d.name()).as_str() == ident.as_str());
-
-                            if is_dim_name {
-                                let active_dims = config.active_dimension?;
-                                // Find matching active dimension
-                                let active_idx = active_dims.iter().position(|ad| {
-                                    canonicalize(ad.name()).as_str() == ident.as_str()
-                                })?;
-                                IndexOp::ActiveDimRef(active_idx)
-                            } else {
-                                return None;
-                            }
-                        }
-                    }
-                    _ => return None,
-                }
-            }
-            IndexExpr2::StarRange(subdim_name, _) => {
-                // *:SubDim - iterate over subdimension elements
-                if i >= config.dims.len() {
-                    return None;
-                }
-                let parent_dim = &config.dims[i];
-                let parent_name =
-                    crate::common::CanonicalDimensionName::from_raw(parent_dim.name());
-
-                // Look up subdimension relationship
-                let relation = config
-                    .dimensions_ctx
-                    .get_subdimension_relation(subdim_name, &parent_name)?;
-
-                if relation.is_contiguous() {
-                    // Contiguous subdimension - use Range
-                    let start = relation.start_offset();
-                    let end = start + relation.parent_offsets.len();
-                    IndexOp::Range(start, end)
-                } else {
-                    // Non-contiguous - use SparseRange
-                    IndexOp::SparseRange(relation.parent_offsets.clone())
-                }
-            }
-        };
-        operations.push(op);
-    }
-
-    Some(operations)
-}
-
 /// Configuration for subscript normalization from Expr3.
-/// Similar to SubscriptConfig but for IndexExpr3.
 struct Subscript3Config<'a> {
     /// Dimensions of the variable being subscripted
     dims: &'a [Dimension],
@@ -253,7 +110,7 @@ struct Subscript3Config<'a> {
 /// Returns Some(ops) if all subscripts can be converted statically,
 /// None if any subscript requires dynamic evaluation.
 ///
-/// Key differences from normalize_subscripts:
+/// Key features:
 /// - Handles IndexExpr3::StarRange where the name might be the full dimension (not just subdimension)
 /// - Handles IndexExpr3::Dimension for A2A dimension references
 /// - No Wildcard variant (wildcards are converted to StarRange in pass 0)
@@ -856,19 +713,6 @@ impl Context<'_> {
         Ok(off)
     }
 
-    fn get_dimension_name_subscript(&self, dim_name: &str) -> Option<usize> {
-        let active_dims = self.active_dimension.as_ref()?;
-        let active_subscripts = self.active_subscript.as_ref().unwrap();
-
-        for (dim, subscript) in active_dims.iter().zip(active_subscripts) {
-            if dim.name() == dim_name {
-                return dim.get_offset(subscript);
-            }
-        }
-
-        None
-    }
-
     fn get_submodel_metadata(
         &self,
         model: &Ident<Canonical>,
@@ -1191,817 +1035,36 @@ impl Context<'_> {
     }
 
     /// Entry point for lowering Expr2 to compiler's Expr representation.
-    /// Applies pass 0 (structural lowering) then lower_late (full lowering).
-    fn lower(&self, expr: &ast::Expr2) -> Result<Expr> {
+    /// Applies pass 0 → Expr3 → pass 1 → lower_from_expr3.
+    /// Returns a Vec<Expr> where the first elements are temp assignments
+    /// and the last element is the main expression.
+    fn lower(&self, expr: &ast::Expr2) -> Result<Vec<Expr>> {
+        // Pass 0: normalize bare arrays, subscripts
         let normalized = self.lower_pass0(expr);
-        self.lower_late(&normalized)
-    }
 
-    /// Lowers an Expr2 AST node to the compiler's Expr representation.
-    /// This handles all expression types including subscripts, builtins, and operations.
-    fn lower_late(&self, expr: &ast::Expr2) -> Result<Expr> {
-        let expr = match expr {
-            ast::Expr2::Const(_, n, loc) => Expr::Const(*n, *loc),
-            ast::Expr2::Var(id, _, loc) => {
-                // Check if this identifier is a dimension name
-                let is_dimension = self
-                    .dimensions
-                    .iter()
-                    .any(|dim| id.as_str() == canonicalize(dim.name()).as_str());
+        // Convert to Expr3 (wildcard resolution, dimension detection)
+        let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
+            kind: ErrorKind::Model,
+            code: e.code,
+            details: Some(format!("Error at {}:{}", e.start, e.end)),
+        })?;
 
-                if is_dimension {
-                    // This is a dimension name
-                    if let Some(active_dims) = &self.active_dimension {
-                        if let Some(active_subscripts) = &self.active_subscript {
-                            // We're in an array context - find the matching dimension
-                            for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
-                            {
-                                if id.as_str() == canonicalize(dim.name()).as_str() {
-                                    // Convert to the subscript index (0-based)
-                                    let index = match dim {
-                                        Dimension::Indexed(_, _) => {
-                                            // Subscript is already a 1-based index as a string
-                                            subscript.as_str().parse::<f64>().unwrap()
-                                        }
-                                        Dimension::Named(_, named_dim) => {
-                                            let off = named_dim
-                                                .elements
-                                                .iter()
-                                                .position(|elem| {
-                                                    elem.as_str() == subscript.as_str()
-                                                })
-                                                .unwrap();
+        // Pass 1: temp decomposition for complex array expressions
+        let mut pass1_ctx = Pass1Context::new();
+        let transformed = pass1_ctx.transform(expr3);
+        let assignments = pass1_ctx.take_assignments();
 
-                                            (off + 1) as f64
-                                        }
-                                    };
-                                    return Ok(Expr::Const(index, *loc));
-                                }
-                            }
-                        }
-                    } else {
-                        // We're in a scalar context but trying to use a dimension name
-                        return Err(Error {
-                            kind: ErrorKind::Model,
-                            code: ErrorCode::DimensionInScalarContext,
-                            details: Some(format!(
-                                "Dimension '{id}' cannot be used in a scalar equation"
-                            )),
-                        });
-                    }
-                }
+        // Lower the assignments
+        let mut result: Vec<Expr> = assignments
+            .iter()
+            .map(|a| self.lower_from_expr3(a))
+            .collect::<Result<Vec<_>>>()?;
 
-                // Not a dimension, check if it's a module input
-                if let Some((off, _)) = self
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, input)| id.as_str() == input.as_str())
-                {
-                    Expr::ModuleInput(off, *loc)
-                } else {
-                    match self.get_offset(id) {
-                        Ok(off) => Expr::Var(off, *loc),
-                        Err(err) => {
-                            // If get_offset fails because it's an array without implicit subscripts,
-                            // try to create a full array view
-                            if matches!(err.code, ErrorCode::ArrayReferenceNeedsExplicitSubscripts)
-                                && let Ok(metadata) = self.get_metadata(id)
-                                && let Some(source_dims) = metadata.var.get_dimensions()
-                            {
-                                // This is an array variable - check if we need dimension reordering
-                                let off = self.get_base_offset(id)?;
+        // Lower the main expression
+        let main_expr = self.lower_from_expr3(&transformed)?;
+        result.push(main_expr);
 
-                                // Check if we're in an A2A context and need to reorder dimensions
-                                if let Some(target_dims) = &self.active_dimension {
-                                    // Get dimension names
-                                    let source_dim_names: Vec<String> =
-                                        source_dims.iter().map(|d| d.name().to_string()).collect();
-                                    let target_dim_names: Vec<String> =
-                                        target_dims.iter().map(|d| d.name().to_string()).collect();
-
-                                    // Check if dimensions can be reordered
-                                    if let Some(reordering) = find_dimension_reordering(
-                                        &source_dim_names,
-                                        &target_dim_names,
-                                    ) {
-                                        // Check if reordering is needed (not identity)
-                                        let needs_reordering =
-                                            reordering.iter().enumerate().any(|(i, &idx)| i != idx);
-
-                                        if needs_reordering {
-                                            // Create a transposed view
-                                            // We need to apply the dimension reordering
-                                            let orig_dims: Vec<usize> =
-                                                source_dims.iter().map(|d| d.len()).collect();
-
-                                            // Reorder the dimensions
-                                            let reordered_dims: Vec<usize> = target_dims
-                                                .iter()
-                                                .map(|target_dim| {
-                                                    // Find the matching source dimension
-                                                    source_dims
-                                                        .iter()
-                                                        .find(|source_dim| {
-                                                            canonicalize(source_dim.name())
-                                                                == canonicalize(target_dim.name())
-                                                        })
-                                                        .unwrap()
-                                                        .len()
-                                                })
-                                                .collect();
-
-                                            // Create strides for the reordered view
-                                            let mut strides = vec![1isize; orig_dims.len()];
-                                            for i in (0..orig_dims.len() - 1).rev() {
-                                                strides[i] =
-                                                    strides[i + 1] * orig_dims[i + 1] as isize;
-                                            }
-
-                                            // Reorder the strides according to the dimension reordering
-                                            let reordered_strides: Vec<isize> = reordering
-                                                .iter()
-                                                .map(|&idx| strides[idx])
-                                                .collect();
-
-                                            let view = ArrayView {
-                                                dims: reordered_dims,
-                                                strides: reordered_strides,
-                                                offset: 0,
-                                                sparse: Vec::new(),
-                                            };
-
-                                            return Ok(Expr::StaticSubscript(off, view, *loc));
-                                        }
-                                    }
-                                }
-
-                                // No reordering needed or not in A2A context
-                                let orig_dims: Vec<usize> =
-                                    source_dims.iter().map(|d| d.len()).collect();
-                                let view = ArrayView::contiguous(orig_dims);
-                                return Ok(Expr::StaticSubscript(off, view, *loc));
-                            }
-                            return Err(err);
-                        }
-                    }
-                }
-            }
-            ast::Expr2::App(builtin, _, loc) => {
-                use crate::builtins::BuiltinFn as BFn;
-                let builtin: BuiltinFn = match builtin {
-                    BFn::Lookup(id, expr, loc) => {
-                        BuiltinFn::Lookup(id.clone(), Box::new(self.lower(expr)?), *loc)
-                    }
-                    BFn::Abs(a) => BuiltinFn::Abs(Box::new(self.lower(a)?)),
-                    BFn::Arccos(a) => BuiltinFn::Arccos(Box::new(self.lower(a)?)),
-                    BFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(self.lower(a)?)),
-                    BFn::Arctan(a) => BuiltinFn::Arctan(Box::new(self.lower(a)?)),
-                    BFn::Cos(a) => BuiltinFn::Cos(Box::new(self.lower(a)?)),
-                    BFn::Exp(a) => BuiltinFn::Exp(Box::new(self.lower(a)?)),
-                    BFn::Inf => BuiltinFn::Inf,
-                    BFn::Int(a) => BuiltinFn::Int(Box::new(self.lower(a)?)),
-                    BFn::IsModuleInput(id, loc) => BuiltinFn::IsModuleInput(id.clone(), *loc),
-                    BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower(a)?)),
-                    BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower(a)?)),
-                    BFn::Max(a, b) => {
-                        if b.is_none() {
-                            // Single-arg array Max: preserve wildcards for iteration
-                            let mut ctx = self.clone();
-                            ctx.preserve_wildcards_for_iteration = true;
-                            BuiltinFn::Max(Box::new(ctx.lower(a)?), None)
-                        } else {
-                            // Two-arg scalar Max
-                            let a = Box::new(self.lower(a)?);
-                            let b = Some(Box::new(self.lower(b.as_ref().unwrap())?));
-                            BuiltinFn::Max(a, b)
-                        }
-                    }
-                    BFn::Mean(args) => {
-                        // Mean can be used with arrays - preserve wildcards
-                        let mut ctx = self.clone();
-                        ctx.preserve_wildcards_for_iteration = true;
-                        let args = args
-                            .iter()
-                            .map(|arg| ctx.lower(arg))
-                            .collect::<Result<Vec<Expr>>>();
-                        BuiltinFn::Mean(args?)
-                    }
-                    BFn::Min(a, b) => {
-                        if b.is_none() {
-                            // Single-arg array Min: preserve wildcards for iteration
-                            let mut ctx = self.clone();
-                            ctx.preserve_wildcards_for_iteration = true;
-                            BuiltinFn::Min(Box::new(ctx.lower(a)?), None)
-                        } else {
-                            // Two-arg scalar Min
-                            let a = Box::new(self.lower(a)?);
-                            let b = Some(Box::new(self.lower(b.as_ref().unwrap())?));
-                            BuiltinFn::Min(a, b)
-                        }
-                    }
-                    BFn::Pi => BuiltinFn::Pi,
-                    BFn::Pulse(a, b, c) => {
-                        let c = match c {
-                            Some(c) => Some(Box::new(self.lower(c)?)),
-                            None => None,
-                        };
-                        BuiltinFn::Pulse(Box::new(self.lower(a)?), Box::new(self.lower(b)?), c)
-                    }
-                    BFn::Ramp(a, b, c) => {
-                        let c = match c {
-                            Some(c) => Some(Box::new(self.lower(c)?)),
-                            None => None,
-                        };
-                        BuiltinFn::Ramp(Box::new(self.lower(a)?), Box::new(self.lower(b)?), c)
-                    }
-                    BFn::SafeDiv(a, b, c) => {
-                        let c = match c {
-                            Some(c) => Some(Box::new(self.lower(c)?)),
-                            None => None,
-                        };
-                        BuiltinFn::SafeDiv(Box::new(self.lower(a)?), Box::new(self.lower(b)?), c)
-                    }
-                    BFn::Sign(a) => BuiltinFn::Sign(Box::new(self.lower(a)?)),
-                    BFn::Sin(a) => BuiltinFn::Sin(Box::new(self.lower(a)?)),
-                    BFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(self.lower(a)?)),
-                    BFn::Step(a, b) => {
-                        BuiltinFn::Step(Box::new(self.lower(a)?), Box::new(self.lower(b)?))
-                    }
-                    BFn::Tan(a) => BuiltinFn::Tan(Box::new(self.lower(a)?)),
-                    BFn::Time => BuiltinFn::Time,
-                    BFn::TimeStep => BuiltinFn::TimeStep,
-                    BFn::StartTime => BuiltinFn::StartTime,
-                    BFn::FinalTime => BuiltinFn::FinalTime,
-                    BFn::Rank(_, _) => {
-                        return sim_err!(TodoArrayBuiltin, self.ident.to_string());
-                    }
-                    BFn::Size(a) => {
-                        // Set flag to preserve wildcards for array iteration
-                        let mut ctx = self.clone();
-                        ctx.preserve_wildcards_for_iteration = true;
-                        BuiltinFn::Size(Box::new(ctx.lower(a)?))
-                    }
-                    BFn::Stddev(a) => {
-                        let mut ctx = self.clone();
-                        ctx.preserve_wildcards_for_iteration = true;
-                        BuiltinFn::Stddev(Box::new(ctx.lower(a)?))
-                    }
-                    BFn::Sum(a) => {
-                        let mut ctx = self.clone();
-                        ctx.preserve_wildcards_for_iteration = true;
-                        BuiltinFn::Sum(Box::new(ctx.lower(a)?))
-                    }
-                };
-                Expr::App(builtin, *loc)
-            }
-            ast::Expr2::Subscript(id, args, _, loc) => {
-                let off = self.get_base_offset(id)?;
-                let metadata = self.get_metadata(id)?;
-                let dims = metadata.var.get_dimensions().unwrap();
-                if args.len() != dims.len() {
-                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                }
-                for arg in args {
-                    if let IndexExpr2::Expr(expr) = arg
-                        && expr.get_array_bounds().is_some()
-                    {
-                        return sim_err!(
-                            Generic,
-                            format!("array-valued subscript expression for '{}'", id.as_str())
-                        );
-                    }
-                }
-
-                // Try to normalize subscripts to static operations
-                let config = SubscriptConfig {
-                    dims,
-                    all_dimensions: &self.dimensions,
-                    dimensions_ctx: self.dimensions_ctx,
-                    active_dimension: self.active_dimension.as_deref(),
-                };
-
-                if let Some(operations) = normalize_subscripts(args, &config) {
-                    // Build a unified view for any combination of static operations
-                    let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
-
-                    // Calculate original strides (row-major)
-                    let mut orig_strides = vec![1isize; orig_dims.len()];
-                    for i in (0..orig_dims.len().saturating_sub(1)).rev() {
-                        orig_strides[i] = orig_strides[i + 1] * orig_dims[i + 1] as isize;
-                    }
-
-                    // Build the view using the helper
-                    let view_config = ViewBuildConfig {
-                        active_subscript: self.active_subscript.as_deref(),
-                        dims,
-                    };
-                    let ViewBuildResult {
-                        view,
-                        dim_mapping,
-                        single_indices,
-                    } = build_view_from_ops(&operations, &orig_dims, &orig_strides, &view_config)?;
-
-                    // Check if we're in an array iteration context
-                    // If we have dimension positions, we need special handling in A2A context
-                    if let Some(active_subscripts) = &self.active_subscript
-                        && let Some(active_dims) = &self.active_dimension
-                    {
-                        // Check if we have any dimension positions
-                        let has_dim_positions = operations
-                            .iter()
-                            .any(|op| matches!(op, IndexOp::DimPosition(_)));
-
-                        // Check for operations that preserve dimensions for iteration.
-                        // These include Wildcard (*), Range (1:3), and SparseRange (*:SubDim).
-                        let has_iteration_preserving_ops = operations.iter().any(|op| {
-                            matches!(
-                                op,
-                                IndexOp::Wildcard | IndexOp::SparseRange(_) | IndexOp::Range(_, _)
-                            )
-                        });
-
-                        // When preserve_wildcards_for_iteration is set (inside SUM, etc.),
-                        // any iteration-preserving op should keep the array for iteration.
-                        // This handles cases like SUM(b[*]) or SUM(b[*:SubA]) or SUM(b[1:3])
-                        // where we want to iterate all elements, not collapse to current element.
-                        let preserve_for_iteration =
-                            self.preserve_wildcards_for_iteration && has_iteration_preserving_ops;
-
-                        if has_dim_positions {
-                            // For dimension positions in A2A context,
-                            // we'll fall through to dynamic handling at the end
-                        } else if preserve_for_iteration {
-                            // View has extra dims beyond active dims - return StaticSubscript for iteration
-                            return Ok(Expr::StaticSubscript(off, view, *loc));
-                        } else {
-                            if view.dims.is_empty() {
-                                return Ok(Expr::Var(off + view.offset, *loc));
-                            }
-                            if view.dims.len() != active_dims.len() {
-                                return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                            }
-                            for (view_dim, active_dim) in view.dims.iter().zip(active_dims.iter()) {
-                                if *view_dim != active_dim.len() {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                }
-                            }
-
-                            // Calculate the linear index in the result array based on the view
-                            let mut result_index = 0;
-
-                            // Build map of dim_index -> sparse parent_offsets for quick lookup
-                            let sparse_map: std::collections::HashMap<usize, &[usize]> = view
-                                .sparse
-                                .iter()
-                                .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
-                                .collect();
-
-                            // For each dimension in the view, find its value from active subscripts
-                            // The active subscripts correspond to the OUTPUT dimensions, not the input
-                            for (view_idx, stride) in view.strides.iter().enumerate() {
-                                // Get the dimension for this view index
-                                let dim_idx = if let Some(dim_idx) =
-                                    dim_mapping.get(view_idx).and_then(|idx| *idx)
-                                {
-                                    dim_idx
-                                } else {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                };
-                                if dim_idx >= dims.len() {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                }
-
-                                let source_dim = &dims[dim_idx];
-                                let target_dim = &active_dims[view_idx];
-                                let subscript = &active_subscripts[view_idx];
-
-                                // For sparse dimensions, we need to find which sparse index
-                                // corresponds to the subscript's absolute offset in the parent
-                                let is_sparse = sparse_map.contains_key(&view_idx);
-
-                                let prefer_source = source_dim.name() == target_dim.name()
-                                    || matches!(source_dim, Dimension::Named(_, _));
-
-                                let source_offset = if prefer_source {
-                                    source_dim.get_offset(subscript)
-                                } else {
-                                    None
-                                };
-                                let target_offset = if source_offset.is_none() {
-                                    target_dim.get_offset(subscript)
-                                } else {
-                                    None
-                                };
-
-                                let (abs_offset, offset_from_source) = if let Some(abs_offset) =
-                                    source_offset
-                                {
-                                    (abs_offset, true)
-                                } else if let Some(abs_offset) = target_offset {
-                                    (abs_offset, false)
-                                } else {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
-                                };
-
-                                let rel_offset = if is_sparse {
-                                    if !offset_from_source {
-                                        return sim_err!(
-                                            MismatchedDimensions,
-                                            id.as_str().to_string()
-                                        );
-                                    }
-                                    // For sparse dimensions in A2A, use the absolute
-                                    // offset to access the source element directly.
-                                    abs_offset
-                                } else if offset_from_source {
-                                    // Subscript found in source - adjust for range start
-                                    let start_offset = single_indices[dim_idx];
-                                    if let Some(rel_offset) = abs_offset.checked_sub(start_offset) {
-                                        rel_offset
-                                    } else {
-                                        return sim_err!(
-                                            MismatchedDimensions,
-                                            id.as_str().to_string()
-                                        );
-                                    }
-                                } else {
-                                    // Different dimension name: map by target position.
-                                    abs_offset
-                                };
-
-                                result_index += rel_offset * (*stride as usize);
-                            }
-
-                            return Ok(Expr::Var(off + view.offset + result_index, *loc));
-                        }
-
-                        if !has_dim_positions {
-                            // No dimension positions - use StaticSubscript for the full view
-                            return Ok(Expr::StaticSubscript(off, view, *loc));
-                        }
-                        // has_dim_positions is true - fall through to dynamic handling
-                    } else {
-                        // Not in A2A context - return StaticSubscript for the full view
-                        return Ok(Expr::StaticSubscript(off, view, *loc));
-                    }
-                }
-
-                // Fall back to dynamic subscript handling
-                let args: Result<Vec<_>> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, arg)| {
-                        match arg {
-                            IndexExpr2::Wildcard(loc) => {
-                                // Wildcard means use the implicit subscript for this dimension
-                                if self.active_dimension.is_none() {
-                                    return sim_err!(
-                                        ArrayReferenceNeedsExplicitSubscripts,
-                                        id.as_str().to_string()
-                                    );
-                                }
-                                let active_dims = self.active_dimension.as_ref().unwrap();
-                                let active_subscripts = self.active_subscript.as_ref().unwrap();
-                                let dim = &dims[i];
-
-                                // Find the matching dimension in the active context
-                                for (active_dim, active_subscript) in
-                                    active_dims.iter().zip(active_subscripts)
-                                {
-                                    if active_dim.name() == dim.name() {
-                                        // Found the matching dimension, use its subscript
-                                        if let Dimension::Named(_, _) = dim {
-                                            if let Some(subscript_off) =
-                                                dim.get_offset(active_subscript)
-                                            {
-                                                return Ok(Expr::Const(
-                                                    (subscript_off + 1) as f64,
-                                                    *loc,
-                                                ));
-                                            }
-                                        } else if let Dimension::Indexed(_name, _size) = dim {
-                                            // For indexed dimensions, the subscript is now just a numeric string
-                                            // like "1", "2", etc. (1-based)
-                                            if let Ok(idx) =
-                                                active_subscript.as_str().parse::<usize>()
-                                            {
-                                                // The index is already 1-based, so we can use it directly
-                                                return Ok(Expr::Const(idx as f64, *loc));
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // If we didn't find a matching dimension, that's an error
-                                sim_err!(MismatchedDimensions, id.as_str().to_string())
-                            }
-                            IndexExpr2::StarRange(_id, _loc) => {
-                                sim_err!(TodoStarRange, id.as_str().to_string())
-                            }
-                            IndexExpr2::Range(_start_expr, _end_expr, _loc) => {
-                                // Dynamic range - not supported yet in old-style subscript
-                                sim_err!(TodoRange, id.as_str().to_string())
-                            }
-                            IndexExpr2::DimPosition(pos, loc) => {
-                                // @1 refers to the first dimension, @2 to the second, etc.
-                                // In dynamic context, we need the active subscript for that dimension position
-                                if self.active_dimension.is_none() {
-                                    return sim_err!(
-                                        ArrayReferenceNeedsExplicitSubscripts,
-                                        id.as_str().to_string()
-                                    );
-                                }
-                                let active_dims = self.active_dimension.as_ref().unwrap();
-                                let active_subscripts = self.active_subscript.as_ref().unwrap();
-
-                                // Convert 1-based position to 0-based index
-                                let dim_idx = (*pos as usize).saturating_sub(1);
-
-                                // Check if the dimension position is valid
-                                if dim_idx >= active_dims.len() {
-                                    return sim_err!(
-                                        Generic,
-                                        format!("Dimension position @{} out of bounds", pos)
-                                    );
-                                }
-
-                                // Get the subscript for the specified dimension position
-                                let subscript = &active_subscripts[dim_idx];
-
-                                // Parse it as a numeric index (1-based)
-                                if let Ok(idx) = subscript.as_str().parse::<usize>() {
-                                    Ok(Expr::Const(idx as f64, *loc))
-                                } else {
-                                    // If it's a named subscript, we need to resolve it
-                                    // This would require looking up the dimension at that position
-                                    // For now, return an error
-                                    sim_err!(ArraysNotImplemented, id.as_str().to_string())
-                                }
-                            }
-                            IndexExpr2::Expr(arg) => {
-                                let expr = if let ast::Expr2::Var(ident, _, loc) = arg {
-                                    let dim = &dims[i];
-                                    // we need to check to make sure that any explicit subscript names are
-                                    // converted to offsets here and not passed to self.lower
-
-                                    // First check for named dimension subscripts
-                                    // Need to do case-insensitive matching since identifiers are canonicalized
-                                    let subscript_off =
-                                        if let Dimension::Named(_, named_dim) = dim {
-                                            let canonicalized_ident = ident.as_str();
-                                            named_dim.elements.iter().position(|elem| {
-                                                elem.as_str() == canonicalized_ident
-                                            })
-                                        } else {
-                                            None
-                                        };
-
-                                    if let Some(offset) = subscript_off {
-                                        Expr::Const((offset + 1) as f64, *loc)
-                                    } else if let Dimension::Indexed(name, _size) = dim {
-                                        // For indexed dimensions, check if ident is of format "DimName.Index"
-                                        let expected_prefix = format!("{}.", name.as_str());
-                                        if ident.as_str().starts_with(&expected_prefix) {
-                                            if let Ok(idx) = ident.as_str()[expected_prefix.len()..]
-                                                .parse::<usize>()
-                                            {
-                                                // Validate the index is within bounds (1-based)
-                                                if idx >= 1 && idx <= dim.len() {
-                                                    Expr::Const(idx as f64, *loc)
-                                                } else {
-                                                    return sim_err!(
-                                                        BadDimensionName,
-                                                        id.as_str().to_string()
-                                                    );
-                                                }
-                                            } else {
-                                                self.lower(arg)?
-                                            }
-                                        } else {
-                                            self.lower(arg)?
-                                        }
-                                    } else if let Some(subscript_off) =
-                                        self.get_dimension_name_subscript(ident.as_str())
-                                    {
-                                        // some modelers do `Variable[SubscriptName]` in their A2A equations
-                                        Expr::Const((subscript_off + 1) as f64, *loc)
-                                    } else {
-                                        self.lower(arg)?
-                                    }
-                                } else {
-                                    self.lower(arg)?
-                                };
-                                Ok(expr)
-                            }
-                        }
-                    })
-                    .collect();
-                let bounds = dims.iter().map(|dim| dim.len()).collect();
-                Expr::Subscript(off, args?, bounds, *loc)
-            }
-            ast::Expr2::Op1(op, l, _, loc) => {
-                match op {
-                    ast::UnaryOp::Transpose => {
-                        // Special handling for transpose of bare array variables
-                        if let ast::Expr2::Var(id, _, var_loc) = &**l {
-                            // Get the variable's metadata to check if it's an array
-                            if let Ok(metadata) = self.get_metadata(id)
-                                && let Some(dims) = metadata.var.get_dimensions()
-                            {
-                                if self.active_dimension.is_some() {
-                                    // We're in an A2A context - need to handle bare array transpose specially
-                                    // We need to reverse the active dimensions before processing the variable
-                                    let mut ctx = self.clone();
-                                    if let Some(ref active_dims) = ctx.active_dimension {
-                                        let mut reversed_dims = active_dims.clone();
-                                        reversed_dims.reverse();
-                                        ctx.active_dimension = Some(reversed_dims);
-                                    }
-                                    if let Some(ref active_subs) = ctx.active_subscript {
-                                        let mut reversed_subs = active_subs.clone();
-                                        reversed_subs.reverse();
-                                        ctx.active_subscript = Some(reversed_subs);
-                                    }
-                                    // Process the variable with reversed dimensions
-                                    let inner = ctx.lower(l)?;
-                                    // The result already has the correct transposed access pattern
-                                    return Ok(inner);
-                                } else {
-                                    // Not in A2A context - create a wildcard subscript to get the full array
-                                    // then apply transpose
-                                    let off = self.get_base_offset(id)?;
-                                    let orig_dims: Vec<usize> =
-                                        dims.iter().map(|d| d.len()).collect();
-                                    let orig_strides =
-                                        ArrayView::contiguous(orig_dims.clone()).strides;
-
-                                    // Create a view for the full array
-                                    let view = ArrayView {
-                                        dims: orig_dims.clone(),
-                                        strides: orig_strides,
-                                        offset: 0,
-                                        sparse: Vec::new(),
-                                    };
-
-                                    // Now transpose it
-                                    let mut transposed_dims = view.dims.clone();
-                                    transposed_dims.reverse();
-                                    let mut transposed_strides = view.strides.clone();
-                                    transposed_strides.reverse();
-                                    let transposed_view = ArrayView {
-                                        dims: transposed_dims,
-                                        strides: transposed_strides,
-                                        offset: view.offset,
-                                        sparse: view.sparse.clone(),
-                                    };
-
-                                    return Ok(Expr::StaticSubscript(
-                                        off,
-                                        transposed_view,
-                                        *var_loc,
-                                    ));
-                                }
-                            }
-                        }
-
-                        // Default transpose handling
-                        if self.active_dimension.is_some() {
-                            // In A2A context, transpose swaps the active indices. We lower the
-                            // inner expression with reversed active dims/subscripts so the
-                            // element-level expression already reflects the transposed access.
-                            let mut ctx = self.clone();
-                            if let Some(ref active_dims) = ctx.active_dimension {
-                                let mut reversed_dims = active_dims.clone();
-                                reversed_dims.reverse();
-                                ctx.active_dimension = Some(reversed_dims);
-                            }
-                            if let Some(ref active_subs) = ctx.active_subscript {
-                                let mut reversed_subs = active_subs.clone();
-                                reversed_subs.reverse();
-                                ctx.active_subscript = Some(reversed_subs);
-                            }
-                            ctx.lower(l)?
-                        } else {
-                            let l = self.lower(l)?;
-                            // Transpose reverses the dimensions of an array
-                            match l {
-                                Expr::StaticSubscript(off, view, loc) => {
-                                    // Transpose a view by reversing its dimensions and strides
-                                    let mut transposed_dims = view.dims.clone();
-                                    transposed_dims.reverse();
-                                    let mut transposed_strides = view.strides.clone();
-                                    transposed_strides.reverse();
-
-                                    let transposed_view = ArrayView {
-                                        dims: transposed_dims,
-                                        strides: transposed_strides,
-                                        offset: view.offset,
-                                        sparse: view.sparse.clone(),
-                                    };
-
-                                    Expr::StaticSubscript(off, transposed_view, loc)
-                                }
-                                _ => {
-                                    // For other expressions (including bare variables),
-                                    // wrap in a transpose operation to be handled at runtime
-                                    Expr::Op1(UnaryOp::Transpose, Box::new(l), *loc)
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        // Process the inner expression first for other operators
-                        let l = self.lower(l)?;
-                        match op {
-                            ast::UnaryOp::Negative => Expr::Op2(
-                                BinaryOp::Sub,
-                                Box::new(Expr::Const(0.0, *loc)),
-                                Box::new(l),
-                                *loc,
-                            ),
-                            ast::UnaryOp::Positive => l,
-                            ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(l), *loc),
-                            ast::UnaryOp::Transpose => unreachable!("Transpose handled above"),
-                        }
-                    }
-                }
-            }
-            ast::Expr2::Op2(op, l, r, array_bounds, loc) => {
-                // Check if we need dimension reordering for binary operations
-                let mut l_expr = self.lower(l)?;
-                let mut r_expr = self.lower(r)?;
-
-                // Only apply dimension reordering if we're NOT in an A2A context.
-                // In A2A context, the implicit subscripts already handle dimension reordering.
-                if self.active_dimension.is_none() {
-                    // If the result is an array, check if operand dimension reordering is needed.
-                    // Prefer ArrayBounds dim_names (computed during type checking), with fallback
-                    // to metadata lookup for temp arrays where dim_names can be None.
-                    if let Some(bounds) = array_bounds
-                        && bounds.dim_names().is_some()
-                    {
-                        let l_dim_names: Option<Vec<String>> =
-                            match l.get_array_bounds().and_then(|b| b.dim_names()) {
-                                Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
-                                None => self.get_expr_dimension_names(l),
-                            };
-                        let r_dim_names: Option<Vec<String>> =
-                            match r.get_array_bounds().and_then(|b| b.dim_names()) {
-                                Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
-                                None => self.get_expr_dimension_names(r),
-                            };
-
-                        // Check if right needs reordering to match left's dimension order
-                        if let (Some(l_names), Some(r_names)) = (&l_dim_names, &r_dim_names)
-                            && l_names != r_names
-                        {
-                            // Check if r can be reordered to match l
-                            if let Some(reordering) = find_dimension_reordering(r_names, l_names) {
-                                r_expr =
-                                    self.apply_dimension_reordering(r_expr, reordering, *loc)?;
-                            }
-                            // Otherwise check if l can be reordered to match r
-                            else if let Some(reordering) =
-                                find_dimension_reordering(l_names, r_names)
-                            {
-                                l_expr =
-                                    self.apply_dimension_reordering(l_expr, reordering, *loc)?;
-                            }
-                        }
-                    }
-                }
-
-                let op = match op {
-                    ast::BinaryOp::Add => BinaryOp::Add,
-                    ast::BinaryOp::Sub => BinaryOp::Sub,
-                    ast::BinaryOp::Exp => BinaryOp::Exp,
-                    ast::BinaryOp::Mul => BinaryOp::Mul,
-                    ast::BinaryOp::Div => BinaryOp::Div,
-                    ast::BinaryOp::Mod => BinaryOp::Mod,
-                    ast::BinaryOp::Gt => BinaryOp::Gt,
-                    ast::BinaryOp::Gte => BinaryOp::Gte,
-                    ast::BinaryOp::Lt => BinaryOp::Lt,
-                    ast::BinaryOp::Lte => BinaryOp::Lte,
-                    ast::BinaryOp::Eq => BinaryOp::Eq,
-                    ast::BinaryOp::Neq => BinaryOp::Neq,
-                    ast::BinaryOp::And => BinaryOp::And,
-                    ast::BinaryOp::Or => BinaryOp::Or,
-                };
-
-                // For now, just create the Op2 expression
-                // The rewriting to use temporaries will happen in a separate pass
-                Expr::Op2(op, Box::new(l_expr), Box::new(r_expr), *loc)
-            }
-            ast::Expr2::If(cond, t, f, _, loc) => {
-                let cond = self.lower(cond)?;
-                let t = self.lower(t)?;
-                let f = self.lower(f)?;
-                Expr::If(Box::new(cond), Box::new(t), Box::new(f), *loc)
-            }
-        };
-
-        Ok(expr)
+        Ok(result)
     }
 
     fn fold_flows(&self, flows: &[Ident<Canonical>]) -> Option<Expr> {
@@ -2017,33 +1080,6 @@ impl Context<'_> {
         Some(loads.fold(first, |acc, flow| {
             Expr::Op2(BinaryOp::Add, Box::new(acc), Box::new(flow), Loc::default())
         }))
-    }
-
-    /// Get dimension names from an Expr2 if it's an array variable
-    fn get_expr_dimension_names(&self, expr: &ast::Expr2) -> Option<Vec<String>> {
-        match expr {
-            ast::Expr2::Var(id, _, _) => {
-                // Get the variable's dimensions
-                let metadata = self.metadata.get(self.model_name)?;
-                let var_metadata = metadata.get(id)?;
-                let dims = var_metadata.var.get_dimensions()?;
-                Some(dims.iter().map(|d| d.name().to_string()).collect())
-            }
-            ast::Expr2::Subscript(id, _, _, _) => {
-                // For subscripted arrays, get the base variable's dimensions
-                let metadata = self.metadata.get(self.model_name)?;
-                let var_metadata = metadata.get(id)?;
-                let dims = var_metadata.var.get_dimensions()?;
-                Some(dims.iter().map(|d| d.name().to_string()).collect())
-            }
-            ast::Expr2::Op1(ast::UnaryOp::Transpose, inner, _, _) => {
-                // For transpose, get the inner dimensions and reverse them
-                let mut dims = self.get_expr_dimension_names(inner)?;
-                dims.reverse();
-                Some(dims)
-            }
-            _ => None,
-        }
     }
 
     /// Apply dimension reordering to an expression
@@ -2209,8 +1245,8 @@ pub struct Pass1Result {
 
 impl Context<'_> {
     /// Lower an Expr3 to compiler's Expr representation.
-    /// Handles Expr3-specific variants (TempArray, AssignTemp, etc.) directly,
-    /// and converts common variants to Expr2 for lower_late processing.
+    /// Handles all Expr3 variants directly, including pass-1 specific variants
+    /// (TempArray, AssignTemp, etc.) and common expression types.
     fn lower_from_expr3(&self, expr: &Expr3) -> Result<Expr> {
         match expr {
             // Handle Expr3-specific variants directly
@@ -2230,13 +1266,148 @@ impl Context<'_> {
                 Ok(Expr::AssignTemp(*id, Box::new(lowered_inner), view.clone()))
             }
 
-            // For common variants, convert to Expr2 and use lower_late
+            // Handle common variants directly (no longer converting to Expr2)
             Expr3::Const(_, n, loc) => Ok(Expr::Const(*n, *loc)),
 
             Expr3::Var(id, _, loc) => {
-                // Convert to Expr2 and use lower_late
-                let expr2 = ast::Expr2::Var(id.clone(), None, *loc);
-                self.lower_late(&expr2)
+                // Check if this identifier is a dimension name
+                let is_dimension = self
+                    .dimensions
+                    .iter()
+                    .any(|dim| id.as_str() == canonicalize(dim.name()).as_str());
+
+                if is_dimension {
+                    // This is a dimension name
+                    if let Some(active_dims) = &self.active_dimension {
+                        if let Some(active_subscripts) = &self.active_subscript {
+                            // We're in an array context - find the matching dimension
+                            for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
+                            {
+                                if id.as_str() == canonicalize(dim.name()).as_str() {
+                                    // Convert to the subscript index (0-based)
+                                    let index = match dim {
+                                        Dimension::Indexed(_, _) => {
+                                            // Subscript is already a 1-based index as a string
+                                            subscript.as_str().parse::<f64>().unwrap()
+                                        }
+                                        Dimension::Named(_, named_dim) => {
+                                            let off = named_dim
+                                                .elements
+                                                .iter()
+                                                .position(|elem| {
+                                                    elem.as_str() == subscript.as_str()
+                                                })
+                                                .unwrap();
+
+                                            (off + 1) as f64
+                                        }
+                                    };
+                                    return Ok(Expr::Const(index, *loc));
+                                }
+                            }
+                        }
+                    } else {
+                        // We're in a scalar context but trying to use a dimension name
+                        return Err(Error {
+                            kind: ErrorKind::Model,
+                            code: ErrorCode::DimensionInScalarContext,
+                            details: Some(format!(
+                                "Dimension '{id}' cannot be used in a scalar equation"
+                            )),
+                        });
+                    }
+                }
+
+                // Not a dimension, check if it's a module input
+                if let Some((off, _)) = self
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, input)| id.as_str() == input.as_str())
+                {
+                    return Ok(Expr::ModuleInput(off, *loc));
+                }
+
+                // Check if it's a regular variable
+                match self.get_offset(id) {
+                    Ok(off) => Ok(Expr::Var(off, *loc)),
+                    Err(err) => {
+                        // If get_offset fails because it's an array without implicit subscripts,
+                        // try to create a full array view
+                        if matches!(err.code, ErrorCode::ArrayReferenceNeedsExplicitSubscripts)
+                            && let Ok(metadata) = self.get_metadata(id)
+                            && let Some(source_dims) = metadata.var.get_dimensions()
+                        {
+                            // This is an array variable - check if we need dimension reordering
+                            let off = self.get_base_offset(id)?;
+
+                            // Check if we're in an A2A context and need to reorder dimensions
+                            if let Some(target_dims) = &self.active_dimension {
+                                // Get dimension names
+                                let source_dim_names: Vec<String> =
+                                    source_dims.iter().map(|d| d.name().to_string()).collect();
+                                let target_dim_names: Vec<String> =
+                                    target_dims.iter().map(|d| d.name().to_string()).collect();
+
+                                // Check if dimensions can be reordered
+                                if let Some(reordering) =
+                                    find_dimension_reordering(&source_dim_names, &target_dim_names)
+                                {
+                                    // Check if reordering is needed (not identity)
+                                    let needs_reordering =
+                                        reordering.iter().enumerate().any(|(i, &idx)| i != idx);
+
+                                    if needs_reordering {
+                                        // Create a transposed view
+                                        let orig_dims: Vec<usize> =
+                                            source_dims.iter().map(|d| d.len()).collect();
+
+                                        // Reorder the dimensions
+                                        let reordered_dims: Vec<usize> = target_dims
+                                            .iter()
+                                            .map(|target_dim| {
+                                                source_dims
+                                                    .iter()
+                                                    .find(|source_dim| {
+                                                        canonicalize(source_dim.name())
+                                                            == canonicalize(target_dim.name())
+                                                    })
+                                                    .unwrap()
+                                                    .len()
+                                            })
+                                            .collect();
+
+                                        // Create strides for the reordered view
+                                        let mut strides = vec![1isize; orig_dims.len()];
+                                        for i in (0..orig_dims.len() - 1).rev() {
+                                            strides[i] = strides[i + 1] * orig_dims[i + 1] as isize;
+                                        }
+
+                                        // Reorder the strides according to the dimension reordering
+                                        let reordered_strides: Vec<isize> =
+                                            reordering.iter().map(|&idx| strides[idx]).collect();
+
+                                        let view = ArrayView {
+                                            dims: reordered_dims,
+                                            strides: reordered_strides,
+                                            offset: 0,
+                                            sparse: Vec::new(),
+                                        };
+
+                                        return Ok(Expr::StaticSubscript(off, view, *loc));
+                                    }
+                                }
+                            }
+
+                            // No reordering needed or not in A2A context
+                            let orig_dims: Vec<usize> =
+                                source_dims.iter().map(|d| d.len()).collect();
+                            let view = ArrayView::contiguous(orig_dims);
+                            return Ok(Expr::StaticSubscript(off, view, *loc));
+                        }
+                        Err(err)
+                    }
+                }
             }
 
             Expr3::Subscript(id, indices, _bounds, loc) => {
@@ -2438,46 +1609,351 @@ impl Context<'_> {
                 Ok(Expr::Subscript(off, args?, orig_dims, *loc))
             }
 
-            Expr3::App(builtin, bounds, loc) => {
-                // Convert builtin arguments from Expr3 to Expr2
-                let expr2_builtin = self.convert_builtin_expr3_to_expr2(builtin)?;
-                let expr2 = ast::Expr2::App(expr2_builtin, bounds.clone(), *loc);
-                self.lower_late(&expr2)
+            Expr3::App(builtin, _bounds, loc) => {
+                // Lower builtin directly without converting to Expr2
+                let lowered_builtin = self.lower_builtin_expr3(builtin)?;
+                Ok(Expr::App(lowered_builtin, *loc))
             }
 
-            Expr3::Op1(op, inner, bounds, loc) => {
-                let inner_expr2 = self.convert_expr3_to_expr2(inner)?;
-                let expr2 = ast::Expr2::Op1(*op, Box::new(inner_expr2), bounds.clone(), *loc);
-                self.lower_late(&expr2)
+            Expr3::Op1(op, inner, _bounds, loc) => {
+                match op {
+                    ast::UnaryOp::Transpose => {
+                        // Special handling for transpose of bare array variables
+                        if let Expr3::Var(id, _, var_loc) = &**inner {
+                            // Get the variable's metadata to check if it's an array
+                            if let Ok(metadata) = self.get_metadata(id)
+                                && let Some(dims) = metadata.var.get_dimensions()
+                            {
+                                if self.active_dimension.is_some() {
+                                    // We're in an A2A context - need to handle bare array transpose specially
+                                    // We need to reverse the active dimensions before processing the variable
+                                    let mut ctx = self.clone();
+                                    if let Some(ref active_dims) = ctx.active_dimension {
+                                        let mut reversed_dims = active_dims.clone();
+                                        reversed_dims.reverse();
+                                        ctx.active_dimension = Some(reversed_dims);
+                                    }
+                                    if let Some(ref active_subs) = ctx.active_subscript {
+                                        let mut reversed_subs = active_subs.clone();
+                                        reversed_subs.reverse();
+                                        ctx.active_subscript = Some(reversed_subs);
+                                    }
+                                    // Process the variable with reversed dimensions
+                                    let result = ctx.lower_from_expr3(inner)?;
+                                    // The result already has the correct transposed access pattern
+                                    return Ok(result);
+                                } else {
+                                    // Not in A2A context - create a wildcard subscript to get the full array
+                                    // then apply transpose
+                                    let off = self.get_base_offset(id)?;
+                                    let orig_dims: Vec<usize> =
+                                        dims.iter().map(|d| d.len()).collect();
+                                    let orig_strides =
+                                        ArrayView::contiguous(orig_dims.clone()).strides;
+
+                                    // Create a view for the full array
+                                    let view = ArrayView {
+                                        dims: orig_dims.clone(),
+                                        strides: orig_strides,
+                                        offset: 0,
+                                        sparse: Vec::new(),
+                                    };
+
+                                    // Now transpose it
+                                    let mut transposed_dims = view.dims.clone();
+                                    transposed_dims.reverse();
+                                    let mut transposed_strides = view.strides.clone();
+                                    transposed_strides.reverse();
+                                    let transposed_view = ArrayView {
+                                        dims: transposed_dims,
+                                        strides: transposed_strides,
+                                        offset: view.offset,
+                                        sparse: view.sparse.clone(),
+                                    };
+
+                                    return Ok(Expr::StaticSubscript(
+                                        off,
+                                        transposed_view,
+                                        *var_loc,
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Default transpose handling
+                        if self.active_dimension.is_some() {
+                            // In A2A context, transpose swaps the active indices
+                            let mut ctx = self.clone();
+                            if let Some(ref active_dims) = ctx.active_dimension {
+                                let mut reversed_dims = active_dims.clone();
+                                reversed_dims.reverse();
+                                ctx.active_dimension = Some(reversed_dims);
+                            }
+                            if let Some(ref active_subs) = ctx.active_subscript {
+                                let mut reversed_subs = active_subs.clone();
+                                reversed_subs.reverse();
+                                ctx.active_subscript = Some(reversed_subs);
+                            }
+                            ctx.lower_from_expr3(inner)
+                        } else {
+                            let lowered = self.lower_from_expr3(inner)?;
+                            // Transpose reverses the dimensions of an array
+                            match lowered {
+                                Expr::StaticSubscript(off, view, expr_loc) => {
+                                    // Transpose a view by reversing its dimensions and strides
+                                    let mut transposed_dims = view.dims.clone();
+                                    transposed_dims.reverse();
+                                    let mut transposed_strides = view.strides.clone();
+                                    transposed_strides.reverse();
+
+                                    let transposed_view = ArrayView {
+                                        dims: transposed_dims,
+                                        strides: transposed_strides,
+                                        offset: view.offset,
+                                        sparse: view.sparse.clone(),
+                                    };
+
+                                    Ok(Expr::StaticSubscript(off, transposed_view, expr_loc))
+                                }
+                                _ => {
+                                    // For other expressions, wrap in a transpose operation
+                                    Ok(Expr::Op1(UnaryOp::Transpose, Box::new(lowered), *loc))
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Process the inner expression first for other operators
+                        let lowered = self.lower_from_expr3(inner)?;
+                        let result = match op {
+                            ast::UnaryOp::Negative => Expr::Op2(
+                                BinaryOp::Sub,
+                                Box::new(Expr::Const(0.0, *loc)),
+                                Box::new(lowered),
+                                *loc,
+                            ),
+                            ast::UnaryOp::Positive => lowered,
+                            ast::UnaryOp::Not => Expr::Op1(UnaryOp::Not, Box::new(lowered), *loc),
+                            ast::UnaryOp::Transpose => unreachable!("Transpose handled above"),
+                        };
+                        Ok(result)
+                    }
+                }
             }
 
-            Expr3::Op2(op, left, right, bounds, loc) => {
-                let left_expr2 = self.convert_expr3_to_expr2(left)?;
-                let right_expr2 = self.convert_expr3_to_expr2(right)?;
-                let expr2 = ast::Expr2::Op2(
-                    *op,
-                    Box::new(left_expr2),
-                    Box::new(right_expr2),
-                    bounds.clone(),
-                    *loc,
-                );
-                self.lower_late(&expr2)
+            Expr3::Op2(op, left, right, array_bounds, loc) => {
+                // Lower both operands
+                let mut l_expr = self.lower_from_expr3(left)?;
+                let mut r_expr = self.lower_from_expr3(right)?;
+
+                // Only apply dimension reordering if we're NOT in an A2A context.
+                // In A2A context, the implicit subscripts already handle dimension reordering.
+                if self.active_dimension.is_none() {
+                    // If the result is an array, check if operand dimension reordering is needed.
+                    if let Some(bounds) = array_bounds
+                        && bounds.dim_names().is_some()
+                    {
+                        let l_dim_names: Option<Vec<String>> =
+                            match left.get_array_bounds().and_then(|b| b.dim_names()) {
+                                Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
+                                None => self.get_expr3_dimension_names(left),
+                            };
+                        let r_dim_names: Option<Vec<String>> =
+                            match right.get_array_bounds().and_then(|b| b.dim_names()) {
+                                Some(names) => Some(names.iter().map(|s| s.to_string()).collect()),
+                                None => self.get_expr3_dimension_names(right),
+                            };
+
+                        // Check if right needs reordering to match left's dimension order
+                        if let (Some(l_names), Some(r_names)) = (&l_dim_names, &r_dim_names)
+                            && l_names != r_names
+                        {
+                            // Check if r can be reordered to match l
+                            if let Some(reordering) = find_dimension_reordering(r_names, l_names) {
+                                r_expr =
+                                    self.apply_dimension_reordering(r_expr, reordering, *loc)?;
+                            }
+                            // Otherwise check if l can be reordered to match r
+                            else if let Some(reordering) =
+                                find_dimension_reordering(l_names, r_names)
+                            {
+                                l_expr =
+                                    self.apply_dimension_reordering(l_expr, reordering, *loc)?;
+                            }
+                        }
+                    }
+                }
+
+                let bin_op = match op {
+                    ast::BinaryOp::Add => BinaryOp::Add,
+                    ast::BinaryOp::Sub => BinaryOp::Sub,
+                    ast::BinaryOp::Exp => BinaryOp::Exp,
+                    ast::BinaryOp::Mul => BinaryOp::Mul,
+                    ast::BinaryOp::Div => BinaryOp::Div,
+                    ast::BinaryOp::Mod => BinaryOp::Mod,
+                    ast::BinaryOp::Gt => BinaryOp::Gt,
+                    ast::BinaryOp::Gte => BinaryOp::Gte,
+                    ast::BinaryOp::Lt => BinaryOp::Lt,
+                    ast::BinaryOp::Lte => BinaryOp::Lte,
+                    ast::BinaryOp::Eq => BinaryOp::Eq,
+                    ast::BinaryOp::Neq => BinaryOp::Neq,
+                    ast::BinaryOp::And => BinaryOp::And,
+                    ast::BinaryOp::Or => BinaryOp::Or,
+                };
+
+                Ok(Expr::Op2(bin_op, Box::new(l_expr), Box::new(r_expr), *loc))
             }
 
-            Expr3::If(cond, then_expr, else_expr, bounds, loc) => {
-                let cond_expr2 = self.convert_expr3_to_expr2(cond)?;
-                let then_expr2 = self.convert_expr3_to_expr2(then_expr)?;
-                let else_expr2 = self.convert_expr3_to_expr2(else_expr)?;
-                let expr2 = ast::Expr2::If(
-                    Box::new(cond_expr2),
-                    Box::new(then_expr2),
-                    Box::new(else_expr2),
-                    bounds.clone(),
-                    *loc,
-                );
-                self.lower_late(&expr2)
+            Expr3::If(cond, then_expr, else_expr, _bounds, loc) => {
+                let cond = self.lower_from_expr3(cond)?;
+                let t = self.lower_from_expr3(then_expr)?;
+                let f = self.lower_from_expr3(else_expr)?;
+                Ok(Expr::If(Box::new(cond), Box::new(t), Box::new(f), *loc))
             }
         }
+    }
+
+    /// Get dimension names from an Expr3 if it's an array variable
+    fn get_expr3_dimension_names(&self, expr: &Expr3) -> Option<Vec<String>> {
+        match expr {
+            Expr3::Var(ident, _, _) => {
+                let metadata = self.get_metadata(ident).ok()?;
+                let dims = metadata.var.get_dimensions()?;
+                Some(dims.iter().map(|d| d.name().to_string()).collect())
+            }
+            Expr3::Subscript(ident, _, _, _) => {
+                let metadata = self.get_metadata(ident).ok()?;
+                let dims = metadata.var.get_dimensions()?;
+                Some(dims.iter().map(|d| d.name().to_string()).collect())
+            }
+            _ => None,
+        }
+    }
+
+    /// Lower a BuiltinFn<Expr3> to BuiltinFn (i.e., BuiltinFn<Expr>).
+    /// Handles array builtins that need preserve_wildcards_for_iteration.
+    fn lower_builtin_expr3(
+        &self,
+        builtin: &crate::builtins::BuiltinFn<Expr3>,
+    ) -> Result<BuiltinFn> {
+        use crate::builtins::BuiltinFn as BFn;
+        Ok(match builtin {
+            BFn::Lookup(id, expr, loc) => {
+                BuiltinFn::Lookup(id.clone(), Box::new(self.lower_from_expr3(expr)?), *loc)
+            }
+            BFn::Abs(a) => BuiltinFn::Abs(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Arccos(a) => BuiltinFn::Arccos(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Arctan(a) => BuiltinFn::Arctan(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Cos(a) => BuiltinFn::Cos(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Exp(a) => BuiltinFn::Exp(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Inf => BuiltinFn::Inf,
+            BFn::Int(a) => BuiltinFn::Int(Box::new(self.lower_from_expr3(a)?)),
+            BFn::IsModuleInput(id, loc) => BuiltinFn::IsModuleInput(id.clone(), *loc),
+            BFn::Ln(a) => BuiltinFn::Ln(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Log10(a) => BuiltinFn::Log10(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Max(a, b) => {
+                if b.is_none() {
+                    // Single-arg array Max: preserve wildcards for iteration
+                    let mut ctx = self.clone();
+                    ctx.preserve_wildcards_for_iteration = true;
+                    BuiltinFn::Max(Box::new(ctx.lower_from_expr3(a)?), None)
+                } else {
+                    // Two-arg scalar Max
+                    let a = Box::new(self.lower_from_expr3(a)?);
+                    let b = Some(Box::new(self.lower_from_expr3(b.as_ref().unwrap())?));
+                    BuiltinFn::Max(a, b)
+                }
+            }
+            BFn::Mean(args) => {
+                // Mean can be used with arrays - preserve wildcards
+                let mut ctx = self.clone();
+                ctx.preserve_wildcards_for_iteration = true;
+                let args = args
+                    .iter()
+                    .map(|arg| ctx.lower_from_expr3(arg))
+                    .collect::<Result<Vec<Expr>>>();
+                BuiltinFn::Mean(args?)
+            }
+            BFn::Min(a, b) => {
+                if b.is_none() {
+                    // Single-arg array Min: preserve wildcards for iteration
+                    let mut ctx = self.clone();
+                    ctx.preserve_wildcards_for_iteration = true;
+                    BuiltinFn::Min(Box::new(ctx.lower_from_expr3(a)?), None)
+                } else {
+                    // Two-arg scalar Min
+                    let a = Box::new(self.lower_from_expr3(a)?);
+                    let b = Some(Box::new(self.lower_from_expr3(b.as_ref().unwrap())?));
+                    BuiltinFn::Min(a, b)
+                }
+            }
+            BFn::Pi => BuiltinFn::Pi,
+            BFn::Pulse(a, b, c) => {
+                let c = match c {
+                    Some(c) => Some(Box::new(self.lower_from_expr3(c)?)),
+                    None => None,
+                };
+                BuiltinFn::Pulse(
+                    Box::new(self.lower_from_expr3(a)?),
+                    Box::new(self.lower_from_expr3(b)?),
+                    c,
+                )
+            }
+            BFn::Ramp(a, b, c) => {
+                let c = match c {
+                    Some(c) => Some(Box::new(self.lower_from_expr3(c)?)),
+                    None => None,
+                };
+                BuiltinFn::Ramp(
+                    Box::new(self.lower_from_expr3(a)?),
+                    Box::new(self.lower_from_expr3(b)?),
+                    c,
+                )
+            }
+            BFn::SafeDiv(a, b, c) => {
+                let c = match c {
+                    Some(c) => Some(Box::new(self.lower_from_expr3(c)?)),
+                    None => None,
+                };
+                BuiltinFn::SafeDiv(
+                    Box::new(self.lower_from_expr3(a)?),
+                    Box::new(self.lower_from_expr3(b)?),
+                    c,
+                )
+            }
+            BFn::Sign(a) => BuiltinFn::Sign(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Sin(a) => BuiltinFn::Sin(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Sqrt(a) => BuiltinFn::Sqrt(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Step(a, b) => BuiltinFn::Step(
+                Box::new(self.lower_from_expr3(a)?),
+                Box::new(self.lower_from_expr3(b)?),
+            ),
+            BFn::Tan(a) => BuiltinFn::Tan(Box::new(self.lower_from_expr3(a)?)),
+            BFn::Time => BuiltinFn::Time,
+            BFn::TimeStep => BuiltinFn::TimeStep,
+            BFn::StartTime => BuiltinFn::StartTime,
+            BFn::FinalTime => BuiltinFn::FinalTime,
+            BFn::Rank(_, _) => {
+                return sim_err!(TodoArrayBuiltin, self.ident.to_string());
+            }
+            BFn::Size(a) => {
+                // Set flag to preserve wildcards for array iteration
+                let mut ctx = self.clone();
+                ctx.preserve_wildcards_for_iteration = true;
+                BuiltinFn::Size(Box::new(ctx.lower_from_expr3(a)?))
+            }
+            BFn::Stddev(a) => {
+                let mut ctx = self.clone();
+                ctx.preserve_wildcards_for_iteration = true;
+                BuiltinFn::Stddev(Box::new(ctx.lower_from_expr3(a)?))
+            }
+            BFn::Sum(a) => {
+                let mut ctx = self.clone();
+                ctx.preserve_wildcards_for_iteration = true;
+                BuiltinFn::Sum(Box::new(ctx.lower_from_expr3(a)?))
+            }
+        })
     }
 
     /// Lower an IndexExpr3 to Expr for dynamic subscript handling.
@@ -2662,233 +2138,6 @@ impl Context<'_> {
             }
         }
     }
-
-    /// Convert IndexExpr3 to IndexExpr2 for lower_late processing.
-    /// Handles IndexExpr3::Dimension by resolving it in A2A context.
-    fn convert_index_expr3_to_expr2(&self, idx: &IndexExpr3) -> Result<IndexExpr2> {
-        match idx {
-            IndexExpr3::StarRange(name, loc) => Ok(IndexExpr2::StarRange(name.clone(), *loc)),
-            IndexExpr3::Range(start, end, loc) => {
-                let start_expr2 = self.convert_expr3_to_expr2(start)?;
-                let end_expr2 = self.convert_expr3_to_expr2(end)?;
-                Ok(IndexExpr2::Range(start_expr2, end_expr2, *loc))
-            }
-            IndexExpr3::DimPosition(pos, loc) => Ok(IndexExpr2::DimPosition(*pos, *loc)),
-            IndexExpr3::Expr(e) => {
-                let expr2 = self.convert_expr3_to_expr2(e)?;
-                Ok(IndexExpr2::Expr(expr2))
-            }
-            IndexExpr3::Dimension(name, loc) => {
-                // Dimension reference - convert to a Var expression that lower_late will handle
-                // lower_late knows how to resolve dimension names in A2A context
-                Ok(IndexExpr2::Expr(ast::Expr2::Var(
-                    canonicalize(name.as_str()),
-                    None,
-                    *loc,
-                )))
-            }
-        }
-    }
-
-    /// Convert Expr3 to Expr2 (for variants that exist in both).
-    /// This is used for arguments to operations that need to go through lower_late.
-    fn convert_expr3_to_expr2(&self, expr: &Expr3) -> Result<ast::Expr2> {
-        match expr {
-            Expr3::Const(s, n, loc) => Ok(ast::Expr2::Const(s.clone(), *n, *loc)),
-
-            Expr3::Var(id, bounds, loc) => Ok(ast::Expr2::Var(id.clone(), bounds.clone(), *loc)),
-
-            Expr3::Subscript(id, indices, bounds, loc) => {
-                let indices_expr2: Vec<IndexExpr2> = indices
-                    .iter()
-                    .map(|idx| self.convert_index_expr3_to_expr2(idx))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(ast::Expr2::Subscript(
-                    id.clone(),
-                    indices_expr2,
-                    bounds.clone(),
-                    *loc,
-                ))
-            }
-
-            Expr3::App(builtin, bounds, loc) => {
-                let builtin_expr2 = self.convert_builtin_expr3_to_expr2(builtin)?;
-                Ok(ast::Expr2::App(builtin_expr2, bounds.clone(), *loc))
-            }
-
-            Expr3::Op1(op, inner, bounds, loc) => {
-                let inner_expr2 = self.convert_expr3_to_expr2(inner)?;
-                Ok(ast::Expr2::Op1(
-                    *op,
-                    Box::new(inner_expr2),
-                    bounds.clone(),
-                    *loc,
-                ))
-            }
-
-            Expr3::Op2(op, left, right, bounds, loc) => {
-                let left_expr2 = self.convert_expr3_to_expr2(left)?;
-                let right_expr2 = self.convert_expr3_to_expr2(right)?;
-                Ok(ast::Expr2::Op2(
-                    *op,
-                    Box::new(left_expr2),
-                    Box::new(right_expr2),
-                    bounds.clone(),
-                    *loc,
-                ))
-            }
-
-            Expr3::If(cond, then_expr, else_expr, bounds, loc) => {
-                let cond_expr2 = self.convert_expr3_to_expr2(cond)?;
-                let then_expr2 = self.convert_expr3_to_expr2(then_expr)?;
-                let else_expr2 = self.convert_expr3_to_expr2(else_expr)?;
-                Ok(ast::Expr2::If(
-                    Box::new(cond_expr2),
-                    Box::new(then_expr2),
-                    Box::new(else_expr2),
-                    bounds.clone(),
-                    *loc,
-                ))
-            }
-
-            // Expr3-specific variants cannot be converted to Expr2
-            Expr3::StaticSubscript(_, _, _, _)
-            | Expr3::TempArray(_, _, _)
-            | Expr3::TempArrayElement(_, _, _, _)
-            | Expr3::AssignTemp(_, _, _) => {
-                sim_err!(
-                    Generic,
-                    "Cannot convert Expr3-specific variant to Expr2".to_string()
-                )
-            }
-        }
-    }
-
-    /// Convert a BuiltinFn<Expr3> to BuiltinFn<Expr2>.
-    fn convert_builtin_expr3_to_expr2(
-        &self,
-        builtin: &crate::builtins::BuiltinFn<Expr3>,
-    ) -> Result<crate::builtins::BuiltinFn<ast::Expr2>> {
-        use crate::builtins::BuiltinFn::*;
-
-        Ok(match builtin {
-            Lookup(id, e, loc) => {
-                Lookup(id.clone(), Box::new(self.convert_expr3_to_expr2(e)?), *loc)
-            }
-            Abs(e) => Abs(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Arccos(e) => Arccos(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Arcsin(e) => Arcsin(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Arctan(e) => Arctan(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Cos(e) => Cos(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Exp(e) => Exp(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Inf => Inf,
-            Int(e) => Int(Box::new(self.convert_expr3_to_expr2(e)?)),
-            IsModuleInput(id, loc) => IsModuleInput(id.clone(), *loc),
-            Ln(e) => Ln(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Log10(e) => Log10(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Max(a, b) => Max(
-                Box::new(self.convert_expr3_to_expr2(a)?),
-                b.as_ref()
-                    .map(|e| self.convert_expr3_to_expr2(e).map(Box::new))
-                    .transpose()?,
-            ),
-            Mean(args) => Mean(
-                args.iter()
-                    .map(|e| self.convert_expr3_to_expr2(e))
-                    .collect::<Result<Vec<_>>>()?,
-            ),
-            Min(a, b) => Min(
-                Box::new(self.convert_expr3_to_expr2(a)?),
-                b.as_ref()
-                    .map(|e| self.convert_expr3_to_expr2(e).map(Box::new))
-                    .transpose()?,
-            ),
-            Pi => Pi,
-            Pulse(a, b, c) => Pulse(
-                Box::new(self.convert_expr3_to_expr2(a)?),
-                Box::new(self.convert_expr3_to_expr2(b)?),
-                c.as_ref()
-                    .map(|e| self.convert_expr3_to_expr2(e).map(Box::new))
-                    .transpose()?,
-            ),
-            Ramp(a, b, c) => Ramp(
-                Box::new(self.convert_expr3_to_expr2(a)?),
-                Box::new(self.convert_expr3_to_expr2(b)?),
-                c.as_ref()
-                    .map(|e| self.convert_expr3_to_expr2(e).map(Box::new))
-                    .transpose()?,
-            ),
-            Rank(e, opt) => Rank(
-                Box::new(self.convert_expr3_to_expr2(e)?),
-                opt.as_ref()
-                    .map(|(a, b)| {
-                        Ok::<_, Error>((
-                            Box::new(self.convert_expr3_to_expr2(a)?),
-                            b.as_ref()
-                                .map(|e| self.convert_expr3_to_expr2(e).map(Box::new))
-                                .transpose()?,
-                        ))
-                    })
-                    .transpose()?,
-            ),
-            SafeDiv(a, b, c) => SafeDiv(
-                Box::new(self.convert_expr3_to_expr2(a)?),
-                Box::new(self.convert_expr3_to_expr2(b)?),
-                c.as_ref()
-                    .map(|e| self.convert_expr3_to_expr2(e).map(Box::new))
-                    .transpose()?,
-            ),
-            Sign(e) => Sign(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Sin(e) => Sin(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Size(e) => Size(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Sqrt(e) => Sqrt(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Stddev(e) => Stddev(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Step(a, b) => Step(
-                Box::new(self.convert_expr3_to_expr2(a)?),
-                Box::new(self.convert_expr3_to_expr2(b)?),
-            ),
-            Sum(e) => Sum(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Tan(e) => Tan(Box::new(self.convert_expr3_to_expr2(e)?)),
-            Time => Time,
-            TimeStep => TimeStep,
-            StartTime => StartTime,
-            FinalTime => FinalTime,
-        })
-    }
-
-    /// Apply pass 1 transformation and lower the result.
-    /// Returns a Pass1Result containing any temp assignments and the main expression.
-    #[allow(dead_code)]
-    fn lower_with_pass1(&self, expr: &ast::Expr2) -> Result<Pass1Result> {
-        // First apply pass 0 (bare array expansion, subscript normalization)
-        let normalized = self.lower_pass0(expr);
-
-        // Convert to Expr3 (wildcard resolution, dimension detection)
-        let expr3 = Expr3::from_expr2(&normalized, self).map_err(|e| Error {
-            kind: ErrorKind::Model,
-            code: e.code,
-            details: Some(format!("Error at {}:{}", e.start, e.end)),
-        })?;
-
-        // Apply pass 1 (temp decomposition for complex array expressions)
-        let mut pass1_ctx = Pass1Context::new();
-        let transformed = pass1_ctx.transform(expr3);
-        let assignments = pass1_ctx.take_assignments();
-
-        // Lower the assignments
-        let lowered_assignments: Vec<Expr> = assignments
-            .iter()
-            .map(|a| self.lower_from_expr3(a))
-            .collect::<Result<Vec<_>>>()?;
-
-        // Lower the main expression
-        let lowered_expr = self.lower_from_expr3(&transformed)?;
-
-        Ok(Pass1Result {
-            assignments: lowered_assignments,
-            expr: lowered_expr,
-        })
-    }
 }
 
 #[test]
@@ -2988,7 +2237,9 @@ fn test_lower() {
 
     let output = context.lower(&input);
     assert!(output.is_ok());
-    assert_eq!(expected, output.unwrap());
+    let mut output_exprs = output.unwrap();
+    // The last element is the main expression
+    assert_eq!(expected, output_exprs.pop().unwrap());
 
     let input = {
         use ast::BinaryOp::*;
@@ -3084,7 +2335,9 @@ fn test_lower() {
 
     let output = context.lower(&input);
     assert!(output.is_ok());
-    assert_eq!(expected, output.unwrap());
+    let mut output_exprs = output.unwrap();
+    // The last element is the main expression
+    assert_eq!(expected, output_exprs.pop().unwrap());
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3251,10 +2504,13 @@ impl Var {
                         }
                         match ast.as_ref().unwrap() {
                             Ast::Scalar(ast) => {
-                                vec![Expr::AssignCurr(off, Box::new(ctx.lower(ast)?))]
+                                let mut exprs = ctx.lower(ast)?;
+                                let main_expr = exprs.pop().unwrap();
+                                exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
+                                exprs
                             }
                             Ast::ApplyToAll(dims, ast) => {
-                                let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
+                                let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
                                         let mut ctx = ctx.clone();
@@ -3265,14 +2521,20 @@ impl Var {
                                                 .map(|s| CanonicalElementName::from_raw(s))
                                                 .collect(),
                                         );
-                                        ctx.lower(ast)
-                                            .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                        ctx.lower(ast).map(|mut exprs| {
+                                            let main_expr = exprs.pop().unwrap();
+                                            exprs.push(Expr::AssignCurr(
+                                                off + i,
+                                                Box::new(main_expr),
+                                            ));
+                                            exprs
+                                        })
                                     })
                                     .collect();
-                                exprs?
+                                exprs?.into_iter().flatten().collect()
                             }
                             Ast::Arrayed(dims, elements) => {
-                                let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
+                                let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                     .enumerate()
                                     .map(|(i, subscripts)| {
                                         let subscript_str = subscripts.join(",");
@@ -3287,11 +2549,17 @@ impl Var {
                                                 .map(|s| CanonicalElementName::from_raw(s))
                                                 .collect(),
                                         );
-                                        ctx.lower(ast)
-                                            .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                        ctx.lower(ast).map(|mut exprs| {
+                                            let main_expr = exprs.pop().unwrap();
+                                            exprs.push(Expr::AssignCurr(
+                                                off + i,
+                                                Box::new(main_expr),
+                                            ));
+                                            exprs
+                                        })
                                     })
                                     .collect();
-                                exprs?
+                                exprs?.into_iter().flatten().collect()
                             }
                         }
                     } else {
@@ -3338,25 +2606,26 @@ impl Var {
                     }
                     match ast.as_ref().unwrap() {
                         Ast::Scalar(ast) => {
-                            // Use old path for now
-                            let expr = ctx.lower(ast)?;
-                            let expr = if table.is_some() {
-                                let loc = expr.get_loc();
+                            let mut exprs = ctx.lower(ast)?;
+                            let main_expr = exprs.pop().unwrap();
+                            let main_expr = if table.is_some() {
+                                let loc = main_expr.get_loc();
                                 Expr::App(
                                     BuiltinFn::Lookup(
                                         ident.as_str().to_string(),
-                                        Box::new(expr),
+                                        Box::new(main_expr),
                                         loc,
                                     ),
                                     loc,
                                 )
                             } else {
-                                expr
+                                main_expr
                             };
-                            vec![Expr::AssignCurr(off, Box::new(expr))]
+                            exprs.push(Expr::AssignCurr(off, Box::new(main_expr)));
+                            exprs
                         }
                         Ast::ApplyToAll(dims, ast) => {
-                            let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
+                            let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
                                     let mut ctx = ctx.clone();
@@ -3367,14 +2636,17 @@ impl Var {
                                             .map(|s| CanonicalElementName::from_raw(s))
                                             .collect(),
                                     );
-                                    ctx.lower(ast)
-                                        .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                    ctx.lower(ast).map(|mut exprs| {
+                                        let main_expr = exprs.pop().unwrap();
+                                        exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                                        exprs
+                                    })
                                 })
                                 .collect();
-                            exprs?
+                            exprs?.into_iter().flatten().collect()
                         }
                         Ast::Arrayed(dims, elements) => {
-                            let exprs: Result<Vec<Expr>> = SubscriptIterator::new(dims)
+                            let exprs: Result<Vec<Vec<Expr>>> = SubscriptIterator::new(dims)
                                 .enumerate()
                                 .map(|(i, subscripts)| {
                                     let subscript_str = subscripts.join(",");
@@ -3389,11 +2661,14 @@ impl Var {
                                             .map(|s| CanonicalElementName::from_raw(s))
                                             .collect(),
                                     );
-                                    ctx.lower(ast)
-                                        .map(|ast| Expr::AssignCurr(off + i, Box::new(ast)))
+                                    ctx.lower(ast).map(|mut exprs| {
+                                        let main_expr = exprs.pop().unwrap();
+                                        exprs.push(Expr::AssignCurr(off + i, Box::new(main_expr)));
+                                        exprs
+                                    })
                                 })
                                 .collect();
-                            exprs?
+                            exprs?.into_iter().flatten().collect()
                         }
                     }
                 }
@@ -3403,6 +2678,115 @@ impl Var {
             ident: canonicalize(var.ident()),
             ast,
         })
+    }
+}
+
+/// Recursively extract temporary array sizes from an expression.
+/// Populates the temp_sizes_map with (temp_id, size) entries.
+fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
+    match expr {
+        Expr::AssignTemp(id, inner, view) => {
+            let size = view.dims.iter().product::<usize>();
+            temp_sizes_map.insert(*id, size);
+            extract_temp_sizes(inner, temp_sizes_map);
+        }
+        Expr::TempArray(_, _, _) | Expr::TempArrayElement(_, _, _, _) => {
+            // These reference temps, but don't define sizes - do nothing
+        }
+        Expr::Const(_, _) | Expr::Var(_, _) | Expr::Dt(_) => {}
+        Expr::Subscript(_, indices, _, _) => {
+            for idx in indices {
+                extract_temp_sizes(idx, temp_sizes_map);
+            }
+        }
+        Expr::StaticSubscript(_, _, _) => {}
+        Expr::App(builtin, _) => {
+            extract_temp_sizes_from_builtin(builtin, temp_sizes_map);
+        }
+        Expr::EvalModule(_, _, inputs) => {
+            for input in inputs {
+                extract_temp_sizes(input, temp_sizes_map);
+            }
+        }
+        Expr::ModuleInput(_, _) => {}
+        Expr::Op2(_, left, right, _) => {
+            extract_temp_sizes(left, temp_sizes_map);
+            extract_temp_sizes(right, temp_sizes_map);
+        }
+        Expr::Op1(_, inner, _) => {
+            extract_temp_sizes(inner, temp_sizes_map);
+        }
+        Expr::If(cond, t, f, _) => {
+            extract_temp_sizes(cond, temp_sizes_map);
+            extract_temp_sizes(t, temp_sizes_map);
+            extract_temp_sizes(f, temp_sizes_map);
+        }
+        Expr::AssignCurr(_, inner) | Expr::AssignNext(_, inner) => {
+            extract_temp_sizes(inner, temp_sizes_map);
+        }
+    }
+}
+
+/// Extract temp sizes from builtin function arguments.
+fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut HashMap<u32, usize>) {
+    match builtin {
+        BuiltinFn::Lookup(_, expr, _)
+        | BuiltinFn::Abs(expr)
+        | BuiltinFn::Arccos(expr)
+        | BuiltinFn::Arcsin(expr)
+        | BuiltinFn::Arctan(expr)
+        | BuiltinFn::Cos(expr)
+        | BuiltinFn::Exp(expr)
+        | BuiltinFn::Int(expr)
+        | BuiltinFn::Ln(expr)
+        | BuiltinFn::Log10(expr)
+        | BuiltinFn::Sign(expr)
+        | BuiltinFn::Sin(expr)
+        | BuiltinFn::Size(expr)
+        | BuiltinFn::Sqrt(expr)
+        | BuiltinFn::Stddev(expr)
+        | BuiltinFn::Sum(expr)
+        | BuiltinFn::Tan(expr) => {
+            extract_temp_sizes(expr, temp_sizes_map);
+        }
+        BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            if let Some(b) = b {
+                extract_temp_sizes(b, temp_sizes_map);
+            }
+        }
+        BuiltinFn::Mean(args) => {
+            for arg in args {
+                extract_temp_sizes(arg, temp_sizes_map);
+            }
+        }
+        BuiltinFn::Pulse(a, b, c) | BuiltinFn::Ramp(a, b, c) | BuiltinFn::SafeDiv(a, b, c) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+            if let Some(c) = c {
+                extract_temp_sizes(c, temp_sizes_map);
+            }
+        }
+        BuiltinFn::Rank(a, opt) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            if let Some((b, c)) = opt {
+                extract_temp_sizes(b, temp_sizes_map);
+                if let Some(c) = c {
+                    extract_temp_sizes(c, temp_sizes_map);
+                }
+            }
+        }
+        BuiltinFn::Step(a, b) => {
+            extract_temp_sizes(a, temp_sizes_map);
+            extract_temp_sizes(b, temp_sizes_map);
+        }
+        BuiltinFn::Inf
+        | BuiltinFn::Pi
+        | BuiltinFn::Time
+        | BuiltinFn::TimeStep
+        | BuiltinFn::StartTime
+        | BuiltinFn::FinalTime
+        | BuiltinFn::IsModuleInput(_, _) => {}
     }
 }
 
@@ -3679,9 +3063,27 @@ impl Module {
         runlist_order.extend(runlist_stocks.iter().map(|v| v.ident.clone()));
 
         // flatten out the variables so that we're just dealing with lists of expressions
-        let runlist_initials = runlist_initials.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_initials: Vec<Expr> =
+            runlist_initials.into_iter().flat_map(|v| v.ast).collect();
         let runlist_flows: Vec<Expr> = runlist_flows.into_iter().flat_map(|v| v.ast).collect();
-        let runlist_stocks = runlist_stocks.into_iter().flat_map(|v| v.ast).collect();
+        let runlist_stocks: Vec<Expr> = runlist_stocks.into_iter().flat_map(|v| v.ast).collect();
+
+        // Extract temp array information from all runlists
+        let mut temp_sizes_map: HashMap<u32, usize> = HashMap::new();
+        for expr in runlist_initials
+            .iter()
+            .chain(runlist_flows.iter())
+            .chain(runlist_stocks.iter())
+        {
+            extract_temp_sizes(expr, &mut temp_sizes_map);
+        }
+
+        // Build temp_sizes vector, ordered by temp ID
+        let n_temps = temp_sizes_map.len();
+        let mut temp_sizes: Vec<usize> = vec![0; n_temps];
+        for (id, size) in temp_sizes_map {
+            temp_sizes[id as usize] = size;
+        }
 
         let tables: Result<HashMap<Ident<Canonical>, Table>> = var_names
             .iter()
@@ -3709,9 +3111,6 @@ impl Module {
                 )
             })
             .collect();
-
-        let n_temps = 0;
-        let temp_sizes = vec![];
 
         Ok(Module {
             ident: model_name.clone(),

@@ -15,7 +15,6 @@ use crate::eqn_err;
 /// Unlike IndexExpr2, this type does NOT have a Wildcard variant.
 /// During the expr2 → expr3 lowering pass, all wildcards are resolved
 /// to explicit StarRange expressions based on the variable's dimensions.
-#[allow(dead_code)]
 #[derive(PartialEq, Clone, Debug)]
 pub enum IndexExpr3 {
     /// Star range (*:dim or dim.*) - preserves dimension for iteration.
@@ -36,7 +35,7 @@ pub enum IndexExpr3 {
 }
 
 impl IndexExpr3 {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in pass 2
     pub fn get_loc(&self) -> Loc {
         match self {
             IndexExpr3::StarRange(_, loc) => *loc,
@@ -50,7 +49,7 @@ impl IndexExpr3 {
     /// Returns true if this index expression references an A2A dimension.
     /// Such expressions cannot be fully resolved until pass 2 when we know
     /// which specific A2A element is being evaluated.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in pass 2
     pub fn references_a2a_dimension(&self) -> bool {
         match self {
             IndexExpr3::Dimension(_, _) => true,
@@ -77,7 +76,6 @@ impl IndexExpr3 {
 /// - Keeps string representation in Const for debugging
 /// - No module-specific variants (EvalModule, ModuleInput)
 /// - No assignment variants (AssignCurr, AssignNext)
-#[allow(dead_code)]
 #[derive(PartialEq, Clone, Debug)]
 pub enum Expr3 {
     // Core variants (similar to Expr2)
@@ -90,20 +88,21 @@ pub enum Expr3 {
     Op2(BinaryOp, Box<Expr3>, Box<Expr3>, Option<ArrayBounds>, Loc),
     If(Box<Expr3>, Box<Expr3>, Box<Expr3>, Option<ArrayBounds>, Loc),
 
-    // Array-specific variants
+    // Array-specific variants (some used in pass 2)
     /// Static subscript with precomputed view.
     /// (variable name, view into array, base offset of variable, location)
+    #[allow(dead_code)] // Used in pass 2
     StaticSubscript(Ident<Canonical>, ArrayView, usize, Loc),
     /// Reference to a temporary array
     TempArray(u32, ArrayView, Loc),
     /// Reference to a specific element of a temporary array
+    #[allow(dead_code)] // Used in pass 2
     TempArrayElement(u32, ArrayView, usize, Loc),
     /// Assign an expression result to temporary array storage
     AssignTemp(u32, Box<Expr3>, ArrayView),
 }
 
 impl Expr3 {
-    #[allow(dead_code)]
     pub fn get_loc(&self) -> Loc {
         match self {
             Expr3::Const(_, _, loc) => *loc,
@@ -120,7 +119,6 @@ impl Expr3 {
         }
     }
 
-    #[allow(dead_code)]
     pub fn get_array_bounds(&self) -> Option<&ArrayBounds> {
         match self {
             Expr3::Const(_, _, _) => None,
@@ -139,7 +137,6 @@ impl Expr3 {
     }
 
     /// Get the ArrayView for array-specific variants, if present
-    #[allow(dead_code)]
     pub fn get_array_view(&self) -> Option<&ArrayView> {
         match self {
             Expr3::StaticSubscript(_, view, _, _) => Some(view),
@@ -153,7 +150,7 @@ impl Expr3 {
     /// Returns true if this expression contains any A2A dimension references.
     /// Such expressions cannot be fully resolved until pass 2 when we know
     /// which specific A2A element is being evaluated.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in pass 2
     pub fn references_a2a_dimension(&self) -> bool {
         match self {
             Expr3::Const(_, _, _) => false,
@@ -260,7 +257,6 @@ impl IndexExpr3 {
     /// # Errors
     /// Returns an error if a wildcard is used but no dimension is available
     /// (e.g., subscripting a scalar variable or out-of-bounds subscript).
-    #[allow(dead_code)]
     pub fn from_index_expr2<C: Expr3LowerContext>(
         expr: &IndexExpr2,
         dim: Option<&Dimension>,
@@ -323,7 +319,6 @@ impl Expr3 {
     /// Returns an error if:
     /// - A wildcard is used on a non-arrayed variable
     /// - A subscript is applied to a scalar variable
-    #[allow(dead_code)]
     pub fn from_expr2<C: Expr3LowerContext>(expr: &Expr2, ctx: &C) -> EquationResult<Self> {
         match expr {
             Expr2::Const(s, n, loc) => Ok(Expr3::Const(s.clone(), *n, *loc)),
@@ -459,7 +454,6 @@ impl Expr3 {
 
 /// Context for pass 1 temp decomposition.
 /// Tracks temp ID allocation across the transformation.
-#[allow(dead_code)]
 pub struct Pass1Context {
     /// Counter for allocating temp array IDs
     next_temp_id: u32,
@@ -467,7 +461,6 @@ pub struct Pass1Context {
     temp_assignments: Vec<Expr3>,
 }
 
-#[allow(dead_code)]
 impl Pass1Context {
     /// Create a new pass 1 context
     pub fn new() -> Self {
