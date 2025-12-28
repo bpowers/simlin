@@ -316,7 +316,15 @@ impl Expr2 {
     }
 
     /// Compute the size of a range subscript from constant bounds.
-    /// Returns None if the bounds are not constant or cannot be resolved.
+    ///
+    /// Returns `Some(size)` if both bounds are constant and the range is valid.
+    /// Returns `None` in these cases:
+    /// - Either bound is not a constant expression (we can't compute at compile time)
+    /// - The range is invalid (end < start), which will be caught later during
+    ///   compilation when `build_view_from_ops` validates the IndexOp::Range
+    ///
+    /// When `None` is returned, callers should fall back to the full dimension size
+    /// as a conservative upper bound for ArrayBounds.
     fn compute_range_size(start: &Expr2, end: &Expr2, dim: &Dimension) -> Option<usize> {
         let start_idx = Self::expr_to_index(start, dim)?;
         let end_idx = Self::expr_to_index(end, dim)?;
@@ -324,7 +332,7 @@ impl Expr2 {
         if end_idx >= start_idx {
             Some(end_idx - start_idx + 1)
         } else {
-            None // Invalid range (end before start)
+            None // Invalid range will be caught during build_view_from_ops
         }
     }
 
@@ -332,9 +340,13 @@ impl Expr2 {
     fn expr_to_index(expr: &Expr2, dim: &Dimension) -> Option<usize> {
         match expr {
             Expr2::Const(_, val, _) => {
-                // Numeric constant - interpret as 1-based index
-                let idx = *val as isize - 1;
-                if idx >= 0 { Some(idx as usize) } else { None }
+                // Numeric constant - interpret as 1-based index.
+                // Guard against overflow: val must be in range [1, isize::MAX].
+                if *val >= 1.0 && *val <= isize::MAX as f64 {
+                    Some((*val as usize).saturating_sub(1))
+                } else {
+                    None
+                }
             }
             Expr2::Var(ident, _, _) => {
                 // Could be a named dimension element

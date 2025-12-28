@@ -713,6 +713,29 @@ impl Context<'_> {
         Ok(off)
     }
 
+    /// Convert a dimension + subscript to its 1-based index value.
+    /// For indexed dimensions (Dim(5)), the subscript is a numeric string like "3".
+    /// For named dimensions (Cities{A,B,C}), the subscript is an element name like "B",
+    /// and we return its position + 1.
+    fn subscript_to_index(dim: &Dimension, subscript: &CanonicalElementName) -> f64 {
+        match dim {
+            Dimension::Indexed(_, _) => {
+                // For indexed dimensions, the subscript is already a 1-based index
+                // stored as a string (e.g., "3" means the third element).
+                subscript.as_str().parse::<f64>().unwrap_or(1.0)
+            }
+            Dimension::Named(_, named_dim) => {
+                // For named dimensions, find the element's position (0-based) and add 1
+                named_dim
+                    .elements
+                    .iter()
+                    .position(|elem| elem.as_str() == subscript.as_str())
+                    .map(|off| (off + 1) as f64)
+                    .unwrap_or(1.0)
+            }
+        }
+    }
+
     fn get_submodel_metadata(
         &self,
         model: &Ident<Canonical>,
@@ -1284,24 +1307,7 @@ impl Context<'_> {
                             for (dim, subscript) in active_dims.iter().zip(active_subscripts.iter())
                             {
                                 if id.as_str() == canonicalize(dim.name()).as_str() {
-                                    // Convert to the subscript index (0-based)
-                                    let index = match dim {
-                                        Dimension::Indexed(_, _) => {
-                                            // Subscript is already a 1-based index as a string
-                                            subscript.as_str().parse::<f64>().unwrap()
-                                        }
-                                        Dimension::Named(_, named_dim) => {
-                                            let off = named_dim
-                                                .elements
-                                                .iter()
-                                                .position(|elem| {
-                                                    elem.as_str() == subscript.as_str()
-                                                })
-                                                .unwrap();
-
-                                            (off + 1) as f64
-                                        }
-                                    };
+                                    let index = Self::subscript_to_index(dim, subscript);
                                     return Ok(Expr::Const(index, *loc));
                                 }
                             }
@@ -2682,12 +2688,19 @@ impl Var {
 }
 
 /// Recursively extract temporary array sizes from an expression.
-/// Populates the temp_sizes_map with (temp_id, size) entries.
+/// Populates the temp_sizes_map with (temp_id, max_size) entries.
+/// Since temp IDs restart at 0 for each lower() call, the same ID may be
+/// reused across different expressions with different sizes. We track the
+/// maximum size per ID to ensure the temp buffer is large enough for all uses.
 fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
     match expr {
         Expr::AssignTemp(id, inner, view) => {
             let size = view.dims.iter().product::<usize>();
-            temp_sizes_map.insert(*id, size);
+            // Preserve the maximum size for this temp ID across all expressions
+            temp_sizes_map
+                .entry(*id)
+                .and_modify(|existing| *existing = (*existing).max(size))
+                .or_insert(size);
             extract_temp_sizes(inner, temp_sizes_map);
         }
         Expr::TempArray(_, _, _) | Expr::TempArrayElement(_, _, _, _) => {
