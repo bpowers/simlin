@@ -695,10 +695,12 @@ impl Vm {
                 }
 
                 Opcode::ViewSubscriptDynamic { dim_idx } => {
-                    let index = stack.pop().floor() as u16;
+                    // XMILE uses 1-based indexing; validate bounds and convert to 0-based
+                    let index_1based = stack.pop().floor() as u16;
                     let view = view_stack.last_mut().unwrap();
-                    // Note: assumes 0-based index from stack for dynamic subscripts
-                    view.apply_single_subscript(*dim_idx as usize, index);
+                    // apply_single_subscript_checked validates bounds and sets is_valid=false
+                    // if out of bounds, allowing subsequent reads to return NaN
+                    view.apply_single_subscript_checked(*dim_idx as usize, index_1based);
                 }
 
                 Opcode::ViewRange {
@@ -716,7 +718,13 @@ impl Vm {
                 } => {
                     let rel = &context.subdim_relations[*subdim_relation_id as usize];
                     let view = view_stack.last_mut().unwrap();
-                    view.apply_sparse(*dim_idx as usize, rel.parent_offsets.clone());
+                    // Use apply_sparse_with_dim_id to update the dim_id to the child
+                    // (subdimension) so broadcasting matches correctly
+                    view.apply_sparse_with_dim_id(
+                        *dim_idx as usize,
+                        rel.parent_offsets.clone(),
+                        rel.child_dim_id,
+                    );
                 }
 
                 Opcode::ViewWildcard { dim_idx: _ } => {
@@ -806,20 +814,25 @@ impl Vm {
                     let iter_state = iter_stack.last().unwrap();
                     let view = &view_stack[iter_state.view_stack_idx];
 
-                    let flat_off = if let Some(ref offsets) = iter_state.flat_offsets {
-                        offsets[iter_state.current]
+                    // Return NaN for invalid views (e.g., out-of-bounds subscript)
+                    if !view.is_valid {
+                        stack.push(f64::NAN);
                     } else {
-                        // Contiguous: flat offset = base_off + offset + current
-                        view.offset as usize + iter_state.current
-                    };
+                        let flat_off = if let Some(ref offsets) = iter_state.flat_offsets {
+                            offsets[iter_state.current]
+                        } else {
+                            // Contiguous: flat offset = base_off + offset + current
+                            view.offset as usize + iter_state.current
+                        };
 
-                    let value = if view.is_temp {
-                        let temp_off = context.temp_offsets[view.base_off as usize];
-                        self.temp_storage[temp_off + flat_off]
-                    } else {
-                        curr[view.base_off as usize + flat_off]
-                    };
-                    stack.push(value);
+                        let value = if view.is_temp {
+                            let temp_off = context.temp_offsets[view.base_off as usize];
+                            self.temp_storage[temp_off + flat_off]
+                        } else {
+                            curr[view.base_off as usize + flat_off]
+                        };
+                        stack.push(value);
+                    }
                 }
 
                 Opcode::LoadIterTempElement { temp_id } => {
@@ -984,35 +997,40 @@ impl Vm {
                     let source_info = &bc_state.sources[*source_idx as usize];
                     let view = &view_stack[source_info.view_stack_idx];
 
-                    // Map result indices to source indices
-                    let mut source_indices: SmallVec<[u16; 4]> = SmallVec::new();
-                    for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
-                        if src_dim >= 0 {
-                            // This result dimension maps to source dimension src_dim
-                            // But we need to put it in the source's dimension order
-                            source_indices.push(bc_state.result_indices[result_dim]);
-                        }
-                    }
-
-                    // Reorder source_indices according to source's original dim order
-                    let mut ordered_source_indices: SmallVec<[u16; 4]> =
-                        smallvec::smallvec![0; view.dims.len()];
-                    for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
-                        if src_dim >= 0 {
-                            ordered_source_indices[src_dim as usize] =
-                                bc_state.result_indices[result_dim];
-                        }
-                    }
-
-                    let flat_off = view.flat_offset(&ordered_source_indices);
-
-                    let value = if view.is_temp {
-                        let temp_off = context.temp_offsets[view.base_off as usize];
-                        self.temp_storage[temp_off + flat_off]
+                    // Return NaN for invalid views
+                    if !view.is_valid {
+                        stack.push(f64::NAN);
                     } else {
-                        curr[view.base_off as usize + flat_off]
-                    };
-                    stack.push(value);
+                        // Map result indices to source indices
+                        let mut source_indices: SmallVec<[u16; 4]> = SmallVec::new();
+                        for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
+                            if src_dim >= 0 {
+                                // This result dimension maps to source dimension src_dim
+                                // But we need to put it in the source's dimension order
+                                source_indices.push(bc_state.result_indices[result_dim]);
+                            }
+                        }
+
+                        // Reorder source_indices according to source's original dim order
+                        let mut ordered_source_indices: SmallVec<[u16; 4]> =
+                            smallvec::smallvec![0; view.dims.len()];
+                        for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
+                            if src_dim >= 0 {
+                                ordered_source_indices[src_dim as usize] =
+                                    bc_state.result_indices[result_dim];
+                            }
+                        }
+
+                        let flat_off = view.flat_offset(&ordered_source_indices);
+
+                        let value = if view.is_temp {
+                            let temp_off = context.temp_offsets[view.base_off as usize];
+                            self.temp_storage[temp_off + flat_off]
+                        } else {
+                            curr[view.base_off as usize + flat_off]
+                        };
+                        stack.push(value);
+                    }
                 }
 
                 Opcode::StoreBroadcastElement {} => {
@@ -1065,6 +1083,11 @@ impl Vm {
     where
         F: Fn(f64, f64) -> f64,
     {
+        // Return NaN for invalid views
+        if !view.is_valid {
+            return f64::NAN;
+        }
+
         let size = view.size();
         let dims = &view.dims;
         let n_dims = dims.len();

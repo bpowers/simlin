@@ -148,6 +148,8 @@ pub struct RuntimeView {
     pub sparse: SmallVec<[RuntimeSparseMapping; 2]>,
     /// Dimension IDs for broadcasting (to match dimensions by name)
     pub dim_ids: SmallVec<[DimId; 4]>,
+    /// Whether this view is valid (false if out-of-bounds subscript was applied)
+    pub is_valid: bool,
 }
 
 impl RuntimeView {
@@ -170,6 +172,7 @@ impl RuntimeView {
             offset: 0,
             sparse: SmallVec::new(),
             dim_ids,
+            is_valid: true,
         }
     }
 
@@ -182,6 +185,48 @@ impl RuntimeView {
         let mut view = Self::for_var(temp_id as u32, dims, dim_ids);
         view.is_temp = true;
         view
+    }
+
+    /// Create an invalid view (for out-of-bounds subscripts)
+    #[allow(dead_code)]
+    pub fn invalid() -> Self {
+        RuntimeView {
+            base_off: 0,
+            is_temp: false,
+            dims: SmallVec::new(),
+            strides: SmallVec::new(),
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::new(),
+            is_valid: false,
+        }
+    }
+
+    /// Mark this view as invalid (e.g., after out-of-bounds subscript)
+    #[allow(dead_code)]
+    pub fn mark_invalid(&mut self) {
+        self.is_valid = false;
+    }
+
+    /// Apply a single-element subscript with bounds checking.
+    /// If index is out of bounds (using 1-based indexing), marks view as invalid.
+    /// Returns true if subscript was valid, false otherwise.
+    pub fn apply_single_subscript_checked(&mut self, dim_idx: usize, index_1based: u16) -> bool {
+        if dim_idx >= self.dims.len() {
+            self.is_valid = false;
+            return false;
+        }
+
+        // Check bounds (1-based: valid range is 1..=dim_size)
+        if index_1based == 0 || index_1based > self.dims[dim_idx] {
+            self.is_valid = false;
+            return false;
+        }
+
+        // Convert to 0-based and apply
+        let index_0based = index_1based - 1;
+        self.apply_single_subscript(dim_idx, index_0based);
+        true
     }
 
     /// Total number of elements in this view
@@ -294,6 +339,20 @@ impl RuntimeView {
             dim_index: dim_idx as u8,
             parent_offsets,
         });
+    }
+
+    /// Apply a sparse subscript (star range) and update the dimension ID.
+    /// Used for star ranges like `*:SubDim` where the view's dimension should
+    /// be relabeled with the subdimension ID for proper broadcast matching.
+    pub fn apply_sparse_with_dim_id(
+        &mut self,
+        dim_idx: usize,
+        parent_offsets: SmallVec<[u16; 16]>,
+        new_dim_id: DimId,
+    ) {
+        self.apply_sparse(dim_idx, parent_offsets);
+        // Update the dimension ID to the subdimension
+        self.dim_ids[dim_idx] = new_dim_id;
     }
 
     /// Transpose the view (reverse dimensions and strides)
@@ -630,6 +689,7 @@ impl StaticArrayView {
             offset: self.offset,
             sparse: self.sparse.clone(),
             dim_ids: self.dim_ids.clone(),
+            is_valid: true,
         }
     }
 }
@@ -1152,6 +1212,76 @@ mod tests {
             ctx.subdim_relations[0].parent_offsets.as_slice(),
             &[2, 3, 4]
         );
+    }
+
+    #[test]
+    fn test_runtime_view_is_valid() {
+        // Views created with constructors should be valid
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let view = RuntimeView::for_var(0, dims, dim_ids);
+        assert!(view.is_valid);
+
+        // Invalid view should have is_valid = false
+        let invalid_view = RuntimeView::invalid();
+        assert!(!invalid_view.is_valid);
+    }
+
+    #[test]
+    fn test_runtime_view_subscript_checked_valid() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Valid 1-based index (1..=5 is valid range)
+        let result = view.apply_single_subscript_checked(0, 3);
+        assert!(result);
+        assert!(view.is_valid);
+        // After subscript, view becomes scalar
+        assert!(view.dims.is_empty());
+    }
+
+    #[test]
+    fn test_runtime_view_subscript_checked_out_of_bounds_zero() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Index 0 is out of bounds (1-based indexing)
+        let result = view.apply_single_subscript_checked(0, 0);
+        assert!(!result);
+        assert!(!view.is_valid);
+    }
+
+    #[test]
+    fn test_runtime_view_subscript_checked_out_of_bounds_high() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Index 6 is out of bounds (max is 5)
+        let result = view.apply_single_subscript_checked(0, 6);
+        assert!(!result);
+        assert!(!view.is_valid);
+    }
+
+    #[test]
+    fn test_runtime_view_apply_sparse_with_dim_id() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0]; // Parent dim id = 0
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Apply sparse with child dim id = 1
+        let parent_offsets: SmallVec<[u16; 16]> = smallvec::smallvec![1, 3, 4];
+        view.apply_sparse_with_dim_id(0, parent_offsets, 1);
+
+        // Dimension ID should be updated to child dim id
+        assert_eq!(view.dim_ids[0], 1);
+        // Size should be reduced to sparse count
+        assert_eq!(view.dims[0], 3);
+        // Should have sparse mapping
+        assert_eq!(view.sparse.len(), 1);
+        assert_eq!(view.sparse[0].parent_offsets.as_slice(), &[1, 3, 4]);
     }
 }
 
