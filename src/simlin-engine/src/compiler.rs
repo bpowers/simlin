@@ -10,8 +10,9 @@ use crate::ast::{
     SparseInfo,
 };
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
-    ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
+    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, DimId, DimensionInfo,
+    GraphicalFunctionId, ModuleDeclaration, ModuleId, ModuleInputOffset, NameId, Op2, Opcode,
+    RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId, VariableOffset, ViewId,
 };
 use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
@@ -24,6 +25,7 @@ use crate::vm::{
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, SubscriptIterator, TIME_OFF,
 };
 use crate::{Error, sim_err};
+use smallvec::SmallVec;
 
 // Type alias to reduce complexity
 type VariableOffsetMap = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
@@ -3217,6 +3219,13 @@ struct Compiler<'module> {
     module_decls: Vec<ModuleDeclaration>,
     graphical_functions: Vec<Vec<(f64, f64)>>,
     curr_code: ByteCodeBuilder,
+    // Array support fields
+    dimensions: Vec<DimensionInfo>,
+    subdim_relations: Vec<SubdimensionRelation>,
+    names: Vec<String>,
+    static_views: Vec<StaticArrayView>,
+    // Iteration context - set when compiling inside AssignTemp
+    in_iteration: bool,
 }
 
 impl<'module> Compiler<'module> {
@@ -3226,6 +3235,154 @@ impl<'module> Compiler<'module> {
             module_decls: vec![],
             graphical_functions: vec![],
             curr_code: ByteCodeBuilder::default(),
+            dimensions: vec![],
+            subdim_relations: vec![],
+            names: vec![],
+            static_views: vec![],
+            in_iteration: false,
+        }
+    }
+
+    /// Intern a name and return its NameId
+    #[allow(dead_code)] // Infrastructure for future dimension tracking
+    fn intern_name(&mut self, name: &str) -> NameId {
+        if let Some(pos) = self.names.iter().position(|n| n == name) {
+            return pos as NameId;
+        }
+        self.names.push(name.to_string());
+        (self.names.len() - 1) as NameId
+    }
+
+    /// Add a dimension and return its DimId
+    #[allow(dead_code)] // Infrastructure for future dimension tracking
+    fn add_dimension(&mut self, dim: &Dimension) -> DimId {
+        let name_id = self.intern_name(dim.name());
+        let info = match dim {
+            Dimension::Indexed(_, size) => DimensionInfo::indexed(name_id, *size as u16),
+            Dimension::Named(_, named) => {
+                let elem_ids: SmallVec<[NameId; 8]> = named
+                    .elements
+                    .iter()
+                    .map(|e| self.intern_name(e.as_str()))
+                    .collect();
+                DimensionInfo::named(name_id, elem_ids)
+            }
+        };
+        self.dimensions.push(info);
+        (self.dimensions.len() - 1) as DimId
+    }
+
+    /// Find or add a dimension by name, returning its DimId
+    #[allow(dead_code)] // Infrastructure for future dimension tracking
+    fn get_or_add_dimension(&mut self, dim: &Dimension) -> DimId {
+        let name = dim.name();
+        // Check if already exists
+        for (i, existing) in self.dimensions.iter().enumerate() {
+            if self
+                .names
+                .get(existing.name_id as usize)
+                .is_some_and(|existing_name| existing_name == name)
+            {
+                return i as DimId;
+            }
+        }
+        // Add new
+        self.add_dimension(dim)
+    }
+
+    /// Add a static view and return its ViewId
+    fn add_static_view(&mut self, view: StaticArrayView) -> ViewId {
+        self.static_views.push(view);
+        (self.static_views.len() - 1) as ViewId
+    }
+
+    /// Convert an ArrayView to a StaticArrayView for a variable
+    fn array_view_to_static(&mut self, base_off: usize, view: &ArrayView) -> StaticArrayView {
+        // Convert sparse info
+        let sparse: SmallVec<[RuntimeSparseMapping; 2]> = view
+            .sparse
+            .iter()
+            .map(|s| RuntimeSparseMapping {
+                dim_index: s.dim_index as u8,
+                parent_offsets: s.parent_offsets.iter().map(|&x| x as u16).collect(),
+            })
+            .collect();
+
+        // For now, we don't have dimension IDs for views - use placeholder 0s
+        // This will be improved when we properly track dimension info
+        let dim_ids: SmallVec<[DimId; 4]> = (0..view.dims.len()).map(|_| 0 as DimId).collect();
+
+        StaticArrayView {
+            base_off: base_off as u32,
+            is_temp: false,
+            dims: view.dims.iter().map(|&d| d as u16).collect(),
+            strides: view.strides.iter().map(|&s| s as i32).collect(),
+            offset: view.offset as u32,
+            sparse,
+            dim_ids,
+        }
+    }
+
+    /// Convert an ArrayView to a StaticArrayView for a temp array
+    fn array_view_to_static_temp(&mut self, temp_id: u32, view: &ArrayView) -> StaticArrayView {
+        let sparse: SmallVec<[RuntimeSparseMapping; 2]> = view
+            .sparse
+            .iter()
+            .map(|s| RuntimeSparseMapping {
+                dim_index: s.dim_index as u8,
+                parent_offsets: s.parent_offsets.iter().map(|&x| x as u16).collect(),
+            })
+            .collect();
+
+        let dim_ids: SmallVec<[DimId; 4]> = (0..view.dims.len()).map(|_| 0 as DimId).collect();
+
+        StaticArrayView {
+            base_off: temp_id,
+            is_temp: true,
+            dims: view.dims.iter().map(|&d| d as u16).collect(),
+            strides: view.strides.iter().map(|&s| s as i32).collect(),
+            offset: view.offset as u32,
+            sparse,
+            dim_ids,
+        }
+    }
+
+    /// Emit bytecode to push an expression's view onto the view stack.
+    /// This is used for array operations that need to iterate over arrays.
+    fn walk_expr_as_view(&mut self, expr: &Expr) -> Result<()> {
+        match expr {
+            Expr::StaticSubscript(off, view, _) => {
+                // Create a static view and push it
+                let static_view = self.array_view_to_static(*off, view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+                Ok(())
+            }
+            Expr::TempArray(id, view, _) => {
+                // Create a static view for the temp array and push it
+                let static_view = self.array_view_to_static_temp(*id, view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+                Ok(())
+            }
+            Expr::Var(off, _) => {
+                // A bare variable reference used as an array - create a scalar view
+                // This shouldn't normally happen for array operations, but handle it
+                let view = ArrayView::contiguous(vec![1]);
+                let static_view = self.array_view_to_static(*off, &view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+                Ok(())
+            }
+            _ => {
+                sim_err!(
+                    Generic,
+                    format!(
+                        "Cannot push view for expression type {:?} - expected array expression",
+                        std::mem::discriminant(expr)
+                    )
+                )
+            }
         }
     }
 
@@ -3266,28 +3423,49 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::StaticSubscript(off, view, _) => {
-                // For static subscripts, we can directly compute the final offset
-                // For now, just load from the offset + view offset
-                // TODO: This needs proper iteration support for non-scalar views
-                let final_off = (*off + view.offset) as VariableOffset;
-                self.push(Opcode::LoadVar { off: final_off });
+                if self.in_iteration {
+                    // In iteration context, use LoadIterElement to load from current position
+                    // The view is already on the view stack from the AssignTemp setup
+                    self.push(Opcode::LoadIterElement {});
+                    Some(())
+                } else if view.dims.iter().product::<usize>() == 1 {
+                    // Scalar result - compute final offset and load
+                    let final_off = (*off + view.offset) as VariableOffset;
+                    self.push(Opcode::LoadVar { off: final_off });
+                    Some(())
+                } else {
+                    // Non-scalar array outside iteration context - this shouldn't happen
+                    // for well-formed expressions after pass 1 decomposition
+                    return sim_err!(
+                        Generic,
+                        "Non-scalar StaticSubscript outside iteration context".to_string()
+                    );
+                }
+            }
+            Expr::TempArray(id, view, _) => {
+                if self.in_iteration {
+                    // In iteration context, use LoadIterElement
+                    // The temp view should already be on the view stack
+                    self.push(Opcode::LoadIterTempElement {
+                        temp_id: *id as TempId,
+                    });
+                    Some(())
+                } else {
+                    // Outside iteration - push temp view for subsequent operations (like SUM)
+                    let static_view = self.array_view_to_static_temp(*id, view);
+                    let view_id = self.add_static_view(static_view);
+                    self.push(Opcode::PushStaticView { view_id });
+                    // Note: caller (like array builtin) will use and pop this view
+                    None
+                }
+            }
+            Expr::TempArrayElement(id, _view, idx, _) => {
+                // Load a specific element from a temp array
+                self.push(Opcode::LoadTempConst {
+                    temp_id: *id as TempId,
+                    index: *idx as u16,
+                });
                 Some(())
-            }
-            Expr::TempArray(_id, _view, _) => {
-                // TODO: Implement loading from temporary arrays
-                // For now, just return an error
-                return sim_err!(
-                    Generic,
-                    "TempArray not yet implemented in bytecode compiler".to_string()
-                );
-            }
-            Expr::TempArrayElement(_id, _view, _idx, _) => {
-                // TODO: Implement loading from temporary array elements
-                // For now, just return an error
-                return sim_err!(
-                    Generic,
-                    "TempArrayElement not yet implemented in bytecode compiler".to_string()
-                );
             }
             Expr::Dt(_) => {
                 self.push(Opcode::LoadGlobalVar {
@@ -3367,14 +3545,34 @@ impl<'module> Compiler<'module> {
                         let id = self.curr_code.intern_literal(0.0);
                         self.push(Opcode::LoadConstant { id });
                     }
-                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                    BuiltinFn::Max(a, b) => {
                         if let Some(b) = b {
+                            // Two-argument scalar max
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
                             let id = self.curr_code.intern_literal(0.0);
                             self.push(Opcode::LoadConstant { id });
                         } else {
-                            return sim_err!(BadBuiltinArgs, "".to_owned());
+                            // Single-argument array max
+                            self.walk_expr_as_view(a)?;
+                            self.push(Opcode::ArrayMax {});
+                            self.push(Opcode::PopView {});
+                            return Ok(Some(()));
+                        }
+                    }
+                    BuiltinFn::Min(a, b) => {
+                        if let Some(b) = b {
+                            // Two-argument scalar min
+                            self.walk_expr(a)?.unwrap();
+                            self.walk_expr(b)?.unwrap();
+                            let id = self.curr_code.intern_literal(0.0);
+                            self.push(Opcode::LoadConstant { id });
+                        } else {
+                            // Single-argument array min
+                            self.walk_expr_as_view(a)?;
+                            self.push(Opcode::ArrayMin {});
+                            self.push(Opcode::PopView {});
+                            return Ok(Some(()));
                         }
                     }
                     BuiltinFn::Pulse(a, b, c) => {
@@ -3408,6 +3606,25 @@ impl<'module> Compiler<'module> {
                         }
                     }
                     BuiltinFn::Mean(args) => {
+                        // Check if this is a single array argument (array mean)
+                        // vs multiple scalar arguments (variadic mean)
+                        if args.len() == 1 {
+                            // Check if the argument is an array expression
+                            let arg = &args[0];
+                            let is_array = matches!(
+                                arg,
+                                Expr::StaticSubscript(_, _, _) | Expr::TempArray(_, _, _)
+                            );
+                            if is_array {
+                                // Array mean - use ArrayMean opcode
+                                self.walk_expr_as_view(arg)?;
+                                self.push(Opcode::ArrayMean {});
+                                self.push(Opcode::PopView {});
+                                return Ok(Some(()));
+                            }
+                        }
+
+                        // Multi-argument scalar mean: (arg1 + arg2 + ... + argN) / N
                         let id = self.curr_code.intern_literal(0.0);
                         self.push(Opcode::LoadConstant { id });
 
@@ -3422,16 +3639,28 @@ impl<'module> Compiler<'module> {
                         return Ok(Some(()));
                     }
                     BuiltinFn::Rank(_, _) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                        return sim_err!(TodoArrayBuiltin, "RANK not yet supported".to_owned());
                     }
-                    BuiltinFn::Size(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Size(arg) => {
+                        // SIZE returns the number of elements in an array
+                        self.walk_expr_as_view(arg)?;
+                        self.push(Opcode::ArraySize {});
+                        self.push(Opcode::PopView {});
+                        return Ok(Some(()));
                     }
-                    BuiltinFn::Stddev(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Stddev(arg) => {
+                        // STDDEV computes standard deviation of array elements
+                        self.walk_expr_as_view(arg)?;
+                        self.push(Opcode::ArrayStddev {});
+                        self.push(Opcode::PopView {});
+                        return Ok(Some(()));
                     }
-                    BuiltinFn::Sum(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Sum(arg) => {
+                        // SUM computes the sum of array elements
+                        self.walk_expr_as_view(arg)?;
+                        self.push(Opcode::ArraySum {});
+                        self.push(Opcode::PopView {});
+                        return Ok(Some(()));
                     }
                 };
                 let func = match builtin {
@@ -3555,12 +3784,80 @@ impl<'module> Compiler<'module> {
                 });
                 None
             }
-            Expr::AssignTemp(_id, _rhs, _view) => {
-                // TODO: Implement AssignTemp in bytecode compiler
-                return sim_err!(
-                    Generic,
-                    "AssignTemp not yet implemented in bytecode compiler".to_string()
-                );
+            Expr::AssignTemp(id, rhs, view) => {
+                // AssignTemp evaluates an array expression element-by-element and stores to temp
+                //
+                // Bytecode pattern:
+                // 1. PushStaticView (the source array view for iteration)
+                // 2. BeginIter { write_temp_id, has_write_temp: true }
+                // 3. [Loop body start]
+                //    - Compile RHS in iteration context (StaticSubscript -> LoadIterElement)
+                //    - StoreIterElement
+                // 4. NextIterOrJump { jump_back: -(distance to loop body start) }
+                // 5. EndIter
+                // 6. PopView
+
+                // Find the StaticSubscript in the RHS to get the source view for iteration
+                // This is the view we iterate over and load from
+                fn find_static_subscript(expr: &Expr) -> Option<(usize, &ArrayView)> {
+                    match expr {
+                        Expr::StaticSubscript(off, view, _) => Some((*off, view)),
+                        Expr::Op1(_, inner, _) => find_static_subscript(inner),
+                        Expr::Op2(_, left, right, _) => {
+                            find_static_subscript(left).or_else(|| find_static_subscript(right))
+                        }
+                        Expr::If(cond, t, f, _) => find_static_subscript(cond)
+                            .or_else(|| find_static_subscript(t))
+                            .or_else(|| find_static_subscript(f)),
+                        _ => None,
+                    }
+                }
+
+                let (source_off, source_view) = match find_static_subscript(rhs) {
+                    Some(v) => v,
+                    None => {
+                        // No StaticSubscript found - create a synthetic iteration view
+                        // from the AssignTemp's view dimensions
+                        (0, view)
+                    }
+                };
+
+                // Push the source view for iteration
+                let static_view = self.array_view_to_static(source_off, source_view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+
+                // Begin iteration - writes to temp array with id
+                self.push(Opcode::BeginIter {
+                    write_temp_id: *id as TempId,
+                    has_write_temp: true,
+                });
+
+                // Record loop body start position
+                let loop_start = self.curr_code.len();
+
+                // Compile RHS in iteration context
+                self.in_iteration = true;
+                self.walk_expr(rhs)?.unwrap();
+                self.in_iteration = false;
+
+                // Store the result to temp
+                self.push(Opcode::StoreIterElement {});
+
+                // Calculate jump offset (negative, back to loop start)
+                // The jump is relative to the NextIterOrJump instruction's position
+                // VM: pc = pc + jump_back (then continue without incrementing)
+                // So: loop_start = next_iter_pos + jump_back
+                // Therefore: jump_back = loop_start - next_iter_pos
+                let next_iter_pos = self.curr_code.len();
+                let jump_back = (loop_start as isize - next_iter_pos as isize) as i16;
+
+                self.push(Opcode::NextIterOrJump { jump_back });
+                self.push(Opcode::EndIter {});
+                self.push(Opcode::PopView {});
+
+                // AssignTemp doesn't produce a value on the stack
+                None
             }
         };
         Ok(result)
@@ -3591,11 +3888,11 @@ impl<'module> Compiler<'module> {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
                 arrays: vec![],
-                // New array support fields (populated during compilation)
-                dimensions: vec![],
-                subdim_relations: vec![],
-                names: vec![],
-                static_views: vec![],
+                // Array support fields populated during compilation
+                dimensions: self.dimensions,
+                subdim_relations: self.subdim_relations,
+                names: self.names,
+                static_views: self.static_views,
                 temp_offsets,
                 temp_total_size,
             }),

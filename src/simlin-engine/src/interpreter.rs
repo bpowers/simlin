@@ -877,7 +877,34 @@ impl ModuleEvaluator<'_> {
                                 }
                             }
                         }
-                        _ => panic!("Unsupported expression in AssignTemp: {expr:?}"),
+                        Expr::If(cond, t, f, _) => {
+                            // Evaluate condition (may be scalar or array)
+                            let cond_val = eval_at_index(evaluator, cond, flat_idx, dims);
+                            if is_truthy(cond_val) {
+                                eval_at_index(evaluator, t, flat_idx, dims)
+                            } else {
+                                eval_at_index(evaluator, f, flat_idx, dims)
+                            }
+                        }
+                        // Scalar expressions: same value for every array index
+                        // Delegate to main eval method
+                        Expr::Var(_, _)
+                        | Expr::Dt(_)
+                        | Expr::ModuleInput(_, _)
+                        | Expr::Subscript(_, _, _, _)
+                        | Expr::EvalModule(_, _, _)
+                        | Expr::App(_, _) => {
+                            // These are scalar expressions (or reduce to scalar)
+                            // They don't depend on the array index, so evaluate once
+                            evaluator.eval(expr)
+                        }
+                        // Assignment expressions shouldn't appear inside AssignTemp RHS
+                        Expr::AssignCurr(_, _)
+                        | Expr::AssignNext(_, _)
+                        | Expr::AssignTemp(_, _, _)
+                        | Expr::TempArrayElement(_, _, _, _) => {
+                            panic!("Unexpected assignment expression in AssignTemp RHS: {expr:?}")
+                        }
                     }
                 }
 

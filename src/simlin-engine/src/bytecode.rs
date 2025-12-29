@@ -821,6 +821,11 @@ impl ByteCodeBuilder {
         self.bytecode.code.push(op)
     }
 
+    /// Returns the current number of opcodes in the bytecode
+    pub(crate) fn len(&self) -> usize {
+        self.bytecode.code.len()
+    }
+
     pub(crate) fn finish(self) -> ByteCode {
         self.bytecode
     }

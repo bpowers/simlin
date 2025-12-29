@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>Test</vendor>
+        <product>Simlin</product>
+    </header>
+    <sim_specs method="Euler" time_units="Time">
+        <start>0</start>
+        <stop>2</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Items">
+            <elem name="A"/>
+            <elem name="B"/>
+            <elem name="C"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <aux name="values">
+                <element subscript="A">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="B">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="C">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Items"/>
+                </dimensions>
+            </aux>
+            <aux name="total">
+                <eqn>SUM(values[*])</eqn>
+            </aux>
+            <aux name="average">
+                <eqn>MEAN(values[*])</eqn>
+            </aux>
+            <aux name="count">
+                <eqn>SIZE(values[*])</eqn>
+            </aux>
+        </variables>
+    </model>
+</xmile>
