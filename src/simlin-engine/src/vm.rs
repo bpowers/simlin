@@ -36,6 +36,33 @@ struct IterState {
     flat_offsets: Option<Vec<usize>>,
 }
 
+/// Info about how one source maps to the broadcast result dimensions.
+#[derive(Clone, Debug)]
+struct BroadcastSourceInfo {
+    /// Index into view_stack for this source
+    view_stack_idx: usize,
+    /// For each result dimension, which source dimension it maps to.
+    /// -1 means this source doesn't have this dimension (broadcast).
+    dim_map: SmallVec<[i8; 4]>,
+}
+
+/// State for broadcast iteration over multiple sources.
+#[derive(Clone, Debug)]
+struct BroadcastState {
+    /// Info for each source
+    sources: SmallVec<[BroadcastSourceInfo; 2]>,
+    /// Destination temp array ID
+    dest_temp_id: TempId,
+    /// Result dimensions (sizes)
+    result_dims: SmallVec<[u16; 4]>,
+    /// Current multi-dimensional indices in result
+    result_indices: SmallVec<[u16; 4]>,
+    /// Current flat index in result
+    current: usize,
+    /// Total result size
+    size: usize,
+}
+
 pub(crate) const TIME_OFF: usize = 0;
 pub(crate) const DT_OFF: usize = 1;
 pub(crate) const INITIAL_TIME_OFF: usize = 2;
@@ -504,9 +531,10 @@ impl Vm {
         let mut subscript_index: Vec<(u16, u16)> = vec![];
         let mut subscript_index_valid = true;
 
-        // Array support: view stack and iteration stack (local to this eval)
+        // Array support: view stack, iteration stack, broadcast stack (local to this eval)
         let mut view_stack: Vec<RuntimeView> = Vec::with_capacity(4);
         let mut iter_stack: Vec<IterState> = Vec::with_capacity(2);
+        let mut broadcast_stack: Vec<BroadcastState> = Vec::with_capacity(1);
 
         let code = &bytecode.code;
 
@@ -888,14 +916,136 @@ impl Vm {
                 }
 
                 // =========================================================
-                // BROADCASTING (Phase 5 - stubs for now)
+                // BROADCASTING ITERATION
                 // =========================================================
-                Opcode::BeginBroadcastIter { .. }
-                | Opcode::LoadBroadcastElement { .. }
-                | Opcode::StoreBroadcastElement {}
-                | Opcode::NextBroadcastOrJump { .. }
-                | Opcode::EndBroadcastIter {} => {
-                    unimplemented!("Broadcasting opcodes not yet implemented");
+                Opcode::BeginBroadcastIter {
+                    n_sources,
+                    dest_temp_id,
+                } => {
+                    let n = *n_sources as usize;
+
+                    // Collect source views and their view stack indices
+                    let source_indices: SmallVec<[usize; 4]> =
+                        (view_stack.len() - n..view_stack.len()).collect();
+
+                    // Compute result dimensions by unioning all source dim_ids
+                    // We iterate over all dimensions from all sources and build a map
+                    let mut result_dim_ids: SmallVec<[DimId; 4]> = SmallVec::new();
+                    let mut result_dims: SmallVec<[u16; 4]> = SmallVec::new();
+
+                    for &idx in &source_indices {
+                        let view = &view_stack[idx];
+                        for (d, &dim_id) in view.dim_ids.iter().enumerate() {
+                            if !result_dim_ids.contains(&dim_id) {
+                                result_dim_ids.push(dim_id);
+                                result_dims.push(view.dims[d]);
+                            }
+                        }
+                    }
+
+                    // For each source, compute dim_map: result dim index -> source dim index (or -1)
+                    let mut sources: SmallVec<[BroadcastSourceInfo; 2]> = SmallVec::new();
+                    for &idx in &source_indices {
+                        let view = &view_stack[idx];
+                        let mut dim_map: SmallVec<[i8; 4]> = SmallVec::new();
+
+                        for &result_dim_id in &result_dim_ids {
+                            // Find this dim_id in the source
+                            if let Some(pos) =
+                                view.dim_ids.iter().position(|&id| id == result_dim_id)
+                            {
+                                dim_map.push(pos as i8);
+                            } else {
+                                dim_map.push(-1); // Broadcast: source doesn't have this dim
+                            }
+                        }
+
+                        sources.push(BroadcastSourceInfo {
+                            view_stack_idx: idx,
+                            dim_map,
+                        });
+                    }
+
+                    // Compute total size
+                    let size = result_dims.iter().map(|&d| d as usize).product();
+
+                    broadcast_stack.push(BroadcastState {
+                        sources,
+                        dest_temp_id: *dest_temp_id,
+                        result_dims,
+                        result_indices: smallvec::smallvec![0; result_dim_ids.len()],
+                        current: 0,
+                        size,
+                    });
+                }
+
+                Opcode::LoadBroadcastElement { source_idx } => {
+                    let bc_state = broadcast_stack.last().unwrap();
+                    let source_info = &bc_state.sources[*source_idx as usize];
+                    let view = &view_stack[source_info.view_stack_idx];
+
+                    // Map result indices to source indices
+                    let mut source_indices: SmallVec<[u16; 4]> = SmallVec::new();
+                    for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
+                        if src_dim >= 0 {
+                            // This result dimension maps to source dimension src_dim
+                            // But we need to put it in the source's dimension order
+                            source_indices.push(bc_state.result_indices[result_dim]);
+                        }
+                    }
+
+                    // Reorder source_indices according to source's original dim order
+                    let mut ordered_source_indices: SmallVec<[u16; 4]> =
+                        smallvec::smallvec![0; view.dims.len()];
+                    for (result_dim, &src_dim) in source_info.dim_map.iter().enumerate() {
+                        if src_dim >= 0 {
+                            ordered_source_indices[src_dim as usize] =
+                                bc_state.result_indices[result_dim];
+                        }
+                    }
+
+                    let flat_off = view.flat_offset(&ordered_source_indices);
+
+                    let value = if view.is_temp {
+                        let temp_off = context.temp_offsets[view.base_off as usize];
+                        self.temp_storage[temp_off + flat_off]
+                    } else {
+                        curr[view.base_off as usize + flat_off]
+                    };
+                    stack.push(value);
+                }
+
+                Opcode::StoreBroadcastElement {} => {
+                    let value = stack.pop();
+                    let bc_state = broadcast_stack.last().unwrap();
+                    let temp_off = context.temp_offsets[bc_state.dest_temp_id as usize];
+                    self.temp_storage[temp_off + bc_state.current] = value;
+                }
+
+                Opcode::NextBroadcastOrJump { jump_back } => {
+                    let bc_state = broadcast_stack.last_mut().unwrap();
+                    bc_state.current += 1;
+
+                    if bc_state.current < bc_state.size {
+                        // Increment result indices (row-major order)
+                        let n_dims = bc_state.result_dims.len();
+                        for d in (0..n_dims).rev() {
+                            bc_state.result_indices[d] += 1;
+                            if bc_state.result_indices[d] < bc_state.result_dims[d] {
+                                break;
+                            }
+                            bc_state.result_indices[d] = 0;
+                        }
+
+                        // Jump backward to loop start
+                        pc = (pc as isize + *jump_back as isize) as usize;
+                        continue; // Skip pc increment
+                    }
+                    // else: iteration done, continue to next opcode
+                }
+
+                Opcode::EndBroadcastIter {} => {
+                    broadcast_stack.pop();
                 }
             }
 
