@@ -9,12 +9,32 @@ use float_cmp::approx_eq;
 use smallvec::SmallVec;
 
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, ModuleId, Op2, Opcode,
+    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, DimId, ModuleId, Op2, Opcode,
+    RuntimeView, TempId,
 };
 use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 use crate::dimensions::Dimension;
 use crate::sim_err;
+
+// ============================================================================
+// Iteration State (for array iteration during VM execution)
+// ============================================================================
+
+/// State for array iteration within the VM.
+#[derive(Clone, Debug)]
+struct IterState {
+    /// Index into view_stack for the source view
+    view_stack_idx: usize,
+    /// Target temp array ID (if writing to temp)
+    write_temp_id: Option<TempId>,
+    /// Current flat index in the iteration
+    current: usize,
+    /// Total number of elements to iterate
+    size: usize,
+    /// Pre-computed flat offsets for sparse iteration (None if contiguous)
+    flat_offsets: Option<Vec<usize>>,
+}
 
 pub(crate) const TIME_OFF: usize = 0;
 pub(crate) const DT_OFF: usize = 1;
@@ -223,6 +243,9 @@ pub struct Vm {
     did_initials: bool,
     // step counter for save_every cadence
     step_accum: usize,
+    // Temp array storage (allocated once, reused across evals)
+    // Indexed by temp_offsets from ByteCodeContext
+    temp_storage: Vec<f64>,
 }
 
 #[derive(Debug)]
@@ -287,9 +310,15 @@ impl Vm {
         } else {
             sim.specs.dt
         };
-        let n_slots = sim.modules[&sim.root].n_slots;
+        let root_module = &sim.modules[&sim.root];
+        let n_slots = root_module.n_slots;
         let n_chunks: usize = ((sim.specs.stop - sim.specs.start) / save_step + 1.0) as usize;
         let data: Box<[f64]> = vec![0.0; n_slots * (n_chunks + 2)].into_boxed_slice();
+
+        // Allocate temp storage based on context temp info
+        let temp_total_size = root_module.context.temp_total_size;
+        let temp_storage = vec![0.0; temp_total_size];
+
         Ok(Vm {
             specs: sim.specs,
             root: sim.root,
@@ -318,6 +347,7 @@ impl Vm {
             next_chunk: 1,
             did_initials: false,
             step_accum: 0,
+            temp_storage,
         })
     }
     pub fn run_to_end(&mut self) -> Result<()> {
@@ -327,15 +357,15 @@ impl Vm {
 
     #[inline(never)]
     pub fn run_to(&mut self, end: f64) -> Result<()> {
-        let spec = &self.specs;
+        // Copy spec values to avoid holding borrows across eval calls
+        let spec_start = self.specs.start;
+        let spec_stop = self.specs.stop;
+        let dt = self.specs.dt;
+        let save_step = self.specs.save_step;
+        let n_slots = self.n_slots;
+        let n_chunks = self.n_chunks;
 
-        let sliced_sim = &self.sliced_sim;
-        let module_initials = &sliced_sim.initial_modules[&self.root];
-        let module_flows = &sliced_sim.flow_modules[&self.root];
-        let module_stocks = &sliced_sim.stock_modules[&self.root];
-
-        let save_every = std::cmp::max(1, (spec.save_step / spec.dt + 0.5).floor() as usize);
-        let dt = spec.dt;
+        let save_every = std::cmp::max(1, (save_step / dt + 0.5).floor() as usize);
 
         let mut stack = Stack::new();
         let module_inputs: &[f64] = &[0.0; 0];
@@ -345,41 +375,46 @@ impl Vm {
 
         // Initialize initials once
         if !self.did_initials {
-            let (curr, next) =
-                borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
-            curr[TIME_OFF] = spec.start;
+            let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
+            curr[TIME_OFF] = spec_start;
             curr[DT_OFF] = dt;
-            curr[INITIAL_TIME_OFF] = spec.start;
-            curr[FINAL_TIME_OFF] = spec.stop;
-            self.eval(module_initials, 0, module_inputs, curr, next, &mut stack);
+            curr[INITIAL_TIME_OFF] = spec_start;
+            curr[FINAL_TIME_OFF] = spec_stop;
+
+            // Clone module reference to avoid borrow conflict
+            let module_initials = self.sliced_sim.initial_modules[&self.root].clone();
+            self.eval(&module_initials, 0, module_inputs, curr, next, &mut stack);
             self.did_initials = true;
             self.step_accum = 0;
         }
 
         loop {
-            let (curr, next) =
-                borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+            let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
             if curr[TIME_OFF] > end {
                 break;
             }
 
-            self.eval(module_flows, 0, module_inputs, curr, next, &mut stack);
-            self.eval(module_stocks, 0, module_inputs, curr, next, &mut stack);
+            // Clone module references to avoid borrow conflict with &mut self.eval()
+            let module_flows = self.sliced_sim.flow_modules[&self.root].clone();
+            let module_stocks = self.sliced_sim.stock_modules[&self.root].clone();
+
+            self.eval(&module_flows, 0, module_inputs, curr, next, &mut stack);
+            self.eval(&module_stocks, 0, module_inputs, curr, next, &mut stack);
             next[TIME_OFF] = curr[TIME_OFF] + dt;
             next[DT_OFF] = curr[DT_OFF];
             next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
             next[FINAL_TIME_OFF] = curr[FINAL_TIME_OFF];
 
             self.step_accum += 1;
-            let is_initial_timestep = (self.curr_chunk == 0) && (curr[TIME_OFF] == spec.start);
+            let is_initial_timestep = (self.curr_chunk == 0) && (curr[TIME_OFF] == spec_start);
             if self.step_accum != save_every && !is_initial_timestep {
                 // copy next into curr
                 let (curr2, next2) =
-                    borrow_two(&mut data, self.n_slots, self.curr_chunk, self.next_chunk);
+                    borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
                 curr2.copy_from_slice(next2);
             } else {
                 self.curr_chunk = self.next_chunk;
-                if self.next_chunk + 1 >= self.n_chunks + 2 {
+                if self.next_chunk + 1 >= n_chunks + 2 {
                     break;
                 }
                 self.next_chunk += 1;
@@ -429,7 +464,7 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn eval_module(
-        &self,
+        &mut self,
         parent_module: &CompiledModuleSlice,
         parent_module_off: usize,
         module_inputs: &[f64],
@@ -439,20 +474,21 @@ impl Vm {
         id: ModuleId,
     ) {
         let new_module_decl = &parent_module.context.modules[id as usize];
-        let model_name = &new_module_decl.model_name;
-        let sliced_sim = &self.sliced_sim;
+        let model_name = new_module_decl.model_name.clone();
+        let module_off = parent_module_off + new_module_decl.off;
+
+        // Clone module to avoid borrow conflict with &mut self.eval()
         let module = match parent_module.part {
-            StepPart::Initials => &sliced_sim.initial_modules[model_name],
-            StepPart::Flows => &sliced_sim.flow_modules[model_name],
-            StepPart::Stocks => &sliced_sim.stock_modules[model_name],
+            StepPart::Initials => self.sliced_sim.initial_modules[&model_name].clone(),
+            StepPart::Flows => self.sliced_sim.flow_modules[&model_name].clone(),
+            StepPart::Stocks => self.sliced_sim.stock_modules[&model_name].clone(),
         };
 
-        let module_off = parent_module_off + new_module_decl.off;
-        self.eval(module, module_off, module_inputs, curr, next, stack);
+        self.eval(&module, module_off, module_inputs, curr, next, stack);
     }
 
     fn eval(
-        &self,
+        &mut self,
         module: &CompiledModuleSlice,
         module_off: usize,
         module_inputs: &[f64],
@@ -461,14 +497,23 @@ impl Vm {
         stack: &mut Stack,
     ) {
         let bytecode = &module.bytecode;
+        let context = &module.context;
 
+        // Existing state
         let mut condition = false;
         let mut subscript_index: Vec<(u16, u16)> = vec![];
         let mut subscript_index_valid = true;
 
+        // Array support: view stack and iteration stack (local to this eval)
+        let mut view_stack: Vec<RuntimeView> = Vec::with_capacity(4);
+        let mut iter_stack: Vec<IterState> = Vec::with_capacity(2);
+
         let code = &bytecode.code;
-        for op in code.iter() {
-            match *op {
+
+        // PC-based loop for jump support
+        let mut pc: usize = 0;
+        while pc < code.len() {
+            match &code[pc] {
                 Opcode::Op2 { op } => {
                     let r = stack.pop();
                     let l = stack.pop();
@@ -494,21 +539,21 @@ impl Vm {
                     stack.push((!is_truthy(r)) as i8 as f64);
                 }
                 Opcode::LoadConstant { id } => {
-                    stack.push(bytecode.literals[id as usize]);
+                    stack.push(bytecode.literals[*id as usize]);
                 }
                 Opcode::LoadGlobalVar { off } => {
-                    stack.push(curr[off as usize]);
+                    stack.push(curr[*off as usize]);
                 }
                 Opcode::LoadVar { off } => {
-                    stack.push(curr[module_off + off as usize]);
+                    stack.push(curr[module_off + *off as usize]);
                 }
                 Opcode::PushSubscriptIndex { bounds } => {
                     let index = stack.pop().floor() as u16;
-                    if index == 0 || index > bounds {
+                    if index == 0 || index > *bounds {
                         subscript_index_valid = false;
                     } else {
                         // we convert from 1-based to 0-based here
-                        subscript_index.push((index - 1, bounds));
+                        subscript_index.push((index - 1, *bounds));
                         subscript_index_valid &= true;
                     };
                 }
@@ -520,7 +565,7 @@ impl Vm {
                             index *= *bounds as usize;
                             index += *i as usize;
                         }
-                        curr[module_off + off as usize + index]
+                        curr[module_off + *off as usize + index]
                     } else {
                         f64::NAN
                     };
@@ -538,23 +583,23 @@ impl Vm {
                     stack.push(result);
                 }
                 Opcode::LoadModuleInput { input } => {
-                    stack.push(module_inputs[input as usize]);
+                    stack.push(module_inputs[*input as usize]);
                 }
                 Opcode::EvalModule { id, n_inputs } => {
                     use std::iter;
                     let mut module_inputs: SmallVec<[f64; 16]> =
-                        iter::repeat_n(0.0, n_inputs as usize).collect();
-                    for j in (0..(n_inputs as usize)).rev() {
+                        iter::repeat_n(0.0, *n_inputs as usize).collect();
+                    for j in (0..(*n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }
-                    self.eval_module(module, module_off, &module_inputs, curr, next, stack, id);
+                    self.eval_module(module, module_off, &module_inputs, curr, next, stack, *id);
                 }
                 Opcode::AssignCurr { off } => {
-                    curr[module_off + off as usize] = stack.pop();
+                    curr[module_off + *off as usize] = stack.pop();
                     assert_eq!(0, stack.stack.len());
                 }
                 Opcode::AssignNext { off } => {
-                    next[module_off + off as usize] = stack.pop();
+                    next[module_off + *off as usize] = stack.pop();
                     assert_eq!(0, stack.stack.len());
                 }
                 Opcode::Apply { func } => {
@@ -564,18 +609,342 @@ impl Vm {
                     let b = stack.pop();
                     let a = stack.pop();
 
-                    stack.push(apply(func, time, dt, a, b, c));
+                    stack.push(apply(*func, time, dt, a, b, c));
                 }
                 Opcode::Lookup { gf } => {
                     let index = stack.pop();
-                    let gf = &module.context.graphical_functions[gf as usize];
+                    let gf = &context.graphical_functions[*gf as usize];
                     stack.push(lookup(gf, index));
                 }
                 Opcode::Ret => {
                     break;
                 }
+
+                // =========================================================
+                // VIEW STACK OPERATIONS
+                // =========================================================
+                Opcode::PushVarView {
+                    base_off,
+                    n_dims,
+                    dim_ids,
+                } => {
+                    // Build a view for a variable with given dimensions
+                    let n = *n_dims as usize;
+                    let dims: SmallVec<[u16; 4]> = (0..n)
+                        .map(|i| context.dimensions[dim_ids[i] as usize].size)
+                        .collect();
+                    let dim_id_vec: SmallVec<[DimId; 4]> = dim_ids[..n].iter().copied().collect();
+                    let view = RuntimeView::for_var(
+                        (module_off + *base_off as usize) as u32,
+                        dims,
+                        dim_id_vec,
+                    );
+                    view_stack.push(view);
+                }
+
+                Opcode::PushTempView {
+                    temp_id,
+                    n_dims,
+                    dim_ids,
+                } => {
+                    let n = *n_dims as usize;
+                    let dims: SmallVec<[u16; 4]> = (0..n)
+                        .map(|i| context.dimensions[dim_ids[i] as usize].size)
+                        .collect();
+                    let dim_id_vec: SmallVec<[DimId; 4]> = dim_ids[..n].iter().copied().collect();
+                    let view = RuntimeView::for_temp(*temp_id, dims, dim_id_vec);
+                    view_stack.push(view);
+                }
+
+                Opcode::PushStaticView { view_id } => {
+                    let static_view = &context.static_views[*view_id as usize];
+                    view_stack.push(static_view.to_runtime_view());
+                }
+
+                Opcode::ViewSubscriptConst { dim_idx, index } => {
+                    let view = view_stack.last_mut().unwrap();
+                    view.apply_single_subscript(*dim_idx as usize, *index);
+                }
+
+                Opcode::ViewSubscriptDynamic { dim_idx } => {
+                    let index = stack.pop().floor() as u16;
+                    let view = view_stack.last_mut().unwrap();
+                    // Note: assumes 0-based index from stack for dynamic subscripts
+                    view.apply_single_subscript(*dim_idx as usize, index);
+                }
+
+                Opcode::ViewRange {
+                    dim_idx,
+                    start,
+                    end,
+                } => {
+                    let view = view_stack.last_mut().unwrap();
+                    view.apply_range(*dim_idx as usize, *start, *end);
+                }
+
+                Opcode::ViewStarRange {
+                    dim_idx,
+                    subdim_relation_id,
+                } => {
+                    let rel = &context.subdim_relations[*subdim_relation_id as usize];
+                    let view = view_stack.last_mut().unwrap();
+                    view.apply_sparse(*dim_idx as usize, rel.parent_offsets.clone());
+                }
+
+                Opcode::ViewWildcard { dim_idx: _ } => {
+                    // Wildcard is a no-op - dimension stays as-is
+                }
+
+                Opcode::ViewTranspose {} => {
+                    let view = view_stack.last_mut().unwrap();
+                    view.transpose();
+                }
+
+                Opcode::PopView {} => {
+                    view_stack.pop();
+                }
+
+                Opcode::DupView {} => {
+                    let top = view_stack.last().unwrap().clone();
+                    view_stack.push(top);
+                }
+
+                // =========================================================
+                // TEMP ARRAY ACCESS
+                // =========================================================
+                Opcode::LoadTempConst { temp_id, index } => {
+                    let temp_off = context.temp_offsets[*temp_id as usize];
+                    let value = self.temp_storage[temp_off + *index as usize];
+                    stack.push(value);
+                }
+
+                Opcode::LoadTempDynamic { temp_id } => {
+                    let index = stack.pop().floor() as usize;
+                    let temp_off = context.temp_offsets[*temp_id as usize];
+                    let value = self.temp_storage[temp_off + index];
+                    stack.push(value);
+                }
+
+                // =========================================================
+                // ITERATION
+                // =========================================================
+                Opcode::BeginIter {
+                    write_temp_id,
+                    has_write_temp,
+                } => {
+                    let view = view_stack.last().unwrap();
+                    let size = view.size();
+
+                    // Pre-compute flat offsets for iteration
+                    let flat_offsets = if view.sparse.is_empty() && view.is_contiguous() {
+                        // Contiguous: can iterate directly
+                        None
+                    } else {
+                        // Need to pre-compute all flat offsets
+                        let mut offsets = Vec::with_capacity(size);
+                        let dims = &view.dims;
+                        let n_dims = dims.len();
+                        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+
+                        for _ in 0..size {
+                            offsets.push(view.flat_offset(&indices));
+
+                            // Increment indices (row-major order)
+                            for d in (0..n_dims).rev() {
+                                indices[d] += 1;
+                                if indices[d] < dims[d] {
+                                    break;
+                                }
+                                indices[d] = 0;
+                            }
+                        }
+                        Some(offsets)
+                    };
+
+                    iter_stack.push(IterState {
+                        view_stack_idx: view_stack.len() - 1,
+                        write_temp_id: if *has_write_temp {
+                            Some(*write_temp_id)
+                        } else {
+                            None
+                        },
+                        current: 0,
+                        size,
+                        flat_offsets,
+                    });
+                }
+
+                Opcode::LoadIterElement {} => {
+                    let iter_state = iter_stack.last().unwrap();
+                    let view = &view_stack[iter_state.view_stack_idx];
+
+                    let flat_off = if let Some(ref offsets) = iter_state.flat_offsets {
+                        offsets[iter_state.current]
+                    } else {
+                        // Contiguous: flat offset = base_off + offset + current
+                        view.offset as usize + iter_state.current
+                    };
+
+                    let value = if view.is_temp {
+                        let temp_off = context.temp_offsets[view.base_off as usize];
+                        self.temp_storage[temp_off + flat_off]
+                    } else {
+                        curr[view.base_off as usize + flat_off]
+                    };
+                    stack.push(value);
+                }
+
+                Opcode::LoadIterTempElement { temp_id } => {
+                    let iter_state = iter_stack.last().unwrap();
+                    let temp_off = context.temp_offsets[*temp_id as usize];
+                    let value = self.temp_storage[temp_off + iter_state.current];
+                    stack.push(value);
+                }
+
+                Opcode::StoreIterElement {} => {
+                    let value = stack.pop();
+                    let iter_state = iter_stack.last().unwrap();
+
+                    if let Some(write_temp_id) = iter_state.write_temp_id {
+                        let temp_off = context.temp_offsets[write_temp_id as usize];
+                        self.temp_storage[temp_off + iter_state.current] = value;
+                    } else {
+                        panic!("StoreIterElement without write_temp");
+                    }
+                }
+
+                Opcode::NextIterOrJump { jump_back } => {
+                    let iter_state = iter_stack.last_mut().unwrap();
+                    iter_state.current += 1;
+
+                    if iter_state.current < iter_state.size {
+                        // Jump backward to loop start
+                        pc = (pc as isize + *jump_back as isize) as usize;
+                        continue; // Skip pc increment
+                    }
+                    // else: iteration done, continue to next opcode
+                }
+
+                Opcode::EndIter {} => {
+                    iter_stack.pop();
+                }
+
+                // =========================================================
+                // ARRAY REDUCTIONS
+                // =========================================================
+                Opcode::ArraySum {} => {
+                    let view = view_stack.last().unwrap();
+                    let sum = self.reduce_view(view, curr, context, |acc, v| acc + v, 0.0);
+                    stack.push(sum);
+                }
+
+                Opcode::ArrayMax {} => {
+                    let view = view_stack.last().unwrap();
+                    let max = self.reduce_view(
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc.max(v),
+                        f64::NEG_INFINITY,
+                    );
+                    stack.push(max);
+                }
+
+                Opcode::ArrayMin {} => {
+                    let view = view_stack.last().unwrap();
+                    let min =
+                        self.reduce_view(view, curr, context, |acc, v| acc.min(v), f64::INFINITY);
+                    stack.push(min);
+                }
+
+                Opcode::ArrayMean {} => {
+                    let view = view_stack.last().unwrap();
+                    let sum = self.reduce_view(view, curr, context, |acc, v| acc + v, 0.0);
+                    let count = view.size() as f64;
+                    stack.push(sum / count);
+                }
+
+                Opcode::ArrayStddev {} => {
+                    let view = view_stack.last().unwrap();
+                    let size = view.size();
+                    let sum = self.reduce_view(view, curr, context, |acc, v| acc + v, 0.0);
+                    let mean = sum / size as f64;
+
+                    // Second pass for variance
+                    let variance_sum = self.reduce_view(
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc + (v - mean).powi(2),
+                        0.0,
+                    );
+                    let stddev = (variance_sum / size as f64).sqrt();
+                    stack.push(stddev);
+                }
+
+                Opcode::ArraySize {} => {
+                    let view = view_stack.last().unwrap();
+                    stack.push(view.size() as f64);
+                }
+
+                // =========================================================
+                // BROADCASTING (Phase 5 - stubs for now)
+                // =========================================================
+                Opcode::BeginBroadcastIter { .. }
+                | Opcode::LoadBroadcastElement { .. }
+                | Opcode::StoreBroadcastElement {}
+                | Opcode::NextBroadcastOrJump { .. }
+                | Opcode::EndBroadcastIter {} => {
+                    unimplemented!("Broadcasting opcodes not yet implemented");
+                }
+            }
+
+            pc += 1;
+        }
+    }
+
+    /// Helper: Reduce all elements of a view using a fold function
+    fn reduce_view<F>(
+        &self,
+        view: &RuntimeView,
+        curr: &[f64],
+        context: &ByteCodeContext,
+        f: F,
+        init: f64,
+    ) -> f64
+    where
+        F: Fn(f64, f64) -> f64,
+    {
+        let size = view.size();
+        let dims = &view.dims;
+        let n_dims = dims.len();
+
+        let mut acc = init;
+        let mut indices: SmallVec<[u16; 4]> = smallvec::smallvec![0; n_dims];
+
+        for _ in 0..size {
+            let flat_off = view.flat_offset(&indices);
+
+            let value = if view.is_temp {
+                let temp_off = context.temp_offsets[view.base_off as usize];
+                self.temp_storage[temp_off + flat_off]
+            } else {
+                curr[view.base_off as usize + flat_off]
+            };
+
+            acc = f(acc, value);
+
+            // Increment indices (row-major order)
+            for d in (0..n_dims).rev() {
+                indices[d] += 1;
+                if indices[d] < dims[d] {
+                    break;
+                }
+                indices[d] = 0;
             }
         }
+
+        acc
     }
 
     #[cfg(test)]
