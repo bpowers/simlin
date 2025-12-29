@@ -3575,6 +3575,15 @@ impl<'module> Compiler<'module> {
         let compiled_flows = Arc::new(self.walk(&self.module.runlist_flows)?);
         let compiled_stocks = Arc::new(self.walk(&self.module.runlist_stocks)?);
 
+        // Build temp info from module
+        let mut temp_offsets = Vec::with_capacity(self.module.n_temps);
+        let mut offset = 0usize;
+        for &size in &self.module.temp_sizes {
+            temp_offsets.push(offset);
+            offset += size;
+        }
+        let temp_total_size = offset;
+
         Ok(CompiledModule {
             ident: self.module.ident.clone(),
             n_slots: self.module.n_slots,
@@ -3582,6 +3591,13 @@ impl<'module> Compiler<'module> {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
                 arrays: vec![],
+                // New array support fields (populated during compilation)
+                dimensions: vec![],
+                subdim_relations: vec![],
+                names: vec![],
+                static_views: vec![],
+                temp_offsets,
+                temp_total_size,
             }),
             compiled_initials,
             compiled_flows,
