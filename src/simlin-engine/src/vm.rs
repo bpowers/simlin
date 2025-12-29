@@ -842,6 +842,28 @@ impl Vm {
                     stack.push(value);
                 }
 
+                Opcode::LoadIterViewTop {} => {
+                    // Load from the view on TOP of view_stack (not iter_state's view)
+                    // using the current iteration index from iter_state.
+                    // This allows loading from multiple different source arrays in one loop.
+                    let iter_state = iter_stack.last().unwrap();
+                    let view = view_stack.last().unwrap();
+
+                    if !view.is_valid {
+                        stack.push(f64::NAN);
+                    } else {
+                        let flat_off = view.offset_for_iter_index(iter_state.current);
+
+                        let value = if view.is_temp {
+                            let temp_off = context.temp_offsets[view.base_off as usize];
+                            self.temp_storage[temp_off + flat_off]
+                        } else {
+                            curr[view.base_off as usize + flat_off]
+                        };
+                        stack.push(value);
+                    }
+                }
+
                 Opcode::StoreIterElement {} => {
                     let value = stack.pop();
                     let iter_state = iter_stack.last().unwrap();

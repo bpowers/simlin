@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>Test</vendor>
+        <product>Simlin</product>
+    </header>
+    <sim_specs method="Euler" time_units="Time">
+        <start>0</start>
+        <stop>2</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Items">
+            <elem name="A"/>
+            <elem name="B"/>
+            <elem name="C"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <!-- First array: [10, 20, 30] -->
+            <aux name="array_a">
+                <element subscript="A">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="B">
+                    <eqn>20</eqn>
+                </element>
+                <element subscript="C">
+                    <eqn>30</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Items"/>
+                </dimensions>
+            </aux>
+            <!-- Second array: [1, 2, 3] -->
+            <aux name="array_b">
+                <element subscript="A">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="B">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="C">
+                    <eqn>3</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Items"/>
+                </dimensions>
+            </aux>
+            <!-- SUM(a[*] + b[*]) = (10+1) + (20+2) + (30+3) = 11 + 22 + 33 = 66 -->
+            <aux name="sum_of_sums">
+                <eqn>SUM(array_a[*] + array_b[*])</eqn>
+            </aux>
+            <!-- SUM(a[*] * b[*]) = (10*1) + (20*2) + (30*3) = 10 + 40 + 90 = 140 -->
+            <aux name="sum_of_products">
+                <eqn>SUM(array_a[*] * array_b[*])</eqn>
+            </aux>
+            <!-- MEAN(a[*] - b[*]) = ((10-1) + (20-2) + (30-3)) / 3 = (9 + 18 + 27) / 3 = 54 / 3 = 18 -->
+            <aux name="mean_of_diffs">
+                <eqn>MEAN(array_a[*] - array_b[*])</eqn>
+            </aux>
+            <!-- Complex: SUM(a[*] + b[*] + 5) = (10+1+5) + (20+2+5) + (30+3+5) = 16 + 27 + 38 = 81 -->
+            <aux name="sum_with_constant">
+                <eqn>SUM(array_a[*] + array_b[*] + 5)</eqn>
+            </aux>
+        </variables>
+    </model>
+</xmile>

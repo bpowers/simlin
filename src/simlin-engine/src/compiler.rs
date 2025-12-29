@@ -11,7 +11,7 @@ use crate::ast::{
 };
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, DimId, DimensionInfo,
-    GraphicalFunctionId, ModuleDeclaration, ModuleId, ModuleInputOffset, NameId, Op2, Opcode,
+    GraphicalFunctionId, ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode,
     RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId, VariableOffset, ViewId,
 };
 use crate::common::{
@@ -3243,53 +3243,6 @@ impl<'module> Compiler<'module> {
         }
     }
 
-    /// Intern a name and return its NameId
-    #[allow(dead_code)] // Infrastructure for future dimension tracking
-    fn intern_name(&mut self, name: &str) -> NameId {
-        if let Some(pos) = self.names.iter().position(|n| n == name) {
-            return pos as NameId;
-        }
-        self.names.push(name.to_string());
-        (self.names.len() - 1) as NameId
-    }
-
-    /// Add a dimension and return its DimId
-    #[allow(dead_code)] // Infrastructure for future dimension tracking
-    fn add_dimension(&mut self, dim: &Dimension) -> DimId {
-        let name_id = self.intern_name(dim.name());
-        let info = match dim {
-            Dimension::Indexed(_, size) => DimensionInfo::indexed(name_id, *size as u16),
-            Dimension::Named(_, named) => {
-                let elem_ids: SmallVec<[NameId; 8]> = named
-                    .elements
-                    .iter()
-                    .map(|e| self.intern_name(e.as_str()))
-                    .collect();
-                DimensionInfo::named(name_id, elem_ids)
-            }
-        };
-        self.dimensions.push(info);
-        (self.dimensions.len() - 1) as DimId
-    }
-
-    /// Find or add a dimension by name, returning its DimId
-    #[allow(dead_code)] // Infrastructure for future dimension tracking
-    fn get_or_add_dimension(&mut self, dim: &Dimension) -> DimId {
-        let name = dim.name();
-        // Check if already exists
-        for (i, existing) in self.dimensions.iter().enumerate() {
-            if self
-                .names
-                .get(existing.name_id as usize)
-                .is_some_and(|existing_name| existing_name == name)
-            {
-                return i as DimId;
-            }
-        }
-        // Add new
-        self.add_dimension(dim)
-    }
-
     /// Add a static view and return its ViewId
     fn add_static_view(&mut self, view: StaticArrayView) -> ViewId {
         self.static_views.push(view);
@@ -3424,9 +3377,15 @@ impl<'module> Compiler<'module> {
             }
             Expr::StaticSubscript(off, view, _) => {
                 if self.in_iteration {
-                    // In iteration context, use LoadIterElement to load from current position
-                    // The view is already on the view stack from the AssignTemp setup
-                    self.push(Opcode::LoadIterElement {});
+                    // In iteration context, each StaticSubscript pushes its own view,
+                    // loads from it using the current iteration index, then pops.
+                    // This correctly handles expressions with multiple source arrays
+                    // like `a[*] + b[*]` where each array needs its own view.
+                    let static_view = self.array_view_to_static(*off, view);
+                    let view_id = self.add_static_view(static_view);
+                    self.push(Opcode::PushStaticView { view_id });
+                    self.push(Opcode::LoadIterViewTop {});
+                    self.push(Opcode::PopView {});
                     Some(())
                 } else if view.dims.iter().product::<usize>() == 1 {
                     // Scalar result - compute final offset and load
@@ -3444,11 +3403,13 @@ impl<'module> Compiler<'module> {
             }
             Expr::TempArray(id, view, _) => {
                 if self.in_iteration {
-                    // In iteration context, use LoadIterElement
-                    // The temp view should already be on the view stack
-                    self.push(Opcode::LoadIterTempElement {
-                        temp_id: *id as TempId,
-                    });
+                    // In iteration context, push the temp's view, load using current index, pop.
+                    // Similar to StaticSubscript, this ensures each temp reference uses its own view.
+                    let static_view = self.array_view_to_static_temp(*id, view);
+                    let view_id = self.add_static_view(static_view);
+                    self.push(Opcode::PushStaticView { view_id });
+                    self.push(Opcode::LoadIterViewTop {});
+                    self.push(Opcode::PopView {});
                     Some(())
                 } else {
                     // Outside iteration - push temp view for subsequent operations (like SUM)
@@ -3788,42 +3749,22 @@ impl<'module> Compiler<'module> {
                 // AssignTemp evaluates an array expression element-by-element and stores to temp
                 //
                 // Bytecode pattern:
-                // 1. PushStaticView (the source array view for iteration)
+                // 1. PushStaticView (OUTPUT temp's view - determines iteration size)
                 // 2. BeginIter { write_temp_id, has_write_temp: true }
                 // 3. [Loop body start]
-                //    - Compile RHS in iteration context (StaticSubscript -> LoadIterElement)
+                //    - Compile RHS in iteration context
+                //      (each StaticSubscript/TempArray pushes its own view, loads, pops)
                 //    - StoreIterElement
                 // 4. NextIterOrJump { jump_back: -(distance to loop body start) }
                 // 5. EndIter
                 // 6. PopView
+                //
+                // Note: We use the OUTPUT temp's view for BeginIter to determine iteration count.
+                // Each source array reference in the RHS pushes its own view for loading.
+                // This correctly handles expressions with multiple source arrays like `a[*] + b[*]`.
 
-                // Find the StaticSubscript in the RHS to get the source view for iteration
-                // This is the view we iterate over and load from
-                fn find_static_subscript(expr: &Expr) -> Option<(usize, &ArrayView)> {
-                    match expr {
-                        Expr::StaticSubscript(off, view, _) => Some((*off, view)),
-                        Expr::Op1(_, inner, _) => find_static_subscript(inner),
-                        Expr::Op2(_, left, right, _) => {
-                            find_static_subscript(left).or_else(|| find_static_subscript(right))
-                        }
-                        Expr::If(cond, t, f, _) => find_static_subscript(cond)
-                            .or_else(|| find_static_subscript(t))
-                            .or_else(|| find_static_subscript(f)),
-                        _ => None,
-                    }
-                }
-
-                let (source_off, source_view) = match find_static_subscript(rhs) {
-                    Some(v) => v,
-                    None => {
-                        // No StaticSubscript found - create a synthetic iteration view
-                        // from the AssignTemp's view dimensions
-                        (0, view)
-                    }
-                };
-
-                // Push the source view for iteration
-                let static_view = self.array_view_to_static(source_off, source_view);
+                // Push the OUTPUT temp's view for iteration size
+                let static_view = self.array_view_to_static_temp(*id, view);
                 let view_id = self.add_static_view(static_view);
                 self.push(Opcode::PushStaticView { view_id });
 

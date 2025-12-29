@@ -327,6 +327,34 @@ impl RuntimeView {
         self.dims[dim_idx] = end - start;
     }
 
+    /// Compute the flat memory offset for a given iteration index.
+    /// This converts a flat iteration index (0..size) to multi-dimensional indices,
+    /// then uses flat_offset to compute the memory location.
+    pub fn offset_for_iter_index(&self, iter_idx: usize) -> usize {
+        if self.dims.is_empty() {
+            // Scalar view
+            return self.offset as usize;
+        }
+
+        // For contiguous views with no sparse mappings, we can compute directly
+        if self.sparse.is_empty() && self.is_contiguous() {
+            return self.offset as usize + iter_idx;
+        }
+
+        // Convert flat index to multi-dimensional indices
+        let mut indices: SmallVec<[u16; 4]> = SmallVec::new();
+        let mut remaining = iter_idx;
+
+        // Compute indices from last dimension to first
+        for &dim in self.dims.iter().rev() {
+            indices.push((remaining % dim as usize) as u16);
+            remaining /= dim as usize;
+        }
+        indices.reverse();
+
+        self.flat_offset(&indices)
+    }
+
     /// Apply a sparse subscript (star range) to a dimension
     pub fn apply_sparse(&mut self, dim_idx: usize, parent_offsets: SmallVec<[u16; 16]>) {
         debug_assert!(dim_idx < self.dims.len());
@@ -579,6 +607,12 @@ pub(crate) enum Opcode {
     LoadIterTempElement {
         temp_id: TempId,
     },
+
+    /// Load element from top view at current iteration index.
+    /// Unlike LoadIterElement, this uses the view currently on top of view_stack,
+    /// not the view captured when BeginIter was called.
+    /// This allows loading from multiple different source arrays in a single iteration loop.
+    LoadIterViewTop {},
 
     /// Store top of arithmetic stack to current iteration position in dest temp.
     /// Pops value from arithmetic stack.
@@ -1287,6 +1321,134 @@ mod tests {
         // Should have sparse mapping
         assert_eq!(view.sparse.len(), 1);
         assert_eq!(view.sparse[0].parent_offsets.as_slice(), &[1, 3, 4]);
+    }
+
+    // =========================================================================
+    // offset_for_iter_index Tests
+    // =========================================================================
+
+    #[test]
+    fn test_offset_for_iter_index_contiguous_1d() {
+        // Simple 1D contiguous array [5 elements]
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let view = RuntimeView::for_var(10, dims, dim_ids);
+
+        // For contiguous array, offset_for_iter_index should return offset + index
+        assert_eq!(view.offset_for_iter_index(0), 0);
+        assert_eq!(view.offset_for_iter_index(1), 1);
+        assert_eq!(view.offset_for_iter_index(4), 4);
+    }
+
+    #[test]
+    fn test_offset_for_iter_index_contiguous_2d() {
+        // 2D contiguous array [3][4] = 12 elements
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![3, 4];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0, 1];
+        let view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Row-major: flat index = row * 4 + col
+        // Index 0 -> [0,0] -> 0
+        // Index 1 -> [0,1] -> 1
+        // Index 4 -> [1,0] -> 4
+        // Index 5 -> [1,1] -> 5
+        // Index 11 -> [2,3] -> 11
+        assert_eq!(view.offset_for_iter_index(0), 0);
+        assert_eq!(view.offset_for_iter_index(1), 1);
+        assert_eq!(view.offset_for_iter_index(4), 4);
+        assert_eq!(view.offset_for_iter_index(5), 5);
+        assert_eq!(view.offset_for_iter_index(11), 11);
+    }
+
+    #[test]
+    fn test_offset_for_iter_index_with_offset() {
+        // 1D array with non-zero offset (sliced view)
+        let view = RuntimeView {
+            base_off: 0,
+            is_temp: false,
+            dims: smallvec::smallvec![3],
+            strides: smallvec::smallvec![1],
+            offset: 5, // Start at element 5
+            sparse: SmallVec::new(),
+            dim_ids: smallvec::smallvec![0],
+            is_valid: true,
+        };
+
+        // Not contiguous due to offset != 0, so we compute via multi-dim indices
+        // Index 0 -> element at offset 5
+        // Index 1 -> element at offset 6
+        // Index 2 -> element at offset 7
+        assert_eq!(view.offset_for_iter_index(0), 5);
+        assert_eq!(view.offset_for_iter_index(1), 6);
+        assert_eq!(view.offset_for_iter_index(2), 7);
+    }
+
+    #[test]
+    fn test_offset_for_iter_index_non_standard_strides() {
+        // 2D array with column-major strides (not contiguous)
+        let view = RuntimeView {
+            base_off: 0,
+            is_temp: false,
+            dims: smallvec::smallvec![3, 4],    // 3 rows, 4 cols
+            strides: smallvec::smallvec![1, 3], // Column-major: stride[0]=1, stride[1]=3
+            offset: 0,
+            sparse: SmallVec::new(),
+            dim_ids: smallvec::smallvec![0, 1],
+            is_valid: true,
+        };
+
+        // Not contiguous (strides are column-major, not row-major)
+        // Flat index 0 -> [0,0] -> 0*1 + 0*3 = 0
+        // Flat index 1 -> [0,1] -> 0*1 + 1*3 = 3
+        // Flat index 4 -> [1,0] -> 1*1 + 0*3 = 1
+        // Flat index 5 -> [1,1] -> 1*1 + 1*3 = 4
+        assert_eq!(view.offset_for_iter_index(0), 0);
+        assert_eq!(view.offset_for_iter_index(1), 3);
+        assert_eq!(view.offset_for_iter_index(4), 1);
+        assert_eq!(view.offset_for_iter_index(5), 4);
+    }
+
+    #[test]
+    fn test_offset_for_iter_index_sparse() {
+        // 1D sparse array: elements at indices [1, 3, 7] of parent
+        let view = RuntimeView {
+            base_off: 0,
+            is_temp: false,
+            dims: smallvec::smallvec![3], // 3 sparse elements
+            strides: smallvec::smallvec![1],
+            offset: 0,
+            sparse: smallvec::smallvec![RuntimeSparseMapping {
+                dim_index: 0,
+                parent_offsets: smallvec::smallvec![1, 3, 7],
+            }],
+            dim_ids: smallvec::smallvec![0],
+            is_valid: true,
+        };
+
+        // Index 0 -> parent offset 1
+        // Index 1 -> parent offset 3
+        // Index 2 -> parent offset 7
+        assert_eq!(view.offset_for_iter_index(0), 1);
+        assert_eq!(view.offset_for_iter_index(1), 3);
+        assert_eq!(view.offset_for_iter_index(2), 7);
+    }
+
+    #[test]
+    fn test_offset_for_iter_index_scalar() {
+        // Scalar view (0 dimensions)
+        let view = RuntimeView {
+            base_off: 10,
+            is_temp: false,
+            dims: SmallVec::new(),
+            strides: SmallVec::new(),
+            offset: 5,
+            sparse: SmallVec::new(),
+            dim_ids: SmallVec::new(),
+            is_valid: true,
+        };
+
+        // For scalar, always return offset
+        assert_eq!(view.offset_for_iter_index(0), 5);
     }
 }
 

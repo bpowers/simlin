@@ -331,6 +331,14 @@ fn simulates_array_sum_expr() {
 }
 
 #[test]
+fn simulates_array_multi_source() {
+    // Tests multi-array expressions like SUM(a[*] + b[*])
+    // This exercises the LoadIterViewTop opcode which loads from each array's
+    // own view rather than a shared iteration view.
+    simulate_path("../../test/array_multi_source/array_multi_source.xmile");
+}
+
+#[test]
 fn simulates_modules() {
     simulate_path("../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx");
 }
