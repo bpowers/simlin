@@ -3367,9 +3367,10 @@ impl<'module> Compiler<'module> {
     /// This populates:
     /// - `names`: interned dimension and element names
     /// - `dimensions`: DimensionInfo for each dimension
-    /// - `subdim_relations`: SubdimensionRelation for each subdimension pair
+    ///
+    /// Note: Subdimension relations are populated lazily via `get_or_add_subdim_relation`
+    /// when ViewStarRange bytecode is emitted, rather than pre-computing all pairs.
     fn populate_dimension_metadata(&mut self) {
-        // First pass: populate dimensions and names
         for dim in &self.module.dimensions {
             let dim_name = dim.name();
             let name_id = self.intern_name(dim_name);
@@ -3386,43 +3387,6 @@ impl<'module> Compiler<'module> {
                 }
             };
             self.dimensions.push(dim_info);
-        }
-
-        // Second pass: populate subdimension relationships
-        // For each pair of named dimensions, check if one is a subdimension of another
-        for (child_idx, child_dim) in self.module.dimensions.iter().enumerate() {
-            let Dimension::Named(child_name, _) = child_dim else {
-                continue;
-            };
-            for (parent_idx, parent_dim) in self.module.dimensions.iter().enumerate() {
-                if child_idx == parent_idx {
-                    continue;
-                }
-                let Dimension::Named(parent_name, _) = parent_dim else {
-                    continue;
-                };
-
-                // Check if child is a subdimension of parent using the DimensionsContext
-                if let Some(relation) = self
-                    .module
-                    .dimensions_ctx
-                    .get_subdimension_relation(child_name, parent_name)
-                {
-                    // Convert the relation to bytecode format
-                    let parent_offsets: SmallVec<[u16; 16]> =
-                        relation.parent_offsets.iter().map(|&x| x as u16).collect();
-                    let is_contiguous = relation.is_contiguous();
-                    let start_offset = relation.start_offset() as u16;
-
-                    self.subdim_relations.push(SubdimensionRelation {
-                        parent_dim_id: parent_idx as DimId,
-                        child_dim_id: child_idx as DimId,
-                        parent_offsets,
-                        is_contiguous,
-                        start_offset,
-                    });
-                }
-            }
         }
     }
 
@@ -3462,6 +3426,61 @@ impl<'module> Compiler<'module> {
             element_name_ids: SmallVec::new(),
         });
         dim_id
+    }
+
+    /// Look up or add a subdimension relation between child and parent dimensions.
+    /// Returns Some(subdim_relation_id) if child is a subdimension of parent,
+    /// or None if no relationship exists.
+    ///
+    /// This method is called lazily when ViewStarRange bytecode is emitted,
+    /// rather than pre-computing all possible relations.
+    #[allow(dead_code)]
+    fn get_or_add_subdim_relation(
+        &mut self,
+        child_dim_name: &crate::common::CanonicalDimensionName,
+        parent_dim_name: &crate::common::CanonicalDimensionName,
+    ) -> Option<u16> {
+        // First, find the DimIds for child and parent
+        let child_dim_id = self.find_dim_id_by_name(child_dim_name.as_str())?;
+        let parent_dim_id = self.find_dim_id_by_name(parent_dim_name.as_str())?;
+
+        // Check if this relation already exists
+        for (idx, rel) in self.subdim_relations.iter().enumerate() {
+            if rel.child_dim_id == child_dim_id && rel.parent_dim_id == parent_dim_id {
+                return Some(idx as u16);
+            }
+        }
+
+        // Look up the relation from DimensionsContext
+        let relation = self
+            .module
+            .dimensions_ctx
+            .get_subdimension_relation(child_dim_name, parent_dim_name)?;
+
+        // Convert and add to subdim_relations
+        let parent_offsets: SmallVec<[u16; 16]> =
+            relation.parent_offsets.iter().map(|&x| x as u16).collect();
+        let is_contiguous = relation.is_contiguous();
+        let start_offset = relation.start_offset() as u16;
+
+        let rel_id = self.subdim_relations.len() as u16;
+        self.subdim_relations.push(SubdimensionRelation {
+            parent_dim_id,
+            child_dim_id,
+            parent_offsets,
+            is_contiguous,
+            start_offset,
+        });
+
+        Some(rel_id)
+    }
+
+    /// Find a DimId by dimension name, returns None if not found.
+    #[allow(dead_code)]
+    fn find_dim_id_by_name(&self, dim_name: &str) -> Option<DimId> {
+        let name_id = self.names.iter().position(|n| n == dim_name)? as NameId;
+        let dim_idx = self.dimensions.iter().position(|d| d.name_id == name_id)?;
+        Some(dim_idx as DimId)
     }
 
     /// Add a static view and return its ViewId
@@ -4786,7 +4805,8 @@ mod tests {
     }
 
     #[test]
-    fn test_subdimension_relation_population() {
+    fn test_lazy_subdimension_relation() {
+        use crate::common::CanonicalDimensionName;
         use crate::datamodel::{
             self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
             Variable as DatamodelVariable, Visibility,
@@ -4855,42 +4875,38 @@ mod tests {
         )
         .expect("Module creation should succeed");
 
-        let compiled = module.compile().expect("Compilation should succeed");
-        let context = &compiled.context;
+        // Create a Compiler directly to test lazy subdim_relation population
+        let mut compiler = Compiler::new(&module);
 
-        // Should have 2 dimensions
-        assert_eq!(context.dimensions.len(), 2, "Should have 2 dimensions");
-
-        // Should have a subdimension relation: Child is a subdimension of Parent
-        // Child elements B, C map to Parent indices 1, 2 (0-based)
+        // Initially, subdim_relations should be empty (lazy population)
         assert!(
-            !context.subdim_relations.is_empty(),
-            "Should have subdimension relations. Relations: {:?}",
-            context.subdim_relations
+            compiler.subdim_relations.is_empty(),
+            "subdim_relations should be empty before lazy lookup"
         );
 
-        // Find the Child->Parent relation
-        let child_parent_relation = context.subdim_relations.iter().find(|rel| {
-            let child_name = context
-                .dimensions
-                .get(rel.child_dim_id as usize)
-                .and_then(|d| context.names.get(d.name_id as usize));
-            let parent_name = context
-                .dimensions
-                .get(rel.parent_dim_id as usize)
-                .and_then(|d| context.names.get(d.name_id as usize));
-            child_name.is_some_and(|n| n == "child") && parent_name.is_some_and(|n| n == "parent")
-        });
-
-        assert!(
-            child_parent_relation.is_some(),
-            "Should have Child->Parent relation. Relations: {:?}, Dims: {:?}, Names: {:?}",
-            context.subdim_relations,
-            context.dimensions,
-            context.names
+        // Dimensions should be populated
+        assert_eq!(
+            compiler.dimensions.len(),
+            2,
+            "Should have 2 dimensions populated"
         );
 
-        let relation = child_parent_relation.unwrap();
+        // Now call get_or_add_subdim_relation to lazily add the relation
+        let child_name = CanonicalDimensionName::from_raw("Child");
+        let parent_name = CanonicalDimensionName::from_raw("Parent");
+
+        let rel_id = compiler.get_or_add_subdim_relation(&child_name, &parent_name);
+        assert!(rel_id.is_some(), "Child should be subdimension of Parent");
+        assert_eq!(rel_id, Some(0), "First relation should have id 0");
+
+        // Now subdim_relations should have one entry
+        assert_eq!(
+            compiler.subdim_relations.len(),
+            1,
+            "Should have 1 subdim_relation after lazy lookup"
+        );
+
+        let relation = &compiler.subdim_relations[0];
         // B is at index 1 in Parent, C is at index 2
         assert_eq!(
             relation.parent_offsets.as_slice(),
@@ -4899,5 +4915,33 @@ mod tests {
         );
         assert!(relation.is_contiguous, "B, C are contiguous in parent");
         assert_eq!(relation.start_offset, 1);
+
+        // Calling again should return the same id (cached)
+        let rel_id_again = compiler.get_or_add_subdim_relation(&child_name, &parent_name);
+        assert_eq!(
+            rel_id_again,
+            Some(0),
+            "Should return same id for same lookup"
+        );
+        assert_eq!(
+            compiler.subdim_relations.len(),
+            1,
+            "Should still have only 1 relation (no duplicate)"
+        );
+
+        // Looking up a non-existent relation should return None
+        let unrelated_name = CanonicalDimensionName::from_raw("Nonexistent");
+        let no_rel = compiler.get_or_add_subdim_relation(&unrelated_name, &parent_name);
+        assert!(
+            no_rel.is_none(),
+            "Non-existent dimension should return None"
+        );
+
+        // Parent is not a subdimension of Child
+        let reverse_rel = compiler.get_or_add_subdim_relation(&parent_name, &child_name);
+        assert!(
+            reverse_rel.is_none(),
+            "Parent is not a subdimension of Child"
+        );
     }
 }
