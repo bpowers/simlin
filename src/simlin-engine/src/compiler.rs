@@ -10,8 +10,9 @@ use crate::ast::{
     SparseInfo,
 };
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, GraphicalFunctionId,
-    ModuleDeclaration, ModuleId, ModuleInputOffset, Op2, Opcode, VariableOffset,
+    BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, DimId, DimensionInfo,
+    GraphicalFunctionId, ModuleDeclaration, ModuleId, ModuleInputOffset, NameId, Op2, Opcode,
+    RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId, VariableOffset, ViewId,
 };
 use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
@@ -24,6 +25,7 @@ use crate::vm::{
     DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, SubscriptIterator, TIME_OFF,
 };
 use crate::{Error, sim_err};
+use smallvec::SmallVec;
 
 // Type alias to reduce complexity
 type VariableOffsetMap = HashMap<Ident<Canonical>, HashMap<Ident<Canonical>, (usize, usize)>>;
@@ -383,6 +385,7 @@ fn build_view_from_ops(
     // Second pass: build the resulting view
     let mut new_dims = Vec::new();
     let mut new_strides = Vec::new();
+    let mut new_dim_names = Vec::new();
     let mut sparse_info = Vec::new();
     let mut output_dim_idx = 0usize;
 
@@ -394,17 +397,35 @@ fn build_view_from_ops(
             IndexOp::Range(start, end) => {
                 new_dims.push(end - start);
                 new_strides.push(orig_strides[i]);
+                // Preserve dimension name from input dimension
+                if i < config.dims.len() {
+                    new_dim_names.push(config.dims[i].name().to_string());
+                } else {
+                    new_dim_names.push(String::new());
+                }
                 output_dim_idx += 1;
             }
             IndexOp::Wildcard => {
                 new_dims.push(orig_dims[i]);
                 new_strides.push(orig_strides[i]);
+                // Preserve dimension name from input dimension
+                if i < config.dims.len() {
+                    new_dim_names.push(config.dims[i].name().to_string());
+                } else {
+                    new_dim_names.push(String::new());
+                }
                 output_dim_idx += 1;
             }
             IndexOp::DimPosition(pos) => {
                 // Use the dimension size and stride from the referenced position
                 new_dims.push(orig_dims[*pos]);
                 new_strides.push(orig_strides[*pos]);
+                // Use dimension name from the referenced position
+                if *pos < config.dims.len() {
+                    new_dim_names.push(config.dims[*pos].name().to_string());
+                } else {
+                    new_dim_names.push(String::new());
+                }
                 output_dim_idx += 1;
             }
             IndexOp::SparseRange(parent_offsets) => {
@@ -415,6 +436,13 @@ fn build_view_from_ops(
                     dim_index: output_dim_idx,
                     parent_offsets: parent_offsets.clone(),
                 });
+                // For sparse ranges (subdimensions), use the subdimension name
+                // TODO: This should ideally use the subdimension name, not parent
+                if i < config.dims.len() {
+                    new_dim_names.push(config.dims[i].name().to_string());
+                } else {
+                    new_dim_names.push(String::new());
+                }
                 output_dim_idx += 1;
             }
             IndexOp::ActiveDimRef(_) => {
@@ -429,6 +457,7 @@ fn build_view_from_ops(
             strides: new_strides,
             offset: offset_adjustment,
             sparse: sparse_info,
+            dim_names: new_dim_names,
         },
         dim_mapping,
         single_indices,
@@ -1133,6 +1162,8 @@ impl Context<'_> {
                     && let Some(dims) = metadata.var.get_dimensions()
                 {
                     let orig_dims: Vec<usize> = dims.iter().map(|d| d.len()).collect();
+                    let orig_dim_names: Vec<String> =
+                        dims.iter().map(|d| d.name().to_string()).collect();
 
                     // Create a contiguous view first
                     let view = ArrayView::contiguous(orig_dims.clone());
@@ -1142,12 +1173,17 @@ impl Context<'_> {
                         reordering.iter().map(|&idx| orig_dims[idx]).collect();
                     let reordered_strides: Vec<isize> =
                         reordering.iter().map(|&idx| view.strides[idx]).collect();
+                    let reordered_dim_names: Vec<String> = reordering
+                        .iter()
+                        .map(|&idx| orig_dim_names[idx].clone())
+                        .collect();
 
                     let reordered_view = ArrayView {
                         dims: reordered_dims,
                         strides: reordered_strides,
                         offset: 0,
                         sparse: Vec::new(),
+                        dim_names: reordered_dim_names,
                     };
 
                     return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
@@ -1159,12 +1195,17 @@ impl Context<'_> {
                     reordering.iter().map(|&idx| view.dims[idx]).collect();
                 let reordered_strides: Vec<isize> =
                     reordering.iter().map(|&idx| view.strides[idx]).collect();
+                let reordered_dim_names: Vec<String> = reordering
+                    .iter()
+                    .map(|&idx| view.dim_names[idx].clone())
+                    .collect();
 
                 let reordered_view = ArrayView {
                     dims: reordered_dims,
                     strides: reordered_strides,
                     offset: view.offset,
                     sparse: view.sparse.clone(),
+                    dim_names: reordered_dim_names,
                 };
 
                 return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
@@ -1406,6 +1447,7 @@ impl Context<'_> {
                                             strides: reordered_strides,
                                             offset: 0,
                                             sparse: Vec::new(),
+                                            dim_names: target_dim_names.clone(),
                                         };
 
                                         return Ok(Expr::StaticSubscript(off, view, *loc));
@@ -1416,7 +1458,9 @@ impl Context<'_> {
                             // No reordering needed or not in A2A context
                             let orig_dims: Vec<usize> =
                                 source_dims.iter().map(|d| d.len()).collect();
-                            let view = ArrayView::contiguous(orig_dims);
+                            let dim_names: Vec<String> =
+                                source_dims.iter().map(|d| d.name().to_string()).collect();
+                            let view = ArrayView::contiguous_with_names(orig_dims, dim_names);
                             return Ok(Expr::StaticSubscript(off, view, *loc));
                         }
                         Err(err)
@@ -1512,12 +1556,55 @@ impl Context<'_> {
                             if view.dims.is_empty() {
                                 return Ok(Expr::Var(off + view.offset, *loc));
                             }
-                            if view.dims.len() != active_dims.len() {
+
+                            // For broadcasting: source array may have fewer dimensions than output.
+                            // Try to match dimensions by name. If name-based matching fails or isn't
+                            // applicable, fall back to positional matching.
+                            //
+                            // Build a map from dimension name to (active_idx, subscript)
+                            let active_dim_map: std::collections::HashMap<
+                                &str,
+                                (usize, &CanonicalElementName),
+                            > = active_dims
+                                .iter()
+                                .zip(active_subscripts.iter())
+                                .enumerate()
+                                .map(|(idx, (dim, sub))| (dim.name(), (idx, sub)))
+                                .collect();
+
+                            // Determine matching mode for each view dimension:
+                            // - Name-based: view dim name matches an active dim name (broadcasting)
+                            // - Positional: view dim name is empty or doesn't match any active dim
+                            //
+                            // Broadcasting is allowed when source has fewer dimensions than output,
+                            // and all source dimensions match some output dimension by name.
+                            // Positional matching requires equal dimension counts.
+                            let use_name_matching: Vec<bool> = view
+                                .dim_names
+                                .iter()
+                                .map(|name| {
+                                    !name.is_empty() && active_dim_map.contains_key(name.as_str())
+                                })
+                                .collect();
+
+                            let all_name_matching = use_name_matching.iter().all(|&b| b);
+
+                            // If all dimensions use name matching, allow broadcasting (fewer dims)
+                            // Otherwise, dimension counts must match for positional matching
+                            if !all_name_matching && view.dims.len() != active_dims.len() {
                                 return sim_err!(MismatchedDimensions, id.as_str().to_string());
                             }
-                            for (view_dim, active_dim) in view.dims.iter().zip(active_dims.iter()) {
-                                if *view_dim != active_dim.len() {
-                                    return sim_err!(MismatchedDimensions, id.as_str().to_string());
+
+                            // For positional matching, verify sizes match
+                            for (view_idx, &view_dim) in view.dims.iter().enumerate() {
+                                if !use_name_matching[view_idx] && view_idx < active_dims.len() {
+                                    // Positional matching - sizes must match
+                                    if view_dim != active_dims[view_idx].len() {
+                                        return sim_err!(
+                                            MismatchedDimensions,
+                                            id.as_str().to_string()
+                                        );
+                                    }
                                 }
                             }
 
@@ -1533,6 +1620,25 @@ impl Context<'_> {
 
                             // For each dimension in the view, find its value from active subscripts
                             for (view_idx, stride) in view.strides.iter().enumerate() {
+                                // Find the active dimension and subscript for this view dimension
+                                let (active_idx, subscript) = if use_name_matching[view_idx] {
+                                    // Name-based matching
+                                    let view_dim_name = &view.dim_names[view_idx];
+                                    if let Some(&(active_idx, subscript)) =
+                                        active_dim_map.get(view_dim_name.as_str())
+                                    {
+                                        (active_idx, subscript)
+                                    } else {
+                                        return sim_err!(
+                                            MismatchedDimensions,
+                                            id.as_str().to_string()
+                                        );
+                                    }
+                                } else {
+                                    // Positional matching
+                                    (view_idx, &active_subscripts[view_idx])
+                                };
+
                                 let dim_idx = if let Some(dim_idx) =
                                     dim_mapping.get(view_idx).and_then(|idx| *idx)
                                 {
@@ -1545,8 +1651,7 @@ impl Context<'_> {
                                 }
 
                                 let source_dim = &dims[dim_idx];
-                                let target_dim = &active_dims[view_idx];
-                                let subscript = &active_subscripts[view_idx];
+                                let target_dim = &active_dims[active_idx];
 
                                 let is_sparse = sparse_map.contains_key(&view_idx);
 
@@ -1662,6 +1767,8 @@ impl Context<'_> {
                                     let off = self.get_base_offset(id)?;
                                     let orig_dims: Vec<usize> =
                                         dims.iter().map(|d| d.len()).collect();
+                                    let orig_dim_names: Vec<String> =
+                                        dims.iter().map(|d| d.name().to_string()).collect();
                                     let orig_strides =
                                         ArrayView::contiguous(orig_dims.clone()).strides;
 
@@ -1671,6 +1778,7 @@ impl Context<'_> {
                                         strides: orig_strides,
                                         offset: 0,
                                         sparse: Vec::new(),
+                                        dim_names: orig_dim_names,
                                     };
 
                                     // Now transpose it
@@ -1678,11 +1786,14 @@ impl Context<'_> {
                                     transposed_dims.reverse();
                                     let mut transposed_strides = view.strides.clone();
                                     transposed_strides.reverse();
+                                    let mut transposed_dim_names = view.dim_names.clone();
+                                    transposed_dim_names.reverse();
                                     let transposed_view = ArrayView {
                                         dims: transposed_dims,
                                         strides: transposed_strides,
                                         offset: view.offset,
                                         sparse: view.sparse.clone(),
+                                        dim_names: transposed_dim_names,
                                     };
 
                                     return Ok(Expr::StaticSubscript(
@@ -1719,12 +1830,15 @@ impl Context<'_> {
                                     transposed_dims.reverse();
                                     let mut transposed_strides = view.strides.clone();
                                     transposed_strides.reverse();
+                                    let mut transposed_dim_names = view.dim_names.clone();
+                                    transposed_dim_names.reverse();
 
                                     let transposed_view = ArrayView {
                                         dims: transposed_dims,
                                         strides: transposed_strides,
                                         offset: view.offset,
                                         sparse: view.sparse.clone(),
+                                        dim_names: transposed_dim_names,
                                     };
 
                                     Ok(Expr::StaticSubscript(off, transposed_view, expr_loc))
@@ -3217,6 +3331,13 @@ struct Compiler<'module> {
     module_decls: Vec<ModuleDeclaration>,
     graphical_functions: Vec<Vec<(f64, f64)>>,
     curr_code: ByteCodeBuilder,
+    // Array support fields
+    dimensions: Vec<DimensionInfo>,
+    subdim_relations: Vec<SubdimensionRelation>,
+    names: Vec<String>,
+    static_views: Vec<StaticArrayView>,
+    // Iteration context - set when compiling inside AssignTemp
+    in_iteration: bool,
 }
 
 impl<'module> Compiler<'module> {
@@ -3226,6 +3347,169 @@ impl<'module> Compiler<'module> {
             module_decls: vec![],
             graphical_functions: vec![],
             curr_code: ByteCodeBuilder::default(),
+            dimensions: vec![],
+            subdim_relations: vec![],
+            names: vec![],
+            static_views: vec![],
+            in_iteration: false,
+        }
+    }
+
+    /// Intern a string name and return its NameId.
+    /// If the name already exists, returns the existing NameId.
+    fn intern_name(&mut self, name: &str) -> NameId {
+        // Look for existing name
+        if let Some(idx) = self.names.iter().position(|n| n == name) {
+            return idx as NameId;
+        }
+        // Add new name
+        let id = self.names.len() as NameId;
+        self.names.push(name.to_string());
+        id
+    }
+
+    /// Get or create a DimId for a dimension with the given name and size.
+    /// If a dimension with the same name exists, returns its DimId (assumes same size).
+    fn get_or_add_dim_id(&mut self, dim_name: &str, size: u16) -> DimId {
+        // Look for existing dimension with the same name
+        let name_id_to_find = self.names.iter().position(|n| n == dim_name);
+        if let Some(name_id) = name_id_to_find
+            && let Some(dim_idx) = self
+                .dimensions
+                .iter()
+                .position(|d| d.name_id == name_id as NameId)
+        {
+            return dim_idx as DimId;
+        }
+        // Create new dimension
+        let name_id = self.intern_name(dim_name);
+        let dim_id = self.dimensions.len() as DimId;
+        self.dimensions.push(DimensionInfo {
+            name_id,
+            size,
+            is_indexed: false, // Assume named elements for now
+            element_name_ids: SmallVec::new(),
+        });
+        dim_id
+    }
+
+    /// Add a static view and return its ViewId
+    fn add_static_view(&mut self, view: StaticArrayView) -> ViewId {
+        self.static_views.push(view);
+        (self.static_views.len() - 1) as ViewId
+    }
+
+    /// Convert an ArrayView to a StaticArrayView for a variable
+    fn array_view_to_static(&mut self, base_off: usize, view: &ArrayView) -> StaticArrayView {
+        // Convert sparse info
+        let sparse: SmallVec<[RuntimeSparseMapping; 2]> = view
+            .sparse
+            .iter()
+            .map(|s| RuntimeSparseMapping {
+                dim_index: s.dim_index as u8,
+                parent_offsets: s.parent_offsets.iter().map(|&x| x as u16).collect(),
+            })
+            .collect();
+
+        // Look up or create DimIds for each dimension using the dim_names
+        let dim_ids: SmallVec<[DimId; 4]> = view
+            .dim_names
+            .iter()
+            .zip(view.dims.iter())
+            .map(|(name, &size)| {
+                if name.is_empty() {
+                    // No dimension name available - use placeholder
+                    0 as DimId
+                } else {
+                    self.get_or_add_dim_id(name, size as u16)
+                }
+            })
+            .collect();
+
+        StaticArrayView {
+            base_off: base_off as u32,
+            is_temp: false,
+            dims: view.dims.iter().map(|&d| d as u16).collect(),
+            strides: view.strides.iter().map(|&s| s as i32).collect(),
+            offset: view.offset as u32,
+            sparse,
+            dim_ids,
+        }
+    }
+
+    /// Convert an ArrayView to a StaticArrayView for a temp array
+    fn array_view_to_static_temp(&mut self, temp_id: u32, view: &ArrayView) -> StaticArrayView {
+        let sparse: SmallVec<[RuntimeSparseMapping; 2]> = view
+            .sparse
+            .iter()
+            .map(|s| RuntimeSparseMapping {
+                dim_index: s.dim_index as u8,
+                parent_offsets: s.parent_offsets.iter().map(|&x| x as u16).collect(),
+            })
+            .collect();
+
+        // Look up or create DimIds for each dimension using the dim_names
+        let dim_ids: SmallVec<[DimId; 4]> = view
+            .dim_names
+            .iter()
+            .zip(view.dims.iter())
+            .map(|(name, &size)| {
+                if name.is_empty() {
+                    // No dimension name available - use placeholder
+                    0 as DimId
+                } else {
+                    self.get_or_add_dim_id(name, size as u16)
+                }
+            })
+            .collect();
+
+        StaticArrayView {
+            base_off: temp_id,
+            is_temp: true,
+            dims: view.dims.iter().map(|&d| d as u16).collect(),
+            strides: view.strides.iter().map(|&s| s as i32).collect(),
+            offset: view.offset as u32,
+            sparse,
+            dim_ids,
+        }
+    }
+
+    /// Emit bytecode to push an expression's view onto the view stack.
+    /// This is used for array operations that need to iterate over arrays.
+    fn walk_expr_as_view(&mut self, expr: &Expr) -> Result<()> {
+        match expr {
+            Expr::StaticSubscript(off, view, _) => {
+                // Create a static view and push it
+                let static_view = self.array_view_to_static(*off, view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+                Ok(())
+            }
+            Expr::TempArray(id, view, _) => {
+                // Create a static view for the temp array and push it
+                let static_view = self.array_view_to_static_temp(*id, view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+                Ok(())
+            }
+            Expr::Var(off, _) => {
+                // A bare variable reference used as an array - create a scalar view
+                // This shouldn't normally happen for array operations, but handle it
+                let view = ArrayView::contiguous(vec![1]);
+                let static_view = self.array_view_to_static(*off, &view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+                Ok(())
+            }
+            _ => {
+                sim_err!(
+                    Generic,
+                    format!(
+                        "Cannot push view for expression type {:?} - expected array expression",
+                        std::mem::discriminant(expr)
+                    )
+                )
+            }
         }
     }
 
@@ -3266,28 +3550,57 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::StaticSubscript(off, view, _) => {
-                // For static subscripts, we can directly compute the final offset
-                // For now, just load from the offset + view offset
-                // TODO: This needs proper iteration support for non-scalar views
-                let final_off = (*off + view.offset) as VariableOffset;
-                self.push(Opcode::LoadVar { off: final_off });
+                if self.in_iteration {
+                    // In iteration context, each StaticSubscript pushes its own view,
+                    // loads from it using the current iteration index, then pops.
+                    // This correctly handles expressions with multiple source arrays
+                    // like `a[*] + b[*]` where each array needs its own view.
+                    let static_view = self.array_view_to_static(*off, view);
+                    let view_id = self.add_static_view(static_view);
+                    self.push(Opcode::PushStaticView { view_id });
+                    self.push(Opcode::LoadIterViewTop {});
+                    self.push(Opcode::PopView {});
+                    Some(())
+                } else if view.dims.iter().product::<usize>() == 1 {
+                    // Scalar result - compute final offset and load
+                    let final_off = (*off + view.offset) as VariableOffset;
+                    self.push(Opcode::LoadVar { off: final_off });
+                    Some(())
+                } else {
+                    // Non-scalar array outside iteration context - this shouldn't happen
+                    // for well-formed expressions after pass 1 decomposition
+                    return sim_err!(
+                        Generic,
+                        "Non-scalar StaticSubscript outside iteration context".to_string()
+                    );
+                }
+            }
+            Expr::TempArray(id, view, _) => {
+                if self.in_iteration {
+                    // In iteration context, push the temp's view, load using current index, pop.
+                    // Similar to StaticSubscript, this ensures each temp reference uses its own view.
+                    let static_view = self.array_view_to_static_temp(*id, view);
+                    let view_id = self.add_static_view(static_view);
+                    self.push(Opcode::PushStaticView { view_id });
+                    self.push(Opcode::LoadIterViewTop {});
+                    self.push(Opcode::PopView {});
+                    Some(())
+                } else {
+                    // Outside iteration - push temp view for subsequent operations (like SUM)
+                    let static_view = self.array_view_to_static_temp(*id, view);
+                    let view_id = self.add_static_view(static_view);
+                    self.push(Opcode::PushStaticView { view_id });
+                    // Note: caller (like array builtin) will use and pop this view
+                    None
+                }
+            }
+            Expr::TempArrayElement(id, _view, idx, _) => {
+                // Load a specific element from a temp array
+                self.push(Opcode::LoadTempConst {
+                    temp_id: *id as TempId,
+                    index: *idx as u16,
+                });
                 Some(())
-            }
-            Expr::TempArray(_id, _view, _) => {
-                // TODO: Implement loading from temporary arrays
-                // For now, just return an error
-                return sim_err!(
-                    Generic,
-                    "TempArray not yet implemented in bytecode compiler".to_string()
-                );
-            }
-            Expr::TempArrayElement(_id, _view, _idx, _) => {
-                // TODO: Implement loading from temporary array elements
-                // For now, just return an error
-                return sim_err!(
-                    Generic,
-                    "TempArrayElement not yet implemented in bytecode compiler".to_string()
-                );
             }
             Expr::Dt(_) => {
                 self.push(Opcode::LoadGlobalVar {
@@ -3367,14 +3680,34 @@ impl<'module> Compiler<'module> {
                         let id = self.curr_code.intern_literal(0.0);
                         self.push(Opcode::LoadConstant { id });
                     }
-                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                    BuiltinFn::Max(a, b) => {
                         if let Some(b) = b {
+                            // Two-argument scalar max
                             self.walk_expr(a)?.unwrap();
                             self.walk_expr(b)?.unwrap();
                             let id = self.curr_code.intern_literal(0.0);
                             self.push(Opcode::LoadConstant { id });
                         } else {
-                            return sim_err!(BadBuiltinArgs, "".to_owned());
+                            // Single-argument array max
+                            self.walk_expr_as_view(a)?;
+                            self.push(Opcode::ArrayMax {});
+                            self.push(Opcode::PopView {});
+                            return Ok(Some(()));
+                        }
+                    }
+                    BuiltinFn::Min(a, b) => {
+                        if let Some(b) = b {
+                            // Two-argument scalar min
+                            self.walk_expr(a)?.unwrap();
+                            self.walk_expr(b)?.unwrap();
+                            let id = self.curr_code.intern_literal(0.0);
+                            self.push(Opcode::LoadConstant { id });
+                        } else {
+                            // Single-argument array min
+                            self.walk_expr_as_view(a)?;
+                            self.push(Opcode::ArrayMin {});
+                            self.push(Opcode::PopView {});
+                            return Ok(Some(()));
                         }
                     }
                     BuiltinFn::Pulse(a, b, c) => {
@@ -3408,6 +3741,25 @@ impl<'module> Compiler<'module> {
                         }
                     }
                     BuiltinFn::Mean(args) => {
+                        // Check if this is a single array argument (array mean)
+                        // vs multiple scalar arguments (variadic mean)
+                        if args.len() == 1 {
+                            // Check if the argument is an array expression
+                            let arg = &args[0];
+                            let is_array = matches!(
+                                arg,
+                                Expr::StaticSubscript(_, _, _) | Expr::TempArray(_, _, _)
+                            );
+                            if is_array {
+                                // Array mean - use ArrayMean opcode
+                                self.walk_expr_as_view(arg)?;
+                                self.push(Opcode::ArrayMean {});
+                                self.push(Opcode::PopView {});
+                                return Ok(Some(()));
+                            }
+                        }
+
+                        // Multi-argument scalar mean: (arg1 + arg2 + ... + argN) / N
                         let id = self.curr_code.intern_literal(0.0);
                         self.push(Opcode::LoadConstant { id });
 
@@ -3422,16 +3774,28 @@ impl<'module> Compiler<'module> {
                         return Ok(Some(()));
                     }
                     BuiltinFn::Rank(_, _) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                        return sim_err!(TodoArrayBuiltin, "RANK not yet supported".to_owned());
                     }
-                    BuiltinFn::Size(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Size(arg) => {
+                        // SIZE returns the number of elements in an array
+                        self.walk_expr_as_view(arg)?;
+                        self.push(Opcode::ArraySize {});
+                        self.push(Opcode::PopView {});
+                        return Ok(Some(()));
                     }
-                    BuiltinFn::Stddev(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Stddev(arg) => {
+                        // STDDEV computes standard deviation of array elements
+                        self.walk_expr_as_view(arg)?;
+                        self.push(Opcode::ArrayStddev {});
+                        self.push(Opcode::PopView {});
+                        return Ok(Some(()));
                     }
-                    BuiltinFn::Sum(_) => {
-                        return sim_err!(TodoArrayBuiltin, "".to_owned());
+                    BuiltinFn::Sum(arg) => {
+                        // SUM computes the sum of array elements
+                        self.walk_expr_as_view(arg)?;
+                        self.push(Opcode::ArraySum {});
+                        self.push(Opcode::PopView {});
+                        return Ok(Some(()));
                     }
                 };
                 let func = match builtin {
@@ -3555,12 +3919,60 @@ impl<'module> Compiler<'module> {
                 });
                 None
             }
-            Expr::AssignTemp(_id, _rhs, _view) => {
-                // TODO: Implement AssignTemp in bytecode compiler
-                return sim_err!(
-                    Generic,
-                    "AssignTemp not yet implemented in bytecode compiler".to_string()
-                );
+            Expr::AssignTemp(id, rhs, view) => {
+                // AssignTemp evaluates an array expression element-by-element and stores to temp
+                //
+                // Bytecode pattern:
+                // 1. PushStaticView (OUTPUT temp's view - determines iteration size)
+                // 2. BeginIter { write_temp_id, has_write_temp: true }
+                // 3. [Loop body start]
+                //    - Compile RHS in iteration context
+                //      (each StaticSubscript/TempArray pushes its own view, loads, pops)
+                //    - StoreIterElement
+                // 4. NextIterOrJump { jump_back: -(distance to loop body start) }
+                // 5. EndIter
+                // 6. PopView
+                //
+                // Note: We use the OUTPUT temp's view for BeginIter to determine iteration count.
+                // Each source array reference in the RHS pushes its own view for loading.
+                // This correctly handles expressions with multiple source arrays like `a[*] + b[*]`.
+
+                // Push the OUTPUT temp's view for iteration size
+                let static_view = self.array_view_to_static_temp(*id, view);
+                let view_id = self.add_static_view(static_view);
+                self.push(Opcode::PushStaticView { view_id });
+
+                // Begin iteration - writes to temp array with id
+                self.push(Opcode::BeginIter {
+                    write_temp_id: *id as TempId,
+                    has_write_temp: true,
+                });
+
+                // Record loop body start position
+                let loop_start = self.curr_code.len();
+
+                // Compile RHS in iteration context
+                self.in_iteration = true;
+                self.walk_expr(rhs)?.unwrap();
+                self.in_iteration = false;
+
+                // Store the result to temp
+                self.push(Opcode::StoreIterElement {});
+
+                // Calculate jump offset (negative, back to loop start)
+                // The jump is relative to the NextIterOrJump instruction's position
+                // VM: pc = pc + jump_back (then continue without incrementing)
+                // So: loop_start = next_iter_pos + jump_back
+                // Therefore: jump_back = loop_start - next_iter_pos
+                let next_iter_pos = self.curr_code.len();
+                let jump_back = (loop_start as isize - next_iter_pos as isize) as i16;
+
+                self.push(Opcode::NextIterOrJump { jump_back });
+                self.push(Opcode::EndIter {});
+                self.push(Opcode::PopView {});
+
+                // AssignTemp doesn't produce a value on the stack
+                None
             }
         };
         Ok(result)
@@ -3591,11 +4003,11 @@ impl<'module> Compiler<'module> {
                 graphical_functions: self.graphical_functions,
                 modules: self.module_decls,
                 arrays: vec![],
-                // New array support fields (populated during compilation)
-                dimensions: vec![],
-                subdim_relations: vec![],
-                names: vec![],
-                static_views: vec![],
+                // Array support fields populated during compilation
+                dimensions: self.dimensions,
+                subdim_relations: self.subdim_relations,
+                names: self.names,
+                static_views: self.static_views,
                 temp_offsets,
                 temp_total_size,
             }),
@@ -4075,6 +4487,7 @@ mod tests {
             strides: vec![4, 1],
             offset: 5,
             sparse: Vec::new(),
+            dim_names: vec![String::new(), String::new()],
         };
         assert!(!view2.is_contiguous());
 
@@ -4084,6 +4497,7 @@ mod tests {
             strides: vec![1, 3], // Column-major strides
             offset: 0,
             sparse: Vec::new(),
+            dim_names: vec![String::new(), String::new()],
         };
         assert!(!view3.is_contiguous());
 
@@ -4093,6 +4507,7 @@ mod tests {
             strides: vec![12, 4, 1],
             offset: 0,
             sparse: Vec::new(),
+            dim_names: vec![String::new(), String::new(), String::new()],
         };
         assert!(view4.is_contiguous());
     }

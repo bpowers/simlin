@@ -203,7 +203,10 @@ fn simulate_path(xmile_path: &str) {
     let results2 = {
         let compiled = sim.compile();
 
-        assert!(compiled.is_ok());
+        if let Err(ref e) = compiled {
+            eprintln!("Compilation error: {:?}", e);
+        }
+        assert!(compiled.is_ok(), "compile failed: {:?}", compiled);
         let compiled_sim = compiled.unwrap();
 
         let mut vm = Vm::new(compiled_sim).unwrap();
@@ -315,6 +318,32 @@ fn simulates_init_builtin() {
 #[test]
 fn simulates_arrays() {
     simulate_path("../../test/arrays1/arrays.stmx");
+}
+
+#[test]
+fn simulates_array_sum_simple() {
+    simulate_path("../../test/array_sum_simple/array_sum_simple.xmile");
+}
+
+#[test]
+fn simulates_array_sum_expr() {
+    simulate_path("../../test/array_sum_expr/array_sum_expr.xmile");
+}
+
+#[test]
+fn simulates_array_multi_source() {
+    // Tests multi-array expressions like SUM(a[*] + b[*])
+    // This exercises the LoadIterViewTop opcode which loads from each array's
+    // own view rather than a shared iteration view.
+    simulate_path("../../test/array_multi_source/array_multi_source.xmile");
+}
+
+#[test]
+fn simulates_array_broadcast() {
+    // Tests cross-dimension broadcasting like sales[Region,Product] * price[Region]
+    // where price is broadcast over the Product dimension.
+    // This verifies that dimension IDs are correctly matched during iteration.
+    simulate_path("../../test/array_broadcast/array_broadcast.xmile");
 }
 
 #[test]

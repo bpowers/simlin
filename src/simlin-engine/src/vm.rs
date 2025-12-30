@@ -842,6 +842,77 @@ impl Vm {
                     stack.push(value);
                 }
 
+                Opcode::LoadIterViewTop {} => {
+                    // Load from the view on TOP of view_stack (not iter_state's view)
+                    // using the current iteration index from iter_state.
+                    // This allows loading from multiple different source arrays in one loop.
+                    //
+                    // Supports broadcasting: if source has fewer dimensions than iteration,
+                    // uses dim_ids to match dimensions and broadcasts along missing axes.
+                    let iter_state = iter_stack.last().unwrap();
+                    let source_view = view_stack.last().unwrap();
+
+                    if !source_view.is_valid {
+                        stack.push(f64::NAN);
+                    } else {
+                        // Get the iteration view (output dimensions)
+                        let iter_view = &view_stack[iter_state.view_stack_idx];
+
+                        // Fast path: if dimensions match exactly, use simple offset calculation
+                        let flat_off = if source_view.dims == iter_view.dims
+                            && source_view.dim_ids == iter_view.dim_ids
+                        {
+                            source_view.offset_for_iter_index(iter_state.current)
+                        } else {
+                            // Broadcasting path: source has different dimensions
+                            // 1. Decompose iteration index into multi-dimensional indices
+                            let iter_dims = &iter_view.dims;
+                            let mut iter_indices: SmallVec<[u16; 4]> = SmallVec::new();
+                            let mut remaining = iter_state.current;
+
+                            for &dim in iter_dims.iter().rev() {
+                                iter_indices.push((remaining % dim as usize) as u16);
+                                remaining /= dim as usize;
+                            }
+                            iter_indices.reverse();
+
+                            // 2. For each source dimension, find matching iteration dimension
+                            let mut source_indices: SmallVec<[u16; 4]> =
+                                SmallVec::with_capacity(source_view.dims.len());
+
+                            for src_dim_id in &source_view.dim_ids {
+                                // Find this dim_id in the iteration view
+                                let iter_idx =
+                                    iter_view.dim_ids.iter().position(|&id| id == *src_dim_id);
+
+                                // Every source dimension must exist in the iteration dimensions.
+                                // If this fails, the compiler generated invalid dimension combinations.
+                                debug_assert!(
+                                    iter_idx.is_some(),
+                                    "Source dimension ID {} not found in iteration dimensions {:?}. \
+                                     This indicates a compiler bug in broadcasting logic.",
+                                    src_dim_id,
+                                    iter_view.dim_ids
+                                );
+
+                                // Use matched index, or 0 as fallback in release mode to avoid panic
+                                source_indices.push(iter_indices[iter_idx.unwrap_or(0)]);
+                            }
+
+                            // 3. Compute flat offset using source view
+                            source_view.flat_offset(&source_indices)
+                        };
+
+                        let value = if source_view.is_temp {
+                            let temp_off = context.temp_offsets[source_view.base_off as usize];
+                            self.temp_storage[temp_off + flat_off]
+                        } else {
+                            curr[source_view.base_off as usize + flat_off]
+                        };
+                        stack.push(value);
+                    }
+                }
+
                 Opcode::StoreIterElement {} => {
                     let value = stack.pop();
                     let iter_state = iter_stack.last().unwrap();

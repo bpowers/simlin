@@ -260,8 +260,14 @@ impl Expr2 {
         dims
     }
 
-    /// Check if two array dimension lists are compatible for element-wise operations
-    /// This version also handles dimension names and allows reordering
+    /// Check if two array dimension lists are compatible for element-wise operations.
+    /// This version handles dimension names and supports both reordering and broadcasting.
+    ///
+    /// Broadcasting rules:
+    /// - If both arrays have the same dimensions (possibly reordered), sizes must match
+    /// - If one array's dimensions are a SUBSET of the other, broadcast the smaller one
+    /// - If dimensions are disjoint (neither is subset of other), return error
+    /// - Output dimension order: larger array's dimensions (or first if equal)
     fn unify_dims_with_names(
         a_dims: &[usize],
         a_names: Option<&[String]>,
@@ -279,40 +285,63 @@ impl Expr2 {
             }
         };
 
-        // Check if dimensions have same count
-        if a_dims.len() != b_dims.len() {
+        use std::collections::HashSet;
+
+        // Build sets of dimension names for subset checking
+        let a_name_set: HashSet<&str> = a_names.iter().map(|s| s.as_str()).collect();
+        let b_name_set: HashSet<&str> = b_names.iter().map(|s| s.as_str()).collect();
+
+        // Check subset relationships:
+        // - a is subset of b: all dims in a are also in b
+        // - b is subset of a: all dims in b are also in a
+        let a_subset_of_b = a_name_set.iter().all(|name| b_name_set.contains(name));
+        let b_subset_of_a = b_name_set.iter().all(|name| a_name_set.contains(name));
+
+        if !a_subset_of_b && !b_subset_of_a {
+            // Neither is a subset of the other - disjoint or partially overlapping
+            // This is an error (incompatible dimensions)
             return eqn_err!(MismatchedDimensions, loc.start, loc.end);
         }
 
-        // Try to match dimensions by name
-        use crate::compiler::find_dimension_reordering;
+        // Build a map from dimension name to size for quick lookup
+        let a_dim_map: std::collections::HashMap<&str, usize> = a_names
+            .iter()
+            .zip(a_dims.iter())
+            .map(|(name, &size)| (name.as_str(), size))
+            .collect();
 
-        // Check if b can be reordered to match a's dimension order
-        if let Some(reordering) = find_dimension_reordering(b_names, a_names) {
-            // Build the unified dimensions using a's order
-            let mut unified_dims = Vec::with_capacity(a_dims.len());
-            let mut has_mismatch = false;
+        let b_dim_map: std::collections::HashMap<&str, usize> = b_names
+            .iter()
+            .zip(b_dims.iter())
+            .map(|(name, &size)| (name.as_str(), size))
+            .collect();
 
-            for (i, &a_dim) in a_dims.iter().enumerate() {
-                let b_idx = reordering[i];
-                let b_dim = b_dims[b_idx];
+        // Use the larger array (superset) as the output dimension order
+        // If equal, use a's order
+        let (primary_names, primary_dims, secondary_map) =
+            if b_subset_of_a || a_dims.len() >= b_dims.len() {
+                (a_names, a_dims, &b_dim_map)
+            } else {
+                (b_names, b_dims, &a_dim_map)
+            };
 
-                if a_dim != b_dim {
-                    has_mismatch = true;
-                    break;
+        // Build output dimensions in the primary array's order
+        let mut unified_dims = Vec::new();
+        let mut unified_names = Vec::new();
+
+        for (name, &size) in primary_names.iter().zip(primary_dims.iter()) {
+            // Check if this dimension also exists in secondary
+            if let Some(&other_size) = secondary_map.get(name.as_str()) {
+                // Both have this dimension - sizes must match
+                if size != other_size {
+                    return eqn_err!(MismatchedDimensions, loc.start, loc.end);
                 }
-                unified_dims.push(a_dim);
             }
-
-            if has_mismatch {
-                return eqn_err!(MismatchedDimensions, loc.start, loc.end);
-            }
-
-            return Ok((unified_dims, Some(a_names.to_vec())));
+            unified_dims.push(size);
+            unified_names.push(name.clone());
         }
 
-        // If reordering doesn't work, dimensions are incompatible
-        eqn_err!(MismatchedDimensions, loc.start, loc.end)
+        Ok((unified_dims, Some(unified_names)))
     }
 
     /// Compute the size of a range subscript from constant bounds.
@@ -475,6 +504,7 @@ impl Expr2 {
                     // The actual subscript logic will be handled in the compiler
 
                     let mut result_dims = Vec::new();
+                    let mut result_dim_names = Vec::new();
 
                     // Simple dimension calculation - count wildcards to determine result dims
                     for (i, arg) in args.iter().enumerate() {
@@ -482,17 +512,21 @@ impl Expr2 {
                             match arg {
                                 IndexExpr2::Wildcard(_) => {
                                     result_dims.push(dims[i].len());
+                                    result_dim_names.push(dims[i].name().to_string());
                                 }
                                 IndexExpr2::Range(start, end, _) => {
                                     // Try to compute actual range size from constant bounds
                                     let range_size = Self::compute_range_size(start, end, &dims[i]);
                                     result_dims.push(range_size.unwrap_or(dims[i].len()));
+                                    result_dim_names.push(dims[i].name().to_string());
                                 }
                                 IndexExpr2::StarRange(subdim_name, _) => {
                                     // Star ranges use the subdimension's length, not the parent's
                                     // This is critical for correct temp array sizing
                                     if let Some(subdim_len) = ctx.get_dimension_len(subdim_name) {
                                         result_dims.push(subdim_len);
+                                        // Use the subdimension name, not the parent dimension
+                                        result_dim_names.push(subdim_name.as_str().to_string());
                                     } else {
                                         unreachable!(
                                             "StarRange subdimension '{}' should exist - validated during compilation",
@@ -510,7 +544,11 @@ impl Expr2 {
                     if result_dims.is_empty() {
                         None // Result is scalar
                     } else {
-                        Some(Self::allocate_temp_array(ctx, result_dims))
+                        Some(Self::allocate_temp_array_with_names(
+                            ctx,
+                            result_dims,
+                            result_dim_names,
+                        ))
                     }
                 } else {
                     None // Scalar variable or unknown variable

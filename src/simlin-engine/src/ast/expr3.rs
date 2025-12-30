@@ -876,14 +876,17 @@ impl<'a> Pass1Context<'a> {
             return (transformed, has_a2a);
         }
 
-        // Get the array dimensions from the expression bounds
-        let dims = match transformed.get_array_bounds() {
-            Some(bounds) => bounds.dims().to_vec(),
+        // Get the array dimensions and names from the expression bounds
+        let (dims, dim_names) = match transformed.get_array_bounds() {
+            Some(bounds) => (
+                bounds.dims().to_vec(),
+                bounds.dim_names().map(|n| n.to_vec()),
+            ),
             None => {
                 // No array bounds - might be a scalar or already decomposed
                 // Check for array view
                 if let Some(view) = transformed.get_array_view() {
-                    view.dims.clone()
+                    (view.dims.clone(), Some(view.dim_names.clone()))
                 } else {
                     // Scalar expression - no decomposition needed
                     return (transformed, has_a2a);
@@ -897,8 +900,12 @@ impl<'a> Pass1Context<'a> {
             return (transformed, has_a2a);
         }
 
-        // Create the view for the temp array
-        let view = ArrayView::contiguous(dims);
+        // Create the view for the temp array, preserving dimension names for broadcasting
+        let view = if let Some(names) = dim_names {
+            ArrayView::contiguous_with_names(dims, names)
+        } else {
+            ArrayView::contiguous(dims)
+        };
 
         // Allocate a temp ID and create the decomposition
         let temp_id = self.allocate_temp_id();
