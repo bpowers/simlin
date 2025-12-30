@@ -146,6 +146,13 @@ pub struct DimensionsContext {
     relationship_cache: RelationshipCache,
 }
 
+// Manual PartialEq implementation that ignores the cache (caches don't affect equality)
+impl PartialEq for DimensionsContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.dimensions == other.dimensions
+    }
+}
+
 impl DimensionsContext {
     pub(crate) fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
         DimensionsContext {

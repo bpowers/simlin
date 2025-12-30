@@ -2938,6 +2938,10 @@ pub struct Module {
     pub(crate) offsets: VariableOffsetMap,
     pub(crate) runlist_order: Vec<Ident<Canonical>>,
     pub(crate) tables: HashMap<Ident<Canonical>, Table>,
+    /// All dimensions from the project, for bytecode compilation
+    pub(crate) dimensions: Vec<Dimension>,
+    /// DimensionsContext for subdimension relationship lookups
+    pub(crate) dimensions_ctx: DimensionsContext,
 }
 
 // calculate a mapping of module variable name -> module model name
@@ -3259,6 +3263,8 @@ impl Module {
             offsets,
             runlist_order,
             tables,
+            dimensions: converted_dims,
+            dimensions_ctx: project.dimensions_ctx.clone(),
         })
     }
 
@@ -3342,7 +3348,7 @@ struct Compiler<'module> {
 
 impl<'module> Compiler<'module> {
     fn new(module: &'module Module) -> Compiler<'module> {
-        Compiler {
+        let mut compiler = Compiler {
             module,
             module_decls: vec![],
             graphical_functions: vec![],
@@ -3352,6 +3358,71 @@ impl<'module> Compiler<'module> {
             names: vec![],
             static_views: vec![],
             in_iteration: false,
+        };
+        compiler.populate_dimension_metadata();
+        compiler
+    }
+
+    /// Populate dimension metadata tables from the module's dimensions.
+    /// This populates:
+    /// - `names`: interned dimension and element names
+    /// - `dimensions`: DimensionInfo for each dimension
+    /// - `subdim_relations`: SubdimensionRelation for each subdimension pair
+    fn populate_dimension_metadata(&mut self) {
+        // First pass: populate dimensions and names
+        for dim in &self.module.dimensions {
+            let dim_name = dim.name();
+            let name_id = self.intern_name(dim_name);
+
+            let dim_info = match dim {
+                Dimension::Indexed(_, size) => DimensionInfo::indexed(name_id, *size as u16),
+                Dimension::Named(_, named_dim) => {
+                    let element_name_ids: SmallVec<[NameId; 8]> = named_dim
+                        .elements
+                        .iter()
+                        .map(|elem| self.intern_name(elem.as_str()))
+                        .collect();
+                    DimensionInfo::named(name_id, element_name_ids)
+                }
+            };
+            self.dimensions.push(dim_info);
+        }
+
+        // Second pass: populate subdimension relationships
+        // For each pair of named dimensions, check if one is a subdimension of another
+        for (child_idx, child_dim) in self.module.dimensions.iter().enumerate() {
+            let Dimension::Named(child_name, _) = child_dim else {
+                continue;
+            };
+            for (parent_idx, parent_dim) in self.module.dimensions.iter().enumerate() {
+                if child_idx == parent_idx {
+                    continue;
+                }
+                let Dimension::Named(parent_name, _) = parent_dim else {
+                    continue;
+                };
+
+                // Check if child is a subdimension of parent using the DimensionsContext
+                if let Some(relation) = self
+                    .module
+                    .dimensions_ctx
+                    .get_subdimension_relation(child_name, parent_name)
+                {
+                    // Convert the relation to bytecode format
+                    let parent_offsets: SmallVec<[u16; 16]> =
+                        relation.parent_offsets.iter().map(|&x| x as u16).collect();
+                    let is_contiguous = relation.is_contiguous();
+                    let start_offset = relation.start_offset() as u16;
+
+                    self.subdim_relations.push(SubdimensionRelation {
+                        parent_dim_id: parent_idx as DimId,
+                        child_dim_id: child_idx as DimId,
+                        parent_offsets,
+                        is_contiguous,
+                        start_offset,
+                    });
+                }
+            }
         }
     }
 
@@ -4510,5 +4581,323 @@ mod tests {
             dim_names: vec![String::new(), String::new(), String::new()],
         };
         assert!(view4.is_contiguous());
+    }
+
+    #[test]
+    fn test_dimension_metadata_population() {
+        use crate::datamodel::{
+            self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
+            Variable as DatamodelVariable, Visibility,
+        };
+        use crate::project::Project;
+
+        // Create a datamodel project with a named dimension
+        let datamodel_project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: SimMethod::Euler,
+                time_units: Some("time".to_string()),
+            },
+            dimensions: vec![datamodel::Dimension::Named(
+                "letters".to_string(),
+                vec![
+                    "a".to_string(),
+                    "b".to_string(),
+                    "c".to_string(),
+                    "d".to_string(),
+                    "e".to_string(),
+                ],
+            )],
+            units: vec![],
+            models: vec![DatamodelModel {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![DatamodelVariable::Aux(DatamodelAux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Public,
+                    ai_state: None,
+                    uid: None,
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        // Convert to engine project
+        let project: Project = datamodel_project.into();
+
+        // Create a Module and compile it
+        let model = project
+            .models
+            .get(&canonicalize("main"))
+            .expect("main model should exist");
+        let module = Module::new(
+            &project,
+            model.clone(),
+            &std::collections::BTreeSet::new(),
+            true,
+        )
+        .expect("Module creation should succeed");
+
+        // Compile the module
+        let compiled = module.compile().expect("Compilation should succeed");
+
+        // Verify dimension metadata is populated
+        let context = &compiled.context;
+
+        // Should have one dimension: "letters" with 5 elements
+        assert!(
+            !context.dimensions.is_empty(),
+            "Dimensions should be populated"
+        );
+        assert!(!context.names.is_empty(), "Names should be populated");
+
+        // Find the "letters" dimension
+        let letters_dim = context.dimensions.iter().find(|dim| {
+            context
+                .names
+                .get(dim.name_id as usize)
+                .is_some_and(|n| n == "letters")
+        });
+
+        assert!(
+            letters_dim.is_some(),
+            "Should have a 'letters' dimension. Names: {:?}, Dimensions: {:?}",
+            context.names,
+            context.dimensions
+        );
+
+        let letters_dim = letters_dim.unwrap();
+        assert_eq!(
+            letters_dim.size, 5,
+            "letters dimension should have 5 elements"
+        );
+        assert!(
+            !letters_dim.is_indexed,
+            "letters should be a named dimension, not indexed"
+        );
+        assert_eq!(
+            letters_dim.element_name_ids.len(),
+            5,
+            "Should have 5 element name IDs"
+        );
+
+        // Verify element names are interned
+        let element_names: Vec<&str> = letters_dim
+            .element_name_ids
+            .iter()
+            .filter_map(|&id| context.names.get(id as usize).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(element_names.len(), 5);
+        // Element names should be canonicalized (lowercase)
+        assert!(element_names.contains(&"a"));
+        assert!(element_names.contains(&"b"));
+        assert!(element_names.contains(&"c"));
+        assert!(element_names.contains(&"d"));
+        assert!(element_names.contains(&"e"));
+    }
+
+    #[test]
+    fn test_indexed_dimension_metadata() {
+        use crate::datamodel::{
+            self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
+            Variable as DatamodelVariable, Visibility,
+        };
+        use crate::project::Project;
+
+        // Create a datamodel project with an indexed dimension
+        let datamodel_project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: SimMethod::Euler,
+                time_units: Some("time".to_string()),
+            },
+            dimensions: vec![datamodel::Dimension::Indexed("Size".to_string(), 10)],
+            units: vec![],
+            models: vec![DatamodelModel {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![DatamodelVariable::Aux(DatamodelAux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Public,
+                    ai_state: None,
+                    uid: None,
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let project: Project = datamodel_project.into();
+
+        let model = project
+            .models
+            .get(&canonicalize("main"))
+            .expect("main model should exist");
+        let module = Module::new(
+            &project,
+            model.clone(),
+            &std::collections::BTreeSet::new(),
+            true,
+        )
+        .expect("Module creation should succeed");
+
+        let compiled = module.compile().expect("Compilation should succeed");
+        let context = &compiled.context;
+
+        // Find the "size" dimension (name is canonicalized)
+        let size_dim = context.dimensions.iter().find(|dim| {
+            context
+                .names
+                .get(dim.name_id as usize)
+                .is_some_and(|n| n == "size")
+        });
+
+        assert!(size_dim.is_some(), "Should have a 'size' dimension");
+        let size_dim = size_dim.unwrap();
+        assert_eq!(size_dim.size, 10, "Size dimension should have 10 elements");
+        assert!(size_dim.is_indexed, "Size should be an indexed dimension");
+        assert!(
+            size_dim.element_name_ids.is_empty(),
+            "Indexed dimensions should not have element names"
+        );
+    }
+
+    #[test]
+    fn test_subdimension_relation_population() {
+        use crate::datamodel::{
+            self, Aux as DatamodelAux, Model as DatamodelModel, SimMethod, SimSpecs,
+            Variable as DatamodelVariable, Visibility,
+        };
+        use crate::project::Project;
+
+        // Create a datamodel project with a parent dimension and subdimension
+        let datamodel_project = datamodel::Project {
+            name: "test".to_string(),
+            sim_specs: SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: datamodel::Dt::Dt(1.0),
+                save_step: None,
+                sim_method: SimMethod::Euler,
+                time_units: Some("time".to_string()),
+            },
+            dimensions: vec![
+                datamodel::Dimension::Named(
+                    "Parent".to_string(),
+                    vec![
+                        "A".to_string(),
+                        "B".to_string(),
+                        "C".to_string(),
+                        "D".to_string(),
+                    ],
+                ),
+                datamodel::Dimension::Named(
+                    "Child".to_string(),
+                    vec!["B".to_string(), "C".to_string()],
+                ),
+            ],
+            units: vec![],
+            models: vec![DatamodelModel {
+                name: "main".to_string(),
+                sim_specs: None,
+                variables: vec![DatamodelVariable::Aux(DatamodelAux {
+                    ident: "x".to_string(),
+                    equation: datamodel::Equation::Scalar("1".to_string(), None),
+                    documentation: String::new(),
+                    units: None,
+                    gf: None,
+                    can_be_module_input: false,
+                    visibility: Visibility::Public,
+                    ai_state: None,
+                    uid: None,
+                })],
+                views: vec![],
+                loop_metadata: vec![],
+            }],
+            source: None,
+            ai_information: None,
+        };
+
+        let project: Project = datamodel_project.into();
+
+        let model = project
+            .models
+            .get(&canonicalize("main"))
+            .expect("main model should exist");
+        let module = Module::new(
+            &project,
+            model.clone(),
+            &std::collections::BTreeSet::new(),
+            true,
+        )
+        .expect("Module creation should succeed");
+
+        let compiled = module.compile().expect("Compilation should succeed");
+        let context = &compiled.context;
+
+        // Should have 2 dimensions
+        assert_eq!(context.dimensions.len(), 2, "Should have 2 dimensions");
+
+        // Should have a subdimension relation: Child is a subdimension of Parent
+        // Child elements B, C map to Parent indices 1, 2 (0-based)
+        assert!(
+            !context.subdim_relations.is_empty(),
+            "Should have subdimension relations. Relations: {:?}",
+            context.subdim_relations
+        );
+
+        // Find the Child->Parent relation
+        let child_parent_relation = context.subdim_relations.iter().find(|rel| {
+            let child_name = context
+                .dimensions
+                .get(rel.child_dim_id as usize)
+                .and_then(|d| context.names.get(d.name_id as usize));
+            let parent_name = context
+                .dimensions
+                .get(rel.parent_dim_id as usize)
+                .and_then(|d| context.names.get(d.name_id as usize));
+            child_name.is_some_and(|n| n == "child") && parent_name.is_some_and(|n| n == "parent")
+        });
+
+        assert!(
+            child_parent_relation.is_some(),
+            "Should have Child->Parent relation. Relations: {:?}, Dims: {:?}, Names: {:?}",
+            context.subdim_relations,
+            context.dimensions,
+            context.names
+        );
+
+        let relation = child_parent_relation.unwrap();
+        // B is at index 1 in Parent, C is at index 2
+        assert_eq!(
+            relation.parent_offsets.as_slice(),
+            &[1, 2],
+            "Child elements should map to parent indices 1, 2"
+        );
+        assert!(relation.is_contiguous, "B, C are contiguous in parent");
+        assert_eq!(relation.start_offset, 1);
     }
 }
