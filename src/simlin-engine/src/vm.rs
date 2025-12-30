@@ -882,14 +882,21 @@ impl Vm {
 
                             for src_dim_id in &source_view.dim_ids {
                                 // Find this dim_id in the iteration view
-                                if let Some(iter_idx) =
-                                    iter_view.dim_ids.iter().position(|&id| id == *src_dim_id)
-                                {
-                                    source_indices.push(iter_indices[iter_idx]);
-                                } else {
-                                    // Dimension not found - use 0 (shouldn't happen for valid broadcasts)
-                                    source_indices.push(0);
-                                }
+                                let iter_idx =
+                                    iter_view.dim_ids.iter().position(|&id| id == *src_dim_id);
+
+                                // Every source dimension must exist in the iteration dimensions.
+                                // If this fails, the compiler generated invalid dimension combinations.
+                                debug_assert!(
+                                    iter_idx.is_some(),
+                                    "Source dimension ID {} not found in iteration dimensions {:?}. \
+                                     This indicates a compiler bug in broadcasting logic.",
+                                    src_dim_id,
+                                    iter_view.dim_ids
+                                );
+
+                                // Use matched index, or 0 as fallback in release mode to avoid panic
+                                source_indices.push(iter_indices[iter_idx.unwrap_or(0)]);
                             }
 
                             // 3. Compute flat offset using source view

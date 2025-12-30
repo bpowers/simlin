@@ -774,16 +774,27 @@ impl ModuleEvaluator<'_> {
                 let total_elements = view.dims.iter().product::<usize>();
 
                 // Helper function to evaluate an expression at a specific array index
+                // dims and dim_names are the OUTPUT dimensions; the source view may have
+                // fewer dimensions which requires broadcasting (dimension matching by name).
                 fn eval_at_index(
                     evaluator: &mut ModuleEvaluator,
                     expr: &Expr,
                     flat_idx: usize,
                     dims: &[usize],
+                    dim_names: &[String],
                 ) -> f64 {
+                    // First, decompose flat_idx into per-dimension coordinates
+                    let mut coords: Vec<usize> = vec![0; dims.len()];
+                    let mut remainder = flat_idx;
+                    for (dim_idx, &dim_size) in dims.iter().enumerate().rev() {
+                        coords[dim_idx] = remainder % dim_size;
+                        remainder /= dim_size;
+                    }
+
                     match expr {
                         Expr::Const(n, _) => *n,
                         Expr::StaticSubscript(off, view, _) => {
-                            // Calculate position in the source array
+                            // Calculate position in the source array with broadcasting support
                             // Build sparse lookup for this view
                             let sparse_map: std::collections::HashMap<usize, &[usize]> = view
                                 .sparse
@@ -791,23 +802,56 @@ impl ModuleEvaluator<'_> {
                                 .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
                                 .collect();
 
-                            let mut remainder = flat_idx;
                             let mut src_idx = view.offset;
-                            for (dim_idx, &dim_size) in dims.iter().enumerate().rev() {
-                                let coord = remainder % dim_size;
-                                remainder /= dim_size;
-                                // Translate through sparse offsets if this dimension is sparse
-                                let parent_coord = if let Some(offsets) = sparse_map.get(&dim_idx) {
-                                    offsets[coord]
-                                } else {
-                                    coord
-                                };
-                                src_idx += parent_coord * view.strides[dim_idx] as usize;
+
+                            // Check if we can use name-based matching
+                            // We need both source and output to have valid dimension names
+                            let has_valid_names = view.dim_names.iter().all(|n| !n.is_empty())
+                                && dim_names.iter().all(|n| !n.is_empty());
+
+                            if has_valid_names && view.dims.len() <= dims.len() {
+                                // Broadcasting path: use name-based matching
+                                for (src_dim_idx, src_dim_name) in view.dim_names.iter().enumerate()
+                                {
+                                    let output_dim_idx =
+                                        dim_names.iter().position(|name| name == src_dim_name);
+
+                                    debug_assert!(
+                                        output_dim_idx.is_some(),
+                                        "Source dimension '{}' not found in output dimensions {:?}. \
+                                         This indicates a compiler bug.",
+                                        src_dim_name,
+                                        dim_names
+                                    );
+
+                                    let coord = output_dim_idx.map(|idx| coords[idx]).unwrap_or(0);
+
+                                    let parent_coord =
+                                        if let Some(offsets) = sparse_map.get(&src_dim_idx) {
+                                            offsets[coord]
+                                        } else {
+                                            coord
+                                        };
+                                    src_idx += parent_coord * view.strides[src_dim_idx] as usize;
+                                }
+                            } else {
+                                // Positional matching: use same dimension order
+                                for (dim_idx, &coord) in coords.iter().enumerate() {
+                                    if dim_idx < view.strides.len() {
+                                        let parent_coord =
+                                            if let Some(offsets) = sparse_map.get(&dim_idx) {
+                                                offsets[coord]
+                                            } else {
+                                                coord
+                                            };
+                                        src_idx += parent_coord * view.strides[dim_idx] as usize;
+                                    }
+                                }
                             }
                             evaluator.curr[evaluator.off + *off + src_idx]
                         }
                         Expr::TempArray(id, view, _) => {
-                            // Access element from temporary array
+                            // Access element from temporary array with broadcasting support
                             let id = *id as usize;
                             let start = evaluator.sim.temp_offsets[id];
 
@@ -818,27 +862,58 @@ impl ModuleEvaluator<'_> {
                                 .map(|s| (s.dim_index, s.parent_offsets.as_slice()))
                                 .collect();
 
-                            // Calculate position in the temp array
-                            let mut remainder = flat_idx;
                             let mut src_idx = view.offset;
-                            for (dim_idx, &dim_size) in dims.iter().enumerate().rev() {
-                                let coord = remainder % dim_size;
-                                remainder /= dim_size;
-                                // Translate through sparse offsets if this dimension is sparse
-                                let parent_coord = if let Some(offsets) = sparse_map.get(&dim_idx) {
-                                    offsets[coord]
-                                } else {
-                                    coord
-                                };
-                                src_idx += parent_coord * view.strides[dim_idx] as usize;
+
+                            // Check if we can use name-based matching
+                            let has_valid_names = view.dim_names.iter().all(|n| !n.is_empty())
+                                && dim_names.iter().all(|n| !n.is_empty());
+
+                            if has_valid_names && view.dims.len() <= dims.len() {
+                                // Broadcasting path: use name-based matching
+                                for (src_dim_idx, src_dim_name) in view.dim_names.iter().enumerate()
+                                {
+                                    let output_dim_idx =
+                                        dim_names.iter().position(|name| name == src_dim_name);
+
+                                    debug_assert!(
+                                        output_dim_idx.is_some(),
+                                        "Source dimension '{}' not found in output dimensions {:?}. \
+                                         This indicates a compiler bug.",
+                                        src_dim_name,
+                                        dim_names
+                                    );
+
+                                    let coord = output_dim_idx.map(|idx| coords[idx]).unwrap_or(0);
+
+                                    let parent_coord =
+                                        if let Some(offsets) = sparse_map.get(&src_dim_idx) {
+                                            offsets[coord]
+                                        } else {
+                                            coord
+                                        };
+                                    src_idx += parent_coord * view.strides[src_dim_idx] as usize;
+                                }
+                            } else {
+                                // Positional matching: use same dimension order
+                                for (dim_idx, &coord) in coords.iter().enumerate() {
+                                    if dim_idx < view.strides.len() {
+                                        let parent_coord =
+                                            if let Some(offsets) = sparse_map.get(&dim_idx) {
+                                                offsets[coord]
+                                            } else {
+                                                coord
+                                            };
+                                        src_idx += parent_coord * view.strides[dim_idx] as usize;
+                                    }
+                                }
                             }
 
                             let temp_data = (*evaluator.sim.temps).borrow();
                             temp_data[start + src_idx]
                         }
                         Expr::Op2(op, l, r, _) => {
-                            let l_val = eval_at_index(evaluator, l, flat_idx, dims);
-                            let r_val = eval_at_index(evaluator, r, flat_idx, dims);
+                            let l_val = eval_at_index(evaluator, l, flat_idx, dims, dim_names);
+                            let r_val = eval_at_index(evaluator, r, flat_idx, dims, dim_names);
                             match op {
                                 BinaryOp::Add => l_val + r_val,
                                 BinaryOp::Sub => l_val - r_val,
@@ -861,7 +936,8 @@ impl ModuleEvaluator<'_> {
                         Expr::Op1(op, e, _) => {
                             match op {
                                 UnaryOp::Not => {
-                                    let val = eval_at_index(evaluator, e, flat_idx, dims);
+                                    let val =
+                                        eval_at_index(evaluator, e, flat_idx, dims, dim_names);
                                     (!is_truthy(val)) as i8 as f64
                                 }
                                 UnaryOp::Transpose => {
@@ -872,18 +948,21 @@ impl ModuleEvaluator<'_> {
                                     // Get original dimensions by reversing transposed dimensions
                                     let mut orig_dims = dims.to_vec();
                                     orig_dims.reverse();
+                                    let mut orig_names = dim_names.to_vec();
+                                    orig_names.reverse();
 
-                                    eval_at_index(evaluator, e, orig_idx, &orig_dims)
+                                    eval_at_index(evaluator, e, orig_idx, &orig_dims, &orig_names)
                                 }
                             }
                         }
                         Expr::If(cond, t, f, _) => {
                             // Evaluate condition (may be scalar or array)
-                            let cond_val = eval_at_index(evaluator, cond, flat_idx, dims);
+                            let cond_val =
+                                eval_at_index(evaluator, cond, flat_idx, dims, dim_names);
                             if is_truthy(cond_val) {
-                                eval_at_index(evaluator, t, flat_idx, dims)
+                                eval_at_index(evaluator, t, flat_idx, dims, dim_names)
                             } else {
-                                eval_at_index(evaluator, f, flat_idx, dims)
+                                eval_at_index(evaluator, f, flat_idx, dims, dim_names)
                             }
                         }
                         // Scalar expressions: same value for every array index
@@ -912,7 +991,8 @@ impl ModuleEvaluator<'_> {
 
                 // Evaluate element by element
                 for i in 0..total_elements {
-                    temp_data[start + i] = eval_at_index(self, rhs.as_ref(), i, &view.dims);
+                    temp_data[start + i] =
+                        eval_at_index(self, rhs.as_ref(), i, &view.dims, &view.dim_names);
                 }
 
                 // AssignTemp doesn't produce a scalar value

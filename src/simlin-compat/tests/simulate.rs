@@ -339,6 +339,14 @@ fn simulates_array_multi_source() {
 }
 
 #[test]
+fn simulates_array_broadcast() {
+    // Tests cross-dimension broadcasting like sales[Region,Product] * price[Region]
+    // where price is broadcast over the Product dimension.
+    // This verifies that dimension IDs are correctly matched during iteration.
+    simulate_path("../../test/array_broadcast/array_broadcast.xmile");
+}
+
+#[test]
 fn simulates_modules() {
     simulate_path("../../test/modules_hares_and_foxes/modules_hares_and_foxes.stmx");
 }
