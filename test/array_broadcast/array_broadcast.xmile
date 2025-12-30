@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+    <header>
+        <vendor>Test</vendor>
+        <product>Simlin</product>
+    </header>
+    <sim_specs method="Euler" time_units="Time">
+        <start>0</start>
+        <stop>2</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Region">
+            <elem name="North"/>
+            <elem name="South"/>
+        </dim>
+        <dim name="Product">
+            <elem name="A"/>
+            <elem name="B"/>
+            <elem name="C"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <!-- 2D array: sales[Region, Product] -->
+            <!-- North: [1, 2, 3], South: [4, 5, 6] -->
+            <aux name="sales">
+                <element subscript="North, A">
+                    <eqn>1</eqn>
+                </element>
+                <element subscript="North, B">
+                    <eqn>2</eqn>
+                </element>
+                <element subscript="North, C">
+                    <eqn>3</eqn>
+                </element>
+                <element subscript="South, A">
+                    <eqn>4</eqn>
+                </element>
+                <element subscript="South, B">
+                    <eqn>5</eqn>
+                </element>
+                <element subscript="South, C">
+                    <eqn>6</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                    <dim name="Product"/>
+                </dimensions>
+            </aux>
+            <!-- 1D array: price[Region] = [10, 20] -->
+            <aux name="price">
+                <element subscript="North">
+                    <eqn>10</eqn>
+                </element>
+                <element subscript="South">
+                    <eqn>20</eqn>
+                </element>
+                <dimensions>
+                    <dim name="Region"/>
+                </dimensions>
+            </aux>
+            <!-- SUM(sales[*,*] * price[*]) -->
+            <!-- Broadcasting price over Product dimension -->
+            <!-- = (1*10 + 2*10 + 3*10) + (4*20 + 5*20 + 6*20) -->
+            <!-- = 60 + 300 = 360 -->
+            <aux name="total_revenue">
+                <eqn>SUM(sales[*,*] * price[*])</eqn>
+            </aux>
+            <!-- MEAN(sales[*,*] * price[*]) = 360 / 6 = 60 -->
+            <aux name="avg_revenue">
+                <eqn>MEAN(sales[*,*] * price[*])</eqn>
+            </aux>
+        </variables>
+    </model>
+</xmile>

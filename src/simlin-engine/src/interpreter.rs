@@ -1637,6 +1637,7 @@ fn test_arrays() {
                     strides: vec![],
                     offset: 1,
                     sparse: Vec::new(),
+                    dim_names: vec![],
                 },
                 Loc::default(),
             )),

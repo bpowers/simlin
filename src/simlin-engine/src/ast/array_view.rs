@@ -30,21 +30,37 @@ pub struct ArrayView {
     pub offset: usize,
     /// Sparse dimension info (empty means fully contiguous)
     pub sparse: Vec<SparseInfo>,
+    /// Dimension names for each dimension (canonical form).
+    /// Used for dimension ID lookup in bytecode generation and broadcasting.
+    /// Empty string means dimension name is unknown (e.g., temp arrays).
+    pub dim_names: Vec<String>,
 }
 
 impl ArrayView {
-    /// Create a contiguous array view (row-major order)
+    /// Create a contiguous array view (row-major order) with no dimension names
     pub fn contiguous(dims: Vec<usize>) -> Self {
+        Self::contiguous_with_names(dims, Vec::new())
+    }
+
+    /// Create a contiguous array view (row-major order) with dimension names
+    pub fn contiguous_with_names(dims: Vec<usize>, dim_names: Vec<String>) -> Self {
         let mut strides = vec![1isize; dims.len()];
         // Build strides from right to left for row-major order
         for i in (0..dims.len().saturating_sub(1)).rev() {
             strides[i] = strides[i + 1] * dims[i + 1] as isize;
         }
+        // If dim_names is empty, fill with empty strings
+        let dim_names = if dim_names.is_empty() {
+            vec![String::new(); dims.len()]
+        } else {
+            dim_names
+        };
         ArrayView {
             dims,
             strides,
             offset: 0,
             sparse: Vec::new(),
+            dim_names,
         }
     }
 
@@ -96,6 +112,7 @@ impl ArrayView {
             strides: new_strides,
             offset: new_offset,
             sparse: self.sparse.clone(),
+            dim_names: self.dim_names.clone(),
         })
     }
 }
