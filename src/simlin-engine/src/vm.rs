@@ -876,6 +876,11 @@ impl Vm {
                     //
                     // Supports broadcasting: if source has fewer dimensions than iteration,
                     // uses dim_ids to match dimensions and broadcasts along missing axes.
+                    //
+                    // For indexed dimensions of the same size but different dim_ids,
+                    // uses positional matching as a fallback.
+                    //
+                    // Returns NaN for out-of-bounds access (when source is smaller than iteration).
                     let iter_state = iter_stack.last().unwrap();
                     let source_view = view_stack.last().unwrap();
 
@@ -886,10 +891,15 @@ impl Vm {
                         let iter_view = &view_stack[iter_state.view_stack_idx];
 
                         // Fast path: if dimensions match exactly, use simple offset calculation
-                        let flat_off = if source_view.dims == iter_view.dims
+                        let result = if source_view.dims == iter_view.dims
                             && source_view.dim_ids == iter_view.dim_ids
                         {
-                            source_view.offset_for_iter_index(iter_state.current)
+                            // Bounds check: if source is smaller than iteration, return NaN
+                            if iter_state.current >= source_view.size() {
+                                None
+                            } else {
+                                Some(source_view.offset_for_iter_index(iter_state.current))
+                            }
                         } else {
                             // Broadcasting path: source has different dimensions
                             // 1. Decompose iteration index into multi-dimensional indices
@@ -904,39 +914,96 @@ impl Vm {
                             iter_indices.reverse();
 
                             // 2. For each source dimension, find matching iteration dimension
+                            // First by dim_id, then by positional fallback for indexed dims
                             let mut source_indices: SmallVec<[u16; 4]> =
                                 SmallVec::with_capacity(source_view.dims.len());
+                            let mut out_of_bounds = false;
+                            let mut used_iter_positions: SmallVec<[bool; 4]> =
+                                smallvec::smallvec![false; iter_view.dims.len()];
 
-                            for src_dim_id in &source_view.dim_ids {
-                                // Find this dim_id in the iteration view
+                            for (src_dim_pos, src_dim_id) in source_view.dim_ids.iter().enumerate()
+                            {
+                                // Try to find matching dim_id in iteration view
                                 let iter_idx =
                                     iter_view.dim_ids.iter().position(|&id| id == *src_dim_id);
 
-                                // Every source dimension must exist in the iteration dimensions.
-                                // If this fails, the compiler generated invalid dimension combinations.
-                                debug_assert!(
-                                    iter_idx.is_some(),
-                                    "Source dimension ID {} not found in iteration dimensions {:?}. \
-                                     This indicates a compiler bug in broadcasting logic.",
-                                    src_dim_id,
-                                    iter_view.dim_ids
-                                );
+                                let matched_iter_idx = if let Some(idx) = iter_idx {
+                                    used_iter_positions[idx] = true;
+                                    Some(idx)
+                                } else {
+                                    // Dim_id not found - try positional fallback for indexed dims
+                                    // of the same size. This allows a[DimA] + b[DimB] where DimA
+                                    // and DimB are different indexed dims of the same size.
+                                    let src_size = source_view.dims[src_dim_pos];
+                                    let src_is_indexed = context
+                                        .dimensions
+                                        .get(*src_dim_id as usize)
+                                        .is_some_and(|d| d.is_indexed);
 
-                                // Use matched index, or 0 as fallback in release mode to avoid panic
-                                source_indices.push(iter_indices[iter_idx.unwrap_or(0)]);
+                                    if src_is_indexed {
+                                        // Find an unused iter dimension of the same size
+                                        // that is also indexed
+                                        let mut found = None;
+                                        for (iter_pos, &iter_dim_id) in
+                                            iter_view.dim_ids.iter().enumerate()
+                                        {
+                                            if used_iter_positions[iter_pos] {
+                                                continue;
+                                            }
+                                            let iter_size = iter_view.dims[iter_pos];
+                                            let iter_is_indexed = context
+                                                .dimensions
+                                                .get(iter_dim_id as usize)
+                                                .is_some_and(|d| d.is_indexed);
+
+                                            if iter_size == src_size && iter_is_indexed {
+                                                used_iter_positions[iter_pos] = true;
+                                                found = Some(iter_pos);
+                                                break;
+                                            }
+                                        }
+                                        found
+                                    } else {
+                                        None
+                                    }
+                                };
+
+                                if let Some(iter_pos) = matched_iter_idx {
+                                    let idx = iter_indices[iter_pos];
+                                    // Bounds check for this dimension
+                                    if idx >= source_view.dims[src_dim_pos] {
+                                        out_of_bounds = true;
+                                        break;
+                                    }
+                                    source_indices.push(idx);
+                                } else {
+                                    // No matching dimension found - this is a compiler bug
+                                    // or dimension mismatch. Return NaN.
+                                    out_of_bounds = true;
+                                    break;
+                                }
                             }
 
-                            // 3. Compute flat offset using source view
-                            source_view.flat_offset(&source_indices)
+                            if out_of_bounds {
+                                None
+                            } else {
+                                // 3. Compute flat offset using source view
+                                Some(source_view.flat_offset(&source_indices))
+                            }
                         };
 
-                        let value = if source_view.is_temp {
-                            let temp_off = context.temp_offsets[source_view.base_off as usize];
-                            self.temp_storage[temp_off + flat_off]
+                        if let Some(flat_off) = result {
+                            let value = if source_view.is_temp {
+                                let temp_off = context.temp_offsets[source_view.base_off as usize];
+                                self.temp_storage[temp_off + flat_off]
+                            } else {
+                                curr[source_view.base_off as usize + flat_off]
+                            };
+                            stack.push(value);
                         } else {
-                            curr[source_view.base_off as usize + flat_off]
-                        };
-                        stack.push(value);
+                            // Out of bounds or no matching dimension - return NaN
+                            stack.push(f64::NAN);
+                        }
                     }
                 }
 

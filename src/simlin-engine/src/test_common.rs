@@ -509,6 +509,18 @@ impl TestProject {
         }
     }
 
+    /// Get interpreter results for a variable (allows checking for NaN values)
+    pub fn interpreter_result(&self, var_name: &str) -> Vec<f64> {
+        let results = self
+            .run_interpreter()
+            .expect("Interpreter should run successfully");
+
+        results
+            .get(var_name)
+            .unwrap_or_else(|| panic!("Variable {var_name} not found in results"))
+            .clone()
+    }
+
     /// Test that simulation creation succeeds
     pub fn assert_sim_builds(&self) {
         self.build_sim()

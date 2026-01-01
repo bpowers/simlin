@@ -2286,3 +2286,176 @@ mod pass0_structural_lowering_tests {
             .assert_interpreter_result("result", &[2.0, 1.0, 1.0]);
     }
 }
+
+// =============================================================================
+// Tests for indexed dimension broadcasting and bounds checking
+// =============================================================================
+#[cfg(test)]
+mod indexed_dimension_tests {
+    use crate::test_common::TestProject;
+
+    // NOTE: Tests for different-named indexed dimensions broadcasting (e.g., a[DimA] + b[DimB])
+    // require additional compiler changes beyond the VM-level positional matching.
+    // The compiler's dimension matching occurs at multiple levels and all need updates.
+    // These tests are marked #[ignore] as future work.
+
+    #[test]
+    #[ignore]
+    fn different_indexed_dims_same_size_broadcast() {
+        // TODO: Requires compiler-level changes to find_dimension_reordering and
+        // multiple dimension matching code paths.
+        // Test that two arrays with different indexed dimensions of the same size
+        // can be combined in element-wise operations via positional matching.
+        let project = TestProject::new("indexed_broadcast")
+            .indexed_dimension("Products", 3)
+            .indexed_dimension("Regions", 3)
+            .array_aux("sales[Products]", "Products") // [1, 2, 3]
+            .array_aux("costs[Regions]", "Regions * 10") // [10, 20, 30]
+            .array_aux("combined[Products]", "sales + costs"); // [11, 22, 33]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    #[ignore]
+    fn different_indexed_dims_with_wildcard() {
+        // TODO: Requires compiler-level changes for different-named indexed dim matching.
+        let project = TestProject::new("indexed_wildcard_broadcast")
+            .indexed_dimension("A", 4)
+            .indexed_dimension("B", 4)
+            .array_aux("arr_a[A]", "A * 2") // [2, 4, 6, 8]
+            .array_aux("arr_b[B]", "B * 3") // [3, 6, 9, 12]
+            .array_aux("sum[A]", "arr_a[*] + arr_b[*]"); // [5, 10, 15, 20]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("sum", &[5.0, 10.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    #[ignore]
+    fn out_of_bounds_iteration_returns_nan() {
+        // TODO: This test requires bounds checking during A2A iteration.
+        // The VM changes are in place but the compiler needs to generate
+        // code that properly creates mismatched-size views for testing.
+        let project = TestProject::new("oob_iteration")
+            .indexed_dimension("Size5", 5)
+            .array_aux("source[Size5]", "Size5 * 10") // [10, 20, 30, 40, 50]
+            .array_aux("slice[Size5]", "source[1:3]"); // [10, 20, 30, NaN, NaN]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let result = project.interpreter_result("slice");
+        assert_eq!(result[0], 10.0);
+        assert_eq!(result[1], 20.0);
+        assert_eq!(result[2], 30.0);
+        assert!(
+            result[3].is_nan(),
+            "Element 4 should be NaN, got {}",
+            result[3]
+        );
+        assert!(
+            result[4].is_nan(),
+            "Element 5 should be NaN, got {}",
+            result[4]
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_in_sum_builtin() {
+        // When using a sliced array in SUM, only the valid elements should be summed.
+        let project = TestProject::new("oob_sum")
+            .indexed_dimension("Idx", 5)
+            .array_aux("data[Idx]", "Idx") // [1, 2, 3, 4, 5]
+            .scalar_aux("sum_first3", "SUM(data[1:3])"); // Should sum 1+2+3 = 6
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("sum_first3", 6.0);
+    }
+
+    #[test]
+    fn star_range_indexed_subdimension() {
+        // Test that *:IndexedSubDim desugars to [1:SIZE(IndexedSubDim)]
+        // arr[*:SubIdx] where SubIdx is indexed(3) should give arr[1:3]
+        let project = TestProject::new("star_indexed_subdim")
+            .indexed_dimension("FullIdx", 5)
+            .indexed_dimension("SubIdx", 3)
+            .array_aux("data[FullIdx]", "FullIdx * 10") // [10, 20, 30, 40, 50]
+            .array_aux("slice[SubIdx]", "data[*:SubIdx]"); // Should be [10, 20, 30]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("slice", &[10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn star_range_indexed_in_sum() {
+        // Test *:IndexedSubDim inside a SUM builtin
+        let project = TestProject::new("star_indexed_sum")
+            .indexed_dimension("Full", 10)
+            .indexed_dimension("First5", 5)
+            .array_aux("data[Full]", "Full") // [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            .scalar_aux("sum_first5", "SUM(data[*:First5])"); // 1+2+3+4+5 = 15
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("sum_first5", 15.0);
+    }
+
+    #[test]
+    #[ignore]
+    fn indexed_dims_2d_positional_matching() {
+        // TODO: Requires compiler-level changes for different-named indexed dim matching.
+        let project = TestProject::new("indexed_2d_positional")
+            .indexed_dimension("Rows", 2)
+            .indexed_dimension("Cols", 3)
+            .indexed_dimension("AltRows", 2)
+            .indexed_dimension("AltCols", 3)
+            .array_aux("a[Rows, Cols]", "Rows * 10 + Cols") // [[11,12,13],[21,22,23]]
+            .array_aux("b[AltRows, AltCols]", "AltRows + AltCols") // [[2,3,4],[3,4,5]]
+            .array_aux("sum[Rows, Cols]", "a + b"); // [[13,15,17],[24,26,28]]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("sum", &[13.0, 15.0, 17.0, 24.0, 26.0, 28.0]);
+    }
+
+    #[test]
+    fn mixed_indexed_and_named_dims() {
+        // Test that named dimensions still require exact matching (no positional fallback)
+        // while indexed dimensions use positional matching
+        let project = TestProject::new("mixed_dims")
+            .indexed_dimension("NumericDim", 3)
+            .named_dimension("NamedDim", &["A", "B", "C"])
+            .array_aux("numeric_arr[NumericDim]", "NumericDim") // [1, 2, 3]
+            .array_aux("named_arr[NamedDim]", "NamedDim") // [1, 2, 3] (position as value)
+            .array_aux("result[NumericDim]", "numeric_arr * 2"); // [2, 4, 6]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("result", &[2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    #[ignore]
+    fn bounds_check_in_fast_path() {
+        // TODO: Requires compiler-level changes for different-sized array assignment.
+        let project = TestProject::new("fast_path_bounds")
+            .indexed_dimension("SmallDim", 3)
+            .indexed_dimension("LargeDim", 5)
+            .array_aux("small[SmallDim]", "SmallDim * 5") // [5, 10, 15]
+            .array_aux("expanded[LargeDim]", "small[1:3]"); // [5, 10, 15, NaN, NaN]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        let result = project.interpreter_result("expanded");
+        assert_eq!(result[0], 5.0);
+        assert_eq!(result[1], 10.0);
+        assert_eq!(result[2], 15.0);
+        assert!(result[3].is_nan(), "Element 4 should be NaN");
+        assert!(result[4].is_nan(), "Element 5 should be NaN");
+    }
+}

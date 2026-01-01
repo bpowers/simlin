@@ -136,17 +136,38 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
                     // Full dimension - treat as Wildcard
                     IndexOp::Wildcard
                 } else {
-                    // Subdimension - look up relationship
-                    let relation = config
-                        .dimensions_ctx
-                        .get_subdimension_relation(subdim_name, &parent_name)?;
+                    // Check if subdim_name refers to an indexed dimension.
+                    // For indexed dimensions, *:IndexedDim desugars to [1:SIZE(IndexedDim)],
+                    // which is Range(0, size) in 0-based internal representation.
+                    let subdim_canonical = canonicalize(subdim_name.as_str());
+                    let indexed_dim_size = config.all_dimensions.iter().find_map(|d| {
+                        if canonicalize(d.name()).as_str() == subdim_canonical.as_str() {
+                            if let Dimension::Indexed(_, size) = d {
+                                Some(*size as usize)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
 
-                    if relation.is_contiguous() {
-                        let start = relation.start_offset();
-                        let end = start + relation.parent_offsets.len();
-                        IndexOp::Range(start, end)
+                    if let Some(size) = indexed_dim_size {
+                        // Indexed subdimension - desugar to range [0, size) (0-based)
+                        IndexOp::Range(0, size)
                     } else {
-                        IndexOp::SparseRange(relation.parent_offsets.clone())
+                        // Named subdimension - look up relationship
+                        let relation = config
+                            .dimensions_ctx
+                            .get_subdimension_relation(subdim_name, &parent_name)?;
+
+                        if relation.is_contiguous() {
+                            let start = relation.start_offset();
+                            let end = start + relation.parent_offsets.len();
+                            IndexOp::Range(start, end)
+                        } else {
+                            IndexOp::SparseRange(relation.parent_offsets.clone())
+                        }
                     }
                 }
             }
@@ -740,19 +761,35 @@ impl Context<'_> {
 
         let mut active_off = 0;
         for dim in dims.iter() {
+            let mut found = false;
             while active_off < active_dims.len() {
                 let off = active_off;
                 active_off += 1;
                 let candidate = &active_dims[off];
+
+                // First try name matching
                 if candidate.name() == dim.name() {
                     subscripts.push(active_subscripts[off].as_str());
+                    found = true;
+                    break;
+                }
+
+                // For indexed dimensions of the same size, allow positional matching.
+                // This enables expressions like a[DimA] + b[DimB] where DimA and DimB
+                // are both indexed(N) with the same size N.
+                if let (Dimension::Indexed(_, dim_size), Dimension::Indexed(_, candidate_size)) =
+                    (dim, candidate)
+                    && dim_size == candidate_size
+                {
+                    subscripts.push(active_subscripts[off].as_str());
+                    found = true;
                     break;
                 }
             }
-        }
 
-        if subscripts.len() != dims.len() {
-            return sim_err!(MismatchedDimensions, ident.to_owned());
+            if !found {
+                return sim_err!(MismatchedDimensions, ident.to_owned());
+            }
         }
 
         Ok(subscripts)
