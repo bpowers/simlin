@@ -2018,6 +2018,22 @@ mod structural_lowering_tests {
     }
 
     #[test]
+    fn size_with_empty_dynamic_range() {
+        // Test SIZE with empty range (start > end) returns 0, not 1
+        let project = TestProject::new("size_empty_range")
+            .indexed_dimension("Index", 10)
+            .array_aux("data[Index]", "Index")
+            .scalar_const("start_idx", 7.0)
+            .scalar_const("end_idx", 3.0) // Reversed: start > end = empty range
+            // SIZE(data[7:3]) should be 0 (empty range)
+            .scalar_aux("result", "SIZE(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 0.0);
+    }
+
+    #[test]
     fn sum_with_dim_name_subscript_preserves_other_dimension() {
         // SUM(m[DimD, *]) should preserve the array for the * dimension
         // while collapsing DimD to the current A2A element

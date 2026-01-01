@@ -483,7 +483,7 @@ impl ModuleEvaluator<'_> {
                             let start_0based = start_1based.saturating_sub(1);
                             let end_0based = end_1based.min(bounds[i]);
                             let range_size = end_0based.saturating_sub(start_0based);
-                            size *= range_size.max(1); // At least 1 to avoid 0 product
+                            size *= range_size; // Empty ranges result in size 0
                         }
                     }
                 }
