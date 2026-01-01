@@ -365,20 +365,20 @@ impl RuntimeView {
         // Clamp end to dimension size (end_1based is inclusive, so use as-is for exclusive bound)
         let end_0based = end_1based.min(dim_size);
 
-        // Check for empty or reversed range
+        // Check for empty or reversed range.
+        // This also catches out-of-bounds start: if start_0based >= dim_size,
+        // then start_0based >= end_0based (since end_0based <= dim_size).
         if start_0based >= end_0based {
-            // Empty range - mark as invalid and set dimension to 0
             self.dims[dim_idx] = 0;
             self.is_valid = false;
             return false;
         }
 
-        // Clamp start to valid range
-        let start_clamped = start_0based.min(dim_size.saturating_sub(1));
-
-        // Apply the valid range
-        self.offset += start_clamped as u32 * self.strides[dim_idx] as u32;
-        self.dims[dim_idx] = end_0based - start_clamped;
+        // At this point we have the invariant:
+        // 0 <= start_0based < end_0based <= dim_size
+        // So start_0based is a valid index into this dimension.
+        self.offset += start_0based as u32 * self.strides[dim_idx] as u32;
+        self.dims[dim_idx] = end_0based - start_0based;
         true
     }
 
