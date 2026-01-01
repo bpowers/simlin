@@ -785,12 +785,11 @@ impl Context<'_> {
             // the same size.
             let size_match_idx = if let Dimension::Indexed(_, dim_size) = dim {
                 active_dims.iter().enumerate().find_map(|(i, candidate)| {
-                    if !used[i] {
-                        if let Dimension::Indexed(_, candidate_size) = candidate {
-                            if dim_size == candidate_size {
-                                return Some(i);
-                            }
-                        }
+                    if !used[i]
+                        && let Dimension::Indexed(_, candidate_size) = candidate
+                        && dim_size == candidate_size
+                    {
+                        return Some(i);
                     }
                     None
                 })
