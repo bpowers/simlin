@@ -327,6 +327,61 @@ impl RuntimeView {
         self.dims[dim_idx] = end - start;
     }
 
+    /// Apply a range subscript with bounds checking using 1-based indices.
+    ///
+    /// Handles invalid ranges gracefully:
+    /// - If dim_idx is out of bounds, marks view as invalid
+    /// - If start_1based is 0 or > dim size, clamps to valid range
+    /// - If end_1based > dim size, clamps to dim size
+    /// - If range is empty or reversed (start >= end), marks view as invalid
+    ///
+    /// Returns true if a valid range was applied, false otherwise.
+    pub fn apply_range_checked(
+        &mut self,
+        dim_idx: usize,
+        start_1based: u16,
+        end_1based: u16,
+    ) -> bool {
+        // Check dimension index is valid
+        if dim_idx >= self.dims.len() {
+            self.is_valid = false;
+            return false;
+        }
+
+        let dim_size = self.dims[dim_idx];
+
+        // Convert 1-based inclusive range to 0-based exclusive range
+        // XMILE: arr[3:7] means elements 3,4,5,6,7 (1-based inclusive)
+        // Internal: [2, 7) means indices 2,3,4,5,6 (0-based exclusive)
+
+        // Handle invalid start (0 is invalid in 1-based indexing)
+        let start_0based = if start_1based == 0 {
+            // Invalid start index, treat as 0 but mark for potential issues
+            0
+        } else {
+            start_1based.saturating_sub(1)
+        };
+
+        // Clamp end to dimension size (end_1based is inclusive, so use as-is for exclusive bound)
+        let end_0based = end_1based.min(dim_size);
+
+        // Check for empty or reversed range.
+        // This also catches out-of-bounds start: if start_0based >= dim_size,
+        // then start_0based >= end_0based (since end_0based <= dim_size).
+        if start_0based >= end_0based {
+            self.dims[dim_idx] = 0;
+            self.is_valid = false;
+            return false;
+        }
+
+        // At this point we have the invariant:
+        // 0 <= start_0based < end_0based <= dim_size
+        // So start_0based is a valid index into this dimension.
+        self.offset += start_0based as u32 * self.strides[dim_idx] as u32;
+        self.dims[dim_idx] = end_0based - start_0based;
+        true
+    }
+
     /// Compute the flat memory offset for a given iteration index.
     /// This converts a flat iteration index (0..size) to multi-dimensional indices,
     /// then uses flat_offset to compute the memory location.
@@ -537,6 +592,14 @@ pub(crate) enum Opcode {
         view_id: ViewId,
     },
 
+    /// Push a view for a variable with explicit dimension sizes.
+    /// Used when we have bounds but not dim_ids (e.g., dynamic subscripts).
+    PushVarViewDirect {
+        base_off: VariableOffset, // Variable offset in curr[]
+        n_dims: u8,               // Number of dimensions (1-4)
+        dims: [u16; 4],           // Explicit dimension sizes (padded with 0 if < 4)
+    },
+
     /// Apply single-element subscript with constant index to top view.
     /// Removes one dimension from the view.
     ViewSubscriptConst {
@@ -550,11 +613,18 @@ pub(crate) enum Opcode {
         dim_idx: u8,
     },
 
-    /// Apply range subscript [start:end) to a dimension.
+    /// Apply range subscript [start:end) to a dimension with static bounds.
     ViewRange {
         dim_idx: u8,
         start: u16,
         end: u16,
+    },
+
+    /// Apply range subscript with dynamic bounds (from stack).
+    /// Pops end then start from arithmetic stack (1-based indices).
+    /// Applies range to the specified dimension of the top view.
+    ViewRangeDynamic {
+        dim_idx: u8,
     },
 
     /// Apply star range (*:subdim) using subdimension relation.
@@ -1066,6 +1136,114 @@ mod tests {
         assert_eq!(view.dims.as_slice(), &[2, 4]); // First dim now size 2
         assert_eq!(view.offset, 4); // 1 * stride[0] = 1 * 4 = 4
         assert!(!view.is_contiguous()); // offset != 0
+    }
+
+    #[test]
+    fn test_runtime_view_apply_range_checked_valid() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![10];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Valid 1-based range [3:7] -> 0-based [2:7) -> elements 2,3,4,5,6 (5 elements)
+        let result = view.apply_range_checked(0, 3, 7);
+
+        assert!(result, "valid range should return true");
+        assert!(view.is_valid, "view should be valid");
+        assert_eq!(view.dims.as_slice(), &[5]); // 5 elements (7-2)
+        assert_eq!(view.offset, 2); // start at index 2
+    }
+
+    #[test]
+    fn test_runtime_view_apply_range_checked_single_element() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Single element range [3:3] -> 0-based [2:3) -> element 2 (1 element)
+        let result = view.apply_range_checked(0, 3, 3);
+
+        assert!(result, "single element range should be valid");
+        assert!(view.is_valid);
+        assert_eq!(view.dims.as_slice(), &[1]); // 1 element
+        assert_eq!(view.offset, 2);
+    }
+
+    #[test]
+    fn test_runtime_view_apply_range_checked_reversed() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![10];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Reversed range [7:3] should be invalid (start > end)
+        let result = view.apply_range_checked(0, 7, 3);
+
+        assert!(!result, "reversed range should return false");
+        assert!(!view.is_valid, "view should be marked invalid");
+        assert_eq!(view.dims.as_slice(), &[0]); // Empty dimension
+    }
+
+    #[test]
+    fn test_runtime_view_apply_range_checked_out_of_bounds_end() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Range with end beyond bounds [3:100] should clamp to [3:5]
+        // 1-based [3:100] -> 0-based [2:5) -> elements 2,3,4 (3 elements)
+        let result = view.apply_range_checked(0, 3, 100);
+
+        assert!(result, "out-of-bounds end should clamp and succeed");
+        assert!(view.is_valid);
+        assert_eq!(view.dims.as_slice(), &[3]); // 3 elements (5-2)
+        assert_eq!(view.offset, 2);
+    }
+
+    #[test]
+    fn test_runtime_view_apply_range_checked_zero_start() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Zero start [0:3] - invalid in 1-based, treated as [0:3) in 0-based
+        // 0 is treated as start_0based=0, end_0based=3 -> elements 0,1,2 (3 elements)
+        let result = view.apply_range_checked(0, 0, 3);
+
+        assert!(
+            result,
+            "zero start should succeed (treated as 0-based start)"
+        );
+        assert!(view.is_valid);
+        assert_eq!(view.dims.as_slice(), &[3]); // 3 elements
+        assert_eq!(view.offset, 0);
+    }
+
+    #[test]
+    fn test_runtime_view_apply_range_checked_invalid_dim() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Invalid dimension index
+        let result = view.apply_range_checked(5, 1, 3);
+
+        assert!(!result, "invalid dim_idx should return false");
+        assert!(!view.is_valid, "view should be marked invalid");
+    }
+
+    #[test]
+    fn test_runtime_view_apply_range_checked_empty_after_clamp() {
+        let dims: SmallVec<[u16; 4]> = smallvec::smallvec![5];
+        let dim_ids: SmallVec<[DimId; 4]> = smallvec::smallvec![0];
+        let mut view = RuntimeView::for_var(0, dims, dim_ids);
+
+        // Range entirely beyond bounds [10:15] should be empty
+        // start_0based = 9, end_0based = min(15, 5) = 5
+        // 9 >= 5, so empty
+        let result = view.apply_range_checked(0, 10, 15);
+
+        assert!(!result, "range beyond bounds should return false");
+        assert!(!view.is_valid, "view should be marked invalid");
+        assert_eq!(view.dims.as_slice(), &[0]); // Empty dimension
     }
 
     #[test]

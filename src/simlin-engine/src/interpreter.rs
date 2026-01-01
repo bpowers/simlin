@@ -7,7 +7,7 @@ use crate::ast::ArrayView;
 use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, Ident, canonicalize};
-use crate::compiler::{BuiltinFn, Expr, Module, UnaryOp};
+use crate::compiler::{BuiltinFn, Expr, Module, SubscriptIndex, UnaryOp};
 use crate::model::enumerate_modules;
 use crate::sim_err;
 use crate::vm::{
@@ -79,6 +79,29 @@ impl ModuleEvaluator<'_> {
         match expr {
             Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => {
                 Some(view.dims.clone())
+            }
+            Expr::Subscript(_, indices, bounds, _) => {
+                // For dynamic subscripts with ranges, compute effective dimensions
+                // Only Single indices collapse a dimension; Range indices preserve it
+                let mut dims = Vec::new();
+                for (i, idx) in indices.iter().enumerate() {
+                    match idx {
+                        SubscriptIndex::Single(_) => {
+                            // Single index collapses this dimension
+                        }
+                        SubscriptIndex::Range(_, _) => {
+                            // Range preserves dimension - will need runtime evaluation
+                            // For now, use the full bound as a conservative estimate
+                            // The actual iteration will handle the range correctly
+                            dims.push(bounds[i]);
+                        }
+                    }
+                }
+                if dims.is_empty() {
+                    None // All dimensions collapsed = scalar
+                } else {
+                    Some(dims)
+                }
             }
             Expr::Op1(UnaryOp::Transpose, inner, _) => Self::find_array_dims(inner).map(|dims| {
                 let mut dims = dims;
@@ -359,6 +382,69 @@ impl ModuleEvaluator<'_> {
                     f(temps[start + i]);
                 }
             }
+            Expr::Subscript(off, indices, bounds, _) => {
+                // Handle dynamic subscripts with potential ranges
+                let base_off = self.off + *off;
+
+                // Evaluate index bounds for each dimension
+                // For Single: evaluate to get a single index (1-based)
+                // For Range: evaluate start and end to get bounds (1-based)
+                let mut dim_ranges: Vec<(usize, usize)> = Vec::with_capacity(indices.len());
+                for (i, idx) in indices.iter().enumerate() {
+                    match idx {
+                        SubscriptIndex::Single(e) => {
+                            let idx_1based = self.eval(e).floor() as usize;
+                            let idx_0based = idx_1based.saturating_sub(1);
+                            dim_ranges.push((idx_0based, idx_0based + 1));
+                        }
+                        SubscriptIndex::Range(start_expr, end_expr) => {
+                            let start_val = self.eval(start_expr);
+                            let end_val = self.eval(end_expr);
+                            let start_1based = start_val.floor() as usize;
+                            let end_1based = end_val.floor() as usize;
+                            let start_0based = start_1based.saturating_sub(1);
+                            // end is inclusive in XMILE, so add 1 for exclusive end
+                            let end_0based = end_1based.min(bounds[i]);
+                            dim_ranges.push((start_0based, end_0based));
+                        }
+                    }
+                }
+                // Compute strides for row-major layout
+                let mut strides: Vec<usize> = vec![1; bounds.len()];
+                for i in (0..bounds.len().saturating_sub(1)).rev() {
+                    strides[i] = strides[i + 1] * bounds[i + 1];
+                }
+
+                // Iterate over all elements in the ranges
+                fn iterate_ranges(
+                    dim_ranges: &[(usize, usize)],
+                    strides: &[usize],
+                    dim_idx: usize,
+                    current_offset: usize,
+                    base_off: usize,
+                    curr: &[f64],
+                    f: &mut dyn FnMut(f64),
+                ) {
+                    if dim_idx >= dim_ranges.len() {
+                        f(curr[base_off + current_offset]);
+                        return;
+                    }
+                    let (start, end) = dim_ranges[dim_idx];
+                    for i in start..end {
+                        iterate_ranges(
+                            dim_ranges,
+                            strides,
+                            dim_idx + 1,
+                            current_offset + i * strides[dim_idx],
+                            base_off,
+                            curr,
+                            f,
+                        );
+                    }
+                }
+
+                iterate_ranges(&dim_ranges, &strides, 0, 0, base_off, self.curr, &mut f);
+            }
             // Handle composite expressions with arrays (e.g., a[*]*b[*]/DT)
             _ => {
                 if let Some(dims) = Self::find_array_dims(expr) {
@@ -373,13 +459,36 @@ impl ModuleEvaluator<'_> {
         }
     }
 
-    /// Helper to get the size of an array
-    fn get_array_size(&self, expr: &Expr) -> usize {
+    /// Helper to get the size of an array.
+    /// For dynamic subscripts with ranges, evaluates range bounds at runtime.
+    fn get_array_size(&mut self, expr: &Expr) -> usize {
         match expr {
             Expr::StaticSubscript(_, view, _) | Expr::TempArray(_, view, _) => {
                 view.dims.iter().product()
             }
             Expr::TempArrayElement(_, _, _, _) => 1, // Single element
+            Expr::Subscript(_, indices, bounds, _) => {
+                // For dynamic subscripts, compute actual range sizes at runtime
+                let mut size = 1usize;
+                for (i, idx) in indices.iter().enumerate() {
+                    match idx {
+                        SubscriptIndex::Single(_) => {
+                            // Single index collapses dimension - contributes 1
+                        }
+                        SubscriptIndex::Range(start_expr, end_expr) => {
+                            // Evaluate range bounds at runtime
+                            let start_1based = self.eval(start_expr).floor() as usize;
+                            let end_1based = self.eval(end_expr).floor() as usize;
+                            // Clamp and compute range size (1-based inclusive range)
+                            let start_0based = start_1based.saturating_sub(1);
+                            let end_0based = end_1based.min(bounds[i]);
+                            let range_size = end_0based.saturating_sub(start_0based);
+                            size *= range_size; // Empty ranges result in size 0
+                        }
+                    }
+                }
+                size
+            }
             _ => Self::find_array_dims(expr)
                 .map(|dims| dims.iter().product())
                 .unwrap_or(1),
@@ -453,7 +562,20 @@ impl ModuleEvaluator<'_> {
                 self.curr[self.off + *off + view.offset]
             }
             Expr::Subscript(off, r, bounds, _) => {
-                let indices: Vec<_> = r.iter().map(|r| self.eval(r)).collect();
+                use crate::compiler::SubscriptIndex;
+
+                // Evaluate all subscript indices - for now, range subscripts are not supported
+                // in scalar context (they should be handled via iteration)
+                let indices: Vec<_> = r
+                    .iter()
+                    .map(|idx| match idx {
+                        SubscriptIndex::Single(e) => self.eval(e),
+                        SubscriptIndex::Range(_, _) => {
+                            // Range subscripts in scalar context return NaN
+                            f64::NAN
+                        }
+                    })
+                    .collect();
                 let mut index = 0;
                 let max_bounds = bounds.iter().product();
                 let mut ok = true;
@@ -1760,7 +1882,7 @@ fn test_arrays() {
             10,
             Box::new(Expr::Subscript(
                 4,
-                vec![Expr::Op2(
+                vec![SubscriptIndex::Single(Expr::Op2(
                     BinaryOp::Add,
                     Box::new(Expr::App(
                         BuiltinFn::Int(Box::new(Expr::Op2(
@@ -1773,7 +1895,7 @@ fn test_arrays() {
                     )),
                     Box::new(Expr::Const(1.0, Loc::default())),
                     Loc::default(),
-                )],
+                ))],
                 vec![3],
                 Loc::default(),
             )),

@@ -537,41 +537,48 @@ struct IdentifierSetVisitor<'a> {
 }
 
 impl IdentifierSetVisitor<'_> {
+    /// Check if an identifier is a dimension name or element (and should be skipped)
+    fn is_dimension_or_element(&self, ident: &str) -> bool {
+        for dim in self.dimensions.iter() {
+            // Check if it's the dimension name itself
+            if ident == canonicalize(dim.name()).as_str() {
+                return true;
+            }
+            // Check if it's an element of a named dimension
+            if let Dimension::Named(_, named_dim) = dim {
+                let is_element = named_dim.elements.iter().any(|elem| elem.as_str() == ident);
+                if is_element {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Walk an expression, filtering out dimension names/elements
+    fn walk_index_expr(&mut self, expr: &Expr2) {
+        if let Expr2::Var(arg_ident, _, _) = expr {
+            if !self.is_dimension_or_element(arg_ident.as_str()) {
+                self.walk(expr);
+            }
+        } else {
+            self.walk(expr)
+        }
+    }
+
     fn walk_index(&mut self, e: &IndexExpr2) {
         match e {
             IndexExpr2::Wildcard(_) => {}
             IndexExpr2::StarRange(_, _) => {}
-            IndexExpr2::Range(_, _, _) => {}
+            IndexExpr2::Range(start, end, _) => {
+                // Walk both start and end expressions to find dependencies,
+                // but filter out dimension names/elements (e.g., Boston:LA)
+                self.walk_index_expr(start);
+                self.walk_index_expr(end);
+            }
             IndexExpr2::DimPosition(_, _) => {}
             IndexExpr2::Expr(expr) => {
-                if let Expr2::Var(arg_ident, _, _) = expr {
-                    let mut is_subscript_or_dimension = false;
-                    // TODO: this should be optimized
-                    for dim in self.dimensions.iter() {
-                        if arg_ident.as_str() == canonicalize(dim.name()).as_str() {
-                            is_subscript_or_dimension = true;
-                        } else if let Dimension::Named(_, named_dim) = dim {
-                            // Check if arg_ident matches any element (case-insensitive)
-                            // We need to canonicalize both for comparison since identifiers are canonicalized
-                            let canonicalized_arg = arg_ident.as_str();
-                            let is_element = named_dim
-                                .elements
-                                .iter()
-                                .any(|elem| elem.as_str() == canonicalized_arg);
-                            if is_element {
-                                is_subscript_or_dimension = true;
-                            }
-                        }
-                        if is_subscript_or_dimension {
-                            break;
-                        }
-                    }
-                    if !is_subscript_or_dimension {
-                        self.walk(expr);
-                    }
-                } else {
-                    self.walk(expr)
-                }
+                self.walk_index_expr(expr);
             }
         }
     }

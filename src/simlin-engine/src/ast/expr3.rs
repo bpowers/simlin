@@ -23,7 +23,13 @@ pub enum IndexExpr3 {
     /// This includes both user-specified star ranges AND wildcards that
     /// were converted during lowering.
     StarRange(CanonicalDimensionName, Loc),
-    /// Range subscript (e.g., 1:3 or Boston:LA)
+    /// Static range with compile-time known bounds (0-based start, 0-based exclusive end).
+    /// Example: arr[2:5] becomes StaticRange(1, 5) (1-based to 0-based conversion happens during lowering)
+    /// This can be fully resolved at compile time to construct an ArrayView.
+    StaticRange(usize, usize, Loc),
+    /// Dynamic range with runtime-evaluated bounds.
+    /// Example: arr[start:end] where start/end are variables.
+    /// Cannot be resolved at compile time; requires runtime view manipulation.
     Range(Expr3, Expr3, Loc),
     /// Dimension position reference (e.g., @1, @2)
     DimPosition(u32, Loc),
@@ -41,6 +47,7 @@ impl IndexExpr3 {
     pub fn get_loc(&self) -> Loc {
         match self {
             IndexExpr3::StarRange(_, loc) => *loc,
+            IndexExpr3::StaticRange(_, _, loc) => *loc,
             IndexExpr3::Range(_, _, loc) => *loc,
             IndexExpr3::DimPosition(_, loc) => *loc,
             IndexExpr3::Expr(e) => e.get_loc(),
@@ -61,6 +68,7 @@ impl IndexExpr3 {
             }
             IndexExpr3::Expr(e) => e.references_a2a_dimension(),
             IndexExpr3::StarRange(_, _) => false,
+            IndexExpr3::StaticRange(_, _, _) => false, // Static ranges have no A2A refs
         }
     }
 }
@@ -290,6 +298,19 @@ impl IndexExpr3 {
             IndexExpr2::Range(start, end, loc) => {
                 let start_expr = Expr3::from_expr2(start, ctx)?;
                 let end_expr = Expr3::from_expr2(end, ctx)?;
+
+                // Check if both bounds are constants - if so, create a StaticRange
+                if let (Expr3::Const(_, start_val, _), Expr3::Const(_, end_val, _)) =
+                    (&start_expr, &end_expr)
+                {
+                    // Convert 1-based indices to 0-based for StaticRange
+                    // StaticRange stores (0-based start, 0-based exclusive end)
+                    let start_0based = (*start_val as usize).saturating_sub(1);
+                    let end_0based = *end_val as usize; // end is already exclusive in XMILE
+                    return Ok(IndexExpr3::StaticRange(start_0based, end_0based, *loc));
+                }
+
+                // Dynamic range - bounds will be evaluated at runtime
                 Ok(IndexExpr3::Range(start_expr, end_expr, *loc))
             }
             IndexExpr2::DimPosition(pos, loc) => Ok(IndexExpr3::DimPosition(*pos, *loc)),
@@ -604,6 +625,8 @@ impl<'a> Pass1Context<'a> {
     /// are resolved to concrete indices, allowing decomposition to proceed.
     fn transform_index_expr_inner(&mut self, idx: IndexExpr3) -> (IndexExpr3, bool) {
         match idx {
+            // Static ranges are already resolved - no transformation needed
+            IndexExpr3::StaticRange(_, _, _) => (idx, false),
             IndexExpr3::Range(start, end, loc) => {
                 let (new_start, start_a2a) = self.transform_inner(start);
                 let (new_end, end_a2a) = self.transform_inner(end);
@@ -1003,6 +1026,7 @@ impl IndexExpr3 {
         match self {
             IndexExpr3::StarRange(name, _) => IndexExpr3::StarRange(name, loc),
             IndexExpr3::Range(l, r, _) => IndexExpr3::Range(l.strip_loc(), r.strip_loc(), loc),
+            IndexExpr3::StaticRange(start, end, _) => IndexExpr3::StaticRange(start, end, loc),
             IndexExpr3::DimPosition(n, _) => IndexExpr3::DimPosition(n, loc),
             IndexExpr3::Expr(e) => IndexExpr3::Expr(e.strip_loc()),
             IndexExpr3::Dimension(name, _) => IndexExpr3::Dimension(name, loc),
