@@ -759,37 +759,61 @@ impl Context<'_> {
 
         let mut subscripts: Vec<&str> = Vec::with_capacity(dims.len());
 
-        let mut active_off = 0;
+        // Track which active dimensions have been used
+        let mut used: Vec<bool> = vec![false; active_dims.len()];
+
         for dim in dims.iter() {
-            let mut found = false;
-            while active_off < active_dims.len() {
-                let off = active_off;
-                active_off += 1;
-                let candidate = &active_dims[off];
-
-                // First try name matching
-                if candidate.name() == dim.name() {
-                    subscripts.push(active_subscripts[off].as_str());
-                    found = true;
-                    break;
+            // FIRST PASS: Try to find an exact name match anywhere in unused active dims.
+            // This prevents size-based fallback from grabbing the wrong dimension when
+            // the correct name match exists later in the list.
+            let name_match_idx = active_dims.iter().enumerate().find_map(|(i, candidate)| {
+                if !used[i] && candidate.name() == dim.name() {
+                    Some(i)
+                } else {
+                    None
                 }
+            });
 
-                // For indexed dimensions of the same size, allow positional matching.
-                // This enables expressions like a[DimA] + b[DimB] where DimA and DimB
-                // are both indexed(N) with the same size N.
-                if let (Dimension::Indexed(_, dim_size), Dimension::Indexed(_, candidate_size)) =
-                    (dim, candidate)
-                    && dim_size == candidate_size
-                {
-                    subscripts.push(active_subscripts[off].as_str());
-                    found = true;
-                    break;
-                }
+            if let Some(idx) = name_match_idx {
+                subscripts.push(active_subscripts[idx].as_str());
+                used[idx] = true;
+                continue;
             }
 
-            if !found {
-                return sim_err!(MismatchedDimensions, ident.to_owned());
+            // SECOND PASS: Only if no name match exists, try size-based matching
+            // for indexed dimensions. Find the first unused indexed dimension with
+            // the same size.
+            //
+            // IMPORTANT: Size-based fallback only applies when BOTH dimensions are
+            // indexed. Named dimensions must match by name (or subdimension relationship)
+            // because their elements have semantic meaning. For example, Cities=[Boston,
+            // Seattle] and Products=[Widgets,Gadgets] shouldn't match just because both
+            // have size 2 - that would be semantically incorrect.
+            //
+            // NOTE: This algorithm mirrors the dimension matching in vm.rs LoadIterViewTop.
+            // If you modify this logic, update the VM implementation as well.
+            let size_match_idx = if let Dimension::Indexed(_, dim_size) = dim {
+                active_dims.iter().enumerate().find_map(|(i, candidate)| {
+                    if !used[i]
+                        && let Dimension::Indexed(_, candidate_size) = candidate
+                        && dim_size == candidate_size
+                    {
+                        return Some(i);
+                    }
+                    None
+                })
+            } else {
+                None
+            };
+
+            if let Some(idx) = size_match_idx {
+                subscripts.push(active_subscripts[idx].as_str());
+                used[idx] = true;
+                continue;
             }
+
+            // No match found
+            return sim_err!(MismatchedDimensions, ident.to_owned());
         }
 
         Ok(subscripts)
