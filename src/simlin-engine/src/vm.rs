@@ -913,63 +913,75 @@ impl Vm {
                             }
                             iter_indices.reverse();
 
-                            // 2. For each source dimension, find matching iteration dimension
-                            // First by dim_id, then by positional fallback for indexed dims
-                            let mut source_indices: SmallVec<[u16; 4]> =
-                                SmallVec::with_capacity(source_view.dims.len());
-                            let mut out_of_bounds = false;
+                            // 2. Pre-compute which iter dimensions are indexed (O(n) once)
+                            // This avoids repeated context.dimensions.get() calls in the inner loop
+                            let iter_is_indexed: SmallVec<[bool; 4]> = iter_view
+                                .dim_ids
+                                .iter()
+                                .map(|&dim_id| {
+                                    context
+                                        .dimensions
+                                        .get(dim_id as usize)
+                                        .is_some_and(|d| d.is_indexed)
+                                })
+                                .collect();
+
+                            // 3. Build dimension mapping using two-pass approach:
+                            //    Pass 1: Find all exact dim_id matches
+                            //    Pass 2: Find size-based matches for remaining indexed dims
+                            let mut source_to_iter: SmallVec<[Option<usize>; 4]> =
+                                smallvec::smallvec![None; source_view.dims.len()];
                             let mut used_iter_positions: SmallVec<[bool; 4]> =
                                 smallvec::smallvec![false; iter_view.dims.len()];
 
+                            // Pass 1: Exact dim_id matches (O(n²) but typically n ≤ 4)
                             for (src_dim_pos, src_dim_id) in source_view.dim_ids.iter().enumerate()
                             {
-                                // Try to find matching dim_id in iteration view
-                                let iter_idx =
-                                    iter_view.dim_ids.iter().position(|&id| id == *src_dim_id);
+                                if let Some(iter_pos) =
+                                    iter_view.dim_ids.iter().position(|&id| id == *src_dim_id)
+                                {
+                                    source_to_iter[src_dim_pos] = Some(iter_pos);
+                                    used_iter_positions[iter_pos] = true;
+                                }
+                            }
 
-                                let matched_iter_idx = if let Some(idx) = iter_idx {
-                                    used_iter_positions[idx] = true;
-                                    Some(idx)
-                                } else {
-                                    // Dim_id not found - try positional fallback for indexed dims
-                                    // of the same size. This allows a[DimA] + b[DimB] where DimA
-                                    // and DimB are different indexed dims of the same size.
-                                    let src_size = source_view.dims[src_dim_pos];
-                                    let src_is_indexed = context
-                                        .dimensions
-                                        .get(*src_dim_id as usize)
-                                        .is_some_and(|d| d.is_indexed);
+                            // Pass 2: Size-based fallback for unmatched indexed dimensions
+                            for (src_dim_pos, src_dim_id) in source_view.dim_ids.iter().enumerate()
+                            {
+                                if source_to_iter[src_dim_pos].is_some() {
+                                    continue; // Already matched in pass 1
+                                }
 
-                                    if src_is_indexed {
-                                        // Find an unused iter dimension of the same size
-                                        // that is also indexed
-                                        let mut found = None;
-                                        for (iter_pos, &iter_dim_id) in
-                                            iter_view.dim_ids.iter().enumerate()
+                                let src_size = source_view.dims[src_dim_pos];
+                                let src_is_indexed = context
+                                    .dimensions
+                                    .get(*src_dim_id as usize)
+                                    .is_some_and(|d| d.is_indexed);
+
+                                if src_is_indexed {
+                                    // Find first unused indexed iter dim of same size
+                                    for iter_pos in 0..iter_view.dims.len() {
+                                        if !used_iter_positions[iter_pos]
+                                            && iter_view.dims[iter_pos] == src_size
+                                            && iter_is_indexed[iter_pos]
                                         {
-                                            if used_iter_positions[iter_pos] {
-                                                continue;
-                                            }
-                                            let iter_size = iter_view.dims[iter_pos];
-                                            let iter_is_indexed = context
-                                                .dimensions
-                                                .get(iter_dim_id as usize)
-                                                .is_some_and(|d| d.is_indexed);
-
-                                            if iter_size == src_size && iter_is_indexed {
-                                                used_iter_positions[iter_pos] = true;
-                                                found = Some(iter_pos);
-                                                break;
-                                            }
+                                            source_to_iter[src_dim_pos] = Some(iter_pos);
+                                            used_iter_positions[iter_pos] = true;
+                                            break;
                                         }
-                                        found
-                                    } else {
-                                        None
                                     }
-                                };
+                                }
+                            }
 
-                                if let Some(iter_pos) = matched_iter_idx {
-                                    let idx = iter_indices[iter_pos];
+                            // 4. Build source indices from mapping
+                            let mut source_indices: SmallVec<[u16; 4]> =
+                                SmallVec::with_capacity(source_view.dims.len());
+                            let mut out_of_bounds = false;
+
+                            for (src_dim_pos, mapped_iter_pos) in source_to_iter.iter().enumerate()
+                            {
+                                if let Some(iter_pos) = mapped_iter_pos {
+                                    let idx = iter_indices[*iter_pos];
                                     // Bounds check for this dimension
                                     if idx >= source_view.dims[src_dim_pos] {
                                         out_of_bounds = true;
@@ -987,7 +999,7 @@ impl Vm {
                             if out_of_bounds {
                                 None
                             } else {
-                                // 3. Compute flat offset using source view
+                                // 5. Compute flat offset using source view
                                 Some(source_view.flat_offset(&source_indices))
                             }
                         };
