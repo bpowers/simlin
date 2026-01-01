@@ -2458,4 +2458,168 @@ mod indexed_dimension_tests {
         assert!(result[3].is_nan(), "Element 4 should be NaN");
         assert!(result[4].is_nan(), "Element 5 should be NaN");
     }
+
+    #[test]
+    fn simple_1d_reference_in_2d_context() {
+        // Verify that a 1D array can be referenced in a 2D A2A context
+        // using dimension name subscripting.
+        let project = TestProject::new("simple_1d_2d")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .array_aux("source[First]", "First * 10") // [10, 20]
+            // combined should broadcast source across Second dimension
+            // combined[1,1]=10, combined[1,2]=10, combined[2,1]=20, combined[2,2]=20
+            .array_aux("combined[First, Second]", "source");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[10.0, 10.0, 20.0, 20.0]);
+    }
+
+    #[test]
+    fn second_dim_reference_in_2d_context() {
+        // Verify that a 1D array on the SECOND dimension can be referenced
+        // in a 2D A2A context.
+        let project = TestProject::new("second_dim_2d")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .array_aux("source[Second]", "Second") // [1, 2]
+            // combined should broadcast source across First dimension
+            // combined[1,1]=1, combined[1,2]=2, combined[2,1]=1, combined[2,2]=2
+            .array_aux("combined[First, Second]", "source");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn add_1d_same_dim_arrays_in_2d_context() {
+        // Test adding two 1D arrays on the SAME dimension in 2D context
+        let project = TestProject::new("add_same_dim")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .array_aux("a[First]", "First * 10") // [10, 20]
+            .array_aux("b[First]", "First") // [1, 2]
+            // a + b on same First dimension
+            // combined[1,1]=11, combined[1,2]=11, combined[2,1]=22, combined[2,2]=22
+            .array_aux("combined[First, Second]", "a + b");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[11.0, 11.0, 22.0, 22.0]);
+    }
+
+    #[test]
+    #[ignore] // TODO: Broadcasting 1D arrays on different dimensions to 2D requires additional compiler work
+    fn add_1d_different_dim_arrays_in_2d_context() {
+        // This is the critical test: adding two 1D arrays on DIFFERENT dimensions
+        let project = TestProject::new("add_diff_dim")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .array_aux("a[First]", "First * 10") // [10, 20]
+            .array_aux("b[Second]", "Second") // [1, 2]
+            // combined[i,j] = a[i] + b[j]
+            // combined[1,1]=11, combined[1,2]=12, combined[2,1]=21, combined[2,2]=22
+            .array_aux("combined[First, Second]", "a + b");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[11.0, 12.0, 21.0, 22.0]);
+    }
+
+    #[test]
+    fn add_scalar_to_1d_on_second_dim() {
+        // Test adding scalar to 1D array on second dimension
+        let project = TestProject::new("scalar_plus_second")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .array_aux("b[Second]", "Second") // [1, 2]
+            .scalar_const("ten", 10.0)
+            // combined[i,j] = ten + b[j]
+            .array_aux("combined[First, Second]", "ten + b");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[11.0, 12.0, 11.0, 12.0]);
+    }
+
+    #[test]
+    fn just_reference_second_dim_in_2d() {
+        // Simple test: just reference a 1D array on Second dimension in 2D context
+        let project = TestProject::new("just_second")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .array_aux("b[Second]", "Second") // [1, 2]
+            // combined[i,j] = b[j]
+            .array_aux("combined[First, Second]", "b");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn just_reference_first_dim_in_2d() {
+        // Simple test: just reference a 1D array on First dimension in 2D context
+        let project = TestProject::new("just_first")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .array_aux("a[First]", "First * 10") // [10, 20]
+            // combined[i,j] = a[i]
+            .array_aux("combined[First, Second]", "a");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[10.0, 10.0, 20.0, 20.0]);
+    }
+
+    #[test]
+    #[ignore] // TODO: Broadcasting 1D arrays on different dimensions to 2D requires additional compiler work
+    fn name_match_before_size_match_for_indexed_dims() {
+        // Test that when matching implicit subscripts, we prefer name matching over
+        // size-based positional matching. This tests the fix for a bug where having
+        // active_dims = [DimA(3), DimB(3)] and looking for DimB would incorrectly
+        // match DimA due to size-based fallback triggering before name check.
+        //
+        // Simpler test: 2D array that sums values from two 1D arrays on different dims.
+        // This requires proper name-based matching to broadcast correctly.
+        let project = TestProject::new("name_before_size")
+            .indexed_dimension("First", 3)
+            .indexed_dimension("Second", 2)
+            .array_aux("first_vals[First]", "First * 100") // [100, 200, 300]
+            .array_aux("second_vals[Second]", "Second") // [1, 2]
+            // combined[i, j] = first_vals[i] + second_vals[j]
+            // Should be: [101, 102, 201, 202, 301, 302] (row-major order)
+            .array_aux("combined[First, Second]", "first_vals + second_vals");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result("combined", &[101.0, 102.0, 201.0, 202.0, 301.0, 302.0]);
+    }
+
+    #[test]
+    #[ignore] // TODO: Broadcasting 1D arrays on different dimensions to 2D requires additional compiler work
+    fn name_match_same_size_dims() {
+        // More challenging test: two indexed dimensions of THE SAME SIZE.
+        // This specifically tests that name-based matching takes precedence
+        // over size-based fallback.
+        let project = TestProject::new("name_before_size_same_size")
+            .indexed_dimension("First", 3)
+            .indexed_dimension("Second", 3)
+            .array_aux("first_vals[First]", "First * 100") // [100, 200, 300]
+            .array_aux("second_vals[Second]", "Second") // [1, 2, 3]
+            // combined[i, j] = first_vals[i] + second_vals[j]
+            // Should be: [101, 102, 103, 201, 202, 203, 301, 302, 303]
+            .array_aux("combined[First, Second]", "first_vals + second_vals");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "combined",
+            &[
+                101.0, 102.0, 103.0, 201.0, 202.0, 203.0, 301.0, 302.0, 303.0,
+            ],
+        );
+    }
 }
