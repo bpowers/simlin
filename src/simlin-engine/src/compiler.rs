@@ -151,8 +151,14 @@ fn normalize_subscripts3(args: &[IndexExpr3], config: &Subscript3Config) -> Opti
                 }
             }
 
+            // StaticRange - already has 0-based indices from Expr2→Expr3 lowering
+            IndexExpr3::StaticRange(start_0based, end_0based, _) => {
+                IndexOp::Range(*start_0based, *end_0based)
+            }
+
             IndexExpr3::Range(start_expr, end_expr, _) => {
-                // Helper to resolve a dimension element to an index
+                // Dynamic range - try to resolve both bounds to constants
+                // If either can't be resolved, normalization fails and we fall back to dynamic handling
                 let resolve_to_index = |expr: &Expr3| -> Option<usize> {
                     match expr {
                         Expr3::Const(_, val, _) => {
@@ -464,14 +470,40 @@ fn build_view_from_ops(
     })
 }
 
+/// Represents a single subscript index in a dynamic Subscript expression.
+/// This enum distinguishes between single-element access and range access,
+/// enabling proper bytecode generation for dynamic ranges.
+#[derive(PartialEq, Clone, Debug)]
+pub enum SubscriptIndex {
+    /// Single element access - evaluates to a 1-based index
+    Single(Expr),
+    /// Range access - start and end expressions (1-based, inclusive)
+    /// Used for dynamic ranges like arr[start:end] where bounds are variables
+    Range(Expr, Expr),
+}
+
+impl SubscriptIndex {
+    #[cfg(test)]
+    pub(crate) fn strip_loc(self) -> Self {
+        match self {
+            SubscriptIndex::Single(expr) => SubscriptIndex::Single(expr.strip_loc()),
+            SubscriptIndex::Range(start, end) => {
+                SubscriptIndex::Range(start.strip_loc(), end.strip_loc())
+            }
+        }
+    }
+}
+
 #[derive(PartialEq, Clone, Debug)]
 #[allow(dead_code)]
 pub enum Expr {
     Const(f64, Loc),
-    Var(usize, Loc),                              // offset
-    Subscript(usize, Vec<Expr>, Vec<usize>, Loc), // offset, index expression, bounds (for dynamic/old-style)
-    StaticSubscript(usize, ArrayView, Loc),       // offset, precomputed view, location
-    TempArray(u32, ArrayView, Loc),               // temp id, view into temp array, location
+    Var(usize, Loc), // offset
+    /// Dynamic subscript with possible range indices
+    /// (offset, subscript indices, dimension sizes, location)
+    Subscript(usize, Vec<SubscriptIndex>, Vec<usize>, Loc),
+    StaticSubscript(usize, ArrayView, Loc), // offset, precomputed view, location
+    TempArray(u32, ArrayView, Loc),         // temp id, view into temp array, location
     TempArrayElement(u32, ArrayView, usize, Loc), // temp id, view, element index, location
     Dt(Loc),
     App(BuiltinFn, Loc),
@@ -2084,8 +2116,10 @@ impl Context<'_> {
         })
     }
 
-    /// Lower an IndexExpr3 to Expr for dynamic subscript handling.
+    /// Lower an IndexExpr3 to SubscriptIndex for dynamic subscript handling.
     /// This is used when normalize_subscripts3 returns None.
+    /// Returns SubscriptIndex::Single for single-element access or
+    /// SubscriptIndex::Range for range access.
     #[allow(clippy::too_many_arguments)]
     fn lower_index_expr3(
         &self,
@@ -2095,7 +2129,7 @@ impl Context<'_> {
         dims: &[Dimension],
         _orig_dims: &[usize],
         _loc: Loc,
-    ) -> Result<Expr> {
+    ) -> Result<SubscriptIndex> {
         match idx {
             IndexExpr3::StarRange(subdim_name, star_loc) => {
                 // StarRange in dynamic context - need to resolve the current element
@@ -2120,11 +2154,17 @@ impl Context<'_> {
                             if let Dimension::Named(_, _) = dim
                                 && let Some(subscript_off) = dim.get_offset(active_subscript)
                             {
-                                return Ok(Expr::Const((subscript_off + 1) as f64, *star_loc));
+                                return Ok(SubscriptIndex::Single(Expr::Const(
+                                    (subscript_off + 1) as f64,
+                                    *star_loc,
+                                )));
                             } else if let Dimension::Indexed(_, _) = dim
                                 && let Ok(idx_val) = active_subscript.as_str().parse::<usize>()
                             {
-                                return Ok(Expr::Const(idx_val as f64, *star_loc));
+                                return Ok(SubscriptIndex::Single(Expr::Const(
+                                    idx_val as f64,
+                                    *star_loc,
+                                )));
                             }
                         }
                     }
@@ -2134,9 +2174,20 @@ impl Context<'_> {
                 sim_err!(TodoStarRange, id.as_str().to_string())
             }
 
-            IndexExpr3::Range(_start, _end, _range_loc) => {
-                // Range in dynamic context - not yet supported
-                sim_err!(TodoRange, id.as_str().to_string())
+            // StaticRange - should have been handled by normalize_subscripts3,
+            // but handle here as a fallback by creating a Range with constants
+            IndexExpr3::StaticRange(start_0based, end_0based, loc) => {
+                // Convert back to 1-based for the Expr (XMILE uses 1-based indices)
+                let start_expr = Expr::Const((*start_0based + 1) as f64, *loc);
+                let end_expr = Expr::Const(*end_0based as f64, *loc);
+                Ok(SubscriptIndex::Range(start_expr, end_expr))
+            }
+
+            IndexExpr3::Range(start, end, _range_loc) => {
+                // Dynamic range - lower both bound expressions
+                let start_expr = self.lower_from_expr3(start)?;
+                let end_expr = self.lower_from_expr3(end)?;
+                Ok(SubscriptIndex::Range(start_expr, end_expr))
             }
 
             IndexExpr3::DimPosition(pos, dim_loc) => {
@@ -2157,9 +2208,15 @@ impl Context<'_> {
                 let dim = &dims[i];
 
                 if let Some(offset) = dim.get_offset(subscript) {
-                    Ok(Expr::Const((offset + 1) as f64, *dim_loc))
+                    Ok(SubscriptIndex::Single(Expr::Const(
+                        (offset + 1) as f64,
+                        *dim_loc,
+                    )))
                 } else if let Ok(idx_val) = subscript.as_str().parse::<usize>() {
-                    Ok(Expr::Const(idx_val as f64, *dim_loc))
+                    Ok(SubscriptIndex::Single(Expr::Const(
+                        idx_val as f64,
+                        *dim_loc,
+                    )))
                 } else {
                     sim_err!(MismatchedDimensions, id.as_str().to_string())
                 }
@@ -2174,7 +2231,10 @@ impl Context<'_> {
                     if let Some(offset) = dim.get_offset(
                         &crate::common::CanonicalElementName::from_raw(ident.as_str()),
                     ) {
-                        return Ok(Expr::Const((offset + 1) as f64, *var_loc));
+                        return Ok(SubscriptIndex::Single(Expr::Const(
+                            (offset + 1) as f64,
+                            *var_loc,
+                        )));
                     }
 
                     // Check for DimName.Index syntax (e.g., "Dim.3" for indexed dimensions)
@@ -2187,7 +2247,9 @@ impl Context<'_> {
                             // Validate the index is within bounds (1-based)
                             let size_usize = *size as usize;
                             if idx >= 1 && idx <= size_usize {
-                                return Ok(Expr::Const(idx as f64, *var_loc));
+                                return Ok(SubscriptIndex::Single(Expr::Const(
+                                    idx as f64, *var_loc,
+                                )));
                             }
                         }
                     }
@@ -2213,11 +2275,17 @@ impl Context<'_> {
                         {
                             if canonicalize(active_dim.name()).as_str() == ident.as_str() {
                                 if let Some(offset) = dim.get_offset(active_subscript) {
-                                    return Ok(Expr::Const((offset + 1) as f64, *var_loc));
+                                    return Ok(SubscriptIndex::Single(Expr::Const(
+                                        (offset + 1) as f64,
+                                        *var_loc,
+                                    )));
                                 } else if let Ok(idx_val) =
                                     active_subscript.as_str().parse::<usize>()
                                 {
-                                    return Ok(Expr::Const(idx_val as f64, *var_loc));
+                                    return Ok(SubscriptIndex::Single(Expr::Const(
+                                        idx_val as f64,
+                                        *var_loc,
+                                    )));
                                 }
                             }
                         }
@@ -2225,7 +2293,7 @@ impl Context<'_> {
                 }
 
                 // Fall back to lowering the expression directly
-                self.lower_from_expr3(e)
+                Ok(SubscriptIndex::Single(self.lower_from_expr3(e)?))
             }
 
             IndexExpr3::Dimension(name, dim_loc) => {
@@ -2237,7 +2305,10 @@ impl Context<'_> {
                 if let Some(offset) = dim.get_offset(
                     &crate::common::CanonicalElementName::from_raw(name.as_str()),
                 ) {
-                    return Ok(Expr::Const((offset + 1) as f64, *dim_loc));
+                    return Ok(SubscriptIndex::Single(Expr::Const(
+                        (offset + 1) as f64,
+                        *dim_loc,
+                    )));
                 }
 
                 // A2A dimension reference in dynamic context
@@ -2255,9 +2326,15 @@ impl Context<'_> {
                     if canonicalize(active_dim.name()).as_str() == name.as_str() {
                         // Found the matching dimension
                         if let Some(offset) = dim.get_offset(active_subscript) {
-                            return Ok(Expr::Const((offset + 1) as f64, *dim_loc));
+                            return Ok(SubscriptIndex::Single(Expr::Const(
+                                (offset + 1) as f64,
+                                *dim_loc,
+                            )));
                         } else if let Ok(idx_val) = active_subscript.as_str().parse::<usize>() {
-                            return Ok(Expr::Const(idx_val as f64, *dim_loc));
+                            return Ok(SubscriptIndex::Single(Expr::Const(
+                                idx_val as f64,
+                                *dim_loc,
+                            )));
                         }
                     }
                 }
@@ -2831,7 +2908,13 @@ fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
         Expr::Const(_, _) | Expr::Var(_, _) | Expr::Dt(_) => {}
         Expr::Subscript(_, indices, _, _) => {
             for idx in indices {
-                extract_temp_sizes(idx, temp_sizes_map);
+                match idx {
+                    SubscriptIndex::Single(e) => extract_temp_sizes(e, temp_sizes_map),
+                    SubscriptIndex::Range(start, end) => {
+                        extract_temp_sizes(start, temp_sizes_map);
+                        extract_temp_sizes(end, temp_sizes_map);
+                    }
+                }
             }
         }
         Expr::StaticSubscript(_, _, _) => {}
@@ -3591,6 +3674,48 @@ impl<'module> Compiler<'module> {
                 self.push(Opcode::PushStaticView { view_id });
                 Ok(())
             }
+            Expr::Subscript(off, indices, bounds, _) => {
+                // Dynamic subscript with potential range indices
+                // First, push a full view for the base array using explicit bounds
+                let n_dims = bounds.len().min(4) as u8;
+                let mut dims = [0u16; 4];
+                for (i, &bound) in bounds.iter().take(4).enumerate() {
+                    dims[i] = bound as u16;
+                }
+                self.push(Opcode::PushVarViewDirect {
+                    base_off: *off as u16,
+                    n_dims,
+                    dims,
+                });
+
+                // Apply each subscript index to the view.
+                // Single subscripts collapse dimensions, so we track how many have been
+                // processed to compute effective_dim for subsequent ops.
+                let mut singles_processed = 0usize;
+                for (i, idx) in indices.iter().enumerate() {
+                    let effective_dim = (i - singles_processed) as u8;
+
+                    match idx {
+                        SubscriptIndex::Single(expr) => {
+                            // Evaluate the index expression and apply single subscript
+                            self.walk_expr(expr).unwrap().unwrap();
+                            self.push(Opcode::ViewSubscriptDynamic {
+                                dim_idx: effective_dim,
+                            });
+                            singles_processed += 1; // Track collapse for subsequent indices
+                        }
+                        SubscriptIndex::Range(start, end) => {
+                            // Evaluate start and end, then apply dynamic range
+                            self.walk_expr(start).unwrap().unwrap();
+                            self.walk_expr(end).unwrap().unwrap();
+                            self.push(Opcode::ViewRangeDynamic {
+                                dim_idx: effective_dim,
+                            });
+                        }
+                    }
+                }
+                Ok(())
+            }
             _ => {
                 sim_err!(
                     Generic,
@@ -3628,10 +3753,24 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::Subscript(off, indices, bounds, _) => {
-                for (i, expr) in indices.iter().enumerate() {
-                    self.walk_expr(expr).unwrap().unwrap();
-                    let bounds = bounds[i] as VariableOffset;
-                    self.push(Opcode::PushSubscriptIndex { bounds });
+                // For scalar access (old-style Subscript), all indices must be Single
+                for (i, idx) in indices.iter().enumerate() {
+                    match idx {
+                        SubscriptIndex::Single(expr) => {
+                            self.walk_expr(expr).unwrap().unwrap();
+                            let bounds = bounds[i] as VariableOffset;
+                            self.push(Opcode::PushSubscriptIndex { bounds });
+                        }
+                        SubscriptIndex::Range(_, _) => {
+                            // Range subscripts should be handled via walk_expr_as_view
+                            // in reduction context, not through scalar walk_expr
+                            return sim_err!(
+                                Generic,
+                                "Range subscript in scalar context - use walk_expr_as_view"
+                                    .to_string()
+                            );
+                        }
+                    }
                 }
                 assert!(indices.len() == bounds.len());
                 self.push(Opcode::LoadSubscript {
@@ -4161,6 +4300,13 @@ fn paren_if_necessary(parent: &Expr, child: &Expr, eqn: String) -> String {
     }
 }
 
+fn pretty_subscript_index(idx: &SubscriptIndex) -> String {
+    match idx {
+        SubscriptIndex::Single(e) => pretty(e),
+        SubscriptIndex::Range(start, end) => format!("{}:{}", pretty(start), pretty(end)),
+    }
+}
+
 #[allow(dead_code)]
 pub fn pretty(expr: &Expr) -> String {
     match expr {
@@ -4191,7 +4337,7 @@ pub fn pretty(expr: &Expr) -> String {
             format!("temp[{id}][{idx}] (dims: [{}])", dims.join(", "))
         }
         Expr::Subscript(off, args, bounds, _) => {
-            let args: Vec<_> = args.iter().map(pretty).collect();
+            let args: Vec<_> = args.iter().map(pretty_subscript_index).collect();
             let string_args = args.join(", ");
             let bounds: Vec<_> = bounds.iter().map(|bounds| format!("{bounds}")).collect();
             let string_bounds = bounds.join(", ");

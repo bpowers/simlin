@@ -689,6 +689,24 @@ impl Vm {
                     view_stack.push(static_view.to_runtime_view());
                 }
 
+                Opcode::PushVarViewDirect {
+                    base_off,
+                    n_dims,
+                    dims,
+                } => {
+                    // Build a view with explicit dimension sizes (no dim_id lookup needed)
+                    let n = *n_dims as usize;
+                    let dims_vec: SmallVec<[u16; 4]> = dims[..n].iter().copied().collect();
+                    // Use 0 as dim_id since we don't have dimension metadata
+                    let dim_ids: SmallVec<[DimId; 4]> = (0..n).map(|_| 0 as DimId).collect();
+                    let view = RuntimeView::for_var(
+                        (module_off + *base_off as usize) as u32,
+                        dims_vec,
+                        dim_ids,
+                    );
+                    view_stack.push(view);
+                }
+
                 Opcode::ViewSubscriptConst { dim_idx, index } => {
                     let view = view_stack.last_mut().unwrap();
                     view.apply_single_subscript(*dim_idx as usize, *index);
@@ -710,6 +728,15 @@ impl Vm {
                 } => {
                     let view = view_stack.last_mut().unwrap();
                     view.apply_range(*dim_idx as usize, *start, *end);
+                }
+
+                Opcode::ViewRangeDynamic { dim_idx } => {
+                    // Pop end and start from stack (1-based indices, inclusive range)
+                    let end_1based = stack.pop() as u16;
+                    let start_1based = stack.pop() as u16;
+                    let view = view_stack.last_mut().unwrap();
+                    // apply_range_checked handles validation and 1-based to 0-based conversion
+                    view.apply_range_checked(*dim_idx as usize, start_1based, end_1based);
                 }
 
                 Opcode::ViewStarRange {

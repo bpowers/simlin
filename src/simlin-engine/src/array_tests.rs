@@ -1845,6 +1845,179 @@ mod structural_lowering_tests {
     }
 
     #[test]
+    fn sum_with_dynamic_range() {
+        // Test SUM(arr[start:end]) where start and end are variables
+        // This is the critical dynamic range in reduction context case
+        let project = TestProject::new("sum_dynamic_range")
+            .indexed_dimension("Index", 10)
+            .array_aux("data[Index]", "Index") // data = [1,2,3,4,5,6,7,8,9,10]
+            .scalar_const("start_idx", 3.0)
+            .scalar_const("end_idx", 7.0)
+            // SUM(data[3:7]) should sum elements at indices 3,4,5,6,7 = 3+4+5+6+7 = 25
+            .scalar_aux("total", "SUM(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("total", 25.0);
+    }
+
+    #[test]
+    fn sum_with_dynamic_range_2d() {
+        // Test dynamic range in 2D array context
+        let project = TestProject::new("sum_dynamic_range_2d")
+            .indexed_dimension("Row", 4)
+            .indexed_dimension("Col", 5)
+            // matrix[r,c] = r*10 + c: [[11,12,13,14,15], [21,22,23,24,25], [31,32,33,34,35], [41,42,43,44,45]]
+            .array_aux("matrix[Row,Col]", "Row * 10 + Col")
+            .scalar_const("col_start", 2.0)
+            .scalar_const("col_end", 4.0)
+            // Sum row 2 columns 2:4 -> matrix[2,2] + matrix[2,3] + matrix[2,4] = 22+23+24 = 69
+            .scalar_aux("partial_sum", "SUM(matrix[2, col_start:col_end])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("partial_sum", 69.0);
+    }
+
+    #[test]
+    fn sum_with_dynamic_range_mixed_subscripts_3d() {
+        // Test dimension index adjustment with multiple single subscripts
+        // cube[1, row_start:row_end, 2] - single, range, single pattern
+        let project = TestProject::new("sum_dynamic_range_3d")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 4)
+            .indexed_dimension("Z", 3)
+            // cube[x,y,z] = x*100 + y*10 + z
+            .array_aux("cube[X,Y,Z]", "X * 100 + Y * 10 + Z")
+            .scalar_const("row_start", 2.0)
+            .scalar_const("row_end", 3.0)
+            // Sum cube[1, 2:3, 2] = cube[1,2,2] + cube[1,3,2] = (100+20+2) + (100+30+2) = 122+132 = 254
+            .scalar_aux("result", "SUM(cube[1, row_start:row_end, 2])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 254.0);
+    }
+
+    #[test]
+    fn sum_with_dynamic_range_reversed() {
+        // Test reversed range (start > end) - should produce empty sum (0)
+        let project = TestProject::new("sum_reversed_range")
+            .indexed_dimension("Index", 10)
+            .array_aux("data[Index]", "Index")
+            .scalar_const("start_idx", 7.0)
+            .scalar_const("end_idx", 3.0) // end < start
+            .scalar_aux("total", "SUM(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Reversed range should be empty, sum = 0
+        project.assert_scalar_result("total", 0.0);
+    }
+
+    #[test]
+    fn sum_with_dynamic_range_out_of_bounds() {
+        // Test range exceeding array bounds - should clamp to valid range
+        let project = TestProject::new("sum_oob_range")
+            .indexed_dimension("Index", 5)
+            .array_aux("data[Index]", "Index") // [1,2,3,4,5]
+            .scalar_const("start_idx", 3.0)
+            .scalar_const("end_idx", 100.0) // way past the end
+            // SUM(data[3:100]) should clamp to [3:5] = 3+4+5 = 12
+            .scalar_aux("total", "SUM(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("total", 12.0);
+    }
+
+    #[test]
+    fn sum_with_dynamic_range_zero_start() {
+        // Test with start=0 (invalid in 1-based XMILE indexing)
+        // Should treat as start=1 or return empty/invalid result
+        let project = TestProject::new("sum_zero_start")
+            .indexed_dimension("Index", 5)
+            .array_aux("data[Index]", "Index") // [1,2,3,4,5]
+            .scalar_const("start_idx", 0.0) // Invalid: 0 in 1-based indexing
+            .scalar_const("end_idx", 3.0)
+            // SUM(data[0:3]) - start=0 is clamped/handled, should sum 1+2+3 = 6
+            .scalar_aux("total", "SUM(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // With 0 start clamped to valid range, we get data[1:3] = 1+2+3 = 6
+        project.assert_scalar_result("total", 6.0);
+    }
+
+    #[test]
+    fn sum_with_dynamic_range_single_element() {
+        // Test range that selects exactly one element
+        let project = TestProject::new("sum_single_element")
+            .indexed_dimension("Index", 5)
+            .array_aux("data[Index]", "Index * 10") // [10,20,30,40,50]
+            .scalar_const("idx", 3.0)
+            // SUM(data[3:3]) - single element range
+            .scalar_aux("total", "SUM(data[idx:idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // data[3] = 30
+        project.assert_scalar_result("total", 30.0);
+    }
+
+    #[test]
+    fn mean_with_dynamic_range() {
+        // Test MEAN with dynamic range - must use actual range size, not full array size
+        let project = TestProject::new("mean_dynamic_range")
+            .indexed_dimension("Index", 5)
+            .array_aux("data[Index]", "Index * 10") // [10, 20, 30, 40, 50]
+            .scalar_const("start_idx", 2.0)
+            .scalar_const("end_idx", 3.0)
+            // MEAN(data[2:3]) should be (20 + 30) / 2 = 25
+            // NOT (20 + 30) / 5 = 10 (which would be wrong if using full array size)
+            .scalar_aux("result", "MEAN(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 25.0);
+    }
+
+    #[test]
+    fn size_with_dynamic_range() {
+        // Test SIZE with dynamic range - must return actual range size
+        let project = TestProject::new("size_dynamic_range")
+            .indexed_dimension("Index", 10)
+            .array_aux("data[Index]", "Index")
+            .scalar_const("start_idx", 3.0)
+            .scalar_const("end_idx", 7.0)
+            // SIZE(data[3:7]) should be 5 (elements 3, 4, 5, 6, 7)
+            // NOT 10 (full array size)
+            .scalar_aux("result", "SIZE(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 5.0);
+    }
+
+    #[test]
+    fn stddev_with_dynamic_range() {
+        // Test STDDEV with dynamic range - must use actual range size
+        let project = TestProject::new("stddev_dynamic_range")
+            .indexed_dimension("Index", 5)
+            .array_aux("data[Index]", "Index * 10") // [10, 20, 30, 40, 50]
+            .scalar_const("start_idx", 2.0)
+            .scalar_const("end_idx", 4.0)
+            // STDDEV(data[2:4]) for values [20, 30, 40]:
+            // mean = 30, variance = ((20-30)^2 + (30-30)^2 + (40-30)^2) / 2 = (100 + 0 + 100) / 2 = 100
+            // stddev = sqrt(100) = 10
+            .scalar_aux("result", "STDDEV(data[start_idx:end_idx])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("result", 10.0);
+    }
+
+    #[test]
     fn sum_with_dim_name_subscript_preserves_other_dimension() {
         // SUM(m[DimD, *]) should preserve the array for the * dimension
         // while collapsing DimD to the current A2A element
