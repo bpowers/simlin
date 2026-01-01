@@ -2440,6 +2440,30 @@ mod indexed_dimension_tests {
     }
 
     #[test]
+    fn named_dims_same_size_no_fallback() {
+        // Test that named dimensions of the same size do NOT use size-based fallback.
+        // Named dimensions must match by name because their elements have semantic meaning.
+        // Cities=[Boston,Seattle] and Products=[Widgets,Gadgets] shouldn't match just
+        // because both have size 2 - that would be semantically incorrect.
+        //
+        // This test verifies that trying to add arrays with different named dimensions
+        // (even if same size) results in a compilation error, not silent size-based matching.
+        use crate::common::ErrorCode;
+
+        let project = TestProject::new("named_same_size")
+            .named_dimension("Cities", &["Boston", "Seattle"])
+            .named_dimension("Products", &["Widgets", "Gadgets"])
+            .array_aux("sales[Cities]", "Cities") // [1, 2]
+            .array_aux("prices[Products]", "Products") // [1, 2]
+            // This should fail to compile - Cities and Products are incompatible
+            // even though both have size 2
+            .array_aux("bad[Cities]", "sales + prices");
+
+        // This should fail during compilation because the dimensions don't match
+        project.assert_compile_error(ErrorCode::MismatchedDimensions);
+    }
+
+    #[test]
     #[ignore]
     fn bounds_check_in_fast_path() {
         // TODO: Requires compiler-level changes for different-sized array assignment.

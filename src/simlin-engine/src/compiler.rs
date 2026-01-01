@@ -783,6 +783,15 @@ impl Context<'_> {
             // SECOND PASS: Only if no name match exists, try size-based matching
             // for indexed dimensions. Find the first unused indexed dimension with
             // the same size.
+            //
+            // IMPORTANT: Size-based fallback only applies when BOTH dimensions are
+            // indexed. Named dimensions must match by name (or subdimension relationship)
+            // because their elements have semantic meaning. For example, Cities=[Boston,
+            // Seattle] and Products=[Widgets,Gadgets] shouldn't match just because both
+            // have size 2 - that would be semantically incorrect.
+            //
+            // NOTE: This algorithm mirrors the dimension matching in vm.rs LoadIterViewTop.
+            // If you modify this logic, update the VM implementation as well.
             let size_match_idx = if let Dimension::Indexed(_, dim_size) = dim {
                 active_dims.iter().enumerate().find_map(|(i, candidate)| {
                     if !used[i]

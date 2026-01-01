@@ -945,7 +945,16 @@ impl Vm {
                                 }
                             }
 
-                            // Pass 2: Size-based fallback for unmatched indexed dimensions
+                            // Pass 2: Size-based fallback for unmatched indexed dimensions.
+                            //
+                            // IMPORTANT: Size-based fallback only applies when BOTH dimensions
+                            // are indexed. Named dimensions must match by name because their
+                            // elements have semantic meaning. For example, Cities=[Boston,Seattle]
+                            // and Products=[Widgets,Gadgets] shouldn't match just because both
+                            // have size 2.
+                            //
+                            // NOTE: This algorithm mirrors compiler.rs get_implicit_subscripts.
+                            // If you modify this logic, update the compiler implementation too.
                             for (src_dim_pos, src_dim_id) in source_view.dim_ids.iter().enumerate()
                             {
                                 if source_to_iter[src_dim_pos].is_some() {
