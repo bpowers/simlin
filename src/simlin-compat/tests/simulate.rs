@@ -476,8 +476,8 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // EmptyEquation: uses GET DIRECT SUBSCRIPT
     // "test/sdeverywhere/models/directsubs/directsubs.xmile",
     //
-    // EmptyEquation: uses ELMCOUNT builtin (not yet implemented)
-    // "test/sdeverywhere/models/elmcount/elmcount.xmile",
+    // ELMCOUNT/SIZE(DimensionName) - now supported
+    "test/sdeverywhere/models/elmcount/elmcount.xmile",
     //
     // MismatchedDimensions: uses Vensim EXCEPT syntax with subscript mappings
     // "test/sdeverywhere/models/except/except.xmile",

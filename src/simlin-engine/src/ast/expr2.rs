@@ -629,7 +629,31 @@ impl Expr2 {
                         })
                         .transpose()?,
                     ),
-                    Size(e) => Size(Box::new(Expr2::from(*e, ctx)?)),
+                    Size(e) => {
+                        // Special case: SIZE(DimensionName) returns the element count of the dimension.
+                        // This is used by Vensim's ELMCOUNT function (converted to SIZE in XMILE).
+                        //
+                        // Note: The XMILE spec (section 3.7.1) states that dimension names "must be
+                        // distinct from model variables names within the whole-model." Therefore, we
+                        // don't need to disambiguate between a dimension and variable with the same
+                        // name - that's an invalid model per the spec. We check dimension names first,
+                        // which is the sensible default since SIZE(array_var) can use SIZE(arr[*])
+                        // syntax for explicit array sizing.
+                        if let Expr1::Var(ref id, loc) = *e
+                            && ctx.is_dimension_name(id.as_str())
+                        {
+                            // Convert SIZE(DimName) to a constant
+                            let dim_name = CanonicalDimensionName::from_raw(id.as_str());
+                            if let Some(len) = ctx.get_dimension_len(&dim_name) {
+                                // Return a constant expression with the dimension size
+                                return Ok(Expr2::Const(len.to_string(), len as f64, loc));
+                            }
+                            // If we can't find the dimension length, fall through to normal processing
+                            // which will produce an appropriate error
+                        }
+                        // Normal case: SIZE(array_expression)
+                        Size(Box::new(Expr2::from(*e, ctx)?))
+                    }
                     Stddev(e) => Stddev(Box::new(Expr2::from(*e, ctx)?)),
                     Sum(e) => Sum(Box::new(Expr2::from(*e, ctx)?)),
                 };
