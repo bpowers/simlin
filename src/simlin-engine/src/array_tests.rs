@@ -1171,6 +1171,46 @@ mod range_tests {
     }
 
     #[test]
+    fn size_of_dimension_name() {
+        // Test SIZE(DimensionName) - should return the element count of the dimension
+        // This is used by Vensim's ELMCOUNT function (converted to SIZE in XMILE)
+        let project = TestProject::new("size_dim_name")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .scalar_aux("a", "SIZE(DimA)"); // Should be 3
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("a", 3.0);
+    }
+
+    #[test]
+    fn size_of_indexed_dimension_name() {
+        // Test SIZE(DimensionName) with indexed dimension
+        let project = TestProject::new("size_indexed_dim")
+            .indexed_dimension("Items", 5)
+            .scalar_aux("count", "SIZE(Items)"); // Should be 5
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("count", 5.0);
+    }
+
+    #[test]
+    fn size_of_dimension_in_expression() {
+        // Test SIZE(DimensionName) used in larger expressions
+        // This mirrors the elmcount test model: b = 10*SIZE(DimA) + a
+        let project = TestProject::new("size_dim_expr")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .scalar_aux("a", "SIZE(DimA)") // a = 3
+            .array_aux("b[DimA]", "10*SIZE(DimA)+a"); // b = 10*3 + 3 = 33
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_scalar_result("a", 3.0);
+        project.assert_interpreter_result("b", &[33.0, 33.0, 33.0]);
+    }
+
+    #[test]
     fn named_range_sum() {
         // Test SUM with named dimension range
         let project = TestProject::new("named_range_sum")
