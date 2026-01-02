@@ -426,11 +426,133 @@ fn simulates_2d_array() {
     );
 }
 
+// Commented out: test_generator approach is useful for discovery but generates many tests.
+// Use simulates_arrayed_models_correctly below for the curated list.
 // #[test_generator::test_resources("test/sdeverywhere/models/**/*.xmile")]
 // fn simulates_sdeverywhere(resource: &str) {
 //     let resource = format!("../../{}", resource);
 //     simulate_path(&resource);
 // }
+
+/// SDEverywhere test models from test/sdeverywhere/models/**/*.xmile
+/// These are Vensim models converted to XMILE format.
+static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
+    // Passing tests
+    "test/sdeverywhere/models/active_initial/active_initial.xmile",
+    "test/sdeverywhere/models/comments/comments.xmile",
+    "test/sdeverywhere/models/index/index.xmile",
+    "test/sdeverywhere/models/initial/initial.xmile",
+    "test/sdeverywhere/models/pulsetrain/pulsetrain.xmile",
+    "test/sdeverywhere/models/sir/sir.xmile",
+    "test/sdeverywhere/models/specialchars/specialchars.xmile",
+    "test/sdeverywhere/models/subalias/subalias.xmile",
+    "test/sdeverywhere/models/trend/trend.xmile",
+    //
+    // Failing tests - commented out with reasons
+    //
+    // NotSimulatable: uses ALLOCATE AVAILABLE builtin
+    // "test/sdeverywhere/models/allocate/allocate.xmile",
+    //
+    // NotSimulatable: uses GET DIRECT CONSTANTS
+    // "test/sdeverywhere/models/arrays_cname/arrays_cname.xmile",
+    // "test/sdeverywhere/models/arrays_varname/arrays_varname.xmile",
+    //
+    // EmptyEquation: uses DELAY1I/DELAY3I with arrayed initial values
+    // "test/sdeverywhere/models/delay/delay.xmile",
+    //
+    // EmptyEquation: uses DELAY FIXED builtin
+    // "test/sdeverywhere/models/delayfixed/delayfixed.xmile",
+    // "test/sdeverywhere/models/delayfixed2/delayfixed2.xmile",
+    //
+    // Wrong values: sparse array initialization not fully supported
+    // "test/sdeverywhere/models/directconst/directconst.xmile",
+    //
+    // Assertion failure in dat loading: time ordering issue
+    // "test/sdeverywhere/models/directdata/directdata.xmile",
+    //
+    // EmptyEquation: uses GET DIRECT LOOKUPS
+    // "test/sdeverywhere/models/directlookups/directlookups.xmile",
+    //
+    // EmptyEquation: uses GET DIRECT SUBSCRIPT
+    // "test/sdeverywhere/models/directsubs/directsubs.xmile",
+    //
+    // EmptyEquation: uses ELMCOUNT builtin (not yet implemented)
+    // "test/sdeverywhere/models/elmcount/elmcount.xmile",
+    //
+    // MismatchedDimensions: uses Vensim EXCEPT syntax with subscript mappings
+    // "test/sdeverywhere/models/except/except.xmile",
+    // "test/sdeverywhere/models/except2/except2.xmile",
+    //
+    // EmptyEquation: uses GET XLS DATA
+    // "test/sdeverywhere/models/extdata/extdata.xmile",
+    //
+    // No expected results / not test models (preprocessing test files)
+    // "test/sdeverywhere/models/flatten/expected.xmile",
+    // "test/sdeverywhere/models/flatten/input1.xmile",
+    // "test/sdeverywhere/models/flatten/input2.xmile",
+    //
+    // EmptyEquation: uses GET DATA BETWEEN TIMES
+    // "test/sdeverywhere/models/getdata/getdata.xmile",
+    //
+    // EmptyEquation: uses INTEG with complex initialization
+    // "test/sdeverywhere/models/interleaved/interleaved.xmile",
+    //
+    // EmptyEquation: uses :EXCEPT: in equations
+    // "test/sdeverywhere/models/longeqns/longeqns.xmile",
+    //
+    // EmptyEquation: uses WITH LOOKUP in non-standard way
+    // "test/sdeverywhere/models/lookup/lookup.xmile",
+    //
+    // MismatchedDimensions: uses subscript mappings
+    // "test/sdeverywhere/models/mapping/mapping.xmile",
+    // "test/sdeverywhere/models/multimap/multimap.xmile",
+    //
+    // EmptyEquation: uses NPV builtin
+    // "test/sdeverywhere/models/npv/npv.xmile",
+    //
+    // No expected results (preprocessing test files)
+    // "test/sdeverywhere/models/preprocess/expected.xmile",
+    // "test/sdeverywhere/models/preprocess/input.xmile",
+    //
+    // No expected results
+    // "test/sdeverywhere/models/prune/prune.xmile",
+    //
+    // EmptyEquation: uses QUANTUM builtin
+    // "test/sdeverywhere/models/quantum/quantum.xmile",
+    //
+    // EmptyEquation: uses :EXCEPT: syntax
+    // "test/sdeverywhere/models/ref/ref.xmile",
+    //
+    // EmptyEquation: uses SAMPLE IF TRUE builtin
+    // "test/sdeverywhere/models/sample/sample.xmile",
+    //
+    // No expected results (nested model directory)
+    // "test/sdeverywhere/models/sir/model/sir.xmile",
+    //
+    // Values don't match: SMOOTH implementation difference
+    // "test/sdeverywhere/models/smooth/smooth.xmile",
+    // "test/sdeverywhere/models/smooth3/smooth3.xmile",
+    //
+    // MismatchedDimensions: uses subscript mappings
+    // "test/sdeverywhere/models/subscript/subscript.xmile",
+    //
+    // Cross-dimension broadcasting: SUM(a[*]+h[*]) with different dimensions
+    // "test/sdeverywhere/models/sum/sum.xmile",
+    //
+    // EmptyEquation: uses SUM OF builtin with condition
+    // "test/sdeverywhere/models/sumif/sumif.xmile",
+    //
+    // MismatchedDimensions: uses VECTOR ELM MAP
+    // "test/sdeverywhere/models/vector/vector.xmile",
+];
+
+#[test]
+fn simulates_arrayed_models_correctly() {
+    for &path in TEST_SDEVERYWHERE_MODELS {
+        let file_path = format!("../../{path}");
+        simulate_path(file_path.as_str());
+    }
+}
 
 #[test]
 fn bad_model_name() {
