@@ -630,8 +630,15 @@ impl Expr2 {
                         .transpose()?,
                     ),
                     Size(e) => {
-                        // Special case: SIZE(DimensionName) returns the element count of the dimension
-                        // This is used by Vensim's ELMCOUNT function (converted to SIZE in XMILE)
+                        // Special case: SIZE(DimensionName) returns the element count of the dimension.
+                        // This is used by Vensim's ELMCOUNT function (converted to SIZE in XMILE).
+                        //
+                        // Note: The XMILE spec (section 3.7.1) states that dimension names "must be
+                        // distinct from model variables names within the whole-model." Therefore, we
+                        // don't need to disambiguate between a dimension and variable with the same
+                        // name - that's an invalid model per the spec. We check dimension names first,
+                        // which is the sensible default since SIZE(array_var) can use SIZE(arr[*])
+                        // syntax for explicit array sizing.
                         if let Expr1::Var(ref id, loc) = *e
                             && ctx.is_dimension_name(id.as_str())
                         {
