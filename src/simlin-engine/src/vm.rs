@@ -639,12 +639,21 @@ impl Vm {
 
                     stack.push(apply(*func, time, dt, a, b, c));
                 }
-                Opcode::Lookup { base_gf } => {
+                Opcode::Lookup {
+                    base_gf,
+                    table_count,
+                } => {
                     let lookup_index = stack.pop();
-                    let element_offset = stack.pop() as usize;
-                    let gf_idx = (*base_gf as usize) + element_offset;
-                    let gf = &context.graphical_functions[gf_idx];
-                    stack.push(lookup(gf, lookup_index));
+                    let element_offset = stack.pop();
+
+                    // Bounds check: element_offset must be in [0, table_count)
+                    if element_offset < 0.0 || element_offset >= (*table_count as f64) {
+                        stack.push(f64::NAN);
+                    } else {
+                        let gf_idx = (*base_gf as usize) + (element_offset as usize);
+                        let gf = &context.graphical_functions[gf_idx];
+                        stack.push(lookup(gf, lookup_index));
+                    }
                 }
                 Opcode::Ret => {
                     break;

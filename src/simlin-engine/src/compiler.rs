@@ -4039,10 +4039,21 @@ impl<'module> Compiler<'module> {
                         )
                     })?;
 
-                    // Emit: push element_offset, push lookup_index, Lookup { base_gf }
+                    // Get the table count for bounds checking
+                    let table_count = self
+                        .module
+                        .tables
+                        .get(&table_ident)
+                        .map(|tables| tables.len() as u16)
+                        .unwrap_or(1);
+
+                    // Emit: push element_offset, push lookup_index, Lookup { base_gf, table_count }
                     self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
-                    self.push(Opcode::Lookup { base_gf });
+                    self.push(Opcode::Lookup {
+                        base_gf,
+                        table_count,
+                    });
                     return Ok(Some(()));
                 };
 

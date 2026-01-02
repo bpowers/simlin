@@ -115,7 +115,8 @@ impl UnitInferer<'_> {
                     // lookups have the units specified on the table
                     let table_name = match table_expr.as_ref() {
                         Expr2::Var(name, _, _) => name.as_str(),
-                        _ => return Ok(Units::Constant), // subscripted lookup tables not yet supported
+                        Expr2::Subscript(name, _, _, _) => name.as_str(),
+                        _ => return Ok(Units::Constant),
                     };
                     let units: UnitMap = [(format!("@{prefix}{table_name}"), 1)]
                         .iter()

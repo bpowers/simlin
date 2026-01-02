@@ -75,12 +75,16 @@ impl UnitEvaluator<'_> {
                         // lookups have the units specified on the table
                         let table_name = match table_expr.as_ref() {
                             Expr2::Var(name, _, _) => name.clone(),
+                            Expr2::Subscript(name, _, _, _) => name.clone(),
                             _ => {
                                 return Err(ConsistencyError(
-                                ErrorCode::DoesNotExist,
-                                *loc,
-                                Some("subscripted lookup tables not yet supported in units checking".to_string()),
-                            ));
+                                    ErrorCode::DoesNotExist,
+                                    *loc,
+                                    Some(
+                                        "lookup table expression must be a variable or subscript"
+                                            .to_string(),
+                                    ),
+                                ));
                             }
                         };
                         if let Some(units) = self

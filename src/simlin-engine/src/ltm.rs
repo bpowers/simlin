@@ -705,7 +705,7 @@ fn analyze_expr_polarity_with_context(
             }
 
             // Try to find the table and analyze its monotonicity
-            // Extract variable name from table expression - only handle simple variable case
+            // TODO: support Expr2::Subscript for subscripted lookup tables (per-element gf)
             let table_name = match table_expr.as_ref() {
                 Expr2::Var(name, _, _) => Some(name.as_str()),
                 _ => None,

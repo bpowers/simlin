@@ -567,8 +567,12 @@ pub(crate) enum Opcode {
     /// Stack: [..., element_offset, lookup_index] -> [..., result]
     /// The actual table used is graphical_functions[base_gf + element_offset].
     /// For scalar tables, element_offset is always 0.
+    /// If element_offset >= table_count, returns NaN.
     Lookup {
         base_gf: GraphicalFunctionId,
+        /// Number of tables for this variable (1 for scalars, n for arrayed).
+        /// Used for bounds checking at runtime.
+        table_count: u16,
     },
 
     // =========================================================================

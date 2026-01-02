@@ -30,6 +30,16 @@ pub struct Table {
 }
 
 impl Table {
+    /// Creates an empty placeholder table that returns NaN for any lookup.
+    fn empty() -> Self {
+        Table {
+            x: Vec::new(),
+            y: Vec::new(),
+            x_range: datamodel::GraphicalFunctionScale { min: 0.0, max: 0.0 },
+            y_range: datamodel::GraphicalFunctionScale { min: 0.0, max: 0.0 },
+        }
+    }
+
     #[cfg(test)]
     pub fn new_for_test(x: Vec<f64>, y: Vec<f64>) -> Self {
         let x_min = x.first().copied().unwrap_or(0.0);
@@ -295,8 +305,10 @@ fn build_tables(
                 match parse_table(elem_gf) {
                     Ok(Some(table)) => tables.push(table),
                     Ok(None) => {
-                        // Element has no gf - use empty placeholder to maintain indexing
-                        // This allows partial per-element gf specification
+                        // Element has no gf - insert empty placeholder to maintain indexing
+                        // so that table[element_offset] corresponds to the correct element.
+                        // Lookups on empty tables return NaN.
+                        tables.push(Table::empty());
                     }
                     Err(err) => errors.push(err),
                 }
