@@ -70,8 +70,10 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           args: --workspace
 
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v1
+      - name: Install and run cargo-deny
+        run: |
+          cargo install --locked cargo-deny
+          cargo deny check
 
   coverage:
     name: Code Coverage
