@@ -707,7 +707,9 @@ fn analyze_expr_polarity_with_context(
             // Try to find the table and analyze its monotonicity
             if let Some(vars) = variables {
                 let table_ident = crate::common::canonicalize(table_name);
-                if let Some(Variable::Var { table: Some(t), .. }) = vars.get(&table_ident) {
+                if let Some(Variable::Var { tables, .. }) = vars.get(&table_ident)
+                    && let Some(t) = tables.first()
+                {
                     let table_polarity = analyze_graphical_function_polarity(t);
                     // Combine the polarities
                     return match (arg_polarity, table_polarity) {
@@ -1309,7 +1311,7 @@ mod tests {
             init_ast: None,
             eqn: None,
             units: None,
-            table: None,
+            tables: vec![],
             non_negative: false,
             is_flow: false,
             is_table_only: false,

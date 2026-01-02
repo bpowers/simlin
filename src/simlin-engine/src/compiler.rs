@@ -2456,7 +2456,7 @@ fn test_lower() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2476,7 +2476,7 @@ fn test_lower() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2554,7 +2554,7 @@ fn test_lower() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2574,7 +2574,7 @@ fn test_lower() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2643,7 +2643,7 @@ fn test_fold_flows() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2663,7 +2663,7 @@ fn test_fold_flows() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2683,7 +2683,7 @@ fn test_fold_flows() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2703,7 +2703,7 @@ fn test_fold_flows() {
                 init_ast: None,
                 eqn: None,
                 units: None,
-                table: None,
+                tables: vec![],
                 non_negative: false,
                 is_flow: false,
                 is_table_only: false,
@@ -2874,7 +2874,7 @@ impl Var {
                         }
                     }
                 }
-                Variable::Var { ident, table, .. } => {
+                Variable::Var { ident, tables, .. } => {
                     let off = ctx.get_base_offset(&canonicalize(var.ident()))?;
                     let ast = if ctx.is_initial {
                         var.init_ast()
@@ -2888,7 +2888,7 @@ impl Var {
                         Ast::Scalar(ast) => {
                             let mut exprs = ctx.lower(ast)?;
                             let main_expr = exprs.pop().unwrap();
-                            let main_expr = if table.is_some() {
+                            let main_expr = if !tables.is_empty() {
                                 let loc = main_expr.get_loc();
                                 Expr::App(
                                     BuiltinFn::Lookup(
@@ -3160,7 +3160,7 @@ pub(crate) fn build_metadata(
                     init_ast: None,
                     eqn: None,
                     units: None,
-                    table: None,
+                    tables: vec![],
                     non_negative: false,
                     is_flow: false,
                     is_table_only: false,
@@ -3180,7 +3180,7 @@ pub(crate) fn build_metadata(
                     init_ast: None,
                     eqn: None,
                     units: None,
-                    table: None,
+                    tables: vec![],
                     non_negative: false,
                     is_flow: false,
                     is_table_only: false,
@@ -3200,7 +3200,7 @@ pub(crate) fn build_metadata(
                     init_ast: None,
                     eqn: None,
                     units: None,
-                    table: None,
+                    tables: vec![],
                     non_negative: false,
                     is_flow: false,
                     is_table_only: false,
@@ -3220,7 +3220,7 @@ pub(crate) fn build_metadata(
                     init_ast: None,
                     eqn: None,
                     units: None,
-                    table: None,
+                    tables: vec![],
                     non_negative: false,
                     is_flow: false,
                     is_table_only: false,

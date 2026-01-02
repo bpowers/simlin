@@ -625,7 +625,7 @@ pub(crate) fn infer(
             init_ast: None,
             eqn: None,
             units: Some([(time_units, 1)].iter().cloned().collect()),
-            table: None,
+            tables: vec![],
             non_negative: false,
             is_flow: false,
             is_table_only: false,

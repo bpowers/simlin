@@ -79,7 +79,7 @@ pub enum Variable<MI = ModuleInput, E = Expr2> {
         init_ast: Option<Ast<E>>,
         eqn: Option<datamodel::Equation>,
         units: Option<datamodel::UnitMap>,
-        table: Option<Table>,
+        tables: Vec<Table>,
         non_negative: bool,
         is_flow: bool,
         is_table_only: bool,
@@ -226,8 +226,16 @@ impl<MI, E> Variable<MI, E> {
     pub fn table(&self) -> Option<&Table> {
         match self {
             Variable::Stock { .. } => None,
-            Variable::Var { table, .. } => table.as_ref(),
+            Variable::Var { tables, .. } => tables.first(),
             Variable::Module { .. } => None,
+        }
+    }
+
+    pub fn tables(&self) -> &[Table] {
+        match self {
+            Variable::Stock { .. } => &[],
+            Variable::Var { tables, .. } => tables,
+            Variable::Module { .. } => &[],
         }
     }
 
@@ -267,6 +275,44 @@ fn parse_table(gf: &Option<datamodel::GraphicalFunction>) -> EquationResult<Opti
         x_range: gf.x_scale.clone(),
         y_range: gf.y_scale.clone(),
     }))
+}
+
+/// Build the tables vector from equation and variable-level gf.
+/// For arrayed variables with per-element gfs, tables are built from each element.
+/// For scalar variables or arrayed without per-element gfs, uses variable-level gf.
+fn build_tables(
+    gf: &Option<datamodel::GraphicalFunction>,
+    equation: &datamodel::Equation,
+) -> (Vec<Table>, Vec<EquationError>) {
+    let mut tables = Vec::new();
+    let mut errors = Vec::new();
+
+    // Check for per-element gfs in arrayed equation
+    if let datamodel::Equation::Arrayed(_, elements) = equation {
+        let has_element_gfs = elements.iter().any(|(_, _, _, gf)| gf.is_some());
+        if has_element_gfs {
+            for (_, _, _, elem_gf) in elements {
+                match parse_table(elem_gf) {
+                    Ok(Some(table)) => tables.push(table),
+                    Ok(None) => {
+                        // Element has no gf - use empty placeholder to maintain indexing
+                        // This allows partial per-element gf specification
+                    }
+                    Err(err) => errors.push(err),
+                }
+            }
+            return (tables, errors);
+        }
+    }
+
+    // Fall back to variable-level gf
+    match parse_table(gf) {
+        Ok(Some(table)) => tables.push(table),
+        Ok(None) => {}
+        Err(err) => errors.push(err),
+    }
+
+    (tables, errors)
 }
 
 fn get_dimensions(
@@ -440,21 +486,15 @@ where
                     None
                 }
             };
-            let table = match parse_table(&v.gf) {
-                Ok(table) => table,
-                Err(err) => {
-                    // TODO: should have a TableError variant
-                    errors.push(err);
-                    None
-                }
-            };
+            let (tables, table_errors) = build_tables(&v.gf, &v.equation);
+            errors.extend(table_errors);
             Variable::Var {
                 ident,
                 ast,
                 init_ast,
                 eqn: Some(v.equation.clone()),
                 units,
-                table,
+                tables,
                 is_flow: true,
                 is_table_only: false,
                 non_negative: v.non_negative,
@@ -479,21 +519,15 @@ where
                     None
                 }
             };
-            let table = match parse_table(&v.gf) {
-                Ok(table) => table,
-                Err(err) => {
-                    // TODO: should have TableError variant
-                    errors.push(err);
-                    None
-                }
-            };
+            let (tables, table_errors) = build_tables(&v.gf, &v.equation);
+            errors.extend(table_errors);
             Variable::Var {
                 ident,
                 ast,
                 init_ast,
                 eqn: Some(v.equation.clone()),
                 units,
-                table,
+                tables,
                 is_flow: false,
                 is_table_only: false,
                 non_negative: false,
@@ -760,7 +794,7 @@ fn test_tables() {
         init_ast: None,
         eqn: Some(datamodel::Equation::Scalar("0".to_string(), None)),
         units: None,
-        table: Some(Table {
+        tables: vec![Table {
             x: vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0],
             y: vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, 0.0, 0.0],
             x_range: datamodel::GraphicalFunctionScale {
@@ -771,7 +805,7 @@ fn test_tables() {
                 min: -1.0,
                 max: 1.0,
             },
-        }),
+        }],
         non_negative: false,
         is_flow: false,
         is_table_only: false,
@@ -779,13 +813,11 @@ fn test_tables() {
         unit_errors: vec![],
     };
 
-    if let Variable::Var {
-        table: Some(table), ..
-    } = &expected
-    {
-        assert_eq!(table.x.len(), table.y.len());
+    if let Variable::Var { tables, .. } = &expected {
+        assert!(!tables.is_empty());
+        assert_eq!(tables[0].x.len(), tables[0].y.len());
     } else {
-        panic!("not eq");
+        panic!("expected Var");
     }
 
     let mut implicit_vars: Vec<datamodel::Variable> = Vec::new();

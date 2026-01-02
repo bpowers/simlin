@@ -297,7 +297,7 @@ pub fn check(
             init_ast: None,
             eqn: None,
             units: Some(time_units),
-            table: None,
+            tables: vec![],
             non_negative: false,
             is_flow: false,
             is_table_only: false,
