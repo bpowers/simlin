@@ -342,7 +342,7 @@ fn extract_equation_string(eq: &datamodel::Equation) -> String {
         datamodel::Equation::Scalar(s, _) => s.clone(),
         datamodel::Equation::ApplyToAll(_, s, _) => s.clone(),
         datamodel::Equation::Arrayed(_, elems) => {
-            if let Some((_, s, _)) = elems.first() {
+            if let Some((_, s, _, _)) = elems.first() {
                 s.clone()
             } else {
                 String::new()

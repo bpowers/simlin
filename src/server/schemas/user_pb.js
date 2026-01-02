@@ -92,7 +92,7 @@ canCreateProjects: jspb.Message.getBooleanFieldWithDefault(msg, 9, false)
 
 /**
  * Deserializes binary data (in protobuf wire format).
- * @param {jspb.ByteSource} bytes The bytes to deserialize.
+ * @param {jspb.binary.bytesource.ByteSource} bytes The bytes to deserialize.
  * @return {!proto.User}
  */
 proto.User.deserializeBinary = function(bytes) {

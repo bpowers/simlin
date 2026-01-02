@@ -62,6 +62,8 @@ pub struct ElementEquation {
     pub equation: String,
     #[serde(skip_serializing_if = "is_empty_string", default)]
     pub initial_equation: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub graphical_function: Option<GraphicalFunction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -449,6 +451,7 @@ impl From<Stock> for datamodel::Stock {
                                     } else {
                                         Some(ee.initial_equation)
                                     },
+                                    ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
                             .collect(),
@@ -510,6 +513,7 @@ impl From<Flow> for datamodel::Flow {
                                     } else {
                                         Some(ee.initial_equation)
                                     },
+                                    ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
                             .collect(),
@@ -566,6 +570,7 @@ impl From<Auxiliary> for datamodel::Aux {
                                     } else {
                                         Some(ee.initial_equation)
                                     },
+                                    ee.graphical_function.map(|gf| gf.into()),
                                 )
                             })
                             .collect(),
@@ -973,11 +978,14 @@ impl From<datamodel::Stock> for Stock {
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
-                    .map(|(subscript, equation, initial_equation)| ElementEquation {
-                        subscript,
-                        equation,
-                        initial_equation: initial_equation.unwrap_or_default(),
-                    })
+                    .map(
+                        |(subscript, equation, initial_equation, gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            initial_equation: initial_equation.unwrap_or_default(),
+                            graphical_function: gf.map(|g| g.into()),
+                        },
+                    )
                     .collect();
                 (
                     String::new(),
@@ -1023,11 +1031,14 @@ impl From<datamodel::Flow> for Flow {
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
-                    .map(|(subscript, equation, initial_equation)| ElementEquation {
-                        subscript,
-                        equation,
-                        initial_equation: initial_equation.unwrap_or_default(),
-                    })
+                    .map(
+                        |(subscript, equation, initial_equation, gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            initial_equation: initial_equation.unwrap_or_default(),
+                            graphical_function: gf.map(|g| g.into()),
+                        },
+                    )
                     .collect();
                 (
                     String::new(),
@@ -1073,11 +1084,14 @@ impl From<datamodel::Aux> for Auxiliary {
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
-                    .map(|(subscript, equation, initial_equation)| ElementEquation {
-                        subscript,
-                        equation,
-                        initial_equation: initial_equation.unwrap_or_default(),
-                    })
+                    .map(
+                        |(subscript, equation, initial_equation, gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            initial_equation: initial_equation.unwrap_or_default(),
+                            graphical_function: gf.map(|g| g.into()),
+                        },
+                    )
                     .collect();
                 (
                     String::new(),
@@ -1545,11 +1559,13 @@ mod tests {
                                 subscript: "Boston".to_string(),
                                 equation: "50".to_string(),
                                 initial_equation: "10".to_string(),
+                                graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "NYC".to_string(),
                                 equation: "100".to_string(),
                                 initial_equation: String::new(),
+                                graphical_function: None,
                             },
                         ]),
                     }),
@@ -1669,11 +1685,13 @@ mod tests {
                                 subscript: "east".to_string(),
                                 equation: "supply_east".to_string(),
                                 initial_equation: "init_supply_east".to_string(),
+                                graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "west".to_string(),
                                 equation: "supply_west".to_string(),
                                 initial_equation: String::new(),
+                                graphical_function: None,
                             },
                         ]),
                     }),
@@ -1781,11 +1799,13 @@ mod tests {
                                 subscript: "north".to_string(),
                                 equation: "north_demand".to_string(),
                                 initial_equation: "north_demand_init".to_string(),
+                                graphical_function: None,
                             },
                             ElementEquation {
                                 subscript: "south".to_string(),
                                 equation: "south_demand".to_string(),
                                 initial_equation: String::new(),
+                                graphical_function: None,
                             },
                         ]),
                     }),

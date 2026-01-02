@@ -200,13 +200,18 @@ pub struct GraphicalFunction {
     pub y_scale: GraphicalFunctionScale,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Equation {
     Scalar(String, Option<String>),
     ApplyToAll(Vec<DimensionName>, String, Option<String>),
     Arrayed(
         Vec<DimensionName>,
-        Vec<(ElementName, String, Option<String>)>,
+        Vec<(
+            ElementName,
+            String,
+            Option<String>,
+            Option<GraphicalFunction>,
+        )>,
     ),
 }
 
@@ -228,7 +233,7 @@ pub enum AiState {
     H, // Created and edited by a person and also edited by AI.
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Stock {
     pub ident: String,
     pub equation: Equation,

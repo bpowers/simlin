@@ -1,0 +1,107 @@
+<xmile xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE" version="1.0">
+    <isee:prefs show_module_prefix="true" layer="model"/>
+    <header>
+        <options namespace="std"/>
+        <vendor>Ventana Systems, xmutil</vendor>
+        <product lang="en">Vensim, xmutil</product>
+    </header>
+    <sim_specs method="Euler" time_units="Month" isee:sim_duration="0">
+        <start>0</start>
+        <stop>10</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <model_units/>
+    <model>
+        <variables>
+            <aux name="withlookup at 2pt5">
+                <eqn>2.5</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="withlookup at 2pt0">
+                <eqn>2</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="withlookup at 1pt0">
+                <eqn>1</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="withlookup at 0pt5">
+                <eqn>0.5</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="withlookup at minus 1">
+                <eqn>-1</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="withlookup at 0">
+                <eqn>0</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="withlookup at 1pt5">
+                <eqn>1.5</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="b">
+                <eqn>LOOKUP(a, i)</eqn>
+            </aux>
+            <aux name="d">
+                <eqn>i</eqn>
+                <gf>
+                    <yscale min="0" max="1.3"/>
+                    <xpts>0,0.1,0.5,1,1.5,2</xpts>
+                    <ypts>0,0.01,0.7,1,1.2,1.3</ypts>
+                </gf>
+            </aux>
+            <aux name="a">
+                <eqn>0+0</eqn>
+                <gf>
+                    <yscale min="-1" max="1"/>
+                    <xpts>0,0.7,0.8,0.9,1,2</xpts>
+                    <ypts>0,0,0.1,0.9,-1,1</ypts>
+                </gf>
+            </aux>
+            <aux name="g">
+                <eqn>0+0</eqn>
+                <gf>
+                    <yscale min="0" max="2"/>
+                    <xpts>0,1,2</xpts>
+                    <ypts>0,1,2</ypts>
+                </gf>
+            </aux>
+            <aux name="i">
+                <eqn>Time/10</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view/>
+        </views>
+    </model>
+</xmile>

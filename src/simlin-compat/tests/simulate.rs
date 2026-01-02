@@ -555,6 +555,11 @@ fn simulates_arrayed_models_correctly() {
 }
 
 #[test]
+fn simulates_lookup_arrayed() {
+    simulate_path("../../test/lookup_arrayed/lookup_arrayed.xmile");
+}
+
+#[test]
 fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();
     let mut f = BufReader::new(f);

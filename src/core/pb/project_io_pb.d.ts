@@ -216,6 +216,11 @@ export namespace Variable {
       getInitialEquation(): string;
       setInitialEquation(value: string): void;
 
+      hasGf(): boolean;
+      clearGf(): void;
+      getGf(): GraphicalFunction | undefined;
+      setGf(value?: GraphicalFunction): void;
+
       serializeBinary(): Uint8Array;
       toObject(includeInstance?: boolean): Element.AsObject;
       static toObject(includeInstance: boolean, msg: Element): Element.AsObject;
@@ -231,6 +236,7 @@ export namespace Variable {
         subscript: string;
         equation: string;
         initialEquation: string;
+        gf?: GraphicalFunction.AsObject;
       };
     }
   }
@@ -1129,6 +1135,8 @@ export class SimSpecs extends jspb.Message {
   getSimMethod(): SimMethodMap[keyof SimMethodMap];
   setSimMethod(value: SimMethodMap[keyof SimMethodMap]): void;
 
+  hasTimeUnits(): boolean;
+  clearTimeUnits(): void;
   getTimeUnits(): string;
   setTimeUnits(value: string): void;
 
@@ -1304,6 +1312,394 @@ export namespace Source {
   }
 
   export const Extension: ExtensionMap;
+}
+
+export class ProjectPatch extends jspb.Message {
+  clearProjectOpsList(): void;
+  getProjectOpsList(): Array<ProjectOperation>;
+  setProjectOpsList(value: Array<ProjectOperation>): void;
+  addProjectOps(value?: ProjectOperation, index?: number): ProjectOperation;
+
+  clearModelsList(): void;
+  getModelsList(): Array<ModelPatch>;
+  setModelsList(value: Array<ModelPatch>): void;
+  addModels(value?: ModelPatch, index?: number): ModelPatch;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ProjectPatch.AsObject;
+  static toObject(includeInstance: boolean, msg: ProjectPatch): ProjectPatch.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: ProjectPatch, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ProjectPatch;
+  static deserializeBinaryFromReader(message: ProjectPatch, reader: jspb.BinaryReader): ProjectPatch;
+}
+
+export namespace ProjectPatch {
+  export type AsObject = {
+    projectOpsList: Array<ProjectOperation.AsObject>;
+    modelsList: Array<ModelPatch.AsObject>;
+  };
+}
+
+export class ModelPatch extends jspb.Message {
+  getName(): string;
+  setName(value: string): void;
+
+  clearOpsList(): void;
+  getOpsList(): Array<ModelOperation>;
+  setOpsList(value: Array<ModelOperation>): void;
+  addOps(value?: ModelOperation, index?: number): ModelOperation;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ModelPatch.AsObject;
+  static toObject(includeInstance: boolean, msg: ModelPatch): ModelPatch.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: ModelPatch, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ModelPatch;
+  static deserializeBinaryFromReader(message: ModelPatch, reader: jspb.BinaryReader): ModelPatch;
+}
+
+export namespace ModelPatch {
+  export type AsObject = {
+    name: string;
+    opsList: Array<ModelOperation.AsObject>;
+  };
+}
+
+export class ProjectOperation extends jspb.Message {
+  hasSetSimSpecs(): boolean;
+  clearSetSimSpecs(): void;
+  getSetSimSpecs(): SetSimSpecsOp | undefined;
+  setSetSimSpecs(value?: SetSimSpecsOp): void;
+
+  hasSetSource(): boolean;
+  clearSetSource(): void;
+  getSetSource(): SetSourceOp | undefined;
+  setSetSource(value?: SetSourceOp): void;
+
+  getOpCase(): ProjectOperation.OpCase;
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ProjectOperation.AsObject;
+  static toObject(includeInstance: boolean, msg: ProjectOperation): ProjectOperation.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: ProjectOperation, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ProjectOperation;
+  static deserializeBinaryFromReader(message: ProjectOperation, reader: jspb.BinaryReader): ProjectOperation;
+}
+
+export namespace ProjectOperation {
+  export type AsObject = {
+    setSimSpecs?: SetSimSpecsOp.AsObject;
+    setSource?: SetSourceOp.AsObject;
+  };
+
+  export enum OpCase {
+    OP_NOT_SET = 0,
+    SET_SIM_SPECS = 1,
+    SET_SOURCE = 2,
+  }
+}
+
+export class ModelOperation extends jspb.Message {
+  hasUpsertStock(): boolean;
+  clearUpsertStock(): void;
+  getUpsertStock(): UpsertStockOp | undefined;
+  setUpsertStock(value?: UpsertStockOp): void;
+
+  hasUpsertFlow(): boolean;
+  clearUpsertFlow(): void;
+  getUpsertFlow(): UpsertFlowOp | undefined;
+  setUpsertFlow(value?: UpsertFlowOp): void;
+
+  hasUpsertAux(): boolean;
+  clearUpsertAux(): void;
+  getUpsertAux(): UpsertAuxOp | undefined;
+  setUpsertAux(value?: UpsertAuxOp): void;
+
+  hasUpsertModule(): boolean;
+  clearUpsertModule(): void;
+  getUpsertModule(): UpsertModuleOp | undefined;
+  setUpsertModule(value?: UpsertModuleOp): void;
+
+  hasDeleteVariable(): boolean;
+  clearDeleteVariable(): void;
+  getDeleteVariable(): DeleteVariableOp | undefined;
+  setDeleteVariable(value?: DeleteVariableOp): void;
+
+  hasRenameVariable(): boolean;
+  clearRenameVariable(): void;
+  getRenameVariable(): RenameVariableOp | undefined;
+  setRenameVariable(value?: RenameVariableOp): void;
+
+  hasUpsertView(): boolean;
+  clearUpsertView(): void;
+  getUpsertView(): UpsertViewOp | undefined;
+  setUpsertView(value?: UpsertViewOp): void;
+
+  hasDeleteView(): boolean;
+  clearDeleteView(): void;
+  getDeleteView(): DeleteViewOp | undefined;
+  setDeleteView(value?: DeleteViewOp): void;
+
+  getOpCase(): ModelOperation.OpCase;
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ModelOperation.AsObject;
+  static toObject(includeInstance: boolean, msg: ModelOperation): ModelOperation.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: ModelOperation, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ModelOperation;
+  static deserializeBinaryFromReader(message: ModelOperation, reader: jspb.BinaryReader): ModelOperation;
+}
+
+export namespace ModelOperation {
+  export type AsObject = {
+    upsertStock?: UpsertStockOp.AsObject;
+    upsertFlow?: UpsertFlowOp.AsObject;
+    upsertAux?: UpsertAuxOp.AsObject;
+    upsertModule?: UpsertModuleOp.AsObject;
+    deleteVariable?: DeleteVariableOp.AsObject;
+    renameVariable?: RenameVariableOp.AsObject;
+    upsertView?: UpsertViewOp.AsObject;
+    deleteView?: DeleteViewOp.AsObject;
+  };
+
+  export enum OpCase {
+    OP_NOT_SET = 0,
+    UPSERT_STOCK = 1,
+    UPSERT_FLOW = 2,
+    UPSERT_AUX = 3,
+    UPSERT_MODULE = 4,
+    DELETE_VARIABLE = 5,
+    RENAME_VARIABLE = 6,
+    UPSERT_VIEW = 7,
+    DELETE_VIEW = 8,
+  }
+}
+
+export class SetSimSpecsOp extends jspb.Message {
+  hasSimSpecs(): boolean;
+  clearSimSpecs(): void;
+  getSimSpecs(): SimSpecs | undefined;
+  setSimSpecs(value?: SimSpecs): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): SetSimSpecsOp.AsObject;
+  static toObject(includeInstance: boolean, msg: SetSimSpecsOp): SetSimSpecsOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: SetSimSpecsOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): SetSimSpecsOp;
+  static deserializeBinaryFromReader(message: SetSimSpecsOp, reader: jspb.BinaryReader): SetSimSpecsOp;
+}
+
+export namespace SetSimSpecsOp {
+  export type AsObject = {
+    simSpecs?: SimSpecs.AsObject;
+  };
+}
+
+export class UpsertStockOp extends jspb.Message {
+  hasStock(): boolean;
+  clearStock(): void;
+  getStock(): Variable.Stock | undefined;
+  setStock(value?: Variable.Stock): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): UpsertStockOp.AsObject;
+  static toObject(includeInstance: boolean, msg: UpsertStockOp): UpsertStockOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: UpsertStockOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): UpsertStockOp;
+  static deserializeBinaryFromReader(message: UpsertStockOp, reader: jspb.BinaryReader): UpsertStockOp;
+}
+
+export namespace UpsertStockOp {
+  export type AsObject = {
+    stock?: Variable.Stock.AsObject;
+  };
+}
+
+export class UpsertFlowOp extends jspb.Message {
+  hasFlow(): boolean;
+  clearFlow(): void;
+  getFlow(): Variable.Flow | undefined;
+  setFlow(value?: Variable.Flow): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): UpsertFlowOp.AsObject;
+  static toObject(includeInstance: boolean, msg: UpsertFlowOp): UpsertFlowOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: UpsertFlowOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): UpsertFlowOp;
+  static deserializeBinaryFromReader(message: UpsertFlowOp, reader: jspb.BinaryReader): UpsertFlowOp;
+}
+
+export namespace UpsertFlowOp {
+  export type AsObject = {
+    flow?: Variable.Flow.AsObject;
+  };
+}
+
+export class UpsertAuxOp extends jspb.Message {
+  hasAux(): boolean;
+  clearAux(): void;
+  getAux(): Variable.Aux | undefined;
+  setAux(value?: Variable.Aux): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): UpsertAuxOp.AsObject;
+  static toObject(includeInstance: boolean, msg: UpsertAuxOp): UpsertAuxOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: UpsertAuxOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): UpsertAuxOp;
+  static deserializeBinaryFromReader(message: UpsertAuxOp, reader: jspb.BinaryReader): UpsertAuxOp;
+}
+
+export namespace UpsertAuxOp {
+  export type AsObject = {
+    aux?: Variable.Aux.AsObject;
+  };
+}
+
+export class UpsertModuleOp extends jspb.Message {
+  hasModule(): boolean;
+  clearModule(): void;
+  getModule(): Variable.Module | undefined;
+  setModule(value?: Variable.Module): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): UpsertModuleOp.AsObject;
+  static toObject(includeInstance: boolean, msg: UpsertModuleOp): UpsertModuleOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: UpsertModuleOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): UpsertModuleOp;
+  static deserializeBinaryFromReader(message: UpsertModuleOp, reader: jspb.BinaryReader): UpsertModuleOp;
+}
+
+export namespace UpsertModuleOp {
+  export type AsObject = {
+    module?: Variable.Module.AsObject;
+  };
+}
+
+export class DeleteVariableOp extends jspb.Message {
+  getIdent(): string;
+  setIdent(value: string): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): DeleteVariableOp.AsObject;
+  static toObject(includeInstance: boolean, msg: DeleteVariableOp): DeleteVariableOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: DeleteVariableOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): DeleteVariableOp;
+  static deserializeBinaryFromReader(message: DeleteVariableOp, reader: jspb.BinaryReader): DeleteVariableOp;
+}
+
+export namespace DeleteVariableOp {
+  export type AsObject = {
+    ident: string;
+  };
+}
+
+export class RenameVariableOp extends jspb.Message {
+  getFrom(): string;
+  setFrom(value: string): void;
+
+  getTo(): string;
+  setTo(value: string): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RenameVariableOp.AsObject;
+  static toObject(includeInstance: boolean, msg: RenameVariableOp): RenameVariableOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: RenameVariableOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RenameVariableOp;
+  static deserializeBinaryFromReader(message: RenameVariableOp, reader: jspb.BinaryReader): RenameVariableOp;
+}
+
+export namespace RenameVariableOp {
+  export type AsObject = {
+    from: string;
+    to: string;
+  };
+}
+
+export class UpsertViewOp extends jspb.Message {
+  getIndex(): number;
+  setIndex(value: number): void;
+
+  hasView(): boolean;
+  clearView(): void;
+  getView(): View | undefined;
+  setView(value?: View): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): UpsertViewOp.AsObject;
+  static toObject(includeInstance: boolean, msg: UpsertViewOp): UpsertViewOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: UpsertViewOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): UpsertViewOp;
+  static deserializeBinaryFromReader(message: UpsertViewOp, reader: jspb.BinaryReader): UpsertViewOp;
+}
+
+export namespace UpsertViewOp {
+  export type AsObject = {
+    index: number;
+    view?: View.AsObject;
+  };
+}
+
+export class DeleteViewOp extends jspb.Message {
+  getIndex(): number;
+  setIndex(value: number): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): DeleteViewOp.AsObject;
+  static toObject(includeInstance: boolean, msg: DeleteViewOp): DeleteViewOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: DeleteViewOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): DeleteViewOp;
+  static deserializeBinaryFromReader(message: DeleteViewOp, reader: jspb.BinaryReader): DeleteViewOp;
+}
+
+export namespace DeleteViewOp {
+  export type AsObject = {
+    index: number;
+  };
+}
+
+export class SetSourceOp extends jspb.Message {
+  hasSource(): boolean;
+  clearSource(): void;
+  getSource(): Source | undefined;
+  setSource(value?: Source): void;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): SetSourceOp.AsObject;
+  static toObject(includeInstance: boolean, msg: SetSourceOp): SetSourceOp.AsObject;
+  static extensions: { [key: number]: jspb.ExtensionFieldInfo<jspb.Message> };
+  static extensionsBinary: { [key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message> };
+  static serializeBinaryToWriter(message: SetSourceOp, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): SetSourceOp;
+  static deserializeBinaryFromReader(message: SetSourceOp, reader: jspb.BinaryReader): SetSourceOp;
+}
+
+export namespace SetSourceOp {
+  export type AsObject = {
+    source?: Source.AsObject;
+  };
 }
 
 export class Project extends jspb.Message {
