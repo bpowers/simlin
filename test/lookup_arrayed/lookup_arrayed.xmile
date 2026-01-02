@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0" xmlns:isee="http://iseesystems.com/XMILE">
+    <header>
+        <smile version="1.0" namespace="std, isee" uses_arrays="1"/>
+        <name>lookup_arrayed</name>
+        <vendor>Simlin Test</vendor>
+        <product version="1.0">Simlin</product>
+    </header>
+    <sim_specs method="Euler" time_units="Time">
+        <start>0</start>
+        <stop>10</stop>
+        <dt>1</dt>
+    </sim_specs>
+    <dimensions>
+        <dim name="Items">
+            <elem name="A"/>
+            <elem name="B"/>
+        </dim>
+    </dimensions>
+    <model>
+        <variables>
+            <!-- Arrayed variable with per-element graphical functions -->
+            <!-- tables[A]: identity function (0,0), (1,1), (2,2), (5,5) -->
+            <!-- tables[B]: doubling function (0,0), (1,2), (2,4), (5,10) -->
+            <aux name="tables">
+                <dimensions>
+                    <dim name="Items"/>
+                </dimensions>
+                <element subscript="A">
+                    <eqn>0</eqn>
+                    <gf>
+                        <xpts>0,1,2,5</xpts>
+                        <ypts>0,1,2,5</ypts>
+                    </gf>
+                </element>
+                <element subscript="B">
+                    <eqn>0</eqn>
+                    <gf>
+                        <xpts>0,1,2,5</xpts>
+                        <ypts>0,2,4,10</ypts>
+                    </gf>
+                </element>
+            </aux>
+            <!-- Input that changes over time: 0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5 -->
+            <aux name="input">
+                <eqn>Time / 2</eqn>
+            </aux>
+            <!-- result_A uses LOOKUP(tables[A], input) - should return input value (identity) -->
+            <aux name="result A">
+                <eqn>LOOKUP(tables[A], input)</eqn>
+            </aux>
+            <!-- result_B uses LOOKUP(tables[B], input) - should return 2*input (doubling) -->
+            <aux name="result B">
+                <eqn>LOOKUP(tables[B], input)</eqn>
+            </aux>
+        </variables>
+        <views>
+            <view/>
+        </views>
+    </model>
+</xmile>

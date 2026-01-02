@@ -769,6 +769,16 @@ impl ModuleEvaluator<'_> {
                                     .unwrap();
                                 (ident, 0usize)
                             }
+                            compiler::Expr::StaticSubscript(off, view, _) => {
+                                // Static subscript - element offset is precomputed in the ArrayView
+                                let module_offsets = &self.module.offsets[&self.module.ident];
+                                let ident = module_offsets
+                                    .iter()
+                                    .find(|(_, (o, _))| *o == *off)
+                                    .map(|(k, _)| k.clone())
+                                    .unwrap();
+                                (ident, view.offset)
+                            }
                             compiler::Expr::Subscript(off, subscript_indices, dim_sizes, _) => {
                                 // Subscripted table reference - compute element_offset
                                 let module_offsets = &self.module.offsets[&self.module.ident];
@@ -800,7 +810,9 @@ impl ModuleEvaluator<'_> {
                                 (ident, offset)
                             }
                             _ => {
-                                eprintln!("unsupported expression type for lookup table reference");
+                                eprintln!(
+                                    "unsupported expression type for lookup table reference: {table_expr:?}"
+                                );
                                 unreachable!();
                             }
                         };

@@ -3943,6 +3943,10 @@ impl<'module> Compiler<'module> {
                             // Simple scalar table reference - element_offset is always 0
                             (*off, Expr::Const(0.0, *loc))
                         }
+                        Expr::StaticSubscript(off, view, loc) => {
+                            // Static subscript - element offset is precomputed in the ArrayView
+                            (*off, Expr::Const(view.offset as f64, *loc))
+                        }
                         Expr::Subscript(off, subscript_indices, dim_sizes, _loc) => {
                             // Subscripted table reference - compute element_offset
                             // For a multi-dimensional subscript, compute linear offset
