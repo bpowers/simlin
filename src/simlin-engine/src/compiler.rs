@@ -4703,6 +4703,11 @@ fn find_target_for_source(
 /// - If no match: use stride 0 (broadcast/repeat)
 ///
 /// This is dimension-agnostic: works for any N.
+///
+/// NOTE: This function does not preserve sparse array information from the source view.
+/// The resulting view always has an empty sparse vector. If sparse data preservation
+/// is needed in the future, this would require transforming sparse indices to account
+/// for the new dimension order and any broadcast dimensions.
 #[allow(dead_code)] // Scaffolding for future optimization
 pub fn broadcast_view(
     source_view: &ArrayView,
@@ -4735,6 +4740,7 @@ pub fn broadcast_view(
         dims: new_dims,
         strides: new_strides,
         offset: source_view.offset,
+        // Sparse info not preserved - see doc comment for rationale
         sparse: Vec::new(),
         dim_names: new_dim_names,
     })

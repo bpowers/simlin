@@ -950,7 +950,10 @@ mod tests {
         }
 
         fn is_indexed_dimension(&self, _name: &str) -> bool {
-            // For tests, assume all dimensions are indexed
+            // For tests, treat all dimensions as named (not indexed).
+            // This is more conservative - dimensions must match by name, not size.
+            // Tests that need indexed dimension behavior should use TestProject
+            // which has proper dimension context.
             false
         }
     }
