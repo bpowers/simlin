@@ -160,6 +160,10 @@ pub trait Expr2Context {
     /// Get the length of a dimension by its canonical name.
     /// Used for StarRange subscripts to determine result dimensions.
     fn get_dimension_len(&self, name: &CanonicalDimensionName) -> Option<usize>;
+
+    /// Check if a dimension is an indexed dimension (vs. named dimension).
+    /// Indexed dimensions can be matched by size with different names.
+    fn is_indexed_dimension(&self, name: &str) -> bool;
 }
 
 impl Expr2 {
@@ -209,6 +213,7 @@ impl Expr2 {
             (Some(left), Some(right)) => {
                 // Check if dimensions can be unified (with possible reordering)
                 let (dims, dim_names) = Self::unify_dims_with_names(
+                    ctx,
                     left.dims(),
                     left.dim_names(),
                     right.dims(),
@@ -267,8 +272,10 @@ impl Expr2 {
     /// - If both arrays have the same dimensions (possibly reordered), sizes must match
     /// - If one array's dimensions are a SUBSET of the other, broadcast the smaller one
     /// - If dimensions are disjoint (neither is subset of other), return error
+    /// - SPECIAL: Indexed dimensions with same size are considered compatible even with different names
     /// - Output dimension order: larger array's dimensions (or first if equal)
-    fn unify_dims_with_names(
+    fn unify_dims_with_names<C: Expr2Context>(
+        ctx: &C,
         a_dims: &[usize],
         a_names: Option<&[String]>,
         b_dims: &[usize],
@@ -285,44 +292,148 @@ impl Expr2 {
             }
         };
 
-        use std::collections::HashSet;
+        // Check subset relationships with indexed dimension size matching.
+        // Use two-pass matching with usage tracking to avoid the bug where
+        // multiple source dimensions could all "match" the same target dimension.
+        //
+        // For example, a[X(3), Y(3)] vs b[Z(3)]:
+        // - Without usage tracking: X matches Z, Y matches Z → incorrectly reports a can match b
+        // - With usage tracking: X matches Z, Y has no remaining match → correctly reports failure
 
-        // Build sets of dimension names for subset checking
-        let a_name_set: HashSet<&str> = a_names.iter().map(|s| s.as_str()).collect();
-        let b_name_set: HashSet<&str> = b_names.iter().map(|s| s.as_str()).collect();
+        /// Check if all source dimensions can be matched to UNIQUE target dimensions.
+        /// Uses two-pass matching: name matches first, then size matches.
+        fn can_all_match<C: Expr2Context>(
+            ctx: &C,
+            source_names: &[String],
+            source_dims: &[usize],
+            target_names: &[String],
+            target_dims: &[usize],
+        ) -> bool {
+            let mut target_used = vec![false; target_names.len()];
 
-        // Check subset relationships:
-        // - a is subset of b: all dims in a are also in b
-        // - b is subset of a: all dims in b are also in a
-        let a_subset_of_b = a_name_set.iter().all(|name| b_name_set.contains(name));
-        let b_subset_of_a = b_name_set.iter().all(|name| a_name_set.contains(name));
+            // PASS 1: Assign name matches first (reserve them)
+            let mut source_matched = vec![false; source_names.len()];
+            for (source_idx, (name, &_size)) in
+                source_names.iter().zip(source_dims.iter()).enumerate()
+            {
+                for (target_idx, target_name) in target_names.iter().enumerate() {
+                    if !target_used[target_idx] && target_name == name {
+                        target_used[target_idx] = true;
+                        source_matched[source_idx] = true;
+                        break;
+                    }
+                }
+            }
 
-        if !a_subset_of_b && !b_subset_of_a {
-            // Neither is a subset of the other - disjoint or partially overlapping
-            // This is an error (incompatible dimensions)
-            return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+            // PASS 2: For remaining sources, try size-based matching (indexed dims only)
+            for (source_idx, (name, &size)) in
+                source_names.iter().zip(source_dims.iter()).enumerate()
+            {
+                if source_matched[source_idx] {
+                    continue; // Already matched by name
+                }
+
+                if !ctx.is_indexed_dimension(name) {
+                    return false; // Named dim without name match fails
+                }
+
+                let mut found = false;
+                for (target_idx, (target_name, &target_size)) in
+                    target_names.iter().zip(target_dims.iter()).enumerate()
+                {
+                    if !target_used[target_idx]
+                        && ctx.is_indexed_dimension(target_name)
+                        && size == target_size
+                    {
+                        target_used[target_idx] = true;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if !found {
+                    return false;
+                }
+            }
+
+            true
         }
 
-        // Build a map from dimension name to size for quick lookup
-        let a_dim_map: std::collections::HashMap<&str, usize> = a_names
-            .iter()
-            .zip(a_dims.iter())
-            .map(|(name, &size)| (name.as_str(), size))
-            .collect();
+        // Check if all dimensions in a can be matched to UNIQUE dimensions in b
+        let a_can_match_b = can_all_match(ctx, a_names, a_dims, b_names, b_dims);
 
-        let b_dim_map: std::collections::HashMap<&str, usize> = b_names
-            .iter()
-            .zip(b_dims.iter())
-            .map(|(name, &size)| (name.as_str(), size))
-            .collect();
+        // Check if all dimensions in b can be matched to UNIQUE dimensions in a
+        let b_can_match_a = can_all_match(ctx, b_names, b_dims, a_names, a_dims);
 
-        // Use the larger array (superset) as the output dimension order
+        // Handle UNION case: neither is a subset of the other
+        // This happens when we're broadcasting, e.g., a[X] + b[Y] → result[X,Y]
+        // IMPORTANT: UNION broadcasting is only allowed for INDEXED dimensions.
+        // Named dimensions with semantic meaning (like Cities, Products) should NOT
+        // be combined just because they have the same size.
+        if !a_can_match_b && !b_can_match_a {
+            // Check that all unmatched dimensions are indexed (not named)
+            // If any unmatched dimension is named, return an error
+            for (a_name, &a_size) in a_names.iter().zip(a_dims.iter()) {
+                let has_match =
+                    Self::find_matching_dimension(ctx, a_name, a_size, b_names, b_dims).is_some();
+                if !has_match && !ctx.is_indexed_dimension(a_name) {
+                    // This is a named dimension that doesn't match anything in b
+                    return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+                }
+            }
+            for (b_name, &b_size) in b_names.iter().zip(b_dims.iter()) {
+                let has_match =
+                    Self::find_matching_dimension(ctx, b_name, b_size, a_names, a_dims).is_some();
+                if !has_match && !ctx.is_indexed_dimension(b_name) {
+                    // This is a named dimension that doesn't match anything in a
+                    return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+                }
+            }
+
+            // All unmatched dimensions are indexed - safe to build a union
+            // Start with all of a's dimensions, then add b's unmatched dimensions
+            let mut unified_dims = Vec::new();
+            let mut unified_names = Vec::new();
+
+            // Add all of a's dimensions first
+            for (name, &size) in a_names.iter().zip(a_dims.iter()) {
+                unified_dims.push(size);
+                unified_names.push(name.clone());
+            }
+
+            // Add b's dimensions that aren't already matched
+            for (b_name, &b_size) in b_names.iter().zip(b_dims.iter()) {
+                // Check if this b dimension matches any a dimension
+                let match_result =
+                    Self::find_matching_dimension(ctx, b_name, b_size, a_names, a_dims);
+
+                match match_result {
+                    Some((_matched_name, matched_size)) => {
+                        // Dimension matched - verify sizes are equal
+                        // (could differ if matched by name but defined with different sizes)
+                        if b_size != matched_size {
+                            return eqn_err!(MismatchedDimensions, loc.start, loc.end);
+                        }
+                        // Already present in a, don't add again
+                    }
+                    None => {
+                        // This is a new dimension from b - add it to the union
+                        unified_dims.push(b_size);
+                        unified_names.push(b_name.clone());
+                    }
+                }
+            }
+
+            return Ok((unified_dims, Some(unified_names)));
+        }
+
+        // One is a subset of the other - use the larger array as the output dimension order
         // If equal, use a's order
-        let (primary_names, primary_dims, secondary_map) =
-            if b_subset_of_a || a_dims.len() >= b_dims.len() {
-                (a_names, a_dims, &b_dim_map)
+        let (primary_names, primary_dims, secondary_names, secondary_dims) =
+            if b_can_match_a || a_dims.len() >= b_dims.len() {
+                (a_names, a_dims, b_names, b_dims)
             } else {
-                (b_names, b_dims, &a_dim_map)
+                (b_names, b_dims, a_names, a_dims)
             };
 
         // Build output dimensions in the primary array's order
@@ -330,18 +441,51 @@ impl Expr2 {
         let mut unified_names = Vec::new();
 
         for (name, &size) in primary_names.iter().zip(primary_dims.iter()) {
-            // Check if this dimension also exists in secondary
-            if let Some(&other_size) = secondary_map.get(name.as_str()) {
-                // Both have this dimension - sizes must match
-                if size != other_size {
+            // Check if this dimension has a matching dimension in secondary
+            // Match can be by name or by size (for indexed dims)
+            let matching_secondary =
+                Self::find_matching_dimension(ctx, name, size, secondary_names, secondary_dims);
+
+            if let Some((_matched_name, matched_size)) = matching_secondary {
+                // Found a match - sizes must be equal
+                if size != matched_size {
                     return eqn_err!(MismatchedDimensions, loc.start, loc.end);
                 }
             }
+
             unified_dims.push(size);
             unified_names.push(name.clone());
         }
 
         Ok((unified_dims, Some(unified_names)))
+    }
+
+    /// Find a matching dimension in the secondary array.
+    /// Returns the matched dimension's name and size if found.
+    fn find_matching_dimension<'a, C: Expr2Context>(
+        ctx: &C,
+        name: &str,
+        size: usize,
+        secondary_names: &'a [String],
+        secondary_dims: &[usize],
+    ) -> Option<(&'a str, usize)> {
+        // First try name match
+        for (sec_name, &sec_size) in secondary_names.iter().zip(secondary_dims.iter()) {
+            if sec_name == name {
+                return Some((sec_name.as_str(), sec_size));
+            }
+        }
+
+        // If this dimension is indexed, try size-based match
+        if ctx.is_indexed_dimension(name) {
+            for (sec_name, &sec_size) in secondary_names.iter().zip(secondary_dims.iter()) {
+                if ctx.is_indexed_dimension(sec_name) && size == sec_size {
+                    return Some((sec_name.as_str(), sec_size));
+                }
+            }
+        }
+
+        None
     }
 
     /// Compute the size of a range subscript from constant bounds.
@@ -803,6 +947,14 @@ mod tests {
         fn get_dimension_len(&self, _name: &CanonicalDimensionName) -> Option<usize> {
             // For tests, we don't have dimension context
             None
+        }
+
+        fn is_indexed_dimension(&self, _name: &str) -> bool {
+            // For tests, treat all dimensions as named (not indexed).
+            // This is more conservative - dimensions must match by name, not size.
+            // Tests that need indexed dimension behavior should use TestProject
+            // which has proper dimension context.
+            false
         }
     }
 

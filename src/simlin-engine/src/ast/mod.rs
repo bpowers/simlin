@@ -145,6 +145,15 @@ impl<'a> Expr2Context for ArrayContext<'a> {
     fn get_dimension_len(&self, name: &crate::common::CanonicalDimensionName) -> Option<usize> {
         self.scope.dimensions.get(name).map(|dim| dim.len())
     }
+
+    fn is_indexed_dimension(&self, name: &str) -> bool {
+        let canonical_name = crate::common::CanonicalDimensionName::from_raw(name);
+        self.scope
+            .dimensions
+            .get(&canonical_name)
+            .map(|dim| matches!(dim, crate::dimensions::Dimension::Indexed(_, _)))
+            .unwrap_or(false)
+    }
 }
 
 pub(crate) fn lower_ast(scope: &ScopeStage0, ast: Ast<Expr0>) -> EquationResult<Ast<Expr2>> {
