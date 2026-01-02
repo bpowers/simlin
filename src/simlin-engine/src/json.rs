@@ -449,6 +449,7 @@ impl From<Stock> for datamodel::Stock {
                                     } else {
                                         Some(ee.initial_equation)
                                     },
+                                    None, // per-element gf not supported in JSON format
                                 )
                             })
                             .collect(),
@@ -510,6 +511,7 @@ impl From<Flow> for datamodel::Flow {
                                     } else {
                                         Some(ee.initial_equation)
                                     },
+                                    None, // per-element gf not supported in JSON format
                                 )
                             })
                             .collect(),
@@ -566,6 +568,7 @@ impl From<Auxiliary> for datamodel::Aux {
                                     } else {
                                         Some(ee.initial_equation)
                                     },
+                                    None, // per-element gf not supported in JSON format
                                 )
                             })
                             .collect(),
@@ -973,11 +976,13 @@ impl From<datamodel::Stock> for Stock {
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
-                    .map(|(subscript, equation, initial_equation)| ElementEquation {
-                        subscript,
-                        equation,
-                        initial_equation: initial_equation.unwrap_or_default(),
-                    })
+                    .map(
+                        |(subscript, equation, initial_equation, _gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            initial_equation: initial_equation.unwrap_or_default(),
+                        },
+                    )
                     .collect();
                 (
                     String::new(),
@@ -1023,11 +1028,13 @@ impl From<datamodel::Flow> for Flow {
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
-                    .map(|(subscript, equation, initial_equation)| ElementEquation {
-                        subscript,
-                        equation,
-                        initial_equation: initial_equation.unwrap_or_default(),
-                    })
+                    .map(
+                        |(subscript, equation, initial_equation, _gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            initial_equation: initial_equation.unwrap_or_default(),
+                        },
+                    )
                     .collect();
                 (
                     String::new(),
@@ -1073,11 +1080,13 @@ impl From<datamodel::Aux> for Auxiliary {
             datamodel::Equation::Arrayed(dims, elems) => {
                 let ees = elems
                     .into_iter()
-                    .map(|(subscript, equation, initial_equation)| ElementEquation {
-                        subscript,
-                        equation,
-                        initial_equation: initial_equation.unwrap_or_default(),
-                    })
+                    .map(
+                        |(subscript, equation, initial_equation, _gf)| ElementEquation {
+                            subscript,
+                            equation,
+                            initial_equation: initial_equation.unwrap_or_default(),
+                        },
+                    )
                     .collect();
                 (
                     String::new(),

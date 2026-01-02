@@ -294,11 +294,12 @@ impl From<Equation> for project_io::variable::Equation {
                             dimension_names,
                             elements: elements
                                 .into_iter()
-                                .map(|(subscript, equation, initial_equation)| {
+                                .map(|(subscript, equation, initial_equation, gf)| {
                                     project_io::variable::arrayed_equation::Element {
                                         subscript,
                                         equation,
                                         initial_equation,
+                                        gf: gf.map(project_io::GraphicalFunction::from),
                                     }
                                 })
                                 .collect(),
@@ -324,7 +325,14 @@ impl From<project_io::variable::Equation> for Equation {
                 arrayed
                     .elements
                     .into_iter()
-                    .map(|e| (e.subscript, e.equation, e.initial_equation))
+                    .map(|e| {
+                        (
+                            e.subscript,
+                            e.equation,
+                            e.initial_equation,
+                            e.gf.map(GraphicalFunction::from),
+                        )
+                    })
                     .collect(),
             ),
         }
@@ -349,8 +357,13 @@ fn test_equation_roundtrip() {
         Equation::Arrayed(
             vec!["d".to_string()],
             vec![
-                ("e".to_string(), "3".to_string(), None),
-                ("f".to_string(), "7+1".to_string(), Some("l".to_string())),
+                ("e".to_string(), "3".to_string(), None, None),
+                (
+                    "f".to_string(),
+                    "7+1".to_string(),
+                    Some("l".to_string()),
+                    None,
+                ),
             ],
         ),
     ];

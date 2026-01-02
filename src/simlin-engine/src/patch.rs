@@ -370,7 +370,7 @@ fn apply_ast_to_equation_main(equation: &mut datamodel::Equation, ast: &Ast<Expr
             *main = expr2_to_string(expr);
         }
         (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
-            for (element_name, equation, _) in elements.iter_mut() {
+            for (element_name, equation, _, _) in elements.iter_mut() {
                 let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
                 if let Some(expr) = exprs.get(&canonical_element) {
                     *equation = expr2_to_string(expr);
@@ -390,7 +390,7 @@ fn apply_ast_to_equation_initial(equation: &mut datamodel::Equation, ast: &Ast<E
             *initial = Some(expr2_to_string(expr));
         }
         (datamodel::Equation::Arrayed(_, elements), Ast::Arrayed(_, exprs)) => {
-            for (element_name, _, initial) in elements.iter_mut() {
+            for (element_name, _, initial, _) in elements.iter_mut() {
                 if let Some(initial_value) = initial.as_mut() {
                     let canonical_element = CanonicalElementName::from_raw(element_name.as_str());
                     if let Some(expr) = exprs.get(&canonical_element) {
@@ -1444,8 +1444,18 @@ mod tests {
                         equation: datamodel::Equation::Arrayed(
                             vec!["Region".to_string()],
                             vec![
-                                ("North".to_string(), "base_value * 1.5".to_string(), None),
-                                ("South".to_string(), "base_value * 2".to_string(), None),
+                                (
+                                    "North".to_string(),
+                                    "base_value * 1.5".to_string(),
+                                    None,
+                                    None,
+                                ),
+                                (
+                                    "South".to_string(),
+                                    "base_value * 2".to_string(),
+                                    None,
+                                    None,
+                                ),
                             ],
                         ),
                         documentation: String::new(),

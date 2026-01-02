@@ -86,7 +86,7 @@ created: (f = msg.getCreated()) && google_protobuf_timestamp_pb.Timestamp.toObje
 
 /**
  * Deserializes binary data (in protobuf wire format).
- * @param {jspb.ByteSource} bytes The bytes to deserialize.
+ * @param {jspb.binary.bytesource.ByteSource} bytes The bytes to deserialize.
  * @return {!proto.Preview}
  */
 proto.Preview.deserializeBinary = function(bytes) {

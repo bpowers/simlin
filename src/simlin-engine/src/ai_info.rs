@@ -113,7 +113,7 @@ fn append_model(s: &mut String, prefix: &str, mut i: i32, sample: i32, model: &M
                 }
                 Some(Equation::Arrayed(_, eqns)) => {
                     s.push('=');
-                    for (_, eqn, _) in eqns.iter() {
+                    for (_, eqn, _, _) in eqns.iter() {
                         let eqn = escape(eqn);
                         s.push_str(&eqn);
                     }

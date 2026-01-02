@@ -97,7 +97,7 @@ projectContents: msg.getProjectContents_asB64()
 
 /**
  * Deserializes binary data (in protobuf wire format).
- * @param {jspb.ByteSource} bytes The bytes to deserialize.
+ * @param {jspb.binary.bytesource.ByteSource} bytes The bytes to deserialize.
  * @return {!proto.File}
  */
 proto.File.deserializeBinary = function(bytes) {

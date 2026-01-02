@@ -101,7 +101,7 @@ updated: (f = msg.getUpdated()) && google_protobuf_timestamp_pb.Timestamp.toObje
 
 /**
  * Deserializes binary data (in protobuf wire format).
- * @param {jspb.ByteSource} bytes The bytes to deserialize.
+ * @param {jspb.binary.bytesource.ByteSource} bytes The bytes to deserialize.
  * @return {!proto.Project}
  */
 proto.Project.deserializeBinary = function(bytes) {

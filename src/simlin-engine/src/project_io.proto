@@ -46,6 +46,7 @@ message Variable {
       string subscript = 1;
       string equation = 2;
       optional string initial_equation = 3;
+      optional GraphicalFunction gf = 4;
     };
 
     repeated string dimension_names = 1;

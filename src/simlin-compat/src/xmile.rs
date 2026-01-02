@@ -2870,13 +2870,14 @@ pub struct Connect {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct NonNegative {}
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct VarElement {
     #[serde(rename = "@subscript")]
     pub subscript: String,
     pub eqn: String,
     #[serde(rename = "init_eqn")]
     pub initial_eqn: Option<String>,
+    pub gf: Option<Gf>,
 }
 
 impl ToXml<XmlWriter> for VarElement {
@@ -2887,11 +2888,14 @@ impl ToXml<XmlWriter> for VarElement {
         if let Some(init_eqn) = &self.initial_eqn {
             write_tag(writer, "init_eqn", init_eqn.as_str())?;
         }
+        if let Some(gf) = &self.gf {
+            gf.write_xml(writer)?;
+        }
         write_tag_end(writer, "element")
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct Stock {
     #[serde(rename = "@name")]
     pub name: String,
@@ -2981,7 +2985,7 @@ macro_rules! convert_equation(
             };
             let elements = elements.into_iter().map(|e| {
                 let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).as_str().to_string()).collect();
-                (canonical_subscripts.join(","), e.eqn, e.initial_eqn)
+                (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
@@ -3003,7 +3007,7 @@ macro_rules! convert_stock_equation(
             };
             let elements = elements.into_iter().map(|e| {
                 let canonical_subscripts: Vec<_> = e.subscript.split(",").map(|s| canonicalize(s.trim()).as_str().to_string()).collect();
-                (canonical_subscripts.join(","), e.eqn, e.initial_eqn)
+                (canonical_subscripts.join(","), e.eqn, e.initial_eqn, e.gf.map(datamodel::GraphicalFunction::from))
             }).collect();
             datamodel::Equation::Arrayed(dimensions, elements)
         } else if let Some(dimensions) = $var.dimensions {
@@ -3127,10 +3131,11 @@ impl From<datamodel::Stock> for Stock {
                 Equation::Arrayed(_, elements) => Some(
                     elements
                         .into_iter()
-                        .map(|(subscript, eqn, ..)| VarElement {
+                        .map(|(subscript, eqn, _, gf)| VarElement {
                             subscript,
                             eqn,
                             initial_eqn: None,
+                            gf: gf.map(Gf::from),
                         })
                         .collect(),
                 ),
@@ -3293,10 +3298,11 @@ impl From<datamodel::Flow> for Flow {
                 Equation::Arrayed(_, elements) => Some(
                     elements
                         .into_iter()
-                        .map(|(subscript, eqn, initial_eqn)| VarElement {
+                        .map(|(subscript, eqn, initial_eqn, gf)| VarElement {
                             subscript,
                             eqn,
                             initial_eqn,
+                            gf: gf.map(Gf::from),
                         })
                         .collect(),
                 ),
@@ -3449,10 +3455,11 @@ impl From<datamodel::Aux> for Aux {
                 Equation::Arrayed(_, elements) => Some(
                     elements
                         .into_iter()
-                        .map(|(subscript, eqn, initial_eqn)| VarElement {
+                        .map(|(subscript, eqn, initial_eqn, gf)| VarElement {
                             subscript,
                             eqn,
                             initial_eqn,
+                            gf: gf.map(Gf::from),
                         })
                         .collect(),
                 ),
@@ -3821,4 +3828,50 @@ fn test_sim_specs_parsing() {
 
     let roundtripped = SimSpecs::from(datamodel::SimSpecs::from(actual.clone()));
     assert_eq!(roundtripped, actual);
+}
+
+#[test]
+fn test_per_element_gf_parsing() {
+    let input = r#"<aux name="c">
+        <element subscript="A1">
+            <eqn>0</eqn>
+            <gf>
+                <xpts>0,1</xpts>
+                <ypts>10,20</ypts>
+            </gf>
+        </element>
+        <element subscript="A2">
+            <eqn>0</eqn>
+            <gf>
+                <xpts>0,1</xpts>
+                <ypts>20,30</ypts>
+            </gf>
+        </element>
+        <dimensions>
+            <dim name="DimA"/>
+        </dimensions>
+    </aux>"#;
+
+    use quick_xml::de;
+    let aux: Var = de::from_reader(input.as_bytes()).unwrap();
+
+    if let Var::Aux(aux) = aux {
+        let elements = aux.elements.as_ref().expect("elements should exist");
+        assert_eq!(2, elements.len());
+
+        // Check that per-element gf is parsed
+        let elem_a1 = &elements[0];
+        assert_eq!("A1", elem_a1.subscript);
+        let gf_a1 = elem_a1.gf.as_ref().expect("A1 should have gf");
+        assert_eq!(Some("0,1".to_string()), gf_a1.x_pts);
+        assert_eq!(Some("10,20".to_string()), gf_a1.y_pts);
+
+        let elem_a2 = &elements[1];
+        assert_eq!("A2", elem_a2.subscript);
+        let gf_a2 = elem_a2.gf.as_ref().expect("A2 should have gf");
+        assert_eq!(Some("0,1".to_string()), gf_a2.x_pts);
+        assert_eq!(Some("20,30".to_string()), gf_a2.y_pts);
+    } else {
+        panic!("not an aux");
+    }
 }

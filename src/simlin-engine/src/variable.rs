@@ -329,7 +329,7 @@ fn parse_equation(
             let mut errors: Vec<EquationError> = vec![];
             let elements: HashMap<_, _> = elements
                 .iter()
-                .map(|(subscript, eqn, init_eqn)| {
+                .map(|(subscript, eqn, init_eqn, _gf)| {
                     let (ast, single_errors) = if is_initial && init_eqn.is_some() {
                         parse_inner(init_eqn.as_ref().unwrap())
                     } else {

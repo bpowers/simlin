@@ -1631,9 +1631,9 @@ fn test_arrays() {
                         equation: Equation::Arrayed(
                             vec!["letters".to_owned()],
                             vec![
-                                ("a".to_owned(), "9".to_owned(), None),
-                                ("b".to_owned(), "7".to_owned(), None),
-                                ("c".to_owned(), "5".to_owned(), None),
+                                ("a".to_owned(), "9".to_owned(), None, None),
+                                ("b".to_owned(), "7".to_owned(), None, None),
+                                ("c".to_owned(), "5".to_owned(), None, None),
                             ],
                         ),
                         documentation: "".to_owned(),

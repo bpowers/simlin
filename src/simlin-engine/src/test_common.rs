@@ -247,7 +247,7 @@ impl TestProject {
     ) -> Self {
         let arrayed_equations = equations
             .into_iter()
-            .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None))
+            .map(|(elem, eq)| (elem.to_string(), eq.to_string(), None, None))
             .collect();
 
         self.variables.push(Variable::Aux(datamodel::Aux {
