@@ -2818,4 +2818,129 @@ mod indexed_dimension_tests {
             ],
         );
     }
+
+    // =============================================================================
+    // Edge case tests for dimension matching
+    // =============================================================================
+
+    #[test]
+    fn name_match_reserved_before_size_match() {
+        // P1 bug test: Ensure exact name matches are reserved before size-based matching.
+        //
+        // Test scenario: A single 2D source array where dimension order doesn't match target.
+        // Source: arr[Other, Second] with dims [Other(2), Second(2)]
+        // Target: result[Second, First] with dims [Second(2), First(2)]
+        //
+        // With greedy sequential matching (processing source dims in order):
+        //   1. Other(2) has no name match in [Second, First]
+        //   2. Other(2) size-matches Second(2) at index 0 (WRONG - steals Second's spot!)
+        //   3. Second(2) has name match but Second is now used
+        //   4. Second(2) size-matches First(2) at index 1
+        //   Result: Other→position 0 (Second), Second→position 1 (First)
+        //   This swaps dimensions incorrectly!
+        //
+        // Correct behavior (name matches reserved first):
+        //   1. First pass: Second→Second (name match at position 0)
+        //   2. Second pass: Other(2)→First(2) (size match at position 1)
+        //   Result: arr[Other, Second] → result[Second, First] with correct reordering
+        //
+        // arr[i, j] where i=Other, j=Second
+        // arr = [[11, 12],   (Other=1: Second=1→11, Second=2→12)
+        //        [21, 22]]   (Other=2: Second=1→21, Second=2→22)
+        //
+        // result[s, f] should read arr[f, s] after correct mapping:
+        // result[1, 1] = arr[Other=1, Second=1] = 11
+        // result[1, 2] = arr[Other=2, Second=1] = 21
+        // result[2, 1] = arr[Other=1, Second=2] = 12
+        // result[2, 2] = arr[Other=2, Second=2] = 22
+        // So result = [11, 21, 12, 22] (row-major for [Second, First])
+        //
+        // With WRONG mapping (Other→Second, Second→First):
+        // result[s, f] reads arr[s, f] - no reordering!
+        // result = [11, 12, 21, 22] (WRONG!)
+        let project = TestProject::new("name_reserved_before_size")
+            .indexed_dimension("First", 2)
+            .indexed_dimension("Second", 2)
+            .indexed_dimension("Other", 2)
+            .array_aux("arr[Other, Second]", "Other * 10 + Second") // [[11,12],[21,22]]
+            .array_aux("result[Second, First]", "arr");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Correct: reordering happens because Second matches Second, Other matches First
+        // result[Second, First] = transposed view of arr[Other, Second]
+        project.assert_interpreter_result("result", &[11.0, 21.0, 12.0, 22.0]);
+    }
+
+    #[test]
+    fn named_dims_union_broadcasting_error() {
+        // Test that named dimensions with different names do NOT allow UNION broadcasting.
+        // Even in UNION case, named dims should not be combined just by size.
+        use crate::common::ErrorCode;
+
+        let project = TestProject::new("named_union_error")
+            .named_dimension("Cities", &["NYC", "LA", "Chicago"])
+            .named_dimension("Products", &["Widget", "Gadget", "Gizmo"])
+            .array_aux("city_sales[Cities]", "Cities") // [1, 2, 3]
+            .array_aux("product_costs[Products]", "Products") // [1, 2, 3]
+            // This should fail - can't combine Cities and Products even in UNION case
+            .array_aux("invalid[Cities, Products]", "city_sales + product_costs");
+
+        project.assert_compile_error(ErrorCode::MismatchedDimensions);
+    }
+
+    #[test]
+    fn duplicate_dimension_usage_tracking() {
+        // Test that dimension matching correctly tracks usage to prevent
+        // multiple source dimensions from matching the same target dimension.
+        //
+        // Scenario: result[A,B,C] = a[X,Y] + b[Z] where X,Y,Z all have size 2.
+        // With the UNION case:
+        //   - a[X,Y] contributes dims X, Y
+        //   - b[Z] contributes dim Z (doesn't match X or Y by name)
+        //   - Result should be [X, Y, Z] = 3D (UNION)
+        //
+        // This test verifies that when we have three same-sized indexed dims,
+        // they're properly tracked as distinct dimensions in the union.
+        let project = TestProject::new("distinct_same_size_dims")
+            .indexed_dimension("A", 2)
+            .indexed_dimension("B", 2)
+            .indexed_dimension("C", 2)
+            .array_aux("xy_plane[A, B]", "A * 10 + B") // [[11,12],[21,22]]
+            .array_aux("z_line[C]", "C * 100") // [100, 200]
+            // UNION: [A,B] + [C] → [A,B,C]
+            .array_aux("cube[A, B, C]", "xy_plane + z_line");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // cube[a,b,c] = xy_plane[a,b] + z_line[c]
+        // = (a*10 + b) + (c*100)
+        project.assert_interpreter_result(
+            "cube",
+            &[
+                111.0, 211.0, // a=1, b=1, c=[1,2]
+                112.0, 212.0, // a=1, b=2, c=[1,2]
+                121.0, 221.0, // a=2, b=1, c=[1,2]
+                122.0, 222.0, // a=2, b=2, c=[1,2]
+            ],
+        );
+    }
+
+    #[test]
+    fn broadcast_1d_to_2d_correct_axis() {
+        // Test that 1D arrays broadcast to the correct axis in 2D.
+        // When we have result[A,B] = line[B], line should broadcast on A (not B).
+        let project = TestProject::new("correct_axis_broadcast")
+            .indexed_dimension("Rows", 2)
+            .indexed_dimension("Cols", 3)
+            .array_aux("row_vals[Cols]", "Cols * 10") // [10, 20, 30]
+            .array_aux("grid[Rows, Cols]", "row_vals");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // grid[r,c] = row_vals[c] for all r
+        // Row 1: [10, 20, 30]
+        // Row 2: [10, 20, 30]
+        project.assert_interpreter_result("grid", &[10.0, 20.0, 30.0, 10.0, 20.0, 30.0]);
+    }
 }

@@ -1005,21 +1005,26 @@ impl Context<'_> {
                 .collect();
         };
 
-        // For each source dimension, try to find a matching active dimension
-        // Use per-dimension matching (not all-or-nothing) to support partial matching
-        // for reductions like SUM(source[A,B]) in context [A]
-        let mut used_targets = vec![false; active_dims.len()];
+        // Use two-pass matching to ensure name matches are reserved before size matches.
+        // This is critical for correct dimension reordering when same-sized indexed dims exist.
+        //
+        // Pass 1: Assign all exact name matches (reserve them)
+        // Pass 2: For remaining sources, try size-based matching (indexed dims only)
+        //
+        // Use partial matching (not all-or-nothing) to support reductions like SUM(source[A,B])
+        // in context [A] where B doesn't match anything.
+        let source_to_target = match_dimensions_two_pass_partial(
+            &source_dims,
+            active_dims,
+            &vec![false; active_dims.len()],
+        );
 
         source_dims
             .iter()
-            .map(|source_dim| {
-                // Try to find a matching active dimension using the same algorithm
-                // as match_dimensions (name first, then size for indexed dims)
-                let target_idx = find_target_for_source(source_dim, active_dims, &used_targets);
-
-                if let Some(idx) = target_idx {
-                    used_targets[idx] = true;
-                    let active_dim = &active_dims[idx];
+            .enumerate()
+            .map(|(source_idx, _source_dim)| {
+                if let Some(target_idx) = source_to_target[source_idx] {
+                    let active_dim = &active_dims[target_idx];
                     // Create a dimension reference to the matched active dimension
                     ast::IndexExpr2::Expr(ast::Expr2::Var(
                         canonicalize(active_dim.name()),
@@ -4563,11 +4568,13 @@ pub struct DimensionMapping {
 /// Match source dimensions to target dimensions.
 ///
 /// Algorithm (dimension-agnostic, works for any N):
-/// 1. For each source dimension, find a matching target dimension
-///    - Named dims: match by name only
-///    - Indexed dims: match by name first, then by size
-/// 2. Verify all source dimensions found a match
+/// 1. FIRST PASS: Assign all exact name matches (reserve them)
+/// 2. SECOND PASS: For remaining sources, do size-based matching (indexed dims only)
 /// 3. Build the reverse mapping (target → source)
+///
+/// This two-pass approach ensures that name matches take priority over size matches.
+/// Without it, a greedy single-pass approach could let a size match "steal" a target
+/// that a later source dimension would have matched by name.
 ///
 /// Returns None if any source dimension cannot be matched.
 #[allow(dead_code)] // Scaffolding for future broadcast_view usage
@@ -4575,15 +4582,8 @@ pub fn match_dimensions(
     source_dims: &[Dimension],
     target_dims: &[Dimension],
 ) -> Option<DimensionMapping> {
-    let mut target_used = vec![false; target_dims.len()];
-    let mut source_to_target = Vec::with_capacity(source_dims.len());
-
-    // For each source dimension, find its target
-    for source_dim in source_dims {
-        let target_idx = find_target_for_source(source_dim, target_dims, &target_used)?;
-        target_used[target_idx] = true;
-        source_to_target.push(target_idx);
-    }
+    let source_to_target =
+        match_dimensions_two_pass(source_dims, target_dims, &vec![false; target_dims.len()])?;
 
     // Build reverse mapping
     let mut mapping = vec![None; target_dims.len()];
@@ -4597,7 +4597,76 @@ pub fn match_dimensions(
     })
 }
 
-/// Find target dimension for a source dimension.
+/// Two-pass dimension matching that reserves name matches before size matches.
+///
+/// Pass 1: Find and assign all exact name matches
+/// Pass 2: For remaining unmatched sources, try size-based matching (indexed dims only)
+///
+/// Returns source_to_target mapping, or None if matching fails.
+fn match_dimensions_two_pass(
+    source_dims: &[Dimension],
+    target_dims: &[Dimension],
+    initially_used: &[bool],
+) -> Option<Vec<usize>> {
+    let partial = match_dimensions_two_pass_partial(source_dims, target_dims, initially_used);
+
+    // Verify all sources were matched
+    partial.into_iter().collect()
+}
+
+/// Two-pass dimension matching that allows partial matches (some sources unmatched).
+///
+/// This is used for cases like SUM(arr[A,B]) in context [A] where B won't match.
+/// Returns a vector where each element is Some(target_idx) or None.
+fn match_dimensions_two_pass_partial(
+    source_dims: &[Dimension],
+    target_dims: &[Dimension],
+    initially_used: &[bool],
+) -> Vec<Option<usize>> {
+    let mut target_used = initially_used.to_vec();
+    let mut source_to_target: Vec<Option<usize>> = vec![None; source_dims.len()];
+
+    // PASS 1: Exact name matches (highest priority)
+    for (source_idx, source_dim) in source_dims.iter().enumerate() {
+        for (target_idx, target) in target_dims.iter().enumerate() {
+            if !target_used[target_idx] && target.name() == source_dim.name() {
+                target_used[target_idx] = true;
+                source_to_target[source_idx] = Some(target_idx);
+                break;
+            }
+        }
+    }
+
+    // PASS 2: Size-based matches for remaining sources (indexed dimensions only)
+    for (source_idx, source_dim) in source_dims.iter().enumerate() {
+        if source_to_target[source_idx].is_some() {
+            continue; // Already matched by name
+        }
+
+        if let Dimension::Indexed(_, source_size) = source_dim {
+            for (target_idx, target) in target_dims.iter().enumerate() {
+                if !target_used[target_idx]
+                    && let Dimension::Indexed(_, target_size) = target
+                    && source_size == target_size
+                {
+                    target_used[target_idx] = true;
+                    source_to_target[source_idx] = Some(target_idx);
+                    break;
+                }
+            }
+        }
+    }
+
+    source_to_target
+}
+
+/// Find target dimension for a source dimension (single dimension lookup).
+///
+/// NOTE: For matching multiple source dimensions, prefer `match_dimensions_two_pass`
+/// which correctly reserves name matches before allowing size-based matches.
+/// This function is kept for cases where we need to match a single dimension
+/// and the caller manages the used array properly.
+#[allow(dead_code)] // Kept for potential single-dimension matching use cases
 fn find_target_for_source(
     source_dim: &Dimension,
     target_dims: &[Dimension],
@@ -4611,6 +4680,8 @@ fn find_target_for_source(
     }
 
     // Second pass: size-based match (indexed dimensions only)
+    // IMPORTANT: This should only be called when there's no name match pending
+    // for any other source dimension. See match_dimensions_two_pass for proper handling.
     if let Dimension::Indexed(_, source_size) = source_dim {
         for (i, target) in target_dims.iter().enumerate() {
             if !used[i]
