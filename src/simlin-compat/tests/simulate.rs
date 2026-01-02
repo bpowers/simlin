@@ -9,6 +9,8 @@ use std::rc::Rc;
 
 use float_cmp::approx_eq;
 
+#[cfg(feature = "vensim")]
+use simlin_compat::open_vensim;
 use simlin_compat::{load_csv, load_dat, xmile};
 use simlin_engine::common::{Canonical, Ident};
 use simlin_engine::interpreter::Simulation;
@@ -552,6 +554,59 @@ fn simulates_arrayed_models_correctly() {
         let file_path = format!("../../{path}");
         simulate_path(file_path.as_str());
     }
+}
+
+#[test]
+#[ignore] // Investigating GET_DIRECT_CONSTANTS and sparse array initialization
+#[cfg(feature = "vensim")]
+fn simulates_directconst() {
+    // Test for sparse array initialization with per-element definitions
+    // Using the MDL file directly so xmutil converts it fresh
+    let mdl_path = "../../test/sdeverywhere/models/directconst/directconst.mdl";
+    eprintln!("model (via MDL): {mdl_path}");
+
+    let mdl_content = std::fs::read_to_string(mdl_path).unwrap();
+    let mut mdl_reader = BufReader::new(mdl_content.as_bytes());
+
+    let datamodel_project = open_vensim(&mut mdl_reader);
+    if let Err(ref err) = datamodel_project {
+        eprintln!("model '{mdl_path}' error: {err}");
+    }
+    let datamodel_project = datamodel_project.unwrap();
+
+    // Debug: print the parsed variables
+    for model in &datamodel_project.models {
+        eprintln!("Model: {}", model.name);
+        for var in &model.variables {
+            eprintln!(
+                "  Var: {} equation={:?}",
+                var.get_ident(),
+                var.get_equation()
+            );
+        }
+    }
+
+    let project = Rc::new(Project::from(datamodel_project.clone()));
+    let sim = Simulation::new(&project, "main").unwrap();
+
+    let results = sim.run_to_end();
+    assert!(results.is_ok(), "interpreter run failed: {:?}", results);
+    let results = results.unwrap();
+
+    // Debug: print the results
+    eprintln!(
+        "Results offsets: {:?}",
+        results.offsets.keys().collect::<Vec<_>>()
+    );
+    for row in results.iter().take(1) {
+        for (ident, &off) in &results.offsets {
+            eprintln!("  {}: {}", ident, row[off]);
+        }
+    }
+
+    // Compare against expected results
+    let expected = load_expected_results(&mdl_path.replace(".mdl", ".xmile")).unwrap();
+    ensure_results(&expected, &results);
 }
 
 #[test]
