@@ -2300,10 +2300,7 @@ mod indexed_dimension_tests {
     // These tests are marked #[ignore] as future work.
 
     #[test]
-    #[ignore]
     fn different_indexed_dims_same_size_broadcast() {
-        // TODO: Requires compiler-level changes to find_dimension_reordering and
-        // multiple dimension matching code paths.
         // Test that two arrays with different indexed dimensions of the same size
         // can be combined in element-wise operations via positional matching.
         let project = TestProject::new("indexed_broadcast")
@@ -2319,9 +2316,7 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn different_indexed_dims_with_wildcard() {
-        // TODO: Requires compiler-level changes for different-named indexed dim matching.
         let project = TestProject::new("indexed_wildcard_broadcast")
             .indexed_dimension("A", 4)
             .indexed_dimension("B", 4)
@@ -2406,9 +2401,7 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore]
     fn indexed_dims_2d_positional_matching() {
-        // TODO: Requires compiler-level changes for different-named indexed dim matching.
         let project = TestProject::new("indexed_2d_positional")
             .indexed_dimension("Rows", 2)
             .indexed_dimension("Cols", 3)
@@ -2535,7 +2528,6 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Broadcasting 1D arrays on different dimensions to 2D requires additional compiler work
     fn add_1d_different_dim_arrays_in_2d_context() {
         // This is the critical test: adding two 1D arrays on DIFFERENT dimensions
         let project = TestProject::new("add_diff_dim")
@@ -2599,7 +2591,6 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Broadcasting 1D arrays on different dimensions to 2D requires additional compiler work
     fn name_match_before_size_match_for_indexed_dims() {
         // Test that when matching implicit subscripts, we prefer name matching over
         // size-based positional matching. This tests the fix for a bug where having
@@ -2623,7 +2614,6 @@ mod indexed_dimension_tests {
     }
 
     #[test]
-    #[ignore] // TODO: Broadcasting 1D arrays on different dimensions to 2D requires additional compiler work
     fn name_match_same_size_dims() {
         // More challenging test: two indexed dimensions of THE SAME SIZE.
         // This specifically tests that name-based matching takes precedence
@@ -2643,6 +2633,188 @@ mod indexed_dimension_tests {
             "combined",
             &[
                 101.0, 102.0, 103.0, 201.0, 202.0, 203.0, 301.0, 302.0, 303.0,
+            ],
+        );
+    }
+
+    // =============================================================================
+    // N-dimensional broadcasting tests (3D, 4D)
+    // =============================================================================
+
+    #[test]
+    fn broadcast_to_3d() {
+        // plane[X,Y] + line[Z] → cube[X,Y,Z]
+        // Tests broadcasting a 2D and 1D array to 3D.
+        let project = TestProject::new("broadcast_3d")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 3)
+            .indexed_dimension("Z", 4)
+            .array_aux("plane[X, Y]", "X * 10 + Y") // 2x3 = [[11,12,13],[21,22,23]]
+            .array_aux("line[Z]", "Z * 100") // 4 = [100, 200, 300, 400]
+            .array_aux("cube[X, Y, Z]", "plane + line");
+        // cube[x,y,z] = plane[x,y] + line[z]
+        // Expected: 2x3x4 = 24 values in row-major order
+        // For x=1: plane[1,y] = [11,12,13]
+        //   For y=1: plane[1,1]=11, + line[z] = [111, 211, 311, 411]
+        //   For y=2: plane[1,2]=12, + line[z] = [112, 212, 312, 412]
+        //   For y=3: plane[1,3]=13, + line[z] = [113, 213, 313, 413]
+        // For x=2: plane[2,y] = [21,22,23]
+        //   For y=1: plane[2,1]=21, + line[z] = [121, 221, 321, 421]
+        //   For y=2: plane[2,2]=22, + line[z] = [122, 222, 322, 422]
+        //   For y=3: plane[2,3]=23, + line[z] = [123, 223, 323, 423]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "cube",
+            &[
+                111.0, 211.0, 311.0, 411.0, // x=1, y=1
+                112.0, 212.0, 312.0, 412.0, // x=1, y=2
+                113.0, 213.0, 313.0, 413.0, // x=1, y=3
+                121.0, 221.0, 321.0, 421.0, // x=2, y=1
+                122.0, 222.0, 322.0, 422.0, // x=2, y=2
+                123.0, 223.0, 323.0, 423.0, // x=2, y=3
+            ],
+        );
+    }
+
+    #[test]
+    fn broadcast_scalar_to_4d() {
+        // scalar + 4D array → 4D array
+        // Tests broadcasting a scalar across a 4D array.
+        let project = TestProject::new("broadcast_4d")
+            .indexed_dimension("A", 2)
+            .indexed_dimension("B", 2)
+            .indexed_dimension("C", 2)
+            .indexed_dimension("D", 2)
+            .scalar_const("offset", 100.0)
+            .array_aux("arr[A, B, C, D]", "A + B*2 + C*4 + D*8")
+            .array_aux("result[A, B, C, D]", "arr + offset");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Verify a few values: offset is 100, arr values are:
+        // arr[1,1,1,1] = 1+2+4+8 = 15, so result = 115
+        // arr[2,2,2,2] = 2+4+8+16 = 30, so result = 130
+        let result = project.interpreter_result("result");
+        assert_eq!(result[0], 115.0); // [1,1,1,1]
+        assert_eq!(result[15], 130.0); // [2,2,2,2] - last element
+    }
+
+    #[test]
+    fn broadcast_multiple_inputs_3d() {
+        // a[X] + b[Y] + c[Z] → result[X,Y,Z]
+        // Three 1D arrays broadcasting to 3D.
+        let project = TestProject::new("triple_broadcast")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 3)
+            .indexed_dimension("Z", 4)
+            .array_aux("a[X]", "X * 1000") // [1000, 2000]
+            .array_aux("b[Y]", "Y * 100") // [100, 200, 300]
+            .array_aux("c[Z]", "Z") // [1, 2, 3, 4]
+            .array_aux("result[X, Y, Z]", "a + b + c");
+        // result[x,y,z] = a[x] + b[y] + c[z]
+        // For x=1: a[1]=1000
+        //   For y=1: b[1]=100 → 1100 + [1,2,3,4] = [1101, 1102, 1103, 1104]
+        //   For y=2: b[2]=200 → 1200 + [1,2,3,4] = [1201, 1202, 1203, 1204]
+        //   For y=3: b[3]=300 → 1300 + [1,2,3,4] = [1301, 1302, 1303, 1304]
+        // For x=2: a[2]=2000
+        //   For y=1: b[1]=100 → 2100 + [1,2,3,4] = [2101, 2102, 2103, 2104]
+        //   For y=2: b[2]=200 → 2200 + [1,2,3,4] = [2201, 2202, 2203, 2204]
+        //   For y=3: b[3]=300 → 2300 + [1,2,3,4] = [2301, 2302, 2303, 2304]
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "result",
+            &[
+                1101.0, 1102.0, 1103.0, 1104.0, // x=1, y=1
+                1201.0, 1202.0, 1203.0, 1204.0, // x=1, y=2
+                1301.0, 1302.0, 1303.0, 1304.0, // x=1, y=3
+                2101.0, 2102.0, 2103.0, 2104.0, // x=2, y=1
+                2201.0, 2202.0, 2203.0, 2204.0, // x=2, y=2
+                2301.0, 2302.0, 2303.0, 2304.0, // x=2, y=3
+            ],
+        );
+    }
+
+    #[test]
+    fn broadcast_1d_to_3d_on_first_dim() {
+        // line[X] → cube[X, Y, Z]
+        // 1D array on first dimension broadcasts to 3D.
+        let project = TestProject::new("1d_to_3d_first")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 2)
+            .indexed_dimension("Z", 2)
+            .array_aux("line[X]", "X * 100") // [100, 200]
+            .array_aux("cube[X, Y, Z]", "line");
+        // cube[x,y,z] = line[x]
+        // line broadcasts across Y and Z
+        // cube[1,*,*] = 100, cube[2,*,*] = 200
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "cube",
+            &[
+                100.0, 100.0, // x=1, y=1, z=[1,2]
+                100.0, 100.0, // x=1, y=2, z=[1,2]
+                200.0, 200.0, // x=2, y=1, z=[1,2]
+                200.0, 200.0, // x=2, y=2, z=[1,2]
+            ],
+        );
+    }
+
+    #[test]
+    fn broadcast_1d_to_3d_on_middle_dim() {
+        // line[Y] → cube[X, Y, Z]
+        // 1D array on middle dimension broadcasts to 3D.
+        let project = TestProject::new("1d_to_3d_middle")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 2)
+            .indexed_dimension("Z", 2)
+            .array_aux("line[Y]", "Y * 10") // [10, 20]
+            .array_aux("cube[X, Y, Z]", "line");
+        // cube[x,y,z] = line[y]
+        // line broadcasts across X and Z
+        // cube[*,1,*] = 10, cube[*,2,*] = 20
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "cube",
+            &[
+                10.0, 10.0, // x=1, y=1, z=[1,2]
+                20.0, 20.0, // x=1, y=2, z=[1,2]
+                10.0, 10.0, // x=2, y=1, z=[1,2]
+                20.0, 20.0, // x=2, y=2, z=[1,2]
+            ],
+        );
+    }
+
+    #[test]
+    fn broadcast_1d_to_3d_on_last_dim() {
+        // line[Z] → cube[X, Y, Z]
+        // 1D array on last dimension broadcasts to 3D.
+        let project = TestProject::new("1d_to_3d_last")
+            .indexed_dimension("X", 2)
+            .indexed_dimension("Y", 2)
+            .indexed_dimension("Z", 2)
+            .array_aux("line[Z]", "Z") // [1, 2]
+            .array_aux("cube[X, Y, Z]", "line");
+        // cube[x,y,z] = line[z]
+        // line broadcasts across X and Y
+        // cube[*,*,1] = 1, cube[*,*,2] = 2
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        project.assert_interpreter_result(
+            "cube",
+            &[
+                1.0, 2.0, // x=1, y=1, z=[1,2]
+                1.0, 2.0, // x=1, y=2, z=[1,2]
+                1.0, 2.0, // x=2, y=1, z=[1,2]
+                1.0, 2.0, // x=2, y=2, z=[1,2]
             ],
         );
     }

@@ -981,32 +981,14 @@ impl Context<'_> {
         bounds: &ast::ArrayBounds,
         loc: Loc,
     ) -> Vec<ast::IndexExpr2> {
-        // Build set of active dimension names (canonicalized)
-        let active_dim_names: std::collections::HashSet<Ident<Canonical>> = self
-            .active_dimension
-            .as_ref()
-            .map(|dims| dims.iter().map(|d| canonicalize(d.name())).collect())
-            .unwrap_or_default();
+        // Get the source dimensions (from metadata or bounds)
+        let source_dims: Option<Vec<Dimension>> = self
+            .get_metadata(ident)
+            .ok()
+            .and_then(|metadata| metadata.var.get_dimensions())
+            .map(|dims| dims.to_vec());
 
-        let dim_names: Option<Vec<Ident<Canonical>>> = match bounds.dim_names() {
-            Some(names) => Some(
-                names
-                    .iter()
-                    .map(|name| canonicalize(name))
-                    .collect::<Vec<Ident<Canonical>>>(),
-            ),
-            None => self
-                .get_metadata(ident)
-                .ok()
-                .and_then(|metadata| metadata.var.get_dimensions())
-                .map(|dims| {
-                    dims.iter()
-                        .map(|d| canonicalize(d.name()))
-                        .collect::<Vec<Ident<Canonical>>>()
-                }),
-        };
-
-        let Some(dim_names) = dim_names else {
+        let Some(source_dims) = source_dims else {
             return bounds
                 .dims()
                 .iter()
@@ -1014,12 +996,39 @@ impl Context<'_> {
                 .collect();
         };
 
-        dim_names
+        // If we have active dimensions, use the unified dimension matching algorithm
+        let Some(active_dims) = self.active_dimension.as_ref() else {
+            // No active dimensions (not in A2A context) - use wildcards
+            return source_dims
+                .iter()
+                .map(|_| ast::IndexExpr2::Wildcard(loc))
+                .collect();
+        };
+
+        // For each source dimension, try to find a matching active dimension
+        // Use per-dimension matching (not all-or-nothing) to support partial matching
+        // for reductions like SUM(source[A,B]) in context [A]
+        let mut used_targets = vec![false; active_dims.len()];
+
+        source_dims
             .iter()
-            .map(|name| {
-                if active_dim_names.contains(name) {
-                    ast::IndexExpr2::Expr(ast::Expr2::Var(name.clone(), None, loc))
+            .map(|source_dim| {
+                // Try to find a matching active dimension using the same algorithm
+                // as match_dimensions (name first, then size for indexed dims)
+                let target_idx = find_target_for_source(source_dim, active_dims, &used_targets);
+
+                if let Some(idx) = target_idx {
+                    used_targets[idx] = true;
+                    let active_dim = &active_dims[idx];
+                    // Create a dimension reference to the matched active dimension
+                    ast::IndexExpr2::Expr(ast::Expr2::Var(
+                        canonicalize(active_dim.name()),
+                        None,
+                        loc,
+                    ))
                 } else {
+                    // Source dimension didn't match any active dimension - use wildcard
+                    // (needed for reductions like SUM where we iterate over non-matched dims)
                     ast::IndexExpr2::Wildcard(loc)
                 }
             })
@@ -4536,6 +4545,130 @@ pub fn pretty(expr: &Expr) -> String {
     }
 }
 
+/// Result of matching source dimensions to target dimensions.
+///
+/// For each target dimension, provides either:
+/// - Some(source_idx): which source dimension maps here
+/// - None: no source dimension (broadcast with stride 0)
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)] // Scaffolding for future broadcast_view usage
+pub struct DimensionMapping {
+    /// mapping[target_idx] = Some(source_idx) or None
+    /// For each target dimension, which source dimension maps to it (or None for broadcasting)
+    pub mapping: Vec<Option<usize>>,
+    /// For each source dimension, which target dimension it matched
+    pub source_to_target: Vec<usize>,
+}
+
+/// Match source dimensions to target dimensions.
+///
+/// Algorithm (dimension-agnostic, works for any N):
+/// 1. For each source dimension, find a matching target dimension
+///    - Named dims: match by name only
+///    - Indexed dims: match by name first, then by size
+/// 2. Verify all source dimensions found a match
+/// 3. Build the reverse mapping (target → source)
+///
+/// Returns None if any source dimension cannot be matched.
+#[allow(dead_code)] // Scaffolding for future broadcast_view usage
+pub fn match_dimensions(
+    source_dims: &[Dimension],
+    target_dims: &[Dimension],
+) -> Option<DimensionMapping> {
+    let mut target_used = vec![false; target_dims.len()];
+    let mut source_to_target = Vec::with_capacity(source_dims.len());
+
+    // For each source dimension, find its target
+    for source_dim in source_dims {
+        let target_idx = find_target_for_source(source_dim, target_dims, &target_used)?;
+        target_used[target_idx] = true;
+        source_to_target.push(target_idx);
+    }
+
+    // Build reverse mapping
+    let mut mapping = vec![None; target_dims.len()];
+    for (source_idx, &target_idx) in source_to_target.iter().enumerate() {
+        mapping[target_idx] = Some(source_idx);
+    }
+
+    Some(DimensionMapping {
+        mapping,
+        source_to_target,
+    })
+}
+
+/// Find target dimension for a source dimension.
+fn find_target_for_source(
+    source_dim: &Dimension,
+    target_dims: &[Dimension],
+    used: &[bool],
+) -> Option<usize> {
+    // First pass: exact name match (works for both named and indexed)
+    for (i, target) in target_dims.iter().enumerate() {
+        if !used[i] && target.name() == source_dim.name() {
+            return Some(i);
+        }
+    }
+
+    // Second pass: size-based match (indexed dimensions only)
+    if let Dimension::Indexed(_, source_size) = source_dim {
+        for (i, target) in target_dims.iter().enumerate() {
+            if !used[i]
+                && let Dimension::Indexed(_, target_size) = target
+                && source_size == target_size
+            {
+                return Some(i);
+            }
+        }
+    }
+
+    None
+}
+
+/// Broadcast a source view to match target dimensions.
+///
+/// For each target dimension:
+/// - If source has a matching dimension: use its stride
+/// - If no match: use stride 0 (broadcast/repeat)
+///
+/// This is dimension-agnostic: works for any N.
+#[allow(dead_code)] // Scaffolding for future optimization
+pub fn broadcast_view(
+    source_view: &ArrayView,
+    source_dims: &[Dimension],
+    target_dims: &[Dimension],
+) -> Option<ArrayView> {
+    let mapping = match_dimensions(source_dims, target_dims)?;
+
+    let mut new_dims = Vec::with_capacity(target_dims.len());
+    let mut new_strides = Vec::with_capacity(target_dims.len());
+    let mut new_dim_names = Vec::with_capacity(target_dims.len());
+
+    for (target_idx, target_dim) in target_dims.iter().enumerate() {
+        new_dims.push(target_dim.len());
+        new_dim_names.push(target_dim.name().to_string());
+
+        match mapping.mapping[target_idx] {
+            Some(source_idx) => {
+                // Source dimension maps here - use its stride
+                new_strides.push(source_view.strides[source_idx]);
+            }
+            None => {
+                // No source dimension - broadcast (stride 0)
+                new_strides.push(0);
+            }
+        }
+    }
+
+    Some(ArrayView {
+        dims: new_dims,
+        strides: new_strides,
+        offset: source_view.offset,
+        sparse: Vec::new(),
+        dim_names: new_dim_names,
+    })
+}
+
 /// Determines if dimensions can be reordered to match target dimensions and returns the reordering
 ///
 /// Given source dimensions and target dimensions, determines if the source can be
@@ -5150,5 +5283,154 @@ mod tests {
             reverse_rel.is_none(),
             "Parent is not a subdimension of Child"
         );
+    }
+
+    use crate::common::CanonicalDimensionName;
+
+    fn indexed_dim(name: &str, size: u32) -> Dimension {
+        Dimension::Indexed(CanonicalDimensionName::from_raw(name), size)
+    }
+
+    fn named_dim(name: &str, elements: &[&str]) -> Dimension {
+        use crate::dimensions::NamedDimension;
+        let canonical_elements: Vec<crate::common::CanonicalElementName> = elements
+            .iter()
+            .map(|e| crate::common::CanonicalElementName::from_raw(e))
+            .collect();
+        let indexed_elements: std::collections::HashMap<
+            crate::common::CanonicalElementName,
+            usize,
+        > = canonical_elements
+            .iter()
+            .enumerate()
+            .map(|(i, elem)| (elem.clone(), i + 1))
+            .collect();
+        Dimension::Named(
+            CanonicalDimensionName::from_raw(name),
+            NamedDimension {
+                indexed_elements,
+                elements: canonical_elements,
+            },
+        )
+    }
+
+    #[test]
+    fn test_find_target_for_source_name_match() {
+        // Test name matching for indexed dimensions
+        let source = indexed_dim("products", 3);
+        let targets = vec![indexed_dim("products", 3)];
+        let used = vec![false];
+
+        let result = find_target_for_source(&source, &targets, &used);
+        assert_eq!(result, Some(0), "Should match by name");
+    }
+
+    #[test]
+    fn test_find_target_for_source_size_match() {
+        // Test size-based matching for indexed dimensions with different names
+        let source = indexed_dim("regions", 3);
+        let targets = vec![indexed_dim("products", 3)];
+        let used = vec![false];
+
+        let result = find_target_for_source(&source, &targets, &used);
+        assert_eq!(
+            result,
+            Some(0),
+            "Should match by size for different-named indexed dims"
+        );
+    }
+
+    #[test]
+    fn test_find_target_for_source_size_mismatch() {
+        // Test that size must match for indexed dimensions
+        let source = indexed_dim("regions", 3);
+        let targets = vec![indexed_dim("products", 5)];
+        let used = vec![false];
+
+        let result = find_target_for_source(&source, &targets, &used);
+        assert_eq!(result, None, "Should not match when sizes differ");
+    }
+
+    #[test]
+    fn test_find_target_for_source_named_no_size_match() {
+        // Named dimensions should NOT match by size, only by name
+        let source = named_dim("cities", &["boston", "seattle"]);
+        let targets = vec![named_dim("products", &["widgets", "gadgets"])];
+        let used = vec![false];
+
+        let result = find_target_for_source(&source, &targets, &used);
+        assert_eq!(result, None, "Named dims should not match by size");
+    }
+
+    #[test]
+    fn test_find_target_for_source_respects_used() {
+        // Test that already-used targets are skipped
+        let source = indexed_dim("regions", 3);
+        let targets = vec![indexed_dim("products", 3), indexed_dim("categories", 3)];
+        let used = vec![true, false]; // products already used
+
+        let result = find_target_for_source(&source, &targets, &used);
+        assert_eq!(
+            result,
+            Some(1),
+            "Should match second target when first is used"
+        );
+    }
+
+    #[test]
+    fn test_match_dimensions_same_name() {
+        // Test matching dimensions with same names
+        let source = vec![indexed_dim("x", 2), indexed_dim("y", 3)];
+        let target = vec![indexed_dim("x", 2), indexed_dim("y", 3)];
+
+        let result = match_dimensions(&source, &target);
+        assert!(result.is_some());
+        let mapping = result.unwrap();
+        assert_eq!(mapping.mapping, vec![Some(0), Some(1)]);
+        assert_eq!(mapping.source_to_target, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_match_dimensions_different_names_same_size() {
+        // Test matching indexed dimensions with different names but same sizes
+        let source = vec![indexed_dim("a", 3)];
+        let target = vec![indexed_dim("b", 3)];
+
+        let result = match_dimensions(&source, &target);
+        assert!(result.is_some());
+        let mapping = result.unwrap();
+        assert_eq!(mapping.mapping, vec![Some(0)]);
+        assert_eq!(mapping.source_to_target, vec![0]);
+    }
+
+    #[test]
+    fn test_match_dimensions_broadcasting() {
+        // Test broadcasting: 1D source to 2D target
+        let source = vec![indexed_dim("x", 2)];
+        let target = vec![indexed_dim("x", 2), indexed_dim("y", 3)];
+
+        let result = match_dimensions(&source, &target);
+        assert!(result.is_some());
+        let mapping = result.unwrap();
+        assert_eq!(mapping.mapping, vec![Some(0), None]); // x matched, y is broadcast
+        assert_eq!(mapping.source_to_target, vec![0]);
+    }
+
+    #[test]
+    fn test_broadcast_view() {
+        // Test broadcast_view creates correct strides
+        let source_dims = vec![indexed_dim("x", 2)];
+        let target_dims = vec![indexed_dim("x", 2), indexed_dim("y", 3)];
+
+        // Source view: 1D contiguous [2], strides [1]
+        let source_view = ArrayView::contiguous_with_names(vec![2], vec!["x".to_string()]);
+
+        let result = broadcast_view(&source_view, &source_dims, &target_dims);
+        assert!(result.is_some());
+        let broadcast = result.unwrap();
+
+        assert_eq!(broadcast.dims, vec![2, 3]);
+        assert_eq!(broadcast.strides, vec![1, 0]); // x uses stride 1, y uses stride 0 (broadcast)
+        assert_eq!(broadcast.offset, 0);
     }
 }
