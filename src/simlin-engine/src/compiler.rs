@@ -3945,6 +3945,13 @@ impl<'module> Compiler<'module> {
                         }
                         Expr::StaticSubscript(off, view, loc) => {
                             // Static subscript - element offset is precomputed in the ArrayView
+                            // Reject ranges/wildcards - only single element selection is valid
+                            if view.size() > 1 {
+                                return sim_err!(
+                                    BadTable,
+                                    "range subscripts not supported in lookup tables".to_string()
+                                );
+                            }
                             (*off, Expr::Const(view.offset as f64, *loc))
                         }
                         Expr::Subscript(off, subscript_indices, dim_sizes, _loc) => {
