@@ -691,10 +691,10 @@ fn analyze_expr_polarity_with_context(
                 LinkPolarity::Unknown
             }
         }
-        Expr2::App(crate::builtins::BuiltinFn::Lookup(table_name, arg_expr, _), _, _) => {
+        Expr2::App(crate::builtins::BuiltinFn::Lookup(table_expr, index_expr, _), _, _) => {
             // Check if the argument contains our from_var
             let arg_polarity = analyze_expr_polarity_with_context(
-                arg_expr,
+                index_expr,
                 from_var,
                 LinkPolarity::Positive,
                 variables,
@@ -705,7 +705,13 @@ fn analyze_expr_polarity_with_context(
             }
 
             // Try to find the table and analyze its monotonicity
-            if let Some(vars) = variables {
+            // Extract variable name from table expression - only handle simple variable case
+            let table_name = match table_expr.as_ref() {
+                Expr2::Var(name, _, _) => Some(name.as_str()),
+                _ => None,
+            };
+
+            if let (Some(vars), Some(table_name)) = (variables, table_name) {
                 let table_ident = crate::common::canonicalize(table_name);
                 if let Some(Variable::Var { tables, .. }) = vars.get(&table_ident)
                     && let Some(t) = tables.first()

@@ -159,10 +159,14 @@ impl Expr1 {
 
                 let builtin = match id.as_str() {
                     "lookup" => {
-                        if let Some(Expr1::Var(ident, loc)) = args.first() {
-                            BuiltinFn::Lookup(ident.to_string(), Box::new(args[1].clone()), *loc)
+                        if args.len() == 2 {
+                            BuiltinFn::Lookup(
+                                Box::new(args[0].clone()),
+                                Box::new(args[1].clone()),
+                                loc,
+                            )
                         } else {
-                            return eqn_err!(BadTable, loc.start, loc.end);
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
                         }
                     }
                     "mean" => BuiltinFn::Mean(args),
@@ -290,9 +294,11 @@ impl Expr1 {
                         Box::new(b.constify_dimensions(scope)),
                     ),
                     BuiltinFn::IsModuleInput(id, loc) => BuiltinFn::IsModuleInput(id, loc),
-                    BuiltinFn::Lookup(id, arg, loc) => {
-                        BuiltinFn::Lookup(id, Box::new(arg.constify_dimensions(scope)), loc)
-                    }
+                    BuiltinFn::Lookup(table_expr, index_expr, loc) => BuiltinFn::Lookup(
+                        Box::new(table_expr.constify_dimensions(scope)),
+                        Box::new(index_expr.constify_dimensions(scope)),
+                        loc,
+                    ),
                     BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
                         Box::new(a.constify_dimensions(scope)),
                         Box::new(b.constify_dimensions(scope)),

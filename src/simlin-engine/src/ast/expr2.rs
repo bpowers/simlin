@@ -563,7 +563,11 @@ impl Expr2 {
             Expr1::App(builtin_fn, loc) => {
                 use BuiltinFn::*;
                 let builtin = match builtin_fn {
-                    Lookup(v, e, loc) => Lookup(v, Box::new(Expr2::from(*e, ctx)?), loc),
+                    Lookup(table_expr, index_expr, loc) => Lookup(
+                        Box::new(Expr2::from(*table_expr, ctx)?),
+                        Box::new(Expr2::from(*index_expr, ctx)?),
+                        loc,
+                    ),
                     Abs(e) => Abs(Box::new(Expr2::from(*e, ctx)?)),
                     Arccos(e) => Arccos(Box::new(Expr2::from(*e, ctx)?)),
                     Arcsin(e) => Arcsin(Box::new(Expr2::from(*e, ctx)?)),

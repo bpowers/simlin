@@ -756,10 +756,25 @@ impl ModuleEvaluator<'_> {
                             if a > b { a } else { b }
                         }
                     }
-                    BuiltinFn::Lookup(id, index, _) => {
-                        let canonical_id = canonicalize(id);
+                    BuiltinFn::Lookup(table_expr, index, _) => {
+                        // Extract variable name from table expression
+                        let canonical_id = match table_expr.as_ref() {
+                            compiler::Expr::Var(off, _) => {
+                                // Find the variable name from the offset
+                                let module_offsets = &self.module.offsets[&self.module.ident];
+                                module_offsets
+                                    .iter()
+                                    .find(|(_, (o, _))| *o == *off)
+                                    .map(|(k, _)| k.clone())
+                                    .unwrap()
+                            }
+                            _ => {
+                                eprintln!("subscripted lookup tables not yet supported");
+                                unreachable!();
+                            }
+                        };
                         if !self.module.tables.contains_key(&canonical_id) {
-                            eprintln!("bad lookup for {id}");
+                            eprintln!("bad lookup for {canonical_id}");
                             unreachable!();
                         }
                         let table = &self.module.tables[&canonical_id].data;

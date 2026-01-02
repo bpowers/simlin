@@ -53,7 +53,7 @@ pub struct UntypedBuiltinFn<Expr>(pub String, pub Vec<Expr>);
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum BuiltinFn<Expr> {
-    Lookup(String, Box<Expr>, Loc),
+    Lookup(Box<Expr>, Box<Expr>, Loc),
     Abs(Box<Expr>),
     Arccos(Box<Expr>),
     Arcsin(Box<Expr>),
@@ -138,7 +138,9 @@ impl<Expr> BuiltinFn<Expr> {
     {
         use BuiltinFn::*;
         Ok(match self {
-            Lookup(id, expr, loc) => Lookup(id, Box::new(f(*expr)?), loc),
+            Lookup(table_expr, index_expr, loc) => {
+                Lookup(Box::new(f(*table_expr)?), Box::new(f(*index_expr)?), loc)
+            }
             Abs(a) => Abs(Box::new(f(*a)?)),
             Arccos(a) => Arccos(Box::new(f(*a)?)),
             Arcsin(a) => Arcsin(Box::new(f(*a)?)),
@@ -274,9 +276,9 @@ where
         | BuiltinFn::StartTime
         | BuiltinFn::FinalTime => {}
         BuiltinFn::IsModuleInput(id, loc) => cb(BuiltinContents::Ident(id, *loc)),
-        BuiltinFn::Lookup(id, a, loc) => {
-            cb(BuiltinContents::Ident(id, *loc));
-            cb(BuiltinContents::Expr(a));
+        BuiltinFn::Lookup(table_expr, index_expr, _loc) => {
+            cb(BuiltinContents::Expr(table_expr));
+            cb(BuiltinContents::Expr(index_expr));
         }
         BuiltinFn::Abs(a)
         | BuiltinFn::Arccos(a)

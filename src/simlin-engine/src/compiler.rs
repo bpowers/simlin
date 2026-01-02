@@ -2073,9 +2073,11 @@ impl Context<'_> {
     ) -> Result<BuiltinFn> {
         use crate::builtins::BuiltinFn as BFn;
         Ok(match builtin {
-            BFn::Lookup(id, expr, loc) => {
-                BuiltinFn::Lookup(id.clone(), Box::new(self.lower_from_expr3(expr)?), *loc)
-            }
+            BFn::Lookup(table_expr, index_expr, loc) => BuiltinFn::Lookup(
+                Box::new(self.lower_from_expr3(table_expr)?),
+                Box::new(self.lower_from_expr3(index_expr)?),
+                *loc,
+            ),
             BFn::Abs(a) => BuiltinFn::Abs(Box::new(self.lower_from_expr3(a)?)),
             BFn::Arccos(a) => BuiltinFn::Arccos(Box::new(self.lower_from_expr3(a)?)),
             BFn::Arcsin(a) => BuiltinFn::Arcsin(Box::new(self.lower_from_expr3(a)?)),
@@ -2874,7 +2876,7 @@ impl Var {
                         }
                     }
                 }
-                Variable::Var { ident, tables, .. } => {
+                Variable::Var { tables, .. } => {
                     let off = ctx.get_base_offset(&canonicalize(var.ident()))?;
                     let ast = if ctx.is_initial {
                         var.init_ast()
@@ -2892,7 +2894,7 @@ impl Var {
                                 let loc = main_expr.get_loc();
                                 Expr::App(
                                     BuiltinFn::Lookup(
-                                        ident.as_str().to_string(),
+                                        Box::new(Expr::Var(off, loc)),
                                         Box::new(main_expr),
                                         loc,
                                     ),
@@ -3914,8 +3916,32 @@ impl<'module> Compiler<'module> {
             }
             Expr::App(builtin, _) => {
                 // lookups are special
-                if let BuiltinFn::Lookup(ident, index, _loc) = builtin {
-                    let table = &self.module.tables[&canonicalize(ident)];
+                if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
+                    // Extract variable offset from table expression
+                    // For simple var references, use the variable's offset to look up its table
+                    let table_offset = match table_expr.as_ref() {
+                        Expr::Var(off, _) => *off,
+                        _ => {
+                            return sim_err!(
+                                BadTable,
+                                "subscripted lookup tables not yet supported".to_string()
+                            );
+                        }
+                    };
+                    // Find the variable name from the offset by searching the module's offsets
+                    let module_offsets = &self.module.offsets[&self.module.ident];
+                    let table_ident = module_offsets
+                        .iter()
+                        .find(|(_, (off, _))| *off == table_offset)
+                        .map(|(k, _)| k.clone())
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::Simulation,
+                                ErrorCode::BadTable,
+                                Some("could not find table variable".to_string()),
+                            )
+                        })?;
+                    let table = &self.module.tables[&table_ident];
                     self.graphical_functions.push(table.data.clone());
                     let gf = (self.graphical_functions.len() - 1) as GraphicalFunctionId;
                     self.walk_expr(index)?.unwrap();
@@ -4424,7 +4450,9 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::TimeStep => "time_step".to_string(),
             BuiltinFn::StartTime => "initial_time".to_string(),
             BuiltinFn::FinalTime => "final_time".to_string(),
-            BuiltinFn::Lookup(table, idx, _loc) => format!("lookup({}, {})", table, pretty(idx)),
+            BuiltinFn::Lookup(table, idx, _loc) => {
+                format!("lookup({}, {})", pretty(table), pretty(idx))
+            }
             BuiltinFn::Abs(l) => format!("abs({})", pretty(l)),
             BuiltinFn::Arccos(l) => format!("arccos({})", pretty(l)),
             BuiltinFn::Arcsin(l) => format!("arcsin({})", pretty(l)),

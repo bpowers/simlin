@@ -111,10 +111,16 @@ impl UnitInferer<'_> {
                     // returns a bool, which is unitless
                     Ok(Units::Explicit(UnitMap::new()))
                 }
-                BuiltinFn::Lookup(ident, _, _loc) => {
+                BuiltinFn::Lookup(table_expr, _, _loc) => {
                     // lookups have the units specified on the table
-                    let units: UnitMap =
-                        [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
+                    let table_name = match table_expr.as_ref() {
+                        Expr2::Var(name, _, _) => name.as_str(),
+                        _ => return Ok(Units::Constant), // subscripted lookup tables not yet supported
+                    };
+                    let units: UnitMap = [(format!("@{prefix}{table_name}"), 1)]
+                        .iter()
+                        .cloned()
+                        .collect();
 
                     Ok(Units::Explicit(units))
                 }

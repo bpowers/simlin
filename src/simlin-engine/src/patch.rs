@@ -474,9 +474,9 @@ fn rename_builtin(
     new_ident: &Ident<Canonical>,
 ) -> BuiltinFn<Expr2> {
     match builtin {
-        BuiltinFn::Lookup(ident, expr, loc) => BuiltinFn::Lookup(
-            rename_identifier_string(ident, old_ident, new_ident),
-            Box::new(rename_expr(expr, old_ident, new_ident)),
+        BuiltinFn::Lookup(table_expr, index_expr, loc) => BuiltinFn::Lookup(
+            Box::new(rename_expr(table_expr, old_ident, new_ident)),
+            Box::new(rename_expr(index_expr, old_ident, new_ident)),
             *loc,
         ),
         BuiltinFn::IsModuleInput(ident, loc) => {
@@ -634,12 +634,9 @@ fn index_expr2_to_index_expr0(index: &IndexExpr2) -> crate::ast::IndexExpr0 {
 fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
     use crate::builtins::BuiltinFn;
     match builtin {
-        BuiltinFn::Lookup(ident, expr, _) => UntypedBuiltinFn(
+        BuiltinFn::Lookup(table_expr, index_expr, _) => UntypedBuiltinFn(
             "lookup".to_string(),
-            vec![
-                Expr0::Var(RawIdent::new(ident.clone()), Default::default()),
-                expr2_to_expr0(expr),
-            ],
+            vec![expr2_to_expr0(table_expr), expr2_to_expr0(index_expr)],
         ),
         BuiltinFn::IsModuleInput(ident, _) => UntypedBuiltinFn(
             "ismoduleinput".to_string(),

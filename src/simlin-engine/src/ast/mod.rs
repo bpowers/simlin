@@ -638,7 +638,7 @@ fn test_latex_eqn() {
         "\\operatorname{lookup}(\\mathrm{a}, 1.0)",
         latex_eqn(&Expr2::App(
             crate::builtins::BuiltinFn::Lookup(
-                "a".to_string(),
+                Box::new(Expr2::Var(canonicalize("a"), None, Default::default())),
                 Box::new(Expr2::Const("1.0".to_owned(), 1.0, Default::default())),
                 Default::default(),
             ),

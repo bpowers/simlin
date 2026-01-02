@@ -58,138 +58,152 @@ impl UnitEvaluator<'_> {
 
                 Ok(Units::Explicit(units.clone()))
             }
-            Expr2::App(builtin, _, _) => match builtin {
-                BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
-                BuiltinFn::Time
-                | BuiltinFn::TimeStep
-                | BuiltinFn::StartTime
-                | BuiltinFn::FinalTime => Ok(Units::Explicit(
-                    self.time.units().cloned().unwrap_or_default(),
-                )),
-                BuiltinFn::IsModuleInput(_, _) => {
-                    // returns a bool, which is unitless
-                    Ok(Units::Explicit(UnitMap::new()))
-                }
-                BuiltinFn::Lookup(ident, _, loc) => {
-                    // lookups have the units specified on the table
-                    if let Some(units) = self
-                        .model
-                        .variables
-                        .get(&canonicalize(ident))
-                        .and_then(|var| var.units())
-                        .or_else(|| self.inferred_units.get(&canonicalize(ident)))
-                    {
-                        Ok(Units::Explicit(units.clone()))
-                    } else {
-                        Err(ConsistencyError(
-                            ErrorCode::DoesNotExist,
-                            *loc,
-                            Some(format!("can't find or no units for dependency '{ident}'",)),
-                        ))
+            Expr2::App(builtin, _, _) => {
+                match builtin {
+                    BuiltinFn::Inf | BuiltinFn::Pi => Ok(Units::Constant),
+                    BuiltinFn::Time
+                    | BuiltinFn::TimeStep
+                    | BuiltinFn::StartTime
+                    | BuiltinFn::FinalTime => Ok(Units::Explicit(
+                        self.time.units().cloned().unwrap_or_default(),
+                    )),
+                    BuiltinFn::IsModuleInput(_, _) => {
+                        // returns a bool, which is unitless
+                        Ok(Units::Explicit(UnitMap::new()))
                     }
-                }
-                BuiltinFn::Abs(a)
-                | BuiltinFn::Arccos(a)
-                | BuiltinFn::Arcsin(a)
-                | BuiltinFn::Arctan(a)
-                | BuiltinFn::Cos(a)
-                | BuiltinFn::Exp(a)
-                | BuiltinFn::Int(a)
-                | BuiltinFn::Ln(a)
-                | BuiltinFn::Log10(a)
-                | BuiltinFn::Sign(a)
-                | BuiltinFn::Sin(a)
-                | BuiltinFn::Sqrt(a)
-                | BuiltinFn::Tan(a)
-                | BuiltinFn::Size(a)
-                | BuiltinFn::Stddev(a)
-                | BuiltinFn::Sum(a) => self.check(a),
-                BuiltinFn::Mean(args) => {
-                    let args = args
-                        .iter()
-                        .map(|arg| self.check(arg))
-                        .collect::<UnitResult<Vec<_>>>()?;
-
-                    if args.is_empty() {
-                        return Ok(Units::Constant);
+                    BuiltinFn::Lookup(table_expr, _, loc) => {
+                        // lookups have the units specified on the table
+                        let table_name = match table_expr.as_ref() {
+                            Expr2::Var(name, _, _) => name.clone(),
+                            _ => {
+                                return Err(ConsistencyError(
+                                ErrorCode::DoesNotExist,
+                                *loc,
+                                Some("subscripted lookup tables not yet supported in units checking".to_string()),
+                            ));
+                            }
+                        };
+                        if let Some(units) = self
+                            .model
+                            .variables
+                            .get(&table_name)
+                            .and_then(|var| var.units())
+                            .or_else(|| self.inferred_units.get(&table_name))
+                        {
+                            Ok(Units::Explicit(units.clone()))
+                        } else {
+                            Err(ConsistencyError(
+                                ErrorCode::DoesNotExist,
+                                *loc,
+                                Some(format!(
+                                    "can't find or no units for dependency '{table_name}'",
+                                )),
+                            ))
+                        }
                     }
+                    BuiltinFn::Abs(a)
+                    | BuiltinFn::Arccos(a)
+                    | BuiltinFn::Arcsin(a)
+                    | BuiltinFn::Arctan(a)
+                    | BuiltinFn::Cos(a)
+                    | BuiltinFn::Exp(a)
+                    | BuiltinFn::Int(a)
+                    | BuiltinFn::Ln(a)
+                    | BuiltinFn::Log10(a)
+                    | BuiltinFn::Sign(a)
+                    | BuiltinFn::Sin(a)
+                    | BuiltinFn::Sqrt(a)
+                    | BuiltinFn::Tan(a)
+                    | BuiltinFn::Size(a)
+                    | BuiltinFn::Stddev(a)
+                    | BuiltinFn::Sum(a) => self.check(a),
+                    BuiltinFn::Mean(args) => {
+                        let args = args
+                            .iter()
+                            .map(|arg| self.check(arg))
+                            .collect::<UnitResult<Vec<_>>>()?;
 
-                    // find the first non-constant argument
-                    let arg0 = args
-                        .iter()
-                        .find(|arg| matches!(arg, Units::Explicit(_)))
-                        .cloned();
-                    match arg0 {
-                        Some(arg0) => {
-                            if args.iter().all(|arg| arg0.equals(arg)) {
-                                Ok(arg0)
-                            } else {
-                                let expected = match arg0 {
+                        if args.is_empty() {
+                            return Ok(Units::Constant);
+                        }
+
+                        // find the first non-constant argument
+                        let arg0 = args
+                            .iter()
+                            .find(|arg| matches!(arg, Units::Explicit(_)))
+                            .cloned();
+                        match arg0 {
+                            Some(arg0) => {
+                                if args.iter().all(|arg| arg0.equals(arg)) {
+                                    Ok(arg0)
+                                } else {
+                                    let expected = match arg0 {
+                                        Units::Explicit(units) => units,
+                                        Units::Constant => Default::default(),
+                                    };
+                                    Err(ConsistencyError(
+                                        ErrorCode::UnitDefinitionErrors,
+                                        expr.get_loc(),
+                                        Some(format!(
+                                            "expected all arguments to mean() to have the same units '{expected}'",
+                                        )),
+                                    ))
+                                }
+                            }
+                            // all args were constants, so we're good
+                            None => Ok(Units::Constant),
+                        }
+                    }
+                    BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
+                        let a_units = self.check(a)?;
+                        if let Some(b) = b {
+                            let b_units = self.check(b)?;
+                            if !a_units.equals(&b_units) {
+                                let a_units = match a_units {
                                     Units::Explicit(units) => units,
                                     Units::Constant => Default::default(),
                                 };
-                                Err(ConsistencyError(
+                                let b_units = match b_units {
+                                    Units::Explicit(units) => units,
+                                    Units::Constant => Default::default(),
+                                };
+                                let loc = a.get_loc().union(&b.get_loc());
+                                return Err(ConsistencyError(
                                     ErrorCode::UnitDefinitionErrors,
-                                    expr.get_loc(),
+                                    loc,
                                     Some(format!(
-                                        "expected all arguments to mean() to have the same units '{expected}'",
+                                        "expected left and right argument units to match, but '{a_units}' and '{b_units}' don't",
                                     )),
-                                ))
+                                ));
                             }
                         }
-                        // all args were constants, so we're good
-                        None => Ok(Units::Constant),
+                        Ok(a_units)
                     }
-                }
-                BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-                    let a_units = self.check(a)?;
-                    if let Some(b) = b {
-                        let b_units = self.check(b)?;
-                        if !a_units.equals(&b_units) {
-                            let a_units = match a_units {
-                                Units::Explicit(units) => units,
-                                Units::Constant => Default::default(),
-                            };
-                            let b_units = match b_units {
-                                Units::Explicit(units) => units,
-                                Units::Constant => Default::default(),
-                            };
-                            let loc = a.get_loc().union(&b.get_loc());
-                            return Err(ConsistencyError(
-                                ErrorCode::UnitDefinitionErrors,
-                                loc,
-                                Some(format!(
-                                    "expected left and right argument units to match, but '{a_units}' and '{b_units}' don't",
-                                )),
-                            ));
-                        }
-                    }
-                    Ok(a_units)
-                }
-                BuiltinFn::Pulse(_, _, _) | BuiltinFn::Ramp(_, _, _) | BuiltinFn::Step(_, _) => {
-                    Ok(Units::Constant)
-                }
-                BuiltinFn::SafeDiv(a, b, c) => {
-                    let div = Expr2::Op2(
-                        BinaryOp::Div,
-                        a.clone(),
-                        b.clone(),
-                        None,
-                        a.get_loc().union(&b.get_loc()),
-                    );
-                    let units = self.check(&div)?;
+                    BuiltinFn::Pulse(_, _, _)
+                    | BuiltinFn::Ramp(_, _, _)
+                    | BuiltinFn::Step(_, _) => Ok(Units::Constant),
+                    BuiltinFn::SafeDiv(a, b, c) => {
+                        let div = Expr2::Op2(
+                            BinaryOp::Div,
+                            a.clone(),
+                            b.clone(),
+                            None,
+                            a.get_loc().union(&b.get_loc()),
+                        );
+                        let units = self.check(&div)?;
 
-                    if let Some(c) = c {
-                        let c_units = self.check(c)?;
-                        if c_units != units {
-                            // TODO: return an error here
+                        if let Some(c) = c {
+                            let c_units = self.check(c)?;
+                            if c_units != units {
+                                // TODO: return an error here
+                            }
                         }
-                    }
 
-                    Ok(units)
+                        Ok(units)
+                    }
+                    BuiltinFn::Rank(a, _rest) => self.check(a),
                 }
-                BuiltinFn::Rank(a, _rest) => self.check(a),
-            },
+            }
             Expr2::Subscript(_, _, _, _) => Ok(Units::Explicit(UnitMap::new())),
             Expr2::Op1(_, l, _, _) => self.check(l),
             Expr2::Op2(op, l, r, _, _) => {
