@@ -757,19 +757,50 @@ impl ModuleEvaluator<'_> {
                         }
                     }
                     BuiltinFn::Lookup(table_expr, index, _) => {
-                        // Extract variable name from table expression
-                        let canonical_id = match table_expr.as_ref() {
+                        // Extract variable name and element offset from table expression
+                        let (canonical_id, element_offset) = match table_expr.as_ref() {
                             compiler::Expr::Var(off, _) => {
-                                // Find the variable name from the offset
+                                // Simple scalar table reference - element_offset is 0
                                 let module_offsets = &self.module.offsets[&self.module.ident];
-                                module_offsets
+                                let ident = module_offsets
                                     .iter()
                                     .find(|(_, (o, _))| *o == *off)
                                     .map(|(k, _)| k.clone())
-                                    .unwrap()
+                                    .unwrap();
+                                (ident, 0usize)
+                            }
+                            compiler::Expr::Subscript(off, subscript_indices, dim_sizes, _) => {
+                                // Subscripted table reference - compute element_offset
+                                let module_offsets = &self.module.offsets[&self.module.ident];
+                                let ident = module_offsets
+                                    .iter()
+                                    .find(|(_, (o, _))| *o == *off)
+                                    .map(|(k, _)| k.clone())
+                                    .unwrap();
+
+                                // Compute linear offset from subscript indices
+                                let mut offset = 0usize;
+                                let mut stride = 1usize;
+                                for (i, sub_idx) in subscript_indices.iter().enumerate().rev() {
+                                    let idx = match sub_idx {
+                                        compiler::SubscriptIndex::Single(expr) => {
+                                            // Evaluate expression and convert to 0-based
+                                            (self.eval(expr) as usize).saturating_sub(1)
+                                        }
+                                        compiler::SubscriptIndex::Range(_, _) => {
+                                            eprintln!(
+                                                "range subscripts not supported in lookup tables"
+                                            );
+                                            unreachable!();
+                                        }
+                                    };
+                                    offset += idx * stride;
+                                    stride *= dim_sizes.get(i).copied().unwrap_or(1);
+                                }
+                                (ident, offset)
                             }
                             _ => {
-                                eprintln!("subscripted lookup tables not yet supported");
+                                eprintln!("unsupported expression type for lookup table reference");
                                 unreachable!();
                             }
                         };
@@ -777,7 +808,14 @@ impl ModuleEvaluator<'_> {
                             eprintln!("bad lookup for {canonical_id}");
                             unreachable!();
                         }
-                        let table = &self.module.tables[&canonical_id].data;
+                        let tables = &self.module.tables[&canonical_id];
+                        if element_offset >= tables.len() {
+                            eprintln!(
+                                "element_offset {element_offset} out of range for {canonical_id}"
+                            );
+                            return f64::NAN;
+                        }
+                        let table = &tables[element_offset].data;
                         if table.is_empty() {
                             return f64::NAN;
                         }

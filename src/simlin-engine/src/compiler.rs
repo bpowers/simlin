@@ -3097,7 +3097,7 @@ pub struct Module {
     pub(crate) runlist_stocks: Vec<Expr>,
     pub(crate) offsets: VariableOffsetMap,
     pub(crate) runlist_order: Vec<Ident<Canonical>>,
-    pub(crate) tables: HashMap<Ident<Canonical>, Table>,
+    pub(crate) tables: HashMap<Ident<Canonical>, Vec<Table>>,
     /// All dimensions from the project, for bytecode compilation
     pub(crate) dimensions: Vec<Dimension>,
     /// DimensionsContext for subdimension relationship lookups
@@ -3384,16 +3384,20 @@ impl Module {
             temp_sizes[id as usize] = size;
         }
 
-        let tables: Result<HashMap<Ident<Canonical>, Table>> = var_names
+        let tables: Result<HashMap<Ident<Canonical>, Vec<Table>>> = var_names
             .iter()
             .map(|id| {
                 let canonical_id = canonicalize(id);
                 (id, &model.variables[&canonical_id])
             })
-            .filter(|(_, v)| v.table().is_some())
-            .map(|(id, v)| (id, Table::new(id, v.table().unwrap())))
-            .map(|(id, t)| match t {
-                Ok(table) => Ok((canonicalize(id), table)),
+            .filter(|(_, v)| !v.tables().is_empty())
+            .map(|(id, v)| {
+                let tables_result: Result<Vec<Table>> =
+                    v.tables().iter().map(|t| Table::new(id, t)).collect();
+                (id, tables_result)
+            })
+            .map(|(id, tables_result)| match tables_result {
+                Ok(tables) => Ok((canonicalize(id), tables)),
                 Err(err) => Err(err),
             })
             .collect();
@@ -3496,6 +3500,9 @@ struct Compiler<'module> {
     module: &'module Module,
     module_decls: Vec<ModuleDeclaration>,
     graphical_functions: Vec<Vec<(f64, f64)>>,
+    /// Maps table variable names to their base index in graphical_functions.
+    /// For subscripted lookups, the actual table is at base_id + element_offset.
+    table_base_ids: HashMap<Ident<Canonical>, GraphicalFunctionId>,
     curr_code: ByteCodeBuilder,
     // Array support fields
     dimensions: Vec<DimensionInfo>,
@@ -3508,10 +3515,23 @@ struct Compiler<'module> {
 
 impl<'module> Compiler<'module> {
     fn new(module: &'module Module) -> Compiler<'module> {
+        // Pre-populate graphical_functions with all tables and record base IDs
+        let mut graphical_functions = Vec::new();
+        let mut table_base_ids = HashMap::new();
+
+        for (ident, tables) in &module.tables {
+            let base_gf = graphical_functions.len() as GraphicalFunctionId;
+            table_base_ids.insert(ident.clone(), base_gf);
+            for table in tables {
+                graphical_functions.push(table.data.clone());
+            }
+        }
+
         let mut compiler = Compiler {
             module,
             module_decls: vec![],
-            graphical_functions: vec![],
+            graphical_functions,
+            table_base_ids,
             curr_code: ByteCodeBuilder::default(),
             dimensions: vec![],
             subdim_relations: vec![],
@@ -3917,18 +3937,82 @@ impl<'module> Compiler<'module> {
             Expr::App(builtin, _) => {
                 // lookups are special
                 if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
-                    // Extract variable offset from table expression
-                    // For simple var references, use the variable's offset to look up its table
-                    let table_offset = match table_expr.as_ref() {
-                        Expr::Var(off, _) => *off,
+                    // Extract variable offset and compute element_offset from table expression
+                    let (table_offset, element_offset_expr) = match table_expr.as_ref() {
+                        Expr::Var(off, loc) => {
+                            // Simple scalar table reference - element_offset is always 0
+                            (*off, Expr::Const(0.0, *loc))
+                        }
+                        Expr::Subscript(off, subscript_indices, dim_sizes, _loc) => {
+                            // Subscripted table reference - compute element_offset
+                            // For a multi-dimensional subscript, compute linear offset
+                            // offset = sum(index_i * stride_i) where stride_i = product of sizes[i+1..]
+                            let mut offset_expr: Option<Expr> = None;
+                            let mut stride = 1usize;
+
+                            // Process indices in reverse order to compute strides correctly
+                            for (i, sub_idx) in subscript_indices.iter().enumerate().rev() {
+                                let idx_expr = match sub_idx {
+                                    SubscriptIndex::Single(expr) => {
+                                        // Convert to 0-based index by subtracting 1
+                                        let one = Expr::Const(1.0, expr.get_loc());
+                                        Expr::Op2(
+                                            BinaryOp::Sub,
+                                            Box::new(expr.clone()),
+                                            Box::new(one),
+                                            expr.get_loc(),
+                                        )
+                                    }
+                                    SubscriptIndex::Range(_, _) => {
+                                        return sim_err!(
+                                            BadTable,
+                                            "range subscripts not supported in lookup tables"
+                                                .to_string()
+                                        );
+                                    }
+                                };
+
+                                // Multiply by stride if not innermost dimension
+                                let term = if stride == 1 {
+                                    idx_expr
+                                } else {
+                                    let stride_const =
+                                        Expr::Const(stride as f64, idx_expr.get_loc());
+                                    Expr::Op2(
+                                        BinaryOp::Mul,
+                                        Box::new(idx_expr),
+                                        Box::new(stride_const),
+                                        *_loc,
+                                    )
+                                };
+
+                                // Add to running offset
+                                offset_expr = Some(match offset_expr {
+                                    None => term,
+                                    Some(prev) => Expr::Op2(
+                                        BinaryOp::Add,
+                                        Box::new(prev),
+                                        Box::new(term),
+                                        *_loc,
+                                    ),
+                                });
+
+                                // Update stride for next dimension
+                                stride *= dim_sizes.get(i).copied().unwrap_or(1);
+                            }
+
+                            (*off, offset_expr.unwrap_or(Expr::Const(0.0, *_loc)))
+                        }
                         _ => {
                             return sim_err!(
                                 BadTable,
-                                "subscripted lookup tables not yet supported".to_string()
+                                "unsupported expression type for lookup table reference"
+                                    .to_string()
                             );
                         }
                     };
-                    // Find the variable name from the offset by searching the module's offsets
+
+                    // Find the variable name from the offset
                     let module_offsets = &self.module.offsets[&self.module.ident];
                     let table_ident = module_offsets
                         .iter()
@@ -3941,11 +4025,20 @@ impl<'module> Compiler<'module> {
                                 Some("could not find table variable".to_string()),
                             )
                         })?;
-                    let table = &self.module.tables[&table_ident];
-                    self.graphical_functions.push(table.data.clone());
-                    let gf = (self.graphical_functions.len() - 1) as GraphicalFunctionId;
+
+                    // Look up the base_gf for this table variable
+                    let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::Simulation,
+                            ErrorCode::BadTable,
+                            Some(format!("no graphical function found for '{table_ident}'")),
+                        )
+                    })?;
+
+                    // Emit: push element_offset, push lookup_index, Lookup { base_gf }
+                    self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
-                    self.push(Opcode::Lookup { gf });
+                    self.push(Opcode::Lookup { base_gf });
                     return Ok(Some(()));
                 };
 

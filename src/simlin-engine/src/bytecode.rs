@@ -563,8 +563,12 @@ pub(crate) enum Opcode {
     Apply {
         func: BuiltinId,
     },
+    /// Lookup a value in a graphical function table.
+    /// Stack: [..., element_offset, lookup_index] -> [..., result]
+    /// The actual table used is graphical_functions[base_gf + element_offset].
+    /// For scalar tables, element_offset is always 0.
     Lookup {
-        gf: GraphicalFunctionId,
+        base_gf: GraphicalFunctionId,
     },
 
     // =========================================================================
