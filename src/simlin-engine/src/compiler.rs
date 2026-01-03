@@ -23,7 +23,8 @@ use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
 use crate::vm::{
-    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, SubscriptIterator, TIME_OFF,
+    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, ModuleKey, SubscriptIterator,
+    TIME_OFF,
 };
 use crate::{Error, sim_err};
 use smallvec::SmallVec;
@@ -529,7 +530,14 @@ pub enum Expr {
     TempArrayElement(u32, ArrayView, usize, Loc), // temp id, view, element index, location
     Dt(Loc),
     App(BuiltinFn, Loc),
-    EvalModule(Ident<Canonical>, Ident<Canonical>, Vec<Expr>),
+    /// EvalModule(module_ident, model_name, input_set, args)
+    /// input_set is needed to look up the correct compiled module when a model has multiple instantiations
+    EvalModule(
+        Ident<Canonical>,
+        Ident<Canonical>,
+        BTreeSet<Ident<Canonical>>,
+        Vec<Expr>,
+    ),
     ModuleInput(usize, Loc),
     Op2(BinaryOp, Box<Expr>, Box<Expr>, Loc),
     Op1(UnaryOp, Box<Expr>, Loc),
@@ -550,7 +558,7 @@ impl Expr {
             Expr::TempArrayElement(_, _, _, loc) => *loc,
             Expr::Dt(loc) => *loc,
             Expr::App(_, loc) => *loc,
-            Expr::EvalModule(_, _, _) => Loc::default(),
+            Expr::EvalModule(_, _, _, _) => Loc::default(),
             Expr::ModuleInput(_, loc) => *loc,
             Expr::Op2(_, _, _, loc) => *loc,
             Expr::Op1(_, _, loc) => *loc,
@@ -649,9 +657,9 @@ impl Expr {
                 };
                 Expr::App(builtin, loc)
             }
-            Expr::EvalModule(id1, id2, args) => {
+            Expr::EvalModule(id1, id2, input_set, args) => {
                 let args = args.into_iter().map(|expr| expr.strip_loc()).collect();
-                Expr::EvalModule(id1, id2, args)
+                Expr::EvalModule(id1, id2, input_set, args)
             }
             Expr::ModuleInput(mi, _loc) => Expr::ModuleInput(mi, loc),
             Expr::Op2(op, l, r, _loc) => {
@@ -2795,11 +2803,19 @@ impl Var {
                 } => {
                     let mut inputs = inputs.clone();
                     inputs.sort_unstable_by(|a, b| a.dst.partial_cmp(&b.dst).unwrap());
+                    // Create input set for module lookup key
+                    let input_set: BTreeSet<Ident<Canonical>> =
+                        inputs.iter().map(|mi| mi.dst.clone()).collect();
                     let inputs: Vec<Expr> = inputs
                         .into_iter()
                         .map(|mi| Expr::Var(ctx.get_offset(&mi.src).unwrap(), Loc::default()))
                         .collect();
-                    vec![Expr::EvalModule(ident.clone(), model_name.clone(), inputs)]
+                    vec![Expr::EvalModule(
+                        ident.clone(),
+                        model_name.clone(),
+                        input_set,
+                        inputs,
+                    )]
                 }
                 Variable::Stock { init_ast: ast, .. } => {
                     let off = ctx.get_base_offset(&canonicalize(var.ident()))?;
@@ -3021,9 +3037,9 @@ fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
         Expr::App(builtin, _) => {
             extract_temp_sizes_from_builtin(builtin, temp_sizes_map);
         }
-        Expr::EvalModule(_, _, inputs) => {
-            for input in inputs {
-                extract_temp_sizes(input, temp_sizes_map);
+        Expr::EvalModule(_, _, _, args) => {
+            for arg in args {
+                extract_temp_sizes(arg, temp_sizes_map);
             }
         }
         Expr::ModuleInput(_, _) => {}
@@ -3127,6 +3143,9 @@ pub struct Module {
     pub(crate) dimensions: Vec<Dimension>,
     /// DimensionsContext for subdimension relationship lookups
     pub(crate) dimensions_ctx: DimensionsContext,
+    /// Maps module variable idents to their full ModuleKey (model_name, input_set).
+    /// Used to correctly expand nested modules in runlist_order.
+    pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
 // calculate a mapping of module variable name -> module model name
@@ -3338,6 +3357,26 @@ impl Module {
         };
         let module_models = calc_module_model_map(project, model_name);
 
+        // Build module_refs: map from module variable ident to (model_name, input_set)
+        let module_refs: HashMap<Ident<Canonical>, ModuleKey> = model
+            .variables
+            .iter()
+            .filter_map(|(ident, var)| {
+                if let Variable::Module {
+                    model_name: module_model_name,
+                    inputs,
+                    ..
+                } = var
+                {
+                    let input_set: BTreeSet<Ident<Canonical>> =
+                        inputs.iter().map(|mi| mi.dst.clone()).collect();
+                    Some((ident.clone(), (module_model_name.clone(), input_set)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let converted_dims: Vec<Dimension> = project
             .datamodel
             .dimensions
@@ -3454,6 +3493,7 @@ impl Module {
             tables,
             dimensions: converted_dims,
             dimensions_ctx: project.dimensions_ctx.clone(),
+            module_refs,
         })
     }
 
@@ -4384,13 +4424,14 @@ impl<'module> Compiler<'module> {
                 self.push(Opcode::Apply { func });
                 Some(())
             }
-            Expr::EvalModule(ident, model_name, args) => {
+            Expr::EvalModule(ident, model_name, input_set, args) => {
                 for arg in args.iter() {
                     self.walk_expr(arg).unwrap().unwrap()
                 }
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 self.module_decls.push(ModuleDeclaration {
                     model_name: model_name.clone(),
+                    input_set: input_set.clone(),
                     off: module_offsets[ident].0,
                 });
                 let id = (self.module_decls.len() - 1) as ModuleId;
@@ -4575,7 +4616,7 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
         | Expr::TempArrayElement(_, _, _, _) => false,
         // these don't need it
         Expr::Dt(_)
-        | Expr::EvalModule(_, _, _)
+        | Expr::EvalModule(_, _, _, _)
         | Expr::ModuleInput(_, _)
         | Expr::AssignCurr(_, _)
         | Expr::AssignNext(_, _)
@@ -4591,7 +4632,7 @@ fn child_needs_parens(parent: &Expr, child: &Expr) -> bool {
             | Expr::TempArrayElement(_, _, _, _)
             | Expr::If(_, _, _, _)
             | Expr::Dt(_)
-            | Expr::EvalModule(_, _, _)
+            | Expr::EvalModule(_, _, _, _)
             | Expr::ModuleInput(_, _)
             | Expr::AssignCurr(_, _)
             | Expr::AssignNext(_, _)
@@ -4749,7 +4790,7 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::Stddev(a) => format!("stddev({})", pretty(a)),
             BuiltinFn::Sum(a) => format!("sum({})", pretty(a)),
         },
-        Expr::EvalModule(module, model_name, args) => {
+        Expr::EvalModule(module, model_name, _input_set, args) => {
             let args: Vec<_> = args.iter().map(pretty).collect();
             let string_args = args.join(", ");
             format!("eval<{module}::{model_name}>({string_args})")

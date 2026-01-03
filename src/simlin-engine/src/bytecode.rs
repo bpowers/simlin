@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use smallvec::SmallVec;
@@ -775,6 +775,10 @@ pub(crate) enum Opcode {
 #[derive(Clone, Debug)]
 pub struct ModuleDeclaration {
     pub(crate) model_name: Ident<Canonical>,
+    /// The set of input names for this module instantiation.
+    /// Different instantiations of the same model with different input sets
+    /// need separate compiled modules (the ModuleInput offsets differ).
+    pub(crate) input_set: BTreeSet<Ident<Canonical>>,
     pub(crate) off: usize, // offset within the parent module
 }
 

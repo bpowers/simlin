@@ -20,6 +20,13 @@ const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t'
 // these columns are either Vendor specific or otherwise not important.
 const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
 
+/// Check if a variable name is a Vensim-specific internal delay/smooth variable
+/// These have formats like "#d8>DELAY3#[A1]" or "#d8>DELAY3>RT2#[A1]"
+fn is_vensim_internal_module_var(name: &str) -> bool {
+    // Vensim internal variables start with # and contain >
+    name.starts_with('#') && name.contains('>')
+}
+
 static TEST_MODELS: &[&str] = &[
     // failing testcases (various reasons)
     // "test/test-models/tests/arguments/test_arguments.xmile",
@@ -123,7 +130,10 @@ fn ensure_results(expected: &Results, results: &Results) {
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
         for ident in expected.offsets.keys() {
             let expected = expected_row[expected.offsets[ident]];
-            if !results.offsets.contains_key(ident) && IGNORABLE_COLS.contains(&ident.as_str()) {
+            if !results.offsets.contains_key(ident)
+                && (IGNORABLE_COLS.contains(&ident.as_str())
+                    || is_vensim_internal_module_var(ident.as_str()))
+            {
                 continue;
             }
             if !results.offsets.contains_key(ident) {
@@ -558,6 +568,11 @@ fn simulates_arrayed_models_correctly() {
 #[test]
 fn simulates_lookup_arrayed() {
     simulate_path("../../test/lookup_arrayed/lookup_arrayed.xmile");
+}
+
+#[test]
+fn simulates_delay_arrayed() {
+    simulate_path("../../test/sdeverywhere/models/delay/delay.xmile");
 }
 
 #[test]
