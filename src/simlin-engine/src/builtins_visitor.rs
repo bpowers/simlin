@@ -135,8 +135,11 @@ impl<'a> BuiltinVisitor<'a> {
                                 return Const(subscript[i].clone(), val, loc);
                             }
                             Dimension::Named(_, _) => {
-                                // For named dimensions, use qualified element (dimension·element)
-                                // This format is required for constify_dimensions lookup
+                                // For named dimensions, use qualified element (dimension·element).
+                                // During constify_dimensions, this gets looked up via
+                                // DimensionsContext::lookup which returns a 1-based index
+                                // (from indexed_elements). The compiler then converts this
+                                // 1-based value to 0-based when processing subscript indices.
                                 let qualified_name =
                                     format!("{}·{}", dim_name.as_str(), subscript[i]);
                                 return Var(RawIdent::new_from_str(&qualified_name), loc);
