@@ -169,6 +169,28 @@ impl Expr1 {
                             return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
                         }
                     }
+                    "lookup_forward" => {
+                        if args.len() == 2 {
+                            BuiltinFn::LookupForward(
+                                Box::new(args[0].clone()),
+                                Box::new(args[1].clone()),
+                                loc,
+                            )
+                        } else {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+                    }
+                    "lookup_backward" => {
+                        if args.len() == 2 {
+                            BuiltinFn::LookupBackward(
+                                Box::new(args[0].clone()),
+                                Box::new(args[1].clone()),
+                                loc,
+                            )
+                        } else {
+                            return eqn_err!(BadBuiltinArgs, loc.start, loc.end);
+                        }
+                    }
                     "mean" => BuiltinFn::Mean(args),
                     "abs" => check_arity!(Abs, 1),
                     "arccos" => check_arity!(Arccos, 1),
@@ -299,6 +321,20 @@ impl Expr1 {
                         Box::new(index_expr.constify_dimensions(scope)),
                         loc,
                     ),
+                    BuiltinFn::LookupForward(table_expr, index_expr, loc) => {
+                        BuiltinFn::LookupForward(
+                            Box::new(table_expr.constify_dimensions(scope)),
+                            Box::new(index_expr.constify_dimensions(scope)),
+                            loc,
+                        )
+                    }
+                    BuiltinFn::LookupBackward(table_expr, index_expr, loc) => {
+                        BuiltinFn::LookupBackward(
+                            Box::new(table_expr.constify_dimensions(scope)),
+                            Box::new(index_expr.constify_dimensions(scope)),
+                            loc,
+                        )
+                    }
                     BuiltinFn::Pulse(a, b, c) => BuiltinFn::Pulse(
                         Box::new(a.constify_dimensions(scope)),
                         Box::new(b.constify_dimensions(scope)),

@@ -9,7 +9,7 @@ use float_cmp::approx_eq;
 use smallvec::SmallVec;
 
 use crate::bytecode::{
-    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, DimId, ModuleId, Op2, Opcode,
+    BuiltinId, ByteCode, ByteCodeContext, CompiledModule, DimId, LookupMode, ModuleId, Op2, Opcode,
     RuntimeView, TempId,
 };
 use crate::common::{Canonical, Ident, Result};
@@ -642,6 +642,7 @@ impl Vm {
                 Opcode::Lookup {
                     base_gf,
                     table_count,
+                    mode,
                 } => {
                     let lookup_index = stack.pop();
                     let element_offset = stack.pop();
@@ -652,7 +653,12 @@ impl Vm {
                     } else {
                         let gf_idx = (*base_gf as usize) + (element_offset as usize);
                         let gf = &context.graphical_functions[gf_idx];
-                        stack.push(lookup(gf, lookup_index));
+                        let result = match mode {
+                            LookupMode::Interpolate => lookup(gf, lookup_index),
+                            LookupMode::Forward => lookup_forward(gf, lookup_index),
+                            LookupMode::Backward => lookup_backward(gf, lookup_index),
+                        };
+                        stack.push(result);
                     }
                 }
                 Opcode::Ret => {
@@ -1706,5 +1712,175 @@ fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
         let slope = (table[i].1 - table[i - 1].1) / (table[i].0 - table[i - 1].0);
         // y = m*x + b
         (index - table[i - 1].0) * slope + table[i - 1].1
+    }
+}
+
+/// Step function lookup that returns the y-value of the next point >= x.
+/// If x is beyond the last point, returns the y-value of the last point.
+/// This is a "sample and hold" interpolation where we look forward.
+#[inline(never)]
+fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
+    if table.is_empty() {
+        return f64::NAN;
+    }
+
+    if index.is_nan() {
+        return f64::NAN;
+    }
+
+    // If index is at or below the first point, return first y
+    if index <= table[0].0 {
+        return table[0].1;
+    }
+
+    // If index is at or above the last point, return last y
+    let size = table.len();
+    if index >= table[size - 1].0 {
+        return table[size - 1].1;
+    }
+
+    // Binary search for the first point with x >= index
+    let mut low = 0;
+    let mut high = size;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if table[mid].0 < index {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    // low now points to the first element >= index
+    table[low].1
+}
+
+/// Step function lookup that returns the y-value of the previous point <= x.
+/// If x is before the first point, returns the y-value of the first point.
+/// This is a "sample and hold" interpolation where we look backward.
+#[inline(never)]
+fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
+    if table.is_empty() {
+        return f64::NAN;
+    }
+
+    if index.is_nan() {
+        return f64::NAN;
+    }
+
+    // If index is at or below the first point, return first y
+    if index <= table[0].0 {
+        return table[0].1;
+    }
+
+    // If index is at or above the last point, return last y
+    let size = table.len();
+    if index >= table[size - 1].0 {
+        return table[size - 1].1;
+    }
+
+    // Binary search for the first point with x >= index
+    let mut low = 0;
+    let mut high = size;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if table[mid].0 < index {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+
+    // low now points to the first element >= index
+    // For backward lookup, we want the previous point (low - 1)
+    // unless the point is exactly at index
+    if approx_eq!(f64, table[low].0, index) {
+        table[low].1
+    } else {
+        table[low - 1].1
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    // Table: (0,0), (1,1), (2,2)
+    fn test_table() -> Vec<(f64, f64)> {
+        vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+    }
+
+    #[test]
+    fn test_lookup_forward_between_points() {
+        let table = test_table();
+        // Between (0,0) and (1,1), forward should return 1
+        assert_eq!(1.0, lookup_forward(&table, 0.5));
+        // Between (1,1) and (2,2), forward should return 2
+        assert_eq!(2.0, lookup_forward(&table, 1.5));
+    }
+
+    #[test]
+    fn test_lookup_forward_at_points() {
+        let table = test_table();
+        assert_eq!(0.0, lookup_forward(&table, 0.0));
+        assert_eq!(1.0, lookup_forward(&table, 1.0));
+        assert_eq!(2.0, lookup_forward(&table, 2.0));
+    }
+
+    #[test]
+    fn test_lookup_forward_outside_range() {
+        let table = test_table();
+        // Below min: return first y
+        assert_eq!(0.0, lookup_forward(&table, -1.0));
+        // Above max: return last y
+        assert_eq!(2.0, lookup_forward(&table, 2.5));
+    }
+
+    #[test]
+    fn test_lookup_backward_between_points() {
+        let table = test_table();
+        // Between (0,0) and (1,1), backward should return 0
+        assert_eq!(0.0, lookup_backward(&table, 0.5));
+        // Between (1,1) and (2,2), backward should return 1
+        assert_eq!(1.0, lookup_backward(&table, 1.5));
+    }
+
+    #[test]
+    fn test_lookup_backward_at_points() {
+        let table = test_table();
+        assert_eq!(0.0, lookup_backward(&table, 0.0));
+        assert_eq!(1.0, lookup_backward(&table, 1.0));
+        assert_eq!(2.0, lookup_backward(&table, 2.0));
+    }
+
+    #[test]
+    fn test_lookup_backward_outside_range() {
+        let table = test_table();
+        // Below min: return first y
+        assert_eq!(0.0, lookup_backward(&table, -1.0));
+        // Above max: return last y
+        assert_eq!(2.0, lookup_backward(&table, 2.5));
+    }
+
+    #[test]
+    fn test_lookup_empty_table() {
+        let table: Vec<(f64, f64)> = vec![];
+        assert!(lookup_forward(&table, 0.5).is_nan());
+        assert!(lookup_backward(&table, 0.5).is_nan());
+    }
+
+    #[test]
+    fn test_lookup_nan_index() {
+        let table = test_table();
+        assert!(lookup_forward(&table, f64::NAN).is_nan());
+        assert!(lookup_backward(&table, f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_regular_lookup_interpolates() {
+        let table = test_table();
+        // Regular lookup should interpolate
+        assert_eq!(0.5, lookup(&table, 0.5));
+        assert_eq!(1.5, lookup(&table, 1.5));
     }
 }

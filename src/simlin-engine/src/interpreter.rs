@@ -760,14 +760,17 @@ impl ModuleEvaluator<'_> {
                         // Extract variable name and element offset from table expression
                         let (canonical_id, element_offset) = match table_expr.as_ref() {
                             compiler::Expr::Var(off, _) => {
-                                // Simple scalar table reference - element_offset is 0
+                                // Could be a simple scalar table or an element of an arrayed table
+                                // (when subscript was static and compiled to a direct Var reference).
+                                // Find the variable whose range contains this offset.
                                 let module_offsets = &self.module.offsets[&self.module.ident];
-                                let ident = module_offsets
+                                let (ident, base_off) = module_offsets
                                     .iter()
-                                    .find(|(_, (o, _))| *o == *off)
-                                    .map(|(k, _)| k.clone())
+                                    .find(|(_, (base, size))| *off >= *base && *off < *base + *size)
+                                    .map(|(k, (base, _))| (k.clone(), *base))
                                     .unwrap();
-                                (ident, 0usize)
+                                let elem_off = *off - base_off;
+                                (ident, elem_off)
                             }
                             compiler::Expr::StaticSubscript(off, view, _) => {
                                 // Static subscript - element offset is precomputed in the ArrayView
@@ -874,6 +877,114 @@ impl ModuleEvaluator<'_> {
                                 (table[i].1 - table[i - 1].1) / (table[i].0 - table[i - 1].0);
                             // y = m*x + b
                             (index - table[i - 1].0) * slope + table[i - 1].1
+                        }
+                    }
+                    BuiltinFn::LookupForward(table_expr, index, _)
+                    | BuiltinFn::LookupBackward(table_expr, index, _) => {
+                        let is_forward = matches!(builtin, BuiltinFn::LookupForward(_, _, _));
+
+                        // Extract variable name and element offset from table expression
+                        let (canonical_id, element_offset) = match table_expr.as_ref() {
+                            compiler::Expr::Var(off, _) => {
+                                // Could be a simple scalar table or an element of an arrayed table
+                                // (when subscript was static and compiled to a direct Var reference).
+                                // Find the variable whose range contains this offset.
+                                let module_offsets = &self.module.offsets[&self.module.ident];
+                                let (ident, base_off) = module_offsets
+                                    .iter()
+                                    .find(|(_, (base, size))| *off >= *base && *off < *base + *size)
+                                    .map(|(k, (base, _))| (k.clone(), *base))
+                                    .unwrap();
+                                let elem_off = *off - base_off;
+                                (ident, elem_off)
+                            }
+                            compiler::Expr::StaticSubscript(off, view, _) => {
+                                let module_offsets = &self.module.offsets[&self.module.ident];
+                                let ident = module_offsets
+                                    .iter()
+                                    .find(|(_, (o, _))| *o == *off)
+                                    .map(|(k, _)| k.clone())
+                                    .unwrap();
+                                (ident, view.offset)
+                            }
+                            compiler::Expr::Subscript(off, subscript_indices, dim_sizes, _) => {
+                                let module_offsets = &self.module.offsets[&self.module.ident];
+                                let ident = module_offsets
+                                    .iter()
+                                    .find(|(_, (o, _))| *o == *off)
+                                    .map(|(k, _)| k.clone())
+                                    .unwrap();
+
+                                let mut offset = 0usize;
+                                let mut stride = 1usize;
+                                for (i, sub_idx) in subscript_indices.iter().enumerate().rev() {
+                                    let idx = match sub_idx {
+                                        compiler::SubscriptIndex::Single(expr) => {
+                                            (self.eval(expr) as usize).saturating_sub(1)
+                                        }
+                                        compiler::SubscriptIndex::Range(_, _) => {
+                                            unreachable!();
+                                        }
+                                    };
+                                    offset += idx * stride;
+                                    stride *= dim_sizes.get(i).copied().unwrap_or(1);
+                                }
+                                (ident, offset)
+                            }
+                            _ => {
+                                unreachable!();
+                            }
+                        };
+                        if !self.module.tables.contains_key(&canonical_id) {
+                            unreachable!();
+                        }
+                        let tables = &self.module.tables[&canonical_id];
+                        if element_offset >= tables.len() {
+                            return f64::NAN;
+                        }
+                        let table = &tables[element_offset].data;
+                        if table.is_empty() {
+                            return f64::NAN;
+                        }
+
+                        let index = self.eval(index);
+                        if index.is_nan() {
+                            return f64::NAN;
+                        }
+
+                        // At or below first point - return first y
+                        if index <= table[0].0 {
+                            return table[0].1;
+                        }
+
+                        let size = table.len();
+                        // At or above last point - return last y
+                        if index >= table[size - 1].0 {
+                            return table[size - 1].1;
+                        }
+
+                        // Binary search for the first point with x >= index
+                        let mut low = 0;
+                        let mut high = size;
+                        while low < high {
+                            let mid = low + (high - low) / 2;
+                            if table[mid].0 < index {
+                                low = mid + 1;
+                            } else {
+                                high = mid;
+                            }
+                        }
+
+                        // low now points to the first element >= index
+                        if is_forward {
+                            table[low].1
+                        } else {
+                            // Backward: use previous point unless exactly at index
+                            if approx_eq!(f64, table[low].0, index) {
+                                table[low].1
+                            } else {
+                                table[low - 1].1
+                            }
                         }
                     }
                     BuiltinFn::Pulse(a, b, c) => {

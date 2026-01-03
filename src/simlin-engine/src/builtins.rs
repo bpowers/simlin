@@ -54,6 +54,8 @@ pub struct UntypedBuiltinFn<Expr>(pub String, pub Vec<Expr>);
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum BuiltinFn<Expr> {
     Lookup(Box<Expr>, Box<Expr>, Loc),
+    LookupForward(Box<Expr>, Box<Expr>, Loc),
+    LookupBackward(Box<Expr>, Box<Expr>, Loc),
     Abs(Box<Expr>),
     Arccos(Box<Expr>),
     Arcsin(Box<Expr>),
@@ -95,6 +97,8 @@ impl<Expr> BuiltinFn<Expr> {
         use BuiltinFn::*;
         match self {
             Lookup(_, _, _) => "lookup",
+            LookupForward(_, _, _) => "lookup_forward",
+            LookupBackward(_, _, _) => "lookup_backward",
             Abs(_) => "abs",
             Arccos(_) => "arccos",
             Arcsin(_) => "arcsin",
@@ -140,6 +144,12 @@ impl<Expr> BuiltinFn<Expr> {
         Ok(match self {
             Lookup(table_expr, index_expr, loc) => {
                 Lookup(Box::new(f(*table_expr)?), Box::new(f(*index_expr)?), loc)
+            }
+            LookupForward(table_expr, index_expr, loc) => {
+                LookupForward(Box::new(f(*table_expr)?), Box::new(f(*index_expr)?), loc)
+            }
+            LookupBackward(table_expr, index_expr, loc) => {
+                LookupBackward(Box::new(f(*table_expr)?), Box::new(f(*index_expr)?), loc)
             }
             Abs(a) => Abs(Box::new(f(*a)?)),
             Arccos(a) => Arccos(Box::new(f(*a)?)),
@@ -230,6 +240,8 @@ pub fn is_builtin_fn(name: &str) -> bool {
             name,
             // scalar builtins
             "lookup"
+        | "lookup_forward"
+        | "lookup_backward"
         | "abs"
         | "arccos"
         | "arcsin"
@@ -276,7 +288,9 @@ where
         | BuiltinFn::StartTime
         | BuiltinFn::FinalTime => {}
         BuiltinFn::IsModuleInput(id, loc) => cb(BuiltinContents::Ident(id, *loc)),
-        BuiltinFn::Lookup(table_expr, index_expr, _loc) => {
+        BuiltinFn::Lookup(table_expr, index_expr, _loc)
+        | BuiltinFn::LookupForward(table_expr, index_expr, _loc)
+        | BuiltinFn::LookupBackward(table_expr, index_expr, _loc) => {
             cb(BuiltinContents::Expr(table_expr));
             cb(BuiltinContents::Expr(index_expr));
         }

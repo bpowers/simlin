@@ -568,6 +568,16 @@ impl Expr2 {
                         Box::new(Expr2::from(*index_expr, ctx)?),
                         loc,
                     ),
+                    LookupForward(table_expr, index_expr, loc) => LookupForward(
+                        Box::new(Expr2::from(*table_expr, ctx)?),
+                        Box::new(Expr2::from(*index_expr, ctx)?),
+                        loc,
+                    ),
+                    LookupBackward(table_expr, index_expr, loc) => LookupBackward(
+                        Box::new(Expr2::from(*table_expr, ctx)?),
+                        Box::new(Expr2::from(*index_expr, ctx)?),
+                        loc,
+                    ),
                     Abs(e) => Abs(Box::new(Expr2::from(*e, ctx)?)),
                     Arccos(e) => Arccos(Box::new(Expr2::from(*e, ctx)?)),
                     Arcsin(e) => Arcsin(Box::new(Expr2::from(*e, ctx)?)),

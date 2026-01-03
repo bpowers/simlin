@@ -479,6 +479,16 @@ fn rename_builtin(
             Box::new(rename_expr(index_expr, old_ident, new_ident)),
             *loc,
         ),
+        BuiltinFn::LookupForward(table_expr, index_expr, loc) => BuiltinFn::LookupForward(
+            Box::new(rename_expr(table_expr, old_ident, new_ident)),
+            Box::new(rename_expr(index_expr, old_ident, new_ident)),
+            *loc,
+        ),
+        BuiltinFn::LookupBackward(table_expr, index_expr, loc) => BuiltinFn::LookupBackward(
+            Box::new(rename_expr(table_expr, old_ident, new_ident)),
+            Box::new(rename_expr(index_expr, old_ident, new_ident)),
+            *loc,
+        ),
         BuiltinFn::IsModuleInput(ident, loc) => {
             BuiltinFn::IsModuleInput(rename_identifier_string(ident, old_ident, new_ident), *loc)
         }
@@ -636,6 +646,14 @@ fn builtin_to_untyped(builtin: &BuiltinFn<Expr2>) -> UntypedBuiltinFn<Expr0> {
     match builtin {
         BuiltinFn::Lookup(table_expr, index_expr, _) => UntypedBuiltinFn(
             "lookup".to_string(),
+            vec![expr2_to_expr0(table_expr), expr2_to_expr0(index_expr)],
+        ),
+        BuiltinFn::LookupForward(table_expr, index_expr, _) => UntypedBuiltinFn(
+            "lookup_forward".to_string(),
+            vec![expr2_to_expr0(table_expr), expr2_to_expr0(index_expr)],
+        ),
+        BuiltinFn::LookupBackward(table_expr, index_expr, _) => UntypedBuiltinFn(
+            "lookup_backward".to_string(),
             vec![expr2_to_expr0(table_expr), expr2_to_expr0(index_expr)],
         ),
         BuiltinFn::IsModuleInput(ident, _) => UntypedBuiltinFn(

@@ -169,6 +169,8 @@ impl Expr3 {
                 use crate::builtins::BuiltinFn::*;
                 match builtin {
                     Lookup(_, e, _)
+                    | LookupForward(_, e, _)
+                    | LookupBackward(_, e, _)
                     | Abs(e)
                     | Arccos(e)
                     | Arcsin(e)
@@ -745,6 +747,14 @@ impl<'a> Pass1Context<'a> {
             Lookup(id, e, loc) => {
                 let (new_e, has_a2a) = self.transform_inner(*e);
                 (Lookup(id, Box::new(new_e), loc), has_a2a)
+            }
+            LookupForward(id, e, loc) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (LookupForward(id, Box::new(new_e), loc), has_a2a)
+            }
+            LookupBackward(id, e, loc) => {
+                let (new_e, has_a2a) = self.transform_inner(*e);
+                (LookupBackward(id, Box::new(new_e), loc), has_a2a)
             }
             Abs(e) => {
                 let (new_e, has_a2a) = self.transform_inner(*e);

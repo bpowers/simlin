@@ -27,6 +27,18 @@ pub type TempId = u8; // Temp array ID (max 256 temps per module)
 pub type PcOffset = i16; // Relative PC offset for jumps (signed for backward jumps)
 pub type NameId = u16; // Index into names table
 
+/// Lookup interpolation mode for graphical function tables.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookupMode {
+    /// Linear interpolation between points (standard LOOKUP behavior)
+    Interpolate = 0,
+    /// Step function: return y at first point where x >= index (LOOKUP_FORWARD)
+    Forward = 1,
+    /// Step function: return y at last point where x <= index (LOOKUP_BACKWARD)
+    Backward = 2,
+}
+
 // ============================================================================
 // Dimension Information (for runtime dimension table)
 // ============================================================================
@@ -573,6 +585,8 @@ pub(crate) enum Opcode {
         /// Number of tables for this variable (1 for scalars, n for arrayed).
         /// Used for bounds checking at runtime.
         table_count: u16,
+        /// Interpolation mode: Interpolate (linear), Forward (step up), Backward (step down)
+        mode: LookupMode,
     },
 
     // =========================================================================
