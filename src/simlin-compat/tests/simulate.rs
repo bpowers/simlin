@@ -445,8 +445,10 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // Passing tests
     "test/sdeverywhere/models/active_initial/active_initial.xmile",
     "test/sdeverywhere/models/comments/comments.xmile",
+    "test/sdeverywhere/models/elmcount/elmcount.xmile",
     "test/sdeverywhere/models/index/index.xmile",
     "test/sdeverywhere/models/initial/initial.xmile",
+    "test/sdeverywhere/models/lookup/lookup.xmile",
     "test/sdeverywhere/models/pulsetrain/pulsetrain.xmile",
     "test/sdeverywhere/models/sir/sir.xmile",
     "test/sdeverywhere/models/specialchars/specialchars.xmile",
@@ -481,9 +483,6 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // EmptyEquation: uses GET DIRECT SUBSCRIPT
     // "test/sdeverywhere/models/directsubs/directsubs.xmile",
     //
-    // ELMCOUNT/SIZE(DimensionName) - now supported
-    "test/sdeverywhere/models/elmcount/elmcount.xmile",
-    //
     // MismatchedDimensions: uses Vensim EXCEPT syntax with subscript mappings
     // "test/sdeverywhere/models/except/except.xmile",
     // "test/sdeverywhere/models/except2/except2.xmile",
@@ -504,9 +503,6 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     //
     // EmptyEquation: uses :EXCEPT: in equations
     // "test/sdeverywhere/models/longeqns/longeqns.xmile",
-    //
-    // EmptyEquation: uses WITH LOOKUP in non-standard way
-    // "test/sdeverywhere/models/lookup/lookup.xmile",
     //
     // MismatchedDimensions: uses subscript mappings
     // "test/sdeverywhere/models/mapping/mapping.xmile",
