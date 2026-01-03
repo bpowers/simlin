@@ -1649,15 +1649,6 @@ pub fn calc_flattened_offsets(
     offsets
 }
 
-/// Find a module by model name (ignoring input_set).
-/// Returns the first matching module key, if any.
-fn find_module_by_model_name<'a>(
-    sim: &'a Simulation,
-    model_name: &Ident<Canonical>,
-) -> Option<&'a ModuleKey> {
-    sim.modules.keys().find(|(name, _)| name == model_name)
-}
-
 fn calc_flattened_order(sim: &Simulation, module_key: &ModuleKey) -> Vec<Ident<Canonical>> {
     let (model_name, _) = module_key;
     let is_root = model_name.as_str() == "main";
@@ -1671,15 +1662,20 @@ fn calc_flattened_order(sim: &Simulation, module_key: &ModuleKey) -> Vec<Ident<C
     }
 
     for ident in module.runlist_order.iter() {
-        // FIXME: this isn't quite right (assumes no regular var has same name as module)
-        if let Some(sub_module_key) = find_module_by_model_name(sim, ident) {
-            let sub_var_names = calc_flattened_order(sim, sub_module_key);
-            for sub_name in sub_var_names.iter() {
-                offsets.push(Ident::<Canonical>::from_unchecked(format!(
-                    "{}.{}",
-                    ident.to_source_repr(),
-                    sub_name.to_source_repr()
-                )));
+        // Check if this ident is a module reference using the module_refs map
+        if let Some((sub_model_name, sub_input_set)) = module.module_refs.get(ident) {
+            let sub_module_key = (sub_model_name.clone(), sub_input_set.clone());
+            if sim.modules.contains_key(&sub_module_key) {
+                let sub_var_names = calc_flattened_order(sim, &sub_module_key);
+                for sub_name in sub_var_names.iter() {
+                    offsets.push(Ident::<Canonical>::from_unchecked(format!(
+                        "{}.{}",
+                        ident.to_source_repr(),
+                        sub_name.to_source_repr()
+                    )));
+                }
+            } else {
+                offsets.push(Ident::<Canonical>::from_unchecked(ident.to_source_repr()));
             }
         } else {
             offsets.push(Ident::<Canonical>::from_unchecked(ident.to_source_repr()));

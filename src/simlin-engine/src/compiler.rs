@@ -23,7 +23,8 @@ use crate::model::ModelStage1;
 use crate::project::Project;
 use crate::variable::Variable;
 use crate::vm::{
-    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, SubscriptIterator, TIME_OFF,
+    DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, ModuleKey, SubscriptIterator,
+    TIME_OFF,
 };
 use crate::{Error, sim_err};
 use smallvec::SmallVec;
@@ -3142,6 +3143,9 @@ pub struct Module {
     pub(crate) dimensions: Vec<Dimension>,
     /// DimensionsContext for subdimension relationship lookups
     pub(crate) dimensions_ctx: DimensionsContext,
+    /// Maps module variable idents to their full ModuleKey (model_name, input_set).
+    /// Used to correctly expand nested modules in runlist_order.
+    pub(crate) module_refs: HashMap<Ident<Canonical>, ModuleKey>,
 }
 
 // calculate a mapping of module variable name -> module model name
@@ -3353,6 +3357,26 @@ impl Module {
         };
         let module_models = calc_module_model_map(project, model_name);
 
+        // Build module_refs: map from module variable ident to (model_name, input_set)
+        let module_refs: HashMap<Ident<Canonical>, ModuleKey> = model
+            .variables
+            .iter()
+            .filter_map(|(ident, var)| {
+                if let Variable::Module {
+                    model_name: module_model_name,
+                    inputs,
+                    ..
+                } = var
+                {
+                    let input_set: BTreeSet<Ident<Canonical>> =
+                        inputs.iter().map(|mi| mi.dst.clone()).collect();
+                    Some((ident.clone(), (module_model_name.clone(), input_set)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let converted_dims: Vec<Dimension> = project
             .datamodel
             .dimensions
@@ -3469,6 +3493,7 @@ impl Module {
             tables,
             dimensions: converted_dims,
             dimensions_ctx: project.dimensions_ctx.clone(),
+            module_refs,
         })
     }
 
