@@ -77,6 +77,8 @@ void VensimParse::ReadyFunctions() {
     new FunctionRandomPoisson(pSymbolNameSpace);
     new FunctionLookupArea(pSymbolNameSpace);
     new FunctionLookupExtrapolate(pSymbolNameSpace);
+    new FunctionLookupForward(pSymbolNameSpace);
+    new FunctionLookupBackward(pSymbolNameSpace);
     new FunctionGetDataAtTime(pSymbolNameSpace);
     new FunctionGetDataLastTime(pSymbolNameSpace);
     new FunctionModulo(pSymbolNameSpace);

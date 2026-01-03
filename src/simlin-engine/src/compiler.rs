@@ -11,8 +11,9 @@ use crate::ast::{
 };
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeBuilder, ByteCodeContext, CompiledModule, DimId, DimensionInfo,
-    GraphicalFunctionId, ModuleDeclaration, ModuleId, ModuleInputOffset, NameId, Op2, Opcode,
-    RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId, VariableOffset, ViewId,
+    GraphicalFunctionId, LookupMode, ModuleDeclaration, ModuleId, ModuleInputOffset, NameId, Op2,
+    Opcode, RuntimeSparseMapping, StaticArrayView, SubdimensionRelation, TempId, VariableOffset,
+    ViewId,
 };
 use crate::common::{
     Canonical, CanonicalElementName, ErrorCode, ErrorKind, Ident, Result, canonicalize,
@@ -589,6 +590,12 @@ impl Expr {
                     BuiltinFn::IsModuleInput(id, _loc) => BuiltinFn::IsModuleInput(id, loc),
                     BuiltinFn::Lookup(id, a, _loc) => {
                         BuiltinFn::Lookup(id, Box::new(a.strip_loc()), loc)
+                    }
+                    BuiltinFn::LookupForward(id, a, _loc) => {
+                        BuiltinFn::LookupForward(id, Box::new(a.strip_loc()), loc)
+                    }
+                    BuiltinFn::LookupBackward(id, a, _loc) => {
+                        BuiltinFn::LookupBackward(id, Box::new(a.strip_loc()), loc)
                     }
                     BuiltinFn::Abs(a) => BuiltinFn::Abs(Box::new(a.strip_loc())),
                     BuiltinFn::Arccos(a) => BuiltinFn::Arccos(Box::new(a.strip_loc())),
@@ -1168,6 +1175,12 @@ impl Context<'_> {
 
             // Lookup with string table name + expression
             Lookup(name, e, loc) => Lookup(name.clone(), Box::new(self.lower_pass0(e)), *loc),
+            LookupForward(name, e, loc) => {
+                LookupForward(name.clone(), Box::new(self.lower_pass0(e)), *loc)
+            }
+            LookupBackward(name, e, loc) => {
+                LookupBackward(name.clone(), Box::new(self.lower_pass0(e)), *loc)
+            }
 
             // Rank with complex signature
             Rank(e, maybe_tuple) => Rank(
@@ -2074,6 +2087,16 @@ impl Context<'_> {
         use crate::builtins::BuiltinFn as BFn;
         Ok(match builtin {
             BFn::Lookup(table_expr, index_expr, loc) => BuiltinFn::Lookup(
+                Box::new(self.lower_from_expr3(table_expr)?),
+                Box::new(self.lower_from_expr3(index_expr)?),
+                *loc,
+            ),
+            BFn::LookupForward(table_expr, index_expr, loc) => BuiltinFn::LookupForward(
+                Box::new(self.lower_from_expr3(table_expr)?),
+                Box::new(self.lower_from_expr3(index_expr)?),
+                *loc,
+            ),
+            BFn::LookupBackward(table_expr, index_expr, loc) => BuiltinFn::LookupBackward(
                 Box::new(self.lower_from_expr3(table_expr)?),
                 Box::new(self.lower_from_expr3(index_expr)?),
                 *loc,
@@ -3026,6 +3049,8 @@ fn extract_temp_sizes(expr: &Expr, temp_sizes_map: &mut HashMap<u32, usize>) {
 fn extract_temp_sizes_from_builtin(builtin: &BuiltinFn, temp_sizes_map: &mut HashMap<u32, usize>) {
     match builtin {
         BuiltinFn::Lookup(_, expr, _)
+        | BuiltinFn::LookupForward(_, expr, _)
+        | BuiltinFn::LookupBackward(_, expr, _)
         | BuiltinFn::Abs(expr)
         | BuiltinFn::Arccos(expr)
         | BuiltinFn::Arcsin(expr)
@@ -3935,13 +3960,29 @@ impl<'module> Compiler<'module> {
                 Some(())
             }
             Expr::App(builtin, _) => {
-                // lookups are special
-                if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
-                    // Extract variable offset and compute element_offset from table expression
-                    let (table_offset, element_offset_expr) = match table_expr.as_ref() {
+                // Helper to extract table info from table expression
+                fn extract_table_info(
+                    table_expr: &Expr,
+                    module_offsets: &HashMap<Ident<Canonical>, (usize, usize)>,
+                ) -> Result<(Ident<Canonical>, Expr)> {
+                    match table_expr {
                         Expr::Var(off, loc) => {
-                            // Simple scalar table reference - element_offset is always 0
-                            (*off, Expr::Const(0.0, *loc))
+                            // Could be a simple scalar table or an element of an arrayed table
+                            // (when subscript was static and compiled to a direct Var reference).
+                            // Find the variable whose range contains this offset.
+                            let (table_ident, base_off) = module_offsets
+                                .iter()
+                                .find(|(_, (base, size))| *off >= *base && *off < *base + *size)
+                                .map(|(k, (base, _))| (k.clone(), *base))
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorKind::Simulation,
+                                        ErrorCode::BadTable,
+                                        Some("could not find table variable".to_string()),
+                                    )
+                                })?;
+                            let elem_off = *off - base_off;
+                            Ok((table_ident, Expr::Const(elem_off as f64, *loc)))
                         }
                         Expr::StaticSubscript(off, view, loc) => {
                             // Static subscript - element offset is precomputed in the ArrayView
@@ -3952,7 +3993,18 @@ impl<'module> Compiler<'module> {
                                     "range subscripts not supported in lookup tables".to_string()
                                 );
                             }
-                            (*off, Expr::Const(view.offset as f64, *loc))
+                            let table_ident = module_offsets
+                                .iter()
+                                .find(|(_, (base, _))| *off == *base)
+                                .map(|(k, _)| k.clone())
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorKind::Simulation,
+                                        ErrorCode::BadTable,
+                                        Some("could not find table variable".to_string()),
+                                    )
+                                })?;
+                            Ok((table_ident, Expr::Const(view.offset as f64, *loc)))
                         }
                         Expr::Subscript(off, subscript_indices, dim_sizes, _loc) => {
                             // Subscripted table reference - compute element_offset
@@ -4012,30 +4064,34 @@ impl<'module> Compiler<'module> {
                                 stride *= dim_sizes.get(i).copied().unwrap_or(1);
                             }
 
-                            (*off, offset_expr.unwrap_or(Expr::Const(0.0, *_loc)))
+                            let table_ident = module_offsets
+                                .iter()
+                                .find(|(_, (base, _))| *off == *base)
+                                .map(|(k, _)| k.clone())
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorKind::Simulation,
+                                        ErrorCode::BadTable,
+                                        Some("could not find table variable".to_string()),
+                                    )
+                                })?;
+                            Ok((table_ident, offset_expr.unwrap_or(Expr::Const(0.0, *_loc))))
                         }
                         _ => {
-                            return sim_err!(
+                            sim_err!(
                                 BadTable,
                                 "unsupported expression type for lookup table reference"
                                     .to_string()
-                            );
-                        }
-                    };
-
-                    // Find the variable name from the offset
-                    let module_offsets = &self.module.offsets[&self.module.ident];
-                    let table_ident = module_offsets
-                        .iter()
-                        .find(|(_, (off, _))| *off == table_offset)
-                        .map(|(k, _)| k.clone())
-                        .ok_or_else(|| {
-                            Error::new(
-                                ErrorKind::Simulation,
-                                ErrorCode::BadTable,
-                                Some("could not find table variable".to_string()),
                             )
-                        })?;
+                        }
+                    }
+                }
+
+                // lookups are special
+                if let BuiltinFn::Lookup(table_expr, index, _loc) = builtin {
+                    let module_offsets = &self.module.offsets[&self.module.ident];
+                    let (table_ident, element_offset_expr) =
+                        extract_table_info(table_expr, module_offsets)?;
 
                     // Look up the base_gf for this table variable
                     let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
@@ -4054,12 +4110,51 @@ impl<'module> Compiler<'module> {
                         .map(|tables| tables.len() as u16)
                         .unwrap_or(1);
 
-                    // Emit: push element_offset, push lookup_index, Lookup { base_gf, table_count }
+                    // Emit: push element_offset, push lookup_index, Lookup { base_gf, table_count, mode }
                     self.walk_expr(&element_offset_expr)?.unwrap();
                     self.walk_expr(index)?.unwrap();
                     self.push(Opcode::Lookup {
                         base_gf,
                         table_count,
+                        mode: LookupMode::Interpolate,
+                    });
+                    return Ok(Some(()));
+                };
+
+                // LookupForward and LookupBackward use the same Lookup opcode with different modes
+                if let BuiltinFn::LookupForward(table_expr, index, _loc)
+                | BuiltinFn::LookupBackward(table_expr, index, _loc) = builtin
+                {
+                    let mode = if matches!(builtin, BuiltinFn::LookupForward(_, _, _)) {
+                        LookupMode::Forward
+                    } else {
+                        LookupMode::Backward
+                    };
+                    let module_offsets = &self.module.offsets[&self.module.ident];
+                    let (table_ident, element_offset_expr) =
+                        extract_table_info(table_expr, module_offsets)?;
+
+                    let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::Simulation,
+                            ErrorCode::BadTable,
+                            Some(format!("no graphical function found for '{table_ident}'")),
+                        )
+                    })?;
+
+                    let table_count = self
+                        .module
+                        .tables
+                        .get(&table_ident)
+                        .map(|tables| tables.len() as u16)
+                        .unwrap_or(1);
+
+                    self.walk_expr(&element_offset_expr)?.unwrap();
+                    self.walk_expr(index)?.unwrap();
+                    self.push(Opcode::Lookup {
+                        base_gf,
+                        table_count,
+                        mode,
                     });
                     return Ok(Some(()));
                 };
@@ -4090,7 +4185,10 @@ impl<'module> Compiler<'module> {
                         self.push(Opcode::LoadGlobalVar { off });
                         return Ok(Some(()));
                     }
-                    BuiltinFn::Lookup(_, _, _) | BuiltinFn::IsModuleInput(_, _) => unreachable!(),
+                    BuiltinFn::Lookup(_, _, _)
+                    | BuiltinFn::LookupForward(_, _, _)
+                    | BuiltinFn::LookupBackward(_, _, _)
+                    | BuiltinFn::IsModuleInput(_, _) => unreachable!(),
                     BuiltinFn::Inf | BuiltinFn::Pi => {
                         let lit = match builtin {
                             BuiltinFn::Inf => f64::INFINITY,
@@ -4244,7 +4342,9 @@ impl<'module> Compiler<'module> {
                     }
                 };
                 let func = match builtin {
-                    BuiltinFn::Lookup(_, _, _) => unreachable!(),
+                    BuiltinFn::Lookup(_, _, _)
+                    | BuiltinFn::LookupForward(_, _, _)
+                    | BuiltinFn::LookupBackward(_, _, _) => unreachable!(),
                     BuiltinFn::Abs(_) => BuiltinId::Abs,
                     BuiltinFn::Arccos(_) => BuiltinId::Arccos,
                     BuiltinFn::Arcsin(_) => BuiltinId::Arcsin,
@@ -4567,6 +4667,12 @@ pub fn pretty(expr: &Expr) -> String {
             BuiltinFn::FinalTime => "final_time".to_string(),
             BuiltinFn::Lookup(table, idx, _loc) => {
                 format!("lookup({}, {})", pretty(table), pretty(idx))
+            }
+            BuiltinFn::LookupForward(table, idx, _loc) => {
+                format!("lookup_forward({}, {})", pretty(table), pretty(idx))
+            }
+            BuiltinFn::LookupBackward(table, idx, _loc) => {
+                format!("lookup_backward({}, {})", pretty(table), pretty(idx))
             }
             BuiltinFn::Abs(l) => format!("abs({})", pretty(l)),
             BuiltinFn::Arccos(l) => format!("arccos({})", pretty(l)),

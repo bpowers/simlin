@@ -387,6 +387,11 @@ fn simulates_active_initial() {
 }
 
 #[test]
+fn simulates_lookup() {
+    simulate_path("../../test/sdeverywhere/models/lookup/lookup.xmile");
+}
+
+#[test]
 #[ignore]
 fn simulates_except() {
     simulate_path("../../test/sdeverywhere/models/except/except.xmile");
