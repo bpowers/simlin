@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use float_cmp::approx_eq;
@@ -16,6 +16,19 @@ use crate::common::{Canonical, Ident, Result};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 use crate::dimensions::Dimension;
 use crate::sim_err;
+
+/// Key for looking up compiled modules.
+/// A model can have multiple instantiations with different input sets,
+/// and each needs its own compiled module because the ModuleInput offsets differ.
+pub type ModuleKey = (Ident<Canonical>, BTreeSet<Ident<Canonical>>);
+
+/// Helper to create a module key from model name and input set
+pub fn make_module_key(
+    model_name: &Ident<Canonical>,
+    input_set: &BTreeSet<Ident<Canonical>>,
+) -> ModuleKey {
+    (model_name.clone(), input_set.clone())
+}
 
 // ============================================================================
 // Iteration State (for array iteration during VM execution)
@@ -76,17 +89,17 @@ pub(crate) fn is_truthy(n: f64) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct CompiledSimulation {
-    pub(crate) modules: HashMap<Ident<Canonical>, CompiledModule>,
+    pub(crate) modules: HashMap<ModuleKey, CompiledModule>,
     pub(crate) specs: Specs,
-    pub(crate) root: Ident<Canonical>,
+    pub(crate) root: ModuleKey,
     pub(crate) offsets: HashMap<Ident<Canonical>, usize>,
 }
 
 #[derive(Clone, Debug)]
 struct CompiledSlicedSimulation {
-    initial_modules: HashMap<Ident<Canonical>, CompiledModuleSlice>,
-    flow_modules: HashMap<Ident<Canonical>, CompiledModuleSlice>,
-    stock_modules: HashMap<Ident<Canonical>, CompiledModuleSlice>,
+    initial_modules: HashMap<ModuleKey, CompiledModuleSlice>,
+    flow_modules: HashMap<ModuleKey, CompiledModuleSlice>,
+    stock_modules: HashMap<ModuleKey, CompiledModuleSlice>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,7 +269,7 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
 #[derive(Clone, Debug)]
 pub struct Vm {
     specs: Specs,
-    root: Ident<Canonical>,
+    root: ModuleKey,
     offsets: HashMap<Ident<Canonical>, usize>,
     sliced_sim: CompiledSlicedSimulation,
     n_slots: usize,
@@ -501,14 +514,14 @@ impl Vm {
         id: ModuleId,
     ) {
         let new_module_decl = &parent_module.context.modules[id as usize];
-        let model_name = new_module_decl.model_name.clone();
+        let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
         let module_off = parent_module_off + new_module_decl.off;
 
         // Clone module to avoid borrow conflict with &mut self.eval()
         let module = match parent_module.part {
-            StepPart::Initials => self.sliced_sim.initial_modules[&model_name].clone(),
-            StepPart::Flows => self.sliced_sim.flow_modules[&model_name].clone(),
-            StepPart::Stocks => self.sliced_sim.stock_modules[&model_name].clone(),
+            StepPart::Initials => self.sliced_sim.initial_modules[&module_key].clone(),
+            StepPart::Flows => self.sliced_sim.flow_modules[&module_key].clone(),
+            StepPart::Stocks => self.sliced_sim.stock_modules[&module_key].clone(),
         };
 
         self.eval(&module, module_off, module_inputs, curr, next, stack);
@@ -1325,14 +1338,14 @@ impl Vm {
 
     #[cfg(test)]
     pub fn debug_print_bytecode(&self, _model_name: &str) {
-        let mut model_names: Vec<_> = self.sliced_sim.initial_modules.keys().collect();
-        model_names.sort_unstable();
-        for model_name in model_names {
-            eprintln!("\n\nCOMPILED MODEL: {model_name}");
+        let mut module_keys: Vec<_> = self.sliced_sim.initial_modules.keys().collect();
+        module_keys.sort_unstable();
+        for module_key in module_keys {
+            eprintln!("\n\nCOMPILED MODULE: {:?}", module_key);
 
-            let initial_bc = &self.sliced_sim.initial_modules[model_name].bytecode;
-            let flows_bc = &self.sliced_sim.flow_modules[model_name].bytecode;
-            let stocks_bc = &self.sliced_sim.stock_modules[model_name].bytecode;
+            let initial_bc = &self.sliced_sim.initial_modules[module_key].bytecode;
+            let flows_bc = &self.sliced_sim.flow_modules[module_key].bytecode;
+            let stocks_bc = &self.sliced_sim.stock_modules[module_key].bytecode;
 
             eprintln!("\ninitial literals:");
             for (i, lit) in initial_bc.literals.iter().enumerate() {

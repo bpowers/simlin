@@ -8,17 +8,17 @@ use crate::ast::{Ast, BinaryOp};
 use crate::bytecode::CompiledModule;
 use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::{BuiltinFn, Expr, Module, SubscriptIndex, UnaryOp};
-use crate::model::enumerate_modules;
+use crate::model::{ModuleInputSet, enumerate_modules};
 use crate::sim_err;
 use crate::vm::{
-    CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, Specs,
-    StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
+    CompiledSimulation, DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, ModuleKey,
+    Specs, StepPart, SubscriptIterator, TIME_OFF, is_truthy, pulse, ramp, step,
 };
 use crate::{Project, Results, Variable, compiler};
 use float_cmp::approx_eq;
 use std::borrow::BorrowMut;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Maps a flat index from transposed array space to original array space
@@ -610,11 +610,12 @@ impl ModuleEvaluator<'_> {
             Expr::Const(n, _) => *n,
             Expr::Dt(_) => self.curr[DT_OFF],
             Expr::ModuleInput(off, _) => self.inputs[*off],
-            Expr::EvalModule(ident, model_name, args) => {
+            Expr::EvalModule(ident, model_name, input_set, args) => {
                 let args: Vec<f64> = args.iter().map(|arg| self.eval(arg)).collect();
                 let module_offsets = &self.module.offsets[&self.module.ident];
                 let off = self.off + module_offsets[ident].0;
-                let module = &self.sim.modules[model_name];
+                let module_key: ModuleKey = (model_name.clone(), input_set.clone());
+                let module = &self.sim.modules[&module_key];
 
                 self.sim
                     .calc(self.step_part, module, off, &args, self.curr, self.next);
@@ -1264,7 +1265,7 @@ impl ModuleEvaluator<'_> {
                         | Expr::Dt(_)
                         | Expr::ModuleInput(_, _)
                         | Expr::Subscript(_, _, _, _)
-                        | Expr::EvalModule(_, _, _)
+                        | Expr::EvalModule(_, _, _, _)
                         | Expr::App(_, _) => {
                             // These are scalar expressions (or reduce to scalar)
                             // They don't depend on the array index, so evaluate once
@@ -1297,9 +1298,9 @@ impl ModuleEvaluator<'_> {
 
 #[derive(Debug)]
 pub struct Simulation {
-    pub(crate) modules: HashMap<Ident<Canonical>, Module>,
+    pub(crate) modules: HashMap<ModuleKey, Module>,
     specs: Specs,
-    root: Ident<Canonical>,
+    root: ModuleKey,
     offsets: HashMap<Ident<Canonical>, usize>,
     temps: std::rc::Rc<RefCell<Vec<f64>>>, // Flat storage for all temporary arrays
     temp_offsets: Vec<usize>,              // Offset of each temporary in the temps vector
@@ -1338,14 +1339,20 @@ impl Simulation {
             sorted_names
         };
 
-        let mut compiled_modules: HashMap<Ident<Canonical>, Module> = HashMap::new();
+        // Root module key uses empty input set (main model has no module inputs)
+        let root_input_set: ModuleInputSet = BTreeSet::new();
+        let root_key: ModuleKey = (main_model_ident.clone(), root_input_set.clone());
+
+        let mut compiled_modules: HashMap<ModuleKey, Module> = HashMap::new();
         for name in module_names {
             let distinct_inputs = &modules[name];
             for inputs in distinct_inputs.iter() {
                 let model = Arc::clone(&project.models[name]);
                 let is_root = name.as_str() == main_model_ident.as_str();
                 let module = Module::new(project, model, inputs, is_root)?;
-                compiled_modules.insert(name.clone(), module);
+                // Create module key from model name and input set
+                let module_key: ModuleKey = (name.clone(), inputs.clone());
+                compiled_modules.insert(module_key, module);
             }
         }
 
@@ -1385,7 +1392,7 @@ impl Simulation {
         Ok(Simulation {
             modules: compiled_modules,
             specs,
-            root: canonicalize(main_model_name),
+            root: root_key,
             offsets,
             temps,
             temp_offsets,
@@ -1393,10 +1400,10 @@ impl Simulation {
     }
 
     pub fn compile(&self) -> crate::Result<CompiledSimulation> {
-        let modules: crate::Result<HashMap<Ident<Canonical>, CompiledModule>> = self
+        let modules: crate::Result<HashMap<ModuleKey, CompiledModule>> = self
             .modules
             .iter()
-            .map(|(name, module)| module.compile().map(|module| (name.clone(), module)))
+            .map(|(key, module)| module.compile().map(|module| (key.clone(), module)))
             .collect();
 
         Ok(CompiledSimulation {
@@ -1408,16 +1415,17 @@ impl Simulation {
     }
 
     pub fn runlist_order(&self) -> Vec<Ident<Canonical>> {
-        calc_flattened_order(self, &canonicalize("main"))
+        calc_flattened_order(self, &self.root)
     }
 
     pub fn debug_print_runlists(&self, _model_name: &str) {
-        let mut model_names: Vec<_> = self.modules.keys().collect();
-        model_names.sort_unstable();
-        for model_name in model_names {
-            eprintln!("\n\nMODEL: {model_name}");
-            let module = &self.modules[model_name];
-            let offsets = &module.offsets[model_name];
+        let mut module_keys: Vec<_> = self.modules.keys().collect();
+        module_keys.sort_unstable();
+        for module_key in module_keys {
+            eprintln!("\n\nMODULE: {:?}", module_key);
+            let module = &self.modules[module_key];
+            let model_ident = &module_key.0;
+            let offsets = &module.offsets[model_ident];
             let mut idents: Vec<_> = offsets.keys().collect();
             idents.sort_unstable();
 
@@ -1474,8 +1482,8 @@ impl Simulation {
         }
     }
 
-    fn n_slots(&self, module_name: &Ident<Canonical>) -> usize {
-        self.modules[module_name].n_slots
+    fn n_slots(&self, module_key: &ModuleKey) -> usize {
+        self.modules[module_key].n_slots
     }
 
     pub fn run_to_end(&self) -> crate::Result<Results> {
@@ -1641,10 +1649,20 @@ pub fn calc_flattened_offsets(
     offsets
 }
 
-fn calc_flattened_order(sim: &Simulation, model_name: &Ident<Canonical>) -> Vec<Ident<Canonical>> {
+/// Find a module by model name (ignoring input_set).
+/// Returns the first matching module key, if any.
+fn find_module_by_model_name<'a>(
+    sim: &'a Simulation,
+    model_name: &Ident<Canonical>,
+) -> Option<&'a ModuleKey> {
+    sim.modules.keys().find(|(name, _)| name == model_name)
+}
+
+fn calc_flattened_order(sim: &Simulation, module_key: &ModuleKey) -> Vec<Ident<Canonical>> {
+    let (model_name, _) = module_key;
     let is_root = model_name.as_str() == "main";
 
-    let module = &sim.modules[model_name];
+    let module = &sim.modules[module_key];
 
     let mut offsets: Vec<Ident<Canonical>> = Vec::with_capacity(module.runlist_order.len() + 1);
 
@@ -1654,8 +1672,8 @@ fn calc_flattened_order(sim: &Simulation, model_name: &Ident<Canonical>) -> Vec<
 
     for ident in module.runlist_order.iter() {
         // FIXME: this isn't quite right (assumes no regular var has same name as module)
-        if sim.modules.contains_key(ident) {
-            let sub_var_names = calc_flattened_order(sim, ident);
+        if let Some(sub_module_key) = find_module_by_model_name(sim, ident) {
+            let sub_var_names = calc_flattened_order(sim, sub_module_key);
             for sub_name in sub_var_names.iter() {
                 offsets.push(Ident::<Canonical>::from_unchecked(format!(
                     "{}.{}",

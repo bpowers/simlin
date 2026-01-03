@@ -20,6 +20,13 @@ const OUTPUT_FILES: &[(&str, u8)] = &[("output.csv", b','), ("output.tab", b'\t'
 // these columns are either Vendor specific or otherwise not important.
 const IGNORABLE_COLS: &[&str] = &["saveper", "initial_time", "final_time", "time_step"];
 
+/// Check if a variable name is a Vensim-specific internal delay/smooth variable
+/// These have formats like "#d8>DELAY3#[A1]" or "#d8>DELAY3>RT2#[A1]"
+fn is_vensim_internal_module_var(name: &str) -> bool {
+    // Vensim internal variables start with # and contain >
+    name.starts_with('#') && name.contains('>')
+}
+
 static TEST_MODELS: &[&str] = &[
     // failing testcases (various reasons)
     // "test/test-models/tests/arguments/test_arguments.xmile",
@@ -123,7 +130,10 @@ fn ensure_results(expected: &Results, results: &Results) {
     for (expected_row, results_row) in expected.iter().zip(results.iter()) {
         for ident in expected.offsets.keys() {
             let expected = expected_row[expected.offsets[ident]];
-            if !results.offsets.contains_key(ident) && IGNORABLE_COLS.contains(&ident.as_str()) {
+            if !results.offsets.contains_key(ident)
+                && (IGNORABLE_COLS.contains(&ident.as_str())
+                    || is_vensim_internal_module_var(ident.as_str()))
+            {
                 continue;
             }
             if !results.offsets.contains_key(ident) {
@@ -558,6 +568,89 @@ fn simulates_arrayed_models_correctly() {
 #[test]
 fn simulates_lookup_arrayed() {
     simulate_path("../../test/lookup_arrayed/lookup_arrayed.xmile");
+}
+
+#[test]
+fn simulates_delay_arrayed() {
+    simulate_path("../../test/sdeverywhere/models/delay/delay.xmile");
+}
+
+/// Debug test to understand why d5 gives wrong values
+#[test]
+fn debug_delay_d5() {
+    let xmile_path = "../../test/sdeverywhere/models/delay/delay.xmile";
+    let f = File::open(xmile_path).unwrap();
+    let mut f = BufReader::new(f);
+
+    let datamodel_project = xmile::project_from_reader(&mut f).unwrap();
+
+    let project = Rc::new(Project::from(datamodel_project.clone()));
+
+    // Print out all variables from the engine's internal representation
+    eprintln!("\n=== Engine Variables (d5 related) ===");
+    if let Some(model) = project.models.get(&Ident::from_str_unchecked("main")) {
+        for (ident, var) in &model.variables {
+            if ident.as_str().contains("d5") {
+                eprintln!("  {}: {:?}", ident, var);
+            }
+        }
+    }
+
+    // Print stdlib⁚delay1 model instantiations
+    eprintln!("\n=== stdlib⁚delay1 Model Instantiations ===");
+    if let Some(model) = project
+        .models
+        .get(&Ident::from_str_unchecked("stdlib⁚delay1"))
+    {
+        if let Some(instantiations) = &model.instantiations {
+            for (inputs, inst) in instantiations {
+                eprintln!("  Input set: {:?}", inputs);
+                eprintln!("    runlist_flows: {:?}", inst.runlist_flows);
+                eprintln!("    runlist_initials: {:?}", inst.runlist_initials);
+            }
+        }
+        // Print the variables in the model
+        eprintln!("  Variables:");
+        for (ident, var) in &model.variables {
+            eprintln!("    {}: {:?}", ident, var);
+        }
+    }
+
+    // Print main model runlists
+    eprintln!("\n=== Main Model Runlists ===");
+    if let Some(model) = project.models.get(&Ident::from_str_unchecked("main"))
+        && let Some(instantiations) = &model.instantiations
+    {
+        for (inputs, inst) in instantiations {
+            eprintln!("  Input set: {:?}", inputs);
+            // Just print d5-related items from runlist_flows
+            let d5_flows: Vec<_> = inst
+                .runlist_flows
+                .iter()
+                .filter(|i| i.as_str().contains("d5") || i.as_str().contains("arg"))
+                .collect();
+            eprintln!("    d5-related flows: {:?}", d5_flows);
+        }
+    }
+
+    let sim = Simulation::new(&project, "main").unwrap();
+
+    let results = sim.run_to_end().unwrap();
+
+    // Print d5 and related results
+    eprintln!("\n=== Results ===");
+    for (ident, &offset) in &results.offsets {
+        if ident.as_str().contains("d5")
+            || ident.as_str() == "input_a"
+            || ident.as_str() == "delay_a"
+            || ident.as_str() == "init_a"
+        {
+            let values: Vec<f64> = (0..3)
+                .map(|step| results.data[step * results.step_size + offset])
+                .collect();
+            eprintln!("  {} (off={}): steps 0,1,2 = {:?}", ident, offset, values);
+        }
+    }
 }
 
 #[test]
