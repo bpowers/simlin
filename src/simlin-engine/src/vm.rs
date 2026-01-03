@@ -1755,9 +1755,11 @@ fn lookup_forward(table: &[(f64, f64)], index: f64) -> f64 {
     table[low].1
 }
 
-/// Step function lookup that returns the y-value of the previous point <= x.
+/// Step function lookup that returns the y-value of the last point where x <= index.
 /// If x is before the first point, returns the y-value of the first point.
 /// This is a "sample and hold" interpolation where we look backward.
+///
+/// For duplicate x-values, returns the y of the LAST point with that x.
 #[inline(never)]
 fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
@@ -1779,26 +1781,22 @@ fn lookup_backward(table: &[(f64, f64)], index: f64) -> f64 {
         return table[size - 1].1;
     }
 
-    // Binary search for the first point with x >= index
+    // Binary search for the first point with x > index (upper bound)
+    // This gives us the insertion point after all elements <= index
     let mut low = 0;
     let mut high = size;
     while low < high {
         let mid = low + (high - low) / 2;
-        if table[mid].0 < index {
+        if table[mid].0 <= index {
             low = mid + 1;
         } else {
             high = mid;
         }
     }
 
-    // low now points to the first element >= index
-    // For backward lookup, we want the previous point (low - 1)
-    // unless the point is exactly at index
-    if approx_eq!(f64, table[low].0, index) {
-        table[low].1
-    } else {
-        table[low - 1].1
-    }
+    // low now points to the first element > index
+    // We want the element just before it (the last element <= index)
+    table[low - 1].1
 }
 
 #[cfg(test)]
