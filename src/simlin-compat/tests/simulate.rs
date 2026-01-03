@@ -455,6 +455,7 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // Passing tests
     "test/sdeverywhere/models/active_initial/active_initial.xmile",
     "test/sdeverywhere/models/comments/comments.xmile",
+    "test/sdeverywhere/models/delay/delay.xmile",
     "test/sdeverywhere/models/elmcount/elmcount.xmile",
     "test/sdeverywhere/models/index/index.xmile",
     "test/sdeverywhere/models/initial/initial.xmile",
@@ -473,9 +474,6 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     // NotSimulatable: uses GET DIRECT CONSTANTS
     // "test/sdeverywhere/models/arrays_cname/arrays_cname.xmile",
     // "test/sdeverywhere/models/arrays_varname/arrays_varname.xmile",
-    //
-    // EmptyEquation: uses DELAY1I/DELAY3I with arrayed initial values
-    // "test/sdeverywhere/models/delay/delay.xmile",
     //
     // EmptyEquation: uses DELAY FIXED builtin
     // "test/sdeverywhere/models/delayfixed/delayfixed.xmile",
