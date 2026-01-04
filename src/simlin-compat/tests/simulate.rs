@@ -145,27 +145,21 @@ fn ensure_results(expected: &Results, results: &Results) {
             let around_zero = approx_eq!(f64, expected, 0.0, epsilon = 3e-6)
                 && approx_eq!(f64, actual, 0.0, epsilon = 1e-6);
 
-            // this ulps determined empirically /shrug
             if !around_zero {
-                let (expected, actual, epsilon) = if results.is_vensim || expected_results.is_vensim
+                let (exp_cmp, act_cmp, epsilon) = if results.is_vensim || expected_results.is_vensim
                 {
-                    let actual_int = format!("{}", actual.round() as i64);
-                    let actual_int_len =
-                        actual_int.strip_prefix('-').unwrap_or(&actual_int).len() as i64;
-                    let actual = if actual_int == "0" {
-                        actual
-                    } else {
-                        let precision = std::cmp::max(6_i64 - actual_int_len, 0) as usize;
-                        let formatted = format!("{actual:.precision$}");
-                        use std::str::FromStr;
-                        f64::from_str(&formatted).unwrap()
-                    };
-                    (expected, actual, 2e-3)
+                    // Vensim outputs ~6 significant figures. Use relative comparison
+                    // to handle large magnitudes (where small relative errors become
+                    // large absolute errors). For small values, maintain the original
+                    // absolute tolerance of 2e-3 so we don't become too strict.
+                    let max_val = expected.abs().max(actual.abs()).max(1e-10);
+                    let relative_eps = max_val * 5e-6;
+                    (expected, actual, relative_eps.max(2e-3))
                 } else {
                     (expected, actual, 2e-3)
                 };
 
-                if !approx_eq!(f64, expected, actual, epsilon = epsilon) {
+                if !approx_eq!(f64, exp_cmp, act_cmp, epsilon = epsilon) {
                     eprintln!("step {step}: {ident}: {expected} (expected) != {actual} (actual)");
                     panic!("not equal");
                 }
@@ -462,6 +456,7 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     "test/sdeverywhere/models/lookup/lookup.xmile",
     "test/sdeverywhere/models/pulsetrain/pulsetrain.xmile",
     "test/sdeverywhere/models/sir/sir.xmile",
+    "test/sdeverywhere/models/smooth3/smooth3.xmile",
     "test/sdeverywhere/models/specialchars/specialchars.xmile",
     "test/sdeverywhere/models/subalias/subalias.xmile",
     "test/sdeverywhere/models/trend/trend.xmile",
@@ -540,7 +535,6 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     //
     // Values don't match: SMOOTH implementation difference
     // "test/sdeverywhere/models/smooth/smooth.xmile",
-    // "test/sdeverywhere/models/smooth3/smooth3.xmile",
     //
     // MismatchedDimensions: uses subscript mappings
     // "test/sdeverywhere/models/subscript/subscript.xmile",
@@ -571,6 +565,11 @@ fn simulates_lookup_arrayed() {
 #[test]
 fn simulates_delay_arrayed() {
     simulate_path("../../test/sdeverywhere/models/delay/delay.xmile");
+}
+
+#[test]
+fn simulates_smooth3() {
+    simulate_path("../../test/sdeverywhere/models/smooth3/smooth3.xmile");
 }
 
 #[test]
