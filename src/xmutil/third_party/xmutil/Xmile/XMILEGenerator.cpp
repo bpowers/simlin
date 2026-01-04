@@ -275,11 +275,29 @@ void XMILEGenerator::generateDimensions(tinyxml2::XMLElement *element, std::vect
             // Check for dimension mapping (e.g., DimA: A1, A2, A3 -> DimB)
             // The mapping info is in the ExpressionSymbolList's Map, which contains
             // a SymbolList with the target dimension as the first symbol.
+            //
+            // There are two mapping forms in Vensim:
+            // 1. Simple: DimA: A1, A2, A3 -> DimB
+            //    - mapList[0] is EntryType_SYMBOL with the target dimension
+            // 2. Explicit: DimA: A1, A2, A3 -> (DimB: B1, B2, B3)
+            //    - mapList[0] is EntryType_LIST where the list's MapRange() has the target
             SymbolList *mapList = esl->Map();
             if (mapList && mapList->Length() > 0) {
               const SymbolList::SymbolListEntry &elm = (*mapList)[0];
+              Symbol *mapTarget = nullptr;
+
               if (elm.eType == SymbolList::EntryType_SYMBOL) {
-                Symbol *mapTarget = elm.u.pSymbol;
+                // Simple mapping: target is directly the symbol
+                mapTarget = elm.u.pSymbol;
+              } else if (elm.eType == SymbolList::EntryType_LIST) {
+                // Explicit mapping: target is stored in the list's MapRange
+                SymbolList *innerList = elm.u.pSymbolList;
+                if (innerList && innerList->MapRange()) {
+                  mapTarget = innerList->MapRange();
+                }
+              }
+
+              if (mapTarget) {
                 tinyxml2::XMLElement *xmap = doc->NewElement("isee:maps_to");
                 xmap->SetText(mapTarget->GetName().c_str());
                 xsub->InsertEndChild(xmap);

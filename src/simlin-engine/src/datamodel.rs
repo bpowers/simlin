@@ -664,6 +664,12 @@ pub struct Dimension {
     pub elements: DimensionElements,
     /// Name of the dimension this dimension maps to (if any).
     /// When set, elements correspond positionally: A1<->B1, A2<->B2, etc.
+    ///
+    /// **Important**: Dimension mappings are only supported for named dimensions
+    /// (those with explicit element names). Indexed dimensions (numeric subscripts)
+    /// cannot have mappings - the engine will return None from `get_maps_to` for
+    /// indexed dimensions. Additionally, both dimensions in a mapping must have
+    /// the same number of elements for valid positional correspondence.
     pub maps_to: Option<String>,
 }
 

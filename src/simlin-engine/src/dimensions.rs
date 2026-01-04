@@ -240,7 +240,11 @@ impl DimensionsContext {
     /// - We need to find the corresponding DimA element: "a3"
     ///
     /// Returns the source dimension element that corresponds positionally to the
-    /// target element, or None if no mapping relationship exists.
+    /// target element, or None if:
+    /// - No mapping relationship exists between source and target
+    /// - Either dimension is indexed (not named)
+    /// - The dimensions have different sizes (invalid mapping configuration)
+    /// - The target element is not found in the target dimension
     pub fn translate_to_source_via_mapping(
         &self,
         source_dim: &CanonicalDimensionName,
@@ -252,20 +256,27 @@ impl DimensionsContext {
             return None;
         }
 
+        // Get source dimension first to validate it's named
+        let source_named = match self.dimensions.get(source_dim)? {
+            Dimension::Named(_, named) => named,
+            Dimension::Indexed(_, _) => return None,
+        };
+
         // Get the target dimension to find element's position
         let target_named = match self.dimensions.get(target_dim)? {
             Dimension::Named(_, named) => named,
             Dimension::Indexed(_, _) => return None,
         };
 
+        // Validate dimensions have same size for valid positional mapping.
+        // If sizes don't match, this is a configuration error in the model -
+        // dimension mappings require 1:1 positional correspondence.
+        if source_named.elements.len() != target_named.elements.len() {
+            return None;
+        }
+
         // Find position of target element (1-indexed in indexed_elements)
         let position = *target_named.indexed_elements.get(target_element)?;
-
-        // Get source dimension to find element at that position
-        let source_named = match self.dimensions.get(source_dim)? {
-            Dimension::Named(_, named) => named,
-            Dimension::Indexed(_, _) => return None,
-        };
 
         // Get element at same position in source (convert 1-indexed to 0-indexed)
         source_named.elements.get(position - 1).cloned()
@@ -648,10 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_with_different_element_count() {
+    fn test_translate_mismatched_sizes_returns_none() {
         use crate::common::CanonicalDimensionName;
 
-        // DimA has 2 elements, DimB has 3 - accessing B3 should return None
+        // DimA has 2 elements, DimB has 3 - mismatched sizes should fail entirely
+        // This is a configuration error: dimension mappings require 1:1 correspondence
         let mut dim_a = datamodel::Dimension::named(
             "DimA".to_string(),
             vec!["A1".to_string(), "A2".to_string()],
@@ -668,24 +680,26 @@ mod tests {
         let dim_a_name = CanonicalDimensionName::from_raw("DimA");
         let dim_b_name = CanonicalDimensionName::from_raw("DimB");
 
-        // B1 and B2 work
+        // All translations should fail due to size mismatch
         let b1 = CanonicalElementName::from_raw("B1");
         assert_eq!(
             ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b1),
-            Some(CanonicalElementName::from_raw("a1"))
+            None,
+            "Mismatched dimension sizes should fail gracefully"
         );
 
         let b2 = CanonicalElementName::from_raw("B2");
         assert_eq!(
             ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b2),
-            Some(CanonicalElementName::from_raw("a2"))
+            None,
+            "Mismatched dimension sizes should fail gracefully"
         );
 
-        // B3 doesn't have a corresponding element in DimA
         let b3 = CanonicalElementName::from_raw("B3");
         assert_eq!(
             ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b3),
-            None
+            None,
+            "Mismatched dimension sizes should fail gracefully"
         );
     }
 

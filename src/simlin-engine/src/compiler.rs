@@ -1795,21 +1795,34 @@ impl Context<'_> {
                                 // If source_offset failed, try dimension mapping.
                                 // If source_dim maps to target_dim, translate the subscript
                                 // from target_dim's element to source_dim's corresponding element.
+                                let mut mapping_failed = false;
                                 if source_offset.is_none() {
                                     let source_dim_name = source_dim.canonical_name();
                                     let target_dim_name = target_dim.canonical_name();
-                                    if let Some(translated) =
-                                        self.dimensions_ctx.translate_to_source_via_mapping(
-                                            source_dim_name,
-                                            target_dim_name,
-                                            subscript,
-                                        )
-                                    {
-                                        source_offset = source_dim.get_offset(&translated);
+
+                                    // Check if a mapping exists between these dimensions
+                                    let has_mapping =
+                                        self.dimensions_ctx.get_maps_to(source_dim_name)
+                                            == Some(target_dim_name);
+
+                                    if has_mapping {
+                                        if let Some(translated) =
+                                            self.dimensions_ctx.translate_to_source_via_mapping(
+                                                source_dim_name,
+                                                target_dim_name,
+                                                subscript,
+                                            )
+                                        {
+                                            source_offset = source_dim.get_offset(&translated);
+                                        } else {
+                                            // Mapping exists but translation failed - this is a
+                                            // configuration error (e.g., size mismatch or invalid subscript)
+                                            mapping_failed = true;
+                                        }
                                     }
                                 }
 
-                                let target_offset = if source_offset.is_none() {
+                                let target_offset = if source_offset.is_none() && !mapping_failed {
                                     target_dim.get_offset(subscript)
                                 } else {
                                     None
@@ -1821,6 +1834,19 @@ impl Context<'_> {
                                     (abs_offset, true)
                                 } else if let Some(abs_offset) = target_offset {
                                     (abs_offset, false)
+                                } else if mapping_failed {
+                                    // Provide a more specific error when mapping exists but failed
+                                    return sim_err!(
+                                        MismatchedDimensions,
+                                        format!(
+                                            "{}: dimension mapping from {} to {} failed for subscript '{}' \
+                                             (check that both dimensions have the same number of elements)",
+                                            id.as_str(),
+                                            source_dim.name(),
+                                            target_dim.name(),
+                                            subscript.as_str()
+                                        )
+                                    );
                                 } else {
                                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
                                 };
