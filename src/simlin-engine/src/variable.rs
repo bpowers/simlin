@@ -14,7 +14,7 @@ use crate::common::{
     UnitError, canonicalize,
 };
 use crate::datamodel;
-use crate::dimensions::Dimension;
+use crate::dimensions::{Dimension, DimensionsContext};
 #[cfg(test)]
 use crate::model::ScopeStage0;
 use crate::token::LexerType;
@@ -336,7 +336,7 @@ fn get_dimensions(
         .map(|name| -> Result<Dimension, EquationError> {
             for dim in dimensions {
                 if dim.name() == name {
-                    return Ok(Dimension::from(dim.clone()));
+                    return Ok(Dimension::from(dim));
                 }
             }
             eqn_err!(BadDimensionName, 0, 0)
@@ -422,13 +422,16 @@ where
     MI: std::fmt::Debug, // TODO: not sure why unwrap_err needs this
     F: Fn(&datamodel::ModuleReference) -> EquationResult<Option<MI>>,
 {
+    // Create DimensionsContext for dimension mapping lookups in builtin expansion
+    let dimensions_ctx = DimensionsContext::from(dimensions);
+
     let mut parse_and_lower_eqn = |ident: &str,
                                    eqn: &datamodel::Equation,
                                    is_initial: bool|
      -> (Option<Ast<Expr0>>, Vec<EquationError>) {
         let (ast, mut errors) = parse_equation(eqn, dimensions, is_initial);
         let ast = match ast {
-            Some(ast) => match instantiate_implicit_modules(ident, ast) {
+            Some(ast) => match instantiate_implicit_modules(ident, ast, Some(&dimensions_ctx)) {
                 Ok((ast, mut new_vars)) => {
                     implicit_vars.append(&mut new_vars);
                     Some(ast)
@@ -718,7 +721,7 @@ fn test_identifier_sets() {
         ("g[foo]", &["g"]),
     ];
 
-    let dimensions: Vec<Dimension> = vec![Dimension::from(datamodel::Dimension::Named(
+    let dimensions: Vec<Dimension> = vec![Dimension::from(datamodel::Dimension::named(
         "dim1".to_string(),
         vec!["foo".to_owned()],
     ))];

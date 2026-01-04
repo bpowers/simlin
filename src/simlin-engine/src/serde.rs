@@ -5,10 +5,10 @@
 use float_cmp::approx_eq;
 
 use crate::datamodel::{
-    Aux, Dimension, Dt, Equation, Extension, Flow, GraphicalFunction, GraphicalFunctionKind,
-    GraphicalFunctionScale, LoopMetadata, Model, Module, ModuleReference, Project, Rect, SimMethod,
-    SimSpecs, Source, Stock, StockFlow, Unit, Variable, View, ViewElement, Visibility,
-    view_element,
+    Aux, Dimension, DimensionElements, Dt, Equation, Extension, Flow, GraphicalFunction,
+    GraphicalFunctionKind, GraphicalFunctionScale, LoopMetadata, Model, Module, ModuleReference,
+    Project, Rect, SimMethod, SimSpecs, Source, Stock, StockFlow, Unit, Variable, View,
+    ViewElement, Visibility, view_element,
 };
 use crate::project_io;
 
@@ -1565,39 +1565,44 @@ fn test_model_with_loop_metadata_roundtrip() {
 
 impl From<Dimension> for project_io::Dimension {
     fn from(dimension: Dimension) -> Self {
-        match dimension {
-            Dimension::Indexed(name, size) => project_io::Dimension {
-                name,
-                obsolete_elements: vec![],
-                dimension: Some(project_io::dimension::Dimension::Size(
-                    project_io::dimension::DimensionSize { size },
-                )),
-            },
-            Dimension::Named(name, elements) => project_io::Dimension {
-                name,
-                obsolete_elements: vec![],
-                dimension: Some(project_io::dimension::Dimension::Elements(
-                    project_io::dimension::DimensionElements { elements },
-                )),
-            },
+        let dim = match dimension.elements {
+            DimensionElements::Indexed(size) => {
+                project_io::dimension::Dimension::Size(project_io::dimension::DimensionSize {
+                    size,
+                })
+            }
+            DimensionElements::Named(elements) => project_io::dimension::Dimension::Elements(
+                project_io::dimension::DimensionElements { elements },
+            ),
+        };
+        project_io::Dimension {
+            name: dimension.name,
+            obsolete_elements: vec![],
+            dimension: Some(dim),
+            maps_to: dimension.maps_to,
         }
     }
 }
 
 impl From<project_io::Dimension> for Dimension {
     fn from(dimension: project_io::Dimension) -> Self {
-        if let Some(dim) = dimension.dimension {
+        let elements = if let Some(dim) = dimension.dimension {
             match dim {
                 project_io::dimension::Dimension::Elements(elements) => {
-                    Dimension::Named(dimension.name, elements.elements)
+                    DimensionElements::Named(elements.elements)
                 }
                 project_io::dimension::Dimension::Size(size) => {
-                    Dimension::Indexed(dimension.name, size.size)
+                    DimensionElements::Indexed(size.size)
                 }
             }
         } else {
             // originally we ignored dimensions with only indexes -- treat that as a fallback
-            Dimension::Named(dimension.name, dimension.obsolete_elements)
+            DimensionElements::Named(dimension.obsolete_elements)
+        };
+        Dimension {
+            name: dimension.name,
+            elements,
+            maps_to: dimension.maps_to,
         }
     }
 }

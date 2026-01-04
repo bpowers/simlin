@@ -252,7 +252,8 @@ void XMILEGenerator::generateDimensions(tinyxml2::XMLElement *element, std::vect
       if (eq) {
         Expression *exp = eq->GetExpression();
         if (exp && exp->GetType() == EXPTYPE_Symlist) {
-          SymbolList *symlist = static_cast<ExpressionSymbolList *>(exp)->SymList();
+          ExpressionSymbolList *esl = static_cast<ExpressionSymbolList *>(exp);
+          SymbolList *symlist = esl->SymList();
           std::vector<Symbol *> expanded;
           int n = symlist->Length();
           for (int i = 0; i < n; i++) {
@@ -270,6 +271,19 @@ void XMILEGenerator::generateDimensions(tinyxml2::XMLElement *element, std::vect
               tinyxml2::XMLElement *xelm = doc->NewElement("elem");
               xelm->SetAttribute("name", s->GetName().c_str());
               xsub->InsertEndChild(xelm);
+            }
+            // Check for dimension mapping (e.g., DimA: A1, A2, A3 -> DimB)
+            // The mapping info is in the ExpressionSymbolList's Map, which contains
+            // a SymbolList with the target dimension as the first symbol.
+            SymbolList *mapList = esl->Map();
+            if (mapList && mapList->Length() > 0) {
+              const SymbolList::SymbolListEntry &elm = (*mapList)[0];
+              if (elm.eType == SymbolList::EntryType_SYMBOL) {
+                Symbol *mapTarget = elm.u.pSymbol;
+                tinyxml2::XMLElement *xmap = doc->NewElement("isee:maps_to");
+                xmap->SetText(mapTarget->GetName().c_str());
+                xsub->InsertEndChild(xmap);
+              }
             }
             element->InsertEndChild(xsub);
           }

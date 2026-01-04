@@ -1535,16 +1535,16 @@ impl Iterator for SubscriptOffsetIterator {
 #[test]
 fn test_subscript_offset_iter() {
     use crate::datamodel;
-    let empty_dim = Dimension::from(datamodel::Dimension::Named("".to_string(), vec![]));
-    let one_dim = Dimension::from(datamodel::Dimension::Named(
+    let empty_dim = Dimension::from(datamodel::Dimension::named("".to_string(), vec![]));
+    let one_dim = Dimension::from(datamodel::Dimension::named(
         "".to_string(),
         vec!["0".to_owned()],
     ));
-    let two_dim = Dimension::from(datamodel::Dimension::Named(
+    let two_dim = Dimension::from(datamodel::Dimension::named(
         "".to_string(),
         vec!["0".to_owned(), "1".to_owned()],
     ));
-    let three_dim = Dimension::from(datamodel::Dimension::Named(
+    let three_dim = Dimension::from(datamodel::Dimension::named(
         "".to_string(),
         vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
     ));
@@ -1622,16 +1622,16 @@ impl<'a> Iterator for SubscriptIterator<'a> {
 #[test]
 fn test_subscript_iter() {
     use crate::datamodel;
-    let empty_dim = Dimension::from(datamodel::Dimension::Named("".to_string(), vec![]));
-    let one_dim = Dimension::from(datamodel::Dimension::Named(
+    let empty_dim = Dimension::from(datamodel::Dimension::named("".to_string(), vec![]));
+    let one_dim = Dimension::from(datamodel::Dimension::named(
         "".to_string(),
         vec!["0".to_owned()],
     ));
-    let two_dim = Dimension::from(datamodel::Dimension::Named(
+    let two_dim = Dimension::from(datamodel::Dimension::named(
         "".to_string(),
         vec!["0".to_owned(), "1".to_owned()],
     ));
-    let three_dim = Dimension::from(datamodel::Dimension::Named(
+    let three_dim = Dimension::from(datamodel::Dimension::named(
         "".to_string(),
         vec!["0".to_owned(), "1".to_owned(), "2".to_owned()],
     ));

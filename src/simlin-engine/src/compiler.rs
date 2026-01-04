@@ -1786,11 +1786,29 @@ impl Context<'_> {
                                 let prefer_source = source_dim.name() == target_dim.name()
                                     || matches!(source_dim, Dimension::Named(_, _));
 
-                                let source_offset = if prefer_source {
+                                let mut source_offset = if prefer_source {
                                     source_dim.get_offset(subscript)
                                 } else {
                                     None
                                 };
+
+                                // If source_offset failed, try dimension mapping.
+                                // If source_dim maps to target_dim, translate the subscript
+                                // from target_dim's element to source_dim's corresponding element.
+                                if source_offset.is_none() {
+                                    let source_dim_name = source_dim.canonical_name();
+                                    let target_dim_name = target_dim.canonical_name();
+                                    if let Some(translated) =
+                                        self.dimensions_ctx.translate_to_source_via_mapping(
+                                            source_dim_name,
+                                            target_dim_name,
+                                            subscript,
+                                        )
+                                    {
+                                        source_offset = source_dim.get_offset(&translated);
+                                    }
+                                }
+
                                 let target_offset = if source_offset.is_none() {
                                     target_dim.get_offset(subscript)
                                 } else {
@@ -3381,7 +3399,7 @@ impl Module {
             .datamodel
             .dimensions
             .iter()
-            .map(|d| Dimension::from(d.clone()))
+            .map(Dimension::from)
             .collect();
 
         let build_var = |ident: &Ident<Canonical>, is_initial| {
@@ -5328,7 +5346,7 @@ mod tests {
                 sim_method: SimMethod::Euler,
                 time_units: Some("time".to_string()),
             },
-            dimensions: vec![datamodel::Dimension::Named(
+            dimensions: vec![datamodel::Dimension::named(
                 "letters".to_string(),
                 vec![
                     "a".to_string(),
@@ -5453,7 +5471,7 @@ mod tests {
                 sim_method: SimMethod::Euler,
                 time_units: Some("time".to_string()),
             },
-            dimensions: vec![datamodel::Dimension::Indexed("Size".to_string(), 10)],
+            dimensions: vec![datamodel::Dimension::indexed("Size".to_string(), 10)],
             units: vec![],
             models: vec![DatamodelModel {
                 name: "main".to_string(),
@@ -5532,7 +5550,7 @@ mod tests {
                 time_units: Some("time".to_string()),
             },
             dimensions: vec![
-                datamodel::Dimension::Named(
+                datamodel::Dimension::named(
                     "Parent".to_string(),
                     vec![
                         "A".to_string(),
@@ -5541,7 +5559,7 @@ mod tests {
                         "D".to_string(),
                     ],
                 ),
-                datamodel::Dimension::Named(
+                datamodel::Dimension::named(
                     "Child".to_string(),
                     vec!["B".to_string(), "C".to_string()],
                 ),
@@ -5677,6 +5695,7 @@ mod tests {
             NamedDimension {
                 indexed_elements,
                 elements: canonical_elements,
+                maps_to: None,
             },
         )
     }

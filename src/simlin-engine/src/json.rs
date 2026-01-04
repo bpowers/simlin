@@ -845,11 +845,11 @@ impl From<Model> for datamodel::Model {
 impl From<Dimension> for datamodel::Dimension {
     fn from(dim: Dimension) -> Self {
         if !dim.elements.is_empty() {
-            datamodel::Dimension::Named(dim.name, dim.elements)
+            datamodel::Dimension::named(dim.name, dim.elements)
         } else if dim.size > 0 {
-            datamodel::Dimension::Indexed(dim.name, dim.size as u32)
+            datamodel::Dimension::indexed(dim.name, dim.size as u32)
         } else {
-            datamodel::Dimension::Named(dim.name, vec![])
+            datamodel::Dimension::named(dim.name, vec![])
         }
     }
 }
@@ -1320,14 +1320,14 @@ impl From<datamodel::Model> for Model {
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dim: datamodel::Dimension) -> Self {
-        match dim {
-            datamodel::Dimension::Named(name, elements) => Dimension {
-                name,
+        match dim.elements {
+            datamodel::DimensionElements::Named(elements) => Dimension {
+                name: dim.name,
                 elements,
                 size: 0,
             },
-            datamodel::Dimension::Indexed(name, size) => Dimension {
-                name,
+            datamodel::DimensionElements::Indexed(size) => Dimension {
+                name: dim.name,
                 elements: vec![],
                 size: size as i32,
             },

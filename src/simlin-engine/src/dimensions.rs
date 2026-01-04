@@ -12,6 +12,10 @@ use crate::datamodel;
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
     pub indexed_elements: HashMap<CanonicalElementName, usize>,
+    /// If this dimension maps to another (e.g., DimA -> DimB), the target dimension name.
+    /// Elements correspond positionally: elements[i] of this dimension corresponds to
+    /// elements[i] of the target dimension.
+    pub maps_to: Option<CanonicalDimensionName>,
 }
 
 /// Relationship between a subdimension and parent dimension.
@@ -85,6 +89,13 @@ impl Dimension {
         }
     }
 
+    /// Get the canonical dimension name
+    pub fn canonical_name(&self) -> &CanonicalDimensionName {
+        match self {
+            Dimension::Indexed(name, _) | Dimension::Named(name, _) => name,
+        }
+    }
+
     /// Get the offset of an element by name (for named dimensions) or by index string (for indexed dimensions).
     /// Returns 0-based offset for use in array indexing.
     pub fn get_offset(&self, subscript: &CanonicalElementName) -> Option<usize> {
@@ -111,13 +122,17 @@ impl Dimension {
     }
 }
 
-impl From<datamodel::Dimension> for Dimension {
-    fn from(dim: datamodel::Dimension) -> Dimension {
-        match dim {
-            datamodel::Dimension::Indexed(name, size) => {
-                Dimension::Indexed(CanonicalDimensionName::from_raw(&name), size)
+impl From<&datamodel::Dimension> for Dimension {
+    fn from(dim: &datamodel::Dimension) -> Dimension {
+        let maps_to = dim
+            .maps_to
+            .as_ref()
+            .map(|m| CanonicalDimensionName::from_raw(m));
+        match &dim.elements {
+            datamodel::DimensionElements::Indexed(size) => {
+                Dimension::Indexed(CanonicalDimensionName::from_raw(&dim.name), *size)
             }
-            datamodel::Dimension::Named(name, elements) => {
+            datamodel::DimensionElements::Named(elements) => {
                 let canonical_elements: Vec<CanonicalElementName> = elements
                     .iter()
                     .map(|e| CanonicalElementName::from_raw(e))
@@ -126,17 +141,24 @@ impl From<datamodel::Dimension> for Dimension {
                     .iter()
                     .enumerate()
                     // system dynamic indexes are 1-indexed
-                    .map(|(i, elem)| (elem.clone(), i + 1))
+                    .map(|(i, elem): (usize, &CanonicalElementName)| (elem.clone(), i + 1))
                     .collect();
                 Dimension::Named(
-                    CanonicalDimensionName::from_raw(&name),
+                    CanonicalDimensionName::from_raw(&dim.name),
                     NamedDimension {
                         indexed_elements,
                         elements: canonical_elements,
+                        maps_to,
                     },
                 )
             }
         }
+    }
+}
+
+impl From<datamodel::Dimension> for Dimension {
+    fn from(dim: datamodel::Dimension) -> Dimension {
+        Dimension::from(&dim)
     }
 }
 
@@ -161,7 +183,7 @@ impl DimensionsContext {
                 .map(|dim| {
                     (
                         CanonicalDimensionName::from_raw(dim.name()),
-                        Dimension::from(dim.clone()),
+                        Dimension::from(dim),
                     )
                 })
                 .collect(),
@@ -191,6 +213,62 @@ impl DimensionsContext {
             }
         }
         None
+    }
+
+    /// Get the maps_to target for a dimension (e.g., DimA -> DimB).
+    /// Returns None for indexed dimensions or dimensions without a mapping.
+    pub fn get_maps_to(
+        &self,
+        dim_name: &CanonicalDimensionName,
+    ) -> Option<&CanonicalDimensionName> {
+        if let Some(Dimension::Named(_, named)) = self.dimensions.get(dim_name) {
+            named.maps_to.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Translate an element from a target context dimension to a source variable dimension
+    /// using positional correspondence from dimension mapping.
+    ///
+    /// This is used when a variable indexed by source_dim is referenced from a context
+    /// that has target_dim, and source_dim.maps_to == target_dim.
+    ///
+    /// For example, if DimA maps to DimB, and we have:
+    /// - A variable indexed by DimA (source_dim)
+    /// - A context with subscript "b3" from DimB (target_dim)
+    /// - We need to find the corresponding DimA element: "a3"
+    ///
+    /// Returns the source dimension element that corresponds positionally to the
+    /// target element, or None if no mapping relationship exists.
+    pub fn translate_to_source_via_mapping(
+        &self,
+        source_dim: &CanonicalDimensionName,
+        target_dim: &CanonicalDimensionName,
+        target_element: &CanonicalElementName,
+    ) -> Option<CanonicalElementName> {
+        // Verify source maps to target
+        if self.get_maps_to(source_dim) != Some(target_dim) {
+            return None;
+        }
+
+        // Get the target dimension to find element's position
+        let target_named = match self.dimensions.get(target_dim)? {
+            Dimension::Named(_, named) => named,
+            Dimension::Indexed(_, _) => return None,
+        };
+
+        // Find position of target element (1-indexed in indexed_elements)
+        let position = *target_named.indexed_elements.get(target_element)?;
+
+        // Get source dimension to find element at that position
+        let source_named = match self.dimensions.get(source_dim)? {
+            Dimension::Named(_, named) => named,
+            Dimension::Indexed(_, _) => return None,
+        };
+
+        // Get element at same position in source (convert 1-indexed to 0-indexed)
+        source_named.elements.get(position - 1).cloned()
     }
 
     /// Check if child is a subdimension of parent (all child elements exist in parent).
@@ -352,7 +430,7 @@ mod tests {
     #[test]
     fn test_get_offset_named_dimension() {
         // Create a named dimension with canonical elements
-        let datamodel_dim = datamodel::Dimension::Named(
+        let datamodel_dim = datamodel::Dimension::named(
             "Region".to_string(),
             vec!["North".to_string(), "South".to_string(), "East".to_string()],
         );
@@ -397,7 +475,7 @@ mod tests {
     #[test]
     fn test_get_offset_indexed_dimension() {
         // Create an indexed dimension
-        let datamodel_dim = datamodel::Dimension::Indexed("Index".to_string(), 5);
+        let datamodel_dim = datamodel::Dimension::indexed("Index".to_string(), 5);
         let dim = Dimension::from(datamodel_dim);
 
         // Test valid indices (1-based input, 0-based output)
@@ -437,7 +515,7 @@ mod tests {
     #[test]
     fn test_get_offset_with_special_characters() {
         // Test dimension with elements containing spaces and dots
-        let datamodel_dim = datamodel::Dimension::Named(
+        let datamodel_dim = datamodel::Dimension::named(
             "Product Type".to_string(),
             vec![
                 "Product A".to_string(),
@@ -489,7 +567,7 @@ mod tests {
     #[test]
     fn test_get_offset_empty_dimension() {
         // Edge case: empty named dimension
-        let datamodel_dim = datamodel::Dimension::Named("Empty".to_string(), vec![]);
+        let datamodel_dim = datamodel::Dimension::named("Empty".to_string(), vec![]);
         let dim = Dimension::from(datamodel_dim);
 
         assert_eq!(
@@ -498,7 +576,7 @@ mod tests {
         );
 
         // Edge case: indexed dimension with size 0
-        let datamodel_dim = datamodel::Dimension::Indexed("Zero".to_string(), 0);
+        let datamodel_dim = datamodel::Dimension::indexed("Zero".to_string(), 0);
         let dim = Dimension::from(datamodel_dim);
 
         assert_eq!(dim.get_offset(&CanonicalElementName::from_raw("1")), None);
@@ -508,7 +586,7 @@ mod tests {
     #[test]
     fn test_get_offset_large_indexed_dimension() {
         // Test with a larger indexed dimension
-        let datamodel_dim = datamodel::Dimension::Indexed("Large".to_string(), 1000);
+        let datamodel_dim = datamodel::Dimension::indexed("Large".to_string(), 1000);
         let dim = Dimension::from(datamodel_dim);
 
         // Test boundary values
@@ -536,7 +614,7 @@ mod tests {
     #[test]
     fn test_dimension_name_and_len() {
         // Test name() and len() methods work correctly with canonical types
-        let datamodel_dim = datamodel::Dimension::Named(
+        let datamodel_dim = datamodel::Dimension::named(
             "Test Dimension".to_string(),
             vec!["A".to_string(), "B".to_string(), "C".to_string()],
         );
@@ -547,7 +625,7 @@ mod tests {
         assert_eq!(dim.len(), 3);
 
         // Test indexed dimension
-        let datamodel_dim = datamodel::Dimension::Indexed("Index Dim".to_string(), 10);
+        let datamodel_dim = datamodel::Dimension::indexed("Index Dim".to_string(), 10);
         let dim = Dimension::from(datamodel_dim);
 
         assert_eq!(dim.name(), "index_dim");
@@ -557,7 +635,7 @@ mod tests {
     #[test]
     fn test_dimensions_context_lookup() {
         // Test the DimensionsContext lookup method which uses get_offset internally
-        let dims = vec![datamodel::Dimension::Named(
+        let dims = vec![datamodel::Dimension::named(
             "Region".to_string(),
             vec!["North".to_string(), "South".to_string()],
         )];
@@ -718,11 +796,11 @@ mod tests {
 
         // DimA = [A1, A2, A3], SubA = [A2, A3] (contiguous subdimension)
         let dims = vec![
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "DimA".to_string(),
                 vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
             ),
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "SubA".to_string(),
                 vec!["A2".to_string(), "A3".to_string()],
             ),
@@ -747,11 +825,11 @@ mod tests {
 
         // DimA = [A1, A2, A3], SubA = [A1, A3] (non-contiguous subdimension)
         let dims = vec![
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "DimA".to_string(),
                 vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
             ),
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "SubA".to_string(),
                 vec!["A1".to_string(), "A3".to_string()],
             ),
@@ -774,11 +852,11 @@ mod tests {
 
         // DimA = [A1, A2, A3], SubA = [A2] (single element subdimension)
         let dims = vec![
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "DimA".to_string(),
                 vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
             ),
-            datamodel::Dimension::Named("SubA".to_string(), vec!["A2".to_string()]),
+            datamodel::Dimension::named("SubA".to_string(), vec!["A2".to_string()]),
         ];
 
         let ctx = DimensionsContext::from(&dims);
@@ -798,11 +876,11 @@ mod tests {
 
         // DimA = [A1, A2], DimB = [B1, B2] (no overlap)
         let dims = vec![
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "DimA".to_string(),
                 vec!["A1".to_string(), "A2".to_string()],
             ),
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "DimB".to_string(),
                 vec!["B1".to_string(), "B2".to_string()],
             ),
@@ -821,11 +899,11 @@ mod tests {
         use crate::common::CanonicalDimensionName;
 
         let dims = vec![
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "DimA".to_string(),
                 vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
             ),
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "SubA".to_string(),
                 vec!["A2".to_string(), "A3".to_string()],
             ),
@@ -854,8 +932,8 @@ mod tests {
 
         // Indexed dimensions don't support subdimension relationships yet
         let dims = vec![
-            datamodel::Dimension::Indexed("DimA".to_string(), 5),
-            datamodel::Dimension::Indexed("SubA".to_string(), 3),
+            datamodel::Dimension::indexed("DimA".to_string(), 5),
+            datamodel::Dimension::indexed("SubA".to_string(), 3),
         ];
 
         let ctx = DimensionsContext::from(&dims);
@@ -873,11 +951,11 @@ mod tests {
 
         // Named and Indexed dimensions can't be subdimensions of each other
         let dims = vec![
-            datamodel::Dimension::Named(
+            datamodel::Dimension::named(
                 "DimA".to_string(),
                 vec!["A1".to_string(), "A2".to_string()],
             ),
-            datamodel::Dimension::Indexed("DimB".to_string(), 2),
+            datamodel::Dimension::indexed("DimB".to_string(), 2),
         ];
 
         let ctx = DimensionsContext::from(&dims);
@@ -892,7 +970,7 @@ mod tests {
     fn test_dimension_get() {
         use crate::common::CanonicalDimensionName;
 
-        let dims = vec![datamodel::Dimension::Named(
+        let dims = vec![datamodel::Dimension::named(
             "Region".to_string(),
             vec!["North".to_string(), "South".to_string()],
         )];

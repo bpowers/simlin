@@ -1802,7 +1802,7 @@ fn test_arrays() {
                 sim_method: SimMethod::Euler,
                 time_units: Some("time".to_owned()),
             },
-            dimensions: vec![Dimension::Named(
+            dimensions: vec![Dimension::named(
                 "letters".to_owned(),
                 vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
             )],
@@ -1919,7 +1919,7 @@ fn test_arrays() {
                 .datamodel
                 .dimensions
                 .iter()
-                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .map(crate::dimensions::Dimension::from)
                 .collect(),
             dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
@@ -1958,7 +1958,7 @@ fn test_arrays() {
                 .datamodel
                 .dimensions
                 .iter()
-                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .map(crate::dimensions::Dimension::from)
                 .collect(),
             dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
@@ -1996,7 +1996,7 @@ fn test_arrays() {
                 .datamodel
                 .dimensions
                 .iter()
-                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .map(crate::dimensions::Dimension::from)
                 .collect(),
             dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,
@@ -2044,7 +2044,7 @@ fn test_arrays() {
                 .datamodel
                 .dimensions
                 .iter()
-                .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                .map(crate::dimensions::Dimension::from)
                 .collect(),
             dimensions_ctx: &parsed_project.dimensions_ctx,
             model_name: &main_ident,

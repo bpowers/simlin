@@ -1185,6 +1185,7 @@ mod tests {
             NamedDimension {
                 elements: canonical_elements,
                 indexed_elements,
+                maps_to: None,
             },
         )
     }

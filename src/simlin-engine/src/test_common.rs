@@ -86,13 +86,13 @@ impl TestProject {
     /// Add an indexed dimension (e.g., for numeric indices)
     pub fn indexed_dimension(mut self, name: &str, size: u32) -> Self {
         self.dimensions
-            .push(Dimension::Indexed(name.to_string(), size));
+            .push(Dimension::indexed(name.to_string(), size));
         self
     }
 
     /// Add a named dimension with specific elements
     pub fn named_dimension(mut self, name: &str, elements: &[&str]) -> Self {
-        self.dimensions.push(Dimension::Named(
+        self.dimensions.push(Dimension::named(
             name.to_string(),
             elements.iter().map(|s| s.to_string()).collect(),
         ));

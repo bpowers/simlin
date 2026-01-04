@@ -644,43 +644,83 @@ pub struct SimSpecs {
     pub time_units: Option<String>,
 }
 
+/// The elements of a dimension: either indexed (numeric) or named.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Dimension {
-    Indexed(String, u32),
-    Named(String, Vec<String>),
+pub enum DimensionElements {
+    /// Indexed dimension with size (e.g., `Periods(5)` has indices 1-5)
+    Indexed(u32),
+    /// Named dimension with explicit element names
+    Named(Vec<String>),
+}
+
+/// A dimension definition, optionally mapping to another dimension.
+///
+/// Vensim allows specifying dimension mappings like `DimA: A1, A2, A3 -> DimB`
+/// which means elements of DimA correspond positionally to elements of DimB.
+/// This is used when a variable indexed by DimB references variables indexed by DimA.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Dimension {
+    pub name: String,
+    pub elements: DimensionElements,
+    /// Name of the dimension this dimension maps to (if any).
+    /// When set, elements correspond positionally: A1<->B1, A2<->B2, etc.
+    pub maps_to: Option<String>,
 }
 
 impl Dimension {
-    pub fn get_offset(&self, subscript: &str) -> Option<usize> {
-        if let Dimension::Named(_, elements) = self {
-            for (i, element) in elements.iter().enumerate() {
-                if element == subscript {
-                    return Some(i);
-                }
-            }
-        } else if let Dimension::Indexed(_, size) = self {
-            let n = subscript.parse::<u32>().unwrap();
-            return Some((min(max(n, 1), *size) - 1) as usize);
+    /// Create a new indexed dimension
+    pub fn indexed(name: String, size: u32) -> Self {
+        Dimension {
+            name,
+            elements: DimensionElements::Indexed(size),
+            maps_to: None,
         }
-        None
+    }
+
+    /// Create a new named dimension
+    pub fn named(name: String, elements: Vec<String>) -> Self {
+        Dimension {
+            name,
+            elements: DimensionElements::Named(elements),
+            maps_to: None,
+        }
+    }
+
+    pub fn get_offset(&self, subscript: &str) -> Option<usize> {
+        match &self.elements {
+            DimensionElements::Named(elements) => {
+                for (i, element) in elements.iter().enumerate() {
+                    if element == subscript {
+                        return Some(i);
+                    }
+                }
+                None
+            }
+            DimensionElements::Indexed(size) => {
+                let n = subscript.parse::<u32>().unwrap();
+                Some((min(max(n, 1), *size) - 1) as usize)
+            }
+        }
     }
 
     pub fn name(&self) -> &str {
-        match self {
-            Dimension::Indexed(name, _) => name,
-            Dimension::Named(name, _) => name,
-        }
+        &self.name
     }
 
     pub fn len(&self) -> usize {
-        match self {
-            Dimension::Indexed(_, size) => *size as usize,
-            Dimension::Named(_, elements) => elements.len(),
+        match &self.elements {
+            DimensionElements::Indexed(size) => *size as usize,
+            DimensionElements::Named(elements) => elements.len(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Returns true if this is an indexed dimension (numeric indices)
+    pub fn is_indexed(&self) -> bool {
+        matches!(self.elements, DimensionElements::Indexed(_))
     }
 }
 
