@@ -349,6 +349,11 @@ pub struct Dimension {
     pub elements: Vec<String>,
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub size: i32,
+    /// Optional dimension mapping target (e.g., DimA: A1, A2, A3 -> DimB).
+    /// This establishes a positional correspondence between this dimension's
+    /// elements and the target dimension's elements.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub maps_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -844,13 +849,15 @@ impl From<Model> for datamodel::Model {
 
 impl From<Dimension> for datamodel::Dimension {
     fn from(dim: Dimension) -> Self {
-        if !dim.elements.is_empty() {
+        let mut result = if !dim.elements.is_empty() {
             datamodel::Dimension::named(dim.name, dim.elements)
         } else if dim.size > 0 {
             datamodel::Dimension::indexed(dim.name, dim.size as u32)
         } else {
             datamodel::Dimension::named(dim.name, vec![])
-        }
+        };
+        result.maps_to = dim.maps_to;
+        result
     }
 }
 
@@ -1325,11 +1332,13 @@ impl From<datamodel::Dimension> for Dimension {
                 name: dim.name,
                 elements,
                 size: 0,
+                maps_to: dim.maps_to,
             },
             datamodel::DimensionElements::Indexed(size) => Dimension {
                 name: dim.name,
                 elements: vec![],
                 size: size as i32,
+                maps_to: dim.maps_to,
             },
         }
     }
@@ -2117,6 +2126,7 @@ mod tests {
                 name: "cities".to_string(),
                 elements: vec!["Boston".to_string(), "NYC".to_string()],
                 size: 0,
+                maps_to: None,
             }],
             units: vec![Unit {
                 name: "people".to_string(),
@@ -2156,6 +2166,7 @@ mod tests {
                     name: "cities".to_string(),
                     elements: vec!["Boston".to_string(), "NYC".to_string()],
                     size: 0,
+                    maps_to: None,
                 },
             ),
             (
@@ -2164,6 +2175,16 @@ mod tests {
                     name: "items".to_string(),
                     elements: vec![],
                     size: 10,
+                    maps_to: None,
+                },
+            ),
+            (
+                "named dimension with maps_to",
+                Dimension {
+                    name: "DimA".to_string(),
+                    elements: vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+                    size: 0,
+                    maps_to: Some("DimB".to_string()),
                 },
             ),
         ];
@@ -2175,6 +2196,7 @@ mod tests {
             let json_dim3: Dimension = serde_json::from_str(&json_str).unwrap();
 
             assert_eq!(json_dim.name, json_dim3.name, "Failed for: {}", name);
+            assert_eq!(json_dim.maps_to, json_dim3.maps_to, "Failed for: {}", name);
             if json_dim.size > 0 {
                 assert_eq!(json_dim.size, json_dim3.size, "Failed for: {}", name);
             } else {
@@ -2185,6 +2207,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_dimension_maps_to_preserved_in_json() {
+        // Verify that maps_to is correctly serialized to/from JSON
+        let json_str = r#"{
+            "name": "DimA",
+            "elements": ["A1", "A2", "A3"],
+            "maps_to": "DimB"
+        }"#;
+
+        let dim: Dimension = serde_json::from_str(json_str).unwrap();
+        assert_eq!(dim.name, "DimA");
+        assert_eq!(dim.maps_to, Some("DimB".to_string()));
+
+        // Convert to datamodel and back
+        let dm_dim: datamodel::Dimension = dim.into();
+        assert_eq!(dm_dim.maps_to, Some("DimB".to_string()));
+
+        let json_dim: Dimension = dm_dim.into();
+        assert_eq!(json_dim.maps_to, Some("DimB".to_string()));
+
+        // Serialize and verify maps_to is present
+        let serialized = serde_json::to_string(&json_dim).unwrap();
+        assert!(
+            serialized.contains("\"maps_to\":\"DimB\""),
+            "maps_to should be serialized: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn test_dimension_maps_to_omitted_when_none() {
+        // Verify maps_to is not serialized when None (due to skip_serializing_if)
+        let dim = Dimension {
+            name: "Region".to_string(),
+            elements: vec!["North".to_string(), "South".to_string()],
+            size: 0,
+            maps_to: None,
+        };
+
+        let serialized = serde_json::to_string(&dim).unwrap();
+        assert!(
+            !serialized.contains("maps_to"),
+            "maps_to should not appear when None: {}",
+            serialized
+        );
     }
 
     #[test]

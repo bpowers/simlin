@@ -427,6 +427,270 @@ mod tests {
     use crate::common::CanonicalElementName;
     use crate::datamodel;
 
+    // ========== Tests for get_maps_to ==========
+
+    #[test]
+    fn test_get_maps_to_basic_mapping() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA maps to DimB
+        let mut dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+        );
+        dim_a.maps_to = Some("DimB".to_string());
+
+        let dim_b = datamodel::Dimension::named(
+            "DimB".to_string(),
+            vec!["B1".to_string(), "B2".to_string(), "B3".to_string()],
+        );
+
+        let dims = vec![dim_a, dim_b];
+        let ctx = DimensionsContext::from(&dims);
+
+        let dim_a_name = CanonicalDimensionName::from_raw("DimA");
+        let dim_b_name = CanonicalDimensionName::from_raw("DimB");
+
+        // DimA should map to DimB
+        assert_eq!(ctx.get_maps_to(&dim_a_name), Some(&dim_b_name));
+
+        // DimB should not have a mapping
+        assert_eq!(ctx.get_maps_to(&dim_b_name), None);
+    }
+
+    #[test]
+    fn test_get_maps_to_no_mapping() {
+        use crate::common::CanonicalDimensionName;
+
+        // Dimension without mapping
+        let dim = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string()],
+        );
+
+        let ctx = DimensionsContext::from(&[dim]);
+        let region_name = CanonicalDimensionName::from_raw("Region");
+
+        assert_eq!(ctx.get_maps_to(&region_name), None);
+    }
+
+    #[test]
+    fn test_get_maps_to_indexed_dimension_returns_none() {
+        use crate::common::CanonicalDimensionName;
+
+        // Indexed dimensions don't support maps_to
+        let dim = datamodel::Dimension::indexed("Index".to_string(), 5);
+
+        let ctx = DimensionsContext::from(&[dim]);
+        let index_name = CanonicalDimensionName::from_raw("Index");
+
+        // Indexed dimensions should return None for get_maps_to
+        assert_eq!(ctx.get_maps_to(&index_name), None);
+    }
+
+    #[test]
+    fn test_get_maps_to_unknown_dimension_returns_none() {
+        use crate::common::CanonicalDimensionName;
+
+        let dim = datamodel::Dimension::named(
+            "Region".to_string(),
+            vec!["North".to_string(), "South".to_string()],
+        );
+
+        let ctx = DimensionsContext::from(&[dim]);
+        let unknown_name = CanonicalDimensionName::from_raw("Unknown");
+
+        assert_eq!(ctx.get_maps_to(&unknown_name), None);
+    }
+
+    // ========== Tests for translate_to_source_via_mapping ==========
+
+    #[test]
+    fn test_translate_basic_dimension_mapping() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA maps to DimB: A1->B1, A2->B2, A3->B3 (positional correspondence)
+        let mut dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["A1".to_string(), "A2".to_string(), "A3".to_string()],
+        );
+        dim_a.maps_to = Some("DimB".to_string());
+
+        let dim_b = datamodel::Dimension::named(
+            "DimB".to_string(),
+            vec!["B1".to_string(), "B2".to_string(), "B3".to_string()],
+        );
+
+        let dims = vec![dim_a, dim_b];
+        let ctx = DimensionsContext::from(&dims);
+
+        let dim_a_name = CanonicalDimensionName::from_raw("DimA");
+        let dim_b_name = CanonicalDimensionName::from_raw("DimB");
+
+        // Translate B1 in DimB context to corresponding DimA element
+        let b1 = CanonicalElementName::from_raw("B1");
+        let result = ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b1);
+        assert_eq!(result, Some(CanonicalElementName::from_raw("a1")));
+
+        // Translate B2 in DimB context to corresponding DimA element
+        let b2 = CanonicalElementName::from_raw("B2");
+        let result = ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b2);
+        assert_eq!(result, Some(CanonicalElementName::from_raw("a2")));
+
+        // Translate B3 in DimB context to corresponding DimA element
+        let b3 = CanonicalElementName::from_raw("B3");
+        let result = ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b3);
+        assert_eq!(result, Some(CanonicalElementName::from_raw("a3")));
+    }
+
+    #[test]
+    fn test_translate_no_mapping_returns_none() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA and DimB have no mapping relationship
+        let dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["A1".to_string(), "A2".to_string()],
+        );
+
+        let dim_b = datamodel::Dimension::named(
+            "DimB".to_string(),
+            vec!["B1".to_string(), "B2".to_string()],
+        );
+
+        let ctx = DimensionsContext::from(&[dim_a, dim_b]);
+
+        let dim_a_name = CanonicalDimensionName::from_raw("DimA");
+        let dim_b_name = CanonicalDimensionName::from_raw("DimB");
+
+        // No mapping between DimA and DimB, should return None
+        let b1 = CanonicalElementName::from_raw("B1");
+        let result = ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b1);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_translate_invalid_element_returns_none() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA maps to DimB
+        let mut dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["A1".to_string(), "A2".to_string()],
+        );
+        dim_a.maps_to = Some("DimB".to_string());
+
+        let dim_b = datamodel::Dimension::named(
+            "DimB".to_string(),
+            vec!["B1".to_string(), "B2".to_string()],
+        );
+
+        let ctx = DimensionsContext::from(&[dim_a, dim_b]);
+
+        let dim_a_name = CanonicalDimensionName::from_raw("DimA");
+        let dim_b_name = CanonicalDimensionName::from_raw("DimB");
+
+        // Invalid element (not in DimB), should return None
+        let invalid = CanonicalElementName::from_raw("invalid");
+        let result = ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &invalid);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_translate_indexed_dimensions_returns_none() {
+        use crate::common::CanonicalDimensionName;
+
+        // Indexed dimensions can't use translate_to_source_via_mapping
+        let dim_a = datamodel::Dimension::indexed("DimA".to_string(), 3);
+        let dim_b = datamodel::Dimension::indexed("DimB".to_string(), 3);
+
+        let ctx = DimensionsContext::from(&[dim_a, dim_b]);
+
+        let dim_a_name = CanonicalDimensionName::from_raw("DimA");
+        let dim_b_name = CanonicalDimensionName::from_raw("DimB");
+
+        // Indexed dimensions should return None
+        let elem = CanonicalElementName::from_raw("1");
+        let result = ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &elem);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_translate_maps_to_wrong_target_returns_none() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA maps to DimB, but we try to translate via DimC
+        let mut dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["A1".to_string(), "A2".to_string()],
+        );
+        dim_a.maps_to = Some("DimB".to_string());
+
+        let dim_b = datamodel::Dimension::named(
+            "DimB".to_string(),
+            vec!["B1".to_string(), "B2".to_string()],
+        );
+
+        let dim_c = datamodel::Dimension::named(
+            "DimC".to_string(),
+            vec!["C1".to_string(), "C2".to_string()],
+        );
+
+        let ctx = DimensionsContext::from(&[dim_a, dim_b, dim_c]);
+
+        let dim_a_name = CanonicalDimensionName::from_raw("DimA");
+        let dim_c_name = CanonicalDimensionName::from_raw("DimC");
+
+        // DimA maps to DimB, not DimC, so translation via DimC should fail
+        let c1 = CanonicalElementName::from_raw("C1");
+        let result = ctx.translate_to_source_via_mapping(&dim_a_name, &dim_c_name, &c1);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_translate_with_different_element_count() {
+        use crate::common::CanonicalDimensionName;
+
+        // DimA has 2 elements, DimB has 3 - accessing B3 should return None
+        let mut dim_a = datamodel::Dimension::named(
+            "DimA".to_string(),
+            vec!["A1".to_string(), "A2".to_string()],
+        );
+        dim_a.maps_to = Some("DimB".to_string());
+
+        let dim_b = datamodel::Dimension::named(
+            "DimB".to_string(),
+            vec!["B1".to_string(), "B2".to_string(), "B3".to_string()],
+        );
+
+        let ctx = DimensionsContext::from(&[dim_a, dim_b]);
+
+        let dim_a_name = CanonicalDimensionName::from_raw("DimA");
+        let dim_b_name = CanonicalDimensionName::from_raw("DimB");
+
+        // B1 and B2 work
+        let b1 = CanonicalElementName::from_raw("B1");
+        assert_eq!(
+            ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b1),
+            Some(CanonicalElementName::from_raw("a1"))
+        );
+
+        let b2 = CanonicalElementName::from_raw("B2");
+        assert_eq!(
+            ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b2),
+            Some(CanonicalElementName::from_raw("a2"))
+        );
+
+        // B3 doesn't have a corresponding element in DimA
+        let b3 = CanonicalElementName::from_raw("B3");
+        assert_eq!(
+            ctx.translate_to_source_via_mapping(&dim_a_name, &dim_b_name, &b3),
+            None
+        );
+    }
+
+    // ========== Existing tests ==========
+
     #[test]
     fn test_get_offset_named_dimension() {
         // Create a named dimension with canonical elements

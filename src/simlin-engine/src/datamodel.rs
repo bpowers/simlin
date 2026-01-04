@@ -697,7 +697,14 @@ impl Dimension {
                 None
             }
             DimensionElements::Indexed(size) => {
-                let n = subscript.parse::<u32>().unwrap();
+                // Invariant: For indexed dimensions, subscripts must be numeric strings
+                // representing 1-based indices (e.g., "1", "2", "3"). This is enforced
+                // during parsing - the caller ensures only valid numeric subscripts
+                // are passed to indexed dimensions.
+                let n = subscript.parse::<u32>().expect(
+                    "indexed dimension subscript must be a valid integer; \
+                     this indicates a bug in subscript validation",
+                );
                 Some((min(max(n, 1), *size) - 1) as usize)
             }
         }
