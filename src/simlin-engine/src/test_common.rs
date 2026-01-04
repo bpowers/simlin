@@ -99,6 +99,22 @@ impl TestProject {
         self
     }
 
+    /// Add a named dimension with a dimension mapping (e.g., DimA -> DimB)
+    pub fn named_dimension_with_mapping(
+        mut self,
+        name: &str,
+        elements: &[&str],
+        maps_to: &str,
+    ) -> Self {
+        let mut dim = Dimension::named(
+            name.to_string(),
+            elements.iter().map(|s| s.to_string()).collect(),
+        );
+        dim.maps_to = Some(maps_to.to_string());
+        self.dimensions.push(dim);
+        self
+    }
+
     /// Add an auxiliary variable
     pub fn aux(mut self, name: &str, equation: &str, units: Option<&str>) -> Self {
         self.variables.push(Variable::Aux(datamodel::Aux {
