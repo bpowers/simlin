@@ -177,6 +177,22 @@ impl PartialEq for DimensionsContext {
 
 impl DimensionsContext {
     pub(crate) fn from(dimensions: &[datamodel::Dimension]) -> DimensionsContext {
+        // Validate: indexed dimensions should not have maps_to set.
+        // Dimension mappings only make sense for named dimensions where we can
+        // establish positional correspondence between element names.
+        for dim in dimensions {
+            if let datamodel::DimensionElements::Indexed(_) = &dim.elements
+                && dim.maps_to.is_some()
+            {
+                eprintln!(
+                    "warning: indexed dimension '{}' has maps_to='{}' which will be ignored; \
+                     dimension mappings are only supported for named dimensions",
+                    dim.name(),
+                    dim.maps_to.as_ref().unwrap()
+                );
+            }
+        }
+
         DimensionsContext {
             dimensions: dimensions
                 .iter()
@@ -1261,5 +1277,55 @@ mod tests {
 
         let unknown = CanonicalDimensionName::from_raw("Unknown");
         assert!(ctx.get(&unknown).is_none());
+    }
+
+    #[test]
+    fn test_indexed_dimension_with_maps_to_is_ignored() {
+        // Indexed dimensions should not have maps_to - this test verifies
+        // that if one is erroneously provided, it's ignored and doesn't
+        // affect the dimension context behavior.
+        use crate::common::CanonicalDimensionName;
+
+        // Create an indexed dimension with maps_to set (invalid configuration)
+        let mut indexed_dim = datamodel::Dimension::indexed("IndexedDim".to_string(), 3);
+        indexed_dim.maps_to = Some("TargetDim".to_string());
+
+        // Also create the target dimension
+        let target_dim = datamodel::Dimension::named(
+            "TargetDim".to_string(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+
+        // This will print a warning to stderr, but we can verify the maps_to is ignored
+        let ctx = DimensionsContext::from(&[indexed_dim, target_dim]);
+
+        // Verify the indexed dimension exists but has no mapping
+        let dim_name = CanonicalDimensionName::from_raw("IndexedDim");
+        let target_name = CanonicalDimensionName::from_raw("TargetDim");
+
+        // get_maps_to should return None for the indexed dimension
+        // (since the Dimension::Indexed variant doesn't store maps_to)
+        assert!(ctx.get_maps_to(&dim_name).is_none());
+
+        // translate_to_source_via_mapping should return None (no mapping exists)
+        assert!(
+            ctx.translate_to_source_via_mapping(
+                &dim_name,
+                &target_name,
+                &CanonicalElementName::from_raw("A"),
+            )
+            .is_none()
+        );
+
+        // The dimension should still function correctly for offset lookups
+        let dim = ctx.get(&dim_name).unwrap();
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("1")),
+            Some(0)
+        );
+        assert_eq!(
+            dim.get_offset(&CanonicalElementName::from_raw("3")),
+            Some(2)
+        );
     }
 }

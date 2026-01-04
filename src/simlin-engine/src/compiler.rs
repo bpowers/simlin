@@ -1822,6 +1822,15 @@ impl Context<'_> {
                                     }
                                 }
 
+                                // Only try target_dim.get_offset as a fallback if:
+                                // 1. source_offset is still None (no direct or mapped resolution)
+                                // 2. mapping did NOT fail (mapping_failed is false)
+                                //
+                                // If a dimension mapping exists but translation failed, we must NOT
+                                // fall back to target_dim.get_offset. The mapping is authoritative -
+                                // falling back would hide configuration errors (like dimension size
+                                // mismatches) and could lead to subtle, hard-to-debug incorrect
+                                // array indexing behavior.
                                 let target_offset = if source_offset.is_none() && !mapping_failed {
                                     target_dim.get_offset(subscript)
                                 } else {

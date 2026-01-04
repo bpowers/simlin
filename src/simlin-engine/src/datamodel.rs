@@ -2,7 +2,6 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use std::cmp::{max, min};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::iter::Iterator;
@@ -703,15 +702,18 @@ impl Dimension {
                 None
             }
             DimensionElements::Indexed(size) => {
-                // Invariant: For indexed dimensions, subscripts must be numeric strings
-                // representing 1-based indices (e.g., "1", "2", "3"). This is enforced
-                // during parsing - the caller ensures only valid numeric subscripts
-                // are passed to indexed dimensions.
-                let n = subscript.parse::<u32>().expect(
-                    "indexed dimension subscript must be a valid integer; \
-                     this indicates a bug in subscript validation",
-                );
-                Some((min(max(n, 1), *size) - 1) as usize)
+                // Parse as number for indexed dimensions, returning None if
+                // the subscript is not a valid integer or is out of bounds.
+                // This aligns with the safe Option-returning pattern used in
+                // dimensions.rs and allows callers to handle invalid subscripts
+                // gracefully rather than panicking.
+                subscript.parse::<u32>().ok().and_then(|n| {
+                    if n >= 1 && n <= *size {
+                        Some((n - 1) as usize)
+                    } else {
+                        None
+                    }
+                })
             }
         }
     }
