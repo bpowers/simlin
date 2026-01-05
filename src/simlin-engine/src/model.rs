@@ -228,7 +228,7 @@ fn direct_deps(ctx: &DepContext, var: &Variable) -> Vec<Ident<Canonical>> {
                 let converted_dims: Vec<crate::dimensions::Dimension> = ctx
                     .dimensions
                     .iter()
-                    .map(|d| crate::dimensions::Dimension::from(d.clone()))
+                    .map(crate::dimensions::Dimension::from)
                     .collect();
                 identifier_set(ast, &converted_dims, ctx.module_inputs)
             }

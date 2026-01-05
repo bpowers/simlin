@@ -646,6 +646,11 @@ pub struct Dimension {
     pub size: Option<u32>,
     #[serde(rename = "elem")]
     pub elements: Option<Vec<Index>>,
+    /// Vensim dimension mapping: when this dimension "maps to" another,
+    /// elements correspond positionally (e.g., DimA -> DimB means A1<->B1, etc.)
+    /// Note: Element in XML is <isee:maps_to> but quick-xml deserializes with local name only
+    #[serde(rename = "maps_to")]
+    pub maps_to: Option<String>,
 }
 
 impl ToXml<XmlWriter> for Dimension {
@@ -667,6 +672,11 @@ impl ToXml<XmlWriter> for Dimension {
             }
         }
 
+        // Write dimension mapping if present
+        if let Some(ref maps_to) = self.maps_to {
+            write_tag(writer, "isee:maps_to", maps_to)?;
+        }
+
         write_tag_end(writer, "dim")
     }
 }
@@ -674,32 +684,41 @@ impl ToXml<XmlWriter> for Dimension {
 impl From<Dimension> for datamodel::Dimension {
     fn from(dimension: Dimension) -> Self {
         let name = canonicalize(&dimension.name).as_str().to_string();
-        if let Some(elements) = dimension.elements {
-            datamodel::Dimension::Named(
-                name,
+        let maps_to = dimension
+            .maps_to
+            .map(|m| canonicalize(&m).as_str().to_string());
+        let elements = if let Some(elements) = dimension.elements {
+            datamodel::DimensionElements::Named(
                 elements
                     .into_iter()
                     .map(|i| canonicalize(&i.name).as_str().to_string())
                     .collect(),
             )
         } else {
-            datamodel::Dimension::Indexed(name, dimension.size.unwrap_or_default())
+            datamodel::DimensionElements::Indexed(dimension.size.unwrap_or_default())
+        };
+        datamodel::Dimension {
+            name,
+            elements,
+            maps_to,
         }
     }
 }
 
 impl From<datamodel::Dimension> for Dimension {
     fn from(dimension: datamodel::Dimension) -> Self {
-        match dimension {
-            datamodel::Dimension::Indexed(name, size) => Dimension {
-                name,
+        match dimension.elements {
+            datamodel::DimensionElements::Indexed(size) => Dimension {
+                name: dimension.name,
                 size: Some(size),
                 elements: None,
+                maps_to: dimension.maps_to,
             },
-            datamodel::Dimension::Named(name, elements) => Dimension {
-                name,
+            datamodel::DimensionElements::Named(elements) => Dimension {
+                name: dimension.name,
                 size: None,
                 elements: Some(elements.into_iter().map(|i| Index { name: i }).collect()),
+                maps_to: dimension.maps_to,
             },
         }
     }
@@ -3874,4 +3893,36 @@ fn test_per_element_gf_parsing() {
     } else {
         panic!("not an aux");
     }
+}
+
+#[test]
+fn test_dimension_with_maps_to_parsing() {
+    // Test deserialization of dimension with maps_to element
+    let input = r#"<dim name="DimA">
+            <elem name="A1"/>
+            <elem name="A2"/>
+            <elem name="A3"/>
+            <isee:maps_to>DimB</isee:maps_to>
+        </dim>"#;
+
+    let expected = Dimension {
+        name: "DimA".to_string(),
+        size: None,
+        elements: Some(vec![
+            Index {
+                name: "A1".to_string(),
+            },
+            Index {
+                name: "A2".to_string(),
+            },
+            Index {
+                name: "A3".to_string(),
+            },
+        ]),
+        maps_to: Some("DimB".to_string()),
+    };
+
+    use quick_xml::de;
+    let actual: Dimension = de::from_reader(input.as_bytes()).unwrap();
+    assert_eq!(expected, actual);
 }

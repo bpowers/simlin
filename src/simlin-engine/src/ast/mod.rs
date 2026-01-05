@@ -659,7 +659,7 @@ mod ast_tests {
     #[test]
     fn test_simple_expr2_context() {
         // Create a simple model with an array variable
-        let dim = datamodel::Dimension::Named(
+        let dim = datamodel::Dimension::named(
             "region".to_string(),
             vec!["north".to_string(), "south".to_string()],
         );
@@ -731,11 +731,11 @@ mod ast_tests {
         use crate::common::{ErrorCode, canonicalize};
 
         // Create a model with array variables of different dimensions
-        let dim1 = datamodel::Dimension::Named(
+        let dim1 = datamodel::Dimension::named(
             "region".to_string(),
             vec!["north".to_string(), "south".to_string()],
         );
-        let dim2 = datamodel::Dimension::Named(
+        let dim2 = datamodel::Dimension::named(
             "product".to_string(),
             vec!["A".to_string(), "B".to_string(), "C".to_string()],
         );

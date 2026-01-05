@@ -1434,7 +1434,7 @@ mod tests {
         let mut project = datamodel::Project {
             name: "test".to_string(),
             sim_specs: datamodel::SimSpecs::default(),
-            dimensions: vec![datamodel::Dimension::Named(
+            dimensions: vec![datamodel::Dimension::named(
                 "Region".to_string(),
                 vec!["North".to_string(), "South".to_string()],
             )],
@@ -1527,7 +1527,7 @@ mod tests {
         let mut project = datamodel::Project {
             name: "test".to_string(),
             sim_specs: datamodel::SimSpecs::default(),
-            dimensions: vec![datamodel::Dimension::Named(
+            dimensions: vec![datamodel::Dimension::named(
                 "Product".to_string(),
                 vec!["A".to_string(), "B".to_string(), "C".to_string()],
             )],

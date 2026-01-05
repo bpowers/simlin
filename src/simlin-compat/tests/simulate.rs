@@ -572,6 +572,17 @@ fn simulates_smooth3() {
     simulate_path("../../test/sdeverywhere/models/smooth3/smooth3.xmile");
 }
 
+/// Test for arrayed SMOOTH with dimension mappings.
+/// This test is expected to fail until we implement dimension mapping support.
+/// The Vensim model has mappings like `DimA: A1, A2, A3 -> DimB` which define
+/// how elements of one dimension correspond to elements of another.
+/// Variables like `s6[DimB] = SMOOTH(input_3[DimA], delay_3[DimA])` require
+/// this mapping to know that A1->B1, A2->B2, A3->B3.
+#[test]
+fn simulates_smooth_with_dim_mappings() {
+    simulate_path("../../test/sdeverywhere/models/smooth/smooth.xmile");
+}
+
 #[test]
 fn bad_model_name() {
     let f = File::open(format!("../../{}", TEST_MODELS[0])).unwrap();

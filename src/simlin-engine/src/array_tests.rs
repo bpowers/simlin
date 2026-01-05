@@ -2984,3 +2984,92 @@ mod indexed_dimension_tests {
         project.assert_interpreter_result("grid", &[10.0, 20.0, 30.0, 10.0, 20.0, 30.0]);
     }
 }
+
+/// Tests for dimension mapping (maps_to) functionality
+mod dimension_mapping_tests {
+    use crate::test_common::TestProject;
+
+    #[test]
+    fn basic_dimension_mapping() {
+        // Test basic dimension mapping: DimA -> DimB
+        // When iterating over DimB, subscripts should be translated to DimA
+        let project = TestProject::new("basic_mapping")
+            .named_dimension("DimB", &["B1", "B2", "B3"])
+            .named_dimension_with_mapping("DimA", &["A1", "A2", "A3"], "DimB")
+            .array_with_ranges(
+                "var_a[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30")],
+            )
+            // Reference var_a from a DimB context - should use the mapping
+            .array_aux("result[DimB]", "var_a");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // DimA[i] maps to DimB[i], so:
+        // result[B1] = var_a[A1] = 10
+        // result[B2] = var_a[A2] = 20
+        // result[B3] = var_a[A3] = 30
+        project.assert_interpreter_result("result", &[10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn dimension_mapping_with_subdimension() {
+        // Test dimension mapping when iterating over a subdimension of the mapped target.
+        //
+        // Setup:
+        // - DimA = [A1, A2, A3] with maps_to = DimB
+        // - DimB = [B1, B2, B3]
+        // - SubB = [B2, B3] (subdimension of DimB)
+        // - var_a[DimA] = [10, 20, 30]
+        //
+        // When we compute result[SubB] = var_a, the system should:
+        // 1. Detect that DimA maps to DimB (not SubB directly)
+        // 2. Detect that SubB is a subdimension of DimB
+        // 3. Use the mapping through DimB to translate subscripts
+        //
+        // Expected:
+        // - Iterating B2: B2 is at index 1 in DimB → A2 → 20
+        // - Iterating B3: B3 is at index 2 in DimB → A3 → 30
+        //
+        // Bug before fix: would use SubB's local indices:
+        // - B2 is at index 0 in SubB → A1 → 10 (WRONG!)
+        // - B3 is at index 1 in SubB → A2 → 20 (WRONG!)
+        let project = TestProject::new("mapping_with_subdim")
+            .named_dimension("DimB", &["B1", "B2", "B3"])
+            .named_dimension("SubB", &["B2", "B3"])
+            .named_dimension_with_mapping("DimA", &["A1", "A2", "A3"], "DimB")
+            .array_with_ranges(
+                "var_a[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30")],
+            )
+            // Reference var_a from a SubB context - should use mapping via DimB
+            .array_aux("result[SubB]", "var_a");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // result[B2] = var_a[A2] = 20
+        // result[B3] = var_a[A3] = 30
+        project.assert_interpreter_result("result", &[20.0, 30.0]);
+    }
+
+    #[test]
+    fn dimension_mapping_with_non_contiguous_subdimension() {
+        // Test dimension mapping with a non-contiguous subdimension.
+        // SubB = [B1, B3] skips B2.
+        let project = TestProject::new("mapping_noncontig_subdim")
+            .named_dimension("DimB", &["B1", "B2", "B3"])
+            .named_dimension("SubB", &["B1", "B3"]) // Non-contiguous
+            .named_dimension_with_mapping("DimA", &["A1", "A2", "A3"], "DimB")
+            .array_with_ranges(
+                "var_a[DimA]",
+                vec![("A1", "10"), ("A2", "20"), ("A3", "30")],
+            )
+            .array_aux("result[SubB]", "var_a");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // result[B1] = var_a[A1] = 10
+        // result[B3] = var_a[A3] = 30
+        project.assert_interpreter_result("result", &[10.0, 30.0]);
+    }
+}

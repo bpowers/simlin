@@ -795,7 +795,40 @@ impl Context<'_> {
                 continue;
             }
 
-            // SECOND PASS: Only if no name match exists, try size-based matching
+            // SECOND PASS: Check for dimension mapping matches.
+            // If dim.maps_to matches an active dimension (or the active dimension is
+            // a subdimension of maps_to), we can match them.
+            let maps_to = self.dimensions_ctx.get_maps_to(dim.canonical_name());
+            let mapping_match_idx = if let Some(maps_to_dim) = maps_to {
+                active_dims.iter().enumerate().find_map(|(i, candidate)| {
+                    if used[i] {
+                        return None;
+                    }
+                    let candidate_name = candidate.canonical_name();
+                    // Direct mapping: dim maps to this active dimension
+                    if candidate_name == maps_to_dim {
+                        return Some(i);
+                    }
+                    // Subdimension mapping: active_dim is a subdimension of maps_to
+                    if self
+                        .dimensions_ctx
+                        .is_subdimension_of(candidate_name, maps_to_dim)
+                    {
+                        return Some(i);
+                    }
+                    None
+                })
+            } else {
+                None
+            };
+
+            if let Some(idx) = mapping_match_idx {
+                subscripts.push(active_subscripts[idx].as_str());
+                used[idx] = true;
+                continue;
+            }
+
+            // THIRD PASS: Only if no name or mapping match exists, try size-based matching
             // for indexed dimensions. Find the first unused indexed dimension with
             // the same size.
             //
@@ -1702,16 +1735,47 @@ impl Context<'_> {
 
                             // Determine matching mode for each view dimension:
                             // - Name-based: view dim name matches an active dim name (broadcasting)
+                            // - Mapping-based: view dim maps_to matches active dim or its parent
                             // - Positional: view dim name is empty or doesn't match any active dim
                             //
                             // Broadcasting is allowed when source has fewer dimensions than output,
-                            // and all source dimensions match some output dimension by name.
+                            // and all source dimensions match some output dimension by name/mapping.
                             // Positional matching requires equal dimension counts.
                             let use_name_matching: Vec<bool> = view
                                 .dim_names
                                 .iter()
                                 .map(|name| {
-                                    !name.is_empty() && active_dim_map.contains_key(name.as_str())
+                                    if name.is_empty() {
+                                        return false;
+                                    }
+                                    // Direct name match
+                                    if active_dim_map.contains_key(name.as_str()) {
+                                        return true;
+                                    }
+                                    // Check for dimension mapping match
+                                    use crate::common::CanonicalDimensionName;
+                                    let source_dim_name =
+                                        CanonicalDimensionName::from_raw(name.as_str());
+                                    if let Some(maps_to) =
+                                        self.dimensions_ctx.get_maps_to(&source_dim_name)
+                                    {
+                                        // Direct mapping: source.maps_to == active_dim
+                                        if active_dim_map.contains_key(maps_to.as_str()) {
+                                            return true;
+                                        }
+                                        // Subdimension mapping: active_dim is subdimension of maps_to
+                                        for active_dim_name in active_dim_map.keys() {
+                                            let active_canonical =
+                                                CanonicalDimensionName::from_raw(active_dim_name);
+                                            if self
+                                                .dimensions_ctx
+                                                .is_subdimension_of(&active_canonical, maps_to)
+                                            {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                    false
                                 })
                                 .collect();
 
@@ -1750,17 +1814,60 @@ impl Context<'_> {
                             for (view_idx, stride) in view.strides.iter().enumerate() {
                                 // Find the active dimension and subscript for this view dimension
                                 let (active_idx, subscript) = if use_name_matching[view_idx] {
-                                    // Name-based matching
+                                    // Name-based matching - could be direct name match or via mapping
                                     let view_dim_name = &view.dim_names[view_idx];
+
+                                    // First try direct name match
                                     if let Some(&(active_idx, subscript)) =
                                         active_dim_map.get(view_dim_name.as_str())
                                     {
                                         (active_idx, subscript)
                                     } else {
-                                        return sim_err!(
-                                            MismatchedDimensions,
-                                            id.as_str().to_string()
+                                        // Try mapping-based match: find the active dimension that
+                                        // matches via the source dimension's maps_to
+                                        use crate::common::CanonicalDimensionName;
+                                        let source_dim_name = CanonicalDimensionName::from_raw(
+                                            view_dim_name.as_str(),
                                         );
+                                        let maps_to =
+                                            self.dimensions_ctx.get_maps_to(&source_dim_name);
+
+                                        let mut found = None;
+                                        if let Some(maps_to_dim) = maps_to {
+                                            // Direct mapping match
+                                            if let Some(&(active_idx, subscript)) =
+                                                active_dim_map.get(maps_to_dim.as_str())
+                                            {
+                                                found = Some((active_idx, subscript));
+                                            } else {
+                                                // Subdimension match: find active dim that is a
+                                                // subdimension of maps_to
+                                                for (active_dim_name, &(active_idx, subscript)) in
+                                                    &active_dim_map
+                                                {
+                                                    let active_canonical =
+                                                        CanonicalDimensionName::from_raw(
+                                                            active_dim_name,
+                                                        );
+                                                    if self.dimensions_ctx.is_subdimension_of(
+                                                        &active_canonical,
+                                                        maps_to_dim,
+                                                    ) {
+                                                        found = Some((active_idx, subscript));
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if let Some((active_idx, subscript)) = found {
+                                            (active_idx, subscript)
+                                        } else {
+                                            return sim_err!(
+                                                MismatchedDimensions,
+                                                id.as_str().to_string()
+                                            );
+                                        }
                                     }
                                 } else {
                                     // Positional matching
@@ -1786,12 +1893,74 @@ impl Context<'_> {
                                 let prefer_source = source_dim.name() == target_dim.name()
                                     || matches!(source_dim, Dimension::Named(_, _));
 
-                                let source_offset = if prefer_source {
+                                let mut source_offset = if prefer_source {
                                     source_dim.get_offset(subscript)
                                 } else {
                                     None
                                 };
-                                let target_offset = if source_offset.is_none() {
+
+                                // If source_offset failed, try dimension mapping.
+                                // If source_dim maps to target_dim (or a parent of target_dim),
+                                // translate the subscript from target context to source_dim's
+                                // corresponding element.
+                                let mut mapping_failed = false;
+                                if source_offset.is_none() {
+                                    let source_dim_name = source_dim.canonical_name();
+                                    let target_dim_name = target_dim.canonical_name();
+
+                                    // Check if a mapping exists between these dimensions.
+                                    // First try direct mapping: source_dim.maps_to == target_dim
+                                    // If that fails, check if target_dim is a subdimension of
+                                    // the maps_to dimension (e.g., SubB is a subdimension of DimB,
+                                    // and source_dim maps to DimB).
+                                    let maps_to = self.dimensions_ctx.get_maps_to(source_dim_name);
+                                    let effective_target = if maps_to == Some(target_dim_name) {
+                                        // Direct mapping: source_dim maps directly to target_dim
+                                        Some(target_dim_name.clone())
+                                    } else if let Some(maps_to_dim) = maps_to {
+                                        // Check if target_dim is a subdimension of maps_to.
+                                        // If so, use maps_to as the effective target for translation.
+                                        // The subscript element (e.g., "B2") is valid in both
+                                        // target_dim (SubB) and the parent dimension (DimB).
+                                        let is_subdim = self
+                                            .dimensions_ctx
+                                            .is_subdimension_of(target_dim_name, maps_to_dim);
+                                        if is_subdim {
+                                            Some(maps_to_dim.clone())
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(effective_target_dim) = effective_target {
+                                        if let Some(translated) =
+                                            self.dimensions_ctx.translate_to_source_via_mapping(
+                                                source_dim_name,
+                                                &effective_target_dim,
+                                                subscript,
+                                            )
+                                        {
+                                            source_offset = source_dim.get_offset(&translated);
+                                        } else {
+                                            // Mapping exists but translation failed - this is a
+                                            // configuration error (e.g., size mismatch or invalid subscript)
+                                            mapping_failed = true;
+                                        }
+                                    }
+                                }
+
+                                // Only try target_dim.get_offset as a fallback if:
+                                // 1. source_offset is still None (no direct or mapped resolution)
+                                // 2. mapping did NOT fail (mapping_failed is false)
+                                //
+                                // If a dimension mapping exists but translation failed, we must NOT
+                                // fall back to target_dim.get_offset. The mapping is authoritative -
+                                // falling back would hide configuration errors (like dimension size
+                                // mismatches) and could lead to subtle, hard-to-debug incorrect
+                                // array indexing behavior.
+                                let target_offset = if source_offset.is_none() && !mapping_failed {
                                     target_dim.get_offset(subscript)
                                 } else {
                                     None
@@ -1803,6 +1972,19 @@ impl Context<'_> {
                                     (abs_offset, true)
                                 } else if let Some(abs_offset) = target_offset {
                                     (abs_offset, false)
+                                } else if mapping_failed {
+                                    // Provide a more specific error when mapping exists but failed
+                                    return sim_err!(
+                                        MismatchedDimensions,
+                                        format!(
+                                            "{}: dimension mapping from {} to {} failed for subscript '{}' \
+                                             (check that both dimensions have the same number of elements)",
+                                            id.as_str(),
+                                            source_dim.name(),
+                                            target_dim.name(),
+                                            subscript.as_str()
+                                        )
+                                    );
                                 } else {
                                     return sim_err!(MismatchedDimensions, id.as_str().to_string());
                                 };
@@ -3381,7 +3563,7 @@ impl Module {
             .datamodel
             .dimensions
             .iter()
-            .map(|d| Dimension::from(d.clone()))
+            .map(Dimension::from)
             .collect();
 
         let build_var = |ident: &Ident<Canonical>, is_initial| {
@@ -3408,13 +3590,11 @@ impl Module {
             .iter()
             .map(|ident| build_var(ident, true))
             .collect::<Result<Vec<Var>>>()?;
-
         let runlist_flows = instantiation
             .runlist_flows
             .iter()
             .map(|ident| build_var(ident, false))
             .collect::<Result<Vec<Var>>>()?;
-
         let runlist_stocks = instantiation
             .runlist_stocks
             .iter()
@@ -5328,7 +5508,7 @@ mod tests {
                 sim_method: SimMethod::Euler,
                 time_units: Some("time".to_string()),
             },
-            dimensions: vec![datamodel::Dimension::Named(
+            dimensions: vec![datamodel::Dimension::named(
                 "letters".to_string(),
                 vec![
                     "a".to_string(),
@@ -5453,7 +5633,7 @@ mod tests {
                 sim_method: SimMethod::Euler,
                 time_units: Some("time".to_string()),
             },
-            dimensions: vec![datamodel::Dimension::Indexed("Size".to_string(), 10)],
+            dimensions: vec![datamodel::Dimension::indexed("Size".to_string(), 10)],
             units: vec![],
             models: vec![DatamodelModel {
                 name: "main".to_string(),
@@ -5532,7 +5712,7 @@ mod tests {
                 time_units: Some("time".to_string()),
             },
             dimensions: vec![
-                datamodel::Dimension::Named(
+                datamodel::Dimension::named(
                     "Parent".to_string(),
                     vec![
                         "A".to_string(),
@@ -5541,7 +5721,7 @@ mod tests {
                         "D".to_string(),
                     ],
                 ),
-                datamodel::Dimension::Named(
+                datamodel::Dimension::named(
                     "Child".to_string(),
                     vec!["B".to_string(), "C".to_string()],
                 ),
@@ -5677,6 +5857,7 @@ mod tests {
             NamedDimension {
                 indexed_elements,
                 elements: canonical_elements,
+                maps_to: None,
             },
         )
     }

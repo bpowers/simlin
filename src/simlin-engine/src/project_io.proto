@@ -281,6 +281,12 @@ message Dimension {
     DimensionElements elements = 3;
     DimensionSize size = 4;
   }
+  // Vensim dimension mapping: when this dimension "maps to" another,
+  // elements of this dimension correspond positionally to elements of
+  // the target dimension. e.g., "DimA: A1, A2, A3 -> DimB" means
+  // A1<->B1, A2<->B2, A3<->B3. This is used when a variable indexed
+  // by DimB references variables indexed by DimA.
+  optional string maps_to = 5;
 };
 
 message Unit {

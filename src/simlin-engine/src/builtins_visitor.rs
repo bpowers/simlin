@@ -11,7 +11,7 @@ use crate::common::{
     canonicalize,
 };
 use crate::datamodel::Visibility;
-use crate::dimensions::Dimension;
+use crate::dimensions::{Dimension, DimensionsContext};
 use crate::vm::SubscriptIterator;
 use crate::{datamodel, eqn_err};
 
@@ -75,6 +75,8 @@ pub struct BuiltinVisitor<'a> {
     dimension_names: Vec<CanonicalDimensionName>,
     /// Current subscript element names being processed in A2A context
     active_subscript: Option<Vec<String>>,
+    /// Reference to DimensionsContext for dimension mapping lookups
+    dimensions_ctx: Option<&'a DimensionsContext>,
 }
 
 impl<'a> BuiltinVisitor<'a> {
@@ -87,6 +89,7 @@ impl<'a> BuiltinVisitor<'a> {
             dimensions: Vec::new(),
             dimension_names: Vec::new(),
             active_subscript: None,
+            dimensions_ctx: None,
         }
     }
 
@@ -95,6 +98,7 @@ impl<'a> BuiltinVisitor<'a> {
         variable_name: &'a str,
         dimensions: &[Dimension],
         subscript: &[String],
+        dimensions_ctx: Option<&'a DimensionsContext>,
     ) -> Self {
         Self {
             variable_name,
@@ -104,6 +108,7 @@ impl<'a> BuiltinVisitor<'a> {
             dimensions: dimensions.to_vec(),
             dimension_names: get_dimension_names(dimensions),
             active_subscript: Some(subscript.to_vec()),
+            dimensions_ctx,
         }
     }
 
@@ -142,6 +147,33 @@ impl<'a> BuiltinVisitor<'a> {
                                 // 1-based value to 0-based when processing subscript indices.
                                 let qualified_name =
                                     format!("{}·{}", dim_name.as_str(), subscript[i]);
+                                return Var(RawIdent::new_from_str(&qualified_name), loc);
+                            }
+                        }
+                    }
+                }
+                // Check dimension mappings: if this dimension maps to one of our parent dimensions,
+                // translate the subscript using positional correspondence.
+                // For example, if DimA maps to DimB and we're processing subscript "b1" of DimB,
+                // translate the reference to DimA to its equivalent element "a1".
+                if let Some(ctx) = self.dimensions_ctx {
+                    for (i, dim_name) in self.dimension_names.iter().enumerate() {
+                        // Check if canonical_name maps to dim_name
+                        if ctx.get_maps_to(&canonical_name) == Some(dim_name) {
+                            // Translate: find the element in canonical_name that corresponds to
+                            // subscript[i] in dim_name
+                            let target_element = CanonicalElementName::from_raw(&subscript[i]);
+                            if let Some(source_element) = ctx.translate_to_source_via_mapping(
+                                &canonical_name,
+                                dim_name,
+                                &target_element,
+                            ) {
+                                // Return qualified element from the source dimension
+                                let qualified_name = format!(
+                                    "{}·{}",
+                                    canonical_name.as_str(),
+                                    source_element.as_str()
+                                );
                                 return Var(RawIdent::new_from_str(&qualified_name), loc);
                             }
                         }
@@ -344,6 +376,7 @@ impl<'a> BuiltinVisitor<'a> {
 pub fn instantiate_implicit_modules(
     variable_name: &str,
     ast: Ast<Expr0>,
+    dimensions_ctx: Option<&DimensionsContext>,
 ) -> std::result::Result<(Ast<Expr0>, Vec<datamodel::Variable>), EquationError> {
     match ast {
         Ast::Scalar(ast) => {
@@ -367,6 +400,7 @@ pub fn instantiate_implicit_modules(
                         variable_name,
                         &dimensions,
                         &subscript,
+                        dimensions_ctx,
                     );
                     let transformed_ast = visitor.walk(ast_clone)?;
 
