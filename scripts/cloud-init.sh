@@ -15,11 +15,105 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Pinned protoc version - update this when a new version is needed
+# This is the latest stable release as of January 2026
+PROTOC_VERSION="33.2"
+
 # Determine repository root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
+
+# Function to install protoc from GitHub releases
+install_protoc() {
+    local version="$1"
+    local install_dir="$HOME/.local"
+    local bin_dir="$install_dir/bin"
+    local include_dir="$install_dir/include"
+
+    # Detect OS and architecture
+    local os=""
+    local arch=""
+
+    case "$(uname -s)" in
+        Linux)  os="linux" ;;
+        Darwin) os="osx" ;;
+        *)
+            echo -e "${RED}Unsupported OS: $(uname -s)${NC}"
+            return 1
+            ;;
+    esac
+
+    case "$(uname -m)" in
+        x86_64)  arch="x86_64" ;;
+        aarch64) arch="aarch_64" ;;
+        arm64)   arch="aarch_64" ;;  # macOS ARM
+        *)
+            echo -e "${RED}Unsupported architecture: $(uname -m)${NC}"
+            return 1
+            ;;
+    esac
+
+    local filename="protoc-${version}-${os}-${arch}.zip"
+    local url="https://github.com/protocolbuffers/protobuf/releases/download/v${version}/${filename}"
+
+    echo -n "  Downloading protoc ${version}... "
+
+    # Create temp directory for download
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap "rm -rf $tmp_dir" EXIT
+
+    # Download with retry logic
+    local retry_count=0
+    local max_retries=4
+    local wait_time=2
+
+    while [ $retry_count -lt $max_retries ]; do
+        if curl -fsSL "$url" -o "$tmp_dir/$filename" 2>/dev/null; then
+            break
+        fi
+        retry_count=$((retry_count + 1))
+        if [ $retry_count -lt $max_retries ]; then
+            sleep $wait_time
+            wait_time=$((wait_time * 2))
+        fi
+    done
+
+    if [ ! -f "$tmp_dir/$filename" ]; then
+        echo -e "${RED}failed to download${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}done${NC}"
+
+    echo -n "  Installing protoc to $bin_dir... "
+
+    # Create installation directories
+    mkdir -p "$bin_dir" "$include_dir"
+
+    # Extract the zip file
+    if ! unzip -q "$tmp_dir/$filename" -d "$tmp_dir/protoc" 2>/dev/null; then
+        echo -e "${RED}failed to extract${NC}"
+        return 1
+    fi
+
+    # Install binary and includes
+    cp "$tmp_dir/protoc/bin/protoc" "$bin_dir/"
+    chmod +x "$bin_dir/protoc"
+    cp -r "$tmp_dir/protoc/include/"* "$include_dir/" 2>/dev/null || true
+
+    echo -e "${GREEN}done${NC}"
+
+    # Add to PATH for current session if not already there
+    if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
+        export PATH="$bin_dir:$PATH"
+        echo -e "  ${YELLOW}Note: Added $bin_dir to PATH for this session${NC}"
+        echo -e "  ${YELLOW}Add 'export PATH=\"$bin_dir:\$PATH\"' to your shell profile for persistence${NC}"
+    fi
+
+    return 0
+}
 
 echo "Setting up Simlin development environment..."
 echo ""
@@ -103,14 +197,24 @@ else
     echo -e "    ${YELLOW}Install Yarn: npm install -g yarn${NC}"
 fi
 
-# Check protoc (protobuf compiler)
+# Check protoc (protobuf compiler) - install if not found
 echo -n "  Protoc: "
 if command -v protoc >/dev/null 2>&1; then
-    PROTOC_VERSION=$(protoc --version 2>/dev/null | cut -d' ' -f2)
-    echo -e "${GREEN}$PROTOC_VERSION${NC}"
+    INSTALLED_PROTOC_VERSION=$(protoc --version 2>/dev/null | cut -d' ' -f2)
+    echo -e "${GREEN}$INSTALLED_PROTOC_VERSION${NC}"
 else
-    echo -e "${RED}not found${NC}"
-    echo -e "    ${YELLOW}Install protobuf-compiler: apt-get install protobuf-compiler${NC}"
+    echo -e "${YELLOW}not found - installing...${NC}"
+    if install_protoc "$PROTOC_VERSION"; then
+        # Verify installation
+        if command -v protoc >/dev/null 2>&1; then
+            INSTALLED_PROTOC_VERSION=$(protoc --version 2>/dev/null | cut -d' ' -f2)
+            echo -e "  Protoc: ${GREEN}$INSTALLED_PROTOC_VERSION${NC} (newly installed)"
+        fi
+    else
+        echo -e "  ${RED}Failed to install protoc automatically${NC}"
+        echo -e "  ${YELLOW}Manual installation: apt-get install protobuf-compiler${NC}"
+        echo -e "  ${YELLOW}Or download from: https://github.com/protocolbuffers/protobuf/releases${NC}"
+    fi
 fi
 
 # Check Python (optional, for pysimlin)
