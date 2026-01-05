@@ -3696,6 +3696,10 @@ struct Compiler<'module> {
     static_views: Vec<StaticArrayView>,
     // Iteration context - set when compiling inside AssignTemp
     in_iteration: bool,
+    /// When in optimized iteration mode, maps pre-pushed views to their stack offset.
+    /// Each entry is (StaticArrayView, stack_offset) where stack_offset is 1-based from top.
+    /// The output view is always at offset (n_source_views + 1).
+    iter_source_views: Option<Vec<(StaticArrayView, u8)>>,
 }
 
 impl<'module> Compiler<'module> {
@@ -3723,6 +3727,7 @@ impl<'module> Compiler<'module> {
             names: vec![],
             static_views: vec![],
             in_iteration: false,
+            iter_source_views: None,
         };
         compiler.populate_dimension_metadata();
         compiler
@@ -4062,15 +4067,20 @@ impl<'module> Compiler<'module> {
             }
             Expr::StaticSubscript(off, view, _) => {
                 if self.in_iteration {
-                    // In iteration context, each StaticSubscript pushes its own view,
-                    // loads from it using the current iteration index, then pops.
-                    // This correctly handles expressions with multiple source arrays
-                    // like `a[*] + b[*]` where each array needs its own view.
+                    // In iteration context with optimized view hoisting
                     let static_view = self.array_view_to_static(*off, view);
-                    let view_id = self.add_static_view(static_view);
-                    self.push(Opcode::PushStaticView { view_id });
-                    self.push(Opcode::LoadIterViewTop {});
-                    self.push(Opcode::PopView {});
+
+                    if let Some(offset) = self.find_iter_view_offset(&static_view) {
+                        // View was pre-pushed - use LoadIterViewAt with the offset
+                        self.push(Opcode::LoadIterViewAt { offset });
+                    } else {
+                        // Fallback: view not in pre-pushed set (shouldn't happen normally)
+                        // This can occur if the expression has views that weren't collected
+                        let view_id = self.add_static_view(static_view);
+                        self.push(Opcode::PushStaticView { view_id });
+                        self.push(Opcode::LoadIterViewTop {});
+                        self.push(Opcode::PopView {});
+                    }
                     Some(())
                 } else if view.dims.iter().product::<usize>() == 1 {
                     // Scalar result - compute final offset and load
@@ -4088,13 +4098,19 @@ impl<'module> Compiler<'module> {
             }
             Expr::TempArray(id, view, _) => {
                 if self.in_iteration {
-                    // In iteration context, push the temp's view, load using current index, pop.
-                    // Similar to StaticSubscript, this ensures each temp reference uses its own view.
+                    // In iteration context with optimized view hoisting
                     let static_view = self.array_view_to_static_temp(*id, view);
-                    let view_id = self.add_static_view(static_view);
-                    self.push(Opcode::PushStaticView { view_id });
-                    self.push(Opcode::LoadIterViewTop {});
-                    self.push(Opcode::PopView {});
+
+                    if let Some(offset) = self.find_iter_view_offset(&static_view) {
+                        // View was pre-pushed - use LoadIterViewAt with the offset
+                        self.push(Opcode::LoadIterViewAt { offset });
+                    } else {
+                        // Fallback: view not in pre-pushed set (shouldn't happen normally)
+                        let view_id = self.add_static_view(static_view);
+                        self.push(Opcode::PushStaticView { view_id });
+                        self.push(Opcode::LoadIterViewTop {});
+                        self.push(Opcode::PopView {});
+                    }
                     Some(())
                 } else {
                     // Outside iteration - push temp view for subsequent operations (like SUM)
@@ -4628,53 +4644,83 @@ impl<'module> Compiler<'module> {
             Expr::AssignTemp(id, rhs, view) => {
                 // AssignTemp evaluates an array expression element-by-element and stores to temp
                 //
-                // Bytecode pattern:
+                // OPTIMIZED Bytecode pattern (hoisted view pushes):
                 // 1. PushStaticView (OUTPUT temp's view - determines iteration size)
                 // 2. BeginIter { write_temp_id, has_write_temp: true }
-                // 3. [Loop body start]
+                //    - This captures view_stack.last() as the iteration view
+                // 3. PushStaticView for each source view (a, b, etc.) - pushed ONCE
+                // 4. [Loop body start]
                 //    - Compile RHS in iteration context
-                //      (each StaticSubscript/TempArray pushes its own view, loads, pops)
+                //      (each StaticSubscript/TempArray emits LoadIterViewAt with offset)
                 //    - StoreIterElement
-                // 4. NextIterOrJump { jump_back: -(distance to loop body start) }
-                // 5. EndIter
-                // 6. PopView
+                // 5. NextIterOrJump { jump_back }
+                // 6. EndIter
+                // 7. PopView for each source view
+                // 8. PopView (output view)
                 //
-                // Note: We use the OUTPUT temp's view for BeginIter to determine iteration count.
-                // Each source array reference in the RHS pushes its own view for loading.
-                // This correctly handles expressions with multiple source arrays like `a[*] + b[*]`.
+                // IMPORTANT: Source views must be pushed AFTER BeginIter because BeginIter
+                // uses view_stack.last() to determine iteration bounds. If source views
+                // were pushed before BeginIter, it would use the wrong view for iteration.
 
-                // Push the OUTPUT temp's view for iteration size
-                let static_view = self.array_view_to_static_temp(*id, view);
-                let view_id = self.add_static_view(static_view);
-                self.push(Opcode::PushStaticView { view_id });
+                // 1. Collect all source views referenced in RHS (deduplicated)
+                let source_views = self.collect_iter_source_views(rhs);
+                let n_source_views = source_views.len();
 
-                // Begin iteration - writes to temp array with id
+                // 2. Push the OUTPUT temp's view for iteration size
+                let output_static_view = self.array_view_to_static_temp(*id, view);
+                let output_view_id = self.add_static_view(output_static_view);
+                self.push(Opcode::PushStaticView {
+                    view_id: output_view_id,
+                });
+
+                // 3. Begin iteration - MUST be before source views are pushed
+                // BeginIter captures view_stack.last() as the iteration view
                 self.push(Opcode::BeginIter {
                     write_temp_id: *id as TempId,
                     has_write_temp: true,
                 });
 
+                // 4. Push all source views AFTER BeginIter and record their stack offsets
+                // After this, view_stack looks like: [output_view, src1, src2, ...]
+                // So src1 is at offset n_source_views, src2 at n_source_views-1, etc.
+                let mut iter_views_with_offsets: Vec<(StaticArrayView, u8)> =
+                    Vec::with_capacity(n_source_views);
+
+                for (i, src_view) in source_views.into_iter().enumerate() {
+                    let view_id = self.add_static_view(src_view.clone());
+                    self.push(Opcode::PushStaticView { view_id });
+                    // Offset is counted from top: last pushed is at offset 1
+                    // First pushed source view will be at offset n_source_views after all are pushed
+                    let offset = (n_source_views - i) as u8;
+                    iter_views_with_offsets.push((src_view, offset));
+                }
+
                 // Record loop body start position
                 let loop_start = self.curr_code.len();
 
-                // Compile RHS in iteration context
+                // 5. Compile RHS in iteration context with pre-pushed views
                 self.in_iteration = true;
+                self.iter_source_views = Some(iter_views_with_offsets);
                 self.walk_expr(rhs)?.unwrap();
+                self.iter_source_views = None;
                 self.in_iteration = false;
 
                 // Store the result to temp
                 self.push(Opcode::StoreIterElement {});
 
                 // Calculate jump offset (negative, back to loop start)
-                // The jump is relative to the NextIterOrJump instruction's position
-                // VM: pc = pc + jump_back (then continue without incrementing)
-                // So: loop_start = next_iter_pos + jump_back
-                // Therefore: jump_back = loop_start - next_iter_pos
                 let next_iter_pos = self.curr_code.len();
                 let jump_back = (loop_start as isize - next_iter_pos as isize) as i16;
 
                 self.push(Opcode::NextIterOrJump { jump_back });
                 self.push(Opcode::EndIter {});
+
+                // 6. Pop all source views (in reverse order of push)
+                for _ in 0..n_source_views {
+                    self.push(Opcode::PopView {});
+                }
+
+                // 7. Pop output view
                 self.push(Opcode::PopView {});
 
                 // AssignTemp doesn't produce a value on the stack
@@ -4686,6 +4732,125 @@ impl<'module> Compiler<'module> {
 
     fn push(&mut self, op: Opcode) {
         self.curr_code.push_opcode(op)
+    }
+
+    /// Collect all source views referenced in an expression.
+    /// This traverses the expression and collects StaticArrayView data for each
+    /// StaticSubscript and TempArray node, deduplicating identical views.
+    fn collect_iter_source_views(&mut self, expr: &Expr) -> Vec<StaticArrayView> {
+        let mut views = Vec::new();
+        self.collect_iter_source_views_impl(expr, &mut views);
+        views
+    }
+
+    fn collect_iter_source_views_impl(&mut self, expr: &Expr, views: &mut Vec<StaticArrayView>) {
+        match expr {
+            Expr::StaticSubscript(off, view, _) => {
+                let static_view = self.array_view_to_static(*off, view);
+                // Deduplicate: only add if not already present
+                if !views.iter().any(|v| v == &static_view) {
+                    views.push(static_view);
+                }
+            }
+            Expr::TempArray(id, view, _) => {
+                let static_view = self.array_view_to_static_temp(*id, view);
+                if !views.iter().any(|v| v == &static_view) {
+                    views.push(static_view);
+                }
+            }
+            // Recurse into compound expressions
+            Expr::Op2(_, lhs, rhs, _) => {
+                self.collect_iter_source_views_impl(lhs, views);
+                self.collect_iter_source_views_impl(rhs, views);
+            }
+            Expr::Op1(_, inner, _) => {
+                self.collect_iter_source_views_impl(inner, views);
+            }
+            Expr::If(cond, then_expr, else_expr, _) => {
+                self.collect_iter_source_views_impl(cond, views);
+                self.collect_iter_source_views_impl(then_expr, views);
+                self.collect_iter_source_views_impl(else_expr, views);
+            }
+            Expr::App(builtin, _) => {
+                // Recurse into all arguments of the builtin function
+                self.collect_builtin_views(builtin, views);
+            }
+            // Leaf expressions that don't contain views
+            Expr::Const(_, _)
+            | Expr::Var(_, _)
+            | Expr::Dt(_)
+            | Expr::ModuleInput(_, _)
+            | Expr::TempArrayElement(_, _, _, _) => {}
+            // These shouldn't appear in iteration body expressions, but handle gracefully
+            Expr::Subscript(_, _, _, _)
+            | Expr::AssignCurr(_, _)
+            | Expr::AssignNext(_, _)
+            | Expr::AssignTemp(_, _, _)
+            | Expr::EvalModule(_, _, _, _) => {}
+        }
+    }
+
+    fn collect_builtin_views(&mut self, builtin: &BuiltinFn, views: &mut Vec<StaticArrayView>) {
+        use crate::builtins::BuiltinFn::*;
+        match builtin {
+            Lookup(a, b, _) | LookupForward(a, b, _) | LookupBackward(a, b, _) => {
+                self.collect_iter_source_views_impl(a, views);
+                self.collect_iter_source_views_impl(b, views);
+            }
+            Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
+            | Log10(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => {
+                self.collect_iter_source_views_impl(a, views);
+            }
+            Max(a, opt_b) | Min(a, opt_b) => {
+                self.collect_iter_source_views_impl(a, views);
+                if let Some(b) = opt_b {
+                    self.collect_iter_source_views_impl(b, views);
+                }
+            }
+            Mean(exprs) => {
+                for e in exprs {
+                    self.collect_iter_source_views_impl(e, views);
+                }
+            }
+            Pulse(a, b, opt_c) | Ramp(a, b, opt_c) | SafeDiv(a, b, opt_c) => {
+                self.collect_iter_source_views_impl(a, views);
+                self.collect_iter_source_views_impl(b, views);
+                if let Some(c) = opt_c {
+                    self.collect_iter_source_views_impl(c, views);
+                }
+            }
+            Step(a, b) => {
+                self.collect_iter_source_views_impl(a, views);
+                self.collect_iter_source_views_impl(b, views);
+            }
+            // Array builtins with single argument
+            Sum(a) | Stddev(a) | Size(a) => {
+                self.collect_iter_source_views_impl(a, views);
+            }
+            // Rank has a complex optional argument structure
+            Rank(a, opt_args) => {
+                self.collect_iter_source_views_impl(a, views);
+                if let Some((b, opt_c)) = opt_args {
+                    self.collect_iter_source_views_impl(b, views);
+                    if let Some(c) = opt_c {
+                        self.collect_iter_source_views_impl(c, views);
+                    }
+                }
+            }
+            // Constants/no-arg builtins
+            Inf | Pi | Time | TimeStep | StartTime | FinalTime | IsModuleInput(_, _) => {}
+        }
+    }
+
+    /// Find the stack offset for a view that was pre-pushed.
+    /// Returns Some(offset) if found, where offset is 1-based from stack top.
+    fn find_iter_view_offset(&self, view: &StaticArrayView) -> Option<u8> {
+        self.iter_source_views.as_ref().and_then(|views| {
+            views
+                .iter()
+                .find(|(v, _)| v == view)
+                .map(|(_, offset)| *offset)
+        })
     }
 
     fn compile(mut self) -> Result<CompiledModule> {

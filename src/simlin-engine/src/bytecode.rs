@@ -706,6 +706,15 @@ pub(crate) enum Opcode {
     /// This allows loading from multiple different source arrays in a single iteration loop.
     LoadIterViewTop {},
 
+    /// Load element at current iteration position from view at stack offset.
+    /// Like LoadIterViewTop but accesses a specific view on the stack by offset.
+    /// offset=1 means top of stack, offset=2 means second from top, etc.
+    /// This allows views to be pushed before the loop and accessed inside without
+    /// repeated push/pop operations per iteration.
+    LoadIterViewAt {
+        offset: u8,
+    },
+
     /// Store top of arithmetic stack to current iteration position in dest temp.
     /// Pops value from arithmetic stack.
     StoreIterElement {},

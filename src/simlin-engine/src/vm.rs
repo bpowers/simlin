@@ -1067,6 +1067,122 @@ impl Vm {
                     }
                 }
 
+                Opcode::LoadIterViewAt { offset } => {
+                    // Like LoadIterViewTop but accesses a view at a specific stack offset.
+                    // offset=1 means top of stack, offset=2 means second from top, etc.
+                    // This allows views to be pushed before the loop and accessed inside
+                    // without repeated push/pop operations per iteration.
+                    let iter_state = iter_stack.last().unwrap();
+                    let source_view_idx = view_stack.len() - *offset as usize;
+                    let source_view = &view_stack[source_view_idx];
+
+                    if !source_view.is_valid {
+                        stack.push(f64::NAN);
+                    } else {
+                        // Get the iteration view (output dimensions)
+                        let iter_view = &view_stack[iter_state.view_stack_idx];
+
+                        // Fast path: if dimensions match exactly, use simple offset calculation
+                        let result = if source_view.dims == iter_view.dims
+                            && source_view.dim_ids == iter_view.dim_ids
+                        {
+                            // Bounds check: if source is smaller than iteration, return NaN
+                            if iter_state.current >= source_view.size() {
+                                None
+                            } else {
+                                Some(source_view.offset_for_iter_index(iter_state.current))
+                            }
+                        } else {
+                            // Broadcasting path: source has different dimensions
+                            // 1. Decompose iteration index into multi-dimensional indices
+                            let iter_dims = &iter_view.dims;
+                            let mut iter_indices: SmallVec<[u16; 4]> = SmallVec::new();
+                            let mut remaining = iter_state.current;
+
+                            for &dim in iter_dims.iter().rev() {
+                                iter_indices.push((remaining % dim as usize) as u16);
+                                remaining /= dim as usize;
+                            }
+                            iter_indices.reverse();
+
+                            // 2. Pre-compute which dimensions are indexed
+                            let source_is_indexed: SmallVec<[bool; 4]> = source_view
+                                .dim_ids
+                                .iter()
+                                .map(|&dim_id| {
+                                    context
+                                        .dimensions
+                                        .get(dim_id as usize)
+                                        .is_some_and(|d| d.is_indexed)
+                                })
+                                .collect();
+                            let iter_is_indexed: SmallVec<[bool; 4]> = iter_view
+                                .dim_ids
+                                .iter()
+                                .map(|&dim_id| {
+                                    context
+                                        .dimensions
+                                        .get(dim_id as usize)
+                                        .is_some_and(|d| d.is_indexed)
+                                })
+                                .collect();
+
+                            // 3. Use shared two-pass dimension matching algorithm
+                            let source_to_iter = match_dimensions_two_pass(
+                                &source_view.dim_ids,
+                                &source_view.dims,
+                                &source_is_indexed,
+                                &iter_view.dim_ids,
+                                &iter_view.dims,
+                                &iter_is_indexed,
+                            );
+
+                            // 4. Build source indices from mapping
+                            let mut source_indices: SmallVec<[u16; 4]> =
+                                SmallVec::with_capacity(source_view.dims.len());
+                            let mut out_of_bounds = false;
+
+                            for (src_dim_pos, mapped_iter_pos) in source_to_iter.iter().enumerate()
+                            {
+                                if let Some(iter_pos) = mapped_iter_pos {
+                                    let idx = iter_indices[*iter_pos];
+                                    // Bounds check for this dimension
+                                    if idx >= source_view.dims[src_dim_pos] {
+                                        out_of_bounds = true;
+                                        break;
+                                    }
+                                    source_indices.push(idx);
+                                } else {
+                                    // No matching dimension found - this is a compiler bug
+                                    // or dimension mismatch. Return NaN.
+                                    out_of_bounds = true;
+                                    break;
+                                }
+                            }
+
+                            if out_of_bounds {
+                                None
+                            } else {
+                                // 5. Compute flat offset using source view
+                                Some(source_view.flat_offset(&source_indices))
+                            }
+                        };
+
+                        if let Some(flat_off) = result {
+                            let value = if source_view.is_temp {
+                                let temp_off = context.temp_offsets[source_view.base_off as usize];
+                                temp_storage[temp_off + flat_off]
+                            } else {
+                                curr[source_view.base_off as usize + flat_off]
+                            };
+                            stack.push(value);
+                        } else {
+                            // Out of bounds or no matching dimension - return NaN
+                            stack.push(f64::NAN);
+                        }
+                    }
+                }
+
                 Opcode::StoreIterElement {} => {
                     let value = stack.pop();
                     let iter_state = iter_stack.last().unwrap();
