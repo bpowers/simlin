@@ -609,10 +609,25 @@ impl Expr2 {
                     IsModuleInput(s, loc) => IsModuleInput(s, loc),
                     Ln(e) => Ln(Box::new(Expr2::from(*e, ctx)?)),
                     Log10(e) => Log10(Box::new(Expr2::from(*e, ctx)?)),
-                    Max(e1, e2) => Max(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
-                    ),
+                    Max(e1, e2) => {
+                        // When MAX has a single argument (e2 is None), it behaves as an array
+                        // reduction (finding the maximum of all elements in the array),
+                        // so we allow cross-dimension unions.
+                        let is_array_reduction = e2.is_none();
+                        let prev = if is_array_reduction {
+                            ctx.set_allow_dimension_union(true)
+                        } else {
+                            false
+                        };
+                        let result = Max(
+                            Box::new(Expr2::from(*e1, ctx)?),
+                            e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
+                        );
+                        if is_array_reduction {
+                            ctx.set_allow_dimension_union(prev);
+                        }
+                        result
+                    }
                     Mean(exprs) => {
                         // When MEAN has a single argument, it behaves as an array reduction
                         // (averaging all elements in the array), so we allow cross-dimension unions.
@@ -630,10 +645,25 @@ impl Expr2 {
                         }
                         Mean(exprs?)
                     }
-                    Min(e1, e2) => Min(
-                        Box::new(Expr2::from(*e1, ctx)?),
-                        e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
-                    ),
+                    Min(e1, e2) => {
+                        // When MIN has a single argument (e2 is None), it behaves as an array
+                        // reduction (finding the minimum of all elements in the array),
+                        // so we allow cross-dimension unions.
+                        let is_array_reduction = e2.is_none();
+                        let prev = if is_array_reduction {
+                            ctx.set_allow_dimension_union(true)
+                        } else {
+                            false
+                        };
+                        let result = Min(
+                            Box::new(Expr2::from(*e1, ctx)?),
+                            e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
+                        );
+                        if is_array_reduction {
+                            ctx.set_allow_dimension_union(prev);
+                        }
+                        result
+                    }
                     Pi => Pi,
                     Pulse(e1, e2, e3) => Pulse(
                         Box::new(Expr2::from(*e1, ctx)?),

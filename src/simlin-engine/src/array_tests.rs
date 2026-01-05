@@ -3205,4 +3205,87 @@ mod cross_dimension_reduction_tests {
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[344.0, 344.0]);
     }
+
+    /// Test MAX with cross-dimension broadcasting on named dimensions.
+    /// MAX with a single argument behaves as an array reduction.
+    #[test]
+    fn max_cross_dimension_named() {
+        // a[DimA] = [1, 2, 3], h[DimC] = [10, 20, 30]
+        // MAX(a[*]+h[*]) should produce cross-product max:
+        // Elements: 11, 21, 31, 12, 22, 32, 13, 23, 33 (9 elements)
+        // Max = 33
+        let project = TestProject::new("max_cross_dim_named")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .scalar_aux("result", "MAX(a[*]+h[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("result", &[33.0, 33.0]);
+    }
+
+    /// Test MIN with cross-dimension broadcasting on named dimensions.
+    /// MIN with a single argument behaves as an array reduction.
+    #[test]
+    fn min_cross_dimension_named() {
+        // a[DimA] = [1, 2, 3], h[DimC] = [10, 20, 30]
+        // MIN(a[*]+h[*]) should produce cross-product min:
+        // Elements: 11, 21, 31, 12, 22, 32, 13, 23, 33 (9 elements)
+        // Min = 11
+        let project = TestProject::new("min_cross_dim_named")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .scalar_aux("result", "MIN(a[*]+h[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("result", &[11.0, 11.0]);
+    }
+
+    /// Test that the VM produces the same results as the interpreter for cross-dimension
+    /// broadcasting. This verifies the bytecode compiler and VM handle these cases correctly.
+    #[test]
+    fn vm_cross_dimension_sum() {
+        // Same test as sum_cross_dimension_named but using VM
+        let project = TestProject::new("vm_cross_dim_sum")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .scalar_aux("result", "SUM(a[*]+h[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Verify interpreter result
+        project.assert_interpreter_result("result", &[198.0, 198.0]);
+        // Verify VM result matches
+        project.assert_vm_result("result", &[198.0, 198.0]);
+    }
+
+    /// Test that nested reductions work correctly in the VM.
+    #[test]
+    fn vm_nested_reduction() {
+        // Same test as nested_reduction_sum_mean but using VM
+        let project = TestProject::new("vm_nested_reduction")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .named_dimension("DimD", &["D1", "D2"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .array_with_ranges("c[DimD]", vec![("D1", "100"), ("D2", "200")])
+            .scalar_aux("result", "SUM(MEAN(a[*]+h[*]) + c[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // Verify interpreter result
+        project.assert_interpreter_result("result", &[344.0, 344.0]);
+        // Verify VM result matches
+        project.assert_vm_result("result", &[344.0, 344.0]);
+    }
 }
