@@ -614,8 +614,20 @@ impl Expr2 {
                         e2.map(|e| Expr2::from(*e, ctx)).transpose()?.map(Box::new),
                     ),
                     Mean(exprs) => {
+                        // When MEAN has a single argument, it behaves as an array reduction
+                        // (averaging all elements in the array), so we allow cross-dimension unions.
+                        // With multiple arguments, it's a scalar mean and doesn't need the flag.
+                        let is_array_reduction = exprs.len() == 1;
+                        let prev = if is_array_reduction {
+                            ctx.set_allow_dimension_union(true)
+                        } else {
+                            false
+                        };
                         let exprs: EquationResult<Vec<Expr2>> =
                             exprs.into_iter().map(|e| Expr2::from(e, ctx)).collect();
+                        if is_array_reduction {
+                            ctx.set_allow_dimension_union(prev);
+                        }
                         Mean(exprs?)
                     }
                     Min(e1, e2) => Min(

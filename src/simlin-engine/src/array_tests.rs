@@ -3161,4 +3161,48 @@ mod cross_dimension_reduction_tests {
         // 2 time steps: t=0 and t=1
         project.assert_interpreter_result("result", &[360.0, 360.0]);
     }
+
+    /// Test MEAN with cross-dimension broadcasting on named dimensions.
+    /// MEAN with a single argument behaves as an array reduction.
+    #[test]
+    fn mean_cross_dimension_named() {
+        // a[DimA] = [1, 2, 3], h[DimC] = [10, 20, 30]
+        // MEAN(a[*]+h[*]) should produce cross-product mean:
+        // Elements: 11, 21, 31, 12, 22, 32, 13, 23, 33 (9 elements)
+        // Sum = 198, count = 9, mean = 22.0
+        let project = TestProject::new("mean_cross_dim_named")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .scalar_aux("result", "MEAN(a[*]+h[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("result", &[22.0, 22.0]);
+    }
+
+    /// Test nested reduction builtins to verify save/restore of allow_dimension_union flag.
+    /// The inner MEAN should reduce cross-dimension, and outer SUM should also work.
+    #[test]
+    fn nested_reduction_sum_mean() {
+        // a[DimA] = [1, 2, 3], h[DimC] = [10, 20, 30], c[DimD] = [100, 200]
+        // Inner: MEAN(a[*]+h[*]) = 22.0 (cross-product mean of 9 elements)
+        // Middle: 22.0 + c[*] = [122.0, 222.0]
+        // Outer: SUM([122.0, 222.0]) = 344.0
+        let project = TestProject::new("nested_reduction")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .named_dimension("DimD", &["D1", "D2"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .array_with_ranges("c[DimD]", vec![("D1", "100"), ("D2", "200")])
+            .scalar_aux("result", "SUM(MEAN(a[*]+h[*]) + c[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("result", &[344.0, 344.0]);
+    }
 }

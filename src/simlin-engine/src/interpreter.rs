@@ -375,11 +375,18 @@ impl ModuleEvaluator<'_> {
                 }
 
                 let start = self.sim.temp_offsets[id];
-                let temps = (*self.sim.temps).borrow();
                 let size = view.dims.iter().product::<usize>();
 
-                for i in 0..size {
-                    f(temps[start + i]);
+                // Copy values to avoid holding borrow across closure calls.
+                // This is necessary for nested reductions like SUM(MEAN(a[*]+h[*]) + c[*])
+                // where the outer SUM's closure evaluates MEAN which also needs to iterate.
+                let values: Vec<f64> = {
+                    let temps = (*self.sim.temps).borrow();
+                    (0..size).map(|i| temps[start + i]).collect()
+                };
+
+                for val in values {
+                    f(val);
                 }
             }
             Expr::Subscript(off, indices, bounds, _) => {
@@ -1281,12 +1288,23 @@ impl ModuleEvaluator<'_> {
                     }
                 }
 
-                let mut temp_data = (*self.sim.temps).borrow_mut();
-
-                // Evaluate element by element
+                // Evaluate all elements first, then write to temp_data.
+                // This avoids holding a mutable borrow while evaluating, which could
+                // conflict if evaluation needs to read from temps (e.g., nested reductions).
+                let mut values = Vec::with_capacity(total_elements);
                 for i in 0..total_elements {
-                    temp_data[start + i] =
-                        eval_at_index(self, rhs.as_ref(), i, &view.dims, &view.dim_names);
+                    values.push(eval_at_index(
+                        self,
+                        rhs.as_ref(),
+                        i,
+                        &view.dims,
+                        &view.dim_names,
+                    ));
+                }
+
+                let mut temp_data = (*self.sim.temps).borrow_mut();
+                for (i, val) in values.into_iter().enumerate() {
+                    temp_data[start + i] = val;
                 }
 
                 // AssignTemp doesn't produce a scalar value
