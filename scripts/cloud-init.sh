@@ -28,90 +28,42 @@ cd "$REPO_ROOT"
 # Function to install protoc from GitHub releases
 install_protoc() {
     local version="$1"
-    local install_dir="$HOME/.local"
-    local bin_dir="$install_dir/bin"
-    local include_dir="$install_dir/include"
 
     # Detect OS and architecture
-    local os=""
-    local arch=""
-
+    local os arch
     case "$(uname -s)" in
         Linux)  os="linux" ;;
         Darwin) os="osx" ;;
-        *)
-            echo -e "${RED}Unsupported OS: $(uname -s)${NC}"
-            return 1
-            ;;
+        *)      echo -e "${RED}Unsupported OS: $(uname -s)${NC}"; return 1 ;;
     esac
-
     case "$(uname -m)" in
-        x86_64)  arch="x86_64" ;;
-        aarch64) arch="aarch_64" ;;
-        arm64)   arch="aarch_64" ;;  # macOS ARM
-        *)
-            echo -e "${RED}Unsupported architecture: $(uname -m)${NC}"
-            return 1
-            ;;
+        x86_64)          arch="x86_64" ;;
+        aarch64|arm64)   arch="aarch_64" ;;
+        *)               echo -e "${RED}Unsupported architecture: $(uname -m)${NC}"; return 1 ;;
     esac
 
     local filename="protoc-${version}-${os}-${arch}.zip"
     local url="https://github.com/protocolbuffers/protobuf/releases/download/v${version}/${filename}"
-
-    echo -n "  Downloading protoc ${version}... "
-
-    # Create temp directory for download
     local tmp_dir
     tmp_dir=$(mktemp -d)
     trap "rm -rf $tmp_dir" EXIT
 
-    # Download with retry logic
-    local retry_count=0
-    local max_retries=4
-    local wait_time=2
-
-    while [ $retry_count -lt $max_retries ]; do
-        if curl -fsSL "$url" -o "$tmp_dir/$filename" 2>/dev/null; then
-            break
-        fi
-        retry_count=$((retry_count + 1))
-        if [ $retry_count -lt $max_retries ]; then
-            sleep $wait_time
-            wait_time=$((wait_time * 2))
-        fi
-    done
-
-    if [ ! -f "$tmp_dir/$filename" ]; then
-        echo -e "${RED}failed to download${NC}"
+    echo -n "  Downloading protoc ${version}... "
+    if ! curl -fsSL "$url" -o "$tmp_dir/$filename" 2>/dev/null; then
+        echo -e "${RED}failed${NC}"
         return 1
     fi
     echo -e "${GREEN}done${NC}"
 
-    echo -n "  Installing protoc to $bin_dir... "
-
-    # Create installation directories
-    mkdir -p "$bin_dir" "$include_dir"
-
-    # Extract the zip file
+    echo -n "  Installing to /usr/local/bin... "
     if ! unzip -q "$tmp_dir/$filename" -d "$tmp_dir/protoc" 2>/dev/null; then
         echo -e "${RED}failed to extract${NC}"
         return 1
     fi
-
-    # Install binary and includes
-    cp "$tmp_dir/protoc/bin/protoc" "$bin_dir/"
-    chmod +x "$bin_dir/protoc"
-    cp -r "$tmp_dir/protoc/include/"* "$include_dir/" 2>/dev/null || true
-
+    cp "$tmp_dir/protoc/bin/protoc" /usr/local/bin/
+    chmod +x /usr/local/bin/protoc
+    cp -r "$tmp_dir/protoc/include/"* /usr/local/include/ 2>/dev/null || true
     echo -e "${GREEN}done${NC}"
-
-    # Add to PATH for current session if not already there
-    if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
-        export PATH="$bin_dir:$PATH"
-        echo -e "  ${YELLOW}Note: Added $bin_dir to PATH for this session${NC}"
-        echo -e "  ${YELLOW}Add 'export PATH=\"$bin_dir:\$PATH\"' to your shell profile for persistence${NC}"
-    fi
-
     return 0
 }
 
