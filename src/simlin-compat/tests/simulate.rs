@@ -456,6 +456,7 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     "test/sdeverywhere/models/lookup/lookup.xmile",
     "test/sdeverywhere/models/pulsetrain/pulsetrain.xmile",
     "test/sdeverywhere/models/sir/sir.xmile",
+    "test/sdeverywhere/models/smooth/smooth.xmile",
     "test/sdeverywhere/models/smooth3/smooth3.xmile",
     "test/sdeverywhere/models/specialchars/specialchars.xmile",
     "test/sdeverywhere/models/subalias/subalias.xmile",
@@ -532,9 +533,6 @@ static TEST_SDEVERYWHERE_MODELS: &[&str] = &[
     //
     // No expected results (nested model directory)
     // "test/sdeverywhere/models/sir/model/sir.xmile",
-    //
-    // Values don't match: SMOOTH implementation difference
-    // "test/sdeverywhere/models/smooth/smooth.xmile",
     //
     // MismatchedDimensions: uses subscript mappings
     // "test/sdeverywhere/models/subscript/subscript.xmile",
