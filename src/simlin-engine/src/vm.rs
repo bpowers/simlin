@@ -421,9 +421,17 @@ impl Vm {
             curr[INITIAL_TIME_OFF] = spec_start;
             curr[FINAL_TIME_OFF] = spec_stop;
 
-            // Clone module reference to avoid borrow conflict
-            let module_initials = self.sliced_sim.initial_modules[&self.root].clone();
-            self.eval(&module_initials, 0, module_inputs, curr, next, &mut stack);
+            let module_initials = &self.sliced_sim.initial_modules[&self.root];
+            Self::eval(
+                &self.sliced_sim,
+                &mut self.temp_storage,
+                module_initials,
+                0,
+                module_inputs,
+                curr,
+                next,
+                &mut stack,
+            );
             self.did_initials = true;
             self.step_accum = 0;
         }
@@ -434,12 +442,29 @@ impl Vm {
                 break;
             }
 
-            // Clone module references to avoid borrow conflict with &mut self.eval()
-            let module_flows = self.sliced_sim.flow_modules[&self.root].clone();
-            let module_stocks = self.sliced_sim.stock_modules[&self.root].clone();
+            let module_flows = &self.sliced_sim.flow_modules[&self.root];
+            let module_stocks = &self.sliced_sim.stock_modules[&self.root];
 
-            self.eval(&module_flows, 0, module_inputs, curr, next, &mut stack);
-            self.eval(&module_stocks, 0, module_inputs, curr, next, &mut stack);
+            Self::eval(
+                &self.sliced_sim,
+                &mut self.temp_storage,
+                module_flows,
+                0,
+                module_inputs,
+                curr,
+                next,
+                &mut stack,
+            );
+            Self::eval(
+                &self.sliced_sim,
+                &mut self.temp_storage,
+                module_stocks,
+                0,
+                module_inputs,
+                curr,
+                next,
+                &mut stack,
+            );
             next[TIME_OFF] = curr[TIME_OFF] + dt;
             next[DT_OFF] = curr[DT_OFF];
             next[INITIAL_TIME_OFF] = curr[INITIAL_TIME_OFF];
@@ -504,7 +529,8 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn eval_module(
-        &mut self,
+        sliced_sim: &CompiledSlicedSimulation,
+        temp_storage: &mut [f64],
         parent_module: &CompiledModuleSlice,
         parent_module_off: usize,
         module_inputs: &[f64],
@@ -517,18 +543,28 @@ impl Vm {
         let module_key = make_module_key(&new_module_decl.model_name, &new_module_decl.input_set);
         let module_off = parent_module_off + new_module_decl.off;
 
-        // Clone module to avoid borrow conflict with &mut self.eval()
         let module = match parent_module.part {
-            StepPart::Initials => self.sliced_sim.initial_modules[&module_key].clone(),
-            StepPart::Flows => self.sliced_sim.flow_modules[&module_key].clone(),
-            StepPart::Stocks => self.sliced_sim.stock_modules[&module_key].clone(),
+            StepPart::Initials => &sliced_sim.initial_modules[&module_key],
+            StepPart::Flows => &sliced_sim.flow_modules[&module_key],
+            StepPart::Stocks => &sliced_sim.stock_modules[&module_key],
         };
 
-        self.eval(&module, module_off, module_inputs, curr, next, stack);
+        Self::eval(
+            sliced_sim,
+            temp_storage,
+            module,
+            module_off,
+            module_inputs,
+            curr,
+            next,
+            stack,
+        );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn eval(
-        &mut self,
+        sliced_sim: &CompiledSlicedSimulation,
+        temp_storage: &mut [f64],
         module: &CompiledModuleSlice,
         module_off: usize,
         module_inputs: &[f64],
@@ -633,7 +669,17 @@ impl Vm {
                     for j in (0..(*n_inputs as usize)).rev() {
                         module_inputs[j] = stack.pop();
                     }
-                    self.eval_module(module, module_off, &module_inputs, curr, next, stack, *id);
+                    Self::eval_module(
+                        sliced_sim,
+                        temp_storage,
+                        module,
+                        module_off,
+                        &module_inputs,
+                        curr,
+                        next,
+                        stack,
+                        *id,
+                    );
                 }
                 Opcode::AssignCurr { off } => {
                     curr[module_off + *off as usize] = stack.pop();
@@ -807,14 +853,14 @@ impl Vm {
                 // =========================================================
                 Opcode::LoadTempConst { temp_id, index } => {
                     let temp_off = context.temp_offsets[*temp_id as usize];
-                    let value = self.temp_storage[temp_off + *index as usize];
+                    let value = temp_storage[temp_off + *index as usize];
                     stack.push(value);
                 }
 
                 Opcode::LoadTempDynamic { temp_id } => {
                     let index = stack.pop().floor() as usize;
                     let temp_off = context.temp_offsets[*temp_id as usize];
-                    let value = self.temp_storage[temp_off + index];
+                    let value = temp_storage[temp_off + index];
                     stack.push(value);
                 }
 
@@ -884,7 +930,7 @@ impl Vm {
 
                         let value = if view.is_temp {
                             let temp_off = context.temp_offsets[view.base_off as usize];
-                            self.temp_storage[temp_off + flat_off]
+                            temp_storage[temp_off + flat_off]
                         } else {
                             curr[view.base_off as usize + flat_off]
                         };
@@ -895,7 +941,7 @@ impl Vm {
                 Opcode::LoadIterTempElement { temp_id } => {
                     let iter_state = iter_stack.last().unwrap();
                     let temp_off = context.temp_offsets[*temp_id as usize];
-                    let value = self.temp_storage[temp_off + iter_state.current];
+                    let value = temp_storage[temp_off + iter_state.current];
                     stack.push(value);
                 }
 
@@ -1009,7 +1055,7 @@ impl Vm {
                         if let Some(flat_off) = result {
                             let value = if source_view.is_temp {
                                 let temp_off = context.temp_offsets[source_view.base_off as usize];
-                                self.temp_storage[temp_off + flat_off]
+                                temp_storage[temp_off + flat_off]
                             } else {
                                 curr[source_view.base_off as usize + flat_off]
                             };
@@ -1027,7 +1073,7 @@ impl Vm {
 
                     if let Some(write_temp_id) = iter_state.write_temp_id {
                         let temp_off = context.temp_offsets[write_temp_id as usize];
-                        self.temp_storage[temp_off + iter_state.current] = value;
+                        temp_storage[temp_off + iter_state.current] = value;
                     } else {
                         panic!("StoreIterElement without write_temp");
                     }
@@ -1054,13 +1100,15 @@ impl Vm {
                 // =========================================================
                 Opcode::ArraySum {} => {
                     let view = view_stack.last().unwrap();
-                    let sum = self.reduce_view(view, curr, context, |acc, v| acc + v, 0.0);
+                    let sum =
+                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
                     stack.push(sum);
                 }
 
                 Opcode::ArrayMax {} => {
                     let view = view_stack.last().unwrap();
-                    let max = self.reduce_view(
+                    let max = Self::reduce_view(
+                        temp_storage,
                         view,
                         curr,
                         context,
@@ -1072,14 +1120,21 @@ impl Vm {
 
                 Opcode::ArrayMin {} => {
                     let view = view_stack.last().unwrap();
-                    let min =
-                        self.reduce_view(view, curr, context, |acc, v| acc.min(v), f64::INFINITY);
+                    let min = Self::reduce_view(
+                        temp_storage,
+                        view,
+                        curr,
+                        context,
+                        |acc, v| acc.min(v),
+                        f64::INFINITY,
+                    );
                     stack.push(min);
                 }
 
                 Opcode::ArrayMean {} => {
                     let view = view_stack.last().unwrap();
-                    let sum = self.reduce_view(view, curr, context, |acc, v| acc + v, 0.0);
+                    let sum =
+                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
                     let count = view.size() as f64;
                     stack.push(sum / count);
                 }
@@ -1087,11 +1142,13 @@ impl Vm {
                 Opcode::ArrayStddev {} => {
                     let view = view_stack.last().unwrap();
                     let size = view.size();
-                    let sum = self.reduce_view(view, curr, context, |acc, v| acc + v, 0.0);
+                    let sum =
+                        Self::reduce_view(temp_storage, view, curr, context, |acc, v| acc + v, 0.0);
                     let mean = sum / size as f64;
 
                     // Second pass for variance
-                    let variance_sum = self.reduce_view(
+                    let variance_sum = Self::reduce_view(
+                        temp_storage,
                         view,
                         curr,
                         context,
@@ -1204,7 +1261,7 @@ impl Vm {
 
                         let value = if view.is_temp {
                             let temp_off = context.temp_offsets[view.base_off as usize];
-                            self.temp_storage[temp_off + flat_off]
+                            temp_storage[temp_off + flat_off]
                         } else {
                             curr[view.base_off as usize + flat_off]
                         };
@@ -1216,7 +1273,7 @@ impl Vm {
                     let value = stack.pop();
                     let bc_state = broadcast_stack.last().unwrap();
                     let temp_off = context.temp_offsets[bc_state.dest_temp_id as usize];
-                    self.temp_storage[temp_off + bc_state.current] = value;
+                    temp_storage[temp_off + bc_state.current] = value;
                 }
 
                 Opcode::NextBroadcastOrJump { jump_back } => {
@@ -1252,7 +1309,7 @@ impl Vm {
 
     /// Helper: Reduce all elements of a view using a fold function
     fn reduce_view<F>(
-        &self,
+        temp_storage: &[f64],
         view: &RuntimeView,
         curr: &[f64],
         context: &ByteCodeContext,
@@ -1279,7 +1336,7 @@ impl Vm {
 
             let value = if view.is_temp {
                 let temp_off = context.temp_offsets[view.base_off as usize];
-                self.temp_storage[temp_off + flat_off]
+                temp_storage[temp_off + flat_off]
             } else {
                 curr[view.base_off as usize + flat_off]
             };

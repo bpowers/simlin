@@ -130,6 +130,46 @@ impl ArrayView {
             dim_names: self.dim_names.clone(),
         })
     }
+
+    /// Create a transposed view by reversing dimensions and strides.
+    /// Transpose reverses the order of dimensions - e.g., a 2x3 array becomes 3x2.
+    pub fn transpose(&self) -> ArrayView {
+        let mut dims = self.dims.clone();
+        dims.reverse();
+        let mut strides = self.strides.clone();
+        strides.reverse();
+        let mut dim_names = self.dim_names.clone();
+        dim_names.reverse();
+
+        ArrayView {
+            dims,
+            strides,
+            offset: self.offset,
+            sparse: self.sparse.clone(),
+            dim_names,
+        }
+    }
+
+    /// Create a view with reordered dimensions.
+    /// The reordering slice maps output dimension indices to input dimension indices.
+    /// For example, [1, 0] swaps the first two dimensions (equivalent to transpose for 2D).
+    /// [1, 2, 0] means output dim 0 = input dim 1, output dim 1 = input dim 2, output dim 2 = input dim 0.
+    pub fn reorder_dimensions(&self, reordering: &[usize]) -> ArrayView {
+        let dims: Vec<usize> = reordering.iter().map(|&idx| self.dims[idx]).collect();
+        let strides: Vec<isize> = reordering.iter().map(|&idx| self.strides[idx]).collect();
+        let dim_names: Vec<String> = reordering
+            .iter()
+            .map(|&idx| self.dim_names[idx].clone())
+            .collect();
+
+        ArrayView {
+            dims,
+            strides,
+            offset: self.offset,
+            sparse: self.sparse.clone(),
+            dim_names,
+        }
+    }
 }
 
 #[cfg(test)]
