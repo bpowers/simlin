@@ -164,6 +164,22 @@ pub trait Expr2Context {
     /// Check if a dimension is an indexed dimension (vs. named dimension).
     /// Indexed dimensions can be matched by size with different names.
     fn is_indexed_dimension(&self, name: &str) -> bool;
+
+    /// Check if dimension union is allowed for named dimensions.
+    /// When true, arrays with different named dimensions can be combined
+    /// in expressions, producing a cross-product of their dimensions.
+    /// This is used inside array reduction builtins (SUM, MEAN, etc.)
+    /// where cross-dimension expressions are semantically valid.
+    fn allow_dimension_union(&self) -> bool {
+        false
+    }
+
+    /// Set whether dimension union is allowed.
+    /// Returns the previous value so it can be restored.
+    fn set_allow_dimension_union(&mut self, _allow: bool) -> bool {
+        // Default implementation for contexts that don't support this
+        false
+    }
 }
 
 impl Expr2 {
@@ -367,16 +383,20 @@ impl Expr2 {
 
         // Handle UNION case: neither is a subset of the other
         // This happens when we're broadcasting, e.g., a[X] + b[Y] → result[X,Y]
-        // IMPORTANT: UNION broadcasting is only allowed for INDEXED dimensions.
+        // IMPORTANT: UNION broadcasting is only allowed for INDEXED dimensions,
+        // UNLESS we're inside an array reduction builtin (SUM, MEAN, etc.) where
+        // dimension union is explicitly requested (allow_dimension_union=true).
         // Named dimensions with semantic meaning (like Cities, Products) should NOT
-        // be combined just because they have the same size.
+        // be combined just because they have the same size in normal A2A contexts.
         if !a_can_match_b && !b_can_match_a {
             // Check that all unmatched dimensions are indexed (not named)
             // If any unmatched dimension is named, return an error
+            // EXCEPTION: When inside an array reduction builtin, allow named dimension unions
+            let allow_union = ctx.allow_dimension_union();
             for (a_name, &a_size) in a_names.iter().zip(a_dims.iter()) {
                 let has_match =
                     Self::find_matching_dimension(ctx, a_name, a_size, b_names, b_dims).is_some();
-                if !has_match && !ctx.is_indexed_dimension(a_name) {
+                if !has_match && !ctx.is_indexed_dimension(a_name) && !allow_union {
                     // This is a named dimension that doesn't match anything in b
                     return eqn_err!(MismatchedDimensions, loc.start, loc.end);
                 }
@@ -384,7 +404,7 @@ impl Expr2 {
             for (b_name, &b_size) in b_names.iter().zip(b_dims.iter()) {
                 let has_match =
                     Self::find_matching_dimension(ctx, b_name, b_size, a_names, a_dims).is_some();
-                if !has_match && !ctx.is_indexed_dimension(b_name) {
+                if !has_match && !ctx.is_indexed_dimension(b_name) && !allow_union {
                     // This is a named dimension that doesn't match anything in a
                     return eqn_err!(MismatchedDimensions, loc.start, loc.end);
                 }
@@ -666,10 +686,28 @@ impl Expr2 {
                             // which will produce an appropriate error
                         }
                         // Normal case: SIZE(array_expression)
-                        Size(Box::new(Expr2::from(*e, ctx)?))
+                        // Array reduction builtins allow cross-dimension unions
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = Size(Box::new(Expr2::from(*e, ctx)?));
+                        ctx.set_allow_dimension_union(prev);
+                        result
                     }
-                    Stddev(e) => Stddev(Box::new(Expr2::from(*e, ctx)?)),
-                    Sum(e) => Sum(Box::new(Expr2::from(*e, ctx)?)),
+                    Stddev(e) => {
+                        // Array reduction builtin - allow cross-dimension unions
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = Stddev(Box::new(Expr2::from(*e, ctx)?));
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
+                    Sum(e) => {
+                        // Array reduction builtin - allow cross-dimension unions
+                        // This enables expressions like SUM(a[*]+h[*]) where a[DimA] and h[DimC]
+                        // have different dimensions, producing a cross-product sum.
+                        let prev = ctx.set_allow_dimension_union(true);
+                        let result = Sum(Box::new(Expr2::from(*e, ctx)?));
+                        ctx.set_allow_dimension_union(prev);
+                        result
+                    }
                 };
                 // TODO: Handle array sources for builtin functions that return arrays
                 Expr2::App(builtin, None, loc)

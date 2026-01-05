@@ -402,18 +402,11 @@ fn simulates_except() {
 }
 
 #[test]
-#[ignore]
 fn simulates_sum() {
     simulate_path("../../test/sdeverywhere/models/sum/sum.xmile");
 }
 
-// Ignored: The sum model contains cross-dimension broadcasting expressions like
-// "SUM(a[*]+h[*])" where a[DimA] and h[DimC] have different dimensions. The expected
-// behavior is a 3x3 cross-product (9 elements summed = 198), but the interpreter
-// currently treats this as element-wise (3 elements summed = 66).
-// This is a separate interpreter limitation, not related to dimension-name subscripts.
 #[test]
-#[ignore]
 fn simulates_sum_interpreter_only() {
     simulate_path_interpreter_only("../../test/sdeverywhere/models/sum/sum.xmile");
 }

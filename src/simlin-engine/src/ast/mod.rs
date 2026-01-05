@@ -63,6 +63,9 @@ struct ArrayContext<'a> {
     model_name: &'a str,
     next_temp_id: u32,
     is_array: bool,
+    /// When true, allows union of named dimensions (cross-product).
+    /// Set inside array reduction builtins like SUM.
+    allow_dimension_union: bool,
 }
 
 impl<'a> ArrayContext<'a> {
@@ -72,6 +75,7 @@ impl<'a> ArrayContext<'a> {
             model_name,
             next_temp_id: 0,
             is_array: false,
+            allow_dimension_union: false,
         }
     }
 
@@ -81,6 +85,7 @@ impl<'a> ArrayContext<'a> {
             model_name,
             next_temp_id: 0,
             is_array: true,
+            allow_dimension_union: false,
         }
     }
 
@@ -153,6 +158,16 @@ impl<'a> Expr2Context for ArrayContext<'a> {
             .get(&canonical_name)
             .map(|dim| matches!(dim, crate::dimensions::Dimension::Indexed(_, _)))
             .unwrap_or(false)
+    }
+
+    fn allow_dimension_union(&self) -> bool {
+        self.allow_dimension_union
+    }
+
+    fn set_allow_dimension_union(&mut self, allow: bool) -> bool {
+        let prev = self.allow_dimension_union;
+        self.allow_dimension_union = allow;
+        prev
     }
 }
 

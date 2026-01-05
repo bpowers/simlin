@@ -3073,3 +3073,92 @@ mod dimension_mapping_tests {
         project.assert_interpreter_result("result", &[10.0, 30.0]);
     }
 }
+
+/// Tests for cross-dimension array operations inside reduction builtins.
+///
+/// In Vensim, `SUM(a[DimA!] + h[DimC!])` where DimA and DimC are different dimensions
+/// produces a cross-product: the sum iterates over all combinations of (DimA x DimC).
+///
+/// For example, if a[DimA] = [1, 2, 3] and h[DimC] = [10, 20, 30]:
+/// SUM(a[*]+h[*]) = (1+10) + (1+20) + (1+30) + (2+10) + (2+20) + (2+30) + (3+10) + (3+20) + (3+30)
+///                = 11 + 21 + 31 + 12 + 22 + 32 + 13 + 23 + 33 = 198
+#[cfg(test)]
+mod cross_dimension_reduction_tests {
+    use crate::test_common::TestProject;
+
+    /// Test SUM with cross-dimension broadcasting on named dimensions.
+    /// This is the key test case from test/sdeverywhere/models/sum/sum.xmile.
+    #[test]
+    fn sum_cross_dimension_named() {
+        // a[DimA] = [1, 2, 3], h[DimC] = [10, 20, 30]
+        // SUM(a[*]+h[*]) should produce cross-product sum:
+        // (1+10)+(1+20)+(1+30)+(2+10)+(2+20)+(2+30)+(3+10)+(3+20)+(3+30) = 198
+        let project = TestProject::new("sum_cross_dim_named")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .scalar_aux("i", "SUM(a[*]+h[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("i", &[198.0, 198.0]);
+    }
+
+    /// Test SUM with cross-dimension broadcasting on indexed dimensions.
+    #[test]
+    fn sum_cross_dimension_indexed() {
+        // a[DimA] = [1, 2], b[DimB] = [10, 20, 30]
+        // SUM(a[*]+b[*]) = 2x3 cross-product = (1+10)+(1+20)+(1+30)+(2+10)+(2+20)+(2+30)
+        //               = 11+21+31+12+22+32 = 129
+        let project = TestProject::new("sum_cross_dim_indexed")
+            .indexed_dimension("DimA", 2)
+            .indexed_dimension("DimB", 3)
+            .array_aux("a[DimA]", "DimA") // [1, 2]
+            .array_aux("b[DimB]", "DimB * 10") // [10, 20, 30]
+            .scalar_aux("result", "SUM(a[*]+b[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("result", &[129.0, 129.0]);
+    }
+
+    /// Test SUM with same-dimension arrays (element-wise, not cross-product).
+    #[test]
+    fn sum_same_dimension() {
+        // a[DimA] = [1, 2, 3], b[DimA] = [4, 5, 6]
+        // SUM(a[*]+b[*]) = (1+4)+(2+5)+(3+6) = 5+7+9 = 21 (element-wise, not 9 elements)
+        let project = TestProject::new("sum_same_dim")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("b[DimA]", vec![("A1", "4"), ("A2", "5"), ("A3", "6")])
+            .scalar_aux("result", "SUM(a[*]+b[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("result", &[21.0, 21.0]);
+    }
+
+    /// Test SUM with multiplication for cross-dimension (more complex expression).
+    #[test]
+    fn sum_cross_dimension_multiply() {
+        // a[DimA] = [1, 2, 3], h[DimC] = [10, 20, 30]
+        // SUM(a[*]*h[*]) = cross-product multiplication sum
+        // = 1*10+1*20+1*30+2*10+2*20+2*30+3*10+3*20+3*30
+        // = 10+20+30+20+40+60+30+60+90 = 360
+        let project = TestProject::new("sum_cross_dim_multiply")
+            .named_dimension("DimA", &["A1", "A2", "A3"])
+            .named_dimension("DimC", &["C1", "C2", "C3"])
+            .array_with_ranges("a[DimA]", vec![("A1", "1"), ("A2", "2"), ("A3", "3")])
+            .array_with_ranges("h[DimC]", vec![("C1", "10"), ("C2", "20"), ("C3", "30")])
+            .scalar_aux("result", "SUM(a[*]*h[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // 2 time steps: t=0 and t=1
+        project.assert_interpreter_result("result", &[360.0, 360.0]);
+    }
+}
