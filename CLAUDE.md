@@ -12,6 +12,7 @@ It is a crucial resource to consult when adding functionality to the simulation 
 
 The simulation engine for simulating system dynamics stock and flow models is written in Rust, and the interactive model editor (and other components like the web server and model creation/browsing) are written in TypeScript.
 
+You should think of this as a monorepo without external users that depend on it – do NOT worry about breaking changes or backwards compatibility, especially if you see a way to simplify or generalize something.
 
 ## Architecture Overview
 
@@ -20,8 +21,9 @@ The simulation engine for simulating system dynamics stock and flow models is wr
 **simlin-engine (Rust)**: The simulation engine that compiles, edits, and executes system dynamics models
 - Entry point: `src/simlin-engine/src/lib.rs`
 - Equation text is parsed into an AST using LALRPOP parser (`equation.lalrpop`)
-- Projects consisting of models are compiled to a simple bytecode format (`compiler.rs`)
+- Projects consisting of models are compiled to a simple bytecode format (`compiler.rs`).  Today, there are NO places where the bytecode is serialized to disk, so no need for backwards compatibility of improvements here.
 - Executes simulations using a bytecode-based virtual machine (`vm.rs`)
+- There is also a AST-walking interpreter -- it is used as a "spec"/simple implementation to verify we get the exact same behavior from the more complicated bytecode VM.
 - Supports unit checking and dimensional analysis
 - Contains built-in functions library (`builtins.rs`) of _models_ that implement stateful "functions" like TREND and SMOOTH3
 
@@ -185,6 +187,8 @@ When working on this codebase, follow this systematic approach:
 - **Complete all aspects of a task**: When fixing bugs or implementing features, ensure the fix works for all code paths, not just the primary one. Continue making progress until all aspects of the user's task are done, including newly discovered but necessary work and rework along the way.
 - **Test-driven development**: When working on a task or todo-list item, start by writing a unit test with the expected behavior — it will initially fail. Use that to help guide your implementation, which should eventually get the unit test passing after some iteration.
 - **Commit with descriptive messages** strictly following the commit message style from above when you complete a unit of work, like a task or major TODO list item.
+- **No compatability shims or fallback paths**: Remember there are no external users of this codebase, and at this point we have a comprehensive test suite.  Fully complete migrations.
+- **Test Driven Development (TDD)**: Follow TDD best practices, ensure tests actually assert the behavior we're expecting AND have high code coverage.
 
 ### 1. Understanding Requirements
 - Read relevant code and documentation (including for libraries) and build a plan based on the user's task.
@@ -240,13 +244,12 @@ Follow these steps when working on code changes in Rust crates like `src/simlin-
 ## Common Pitfalls to Avoid
 
 ### Rust Development
-- Don't assume specific order of operations beyond what's documented
+- If you find yourself using `unwrap()` you _probably_ actually want a function to return a `Result` or `Option`.
 - Always handle error cases explicitly with proper error types
 - Be careful with floating point comparisons in tests
 
 ### TypeScript Development
-- Don't forget to rebuild after changes: `yarn build`
-- The development server auto-reloads, but the production build does not
+- The development server auto-reloads, but the production build does not (you can build it with `yarn build`)
 - Ensure proper typing for all components and functions
 
 ### System Integration
