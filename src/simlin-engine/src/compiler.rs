@@ -1914,13 +1914,6 @@ impl Context<'_> {
                                     // the maps_to dimension (e.g., SubB is a subdimension of DimB,
                                     // and source_dim maps to DimB).
                                     let maps_to = self.dimensions_ctx.get_maps_to(source_dim_name);
-                                    eprintln!(
-                                        "DEBUG: source_dim={}, target_dim={}, maps_to={:?}, subscript={}",
-                                        source_dim_name.as_str(),
-                                        target_dim_name.as_str(),
-                                        maps_to.map(|m| m.as_str()),
-                                        subscript.as_str()
-                                    );
                                     let effective_target = if maps_to == Some(target_dim_name) {
                                         // Direct mapping: source_dim maps directly to target_dim
                                         Some(target_dim_name.clone())
@@ -1932,12 +1925,6 @@ impl Context<'_> {
                                         let is_subdim = self
                                             .dimensions_ctx
                                             .is_subdimension_of(target_dim_name, maps_to_dim);
-                                        eprintln!(
-                                            "DEBUG: is_subdimension_of({}, {}) = {}",
-                                            target_dim_name.as_str(),
-                                            maps_to_dim.as_str(),
-                                            is_subdim
-                                        );
                                         if is_subdim {
                                             Some(maps_to_dim.clone())
                                         } else {
