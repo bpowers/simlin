@@ -1327,50 +1327,22 @@ impl Context<'_> {
                     let orig_dim_names: Vec<String> =
                         dims.iter().map(|d| d.name().to_string()).collect();
 
-                    // Create a contiguous view first
-                    let view = ArrayView::contiguous(orig_dims.clone());
-
-                    // Apply the reordering
-                    let reordered_dims: Vec<usize> =
-                        reordering.iter().map(|&idx| orig_dims[idx]).collect();
-                    let reordered_strides: Vec<isize> =
-                        reordering.iter().map(|&idx| view.strides[idx]).collect();
-                    let reordered_dim_names: Vec<String> = reordering
-                        .iter()
-                        .map(|&idx| orig_dim_names[idx].clone())
-                        .collect();
-
-                    let reordered_view = ArrayView {
-                        dims: reordered_dims,
-                        strides: reordered_strides,
-                        offset: 0,
-                        sparse: Vec::new(),
-                        dim_names: reordered_dim_names,
-                    };
-
-                    return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
+                    // Create a contiguous view with names and apply reordering
+                    let view = ArrayView::contiguous_with_names(orig_dims, orig_dim_names);
+                    return Ok(Expr::StaticSubscript(
+                        *off,
+                        view.reorder_dimensions(&reordering),
+                        loc,
+                    ));
                 }
             }
             Expr::StaticSubscript(off, view, _) => {
                 // Apply reordering to existing view
-                let reordered_dims: Vec<usize> =
-                    reordering.iter().map(|&idx| view.dims[idx]).collect();
-                let reordered_strides: Vec<isize> =
-                    reordering.iter().map(|&idx| view.strides[idx]).collect();
-                let reordered_dim_names: Vec<String> = reordering
-                    .iter()
-                    .map(|&idx| view.dim_names[idx].clone())
-                    .collect();
-
-                let reordered_view = ArrayView {
-                    dims: reordered_dims,
-                    strides: reordered_strides,
-                    offset: view.offset,
-                    sparse: view.sparse.clone(),
-                    dim_names: reordered_dim_names,
-                };
-
-                return Ok(Expr::StaticSubscript(*off, reordered_view, loc));
+                return Ok(Expr::StaticSubscript(
+                    *off,
+                    view.reorder_dimensions(&reordering),
+                    loc,
+                ));
             }
             _ => {}
         }
@@ -2097,7 +2069,7 @@ impl Context<'_> {
                                     let orig_strides =
                                         ArrayView::contiguous(orig_dims.clone()).strides;
 
-                                    // Create a view for the full array
+                                    // Create a view for the full array and transpose it
                                     let view = ArrayView {
                                         dims: orig_dims.clone(),
                                         strides: orig_strides,
@@ -2106,24 +2078,9 @@ impl Context<'_> {
                                         dim_names: orig_dim_names,
                                     };
 
-                                    // Now transpose it
-                                    let mut transposed_dims = view.dims.clone();
-                                    transposed_dims.reverse();
-                                    let mut transposed_strides = view.strides.clone();
-                                    transposed_strides.reverse();
-                                    let mut transposed_dim_names = view.dim_names.clone();
-                                    transposed_dim_names.reverse();
-                                    let transposed_view = ArrayView {
-                                        dims: transposed_dims,
-                                        strides: transposed_strides,
-                                        offset: view.offset,
-                                        sparse: view.sparse.clone(),
-                                        dim_names: transposed_dim_names,
-                                    };
-
                                     return Ok(Expr::StaticSubscript(
                                         off,
-                                        transposed_view,
+                                        view.transpose(),
                                         *var_loc,
                                     ));
                                 }
@@ -2140,23 +2097,7 @@ impl Context<'_> {
                             // Transpose reverses the dimensions of an array
                             match lowered {
                                 Expr::StaticSubscript(off, view, expr_loc) => {
-                                    // Transpose a view by reversing its dimensions and strides
-                                    let mut transposed_dims = view.dims.clone();
-                                    transposed_dims.reverse();
-                                    let mut transposed_strides = view.strides.clone();
-                                    transposed_strides.reverse();
-                                    let mut transposed_dim_names = view.dim_names.clone();
-                                    transposed_dim_names.reverse();
-
-                                    let transposed_view = ArrayView {
-                                        dims: transposed_dims,
-                                        strides: transposed_strides,
-                                        offset: view.offset,
-                                        sparse: view.sparse.clone(),
-                                        dim_names: transposed_dim_names,
-                                    };
-
-                                    Ok(Expr::StaticSubscript(off, transposed_view, expr_loc))
+                                    Ok(Expr::StaticSubscript(off, view.transpose(), expr_loc))
                                 }
                                 _ => {
                                     // For other expressions, wrap in a transpose operation

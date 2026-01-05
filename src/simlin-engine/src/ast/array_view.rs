@@ -130,6 +130,64 @@ impl ArrayView {
             dim_names: self.dim_names.clone(),
         })
     }
+
+    /// Create a transposed view by reversing dimensions and strides.
+    /// Transpose reverses the order of dimensions - e.g., a 2x3 array becomes 3x2.
+    pub fn transpose(&self) -> ArrayView {
+        let mut dims = self.dims.clone();
+        dims.reverse();
+        let mut strides = self.strides.clone();
+        strides.reverse();
+        let mut dim_names = self.dim_names.clone();
+        dim_names.reverse();
+
+        ArrayView {
+            dims,
+            strides,
+            offset: self.offset,
+            sparse: self.sparse.clone(),
+            dim_names,
+        }
+    }
+
+    /// Create a view with reordered dimensions.
+    /// The reordering slice maps output dimension indices to input dimension indices.
+    /// For example, [1, 0] swaps the first two dimensions (equivalent to transpose for 2D).
+    /// [1, 2, 0] means output dim 0 = input dim 1, output dim 1 = input dim 2, output dim 2 = input dim 0.
+    ///
+    /// # Panics
+    /// Panics in debug builds if:
+    /// - `reordering.len() != self.dims.len()`
+    /// - Any index in `reordering` is out of bounds
+    pub fn reorder_dimensions(&self, reordering: &[usize]) -> ArrayView {
+        debug_assert_eq!(
+            reordering.len(),
+            self.dims.len(),
+            "reordering length ({}) must match number of dimensions ({})",
+            reordering.len(),
+            self.dims.len()
+        );
+        debug_assert!(
+            reordering.iter().all(|&idx| idx < self.dims.len()),
+            "reordering indices must be valid dimension indices (< {})",
+            self.dims.len()
+        );
+
+        let dims: Vec<usize> = reordering.iter().map(|&idx| self.dims[idx]).collect();
+        let strides: Vec<isize> = reordering.iter().map(|&idx| self.strides[idx]).collect();
+        let dim_names: Vec<String> = reordering
+            .iter()
+            .map(|&idx| self.dim_names[idx].clone())
+            .collect();
+
+        ArrayView {
+            dims,
+            strides,
+            offset: self.offset,
+            sparse: self.sparse.clone(),
+            dim_names,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -215,5 +273,95 @@ mod tests {
             parent_offsets: vec![0, 2],
         });
         assert!(!view.is_contiguous());
+    }
+
+    #[test]
+    fn test_transpose_2d() {
+        let view =
+            ArrayView::contiguous_with_names(vec![2, 3], vec!["A".to_string(), "B".to_string()]);
+        let transposed = view.transpose();
+
+        assert_eq!(transposed.dims, vec![3, 2]);
+        assert_eq!(transposed.strides, vec![1, 3]); // Reversed from [3, 1]
+        assert_eq!(transposed.dim_names, vec!["B", "A"]);
+        assert_eq!(transposed.offset, 0);
+    }
+
+    #[test]
+    fn test_transpose_3d() {
+        let view = ArrayView::contiguous_with_names(
+            vec![2, 3, 4],
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+        let transposed = view.transpose();
+
+        assert_eq!(transposed.dims, vec![4, 3, 2]);
+        assert_eq!(transposed.strides, vec![1, 4, 12]); // Reversed from [12, 4, 1]
+        assert_eq!(transposed.dim_names, vec!["C", "B", "A"]);
+    }
+
+    #[test]
+    fn test_transpose_preserves_offset_and_sparse() {
+        let mut view = ArrayView::contiguous(vec![3, 4]);
+        view.offset = 5;
+        view.sparse.push(SparseInfo {
+            dim_index: 0,
+            parent_offsets: vec![0, 2],
+        });
+
+        let transposed = view.transpose();
+
+        assert_eq!(transposed.offset, 5);
+        assert_eq!(transposed.sparse.len(), 1);
+    }
+
+    #[test]
+    fn test_reorder_dimensions_swap() {
+        let view =
+            ArrayView::contiguous_with_names(vec![2, 3], vec!["A".to_string(), "B".to_string()]);
+        // Swap dimensions: [1, 0] is equivalent to transpose for 2D
+        let reordered = view.reorder_dimensions(&[1, 0]);
+
+        assert_eq!(reordered.dims, vec![3, 2]);
+        assert_eq!(reordered.strides, vec![1, 3]);
+        assert_eq!(reordered.dim_names, vec!["B", "A"]);
+    }
+
+    #[test]
+    fn test_reorder_dimensions_3d() {
+        let view = ArrayView::contiguous_with_names(
+            vec![2, 3, 4],
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+        // Rotate dimensions: [1, 2, 0] moves first dim to end
+        let reordered = view.reorder_dimensions(&[1, 2, 0]);
+
+        assert_eq!(reordered.dims, vec![3, 4, 2]);
+        assert_eq!(reordered.strides, vec![4, 1, 12]);
+        assert_eq!(reordered.dim_names, vec!["B", "C", "A"]);
+    }
+
+    #[test]
+    fn test_reorder_dimensions_identity() {
+        let view = ArrayView::contiguous_with_names(
+            vec![2, 3, 4],
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        );
+        // Identity reordering: [0, 1, 2]
+        let reordered = view.reorder_dimensions(&[0, 1, 2]);
+
+        assert_eq!(reordered.dims, view.dims);
+        assert_eq!(reordered.strides, view.strides);
+        assert_eq!(reordered.dim_names, view.dim_names);
+    }
+
+    #[test]
+    fn test_reorder_dimensions_preserves_offset() {
+        let mut view = ArrayView::contiguous(vec![2, 3]);
+        view.offset = 10;
+
+        let reordered = view.reorder_dimensions(&[1, 0]);
+
+        assert_eq!(reordered.offset, 10);
     }
 }
