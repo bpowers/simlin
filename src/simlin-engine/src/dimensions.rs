@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use smallvec::SmallVec;
+
 use crate::common::{CanonicalDimensionName, CanonicalElementName};
 use crate::datamodel;
 
@@ -446,6 +448,105 @@ impl DimensionVec {
 pub struct StridedDimension {
     pub dimension: Dimension,
     pub stride: isize,
+}
+
+// ============================================================================
+// Dimension Matching Algorithm
+// ============================================================================
+
+/// Match source dimensions to target dimensions using a two-pass algorithm.
+///
+/// This algorithm is used for broadcasting array operations where a source array
+/// may have fewer dimensions than the target iteration space. It determines how
+/// to map source dimension indices to target dimension indices.
+///
+/// # Algorithm
+///
+/// **Pass 1: Exact ID match**
+/// Source dimension ID must match target dimension ID exactly. This handles
+/// named dimensions and ensures semantic correctness.
+///
+/// **Pass 2: Size-based fallback for indexed dimensions**
+/// For unmatched source dimensions that are indexed (not named), find the first
+/// unused target dimension with the same size that is also indexed.
+///
+/// The size-based fallback only applies when BOTH dimensions are indexed.
+/// Named dimensions must match by ID because their elements have semantic meaning.
+/// For example, Cities=[Boston,Seattle] and Products=[Widgets,Gadgets] should not
+/// match just because both have size 2.
+///
+/// # Parameters
+///
+/// - `source_ids`: Dimension IDs for the source array
+/// - `source_sizes`: Size of each source dimension
+/// - `source_is_indexed`: Whether each source dimension is indexed (vs named)
+/// - `target_ids`: Dimension IDs for the target iteration space
+/// - `target_sizes`: Size of each target dimension
+/// - `target_is_indexed`: Whether each target dimension is indexed (vs named)
+///
+/// # Returns
+///
+/// A vector where `result[src_idx] = Some(target_idx)` if source dimension
+/// `src_idx` matches target dimension `target_idx`, or `None` if no match found.
+///
+/// # Note
+///
+/// This algorithm is shared between the VM (for runtime broadcasting in
+/// `LoadIterViewTop`) and the compiler (for implicit subscript resolution).
+/// If you modify this logic, ensure both usages remain correct.
+pub fn match_dimensions_two_pass(
+    source_ids: &[u16],
+    source_sizes: &[u16],
+    source_is_indexed: &[bool],
+    target_ids: &[u16],
+    target_sizes: &[u16],
+    target_is_indexed: &[bool],
+) -> SmallVec<[Option<usize>; 4]> {
+    debug_assert_eq!(source_ids.len(), source_sizes.len());
+    debug_assert_eq!(source_ids.len(), source_is_indexed.len());
+    debug_assert_eq!(target_ids.len(), target_sizes.len());
+    debug_assert_eq!(target_ids.len(), target_is_indexed.len());
+
+    let mut source_to_target: SmallVec<[Option<usize>; 4]> =
+        smallvec::smallvec![None; source_ids.len()];
+    let mut used_target_positions: SmallVec<[bool; 4]> =
+        smallvec::smallvec![false; target_ids.len()];
+
+    // Pass 1: Exact dim_id matches
+    for (src_pos, src_id) in source_ids.iter().enumerate() {
+        if let Some(target_pos) = target_ids.iter().position(|&id| id == *src_id) {
+            source_to_target[src_pos] = Some(target_pos);
+            used_target_positions[target_pos] = true;
+        }
+    }
+
+    // Pass 2: Size-based fallback for unmatched indexed dimensions
+    for src_pos in 0..source_ids.len() {
+        if source_to_target[src_pos].is_some() {
+            continue; // Already matched in pass 1
+        }
+
+        // Only indexed dimensions can use size-based matching
+        if !source_is_indexed[src_pos] {
+            continue;
+        }
+
+        let src_size = source_sizes[src_pos];
+
+        // Find first unused indexed target dim of same size
+        for target_pos in 0..target_ids.len() {
+            if !used_target_positions[target_pos]
+                && target_sizes[target_pos] == src_size
+                && target_is_indexed[target_pos]
+            {
+                source_to_target[src_pos] = Some(target_pos);
+                used_target_positions[target_pos] = true;
+                break;
+            }
+        }
+    }
+
+    source_to_target
 }
 
 #[cfg(test)]

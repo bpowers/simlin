@@ -838,8 +838,9 @@ impl Context<'_> {
             // Seattle] and Products=[Widgets,Gadgets] shouldn't match just because both
             // have size 2 - that would be semantically incorrect.
             //
-            // NOTE: This algorithm mirrors the dimension matching in vm.rs LoadIterViewTop.
-            // If you modify this logic, update the VM implementation as well.
+            // NOTE: The two-pass (name → size) matching logic is shared with the VM via
+            // dimensions::match_dimensions_two_pass. This compiler version adds a mapping
+            // pass between name and size matching.
             let size_match_idx = if let Dimension::Indexed(_, dim_size) = dim {
                 active_dims.iter().enumerate().find_map(|(i, candidate)| {
                     if !used[i]
@@ -1477,6 +1478,31 @@ pub struct Pass1Result {
 }
 
 impl Context<'_> {
+    /// Create a context with transposed active dimensions for transpose operations.
+    /// Used when processing expressions under a Transpose operator in A2A context.
+    fn with_transposed_active_context(&self) -> Self {
+        let mut ctx = self.clone();
+        if let Some(ref active_dims) = ctx.active_dimension {
+            let mut reversed = active_dims.clone();
+            reversed.reverse();
+            ctx.active_dimension = Some(reversed);
+        }
+        if let Some(ref active_subs) = ctx.active_subscript {
+            let mut reversed = active_subs.clone();
+            reversed.reverse();
+            ctx.active_subscript = Some(reversed);
+        }
+        ctx
+    }
+
+    /// Create a context that preserves wildcards for array iteration.
+    /// Used for array reduction builtins (SUM, MAX, MIN, MEAN, STDDEV, SIZE).
+    fn with_preserved_wildcards(&self) -> Self {
+        let mut ctx = self.clone();
+        ctx.preserve_wildcards_for_iteration = true;
+        ctx
+    }
+
     /// Lower an Expr3 to compiler's Expr representation.
     /// Handles all Expr3 variants directly, including pass-1 specific variants
     /// (TempArray, AssignTemp, etc.) and common expression types.
@@ -2055,21 +2081,10 @@ impl Context<'_> {
                             {
                                 if self.active_dimension.is_some() {
                                     // We're in an A2A context - need to handle bare array transpose specially
-                                    // We need to reverse the active dimensions before processing the variable
-                                    let mut ctx = self.clone();
-                                    if let Some(ref active_dims) = ctx.active_dimension {
-                                        let mut reversed_dims = active_dims.clone();
-                                        reversed_dims.reverse();
-                                        ctx.active_dimension = Some(reversed_dims);
-                                    }
-                                    if let Some(ref active_subs) = ctx.active_subscript {
-                                        let mut reversed_subs = active_subs.clone();
-                                        reversed_subs.reverse();
-                                        ctx.active_subscript = Some(reversed_subs);
-                                    }
-                                    // Process the variable with reversed dimensions
-                                    let result = ctx.lower_from_expr3(inner)?;
-                                    // The result already has the correct transposed access pattern
+                                    // Process the variable with reversed active dimensions
+                                    let result = self
+                                        .with_transposed_active_context()
+                                        .lower_from_expr3(inner)?;
                                     return Ok(result);
                                 } else {
                                     // Not in A2A context - create a wildcard subscript to get the full array
@@ -2118,18 +2133,8 @@ impl Context<'_> {
                         // Default transpose handling
                         if self.active_dimension.is_some() {
                             // In A2A context, transpose swaps the active indices
-                            let mut ctx = self.clone();
-                            if let Some(ref active_dims) = ctx.active_dimension {
-                                let mut reversed_dims = active_dims.clone();
-                                reversed_dims.reverse();
-                                ctx.active_dimension = Some(reversed_dims);
-                            }
-                            if let Some(ref active_subs) = ctx.active_subscript {
-                                let mut reversed_subs = active_subs.clone();
-                                reversed_subs.reverse();
-                                ctx.active_subscript = Some(reversed_subs);
-                            }
-                            ctx.lower_from_expr3(inner)
+                            self.with_transposed_active_context()
+                                .lower_from_expr3(inner)
                         } else {
                             let lowered = self.lower_from_expr3(inner)?;
                             // Transpose reverses the dimensions of an array
@@ -2305,9 +2310,8 @@ impl Context<'_> {
             BFn::Max(a, b) => {
                 if b.is_none() {
                     // Single-arg array Max: preserve wildcards for iteration
-                    let mut ctx = self.clone();
-                    ctx.preserve_wildcards_for_iteration = true;
-                    BuiltinFn::Max(Box::new(ctx.lower_from_expr3(a)?), None)
+                    let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
+                    BuiltinFn::Max(Box::new(a), None)
                 } else {
                     // Two-arg scalar Max
                     let a = Box::new(self.lower_from_expr3(a)?);
@@ -2317,8 +2321,7 @@ impl Context<'_> {
             }
             BFn::Mean(args) => {
                 // Mean can be used with arrays - preserve wildcards
-                let mut ctx = self.clone();
-                ctx.preserve_wildcards_for_iteration = true;
+                let ctx = self.with_preserved_wildcards();
                 let args = args
                     .iter()
                     .map(|arg| ctx.lower_from_expr3(arg))
@@ -2328,9 +2331,8 @@ impl Context<'_> {
             BFn::Min(a, b) => {
                 if b.is_none() {
                     // Single-arg array Min: preserve wildcards for iteration
-                    let mut ctx = self.clone();
-                    ctx.preserve_wildcards_for_iteration = true;
-                    BuiltinFn::Min(Box::new(ctx.lower_from_expr3(a)?), None)
+                    let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
+                    BuiltinFn::Min(Box::new(a), None)
                 } else {
                     // Two-arg scalar Min
                     let a = Box::new(self.lower_from_expr3(a)?);
@@ -2388,20 +2390,17 @@ impl Context<'_> {
                 return sim_err!(TodoArrayBuiltin, self.ident.to_string());
             }
             BFn::Size(a) => {
-                // Set flag to preserve wildcards for array iteration
-                let mut ctx = self.clone();
-                ctx.preserve_wildcards_for_iteration = true;
-                BuiltinFn::Size(Box::new(ctx.lower_from_expr3(a)?))
+                // Preserve wildcards for array iteration
+                let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
+                BuiltinFn::Size(Box::new(a))
             }
             BFn::Stddev(a) => {
-                let mut ctx = self.clone();
-                ctx.preserve_wildcards_for_iteration = true;
-                BuiltinFn::Stddev(Box::new(ctx.lower_from_expr3(a)?))
+                let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
+                BuiltinFn::Stddev(Box::new(a))
             }
             BFn::Sum(a) => {
-                let mut ctx = self.clone();
-                ctx.preserve_wildcards_for_iteration = true;
-                BuiltinFn::Sum(Box::new(ctx.lower_from_expr3(a)?))
+                let a = self.with_preserved_wildcards().lower_from_expr3(a)?;
+                BuiltinFn::Sum(Box::new(a))
             }
         })
     }
