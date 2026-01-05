@@ -577,7 +577,7 @@ impl Vm {
 
         // Existing state
         let mut condition = false;
-        let mut subscript_index: Vec<(u16, u16)> = vec![];
+        let mut subscript_index: SmallVec<[(u16, u16); 4]> = SmallVec::new();
         let mut subscript_index_valid = true;
 
         // Array support: view stack, iteration stack, broadcast stack (local to this eval)
