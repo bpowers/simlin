@@ -3289,3 +3289,44 @@ mod cross_dimension_reduction_tests {
         project.assert_vm_result("result", &[344.0, 344.0]);
     }
 }
+
+#[cfg(test)]
+mod compiler_limit_tests {
+    use crate::test_common::TestProject;
+
+    /// Verify that a small SUM with multiple array references works correctly
+    /// and goes through the expected code path.
+    #[test]
+    fn sum_with_multiple_views_works() {
+        let project = TestProject::new("sum_multi_views")
+            .indexed_dimension("Idx", 3)
+            .array_aux("a[Idx]", "1")
+            .array_aux("b[Idx]", "2")
+            .array_aux("c[Idx]", "3")
+            .scalar_aux("result", "SUM(a[*] + b[*] + c[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // SUM((1+2+3) + (1+2+3) + (1+2+3)) = SUM(6,6,6) = 18
+        project.assert_vm_result("result", &[18.0, 18.0]);
+    }
+
+    /// Test that reductions with multiple array sources work correctly.
+    /// This exercises the iteration optimization that hoists view pushes before the loop.
+    #[test]
+    fn reduction_with_multiple_array_sources() {
+        let project = TestProject::new("multi_view_reduction")
+            .indexed_dimension("Idx", 3)
+            .array_aux("a[Idx]", "1")
+            .array_aux("b[Idx]", "2")
+            .array_aux("c[Idx]", "3")
+            .array_aux("d[Idx]", "4")
+            .array_aux("e[Idx]", "5")
+            .scalar_aux("result", "SUM(a[*] + b[*] + c[*] + d[*] + e[*])");
+
+        project.assert_compiles();
+        project.assert_sim_builds();
+        // SUM((1+2+3+4+5) * 3 elements) = SUM(15,15,15) = 45
+        project.assert_vm_result("result", &[45.0, 45.0]);
+    }
+}

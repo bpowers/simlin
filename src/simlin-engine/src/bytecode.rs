@@ -134,7 +134,7 @@ impl SubdimensionRelation {
 
 /// Sparse mapping for a single dimension in a RuntimeView.
 /// Used when iterating over non-contiguous elements.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RuntimeSparseMapping {
     /// Which dimension (0-indexed) in the view is sparse
     pub dim_index: u8,
@@ -706,6 +706,15 @@ pub(crate) enum Opcode {
     /// This allows loading from multiple different source arrays in a single iteration loop.
     LoadIterViewTop {},
 
+    /// Load element at current iteration position from view at stack offset.
+    /// Like LoadIterViewTop but accesses a specific view on the stack by offset.
+    /// offset=1 means top of stack, offset=2 means second from top, etc.
+    /// This allows views to be pushed before the loop and accessed inside without
+    /// repeated push/pop operations per iteration.
+    LoadIterViewAt {
+        offset: u8,
+    },
+
     /// Store top of arithmetic stack to current iteration position in dest temp.
     /// Pops value from arithmetic stack.
     StoreIterElement {},
@@ -790,7 +799,7 @@ pub struct ArrayDefinition {
 
 /// A static array view for compile-time known subscripts.
 /// Stored in ByteCodeContext and referenced by ViewId.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StaticArrayView {
     /// Base variable offset in curr[]
     pub base_off: u32,

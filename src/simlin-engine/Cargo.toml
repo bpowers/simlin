@@ -30,6 +30,11 @@ serde_json = "1"
 
 [dev-dependencies]
 rand = "0.9"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "array_ops"
+harness = false
 
 [build-dependencies]
 lalrpop = "0.22"
