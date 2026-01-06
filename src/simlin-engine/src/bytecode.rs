@@ -134,7 +134,7 @@ impl SubdimensionRelation {
 
 /// Sparse mapping for a single dimension in a RuntimeView.
 /// Used when iterating over non-contiguous elements.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RuntimeSparseMapping {
     /// Which dimension (0-indexed) in the view is sparse
     pub dim_index: u8,
@@ -799,7 +799,7 @@ pub struct ArrayDefinition {
 
 /// A static array view for compile-time known subscripts.
 /// Stored in ByteCodeContext and referenced by ViewId.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StaticArrayView {
     /// Base variable offset in curr[]
     pub base_off: u32,

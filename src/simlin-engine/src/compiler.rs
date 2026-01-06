@@ -4750,41 +4750,47 @@ impl<'module> Compiler<'module> {
     /// StaticSubscript and TempArray node, deduplicating identical views.
     fn collect_iter_source_views(&mut self, expr: &Expr) -> Vec<StaticArrayView> {
         let mut views = Vec::new();
-        self.collect_iter_source_views_impl(expr, &mut views);
+        let mut seen = std::collections::HashSet::new();
+        self.collect_iter_source_views_impl(expr, &mut views, &mut seen);
         views
     }
 
-    fn collect_iter_source_views_impl(&mut self, expr: &Expr, views: &mut Vec<StaticArrayView>) {
+    fn collect_iter_source_views_impl(
+        &mut self,
+        expr: &Expr,
+        views: &mut Vec<StaticArrayView>,
+        seen: &mut std::collections::HashSet<StaticArrayView>,
+    ) {
         match expr {
             Expr::StaticSubscript(off, view, _) => {
                 let static_view = self.array_view_to_static(*off, view);
-                // Deduplicate: only add if not already present
-                if !views.iter().any(|v| v == &static_view) {
+                // O(1) deduplication using HashSet
+                if seen.insert(static_view.clone()) {
                     views.push(static_view);
                 }
             }
             Expr::TempArray(id, view, _) => {
                 let static_view = self.array_view_to_static_temp(*id, view);
-                if !views.iter().any(|v| v == &static_view) {
+                if seen.insert(static_view.clone()) {
                     views.push(static_view);
                 }
             }
             // Recurse into compound expressions
             Expr::Op2(_, lhs, rhs, _) => {
-                self.collect_iter_source_views_impl(lhs, views);
-                self.collect_iter_source_views_impl(rhs, views);
+                self.collect_iter_source_views_impl(lhs, views, seen);
+                self.collect_iter_source_views_impl(rhs, views, seen);
             }
             Expr::Op1(_, inner, _) => {
-                self.collect_iter_source_views_impl(inner, views);
+                self.collect_iter_source_views_impl(inner, views, seen);
             }
             Expr::If(cond, then_expr, else_expr, _) => {
-                self.collect_iter_source_views_impl(cond, views);
-                self.collect_iter_source_views_impl(then_expr, views);
-                self.collect_iter_source_views_impl(else_expr, views);
+                self.collect_iter_source_views_impl(cond, views, seen);
+                self.collect_iter_source_views_impl(then_expr, views, seen);
+                self.collect_iter_source_views_impl(else_expr, views, seen);
             }
             Expr::App(builtin, _) => {
                 // Recurse into all arguments of the builtin function
-                self.collect_builtin_views(builtin, views);
+                self.collect_builtin_views(builtin, views, seen);
             }
             // Leaf expressions that don't contain views
             Expr::Const(_, _)
@@ -4801,50 +4807,55 @@ impl<'module> Compiler<'module> {
         }
     }
 
-    fn collect_builtin_views(&mut self, builtin: &BuiltinFn, views: &mut Vec<StaticArrayView>) {
+    fn collect_builtin_views(
+        &mut self,
+        builtin: &BuiltinFn,
+        views: &mut Vec<StaticArrayView>,
+        seen: &mut std::collections::HashSet<StaticArrayView>,
+    ) {
         use crate::builtins::BuiltinFn::*;
         match builtin {
             Lookup(a, b, _) | LookupForward(a, b, _) | LookupBackward(a, b, _) => {
-                self.collect_iter_source_views_impl(a, views);
-                self.collect_iter_source_views_impl(b, views);
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
             }
             Abs(a) | Arccos(a) | Arcsin(a) | Arctan(a) | Cos(a) | Exp(a) | Int(a) | Ln(a)
             | Log10(a) | Sign(a) | Sin(a) | Sqrt(a) | Tan(a) => {
-                self.collect_iter_source_views_impl(a, views);
+                self.collect_iter_source_views_impl(a, views, seen);
             }
             Max(a, opt_b) | Min(a, opt_b) => {
-                self.collect_iter_source_views_impl(a, views);
+                self.collect_iter_source_views_impl(a, views, seen);
                 if let Some(b) = opt_b {
-                    self.collect_iter_source_views_impl(b, views);
+                    self.collect_iter_source_views_impl(b, views, seen);
                 }
             }
             Mean(exprs) => {
                 for e in exprs {
-                    self.collect_iter_source_views_impl(e, views);
+                    self.collect_iter_source_views_impl(e, views, seen);
                 }
             }
             Pulse(a, b, opt_c) | Ramp(a, b, opt_c) | SafeDiv(a, b, opt_c) => {
-                self.collect_iter_source_views_impl(a, views);
-                self.collect_iter_source_views_impl(b, views);
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
                 if let Some(c) = opt_c {
-                    self.collect_iter_source_views_impl(c, views);
+                    self.collect_iter_source_views_impl(c, views, seen);
                 }
             }
             Step(a, b) => {
-                self.collect_iter_source_views_impl(a, views);
-                self.collect_iter_source_views_impl(b, views);
+                self.collect_iter_source_views_impl(a, views, seen);
+                self.collect_iter_source_views_impl(b, views, seen);
             }
             // Array builtins with single argument
             Sum(a) | Stddev(a) | Size(a) => {
-                self.collect_iter_source_views_impl(a, views);
+                self.collect_iter_source_views_impl(a, views, seen);
             }
             // Rank has a complex optional argument structure
             Rank(a, opt_args) => {
-                self.collect_iter_source_views_impl(a, views);
+                self.collect_iter_source_views_impl(a, views, seen);
                 if let Some((b, opt_c)) = opt_args {
-                    self.collect_iter_source_views_impl(b, views);
+                    self.collect_iter_source_views_impl(b, views, seen);
                     if let Some(c) = opt_c {
-                        self.collect_iter_source_views_impl(c, views);
+                        self.collect_iter_source_views_impl(c, views, seen);
                     }
                 }
             }
