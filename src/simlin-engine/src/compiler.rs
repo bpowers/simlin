@@ -4666,6 +4666,17 @@ impl<'module> Compiler<'module> {
                 let source_views = self.collect_iter_source_views(rhs);
                 let n_source_views = source_views.len();
 
+                // Guard: LoadIterViewAt uses u8 for stack offset, limiting to 255 source views
+                if n_source_views > u8::MAX as usize {
+                    return sim_err!(
+                        Generic,
+                        format!(
+                            "Expression references {} distinct array views, exceeding the maximum of 255",
+                            n_source_views
+                        )
+                    );
+                }
+
                 // 2. Push the OUTPUT temp's view for iteration size
                 let output_static_view = self.array_view_to_static_temp(*id, view);
                 let output_view_id = self.add_static_view(output_static_view);
