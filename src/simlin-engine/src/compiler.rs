@@ -4070,17 +4070,13 @@ impl<'module> Compiler<'module> {
                     // In iteration context with optimized view hoisting
                     let static_view = self.array_view_to_static(*off, view);
 
-                    if let Some(offset) = self.find_iter_view_offset(&static_view) {
-                        // View was pre-pushed - use LoadIterViewAt with the offset
-                        self.push(Opcode::LoadIterViewAt { offset });
-                    } else {
-                        // Fallback: view not in pre-pushed set (shouldn't happen normally)
-                        // This can occur if the expression has views that weren't collected
-                        let view_id = self.add_static_view(static_view);
-                        self.push(Opcode::PushStaticView { view_id });
-                        self.push(Opcode::LoadIterViewTop {});
-                        self.push(Opcode::PopView {});
-                    }
+                    let offset = self.find_iter_view_offset(&static_view).unwrap_or_else(|| {
+                        unreachable!(
+                            "StaticSubscript view not found in pre-pushed set - \
+                             collect_iter_source_views_impl and walk_expr should visit same nodes"
+                        )
+                    });
+                    self.push(Opcode::LoadIterViewAt { offset });
                     Some(())
                 } else if view.dims.iter().product::<usize>() == 1 {
                     // Scalar result - compute final offset and load
@@ -4101,16 +4097,13 @@ impl<'module> Compiler<'module> {
                     // In iteration context with optimized view hoisting
                     let static_view = self.array_view_to_static_temp(*id, view);
 
-                    if let Some(offset) = self.find_iter_view_offset(&static_view) {
-                        // View was pre-pushed - use LoadIterViewAt with the offset
-                        self.push(Opcode::LoadIterViewAt { offset });
-                    } else {
-                        // Fallback: view not in pre-pushed set (shouldn't happen normally)
-                        let view_id = self.add_static_view(static_view);
-                        self.push(Opcode::PushStaticView { view_id });
-                        self.push(Opcode::LoadIterViewTop {});
-                        self.push(Opcode::PopView {});
-                    }
+                    let offset = self.find_iter_view_offset(&static_view).unwrap_or_else(|| {
+                        unreachable!(
+                            "TempArray view not found in pre-pushed set - \
+                             collect_iter_source_views_impl and walk_expr should visit same nodes"
+                        )
+                    });
+                    self.push(Opcode::LoadIterViewAt { offset });
                     Some(())
                 } else {
                     // Outside iteration - push temp view for subsequent operations (like SUM)
