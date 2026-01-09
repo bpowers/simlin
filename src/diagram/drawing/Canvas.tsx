@@ -1150,9 +1150,12 @@ export const Canvas = styled(
         deltaX *= 16;
         deltaY *= 16;
       } else if (e.deltaMode === 2) {
-        // Pages - multiply by viewport size
-        deltaX *= viewBox.width;
-        deltaY *= viewBox.height;
+        // Pages - use actual viewport dimensions from DOM, not stored viewBox
+        // which may be stale during resize transitions
+        const viewportWidth = this.svgRef.current?.clientWidth ?? viewBox.width;
+        const viewportHeight = this.svgRef.current?.clientHeight ?? viewBox.height;
+        deltaX *= viewportWidth;
+        deltaY *= viewportHeight;
       }
 
       // Scale delta by zoom level (inverse because higher zoom = smaller view area)
@@ -1413,7 +1416,11 @@ export const Canvas = styled(
 
       // Check for pinch gesture (two touches)
       if (this.activePointers.size === 2 && e.pointerType === 'touch') {
-        // Start pinch mode
+        // Start pinch mode - clear any single-finger pan state to prevent
+        // simultaneous pan+pinch if the first finger's pointerId is still set
+        this.pointerId = undefined;
+        this.mouseDownPoint = undefined;
+
         const distance = this.getPinchDistance();
         const center = this.getPinchCenter();
         const centerCanvas = this.getCanvasPoint(center.x, center.y);
