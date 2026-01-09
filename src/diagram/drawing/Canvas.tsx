@@ -81,7 +81,9 @@ const VELOCITY_THRESHOLD = 50; // pixels/second - below this we stop
 
 // Wheel zoom constants
 const WHEEL_ZOOM_SPEED = 0.002; // For pinch gesture (ctrlKey wheel events)
-const MIN_ZOOM = 0.1;
+// MIN_ZOOM matches the 0.2 floor used in render() to avoid mismatch between
+// view state and actual rendering (which clamps zoom < 0.2 to 1.0)
+const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 5.0;
 
 // Tracked pointer for multi-touch pinch detection
@@ -118,7 +120,9 @@ interface CanvasState {
   isPinching: boolean;
   initialPinchDistance: number;
   initialPinchZoom: number;
-  pinchCenter: Point | undefined;
+  // Store the MODEL coordinates of the point under the initial pinch center.
+  // This is the fixed point that should stay under the user's fingers during zoom.
+  pinchModelPoint: Point | undefined;
 }
 
 export interface CanvasProps {
@@ -205,7 +209,7 @@ export const Canvas = styled(
         isPinching: false,
         initialPinchDistance: 0,
         initialPinchZoom: 1,
-        pinchCenter: undefined,
+        pinchModelPoint: undefined,
       };
     }
 
@@ -717,19 +721,17 @@ export const Canvas = styled(
 
       // Handle end of pinch gesture
       if (this.state.isPinching) {
-        // If we still have one finger down, we could transition back to pan mode
-        // but for simplicity, just end the gesture
+        // When exiting pinch mode, clear all gesture state for a clean restart.
+        // Continuing with a single finger after pinch leads to confusing UX.
         this.setState({
           isPinching: false,
           initialPinchDistance: 0,
           initialPinchZoom: 1,
-          pinchCenter: undefined,
+          pinchModelPoint: undefined,
         });
-        // If there are no more pointers, clear all state
-        if (this.activePointers.size === 0) {
-          this.pointerId = undefined;
-          this.mouseDownPoint = undefined;
-        }
+        this.activePointers.clear();
+        this.pointerId = undefined;
+        this.mouseDownPoint = undefined;
         return;
       }
 
@@ -932,6 +934,9 @@ export const Canvas = styled(
         window.cancelAnimationFrame(this.momentumAnimationId);
         this.momentumAnimationId = undefined;
       }
+      // Clear velocity tracking data
+      this.velocityTracker.positions = [];
+      this.activePointers.clear();
     }
 
     // Flutter-style friction simulation: calculates position at time t
@@ -983,6 +988,9 @@ export const Canvas = styled(
 
     // Start momentum animation after pan release
     startMomentumAnimation = () => {
+      // Cancel any existing momentum animation first (defensive)
+      this.stopMomentumAnimation();
+
       const velocity = this.calculateVelocity();
       const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
 
@@ -1321,7 +1329,7 @@ export const Canvas = styled(
 
     // Handle pinch-to-zoom gesture movement
     handlePinchMove = (): void => {
-      if (!this.state.isPinching || !this.state.pinchCenter) {
+      if (!this.state.isPinching || !this.state.pinchModelPoint) {
         return;
       }
 
@@ -1337,23 +1345,22 @@ export const Canvas = styled(
       // Clamp zoom level
       newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
 
-      // Get current pinch center (it may have moved)
+      // Get current pinch center in screen coordinates, then convert to canvas
+      // coordinates at the NEW zoom level
       const currentCenter = this.getPinchCenter();
       const currentCenterCanvas = this.getCanvasPointWithZoom(currentCenter.x, currentCenter.y, newZoom);
 
-      // Calculate the point that was under the initial pinch center in model coordinates
-      const viewBox = this.props.view.viewBox;
-      const initialCenter = this.state.pinchCenter;
-      const modelX = initialCenter.x - viewBox.x;
-      const modelY = initialCenter.y - viewBox.y;
-
-      // Calculate new offset to keep the pinch center point stable
+      // The pinchModelPoint is fixed in model space - it's the point that was
+      // under the user's fingers when the pinch started. We want that same
+      // model point to remain under the current screen center.
+      // newOffset = currentCenterCanvas - pinchModelPoint
+      const modelPoint = this.state.pinchModelPoint;
       const newOffset = {
-        x: currentCenterCanvas.x - modelX,
-        y: currentCenterCanvas.y - modelY,
+        x: currentCenterCanvas.x - modelPoint.x,
+        y: currentCenterCanvas.y - modelPoint.y,
       };
 
-      const newViewBox = viewBox.merge({
+      const newViewBox = this.props.view.viewBox.merge({
         x: newOffset.x,
         y: newOffset.y,
       });
@@ -1410,12 +1417,21 @@ export const Canvas = styled(
         const distance = this.getPinchDistance();
         const center = this.getPinchCenter();
         const centerCanvas = this.getCanvasPoint(center.x, center.y);
+        const viewBox = this.props.view.viewBox;
+
+        // Calculate the MODEL point under the pinch center. This is the fixed
+        // point in model space that should remain under the user's fingers
+        // throughout the pinch gesture.
+        const pinchModelPoint = {
+          x: centerCanvas.x - viewBox.x,
+          y: centerCanvas.y - viewBox.y,
+        };
 
         this.setState({
           isPinching: true,
           initialPinchDistance: distance,
           initialPinchZoom: this.props.view.zoom,
-          pinchCenter: centerCanvas,
+          pinchModelPoint,
           isMovingCanvas: false,
           isDragSelecting: false,
         });
