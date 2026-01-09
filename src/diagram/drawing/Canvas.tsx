@@ -174,7 +174,8 @@ export const Canvas = styled(
     computeBounds = false;
 
     // Multi-touch tracking for pinch gestures
-    activePointers: Map<number, TrackedPointer> = new Map();
+    // Note: use globalThis.Map to get native Map (not Immutable.Map from imports)
+    activePointers = new (globalThis.Map)<number, TrackedPointer>();
 
     // Momentum/inertia animation
     velocityTracker: VelocityTracker = { positions: [] };
@@ -934,6 +935,10 @@ export const Canvas = styled(
       // Clear velocity tracking and pointer data
       this.velocityTracker.positions = [];
       this.activePointers.clear();
+      // Clear single-pointer gesture state
+      this.pointerId = undefined;
+      this.mouseDownPoint = undefined;
+      this.selectionCenterOffset = undefined;
     }
 
     // Flutter-style friction simulation: calculates position at time t
@@ -1445,6 +1450,8 @@ export const Canvas = styled(
           pinchModelPoint,
           isMovingCanvas: false,
           isDragSelecting: false,
+          // Clear any canvas offset to prevent momentum from starting when exiting pinch
+          movingCanvasOffset: undefined,
         });
         return;
       }
