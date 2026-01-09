@@ -929,12 +929,9 @@ export const Canvas = styled(
         this.svgObserver.disconnect();
         this.svgObserver = undefined;
       }
-      // Cancel any running momentum animation
-      if (this.momentumAnimationId !== undefined) {
-        window.cancelAnimationFrame(this.momentumAnimationId);
-        this.momentumAnimationId = undefined;
-      }
-      // Clear velocity tracking data
+      // Cancel any running momentum animation and clear all momentum state
+      this.stopMomentumAnimation();
+      // Clear velocity tracking and pointer data
       this.velocityTracker.positions = [];
       this.activePointers.clear();
     }
@@ -994,8 +991,8 @@ export const Canvas = styled(
       const velocity = this.calculateVelocity();
       const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
 
-      // Don't start animation if velocity is too low
-      if (speed < VELOCITY_THRESHOLD) {
+      // Don't start animation if velocity is at or below threshold
+      if (speed <= VELOCITY_THRESHOLD) {
         return;
       }
 
@@ -1069,8 +1066,12 @@ export const Canvas = styled(
       this.velocityTracker.positions.push({ x, y, timestamp: now });
 
       // Keep only last 200ms of positions to avoid memory bloat
+      // Only reallocate array if there's actually something to remove
       const cutoff = now - 200;
-      this.velocityTracker.positions = this.velocityTracker.positions.filter((p) => p.timestamp > cutoff);
+      const positions = this.velocityTracker.positions;
+      if (positions.length > 0 && positions[0].timestamp <= cutoff) {
+        this.velocityTracker.positions = positions.filter((p) => p.timestamp > cutoff);
+      }
     };
 
     // Handle wheel events for scroll pan and pinch-to-zoom
@@ -1416,10 +1417,13 @@ export const Canvas = styled(
 
       // Check for pinch gesture (two touches)
       if (this.activePointers.size === 2 && e.pointerType === 'touch') {
-        // Start pinch mode - clear any single-finger pan state to prevent
-        // simultaneous pan+pinch if the first finger's pointerId is still set
+        // Start pinch mode - clear all single-finger gesture state to prevent
+        // simultaneous pan+pinch or drag+pinch if user adds second finger mid-gesture
         this.pointerId = undefined;
         this.mouseDownPoint = undefined;
+        this.selectionCenterOffset = undefined;
+        // Reset velocity tracker since pinch doesn't use momentum
+        this.velocityTracker.positions = [];
 
         const distance = this.getPinchDistance();
         const center = this.getPinchCenter();
