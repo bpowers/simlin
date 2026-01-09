@@ -14,7 +14,7 @@ import {
   updateProfile,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
-} from 'firebase/auth';
+} from '@firebase/auth';
 import clsx from 'clsx';
 import AppleIcon from '@mui/icons-material/Apple';
 import EmailIcon from '@mui/icons-material/Email';
