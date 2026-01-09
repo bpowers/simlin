@@ -73,6 +73,30 @@ function radToDeg(r: number): number {
 
 const ZMax = 6;
 
+// Flutter-style friction simulation constants
+// These values match Flutter's ClampingScrollSimulation for iOS-like feel
+const FRICTION_COEFFICIENT = 0.135;
+const FRICTION_LOG = Math.log(FRICTION_COEFFICIENT); // ≈ -2.002
+const VELOCITY_THRESHOLD = 50; // pixels/second - below this we stop
+
+// Wheel zoom constants
+const WHEEL_ZOOM_SPEED = 0.002; // For pinch gesture (ctrlKey wheel events)
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 5.0;
+
+// Tracked pointer for multi-touch pinch detection
+interface TrackedPointer {
+  id: number;
+  x: number;
+  y: number;
+  timestamp: number;
+}
+
+// Velocity tracking for momentum
+interface VelocityTracker {
+  positions: Array<{ x: number; y: number; timestamp: number }>;
+}
+
 interface CanvasState {
   isMovingCanvas: boolean;
   isDragSelecting: boolean;
@@ -90,6 +114,11 @@ interface CanvasState {
   svgSize: Readonly<{ width: number; height: number }> | undefined;
   inCreation: ViewElement | undefined;
   inCreationCloud: CloudViewElement | undefined;
+  // Multi-touch pinch state
+  isPinching: boolean;
+  initialPinchDistance: number;
+  initialPinchZoom: number;
+  pinchCenter: Point | undefined;
 }
 
 export interface CanvasProps {
@@ -140,6 +169,16 @@ export const Canvas = styled(
     selectionUpdates = Map<UID, ViewElement>();
     computeBounds = false;
 
+    // Multi-touch tracking for pinch gestures
+    activePointers: Map<number, TrackedPointer> = new Map();
+
+    // Momentum/inertia animation
+    velocityTracker: VelocityTracker = { positions: [] };
+    momentumAnimationId: number | undefined;
+    momentumStartTime: number | undefined;
+    momentumInitialVelocity: Point | undefined;
+    momentumStartOffset: Point | undefined;
+
     constructor(props: CanvasProps) {
       super(props);
 
@@ -162,6 +201,11 @@ export const Canvas = styled(
         svgSize: undefined,
         inCreation: undefined,
         inCreationCloud: undefined,
+        // Multi-touch pinch state
+        isPinching: false,
+        initialPinchDistance: 0,
+        initialPinchZoom: 1,
+        pinchCenter: undefined,
       };
     }
 
@@ -664,11 +708,34 @@ export const Canvas = styled(
       if (this.props.embedded) {
         return;
       }
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Remove this pointer from tracking
+      this.activePointers.delete(e.pointerId);
+
+      // Handle end of pinch gesture
+      if (this.state.isPinching) {
+        // If we still have one finger down, we could transition back to pan mode
+        // but for simplicity, just end the gesture
+        this.setState({
+          isPinching: false,
+          initialPinchDistance: 0,
+          initialPinchZoom: 1,
+          pinchCenter: undefined,
+        });
+        // If there are no more pointers, clear all state
+        if (this.activePointers.size === 0) {
+          this.pointerId = undefined;
+          this.mouseDownPoint = undefined;
+        }
+        return;
+      }
+
       if (this.pointerId === undefined || this.pointerId !== e.pointerId) {
         return;
       }
-      e.preventDefault();
-      e.stopPropagation();
 
       this.props.onShowVariableDetails();
 
@@ -767,6 +834,9 @@ export const Canvas = styled(
 
         this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
         this.setState({ movingCanvasOffset: undefined });
+
+        // Start momentum animation for smooth deceleration
+        this.startMomentumAnimation();
       }
 
       if (!this.mouseDownPoint) {
@@ -857,6 +927,269 @@ export const Canvas = styled(
         this.svgObserver.disconnect();
         this.svgObserver = undefined;
       }
+      // Cancel any running momentum animation
+      if (this.momentumAnimationId !== undefined) {
+        window.cancelAnimationFrame(this.momentumAnimationId);
+        this.momentumAnimationId = undefined;
+      }
+    }
+
+    // Flutter-style friction simulation: calculates position at time t
+    // Based on Flutter's FrictionSimulation class
+    // x(t) = x0 + v0 * (friction^t - 1) / ln(friction)
+    frictionPosition(velocity: number, time: number): number {
+      return (velocity * (Math.pow(FRICTION_COEFFICIENT, time) - 1)) / FRICTION_LOG;
+    }
+
+    // Velocity at time t: v(t) = v0 * friction^t
+    frictionVelocity(velocity: number, time: number): number {
+      return velocity * Math.pow(FRICTION_COEFFICIENT, time);
+    }
+
+    // Calculate velocity from recent positions (simple linear regression over last few samples)
+    calculateVelocity(): Point {
+      const positions = this.velocityTracker.positions;
+      if (positions.length < 2) {
+        return { x: 0, y: 0 };
+      }
+
+      // Use last 100ms of samples for velocity calculation
+      const now = window.performance.now();
+      const recentPositions = positions.filter((p) => now - p.timestamp < 100);
+
+      if (recentPositions.length < 2) {
+        // Fall back to last two positions
+        const last = positions[positions.length - 1];
+        const prev = positions[positions.length - 2];
+        const dt = (last.timestamp - prev.timestamp) / 1000; // seconds
+        if (dt <= 0) return { x: 0, y: 0 };
+        return {
+          x: (last.x - prev.x) / dt,
+          y: (last.y - prev.y) / dt,
+        };
+      }
+
+      // Calculate average velocity over recent samples
+      const first = recentPositions[0];
+      const last = recentPositions[recentPositions.length - 1];
+      const dt = (last.timestamp - first.timestamp) / 1000; // seconds
+      if (dt <= 0) return { x: 0, y: 0 };
+
+      return {
+        x: (last.x - first.x) / dt,
+        y: (last.y - first.y) / dt,
+      };
+    }
+
+    // Start momentum animation after pan release
+    startMomentumAnimation = () => {
+      const velocity = this.calculateVelocity();
+      const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
+
+      // Don't start animation if velocity is too low
+      if (speed < VELOCITY_THRESHOLD) {
+        return;
+      }
+
+      this.momentumInitialVelocity = velocity;
+      this.momentumStartOffset = { ...this.getCanvasOffset() };
+      this.momentumStartTime = window.performance.now();
+
+      this.momentumAnimationId = window.requestAnimationFrame(this.animateMomentum);
+    };
+
+    // Animation frame callback for momentum scrolling
+    animateMomentum = (timestamp: number) => {
+      if (
+        this.momentumStartTime === undefined ||
+        this.momentumInitialVelocity === undefined ||
+        this.momentumStartOffset === undefined
+      ) {
+        return;
+      }
+
+      const elapsed = (timestamp - this.momentumStartTime) / 1000; // seconds
+      const vx = this.momentumInitialVelocity.x;
+      const vy = this.momentumInitialVelocity.y;
+
+      // Calculate current velocity
+      const currentVx = this.frictionVelocity(vx, elapsed);
+      const currentVy = this.frictionVelocity(vy, elapsed);
+      const currentSpeed = Math.sqrt(currentVx * currentVx + currentVy * currentVy);
+
+      // Stop when velocity drops below threshold
+      if (currentSpeed < VELOCITY_THRESHOLD) {
+        this.stopMomentumAnimation();
+        return;
+      }
+
+      // Calculate new position using friction simulation
+      // Note: We ADD the friction position because higher offset = view moves in positive direction
+      // but velocity is in screen coordinates where dragging right should move view left
+      const dx = this.frictionPosition(vx, elapsed);
+      const dy = this.frictionPosition(vy, elapsed);
+
+      const newOffset = {
+        x: this.momentumStartOffset.x + dx,
+        y: this.momentumStartOffset.y + dy,
+      };
+
+      // Update viewBox with new offset
+      const newViewBox = this.props.view.viewBox.merge({
+        x: newOffset.x,
+        y: newOffset.y,
+      });
+      this.props.onViewBoxChange(newViewBox, this.props.view.zoom);
+
+      // Continue animation
+      this.momentumAnimationId = window.requestAnimationFrame(this.animateMomentum);
+    };
+
+    stopMomentumAnimation = () => {
+      if (this.momentumAnimationId !== undefined) {
+        window.cancelAnimationFrame(this.momentumAnimationId);
+        this.momentumAnimationId = undefined;
+      }
+      this.momentumStartTime = undefined;
+      this.momentumInitialVelocity = undefined;
+      this.momentumStartOffset = undefined;
+    };
+
+    // Track position for velocity calculation during pan
+    trackPosition = (x: number, y: number) => {
+      const now = window.performance.now();
+      this.velocityTracker.positions.push({ x, y, timestamp: now });
+
+      // Keep only last 200ms of positions to avoid memory bloat
+      const cutoff = now - 200;
+      this.velocityTracker.positions = this.velocityTracker.positions.filter((p) => p.timestamp > cutoff);
+    };
+
+    // Handle wheel events for scroll pan and pinch-to-zoom
+    handleWheel = (e: React.WheelEvent<SVGElement>): void => {
+      if (this.props.embedded) {
+        return;
+      }
+
+      e.preventDefault();
+
+      // Stop any momentum animation when user starts interacting
+      this.stopMomentumAnimation();
+
+      // On Mac trackpads, pinch-to-zoom is reported as wheel events with ctrlKey
+      // The deltaY is much smaller for pinch gestures
+      if (e.ctrlKey || e.metaKey) {
+        // Pinch-to-zoom
+        this.handleWheelZoom(e);
+      } else {
+        // Two-finger scroll for panning
+        this.handleWheelPan(e);
+      }
+    };
+
+    handleWheelZoom = (e: React.WheelEvent<SVGElement>): void => {
+      const zoom = this.props.view.zoom;
+
+      // Calculate zoom change - deltaY is negative when pinching out (zoom in)
+      // Use a smaller multiplier for smoother zooming
+      const zoomDelta = -e.deltaY * WHEEL_ZOOM_SPEED;
+      let newZoom = zoom * (1 + zoomDelta);
+
+      // Clamp zoom level
+      newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+
+      if (newZoom === zoom) {
+        return;
+      }
+
+      // Get cursor position in canvas coordinates
+      const cursorCanvas = this.getCanvasPoint(e.clientX, e.clientY);
+      const viewBox = this.props.view.viewBox;
+
+      // Calculate the point under cursor in model coordinates
+      const modelX = cursorCanvas.x - viewBox.x;
+      const modelY = cursorCanvas.y - viewBox.y;
+
+      // Calculate new offset to keep the point under cursor stable
+      // The key insight: after zoom, we want cursorCanvas to map to the same modelX, modelY
+      // cursorCanvas = screenToCanvasPoint(clientX, clientY, newZoom)
+      // newOffset = cursorCanvas - model
+      const newCursorCanvas = this.getCanvasPointWithZoom(e.clientX, e.clientY, newZoom);
+      const newOffset = {
+        x: newCursorCanvas.x - modelX,
+        y: newCursorCanvas.y - modelY,
+      };
+
+      const newViewBox = viewBox.merge({
+        x: newOffset.x,
+        y: newOffset.y,
+      });
+
+      this.props.onViewBoxChange(newViewBox, newZoom);
+    };
+
+    handleWheelPan = (e: React.WheelEvent<SVGElement>): void => {
+      const zoom = this.props.view.zoom;
+      const viewBox = this.props.view.viewBox;
+
+      // Convert wheel delta to canvas coordinates
+      // deltaMode: 0 = pixels, 1 = lines, 2 = pages
+      let deltaX = e.deltaX;
+      let deltaY = e.deltaY;
+
+      if (e.deltaMode === 1) {
+        // Lines - multiply by line height (typically ~16-20px)
+        deltaX *= 16;
+        deltaY *= 16;
+      } else if (e.deltaMode === 2) {
+        // Pages - multiply by viewport size
+        deltaX *= viewBox.width;
+        deltaY *= viewBox.height;
+      }
+
+      // Scale delta by zoom level (inverse because higher zoom = smaller view area)
+      deltaX /= zoom;
+      deltaY /= zoom;
+
+      const newViewBox = viewBox.merge({
+        x: viewBox.x - deltaX,
+        y: viewBox.y - deltaY,
+      });
+
+      this.props.onViewBoxChange(newViewBox, zoom);
+    };
+
+    // Helper to get canvas point with a specific zoom level
+    getCanvasPointWithZoom(x: number, y: number, zoom: number): Point {
+      if (this.svgRef.current) {
+        const bounds = this.svgRef.current.getBoundingClientRect();
+        x -= bounds.x;
+        y -= bounds.y;
+      }
+      return screenToCanvasPoint(x, y, zoom);
+    }
+
+    // Calculate distance between two pointers for pinch gesture
+    getPinchDistance(): number {
+      const pointers = Array.from(this.activePointers.values());
+      if (pointers.length < 2) {
+        return 0;
+      }
+      const dx = pointers[1].x - pointers[0].x;
+      const dy = pointers[1].y - pointers[0].y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // Get the center point between two pointers
+    getPinchCenter(): Point {
+      const pointers = Array.from(this.activePointers.values());
+      if (pointers.length < 2) {
+        return { x: 0, y: 0 };
+      }
+      return {
+        x: (pointers[0].x + pointers[1].x) / 2,
+        y: (pointers[0].y + pointers[1].y) / 2,
+      };
     }
 
     handleLabelDrag = (uid: number, e: React.PointerEvent<SVGElement>) => {
@@ -923,12 +1256,17 @@ export const Canvas = styled(
       const base = this.props.view.viewBox;
       const curr = this.getCanvasPoint(e.clientX, e.clientY);
 
+      const newOffset = {
+        x: base.x + (curr.x - this.mouseDownPoint.x),
+        y: base.y + (curr.y - this.mouseDownPoint.y),
+      };
+
+      // Track position for momentum calculation
+      this.trackPosition(newOffset.x, newOffset.y);
+
       this.setState({
         isMovingCanvas: true,
-        movingCanvasOffset: {
-          x: base.x + (curr.x - this.mouseDownPoint.x),
-          y: base.y + (curr.y - this.mouseDownPoint.y),
-        },
+        movingCanvasOffset: newOffset,
       });
     }
 
@@ -950,13 +1288,27 @@ export const Canvas = styled(
         return;
       }
 
+      // Update tracked pointer position
+      if (this.activePointers.has(e.pointerId)) {
+        this.activePointers.set(e.pointerId, {
+          id: e.pointerId,
+          x: e.clientX,
+          y: e.clientY,
+          timestamp: window.performance.now(),
+        });
+      }
+
+      // Handle pinch gesture
+      if (this.state.isPinching && this.activePointers.size >= 2) {
+        this.handlePinchMove();
+        return;
+      }
+
       if (this.pointerId !== e.pointerId) {
         return;
       } else if (this.pointerId && e.pointerType === 'mouse' && e.buttons === 0) {
         this.handlePointerCancel(e);
       }
-      // e.preventDefault();
-      // e.stopPropagation();
 
       if (this.selectionCenterOffset) {
         this.handleSelectionMove(e);
@@ -965,6 +1317,48 @@ export const Canvas = styled(
       } else if (this.state.isMovingCanvas) {
         this.handleMovingCanvas(e);
       }
+    };
+
+    // Handle pinch-to-zoom gesture movement
+    handlePinchMove = (): void => {
+      if (!this.state.isPinching || !this.state.pinchCenter) {
+        return;
+      }
+
+      const currentDistance = this.getPinchDistance();
+      if (currentDistance === 0 || this.state.initialPinchDistance === 0) {
+        return;
+      }
+
+      // Calculate scale factor
+      const scale = currentDistance / this.state.initialPinchDistance;
+      let newZoom = this.state.initialPinchZoom * scale;
+
+      // Clamp zoom level
+      newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+
+      // Get current pinch center (it may have moved)
+      const currentCenter = this.getPinchCenter();
+      const currentCenterCanvas = this.getCanvasPointWithZoom(currentCenter.x, currentCenter.y, newZoom);
+
+      // Calculate the point that was under the initial pinch center in model coordinates
+      const viewBox = this.props.view.viewBox;
+      const initialCenter = this.state.pinchCenter;
+      const modelX = initialCenter.x - viewBox.x;
+      const modelY = initialCenter.y - viewBox.y;
+
+      // Calculate new offset to keep the pinch center point stable
+      const newOffset = {
+        x: currentCenterCanvas.x - modelX,
+        y: currentCenterCanvas.y - modelY,
+      };
+
+      const newViewBox = viewBox.merge({
+        x: newOffset.x,
+        y: newOffset.y,
+      });
+
+      this.props.onViewBoxChange(newViewBox, newZoom);
     };
 
     getNewVariableName(base: string): string {
@@ -996,11 +1390,47 @@ export const Canvas = styled(
         return;
       }
 
-      if (!e.isPrimary) {
-        return;
-      }
       e.preventDefault();
       e.stopPropagation();
+
+      // Stop any momentum animation when user starts interacting
+      this.stopMomentumAnimation();
+
+      // Track this pointer for multi-touch detection
+      this.activePointers.set(e.pointerId, {
+        id: e.pointerId,
+        x: e.clientX,
+        y: e.clientY,
+        timestamp: window.performance.now(),
+      });
+
+      // Check for pinch gesture (two touches)
+      if (this.activePointers.size === 2 && e.pointerType === 'touch') {
+        // Start pinch mode
+        const distance = this.getPinchDistance();
+        const center = this.getPinchCenter();
+        const centerCanvas = this.getCanvasPoint(center.x, center.y);
+
+        this.setState({
+          isPinching: true,
+          initialPinchDistance: distance,
+          initialPinchZoom: this.props.view.zoom,
+          pinchCenter: centerCanvas,
+          isMovingCanvas: false,
+          isDragSelecting: false,
+        });
+        return;
+      }
+
+      // If already pinching and a third finger comes in, ignore it
+      if (this.state.isPinching) {
+        return;
+      }
+
+      // For non-primary touches when we already have a primary, track for potential pinch
+      if (!e.isPrimary && this.pointerId !== undefined) {
+        return;
+      }
 
       const client = this.getCanvasPoint(e.clientX, e.clientY);
 
@@ -1107,6 +1537,11 @@ export const Canvas = styled(
       this.mouseDownPoint = this.getCanvasPoint(e.clientX, e.clientY);
 
       if (e.pointerType === 'touch' || e.shiftKey) {
+        // Initialize velocity tracking for momentum
+        this.velocityTracker.positions = [];
+        const canvasOffset = this.getCanvasOffset();
+        this.trackPosition(canvasOffset.x, canvasOffset.y);
+
         this.setState({
           isDragSelecting: false,
           isMovingCanvas: true,
@@ -1607,6 +2042,7 @@ export const Canvas = styled(
             onPointerMove={this.handlePointerMove}
             onPointerCancel={this.handlePointerCancel}
             onPointerUp={this.handlePointerCancel}
+            onWheel={this.handleWheel}
           >
             <defs>
               <filter id="labelBackground" x="-50%" y="-50%" width="200%" height="200%">
@@ -1645,6 +2081,7 @@ export const Canvas = styled(
       box-sizing: border-box;
       user-select: none;
       -webkit-touch-callout: none;
+      touch-action: none;
     }
 
     & .simlin-canvas {
@@ -1653,6 +2090,7 @@ export const Canvas = styled(
       box-sizing: border-box;
       user-select: none;
       -webkit-touch-callout: none;
+      touch-action: none;
     }
 
     & text {
