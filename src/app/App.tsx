@@ -4,14 +4,14 @@
 
 import * as React from 'react';
 
-import { initializeApp } from 'firebase/app';
+import { initializeApp } from '@firebase/app';
 import {
   getAuth,
   connectAuthEmulator,
   onAuthStateChanged,
   Auth as FirebaseAuth,
   User as FirebaseUser,
-} from 'firebase/auth';
+} from '@firebase/auth';
 
 import { useLocation, Route, RouteComponentProps, Switch, Redirect } from 'wouter';
 import { styled } from '@mui/material/styles';
