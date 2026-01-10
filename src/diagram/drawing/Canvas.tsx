@@ -73,14 +73,23 @@ function radToDeg(r: number): number {
 
 const ZMax = 6;
 
-// Flutter-style friction simulation constants
-// These values match Flutter's ClampingScrollSimulation for iOS-like feel
-const FRICTION_COEFFICIENT = 0.135;
-const FRICTION_LOG = Math.log(FRICTION_COEFFICIENT); // ≈ -2.002
-const VELOCITY_THRESHOLD = 50; // pixels/second - below this we stop
+// Momentum scrolling physics for macOS-native feel.
+// macOS apps (Finder, Safari, Maps) have snappier deceleration than iOS.
+// A friction coefficient of 0.05 means velocity retains 5% after 1 second,
+// giving a ~0.5-0.8 second coast for typical pan gestures.
+const FRICTION_COEFFICIENT = 0.05;
+const FRICTION_LOG = Math.log(FRICTION_COEFFICIENT); // ≈ -3.0
 
-// Wheel zoom constants
-const WHEEL_ZOOM_SPEED = 0.002; // For pinch gesture (ctrlKey wheel events)
+// Stop momentum when velocity drops below this threshold.
+// At 60fps, 15 px/s = 0.25 px/frame - imperceptible motion.
+// Lower values make the stop feel more gradual and natural.
+const VELOCITY_THRESHOLD = 15;
+
+// Pinch-to-zoom uses exponential scaling for natural feel.
+// A divisor of 100 means cumulative deltaY of ~100 results in 2x zoom.
+// This matches native macOS apps like Maps and Preview.
+const PINCH_ZOOM_DIVISOR = 100;
+
 // MIN_ZOOM matches the 0.2 floor used in render() to avoid mismatch between
 // view state and actual rendering (which clamps zoom < 0.2 to 1.0)
 const MIN_ZOOM = 0.2;
@@ -175,7 +184,7 @@ export const Canvas = styled(
 
     // Multi-touch tracking for pinch gestures
     // Note: use globalThis.Map to get native Map (not Immutable.Map from imports)
-    activePointers = new (globalThis.Map)<number, TrackedPointer>();
+    activePointers = new globalThis.Map<number, TrackedPointer>();
 
     // Momentum/inertia animation
     velocityTracker: VelocityTracker = { positions: [] };
@@ -930,6 +939,14 @@ export const Canvas = styled(
         this.svgObserver.disconnect();
         this.svgObserver = undefined;
       }
+      // Remove native event listeners for gesture prevention
+      const svg = this.svgRef.current?.querySelector('svg');
+      if (svg) {
+        svg.removeEventListener('wheel', this.handleNativeWheel);
+        svg.removeEventListener('gesturestart', this.handleGestureStart);
+        svg.removeEventListener('gesturechange', this.handleGestureChange);
+        svg.removeEventListener('gestureend', this.handleGestureEnd);
+      }
       // Cancel any running momentum animation and clear all momentum state
       this.stopMomentumAnimation();
       // Clear velocity tracking and pointer data
@@ -953,15 +970,27 @@ export const Canvas = styled(
       return velocity * Math.pow(FRICTION_COEFFICIENT, time);
     }
 
-    // Calculate velocity from recent positions (simple linear regression over last few samples)
+    // Calculate velocity from recent positions for momentum scrolling.
+    // Returns zero if the pointer was stationary before release (intentional stop).
     calculateVelocity(): Point {
       const positions = this.velocityTracker.positions;
       if (positions.length < 2) {
         return { x: 0, y: 0 };
       }
 
-      // Use last 100ms of samples for velocity calculation
       const now = window.performance.now();
+      const lastPosition = positions[positions.length - 1];
+
+      // If the pointer has been stationary for more than 40ms before release,
+      // the user intentionally stopped - don't start momentum.
+      // 40ms ≈ 2.5 frames at 60fps, enough to detect intentional stops
+      // while still capturing quick flick-and-release gestures.
+      const timeSinceLastMove = now - lastPosition.timestamp;
+      if (timeSinceLastMove > 40) {
+        return { x: 0, y: 0 };
+      }
+
+      // Use last 100ms of samples for velocity calculation
       const recentPositions = positions.filter((p) => now - p.timestamp < 100);
 
       if (recentPositions.length < 2) {
@@ -1079,70 +1108,7 @@ export const Canvas = styled(
       }
     };
 
-    // Handle wheel events for scroll pan and pinch-to-zoom
-    handleWheel = (e: React.WheelEvent<SVGElement>): void => {
-      if (this.props.embedded) {
-        return;
-      }
-
-      e.preventDefault();
-
-      // Stop any momentum animation when user starts interacting
-      this.stopMomentumAnimation();
-
-      // On Mac trackpads, pinch-to-zoom is reported as wheel events with ctrlKey
-      // The deltaY is much smaller for pinch gestures
-      if (e.ctrlKey || e.metaKey) {
-        // Pinch-to-zoom
-        this.handleWheelZoom(e);
-      } else {
-        // Two-finger scroll for panning
-        this.handleWheelPan(e);
-      }
-    };
-
-    handleWheelZoom = (e: React.WheelEvent<SVGElement>): void => {
-      const zoom = this.props.view.zoom;
-
-      // Calculate zoom change - deltaY is negative when pinching out (zoom in)
-      // Use a smaller multiplier for smoother zooming
-      const zoomDelta = -e.deltaY * WHEEL_ZOOM_SPEED;
-      let newZoom = zoom * (1 + zoomDelta);
-
-      // Clamp zoom level
-      newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
-
-      if (newZoom === zoom) {
-        return;
-      }
-
-      // Get cursor position in canvas coordinates
-      const cursorCanvas = this.getCanvasPoint(e.clientX, e.clientY);
-      const viewBox = this.props.view.viewBox;
-
-      // Calculate the point under cursor in model coordinates
-      const modelX = cursorCanvas.x - viewBox.x;
-      const modelY = cursorCanvas.y - viewBox.y;
-
-      // Calculate new offset to keep the point under cursor stable
-      // The key insight: after zoom, we want cursorCanvas to map to the same modelX, modelY
-      // cursorCanvas = screenToCanvasPoint(clientX, clientY, newZoom)
-      // newOffset = cursorCanvas - model
-      const newCursorCanvas = this.getCanvasPointWithZoom(e.clientX, e.clientY, newZoom);
-      const newOffset = {
-        x: newCursorCanvas.x - modelX,
-        y: newCursorCanvas.y - modelY,
-      };
-
-      const newViewBox = viewBox.merge({
-        x: newOffset.x,
-        y: newOffset.y,
-      });
-
-      this.props.onViewBoxChange(newViewBox, newZoom);
-    };
-
-    handleWheelPan = (e: React.WheelEvent<SVGElement>): void => {
+    handleWheelPan = (e: WheelEvent): void => {
       const zoom = this.props.view.zoom;
       const viewBox = this.props.view.viewBox;
 
@@ -1174,6 +1140,91 @@ export const Canvas = styled(
       });
 
       this.props.onViewBoxChange(newViewBox, zoom);
+    };
+
+    // Native wheel event handler with { passive: false } to ensure preventDefault works.
+    // React's synthetic onWheel handler is passive by default, so we must use native events.
+    handleNativeWheel = (e: WheelEvent): void => {
+      if (this.props.embedded) {
+        return;
+      }
+
+      // Always prevent default to stop browser zoom, even at zoom limits
+      e.preventDefault();
+
+      // Stop any momentum animation when user starts interacting
+      this.stopMomentumAnimation();
+
+      // On Mac trackpads, pinch-to-zoom is reported as wheel events with ctrlKey
+      if (e.ctrlKey || e.metaKey) {
+        this.handleNativeWheelZoom(e);
+      } else {
+        this.handleWheelPan(e);
+      }
+    };
+
+    // Native wheel zoom handler using exponential scaling for natural macOS feel.
+    // Exponential scaling ensures symmetric behavior: zoom in 2x then out 2x returns to original.
+    handleNativeWheelZoom = (e: WheelEvent): void => {
+      const zoom = this.props.view.zoom;
+
+      // Exponential scaling: deltaY of PINCH_ZOOM_DIVISOR results in 2x zoom change.
+      // Negative deltaY = pinch out = zoom in, so we negate to get correct direction.
+      const scale = Math.pow(2, -e.deltaY / PINCH_ZOOM_DIVISOR);
+      let newZoom = zoom * scale;
+
+      // Clamp zoom level
+      newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+
+      // Use epsilon comparison for floating point
+      if (Math.abs(newZoom - zoom) < 0.0001) {
+        return;
+      }
+
+      // Get cursor position in canvas coordinates
+      const cursorCanvas = this.getCanvasPoint(e.clientX, e.clientY);
+      const viewBox = this.props.view.viewBox;
+
+      // Calculate the point under cursor in model coordinates
+      const modelX = cursorCanvas.x - viewBox.x;
+      const modelY = cursorCanvas.y - viewBox.y;
+
+      // Calculate new offset to keep the point under cursor stable
+      const newCursorCanvas = this.getCanvasPointWithZoom(e.clientX, e.clientY, newZoom);
+      const newOffset = {
+        x: newCursorCanvas.x - modelX,
+        y: newCursorCanvas.y - modelY,
+      };
+
+      const newViewBox = viewBox.merge({
+        x: newOffset.x,
+        y: newOffset.y,
+      });
+
+      this.props.onViewBoxChange(newViewBox, newZoom);
+    };
+
+    // Safari-specific gesture events for pinch-to-zoom prevention.
+    // Safari triggers these events alongside wheel events for trackpad pinch gestures.
+    handleGestureStart = (e: Event): void => {
+      if (this.props.embedded) {
+        return;
+      }
+      e.preventDefault();
+    };
+
+    handleGestureChange = (e: Event): void => {
+      if (this.props.embedded) {
+        return;
+      }
+      e.preventDefault();
+    };
+
+    handleGestureEnd = (e: Event): void => {
+      if (this.props.embedded) {
+        return;
+      }
+      e.preventDefault();
     };
 
     // Helper to get canvas point with a specific zoom level
@@ -1876,6 +1927,18 @@ export const Canvas = styled(
 
       this.svgObserver.observe(svgElement);
 
+      // Register native event listeners with { passive: false } to ensure preventDefault() works.
+      // React's synthetic event handlers are passive by default for wheel events, which means
+      // preventDefault() is ignored and the browser still performs its native pinch-to-zoom.
+      const svg = svgElement.querySelector('svg');
+      if (svg) {
+        svg.addEventListener('wheel', this.handleNativeWheel, { passive: false });
+        // Safari-specific gesture events for pinch-to-zoom prevention
+        svg.addEventListener('gesturestart', this.handleGestureStart, { passive: false });
+        svg.addEventListener('gesturechange', this.handleGestureChange, { passive: false });
+        svg.addEventListener('gestureend', this.handleGestureEnd, { passive: false });
+      }
+
       const svgWidth = svgElement.clientWidth;
       const svgHeight = svgElement.clientHeight;
 
@@ -2076,7 +2139,6 @@ export const Canvas = styled(
             onPointerMove={this.handlePointerMove}
             onPointerCancel={this.handlePointerCancel}
             onPointerUp={this.handlePointerCancel}
-            onWheel={this.handleWheel}
           >
             <defs>
               <filter id="labelBackground" x="-50%" y="-50%" width="200%" height="200%">
