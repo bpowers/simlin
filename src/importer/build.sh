@@ -34,6 +34,5 @@ rm -r pkg-node
 mv lib/index{_main,}.js
 mv lib/index{_main,}.js.map
 mv lib/index{_main,}.d.ts
-rm lib.browser/index_main*
 
 yarn format

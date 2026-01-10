@@ -28,6 +28,6 @@
     "lint": "eslint .",
     "clean": "rm -rf ./lib ./lib.browser",
     "prepublishOnly": "yarn build",
-    "build": "yarn clean && tsc && tsc -p tsconfig.browser.json && cp xmutil.wasm* lib/ && cp xmutil.wasm* lib.browser/ && mv lib/index_main.js lib/index.js && mv lib/index_main.js.map lib/index.js.map && mv lib/index_main.d.ts lib/index.d.ts && rm lib.browser/index_main*"
+    "build": "yarn clean && tsc && tsc -p tsconfig.browser.json && cp xmutil.wasm* lib/ && cp xmutil.wasm* lib.browser/ && mv lib/index_main.js lib/index.js && mv lib/index_main.js.map lib/index.js.map && mv lib/index_main.d.ts lib/index.d.ts"
   }
 }

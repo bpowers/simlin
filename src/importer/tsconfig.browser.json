@@ -12,6 +12,7 @@
   "exclude": [
     "lib",
     "lib.browser",
-    "eslint.config.js"
+    "eslint.config.js",
+    "index_main.ts"
   ]
 }
