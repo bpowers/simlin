@@ -294,6 +294,10 @@ fn build_unit_components(ctx: &Context, ast: &Expr0) -> EquationResult<UnitMap> 
         }
         Expr0::Var(id, _) => {
             let id_str = id.as_str();
+            // Canonicalize the unit name for consistent comparison
+            let id_canonical = crate::common::canonicalize(id_str);
+            let id_str = id_canonical.as_str();
+            // Check aliases with canonicalized name
             let id_str = ctx
                 .aliases
                 .get(id_str)

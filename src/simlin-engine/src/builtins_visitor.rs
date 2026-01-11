@@ -501,7 +501,8 @@ mod tests {
         let project = TestProject::new("arrayed_delay_all")
             .named_dimension("DimA", &["A1", "A2", "A3"])
             .array_const("input_a[DimA]", 10.0)
-            .array_const("delay_a[DimA]", 1.0)
+            // delay_a needs time units matching simulation time (Month)
+            .array_const_with_units("delay_a[DimA]", 1.0, "Month")
             .array_const("init_a[DimA]", 0.0)
             .array_aux(
                 "d[DimA]",
@@ -524,7 +525,8 @@ mod tests {
         let project = TestProject::new("arrayed_delay_diff_values")
             .named_dimension("DimA", &["A1", "A2"])
             .array_with_ranges("input_a[DimA]", vec![("A1", "10"), ("A2", "20")])
-            .array_const("delay_a[DimA]", 2.0)
+            // delay_a needs time units matching simulation time (Month)
+            .array_const_with_units("delay_a[DimA]", 2.0, "Month")
             .array_const("init_a[DimA]", 0.0)
             .array_aux(
                 "d[DimA]",

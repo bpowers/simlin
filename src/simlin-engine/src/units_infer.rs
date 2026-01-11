@@ -222,7 +222,14 @@ impl UnitInferer<'_> {
                     Ok(a_units)
                 }
             },
-            Expr2::Subscript(_, _, _, _) => Ok(Units::Explicit(UnitMap::new())),
+            Expr2::Subscript(base_name, _, _, _) => {
+                // A subscripted expression has the same units as the base array
+                let units: UnitMap = [(format!("@{prefix}{base_name}"), 1)]
+                    .iter()
+                    .cloned()
+                    .collect();
+                Ok(Units::Explicit(units))
+            }
             Expr2::Op1(_, l, _, _) => self.gen_constraints(l, prefix, constraints),
             Expr2::Op2(op, l, r, _, _) => {
                 let lunits = self.gen_constraints(l, prefix, constraints)?;
@@ -364,19 +371,16 @@ impl UnitInferer<'_> {
                     }
                 }
                 .unwrap();
-                match var_units {
-                    Units::Constant => {
-                        // TODO: constant means ~ unconstrained I think
-                    }
-                    Units::Explicit(units) => {
-                        let mv = [(format!("@{prefix}{id}"), 1)]
-                            .iter()
-                            .cloned()
-                            .collect::<UnitMap>()
-                            .push_ctx(format!("computed-mv@{prefix}{id}"));
-                        constraints.push(combine(UnitOp::Div, mv, units));
-                    }
-                };
+                // Constants don't generate constraints - they adopt units from context
+                // (e.g., in "x + 1", the 1 has the same units as x)
+                if let Units::Explicit(units) = var_units {
+                    let mv = [(format!("@{prefix}{id}"), 1)]
+                        .iter()
+                        .cloned()
+                        .collect::<UnitMap>()
+                        .push_ctx(format!("computed-mv@{prefix}{id}"));
+                    constraints.push(combine(UnitOp::Div, mv, units));
+                }
             }
             if let Some(units) = var.units() {
                 let mv = [(format!("@{prefix}{id}"), 1)]
@@ -461,14 +465,27 @@ impl UnitInferer<'_> {
         let (results, constraints) = self.unify(constraints)?;
 
         if let Some(constraints) = constraints {
-            use std::fmt::Write;
-            let prefix = "unit checking failed; couldn't resolve: \n";
-            let mut s = prefix.to_owned();
-            for c in constraints.iter() {
-                let delim = if s.len() == prefix.len() { "" } else { "; " };
-                write!(s, "{delim}\n    1 == {c}").unwrap();
+            // Check if any unresolved constraint represents an actual mismatch
+            // (i.e., contains only concrete units, no metavariables)
+            let has_mismatch = constraints.iter().any(|c| {
+                // A constraint with only concrete units (no @ prefix) is a mismatch
+                !c.map.is_empty() && c.map.keys().all(|name| !name.starts_with('@'))
+            });
+
+            if has_mismatch {
+                use std::fmt::Write;
+                let prefix = "unit checking failed; couldn't resolve: \n";
+                let mut s = prefix.to_owned();
+                for c in constraints.iter() {
+                    let delim = if s.len() == prefix.len() { "" } else { "; " };
+                    write!(s, "{delim}\n    1 == {c}").unwrap();
+                }
+                model_err!(UnitMismatch, s)
+            } else {
+                // Unresolved constraints with metavariables just mean the model
+                // is under-constrained (e.g., no units declared). Return partial results.
+                Ok(results)
             }
-            model_err!(UnitMismatch, s)
         } else {
             Ok(results)
         }
@@ -571,11 +588,16 @@ fn test_inference_negative() {
                 x_stock("stock_1", "1", &["inflow"], &[], Some("usd")),
                 "usd",
             ),
-            // need this to be defined
-            (x_aux("window", "6", None), "parsec"),
-            (x_flow("inflow", "seen/window", None), "usd/parsec"),
-            (x_aux("seen", "sin(seen_dep) mod 3", None), "usd"),
-            (x_aux("seen_dep", "1 + 3", None), "usd"),
+            // window has wrong units (usd instead of parsec/time)
+            // This creates a mismatch: inflow = seen/window should be usd/parsec
+            // but with window in usd, it would be usd/usd = dimensionless
+            (x_aux("window", "6", Some("usd")), "usd"),
+            (
+                x_flow("inflow", "seen/window", Some("usd/parsec")),
+                "usd/parsec",
+            ),
+            (x_aux("seen", "sin(seen_dep) mod 3", Some("usd")), "usd"),
+            (x_aux("seen_dep", "1 + 3 * stock_1", None), "usd"),
         ],
         &[
             // initial needs to have the same units as input

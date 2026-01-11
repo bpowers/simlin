@@ -11,7 +11,9 @@ mod tests {
     #[test]
     fn test_smth1_with_consistent_units() {
         // Test that SMTH1 correctly infers and checks units
+        // delay_time must have the same units as simulation time
         TestProject::new("smth1_test")
+            .with_time_units("seconds")
             .unit("widgets", None)
             .unit("seconds", None)
             .aux_with_units("input", "100", Some("widgets"))
@@ -26,7 +28,9 @@ mod tests {
     #[test]
     fn test_smth1_with_initial_value() {
         // Test SMTH1 with all three parameters
+        // delay_time must have the same units as simulation time
         TestProject::new("smth1_initial_test")
+            .with_time_units("seconds")
             .unit("widgets", None)
             .unit("seconds", None)
             .aux_with_units("input", "100", Some("widgets"))
@@ -39,10 +43,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore] // Requires inference errors to be surfaced; currently disabled for backwards compat
     fn test_smth1_unit_mismatch_initial() {
         // Test that SMTH1 fails when initial value has wrong units
+        // delay_time must have the same units as simulation time
+        // Note: This test requires inference errors to be surfaced to detect the mismatch
+        // between input (widgets) and initial (gadgets) through the SMTH1 module constraints.
         TestProject::new("smth1_mismatch_test")
+            .with_time_units("seconds")
             .unit("widgets", None)
             .unit("gadgets", None)
             .unit("seconds", None)
@@ -56,7 +64,9 @@ mod tests {
     #[test]
     fn test_delay1_with_units() {
         // Test DELAY1 function
+        // delay_time must have the same units as simulation time
         TestProject::new("delay1_test")
+            .with_time_units("days")
             .unit("people", None)
             .unit("days", None)
             .aux_with_units("input_flow", "1000", Some("people"))
@@ -71,10 +81,11 @@ mod tests {
     #[test]
     fn test_trend_with_units() {
         // Test TREND function
+        // averaging_time must have the same units as simulation time
         TestProject::new("trend_test")
+            .with_time_units("years")
             .unit("dollars", None)
             .unit("years", None)
-            .unit("fraction", None)
             .aux_with_units("current_value", "1000", Some("dollars"))
             .aux_with_units("averaging_time", "3", Some("years"))
             .aux_with_units("initial_trend", "0.05", Some("1/years"))
@@ -97,6 +108,7 @@ mod tests {
     #[test]
     fn test_stock_and_flow_units() {
         // Test that stocks and flows have proper unit relationships
+        // Flow units must use simulation time unit (Month, not Months)
         TestProject::new("stock_flow_test")
             .unit("widgets", None)
             .stock_with_units(
@@ -106,39 +118,40 @@ mod tests {
                 &["shipments"],
                 Some("widgets"),
             )
-            .flow_with_units("production", "100", Some("widgets/Months"))
-            .flow_with_units("shipments", "80", Some("widgets/Months"))
+            .flow_with_units("production", "100", Some("widgets/Month"))
+            .flow_with_units("shipments", "80", Some("widgets/Month"))
             .assert_compiles();
     }
 
     #[test]
-    #[ignore]
     fn test_stock_flow_unit_mismatch() {
         // Test that incorrect flow units are caught
+        // Flow units must use simulation time unit (Month)
         TestProject::new("stock_flow_mismatch")
             .unit("widgets", None)
             .unit("gadgets", None)
             .stock_with_units("inventory", "1000", &["production"], &[], Some("widgets"))
-            // Wrong units - should be widgets/Months, not gadgets/Months
-            .flow_with_units("production", "100", Some("gadgets/Months"))
+            // Wrong units - should be widgets/Month, not gadgets/Month
+            .flow_with_units("production", "100", Some("gadgets/Month"))
             .assert_unit_error();
     }
 
     #[test]
     fn test_smth1_in_complex_model() {
         // Test SMTH1 in a more complex model with multiple unit types
+        // smoothing_time must match simulation time units
         TestProject::new("complex_smth1")
+            .with_time_units("weeks")
             .unit("customers", None)
             .unit("dollars", None)
             .unit("weeks", None)
             // Customer acquisition
-            .aux_with_units("new_customers", "50", Some("customers/Months"))
+            .aux_with_units("new_customers", "50", Some("customers/weeks"))
             .aux_with_units("smoothing_time", "4", Some("weeks"))
             // Smooth the customer acquisition rate
-            .aux_with_units("conversion_factor", "4.33", Some("weeks/Months"))
             .aux_with_units(
                 "smoothed_acquisition",
-                "SMTH1(new_customers * conversion_factor, smoothing_time)",
+                "SMTH1(new_customers, smoothing_time)",
                 Some("customers/weeks"),
             )
             // Revenue per customer
@@ -155,7 +168,9 @@ mod tests {
     #[test]
     fn test_delay3_with_units() {
         // Test DELAY3 (third-order delay)
+        // delay_time must match simulation time units
         TestProject::new("delay3_test")
+            .with_time_units("hours")
             .unit("items", None)
             .unit("hours", None)
             .aux_with_units("input_rate", "20", Some("items/hours"))
@@ -174,10 +189,21 @@ mod tests {
     #[test]
     fn test_smth3_with_units() {
         // Test SMTH3 (third-order smooth)
+        // smoothing_time must match simulation time units
+        // Note: Use dimensionally correct expression
         TestProject::new("smth3_test")
+            .with_time_units("minutes")
             .unit("kg", None)
             .unit("minutes", None)
-            .aux_with_units("noisy_signal", "100 + SIN(TIME)", Some("kg"))
+            .aux_with_units("base_weight", "100", Some("kg"))
+            .aux_with_units("noise_amplitude", "10", Some("kg"))
+            .aux_with_units("period", "60", Some("minutes"))
+            // SIN returns dimensionless; multiply by noise_amplitude to get kg units
+            .aux_with_units(
+                "noisy_signal",
+                "base_weight + noise_amplitude * SIN(TIME / period)",
+                Some("kg"),
+            )
             .aux_with_units("smoothing_time", "15", Some("minutes"))
             .aux_with_units("initial", "100", Some("kg"))
             // SMTH3 preserves input units
@@ -193,9 +219,10 @@ mod tests {
     #[test]
     fn test_previous_with_units() {
         // Test PREVIOUS function
+        // Uses default time unit "Month"
         TestProject::new("previous_test")
             .unit("meters", None)
-            .aux_with_units("velocity", "5", Some("meters/Months"))
+            .aux_with_units("velocity", "5", Some("meters/Month"))
             .aux_with_units("position", "TIME * velocity", Some("meters"))
             .aux_with_units("initial_position", "0", Some("meters"))
             // PREVIOUS preserves input units
@@ -215,9 +242,10 @@ mod tests {
     #[test]
     fn test_init_with_units() {
         // Test INIT function
+        // Uses default time unit "Month"
         TestProject::new("init_test")
             .unit("celsius", None)
-            .aux_with_units("temp_rate", "2", Some("celsius/Months"))
+            .aux_with_units("temp_rate", "2", Some("celsius/Month"))
             .aux_with_units("current_temp", "20 + TIME * temp_rate", Some("celsius"))
             // INIT captures initial value and preserves units
             .aux_with_units("initial_temp", "INIT(current_temp)", None)
@@ -232,10 +260,16 @@ mod tests {
     #[test]
     fn test_nested_builtins_with_units() {
         // Test nested builtin functions
+        // time parameters must match simulation time units
+        // Note: SIN expects dimensionless input, so we divide TIME by period to make it dimensionless
         TestProject::new("nested_builtins")
+            .with_time_units("seconds")
             .unit("units", None)
             .unit("seconds", None)
-            .aux_with_units("raw_input", "100 * SIN(TIME)", Some("units"))
+            .aux_with_units("period", "10", Some("seconds"))
+            .aux_with_units("amplitude", "100", Some("units"))
+            // SIN returns dimensionless, multiply by amplitude to get units
+            .aux_with_units("raw_input", "amplitude * SIN(TIME / period)", Some("units"))
             .aux_with_units("smooth_time", "2", Some("seconds"))
             .aux_with_units("delay_time", "3", Some("seconds"))
             // First smooth, then delay
@@ -249,7 +283,9 @@ mod tests {
     #[test]
     fn test_unit_inference_through_expressions() {
         // Test that units are properly inferred through complex expressions
+        // time_period used for SMTH1 must match simulation time units
         TestProject::new("inference_test")
+            .with_time_units("days")
             .unit("apples", None)
             .unit("oranges", None)
             .unit("days", None)
@@ -269,7 +305,9 @@ mod tests {
     #[test]
     fn test_dimensionless_operations() {
         // Test operations that should be dimensionless
+        // time_constant used for SMTH1 must match simulation time units
         TestProject::new("dimensionless_test")
+            .with_time_units("seconds")
             .unit("meters", None)
             .unit("seconds", None)
             .aux_with_units("distance", "100", Some("meters"))
@@ -292,15 +330,16 @@ mod tests {
     #[test]
     fn test_unit_checking_with_time() {
         // Test that TIME has proper units
+        // Uses default time unit "Month" (not "Months")
         TestProject::new("time_units_test")
             .unit("widgets", None)
-            .aux_with_units("production_rate", "10", Some("widgets/Months"))
-            // TIME should have units of Months (from sim_specs)
+            .aux_with_units("production_rate", "10", Some("widgets/Month"))
+            // TIME should have units of Month (from sim_specs)
             .aux_with_units("cumulative", "production_rate * TIME", Some("widgets"))
             // Can also use in SMTH1
-            .aux_with_units("input_rate", "5", Some("widgets/Months"))
+            .aux_with_units("input_rate", "5", Some("widgets/Month"))
             .aux_with_units("varying_input", "TIME * input_rate", None)
-            .aux_with_units("smooth_time", "2", Some("Months"))
+            .aux_with_units("smooth_time", "2", Some("Month"))
             .aux_with_units("smoothed", "SMTH1(varying_input, smooth_time)", None)
             .aux_with_units("result", "smoothed", Some("widgets"))
             .assert_compiles();
@@ -309,7 +348,9 @@ mod tests {
     #[test]
     fn test_chained_smoothing_with_units() {
         // Test multiple levels of smoothing
+        // Smoothing times must match simulation time units
         TestProject::new("chained_smooth")
+            .with_time_units("milliseconds")
             .unit("volts", None)
             .unit("milliseconds", None)
             .aux_with_units("signal", "5", Some("volts"))

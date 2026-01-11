@@ -8,6 +8,7 @@
 //! that can be used by various test modules.
 
 use crate::common::ErrorCode;
+use crate::common::UnitError;
 use crate::common::{Canonical, Ident};
 use crate::compiler::Module;
 use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
@@ -192,6 +193,12 @@ impl TestProject {
         self.array_aux_direct(&name, dims, &value.to_string(), None)
     }
 
+    /// Add an array constant with units using "name[dims]" notation
+    pub fn array_const_with_units(self, name_with_dims: &str, value: f64, units: &str) -> Self {
+        let (name, dims) = parse_array_declaration(name_with_dims);
+        self.array_aux_direct(&name, dims, &value.to_string(), Some(units))
+    }
+
     /// Add an array auxiliary using "name[dims]" notation
     pub fn array_aux(self, name_with_dims: &str, equation: &str) -> Self {
         let (name, dims) = parse_array_declaration(name_with_dims);
@@ -322,10 +329,21 @@ impl TestProject {
                 }
             }
 
-            // Check variable-level errors (including unit errors)
+            // Check variable-level equation errors
             for (var_name, var_errors) in model.get_variable_errors() {
                 for err in var_errors {
                     errors.push((format!("{model_name}.{var_name}"), err.code));
+                }
+            }
+
+            // Check variable-level unit errors
+            for (var_name, unit_errors) in model.get_unit_errors() {
+                for err in unit_errors {
+                    let code = match err {
+                        UnitError::DefinitionError(eq_err, _) => eq_err.code,
+                        UnitError::ConsistencyError(code, _, _) => code,
+                    };
+                    errors.push((format!("{model_name}.{var_name}"), code));
                 }
             }
         }
