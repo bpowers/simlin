@@ -584,4 +584,210 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_arrayed_expression_unit_inference() {
+        // Test that unit inference works for arrayed variables with different expressions
+        // for different elements. All elements should have the same inferred units.
+        TestProject::new("arrayed_units_test")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("days", None)
+            .named_dimension("Region", &["North", "South"])
+            // A scalar with known units
+            .aux_with_units("base_rate", "10", Some("widgets/days"))
+            // An arrayed variable with different expressions per element
+            // Both should infer to widgets/days
+            .array_with_ranges_direct(
+                "regional_rate",
+                vec!["Region".to_string()],
+                vec![("North", "base_rate * 1.5"), ("South", "base_rate * 0.8")],
+                Some("widgets/days"),
+            )
+            // Use the arrayed variable to verify units propagate
+            .aux_with_units("total_rate", "SUM(regional_rate[*])", Some("widgets/days"))
+            .assert_compiles();
+    }
+
+    #[test]
+    fn test_arrayed_expression_inference_without_declared_units() {
+        // Test that arrayed variables can infer units even when not declared
+        TestProject::new("arrayed_infer_test")
+            .with_time_units("seconds")
+            .unit("meters", None)
+            .unit("seconds", None)
+            .named_dimension("Axis", &["X", "Y", "Z"])
+            // A scalar with known units
+            .aux_with_units("speed", "5", Some("meters/seconds"))
+            // An arrayed variable without declared units - should infer from expression
+            .array_with_ranges_direct(
+                "velocity",
+                vec!["Axis".to_string()],
+                vec![("X", "speed"), ("Y", "speed * 2"), ("Z", "speed / 2")],
+                None, // No units declared
+            )
+            // Use velocity in an expression with declared units to verify inference
+            .aux_with_units("total_velocity", "SUM(velocity[*])", Some("meters/seconds"))
+            .assert_compiles();
+    }
+
+    #[test]
+    fn test_arrayed_expression_conflicting_inferred_units() {
+        // Test that inference catches when different array elements have different units
+        // without any declared units on the array itself
+        TestProject::new("arrayed_conflict_test")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("gadgets", None)
+            .named_dimension("Type", &["A", "B"])
+            .aux_with_units("widget_rate", "10", Some("widgets"))
+            .aux_with_units("gadget_rate", "20", Some("gadgets"))
+            // Different elements have different units - should fail
+            .array_with_ranges_direct(
+                "rates",
+                vec!["Type".to_string()],
+                vec![("A", "widget_rate"), ("B", "gadget_rate")],
+                None, // No declared units - relies on inference
+            )
+            .assert_unit_error();
+    }
+
+    #[test]
+    fn test_arrayed_expression_unit_mismatch() {
+        // Test that unit checking catches mismatches in arrayed expressions
+        // The declared units are "widgets" but the expression computes "widgets/days"
+        TestProject::new("arrayed_mismatch_test")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("days", None)
+            .named_dimension("Region", &["North", "South"])
+            .aux_with_units("rate", "10", Some("widgets/days"))
+            // This should cause an error: declared units are "widgets" but
+            // the expression "rate * 1.5" has units "widgets/days"
+            .array_with_ranges_direct(
+                "values",
+                vec!["Region".to_string()],
+                vec![("North", "rate * 1.5"), ("South", "rate * 0.8")],
+                Some("widgets"), // Wrong units!
+            )
+            .assert_unit_error();
+    }
+
+    #[test]
+    fn test_apply_to_all_unit_checking() {
+        // Test that ApplyToAll expressions are properly checked for unit consistency
+        TestProject::new("apply_to_all_units")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("days", None)
+            .named_dimension("Region", &["North", "South"])
+            .aux_with_units("rate", "10", Some("widgets/days"))
+            // ApplyToAll with correct units
+            .array_aux_direct(
+                "values",
+                vec!["Region".to_string()],
+                "rate * 2",
+                Some("widgets/days"),
+            )
+            .aux_with_units("total", "SUM(values[*])", Some("widgets/days"))
+            .assert_compiles();
+    }
+
+    #[test]
+    fn test_apply_to_all_unit_mismatch() {
+        // Test that ApplyToAll expressions catch unit mismatches
+        TestProject::new("apply_to_all_mismatch")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("days", None)
+            .named_dimension("Region", &["North", "South"])
+            .aux_with_units("rate", "10", Some("widgets/days"))
+            // This should cause an error: declared units are "widgets" but
+            // the expression "rate * 2" has units "widgets/days"
+            .array_aux_direct(
+                "values",
+                vec!["Region".to_string()],
+                "rate * 2",
+                Some("widgets"), // Wrong units!
+            )
+            .assert_unit_error();
+    }
+
+    #[test]
+    fn test_if_else_unit_checking() {
+        // Test that if/else branches with consistent units work correctly
+        TestProject::new("if_else_consistent")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("days", None)
+            .aux_with_units("rate_a", "10", Some("widgets/days"))
+            .aux_with_units("rate_b", "20", Some("widgets/days"))
+            .aux_with_units("condition", "1", Some("dimensionless"))
+            // Both branches have the same units - should work
+            .aux_with_units(
+                "selected_rate",
+                "IF condition > 0 THEN rate_a ELSE rate_b",
+                Some("widgets/days"),
+            )
+            .assert_compiles();
+    }
+
+    #[test]
+    fn test_if_else_unit_mismatch() {
+        // Test that if/else branches with inconsistent units are caught
+        TestProject::new("if_else_mismatch")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("gadgets", None)
+            .unit("days", None)
+            .aux_with_units("rate_widgets", "10", Some("widgets/days"))
+            .aux_with_units("rate_gadgets", "20", Some("gadgets/days"))
+            .aux_with_units("condition", "1", Some("dimensionless"))
+            // Branches have different units - should fail
+            .aux_with_units(
+                "selected_rate",
+                "IF condition > 0 THEN rate_widgets ELSE rate_gadgets",
+                Some("widgets/days"),
+            )
+            .assert_unit_error();
+    }
+
+    #[test]
+    fn test_safediv_consistent_units() {
+        // Test SAFEDIV with consistent units
+        TestProject::new("safediv_consistent")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("days", None)
+            .aux_with_units("numerator", "100", Some("widgets"))
+            .aux_with_units("denominator", "5", Some("days"))
+            .aux_with_units("fallback", "0", Some("widgets/days"))
+            // SAFEDIV(a, b, c) should work when c has units a/b
+            .aux_with_units(
+                "result",
+                "SAFEDIV(numerator, denominator, fallback)",
+                Some("widgets/days"),
+            )
+            .assert_compiles();
+    }
+
+    #[test]
+    fn test_safediv_mismatched_fallback() {
+        // Test that SAFEDIV catches mismatched fallback units
+        TestProject::new("safediv_mismatch")
+            .with_time_units("days")
+            .unit("widgets", None)
+            .unit("gadgets", None)
+            .unit("days", None)
+            .aux_with_units("numerator", "100", Some("widgets"))
+            .aux_with_units("denominator", "5", Some("days"))
+            .aux_with_units("bad_fallback", "0", Some("gadgets/days")) // Wrong units!
+            // SAFEDIV(a, b, c) should fail when c has wrong units
+            .aux_with_units(
+                "result",
+                "SAFEDIV(numerator, denominator, bad_fallback)",
+                Some("widgets/days"),
+            )
+            .assert_unit_error();
+    }
 }

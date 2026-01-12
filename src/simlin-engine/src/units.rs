@@ -32,6 +32,14 @@ impl Units {
             (Units::Explicit(lhs), Units::Explicit(rhs)) => *lhs == *rhs,
         }
     }
+
+    /// Convert to a UnitMap, treating Constant as dimensionless (empty map)
+    pub fn to_unit_map(&self) -> UnitMap {
+        match self {
+            Units::Explicit(units) => units.clone(),
+            Units::Constant => UnitMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

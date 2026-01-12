@@ -200,8 +200,16 @@ impl UnitEvaluator<'_> {
 
                         if let Some(c) = c {
                             let c_units = self.check(c)?;
-                            if c_units != units {
-                                // TODO: return an error here
+                            if !c_units.equals(&units) {
+                                return Err(ConsistencyError(
+                                    ErrorCode::UnitMismatch,
+                                    c.get_loc(),
+                                    Some(format!(
+                                        "SAFEDIV fallback has units '{}' but expected '{}'",
+                                        c_units.to_unit_map(),
+                                        units.to_unit_map()
+                                    )),
+                                ));
                             }
                         }
 
@@ -284,12 +292,20 @@ impl UnitEvaluator<'_> {
                     }
                 }
             }
-            Expr2::If(_, l, r, _, _) => {
+            Expr2::If(_, l, r, _, loc) => {
                 let lunits = self.check(l)?;
                 let runits = self.check(r)?;
 
                 if !lunits.equals(&runits) {
-                    eprintln!("TODO: if error, left and right units don't match");
+                    return Err(ConsistencyError(
+                        ErrorCode::UnitMismatch,
+                        *loc,
+                        Some(format!(
+                            "IF branches have different units: then '{}', else '{}'",
+                            lunits.to_unit_map(),
+                            runits.to_unit_map()
+                        )),
+                    ));
                 }
 
                 Ok(lunits)
@@ -310,7 +326,9 @@ pub fn check(
     use UnitError::{ConsistencyError, DefinitionError};
     let mut errors: Vec<(Ident<Canonical>, UnitError)> = vec![];
 
-    // TODO: modules
+    // Module stock/flow relationships are validated when each submodel is processed.
+    // Cross-module connections (module inputs/outputs) are handled in unit inference,
+    // which creates constraints ensuring input variables match across model boundaries.
 
     // get the main model
     // iterate over the variables
@@ -352,6 +370,48 @@ pub fn check(
             // specified on the variable (like a constant would be)
             continue;
         }
+
+        // Check that all elements of arrayed expressions have consistent units,
+        // even when the array variable has no declared units
+        if let Some(Ast::Arrayed(_, asts)) = var.ast() {
+            let mut first_units: Option<UnitMap> = None;
+            for (element, expr) in asts.iter() {
+                match units.check(expr) {
+                    Ok(Units::Explicit(element_units)) => {
+                        if let Some(ref existing) = first_units {
+                            if *existing != element_units {
+                                let loc = expr.get_loc();
+                                errors.push((
+                                    ident.clone(),
+                                    ConsistencyError(
+                                        ErrorCode::UnitMismatch,
+                                        Loc::new(loc.start.into(), loc.end.into()),
+                                        Some(format!(
+                                            "array element '{}' has units '{}' but previous element(s) have units '{}'",
+                                            element, element_units, existing
+                                        )),
+                                    ),
+                                ));
+                            }
+                        } else {
+                            first_units = Some(element_units);
+                        }
+                    }
+                    Ok(Units::Constant) => {
+                        // Constants are compatible with any units
+                    }
+                    Err(ConsistencyError(ErrorCode::DoesNotExist, _, _)) => {
+                        // If we can't determine units for an element (e.g., it uses a module
+                        // that doesn't have inferred units yet), skip the consistency check.
+                        // Other error types are propagated as actual errors.
+                    }
+                    Err(err) => {
+                        errors.push((ident.clone(), err));
+                    }
+                }
+            }
+        }
+
         if let Some(expected) = var.units() {
             if let Variable::Stock {
                 ident,
@@ -416,8 +476,61 @@ pub fn check(
                             errors.push((ident.clone(), err));
                         }
                     },
-                    Ast::ApplyToAll(_, _) => {}
-                    Ast::Arrayed(_, _) => {}
+                    Ast::ApplyToAll(_, expr) => match units.check(expr) {
+                        Ok(Units::Explicit(actual)) => {
+                            if actual != *expected {
+                                let details = format!(
+                                    "computed units '{}' don't match specified units",
+                                    &actual,
+                                );
+                                let loc = expr.get_loc();
+                                errors.push((
+                                    ident.clone(),
+                                    ConsistencyError(
+                                        ErrorCode::UnitMismatch,
+                                        Loc::new(loc.start.into(), loc.end.into()),
+                                        Some(details),
+                                    ),
+                                ))
+                            }
+                        }
+                        Ok(Units::Constant) => {
+                            // definitionally we're fine
+                        }
+                        Err(err) => {
+                            errors.push((ident.clone(), err));
+                        }
+                    },
+                    Ast::Arrayed(_, asts) => {
+                        // Check each element expression in the arrayed variable
+                        for (_element, expr) in asts.iter() {
+                            match units.check(expr) {
+                                Ok(Units::Explicit(actual)) => {
+                                    if actual != *expected {
+                                        let details = format!(
+                                            "computed units '{}' don't match specified units",
+                                            &actual,
+                                        );
+                                        let loc = expr.get_loc();
+                                        errors.push((
+                                            ident.clone(),
+                                            ConsistencyError(
+                                                ErrorCode::UnitMismatch,
+                                                Loc::new(loc.start.into(), loc.end.into()),
+                                                Some(details),
+                                            ),
+                                        ))
+                                    }
+                                }
+                                Ok(Units::Constant) => {
+                                    // definitionally we're fine
+                                }
+                                Err(err) => {
+                                    errors.push((ident.clone(), err));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
