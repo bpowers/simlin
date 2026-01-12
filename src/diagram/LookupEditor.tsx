@@ -116,9 +116,14 @@ function lookup(table: GFTable, index: number): number {
   }
 }
 
+interface ChartInstance {
+  container?: HTMLElement;
+}
+
 export const LookupEditor = styled(
   class InnerLookupEditor extends React.PureComponent<LookupEditorProps & { className?: string }, LookupEditorState> {
-    readonly lookupRef: React.RefObject<SVGSVGElement | null>;
+    // Recharts' LineChart ref exposes the component instance which has a `container` property
+    readonly lookupRef: React.RefObject<any>;
 
     constructor(props: LookupEditorProps) {
       super(props);
@@ -225,8 +230,8 @@ export const LookupEditor = styled(
         return;
       }
 
-      const svg = this.lookupRef.current;
-      if (svg === null) {
+      const chart: ChartInstance | null = this.lookupRef.current;
+      if (chart === null || !chart.container) {
         return;
       }
 
@@ -247,10 +252,7 @@ export const LookupEditor = styled(
         return;
       }
 
-      // Get container height from the SVG element. In evergreen browsers with a
-      // visible, laid-out SVG element (required for us to receive events), this
-      // will always be a positive number.
-      const containerHeight = svg.clientHeight;
+      const containerHeight = chart.container.clientHeight;
       if (containerHeight <= 0) {
         return;
       }
