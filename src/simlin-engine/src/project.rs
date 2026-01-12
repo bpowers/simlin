@@ -71,13 +71,10 @@ impl From<datamodel::Project> for Project {
             // TODO: Consider surfacing UnitMismatch errors once more test models have correct units.
             let inferred_units = crate::units_infer::infer(models, units_ctx, model)
                 .unwrap_or_else(|_err| {
-                    // XXX: for now, ignore inference errors.  They aren't
-                    // understandable for anyone but me - we need to thread
-                    // location information through at a minimum.
-
-                    // let mut errors = model.errors.take().unwrap_or_default();
-                    // errors.push(err);
-                    // model.errors = Some(errors);
+                    // Inference errors now include location information (variable names
+                    // and positions in equations). We're still not surfacing them to
+                    // maintain backwards compatibility, but they're ready to be used.
+                    // To enable: convert _err (UnitError::InferenceError) to model errors.
                     Default::default()
                 });
             model.check_units(units_ctx, &inferred_units)

@@ -216,6 +216,48 @@ fn format_unit_error(
                 kind: FormattedErrorKind::Units,
             }
         }
+        UnitError::InferenceError {
+            code,
+            sources,
+            details,
+        } => {
+            // Extract location from the first source if available
+            let (start, end) = sources
+                .first()
+                .and_then(|(_, loc)| *loc)
+                .map(|loc| (loc.start, loc.end))
+                .unwrap_or((0, 0));
+            let snippet = var
+                .and_then(variable_equation_text)
+                .map(|eqn| format_snippet(&eqn, start, end));
+            // Include involved variables in the message if there are multiple sources
+            let involved_vars: Vec<_> = sources.iter().map(|(v, _)| v.as_str()).collect();
+            let summary = match (details, involved_vars.len()) {
+                (Some(details), n) if n > 1 => format!(
+                    "units inference error in model '{model_name}' involving {}: {code} -- {details}",
+                    involved_vars.join(", ")
+                ),
+                (Some(details), _) => format!(
+                    "units inference error in model '{model_name}' variable '{var_name}': {code} -- {details}"
+                ),
+                (None, n) if n > 1 => format!(
+                    "units inference error in model '{model_name}' involving {}: {code}",
+                    involved_vars.join(", ")
+                ),
+                (None, _) => format!(
+                    "units inference error in model '{model_name}' variable '{var_name}': {code}"
+                ),
+            };
+            FormattedError {
+                code: *code,
+                message: combine_snippet_and_summary(snippet, summary),
+                model_name: Some(model_name.to_string()),
+                variable_name: Some(var_name.to_string()),
+                start_offset: start,
+                end_offset: end,
+                kind: FormattedErrorKind::Units,
+            }
+        }
     }
 }
 

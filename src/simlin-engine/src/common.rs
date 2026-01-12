@@ -194,6 +194,13 @@ impl From<Error> for EquationError {
 pub enum UnitError {
     DefinitionError(EquationError, Option<String>),
     ConsistencyError(ErrorCode, Loc, Option<String>),
+    /// For inference errors that may span multiple variables.
+    /// Each source is (variable_identifier, optional_location_in_that_equation).
+    InferenceError {
+        code: ErrorCode,
+        sources: Vec<(String, Option<Loc>)>,
+        details: Option<String>,
+    },
 }
 
 impl fmt::Display for UnitError {
@@ -211,6 +218,33 @@ impl fmt::Display for UnitError {
                     write!(f, "unit consistency:{loc}:{err} -- {details}")
                 } else {
                     write!(f, "unit consistency:{loc}:{err}")
+                }
+            }
+            UnitError::InferenceError {
+                code,
+                sources,
+                details,
+            } => {
+                // Format sources as "var@loc" or just "var" if no location
+                let sources_str = if sources.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    sources
+                        .iter()
+                        .map(|(var, loc)| {
+                            if let Some(loc) = loc {
+                                format!("'{var}'@{loc}")
+                            } else {
+                                format!("'{var}'")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if let Some(details) = details {
+                    write!(f, "unit inference [{sources_str}]: {code} -- {details}")
+                } else {
+                    write!(f, "unit inference [{sources_str}]: {code}")
                 }
             }
         }
