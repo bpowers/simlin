@@ -194,6 +194,13 @@ impl From<Error> for EquationError {
 pub enum UnitError {
     DefinitionError(EquationError, Option<String>),
     ConsistencyError(ErrorCode, Loc, Option<String>),
+    /// For inference errors that may span multiple variables.
+    /// Each source is (variable_identifier, optional_location_in_that_equation).
+    InferenceError {
+        code: ErrorCode,
+        sources: Vec<(String, Option<Loc>)>,
+        details: Option<String>,
+    },
 }
 
 impl fmt::Display for UnitError {
@@ -211,6 +218,33 @@ impl fmt::Display for UnitError {
                     write!(f, "unit consistency:{loc}:{err} -- {details}")
                 } else {
                     write!(f, "unit consistency:{loc}:{err}")
+                }
+            }
+            UnitError::InferenceError {
+                code,
+                sources,
+                details,
+            } => {
+                // Format sources as "var@loc" or just "var" if no location
+                let sources_str = if sources.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    sources
+                        .iter()
+                        .map(|(var, loc)| {
+                            if let Some(loc) = loc {
+                                format!("'{var}'@{loc}")
+                            } else {
+                                format!("'{var}'")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if let Some(details) = details {
+                    write!(f, "unit inference [{sources_str}]: {code} -- {details}")
+                } else {
+                    write!(f, "unit inference [{sources_str}]: {code}")
                 }
             }
         }
@@ -711,6 +745,76 @@ fn test_fmt_display_implementations() {
 
     let canonical_str = ident.as_canonical_str();
     assert_eq!(format!("{canonical_str}"), "model·var");
+}
+
+#[test]
+fn test_unit_error_inference_display() {
+    use crate::ast::Loc;
+
+    // Test InferenceError with no sources (edge case)
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![],
+        details: None,
+    };
+    let display = format!("{err}");
+    assert!(
+        display.contains("unknown"),
+        "Empty sources should show 'unknown'"
+    );
+    assert!(display.contains("unit_mismatch"));
+
+    // Test InferenceError with single source, no location
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![("my_var".to_string(), None)],
+        details: None,
+    };
+    let display = format!("{err}");
+    assert!(display.contains("'my_var'"), "Should contain variable name");
+    assert!(!display.contains("@"), "Should not have @ when no location");
+
+    // Test InferenceError with single source, with location
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![("my_var".to_string(), Some(Loc::new(5, 10)))],
+        details: None,
+    };
+    let display = format!("{err}");
+    assert!(
+        display.contains("'my_var'@"),
+        "Should contain variable with @ for location"
+    );
+    assert!(
+        display.contains("5:10"),
+        "Should contain location 5:10, got: {}",
+        display
+    );
+
+    // Test InferenceError with multiple sources
+    let err = UnitError::InferenceError {
+        code: ErrorCode::UnitMismatch,
+        sources: vec![
+            ("var_a".to_string(), Some(Loc::new(0, 5))),
+            ("var_b".to_string(), None),
+        ],
+        details: Some("conflicting units".to_string()),
+    };
+    let display = format!("{err}");
+    assert!(display.contains("'var_a'@"));
+    assert!(display.contains("'var_b'"));
+    assert!(
+        display.contains(", "),
+        "Should have comma-separated sources"
+    );
+    assert!(
+        display.contains("conflicting units"),
+        "Should contain details"
+    );
+    assert!(
+        display.contains("--"),
+        "Should have -- separator for details"
+    );
 }
 
 // Implementations for identifier types

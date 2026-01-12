@@ -342,6 +342,7 @@ impl TestProject {
                     let code = match err {
                         UnitError::DefinitionError(eq_err, _) => eq_err.code,
                         UnitError::ConsistencyError(code, _, _) => code,
+                        UnitError::InferenceError { code, .. } => code,
                     };
                     errors.push((format!("{model_name}.{var_name}"), code));
                 }

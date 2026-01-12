@@ -71,6 +71,25 @@ impl From<engine::common::UnitError> for UnitError {
                 end: loc.end,
                 details,
             },
+            engine::common::UnitError::InferenceError {
+                code,
+                sources,
+                details,
+            } => {
+                // Use the first source's location if available, otherwise default to 0
+                let (start, end) = sources
+                    .first()
+                    .and_then(|(_, loc)| *loc)
+                    .map(|loc| (loc.start, loc.end))
+                    .unwrap_or((0, 0));
+                UnitError {
+                    code,
+                    is_consistency_error: true,
+                    start,
+                    end,
+                    details,
+                }
+            }
         }
     }
 }

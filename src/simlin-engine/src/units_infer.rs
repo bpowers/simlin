@@ -5,15 +5,86 @@
 use std::collections::HashMap;
 
 use crate::ast::{Ast, BinaryOp, Expr2};
-use crate::builtins::BuiltinFn;
-use crate::common::{Canonical, Ident, Result, UnitResult, canonicalize};
+use crate::builtins::{BuiltinFn, Loc};
+use crate::common::{Canonical, ErrorCode, Ident, UnitError, UnitResult, canonicalize};
 use crate::datamodel::UnitMap;
 use crate::model::ModelStage1;
-use crate::model_err;
 #[cfg(test)]
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
 use crate::units::{Context, UnitOp, Units, combine};
 use crate::variable::Variable;
+
+/// Source of a constraint for error reporting.
+/// Tracks which variable a constraint relates to and optionally where in that variable's equation.
+#[derive(Clone, Debug)]
+struct ConstraintSource {
+    /// Variable identifier with module prefix (e.g., "module1·varname")
+    var: String,
+    /// Location within that variable's equation (None for structural constraints like stock/flow)
+    loc: Option<Loc>,
+}
+
+/// A constraint with source tracking for error reporting.
+/// Each constraint represents an equation of the form `1 == unit_map`.
+#[derive(Clone, Debug)]
+struct LocatedConstraint {
+    /// The unit map representing the constraint
+    unit_map: UnitMap,
+    /// Where this constraint originated (may have multiple sources for cross-variable constraints)
+    sources: Vec<ConstraintSource>,
+}
+
+#[allow(dead_code)]
+impl LocatedConstraint {
+    /// Create a new constraint with a single source
+    fn new(unit_map: UnitMap, var: &str, loc: Option<Loc>) -> Self {
+        LocatedConstraint {
+            unit_map,
+            sources: vec![ConstraintSource {
+                var: var.to_string(),
+                loc,
+            }],
+        }
+    }
+
+    /// Add an additional source to this constraint
+    fn with_source(mut self, var: &str, loc: Option<Loc>) -> Self {
+        self.sources.push(ConstraintSource {
+            var: var.to_string(),
+            loc,
+        });
+        self
+    }
+
+    /// Merge sources from another constraint into this one
+    fn merge_sources(&mut self, other: &LocatedConstraint) {
+        for source in &other.sources {
+            // Avoid duplicates
+            if !self
+                .sources
+                .iter()
+                .any(|s| s.var == source.var && s.loc == source.loc)
+            {
+                self.sources.push(source.clone());
+            }
+        }
+    }
+
+    /// Get the primary variable this constraint is about
+    fn primary_var(&self) -> Option<&str> {
+        self.sources.first().map(|s| s.var.as_str())
+    }
+
+    /// Get the primary location for error reporting
+    fn primary_loc(&self) -> Option<Loc> {
+        self.sources.first().and_then(|s| s.loc)
+    }
+
+    /// Check if the unit_map is empty (dimensionless/identity)
+    fn is_empty(&self) -> bool {
+        self.unit_map.is_empty()
+    }
+}
 
 struct UnitInferer<'a> {
     ctx: &'a Context,
@@ -57,11 +128,16 @@ fn solve_for(var: &str, mut lhs: UnitMap) -> UnitMap {
     if inverse { lhs.reciprocal() } else { lhs }
 }
 
-fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<UnitMap> {
+fn substitute(
+    var: &str,
+    units: &UnitMap,
+    subst_sources: &[ConstraintSource],
+    constraints: Vec<LocatedConstraint>,
+) -> Vec<LocatedConstraint> {
     constraints
         .into_iter()
-        .map(|mut l| {
-            if let Some(exponent) = l.map.remove(var) {
+        .map(|mut c| {
+            if let Some(exponent) = c.unit_map.map.remove(var) {
                 if exponent.abs() != 1 {
                     println!("oh no!  subst removed {var} with exp {exponent}");
                 }
@@ -71,10 +147,20 @@ fn substitute(var: &str, units: &UnitMap, constraints: Vec<UnitMap>) -> Vec<Unit
                 } else {
                     UnitOp::Div
                 };
-                combine(op, l, units.clone())
-            } else {
-                l
+                c.unit_map = combine(op, c.unit_map, units.clone());
+
+                // Merge sources from the substitution
+                for source in subst_sources {
+                    if !c
+                        .sources
+                        .iter()
+                        .any(|s| s.var == source.var && s.loc == source.loc)
+                    {
+                        c.sources.push(source.clone());
+                    }
+                }
             }
+            c
         })
         .collect()
 }
@@ -109,23 +195,31 @@ fn split_constraint(u: &UnitMap) -> (UnitMap, UnitMap) {
 ///
 /// This is O(n) by grouping constraints by their metavariable signature using a HashMap,
 /// rather than O(n²) pairwise comparison.
-fn find_constraint_mismatch(constraints: &[UnitMap]) -> Option<String> {
+fn find_constraint_mismatch(constraints: &[LocatedConstraint]) -> Option<UnitError> {
     use std::collections::HashMap;
     use std::fmt::Write;
 
     // Group constraints by their metavariable signature.
     // Key: sorted string representation of metavar signature (for HashMap key)
-    // Value: (first constraint with this signature, its residual)
-    let mut signature_groups: HashMap<String, (&UnitMap, UnitMap)> = HashMap::new();
+    // Value: reference to the first LocatedConstraint with this signature, plus its residual
+    let mut signature_groups: HashMap<String, (&LocatedConstraint, UnitMap)> = HashMap::new();
 
     for constraint in constraints {
-        let (signature, residual) = split_constraint(constraint);
+        let (signature, residual) = split_constraint(&constraint.unit_map);
 
         // Case 1: No metavariables means this is a direct concrete mismatch
         if signature.map.is_empty() && !residual.map.is_empty() {
             let mut s = "unit checking failed; conflicting constraint:\n".to_owned();
-            write!(s, "    1 == {constraint}").unwrap();
-            return Some(s);
+            write!(s, "    1 == {}", constraint.unit_map).unwrap();
+            return Some(UnitError::InferenceError {
+                code: ErrorCode::UnitMismatch,
+                sources: constraint
+                    .sources
+                    .iter()
+                    .map(|s| (s.var.clone(), s.loc))
+                    .collect(),
+                details: Some(s),
+            });
         }
 
         // Create a canonical string key for the signature (sorted for consistency)
@@ -135,12 +229,32 @@ fn find_constraint_mismatch(constraints: &[UnitMap]) -> Option<String> {
             // Case 2: Same signature but different residual means contradiction
             if residual != *first_residual {
                 let mut s = "unit checking failed; inconsistent constraints:\n".to_owned();
-                writeln!(s, "    1 == {}", first_constraint).unwrap();
-                writeln!(s, "    1 == {}", constraint).unwrap();
+                writeln!(s, "    1 == {}", first_constraint.unit_map).unwrap();
+                writeln!(s, "    1 == {}", constraint.unit_map).unwrap();
                 // The ratio of residuals shows the implied contradiction
                 let implied = first_residual.clone() / residual;
                 write!(s, "  These imply: 1 == {implied}").unwrap();
-                return Some(s);
+
+                // Combine sources from both constraints
+                let mut all_sources: Vec<(String, Option<Loc>)> = first_constraint
+                    .sources
+                    .iter()
+                    .map(|s| (s.var.clone(), s.loc))
+                    .collect();
+                for source in &constraint.sources {
+                    if !all_sources
+                        .iter()
+                        .any(|(v, l)| v == &source.var && *l == source.loc)
+                    {
+                        all_sources.push((source.var.clone(), source.loc));
+                    }
+                }
+
+                return Some(UnitError::InferenceError {
+                    code: ErrorCode::UnitMismatch,
+                    sources: all_sources,
+                    details: Some(s),
+                });
             }
         } else {
             signature_groups.insert(sig_key, (constraint, residual));
@@ -161,7 +275,8 @@ impl UnitInferer<'_> {
         &self,
         expr: &Expr2,
         prefix: &str,
-        constraints: &mut Vec<UnitMap>,
+        current_var: &str,
+        constraints: &mut Vec<LocatedConstraint>,
     ) -> UnitResult<Units> {
         match expr {
             Expr2::Const(_, _, _) => Ok(Units::Constant),
@@ -213,11 +328,11 @@ impl UnitInferer<'_> {
                 | BuiltinFn::Tan(a)
                 | BuiltinFn::Size(a)
                 | BuiltinFn::Stddev(a)
-                | BuiltinFn::Sum(a) => self.gen_constraints(a, prefix, constraints),
+                | BuiltinFn::Sum(a) => self.gen_constraints(a, prefix, current_var, constraints),
                 BuiltinFn::Mean(args) => {
                     let args = args
                         .iter()
-                        .map(|arg| self.gen_constraints(arg, prefix, constraints))
+                        .map(|arg| self.gen_constraints(arg, prefix, current_var, constraints))
                         .collect::<UnitResult<Vec<_>>>()?;
 
                     if args.is_empty() {
@@ -233,10 +348,11 @@ impl UnitInferer<'_> {
                         Some(Units::Explicit(arg0)) => {
                             for arg in args.iter() {
                                 if let Units::Explicit(arg) = arg {
-                                    constraints.push(combine(
-                                        UnitOp::Div,
-                                        arg0.clone(),
-                                        arg.clone(),
+                                    // Mean arguments must have same units
+                                    constraints.push(LocatedConstraint::new(
+                                        combine(UnitOp::Div, arg0.clone(), arg.clone()),
+                                        current_var,
+                                        Some(expr.get_loc()),
                                     ));
                                 }
                             }
@@ -247,14 +363,19 @@ impl UnitInferer<'_> {
                     }
                 }
                 BuiltinFn::Max(a, b) | BuiltinFn::Min(a, b) => {
-                    let a_units = self.gen_constraints(a, prefix, constraints)?;
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
                     if let Some(b) = b {
-                        let b_units = self.gen_constraints(b, prefix, constraints)?;
+                        let b_units = self.gen_constraints(b, prefix, current_var, constraints)?;
 
                         if let Units::Explicit(ref lunits) = a_units
                             && let Units::Explicit(runits) = b_units
                         {
-                            constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
+                            let loc = a.get_loc().union(&b.get_loc());
+                            constraints.push(LocatedConstraint::new(
+                                combine(UnitOp::Div, lunits.clone(), runits),
+                                current_var,
+                                Some(loc),
+                            ));
                         }
                     }
                     Ok(a_units)
@@ -270,21 +391,25 @@ impl UnitInferer<'_> {
                         None,
                         a.get_loc().union(&b.get_loc()),
                     );
-                    let units = self.gen_constraints(&div, prefix, constraints)?;
+                    let units = self.gen_constraints(&div, prefix, current_var, constraints)?;
 
                     // the optional argument to safediv, if specified, should match the units of a/b
                     if let Units::Explicit(ref result_units) = units
                         && let Some(c) = c
                         && let Units::Explicit(c_units) =
-                            self.gen_constraints(c, prefix, constraints)?
+                            self.gen_constraints(c, prefix, current_var, constraints)?
                     {
-                        constraints.push(combine(UnitOp::Div, c_units, result_units.clone()));
+                        constraints.push(LocatedConstraint::new(
+                            combine(UnitOp::Div, c_units, result_units.clone()),
+                            current_var,
+                            Some(c.get_loc()),
+                        ));
                     }
 
                     Ok(units)
                 }
                 BuiltinFn::Rank(a, _rest) => {
-                    let a_units = self.gen_constraints(a, prefix, constraints)?;
+                    let a_units = self.gen_constraints(a, prefix, current_var, constraints)?;
 
                     // from the spec, I don't think there are any constraints on the optional args:
                     // RANK(A, SIZE) gives index of MAX value in array A (i.e., final ranked, ascending order)
@@ -301,10 +426,10 @@ impl UnitInferer<'_> {
                     .collect();
                 Ok(Units::Explicit(units))
             }
-            Expr2::Op1(_, l, _, _) => self.gen_constraints(l, prefix, constraints),
+            Expr2::Op1(_, l, _, _) => self.gen_constraints(l, prefix, current_var, constraints),
             Expr2::Op2(op, l, r, _, _) => {
-                let lunits = self.gen_constraints(l, prefix, constraints)?;
-                let runits = self.gen_constraints(r, prefix, constraints)?;
+                let lunits = self.gen_constraints(l, prefix, current_var, constraints)?;
+                let runits = self.gen_constraints(r, prefix, current_var, constraints)?;
 
                 match op {
                     BinaryOp::Add | BinaryOp::Sub => match (lunits, runits) {
@@ -312,7 +437,12 @@ impl UnitInferer<'_> {
                         (Units::Constant, Units::Explicit(units))
                         | (Units::Explicit(units), Units::Constant) => Ok(Units::Explicit(units)),
                         (Units::Explicit(lunits), Units::Explicit(runits)) => {
-                            constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
+                            let loc = l.get_loc().union(&r.get_loc());
+                            constraints.push(LocatedConstraint::new(
+                                combine(UnitOp::Div, lunits.clone(), runits),
+                                current_var,
+                                Some(loc),
+                            ));
                             Ok(Units::Explicit(lunits))
                         }
                     },
@@ -349,13 +479,18 @@ impl UnitInferer<'_> {
                 }
             }
             Expr2::If(_, l, r, _, _) => {
-                let lunits = self.gen_constraints(l, prefix, constraints)?;
-                let runits = self.gen_constraints(r, prefix, constraints)?;
+                let lunits = self.gen_constraints(l, prefix, current_var, constraints)?;
+                let runits = self.gen_constraints(r, prefix, current_var, constraints)?;
 
                 if let Units::Explicit(ref lunits) = lunits
                     && let Units::Explicit(runits) = runits
                 {
-                    constraints.push(combine(UnitOp::Div, lunits.clone(), runits));
+                    let loc = l.get_loc().union(&r.get_loc());
+                    constraints.push(LocatedConstraint::new(
+                        combine(UnitOp::Div, lunits.clone(), runits),
+                        current_var,
+                        Some(loc),
+                    ));
                 }
 
                 Ok(lunits)
@@ -367,13 +502,15 @@ impl UnitInferer<'_> {
         &self,
         model: &ModelStage1,
         prefix: &str,
-        constraints: &mut Vec<UnitMap>,
+        constraints: &mut Vec<LocatedConstraint>,
     ) {
         let time_units = canonicalize(self.ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
             .as_str()
             .to_string();
 
         for (id, var) in model.variables.iter() {
+            let current_var = format!("{prefix}{id}");
+
             if let Variable::Stock {
                 ident,
                 inflows,
@@ -382,23 +519,30 @@ impl UnitInferer<'_> {
             } = var
             {
                 let stock_ident = ident;
+                let stock_var = format!("{prefix}{stock_ident}");
                 let expected = [
                     (format!("@{prefix}{stock_ident}"), 1),
                     (time_units.clone(), -1),
                 ]
                 .iter()
                 .cloned()
-                .collect::<UnitMap>()
-                .push_ctx(format!("stock@{prefix}{stock_ident}"));
+                .collect::<UnitMap>();
                 let mut check_flows = |flows: &Vec<Ident<Canonical>>| {
-                    for ident in flows.iter() {
-                        let flow_units: UnitMap =
-                            [(format!("@{prefix}{ident}"), 1)].iter().cloned().collect();
-                        constraints.push(combine(
-                            UnitOp::Div,
-                            flow_units.push_ctx(format!("stock-flow@{prefix}{ident}")),
-                            expected.clone(),
-                        ));
+                    for flow_ident in flows.iter() {
+                        let flow_var = format!("{prefix}{flow_ident}");
+                        let flow_units: UnitMap = [(format!("@{prefix}{flow_ident}"), 1)]
+                            .iter()
+                            .cloned()
+                            .collect();
+                        // Stock/flow constraint: both stock and flow are sources, no equation location
+                        constraints.push(
+                            LocatedConstraint::new(
+                                combine(UnitOp::Div, flow_units, expected.clone()),
+                                &flow_var,
+                                None,
+                            )
+                            .with_source(&stock_var, None),
+                        );
                     }
                 };
                 check_flows(inflows);
@@ -413,15 +557,16 @@ impl UnitInferer<'_> {
                 let submodel = self.models[model_name];
                 let subprefix = format!("{prefix}{ident}·");
                 for input in inputs {
-                    let src = format!("@{}{}", prefix, input.src);
-                    let dst = format!("@{}{}", subprefix, input.dst);
+                    let src_var = format!("{}{}", prefix, input.src);
+                    let dst_var = format!("{}{}", subprefix, input.dst);
+                    let src = format!("@{src_var}");
+                    let dst = format!("@{dst_var}");
                     // src = dst === 1 = src/dst
-                    let units = [(src.clone(), 1), (dst.clone(), -1)]
-                        .iter()
-                        .cloned()
-                        .collect::<UnitMap>()
-                        .push_ctx(format!("module-input{src}{dst}"));
-                    constraints.push(units);
+                    let units: UnitMap = [(src, 1), (dst, -1)].iter().cloned().collect();
+                    // Module input constraint: both caller and callee are sources
+                    constraints.push(
+                        LocatedConstraint::new(units, &src_var, None).with_source(&dst_var, None),
+                    );
                 }
                 self.gen_all_constraints(submodel, &subprefix, constraints);
             }
@@ -430,8 +575,12 @@ impl UnitInferer<'_> {
             // function.
             if var.table().is_none() {
                 let var_units = match var.ast() {
-                    Some(Ast::Scalar(ast)) => self.gen_constraints(ast, prefix, constraints),
-                    Some(Ast::ApplyToAll(_, ast)) => self.gen_constraints(ast, prefix, constraints),
+                    Some(Ast::Scalar(ast)) => {
+                        self.gen_constraints(ast, prefix, &current_var, constraints)
+                    }
+                    Some(Ast::ApplyToAll(_, ast)) => {
+                        self.gen_constraints(ast, prefix, &current_var, constraints)
+                    }
                     Some(Ast::Arrayed(_, _asts)) => {
                         // todo!();
                         Ok(Units::Constant)
@@ -445,21 +594,28 @@ impl UnitInferer<'_> {
                 // Constants don't generate constraints - they adopt units from context
                 // (e.g., in "x + 1", the 1 has the same units as x)
                 if let Units::Explicit(units) = var_units {
-                    let mv = [(format!("@{prefix}{id}"), 1)]
-                        .iter()
-                        .cloned()
-                        .collect::<UnitMap>()
-                        .push_ctx(format!("computed-mv@{prefix}{id}"));
-                    constraints.push(combine(UnitOp::Div, mv, units));
+                    let mv: UnitMap = [(format!("@{prefix}{id}"), 1)].iter().cloned().collect();
+                    // Get the location from the AST for equation-based constraints
+                    let loc = var.ast().map(|ast| match ast {
+                        Ast::Scalar(expr) => expr.get_loc(),
+                        Ast::ApplyToAll(_, expr) => expr.get_loc(),
+                        Ast::Arrayed(_, _) => Loc::default(),
+                    });
+                    constraints.push(LocatedConstraint::new(
+                        combine(UnitOp::Div, mv, units),
+                        &current_var,
+                        loc,
+                    ));
                 }
             }
             if let Some(units) = var.units() {
-                let mv = [(format!("@{prefix}{id}"), 1)]
-                    .iter()
-                    .cloned()
-                    .collect::<UnitMap>()
-                    .push_ctx(format!("userdef-mv@{prefix}{id}"));
-                constraints.push(combine(UnitOp::Div, mv, units.clone()));
+                let mv: UnitMap = [(format!("@{prefix}{id}"), 1)].iter().cloned().collect();
+                // User-defined unit declarations don't have equation locations
+                constraints.push(LocatedConstraint::new(
+                    combine(UnitOp::Div, mv, units.clone()),
+                    &current_var,
+                    None,
+                ));
             }
         }
     }
@@ -467,10 +623,18 @@ impl UnitInferer<'_> {
     #[allow(clippy::type_complexity)]
     fn unify(
         &self,
-        mut constraints: Vec<UnitMap>,
-    ) -> Result<(HashMap<Ident<Canonical>, UnitMap>, Option<Vec<UnitMap>>)> {
+        mut constraints: Vec<LocatedConstraint>,
+    ) -> std::result::Result<
+        (
+            HashMap<Ident<Canonical>, UnitMap>,
+            Option<Vec<LocatedConstraint>>,
+        ),
+        UnitError,
+    > {
         let mut resolved_fvs: HashMap<Ident<Canonical>, UnitMap> = HashMap::new();
-        let mut final_constraints: Vec<UnitMap> = Vec::with_capacity(constraints.len());
+        // Track sources for each resolved variable in case of conflict
+        let mut resolved_sources: HashMap<Ident<Canonical>, Vec<ConstraintSource>> = HashMap::new();
+        let mut final_constraints: Vec<LocatedConstraint> = Vec::with_capacity(constraints.len());
 
         // FIXME: I think this is O(n^3) worst case; we could do better
         //        by maintaining an index of metavar usage -> Units
@@ -481,26 +645,39 @@ impl UnitInferer<'_> {
                 if c.is_empty() {
                     continue;
                 }
-                if let Some(var) = single_fv(&c) {
+                if let Some(var) = single_fv(&c.unit_map) {
                     let var = var.to_owned();
-                    let units = solve_for(&var, c);
-                    constraints = substitute(&var, &units, constraints);
-                    final_constraints = substitute(&var, &units, final_constraints);
+                    let units = solve_for(&var, c.unit_map.clone());
+                    let sources = c.sources.clone();
+                    constraints = substitute(&var, &units, &sources, constraints);
+                    final_constraints = substitute(&var, &units, &sources, final_constraints);
                     let var_key = var.strip_prefix('@').unwrap();
-                    if let Some(existing_units) =
-                        resolved_fvs.get(&Ident::<Canonical>::from_str_unchecked(var_key))
-                    {
+                    let var_ident = Ident::<Canonical>::from_str_unchecked(var_key);
+                    if let Some(existing_units) = resolved_fvs.get(&var_ident) {
                         if *existing_units != units {
-                            return model_err!(
-                                UnitMismatch,
-                                format!(
-                                    "units for {} don't match ({} != {}); this should be Result",
-                                    var, existing_units, units,
-                                )
-                            );
+                            // Combine sources from both the new constraint and the existing one
+                            let mut all_sources: Vec<(String, Option<Loc>)> =
+                                c.sources.iter().map(|s| (s.var.clone(), s.loc)).collect();
+                            if let Some(existing_sources) = resolved_sources.get(&var_ident) {
+                                for s in existing_sources {
+                                    if !all_sources.iter().any(|(v, l)| v == &s.var && *l == s.loc)
+                                    {
+                                        all_sources.push((s.var.clone(), s.loc));
+                                    }
+                                }
+                            }
+                            return Err(UnitError::InferenceError {
+                                code: ErrorCode::UnitMismatch,
+                                sources: all_sources,
+                                details: Some(format!(
+                                    "conflicting units for {}: {} vs {}",
+                                    var, existing_units, units
+                                )),
+                            });
                         }
                     } else {
-                        resolved_fvs.insert(Ident::<Canonical>::from_str_unchecked(var_key), units);
+                        resolved_fvs.insert(var_ident.clone(), units);
+                        resolved_sources.insert(var_ident, sources);
                     }
                 } else {
                     final_constraints.push(c);
@@ -523,7 +700,7 @@ impl UnitInferer<'_> {
         Ok((resolved_fvs, final_constraints))
     }
 
-    fn infer(&self, model: &ModelStage1) -> Result<HashMap<Ident<Canonical>, UnitMap>> {
+    fn infer(&self, model: &ModelStage1) -> UnitResult<HashMap<Ident<Canonical>, UnitMap>> {
         // use rand::seq::SliceRandom;
         // use rand::thread_rng;
 
@@ -539,8 +716,8 @@ impl UnitInferer<'_> {
             // Check if any unresolved constraint represents an actual mismatch
             let mismatch = find_constraint_mismatch(&constraints);
 
-            if let Some(mismatch_info) = mismatch {
-                model_err!(UnitMismatch, mismatch_info)
+            if let Some(err) = mismatch {
+                Err(err)
             } else {
                 // Unresolved constraints with metavariables just mean the model
                 // is under-constrained (e.g., no units declared). Return partial results.
@@ -614,8 +791,8 @@ fn test_inference() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: Result<HashMap<Ident<Canonical>, UnitMap>> =
-                model_err!(UnitMismatch, "".to_owned());
+            let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
+                Ok(Default::default());
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
                 |models, units_ctx, model| {
@@ -694,8 +871,12 @@ fn test_inference_negative() {
         // there is non-determinism in inference; do it a few times to
         // shake out heisenbugs
         for _ in 0..64 {
-            let mut results: Result<HashMap<Ident<Canonical>, UnitMap>> =
-                model_err!(UnitMismatch, "".to_owned());
+            let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
+                Err(UnitError::InferenceError {
+                    code: ErrorCode::UnitMismatch,
+                    sources: vec![],
+                    details: None,
+                });
             let _project = crate::project::Project::base_from(
                 project_datamodel.clone(),
                 |models, units_ctx, model| {
@@ -707,11 +888,67 @@ fn test_inference_negative() {
     }
 }
 
+#[test]
+fn test_inference_error_has_location() {
+    let sim_specs = sim_specs_with_units("parsec");
+
+    // Create a model with a known unit mismatch: input + TIME where input has widget units
+    let vars = vec![
+        x_aux("input", "6", Some("widget")),
+        x_aux("bad", "input + TIME", None), // widget + parsec = mismatch
+    ];
+    let model = x_model("main", vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let _project = crate::project::Project::base_from(
+        project_datamodel.clone(),
+        |models, units_ctx, model| {
+            results = infer(models, units_ctx, model);
+        },
+    );
+
+    // Verify that we got an error with location information
+    match results {
+        Err(UnitError::InferenceError {
+            code,
+            sources,
+            details,
+        }) => {
+            assert_eq!(code, ErrorCode::UnitMismatch);
+            // Should have at least one source with the variable name
+            assert!(
+                !sources.is_empty(),
+                "inference error should have at least one source"
+            );
+            // At least one source should reference "bad" (the variable with the mismatch)
+            let has_bad = sources.iter().any(|(var, _)| var == "bad");
+            assert!(
+                has_bad,
+                "sources should contain 'bad' variable, got: {:?}",
+                sources
+            );
+            // The source should have a location (non-None) for the equation-based constraint
+            // Note: some sources may have None loc (e.g., from declarations without equations)
+            let has_loc = sources.iter().any(|(_, loc)| loc.is_some());
+            assert!(
+                has_loc,
+                "at least one source should have a location, got: {:?}",
+                sources
+            );
+            // Verify there's a meaningful details message
+            assert!(details.is_some(), "error should have details");
+        }
+        Ok(_) => panic!("expected inference error, got Ok"),
+        Err(e) => panic!("expected InferenceError, got {:?}", e),
+    }
+}
+
 pub(crate) fn infer(
     models: &HashMap<Ident<Canonical>, &ModelStage1>,
     units_ctx: &Context,
     model: &ModelStage1,
-) -> Result<HashMap<Ident<Canonical>, UnitMap>> {
+) -> UnitResult<HashMap<Ident<Canonical>, UnitMap>> {
     let time_units = canonicalize(units_ctx.sim_specs.time_units.as_deref().unwrap_or("time"))
         .as_str()
         .to_string();
@@ -800,8 +1037,12 @@ fn test_multi_metavar_constraint_mismatch() {
     let model = x_model("main", vars);
     let project_datamodel = x_project(sim_specs.clone(), &[model]);
 
-    let mut results: Result<HashMap<Ident<Canonical>, UnitMap>> =
-        model_err!(UnitMismatch, "".to_owned());
+    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> =
+        Err(UnitError::InferenceError {
+            code: ErrorCode::UnitMismatch,
+            sources: vec![],
+            details: None,
+        });
     let _project = crate::project::Project::base_from(
         project_datamodel.clone(),
         |models, units_ctx, model| {
@@ -816,39 +1057,49 @@ fn test_multi_metavar_constraint_mismatch() {
     );
 }
 
+#[cfg(test)]
+/// Helper to create a LocatedConstraint from a UnitMap for testing
+fn test_constraint(unit_map: UnitMap) -> LocatedConstraint {
+    LocatedConstraint::new(unit_map, "test", None)
+}
+
 #[test]
 fn test_find_constraint_mismatch_direct() {
     // Test the find_constraint_mismatch function directly
     use crate::datamodel::UnitMap;
 
     // Case 1: Direct concrete-only mismatch
-    let constraints = vec![
+    let constraints = vec![test_constraint(
         [("meter".to_owned(), 1), ("second".to_owned(), -1)]
             .iter()
             .cloned()
             .collect::<UnitMap>(),
-    ];
+    )];
     let result = find_constraint_mismatch(&constraints);
     assert!(result.is_some(), "Should detect direct concrete mismatch");
 
     // Case 2: Pairwise mismatch with shared metavariables
     let constraints = vec![
-        [
-            ("@a".to_owned(), 1),
-            ("@b".to_owned(), -1),
-            ("meter".to_owned(), 1),
-        ]
-        .iter()
-        .cloned()
-        .collect::<UnitMap>(),
-        [
-            ("@a".to_owned(), 1),
-            ("@b".to_owned(), -1),
-            ("second".to_owned(), 1),
-        ]
-        .iter()
-        .cloned()
-        .collect::<UnitMap>(),
+        test_constraint(
+            [
+                ("@a".to_owned(), 1),
+                ("@b".to_owned(), -1),
+                ("meter".to_owned(), 1),
+            ]
+            .iter()
+            .cloned()
+            .collect::<UnitMap>(),
+        ),
+        test_constraint(
+            [
+                ("@a".to_owned(), 1),
+                ("@b".to_owned(), -1),
+                ("second".to_owned(), 1),
+            ]
+            .iter()
+            .cloned()
+            .collect::<UnitMap>(),
+        ),
     ];
     let result = find_constraint_mismatch(&constraints);
     assert!(
@@ -858,22 +1109,26 @@ fn test_find_constraint_mismatch_direct() {
 
     // Case 3: No mismatch - same concrete units
     let constraints = vec![
-        [
-            ("@a".to_owned(), 1),
-            ("@b".to_owned(), -1),
-            ("meter".to_owned(), 1),
-        ]
-        .iter()
-        .cloned()
-        .collect::<UnitMap>(),
-        [
-            ("@c".to_owned(), 1),
-            ("@d".to_owned(), -1),
-            ("meter".to_owned(), 1),
-        ]
-        .iter()
-        .cloned()
-        .collect::<UnitMap>(),
+        test_constraint(
+            [
+                ("@a".to_owned(), 1),
+                ("@b".to_owned(), -1),
+                ("meter".to_owned(), 1),
+            ]
+            .iter()
+            .cloned()
+            .collect::<UnitMap>(),
+        ),
+        test_constraint(
+            [
+                ("@c".to_owned(), 1),
+                ("@d".to_owned(), -1),
+                ("meter".to_owned(), 1),
+            ]
+            .iter()
+            .cloned()
+            .collect::<UnitMap>(),
+        ),
     ];
     let result = find_constraint_mismatch(&constraints);
     // The ratio of these two would be @a/@b * @d/@c which still has metavariables
@@ -884,18 +1139,217 @@ fn test_find_constraint_mismatch_direct() {
 
     // Case 4: No mismatch - under-constrained but not contradictory
     let constraints = vec![
-        [("@a".to_owned(), 1), ("@b".to_owned(), -1)]
-            .iter()
-            .cloned()
-            .collect::<UnitMap>(),
-        [("@c".to_owned(), 1), ("@d".to_owned(), -1)]
-            .iter()
-            .cloned()
-            .collect::<UnitMap>(),
+        test_constraint(
+            [("@a".to_owned(), 1), ("@b".to_owned(), -1)]
+                .iter()
+                .cloned()
+                .collect::<UnitMap>(),
+        ),
+        test_constraint(
+            [("@c".to_owned(), 1), ("@d".to_owned(), -1)]
+                .iter()
+                .cloned()
+                .collect::<UnitMap>(),
+        ),
     ];
     let result = find_constraint_mismatch(&constraints);
     assert!(
         result.is_none(),
         "Should not detect mismatch for purely under-constrained case"
     );
+}
+
+#[test]
+fn test_located_constraint_merge_sources() {
+    use crate::builtins::Loc;
+
+    // Test merge_sources deduplication
+    let mut constraint1 = LocatedConstraint::new(UnitMap::new(), "var_a", Some(Loc::new(0, 10)));
+    let constraint2 = LocatedConstraint::new(UnitMap::new(), "var_b", Some(Loc::new(5, 15)));
+
+    // Merge sources from constraint2 into constraint1
+    constraint1.merge_sources(&constraint2);
+
+    assert_eq!(constraint1.sources.len(), 2, "Should have both sources");
+    assert_eq!(constraint1.sources[0].var, "var_a");
+    assert_eq!(constraint1.sources[1].var, "var_b");
+
+    // Merging again should not add duplicate
+    constraint1.merge_sources(&constraint2);
+    assert_eq!(
+        constraint1.sources.len(),
+        2,
+        "Should not add duplicate source"
+    );
+
+    // But a different location for the same variable should be added
+    let constraint3 = LocatedConstraint::new(UnitMap::new(), "var_b", Some(Loc::new(20, 30)));
+    constraint1.merge_sources(&constraint3);
+    assert_eq!(
+        constraint1.sources.len(),
+        3,
+        "Should add source with different location"
+    );
+
+    // Test merging with None location
+    let constraint4 = LocatedConstraint::new(UnitMap::new(), "var_c", None);
+    constraint1.merge_sources(&constraint4);
+    assert_eq!(constraint1.sources.len(), 4);
+
+    // Merging same var with None location again should not duplicate
+    constraint1.merge_sources(&constraint4);
+    assert_eq!(
+        constraint1.sources.len(),
+        4,
+        "Should not add duplicate None location"
+    );
+}
+
+#[test]
+fn test_located_constraint_primary_accessors() {
+    use crate::builtins::Loc;
+
+    // Test primary_var and primary_loc with sources
+    let constraint = LocatedConstraint::new(UnitMap::new(), "primary_var", Some(Loc::new(5, 15)));
+
+    assert_eq!(
+        constraint.primary_var(),
+        Some("primary_var"),
+        "primary_var should return first source's variable"
+    );
+    assert_eq!(
+        constraint.primary_loc(),
+        Some(Loc::new(5, 15)),
+        "primary_loc should return first source's location"
+    );
+
+    // Test with None location
+    let constraint_no_loc = LocatedConstraint::new(UnitMap::new(), "another_var", None);
+    assert_eq!(constraint_no_loc.primary_var(), Some("another_var"));
+    assert_eq!(
+        constraint_no_loc.primary_loc(),
+        None,
+        "primary_loc should be None when source has no location"
+    );
+
+    // Test with_source chaining
+    let constraint_multi = LocatedConstraint::new(UnitMap::new(), "first", Some(Loc::new(1, 2)))
+        .with_source("second", Some(Loc::new(3, 4)));
+    assert_eq!(constraint_multi.sources.len(), 2);
+    assert_eq!(
+        constraint_multi.primary_var(),
+        Some("first"),
+        "primary_var should still be first source"
+    );
+}
+
+#[test]
+fn test_located_constraint_is_empty() {
+    // Test is_empty on LocatedConstraint
+    let empty_constraint = LocatedConstraint::new(UnitMap::new(), "test", None);
+    assert!(
+        empty_constraint.is_empty(),
+        "Empty UnitMap should make constraint empty"
+    );
+
+    let non_empty: UnitMap = [("meter".to_owned(), 1)].iter().cloned().collect();
+    let non_empty_constraint = LocatedConstraint::new(non_empty, "test", None);
+    assert!(
+        !non_empty_constraint.is_empty(),
+        "Non-empty UnitMap should not be empty"
+    );
+}
+
+#[test]
+fn test_rank_builtin_unit_inference() {
+    // Test that RANK builtin is handled correctly in unit inference
+    // RANK returns the same units as its first argument (the array being ranked)
+    let sim_specs = sim_specs_with_units("year");
+
+    let vars = [
+        (x_aux("values", "10", Some("dollar")), "dollar"),
+        (x_aux("ranking", "RANK(values, 1)", None), "dollar"),
+    ];
+
+    let expected: HashMap<&str, &str> = vars
+        .iter()
+        .map(|(var, units)| (var.get_ident(), *units))
+        .collect();
+    let model_vars: Vec<_> = vars.iter().map(|(var, _)| var.clone()).collect();
+    let model = x_model("main", model_vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let units_ctx = Context::new_with_builtins(&[], &sim_specs).unwrap();
+    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let _project = crate::project::Project::base_from(
+        project_datamodel.clone(),
+        |models, units_ctx, model| {
+            results = infer(models, units_ctx, model);
+        },
+    );
+
+    let results = results.expect("RANK inference should succeed");
+    for (ident, expected_units) in expected.iter() {
+        let expected_units: UnitMap = crate::units::parse_units(&units_ctx, Some(expected_units))
+            .unwrap()
+            .unwrap();
+        if let Some(computed_units) = results.get(&canonicalize(ident)) {
+            assert_eq!(
+                expected_units, *computed_units,
+                "Units for {} should match",
+                ident
+            );
+        }
+    }
+}
+
+#[test]
+fn test_unify_conflict_detection() {
+    // Test that unify() detects when the same variable is resolved to different units
+    // This exercises the code path at lines 656-680 in unify()
+    let sim_specs = sim_specs_with_units("year");
+
+    // Create a model where the same undeclared variable gets constrained to two different units
+    // x = a (no units on x or a)
+    // y = a * 1 {meter} (forces a to be meters through y's declared units)
+    // z = a * 1 {second} (forces a to be seconds through z's declared units)
+    // This creates a conflict: a can't be both meters and seconds
+    let vars = vec![
+        x_aux("a", "10", None),          // undeclared
+        x_aux("x", "a", None),           // uses a
+        x_aux("y", "a", Some("meter")),  // declares y as meters, constrains a
+        x_aux("z", "a", Some("second")), // declares z as seconds, constrains a
+    ];
+
+    let model_vars: Vec<_> = vars.into_iter().collect();
+    let model = x_model("main", model_vars);
+    let project_datamodel = x_project(sim_specs.clone(), &[model]);
+
+    let mut results: UnitResult<HashMap<Ident<Canonical>, UnitMap>> = Ok(Default::default());
+    let _project = crate::project::Project::base_from(
+        project_datamodel.clone(),
+        |models, units_ctx, model| {
+            results = infer(models, units_ctx, model);
+        },
+    );
+
+    // This should fail because 'a' can't be both meters and seconds
+    assert!(
+        results.is_err(),
+        "Should detect conflict when same variable has different unit constraints"
+    );
+
+    // Verify we get an InferenceError with the right code
+    match results {
+        Err(UnitError::InferenceError { code, sources, .. }) => {
+            assert_eq!(code, ErrorCode::UnitMismatch);
+            // Should have sources indicating which variables are involved
+            assert!(
+                !sources.is_empty(),
+                "Should have source information for conflict"
+            );
+        }
+        Err(e) => panic!("Expected InferenceError, got {:?}", e),
+        Ok(_) => panic!("Expected error, got success"),
+    }
 }
